@@ -141,6 +141,7 @@ version = "0.1.0"
 name = "rollshot-cli"
 version = "0.1.0"
 dependencies = [
+ "image",
  "rollshot-capture",
  "rollshot-core",
 ]
