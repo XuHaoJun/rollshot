@@ -1,6 +1,6 @@
 mod common;
 
-use common::{crop_frame, make_scroll_canvas};
+use common::{crop_frame, make_scroll_canvas, paint_sticky_header};
 use image::{Rgba, RgbaImage};
 use rollshot_core::{StitchConfig, StitchOutcome, Stitcher};
 
@@ -130,4 +130,24 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
 
     let stats_after_recover = stitcher.stats();
     assert_eq!(stats_after_recover.frame_count, 2);
+}
+
+#[test]
+fn sticky_header_frames_still_append_expected_amount() {
+    let canvas = make_scroll_canvas(320, 1400);
+    let mut first = crop_frame(&canvas, 0, 320);
+    let mut scrolled = crop_frame(&canvas, 70, 320);
+
+    paint_sticky_header(&mut first, 36);
+    paint_sticky_header(&mut scrolled, 36);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended { added } => {
+            assert!((66..=74).contains(&added), "added = {added}");
+        }
+        other => panic!("expected Appended with sticky header, got {other:?}"),
+    }
 }
