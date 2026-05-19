@@ -1,0 +1,18 @@
+[package]
+name = "rollshot-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rollshot"
+path = "src/main.rs"
+
+[dependencies]
+rollshot-capture = { path = "../rollshot-capture" }
+rollshot-core = { path = "../rollshot-core" }
+
+[lints]
+workspace = true
