@@ -54,4 +54,9 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Branching
+
+- New branches: use `git checkout -b <name>` in place.
+- Never set up git worktrees unless explicitly asked.
+
 @RTK.md
