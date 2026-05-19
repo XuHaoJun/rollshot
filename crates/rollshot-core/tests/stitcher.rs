@@ -59,3 +59,43 @@ fn duplicate_frame_returns_duplicate_without_growing() {
     assert_eq!(full.dimensions(), (320, 320));
     assert_eq!(stitcher.stats().frame_count, 1);
 }
+
+#[test]
+fn normal_scroll_appends_expected_pixels() {
+    let canvas = make_scroll_canvas(320, 1200);
+    let first = crop_frame(&canvas, 0, 320);
+    let scrolled = crop_frame(&canvas, 80, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended { added } => {
+            assert!((76..=84).contains(&added), "added = {added}");
+        }
+        other => panic!("expected Appended, got {other:?}"),
+    }
+
+    let full = stitcher.full_image().expect("stitched image");
+    assert!(full.height() > 320);
+    let stats = stitcher.stats();
+    assert_eq!(stats.frame_count, 2);
+    assert_eq!(stats.total_height, full.height());
+}
+
+#[test]
+fn small_scroll_below_min_append_reports_no_progress() {
+    let canvas = make_scroll_canvas(320, 1000);
+    let first = crop_frame(&canvas, 0, 320);
+    let nudged = crop_frame(&canvas, 16, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig {
+        min_append: 64,
+        ..StitchConfig::default()
+    });
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+    assert_eq!(stitcher.push_frame(nudged), StitchOutcome::NoProgress);
+
+    let full = stitcher.full_image().expect("stitched image");
+    assert_eq!(full.height(), 320);
+}

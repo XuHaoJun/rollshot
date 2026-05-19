@@ -1,6 +1,8 @@
 use image::RgbaImage;
 
 use crate::duplicate;
+use crate::image_ext::append_below;
+use crate::matcher::estimate_offset;
 use crate::types::{StitchConfig, StitchOutcome, StitchStats};
 
 pub struct Stitcher {
@@ -47,12 +49,36 @@ impl Stitcher {
             }
         }
 
-        let _ = signature;
-        let _ = &self.last_offset;
-        let _ = frame;
-        StitchOutcome::NoMatch {
-            confidence: f32::INFINITY,
+        let estimate = estimate_offset(anchor, &frame, self.last_offset, &self.config);
+        if estimate.confidence > self.config.accept_diff {
+            return StitchOutcome::NoMatch {
+                confidence: estimate.confidence,
+            };
         }
+
+        let dy = estimate.dy.max(0) as u32;
+        if dy < self.config.min_append {
+            return StitchOutcome::NoProgress;
+        }
+
+        let combined = append_below(
+            self.full_image
+                .as_ref()
+                .expect("full image present after first frame"),
+            &frame,
+            dy,
+        );
+        let total_height = combined.height();
+
+        self.full_image = Some(combined);
+        self.last_good_frame = Some(frame);
+        self.last_good_signature = Some(signature);
+        self.last_offset = estimate.dy;
+        self.stats.frame_count += 1;
+        self.stats.total_height = total_height;
+        self.stats.last_append = dy;
+
+        StitchOutcome::Appended { added: dy }
     }
 
     pub fn full_image(&self) -> Option<&RgbaImage> {
