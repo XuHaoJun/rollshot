@@ -1,3 +1,4 @@
+mod duplicate;
 mod image_ext;
 mod types;
 
