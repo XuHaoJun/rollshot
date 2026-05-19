@@ -1,0 +1,9 @@
+[submodule "learn-projects/obs-studio"]
+	path = learn-projects/obs-studio
+	url = https://github.com/obsproject/obs-studio.git
+[submodule "learn-projects/scap"]
+	path = learn-projects/scap
+	url = https://github.com/CapSoftware/scap.git
+[submodule "learn-projects/wayscrollshot"]
+	path = learn-projects/wayscrollshot
+	url = https://github.com/jswysnemc/wayscrollshot.git
