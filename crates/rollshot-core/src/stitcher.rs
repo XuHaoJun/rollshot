@@ -29,6 +29,17 @@ impl Stitcher {
             return self.accept_first_frame(frame);
         }
 
+        let anchor = self
+            .last_good_frame
+            .as_ref()
+            .expect("anchor present after first frame");
+
+        if anchor.dimensions() != frame.dimensions() {
+            return StitchOutcome::NoMatch {
+                confidence: f32::INFINITY,
+            };
+        }
+
         let _ = &self.config;
         let _ = &self.last_offset;
         let _ = frame;
