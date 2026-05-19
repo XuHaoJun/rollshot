@@ -99,3 +99,35 @@ fn small_scroll_below_min_append_reports_no_progress() {
     let full = stitcher.full_image().expect("stitched image");
     assert_eq!(full.height(), 320);
 }
+
+#[test]
+fn bad_frame_returns_no_match_and_preserves_anchor() {
+    let canvas = make_scroll_canvas(320, 1200);
+    let first = crop_frame(&canvas, 0, 320);
+    let bad = RgbaImage::from_pixel(320, 320, Rgba([255, 255, 255, 255]));
+    let recovered = crop_frame(&canvas, 96, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(bad) {
+        StitchOutcome::NoMatch { confidence } => {
+            assert!(confidence > StitchConfig::default().accept_diff);
+        }
+        other => panic!("expected NoMatch on white frame, got {other:?}"),
+    }
+
+    let stats_after_bad = stitcher.stats();
+    assert_eq!(stats_after_bad.frame_count, 1);
+    assert_eq!(stats_after_bad.total_height, 320);
+
+    match stitcher.push_frame(recovered) {
+        StitchOutcome::Appended { added } => {
+            assert!((92..=100).contains(&added), "added = {added}");
+        }
+        other => panic!("expected Appended after recovery, got {other:?}"),
+    }
+
+    let stats_after_recover = stitcher.stats();
+    assert_eq!(stats_after_recover.frame_count, 2);
+}
