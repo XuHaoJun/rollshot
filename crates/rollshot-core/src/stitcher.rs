@@ -40,7 +40,14 @@ impl Stitcher {
             };
         }
 
-        let _ = &self.config;
+        let signature = duplicate::signature(&frame);
+        if let Some(prev_sig) = self.last_good_signature.as_ref() {
+            if duplicate::is_duplicate(prev_sig, &signature, self.config.duplicate_threshold) {
+                return StitchOutcome::Duplicate;
+            }
+        }
+
+        let _ = signature;
         let _ = &self.last_offset;
         let _ = frame;
         StitchOutcome::NoMatch {

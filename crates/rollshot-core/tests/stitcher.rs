@@ -45,3 +45,17 @@ fn dimension_mismatch_returns_no_match() {
     assert_eq!(stats.frame_count, 1);
     assert_eq!(stats.total_height, 320);
 }
+
+#[test]
+fn duplicate_frame_returns_duplicate_without_growing() {
+    let canvas = make_scroll_canvas(320, 1000);
+    let first = crop_frame(&canvas, 0, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first.clone()), StitchOutcome::FirstFrame);
+    assert_eq!(stitcher.push_frame(first.clone()), StitchOutcome::Duplicate);
+
+    let full = stitcher.full_image().expect("image stored");
+    assert_eq!(full.dimensions(), (320, 320));
+    assert_eq!(stitcher.stats().frame_count, 1);
+}
