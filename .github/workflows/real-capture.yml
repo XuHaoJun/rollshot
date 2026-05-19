@@ -1,0 +1,35 @@
+name: Real Capture Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-kde-wayland:
+    name: Linux KDE Wayland smoke
+    runs-on: [self-hosted, linux, kde6, wayland]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Explain current bootstrap status
+        run: |
+          echo "Real Linux capture tests are added in the Linux backend phase."
+          echo "This workflow reserves the self-hosted KDE Wayland runner path."
+
+  macos-screencapturekit:
+    name: macOS ScreenCaptureKit smoke
+    runs-on: [self-hosted, macos, screencapturekit]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Explain current bootstrap status
+        run: |
+          echo "Real macOS capture tests are added in the macOS backend phase."
+          echo "This workflow reserves the self-hosted ScreenCaptureKit runner path."
