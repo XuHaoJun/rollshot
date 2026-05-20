@@ -2537,12 +2537,39 @@ fn rollshot_capture_rejects_garbage_region() {
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
+
+#[test]
+fn rollshot_capture_rejects_portal_region_for_fixture_backend() {
+    let tempdir = temp_dir("region-portal-fixture");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--region", "portal"])
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("portal"), "stderr = {stderr}");
+    assert!(stderr.contains("linux-portal"), "stderr = {stderr}");
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
 ```
 
 - [ ] **Step 2: Run, expect failure**
 
 Run: `cargo test -p rollshot-cli --test capture_fixture`
-Expected: the two new tests fail. The current `cmd_capture::run` ignores `args.region` entirely, so `"totally bogus"` is accepted as well.
+Expected: the new invalid-region tests fail. The current `cmd_capture::run` ignores `args.region` entirely, so `"totally bogus"` and fixture `portal` are accepted.
 
 - [ ] **Step 3: Implement region parsing**
 
@@ -2577,7 +2604,13 @@ fn parse_region(flag: &str, kind: BackendKind) -> Result<RegionMode, CliError> {
             | BackendKind::Fixture
             | BackendKind::Unsupported => RegionMode::FullSource,
         }),
-        "portal" => Ok(RegionMode::PortalPicker),
+        "portal" => match kind {
+            BackendKind::LinuxPortalPipeWire => Ok(RegionMode::PortalPicker),
+            _ => Err(CliError::new(
+                "--region portal is only supported with --backend linux-portal",
+                1,
+            )),
+        },
         "full" => Ok(RegionMode::FullSource),
         other => parse_manual_region(other).map(RegionMode::Manual),
     }
@@ -2615,7 +2648,7 @@ fn parse_manual_region(s: &str) -> Result<Region, CliError> {
 - [ ] **Step 4: Run tests**
 
 Run: `cargo test -p rollshot-cli --test capture_fixture`
-Expected: all six tests pass.
+Expected: all seven tests pass.
 
 - [ ] **Step 5: Commit**
 

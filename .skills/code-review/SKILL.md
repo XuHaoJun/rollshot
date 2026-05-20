@@ -15,10 +15,14 @@ Input: $ARGUMENTS
 
 Based on the input provided, determine which type of review to perform:
 
-1. **No arguments (default)**: Review all uncommitted changes
-   - Run: `git diff` for unstaged changes
-   - Run: `git diff --cached` for staged changes
-   - Run: `git status --short` to identify untracked (net new) files
+1. **No arguments (default)**: 
+   - First, check current branch: `git branch --show-current`
+   - If current branch is NOT `main` (or `master`): Review changes compared to main
+     - Run: `git diff main...HEAD` (use `master` if repo uses master)
+   - If current branch IS `main`/`master`: Review all uncommitted changes
+     - Run: `git diff` for unstaged changes
+     - Run: `git diff --cached` for staged changes
+     - Run: `git status --short` to identify untracked (net new) files
 
 2. **Commit hash** (40-char SHA or short hash): Review that specific commit
    - Run: `git show $ARGUMENTS`
