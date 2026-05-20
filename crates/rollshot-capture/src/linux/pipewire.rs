@@ -234,7 +234,10 @@ pub fn map_spa_video_format(
     }
 }
 
+#[allow(dead_code)] // fields exist for drop order: pipewire tears down before portal closes
 pub struct LinuxPortalFrameStream {
+    pipewire: connection::PipeWireConnection,
+    portal: super::portal::PortalSession,
     queue: Arc<FrameQueue>,
 }
 
@@ -347,6 +350,16 @@ mod connection {
             let stream = pipewire::stream::Stream::new(&core, "rollshot-screen", props)
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("stream: {e}")))?;
 
+            let initial_crop = match &options.region {
+                crate::types::RegionMode::Manual(region) => Some(VideoCrop {
+                    x: region.x,
+                    y: region.y,
+                    width: region.width,
+                    height: region.height,
+                }),
+                _ => None,
+            };
+
             let user_data = StreamUserData {
                 queue: Arc::clone(&queue),
                 empty_count: 0,
@@ -354,7 +367,7 @@ mod connection {
                 negotiated_width: 0,
                 negotiated_height: 0,
                 negotiated_stride: 0,
-                crop: None,
+                crop: initial_crop,
                 transform: LinuxVideoTransform::Normal,
                 options: options.clone(),
             };
@@ -487,6 +500,23 @@ mod connection {
                                 };
                                 match super::super::pixel::raw_frame_to_rgba(raw_frame) {
                                     Ok(image) => {
+                                        let effective_region = match meta.crop {
+                                            Some(c) => Some(crate::types::Region {
+                                                x: c.x,
+                                                y: c.y,
+                                                width: c.width,
+                                                height: c.height,
+                                            }),
+                                            None => {
+                                                if let crate::types::RegionMode::Manual(region) =
+                                                    &user_data.options.region
+                                                {
+                                                    Some(*region)
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                        };
                                         user_data.queue.push(FrameEvent::Frame(CapturedFrame {
                                             image,
                                             timestamp: std::time::SystemTime::now(),
@@ -495,14 +525,7 @@ mod connection {
                                                     width: meta.width,
                                                     height: meta.height,
                                                 }),
-                                                effective_region: meta.crop.map(|c| {
-                                                    crate::types::Region {
-                                                        x: c.x,
-                                                        y: c.y,
-                                                        width: c.width,
-                                                        height: c.height,
-                                                    }
-                                                }),
+                                                effective_region,
                                                 pixel_format: Some(match pixel_format {
                                                     LinuxPixelFormat::Bgra => {
                                                         crate::types::PixelFormat::Bgra
@@ -577,8 +600,15 @@ mod connection {
 }
 
 #[cfg(test)]
-mod connection {
+pub(crate) mod connection {
     use super::*;
+    use std::sync::Mutex;
+
+    pub static CAPTURED_OPTIONS: Mutex<Option<crate::types::CaptureOptions>> = Mutex::new(None);
+
+    pub fn take_captured_options() -> Option<crate::types::CaptureOptions> {
+        CAPTURED_OPTIONS.lock().ok().and_then(|mut o| o.take())
+    }
 
     pub struct PipeWireConnection;
 
@@ -586,28 +616,35 @@ mod connection {
         pub fn connect_fd(
             _portal_fd: std::os::fd::OwnedFd,
             _node_id: u32,
-            _options: crate::types::CaptureOptions,
+            options: crate::types::CaptureOptions,
             _queue: Arc<FrameQueue>,
         ) -> Result<Self, CaptureError> {
+            if let Ok(mut captured) = CAPTURED_OPTIONS.lock() {
+                *captured = Some(options);
+            }
             Ok(PipeWireConnection)
         }
     }
 }
 
 impl LinuxPortalFrameStream {
-    pub fn new(
-        portal_fd: std::os::fd::OwnedFd,
-        node_id: u32,
+    pub fn connect(
+        mut portal: super::portal::PortalSession,
         options: crate::types::CaptureOptions,
     ) -> Result<Self, CaptureError> {
         let queue = Arc::new(FrameQueue::new());
-        let _connection = connection::PipeWireConnection::connect_fd(
-            portal_fd,
+        let (fd, node_id) = portal.take_resources();
+        let pipewire = connection::PipeWireConnection::connect_fd(
+            fd,
             node_id,
             options,
             Arc::clone(&queue),
         )?;
-        Ok(Self { queue })
+        Ok(Self {
+            pipewire,
+            portal,
+            queue,
+        })
     }
 }
 

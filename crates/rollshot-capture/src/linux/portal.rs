@@ -67,6 +67,8 @@ pub struct PortalSession {
     pub node_id: u32,
     pub pipewire_fd: std::os::fd::OwnedFd,
     pub capabilities: LinuxPortalCapabilities,
+    pub frame_width: u32,
+    pub frame_height: u32,
     _rt: Option<tokio::runtime::Runtime>,
     close: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -77,6 +79,8 @@ impl std::fmt::Debug for PortalSession {
             .field("node_id", &self.node_id)
             .field("pipewire_fd", &self.pipewire_fd)
             .field("capabilities", &self.capabilities)
+            .field("frame_width", &self.frame_width)
+            .field("frame_height", &self.frame_height)
             .finish()
     }
 }
@@ -88,6 +92,25 @@ impl PortalSession {
             .into();
         let fd = std::mem::replace(&mut self.pipewire_fd, dummy);
         (fd, self.node_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        node_id: u32,
+        pipewire_fd: std::os::fd::OwnedFd,
+        capabilities: LinuxPortalCapabilities,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> Self {
+        Self {
+            node_id,
+            pipewire_fd,
+            capabilities,
+            frame_width,
+            frame_height,
+            _rt: None,
+            close: None,
+        }
     }
 }
 
@@ -213,6 +236,8 @@ impl PortalClient {
                 node_id,
                 pipewire_fd: fd,
                 capabilities,
+                frame_width: 0,
+                frame_height: 0,
                 _rt: None,
                 close: Some(close),
             })
@@ -272,6 +297,15 @@ impl PortalClient {
             CaptureError::Backend(anyhow::anyhow!("fake fd: {e}"))
         })?;
 
+        let frame_width: u32 = std::env::var("XDG_PORTAL_FRAME_WIDTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let frame_height: u32 = std::env::var("XDG_PORTAL_FRAME_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
         Ok(PortalSession {
             node_id,
             pipewire_fd: fd,
@@ -288,6 +322,8 @@ impl PortalClient {
                 profile: LinuxDesktopProfile::Unknown,
                 quirks: Vec::new(),
             },
+            frame_width,
+            frame_height,
             _rt: None,
             close: None,
         })
@@ -1243,6 +1279,8 @@ mod tests {
             node_id: 42,
             pipewire_fd: fd,
             capabilities: default_capabilities(),
+            frame_width: 0,
+            frame_height: 0,
             _rt: None,
             close: Some(Box::new(move || {
                 closed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
