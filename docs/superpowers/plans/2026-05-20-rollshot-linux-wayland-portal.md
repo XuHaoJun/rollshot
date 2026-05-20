@@ -54,10 +54,12 @@ Edit the root `Cargo.toml` `[workspace.dependencies]` block so it includes these
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
 pipewire = "0.8"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-nix = { version = "0.29", features = ["fs", "fcntl"] }
+nix = { version = "0.29", features = ["fs"] }
 ```
 
-`nix` needs both `fs` (for the file constants module) and `fcntl` (for the `fcntl::fcntl` function used by `dup_pipewire_fd`).
+`nix` needs the `fs` feature for the file constants module. The `fcntl` module
+(`fcntl::fcntl` function used by `dup_pipewire_fd`) is always available in nix
+0.29 without a feature gate.
 
 - [ ] **Step 2: Add Linux-only capture deps**
 
