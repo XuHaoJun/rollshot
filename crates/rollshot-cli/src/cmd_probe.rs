@@ -1,6 +1,8 @@
 use std::fmt::Write;
 
-use rollshot_capture::{default_backend, CaptureBackend, CaptureProbe};
+use rollshot_capture::{default_backend, CaptureProbe};
+#[cfg(any(target_os = "linux", all(target_os = "macos", feature = "macos-sck")))]
+use rollshot_capture::CaptureBackend;
 use serde::Serialize;
 
 use crate::args::ProbeArgs;
@@ -54,14 +56,12 @@ fn build_report() -> ProbeReport {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     let default = default_backend();
 
-    let mut backends: Vec<ProbeEntry> = Vec::new();
-
-    backends.push(ProbeEntry {
+    let mut backends: Vec<ProbeEntry> = vec![ProbeEntry {
         name: "fixture",
         available: true,
         message: "directory-based test backend".to_string(),
         details: Vec::new(),
-    });
+    }];
 
     #[cfg(target_os = "linux")]
     {
