@@ -1,6 +1,6 @@
 use image::{Rgba, RgbaImage};
 
-use crate::types::{MatchAlgorithm, OffsetEstimate, StitchConfig};
+use crate::types::{OffsetEstimate, StitchConfig};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
@@ -76,9 +76,6 @@ pub fn estimate_offset(
 
     for offset in predict_iter(max_offset, predict) {
         let search_y = search_start + offset;
-        if search_y < 0 || search_y + template_h as i32 > height as i32 {
-            continue;
-        }
 
         let curr_template = Region {
             y: roi.y,
@@ -130,7 +127,7 @@ pub fn estimate_offset(
     OffsetEstimate {
         dy: best_offset,
         confidence,
-        method: MatchAlgorithm::Template,
+        method: config.algorithm,
     }
 }
 
