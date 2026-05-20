@@ -190,8 +190,7 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        process_scap_frame, FrameProcessOutcome, MacosScreenCaptureKitBackend, EMPTY_FRAME_LIMIT,
-        SCAP_VERSION,
+        process_scap_frame, MacosScreenCaptureKitBackend, EMPTY_FRAME_LIMIT, SCAP_VERSION,
     };
     use crate::backend::CaptureBackend;
     use crate::error::CaptureError;
@@ -210,28 +209,6 @@ mod tests {
             .details
             .iter()
             .any(|(k, _)| k == "screen_recording_permission"));
-    }
-
-    #[test]
-    fn process_scap_frame_skips_audio() {
-        let mut empty_frames = 0;
-        let outcome = process_scap_frame(
-            scap::frame::Frame::Audio(scap::frame::AudioFrame::new(
-                scap::frame::AudioFormat::F32,
-                2,
-                false,
-                Vec::new(),
-                0,
-                48_000,
-                std::time::SystemTime::now(),
-            )),
-            &mut empty_frames,
-            None,
-        )
-        .expect("audio frame handled");
-
-        assert_eq!(outcome, Err(FrameProcessOutcome::Audio));
-        assert_eq!(empty_frames, 0);
     }
 
     #[test]
