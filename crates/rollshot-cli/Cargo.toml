@@ -11,9 +11,13 @@ name = "rollshot"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
 image = { workspace = true }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-core = { path = "../rollshot-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 image = { workspace = true }

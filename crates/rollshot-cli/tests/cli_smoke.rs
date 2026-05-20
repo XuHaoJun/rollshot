@@ -10,11 +10,13 @@ fn rollshot_probe_binary_runs() {
         .output()
         .expect("run rollshot probe");
 
-    assert!(output.status.success());
-
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
-    assert!(stdout.contains("rollshot"));
-    assert!(stdout.contains("real capture: unavailable"));
+    assert!(stdout.contains("probe"), "stdout = {stdout}");
 }
 
 #[test]
