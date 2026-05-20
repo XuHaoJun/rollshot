@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-05-20-rollshot-capture-skeleton-design.md`
 
+**Plan review applied (2026-05-20):**
+- D2: clap `DisplayHelp` / `DisplayVersion` route to stdout exit 0; all other `CliError` paths print to **stderr** (incl. `UserCancelled` exit 0).
+- D4: shared integration-test helpers live in `crates/rollshot-cli/tests/common/mod.rs`.
+- D5: `cmd_capture.rs` opens with an ASCII pipeline diagram doc-comment.
+- D6: `default_backend()` is implemented in terms of a pure `default_backend_for(os, session_type)` helper; the env-touching test exercises the helper instead of mutating real env vars.
+- D7: an additional `capture --backend auto` exit-code test lives in `tests/capture_stubs.rs`.
+- Inline nit 1: drop unused `From<anyhow::Error>` impl on `CliError`.
+- Inline nit 2: create the dump-frames directory once before the capture loop, not per frame.
+
 ---
 
 ## File Map
@@ -37,7 +46,8 @@
 - Create: `crates/rollshot-cli/src/cmd_capture.rs`
 - Create: `crates/rollshot-cli/src/cmd_probe.rs`
 - Create: `crates/rollshot-cli/src/cmd_stitch_folder.rs` (extracted; behavior unchanged)
-- Modify: `crates/rollshot-cli/tests/cli_smoke.rs` (probe assertion updated)
+- Modify: `crates/rollshot-cli/tests/cli_smoke.rs` (probe assertion updated; uses shared helpers)
+- Create: `crates/rollshot-cli/tests/common/mod.rs` (shared test helpers: `temp_dir`, `make_scroll_canvas`, `write_scroll_fixture`)
 - Create: `crates/rollshot-cli/tests/capture_fixture.rs`
 - Create: `crates/rollshot-cli/tests/capture_stubs.rs`
 - Create: `crates/rollshot-cli/tests/probe_cli.rs`
@@ -775,21 +785,26 @@ impl BackendKind {
 }
 
 pub fn default_backend() -> BackendKind {
-    if cfg!(target_os = "macos") {
-        return BackendKind::MacosScreenCaptureKit;
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    default_backend_for(std::env::consts::OS, session_type.as_deref())
+}
+
+/// Pure helper for `default_backend` — exposed for tests so they can exercise
+/// the OS / session decision matrix without mutating process-global env vars.
+pub fn default_backend_for(os: &str, session_type: Option<&str>) -> BackendKind {
+    match os {
+        "macos" => BackendKind::MacosScreenCaptureKit,
+        "linux" => match session_type {
+            Some("wayland") => BackendKind::LinuxPortalPipeWire,
+            _ => BackendKind::Unsupported,
+        },
+        _ => BackendKind::Unsupported,
     }
-    if cfg!(target_os = "linux") {
-        if std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland") {
-            return BackendKind::LinuxPortalPipeWire;
-        }
-        return BackendKind::Unsupported;
-    }
-    BackendKind::Unsupported
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{default_backend, BackendKind};
+    use super::{default_backend_for, BackendKind};
     use crate::error::CaptureError;
 
     #[test]
@@ -838,15 +853,25 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn default_backend_linux_non_wayland_is_unsupported() {
-        // Save and clear XDG_SESSION_TYPE for the duration of this test.
-        let prev = std::env::var("XDG_SESSION_TYPE").ok();
-        std::env::remove_var("XDG_SESSION_TYPE");
-        assert_eq!(default_backend(), BackendKind::Unsupported);
-        if let Some(v) = prev {
-            std::env::set_var("XDG_SESSION_TYPE", v);
-        }
+    fn default_backend_for_decision_matrix() {
+        assert_eq!(
+            default_backend_for("macos", None),
+            BackendKind::MacosScreenCaptureKit
+        );
+        assert_eq!(
+            default_backend_for("macos", Some("wayland")),
+            BackendKind::MacosScreenCaptureKit
+        );
+        assert_eq!(
+            default_backend_for("linux", Some("wayland")),
+            BackendKind::LinuxPortalPipeWire
+        );
+        assert_eq!(
+            default_backend_for("linux", Some("tty")),
+            BackendKind::Unsupported
+        );
+        assert_eq!(default_backend_for("linux", None), BackendKind::Unsupported);
+        assert_eq!(default_backend_for("windows", None), BackendKind::Unsupported);
     }
 }
 ```
@@ -862,7 +887,7 @@ pub mod fake;
 pub mod fixture;
 pub mod types;
 
-pub use backend::{default_backend, BackendKind, CaptureBackend, FrameStream};
+pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
 pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
@@ -875,7 +900,7 @@ pub use types::{
 - [ ] **Step 3: Run tests**
 
 Run: `cargo test -p rollshot-capture --lib backend::`
-Expected: 3 (or 4 on Linux) tests pass.
+Expected: 4 tests pass on every host (the decision matrix test is platform-agnostic).
 
 - [ ] **Step 4: Commit**
 
@@ -1005,7 +1030,7 @@ pub mod types;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-pub use backend::{default_backend, BackendKind, CaptureBackend, FrameStream};
+pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
 pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
@@ -1134,7 +1159,7 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-pub use backend::{default_backend, BackendKind, CaptureBackend, FrameStream};
+pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
 pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
@@ -1303,10 +1328,22 @@ use std::fmt;
 
 use rollshot_capture::CaptureError;
 
+/// Where a `CliError`'s message should be written by `main.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
 #[derive(Debug)]
 pub struct CliError {
     pub message: String,
     pub exit_code: u8,
+    /// Which stream to write `message` to. `Stdout` is used only for clap's
+    /// `--help` / `--version` happy-path output. Every other case (including
+    /// `UserCancelled` with `exit_code = 0`) prints to stderr so shell
+    /// pipelines do not catch diagnostic text as data.
+    pub stream: Stream,
 }
 
 impl CliError {
@@ -1314,6 +1351,17 @@ impl CliError {
         Self {
             message: message.into(),
             exit_code,
+            stream: Stream::Stderr,
+        }
+    }
+
+    /// Construct a CliError destined for stdout. Reserved for clap's
+    /// `--help` / `--version` exit path.
+    pub fn stdout(message: impl Into<String>, exit_code: u8) -> Self {
+        Self {
+            message: message.into(),
+            exit_code,
+            stream: Stream::Stdout,
         }
     }
 
@@ -1341,10 +1389,6 @@ impl CliError {
             CaptureError::Backend(err) => CliError::new(format!("{err:#}"), 1),
         }
     }
-
-    pub fn from_anyhow(err: anyhow::Error) -> Self {
-        CliError::new(format!("{err:#}"), 1)
-    }
 }
 
 impl fmt::Display for CliError {
@@ -1356,12 +1400,6 @@ impl fmt::Display for CliError {
 impl From<CaptureError> for CliError {
     fn from(err: CaptureError) -> Self {
         CliError::from_capture(err)
-    }
-}
-
-impl From<anyhow::Error> for CliError {
-    fn from(err: anyhow::Error) -> Self {
-        CliError::from_anyhow(err)
     }
 }
 ```
@@ -1623,12 +1661,16 @@ where
     S: Into<std::ffi::OsString> + Clone,
 {
     let cli = Cli::try_parse_from(args).map_err(|err| {
-        // clap formats its own messages including --help and --version; we
-        // surface them verbatim and let main.rs print and exit 0 for those.
-        // Real argument errors map to exit 1 — exit 2 is reserved by the spec
-        // for backend NotImplemented errors.
-        let exit_code = if err.use_stderr() { 1 } else { 0 };
-        CliError::new(err.to_string(), exit_code)
+        // clap's --help and --version paths come back as Err with a kind that
+        // means "happy print-and-exit". Route those to stdout exit 0. All
+        // other parse errors are real argument errors → stderr exit 1.
+        // (exit 2 is reserved by the spec for backend NotImplemented.)
+        use clap::error::ErrorKind;
+        let msg = err.to_string();
+        match err.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => CliError::stdout(msg, 0),
+            _ => CliError::new(msg, 1),
+        }
     })?;
 
     match &cli.command {
@@ -1646,6 +1688,8 @@ Replace its full contents with:
 ```rust
 use std::process::ExitCode;
 
+use rollshot_cli::cli_error::Stream;
+
 fn main() -> ExitCode {
     match rollshot_cli::run(std::env::args_os()) {
         Ok(output) => {
@@ -1653,14 +1697,11 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            if error.exit_code == 0 {
-                // clap --help/--version path prints to stdout
-                print!("{}", error.message);
-                ExitCode::SUCCESS
-            } else {
-                eprintln!("{}", error.message);
-                ExitCode::from(error.exit_code)
+            match error.stream {
+                Stream::Stdout => print!("{}", error.message),
+                Stream::Stderr => eprintln!("{}", error.message),
             }
+            ExitCode::from(error.exit_code)
         }
     }
 }
@@ -1920,32 +1961,37 @@ This is the first version of `capture`. It supports only `--backend fixture --fi
 
 **Files:**
 - Modify: `crates/rollshot-cli/src/cmd_capture.rs`
+- Create: `crates/rollshot-cli/tests/common/mod.rs` (shared integration-test helpers)
 - Create: `crates/rollshot-cli/tests/capture_fixture.rs`
 
-- [ ] **Step 1: Write the failing integration test**
+- [ ] **Step 1: Extract shared integration-test helpers**
 
-Create `crates/rollshot-cli/tests/capture_fixture.rs`:
+Rust's integration-test convention is `tests/common/mod.rs` (the `mod.rs` filename keeps cargo from treating it as a top-level test binary).
+
+Create `crates/rollshot-cli/tests/common/mod.rs`:
 
 ```rust
-use std::path::PathBuf;
-use std::process::Command;
+//! Shared helpers for CLI integration tests. Each test file declares
+//! `mod common;` to pull these in.
+
+use std::path::{Path, PathBuf};
 
 use image::{imageops, Rgba, RgbaImage};
 
-fn temp_dir(label: &str) -> PathBuf {
+pub fn temp_dir(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let path = std::env::temp_dir().join(format!(
-        "rollshot-capture-{label}-{nanos}-{}",
+        "rollshot-cli-{label}-{nanos}-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&path).expect("create temp dir");
     path
 }
 
-fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
+pub fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([245, 245, 245, 255]));
     for y in (0..height).step_by(36) {
         let accent = ((y / 3) % 180) as u8;
@@ -1970,7 +2016,7 @@ fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
     img
 }
 
-fn write_scroll_fixture(dir: &std::path::Path) {
+pub fn write_scroll_fixture(dir: &Path) {
     let canvas = make_scroll_canvas(160, 600);
     for (idx, y) in [0u32, 40, 80, 120].iter().enumerate() {
         let frame = imageops::crop_imm(&canvas, 0, *y, canvas.width(), 160).to_image();
@@ -1979,6 +2025,20 @@ fn write_scroll_fixture(dir: &std::path::Path) {
             .expect("save frame");
     }
 }
+```
+
+Cargo treats `tests/common/mod.rs` as a non-test module — there is no integration-test binary created for it.
+
+- [ ] **Step 2: Write the failing integration test**
+
+Create `crates/rollshot-cli/tests/capture_fixture.rs`:
+
+```rust
+mod common;
+
+use std::process::Command;
+
+use common::{temp_dir, write_scroll_fixture};
 
 #[test]
 fn rollshot_capture_fixture_writes_png() {
@@ -2041,16 +2101,50 @@ fn rollshot_capture_fixture_requires_fixture_path() {
 }
 ```
 
-- [ ] **Step 2: Run the tests, expect them to fail**
+- [ ] **Step 3: Run the tests, expect them to fail**
 
 Run: `cargo test -p rollshot-cli --test capture_fixture`
 Expected: both fail because `cmd_capture::run` still returns the placeholder.
 
-- [ ] **Step 3: Implement `cmd_capture::run` (fixture-only for now)**
+- [ ] **Step 4: Implement `cmd_capture::run` (fixture-only for now)**
 
 Replace `crates/rollshot-cli/src/cmd_capture.rs` with:
 
 ```rust
+//! `rollshot capture` — drives a CaptureBackend, stitches its frames, writes a
+//! PNG.
+//!
+//! Pipeline:
+//!
+//! ```text
+//!   args (clap)
+//!     │
+//!     ▼
+//!   BackendKind::from_cli_flag ─► BackendKind
+//!     │                              │
+//!     │                              ├── Fixture  → FixtureBackend::new(--fixture)
+//!     │                              └── other    → BackendKind::create()
+//!     ▼
+//!   CaptureOptions { region, fps, show_cursor }
+//!     │
+//!     ▼
+//!   backend.start(options) ──► Box<dyn FrameStream>
+//!     │
+//!     ▼ loop until EndOfStream / --max-frames
+//!     ┌──────────────────────────────────────────┐
+//!     │  stream.next_frame()                     │
+//!     │     │                                    │
+//!     │     ▼                                    │
+//!     │  [optional] write_dump_frame(idx, image) │
+//!     │     │                                    │
+//!     │     ▼                                    │
+//!     │  stitcher.push_frame(image)              │
+//!     └──────────────────────────────────────────┘
+//!     │
+//!     ▼
+//!   stitcher.full_image() → save PNG → summary
+//! ```
+
 use std::path::Path;
 
 use image::ImageFormat;
@@ -2133,7 +2227,7 @@ fn save_png(image: &image::RgbaImage, path: &Path) -> Result<(), CliError> {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run tests**
 
 Run: `cargo test -p rollshot-cli --test capture_fixture`
 Expected: both tests pass.
@@ -2141,7 +2235,7 @@ Expected: both tests pass.
 Run: `cargo test --workspace`
 Expected: green.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/rollshot-cli
@@ -2217,7 +2311,22 @@ Expected: fail — capture currently ignores `--dump-frames`.
 
 - [ ] **Step 3: Honor `--dump-frames` in `cmd_capture::run`**
 
-In `crates/rollshot-cli/src/cmd_capture.rs`, modify the inner loop. Replace the `Ok(frame) => { captured += 1; match stitcher.push_frame(frame.image) ...}` block with:
+In `crates/rollshot-cli/src/cmd_capture.rs`, ensure the dump directory exists **once before** entering the loop (not on every frame), then dump each frame inside the loop.
+
+Just before `let mut stitcher = Stitcher::new(...)`, add:
+
+```rust
+    if let Some(dir) = args.dump_frames.as_ref() {
+        std::fs::create_dir_all(dir).map_err(|err| {
+            CliError::new(
+                format!("failed to create dump dir {}: {err}", dir.display()),
+                1,
+            )
+        })?;
+    }
+```
+
+Then modify the inner loop. Replace the existing `Ok(frame) => { captured += 1; match stitcher.push_frame(frame.image) ...}` block with:
 
 ```rust
             Ok(frame) => {
@@ -2235,15 +2344,10 @@ In `crates/rollshot-cli/src/cmd_capture.rs`, modify the inner loop. Replace the 
             }
 ```
 
-Add this helper at the bottom of the file:
+Add this helper at the bottom of the file. The directory is guaranteed to exist by the pre-loop block above, so the helper does no syscall beyond the PNG save:
 
 ```rust
 fn write_dump_frame(dir: &Path, index: u32, image: &image::RgbaImage) -> Result<(), CliError> {
-    if !dir.is_dir() {
-        std::fs::create_dir_all(dir).map_err(|err| {
-            CliError::new(format!("failed to create dump dir {}: {err}", dir.display()), 1)
-        })?;
-    }
     let path = dir.join(format!("frame_{index:04}.png"));
     image
         .save_with_format(&path, ImageFormat::Png)
@@ -2534,21 +2638,11 @@ This task verifies the spec's exit-code contract for non-implemented platform ba
 Create `crates/rollshot-cli/tests/capture_stubs.rs`:
 
 ```rust
-use std::path::PathBuf;
+mod common;
+
 use std::process::Command;
 
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!(
-        "rollshot-stub-{label}-{nanos}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&path).expect("create temp dir");
-    path
-}
+use common::temp_dir;
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -2608,6 +2702,44 @@ fn macos_sck_backend_exits_with_not_implemented_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not implemented"), "stderr = {stderr}");
     assert!(stderr.contains("macos-sck"), "stderr = {stderr}");
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+/// `--backend auto` is the default value every user hits first. Its expected
+/// exit code depends on the host, so the test computes the expectation from
+/// the same env vars `default_backend()` reads.
+#[test]
+fn backend_auto_exits_with_host_appropriate_code() {
+    let tempdir = temp_dir("backend-auto");
+    let out = tempdir.join("out.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "auto"])
+        .args(["--output"])
+        .arg(&out)
+        .output()
+        .expect("run rollshot capture");
+
+    let expected_code = if cfg!(target_os = "macos") {
+        // macOS host → MacosScreenCaptureKit stub → NotImplemented → exit 2
+        2
+    } else if cfg!(target_os = "linux")
+        && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+    {
+        // Linux Wayland → LinuxPortalPipeWire stub → NotImplemented → exit 2
+        2
+    } else {
+        // Linux non-Wayland or other host → Unsupported → exit 4
+        4
+    };
+
+    assert_eq!(
+        output.status.code(),
+        Some(expected_code),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
