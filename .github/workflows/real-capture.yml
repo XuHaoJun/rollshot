@@ -14,10 +14,15 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Explain current bootstrap status
+      - name: Install Linux capture deps
         run: |
-          echo "Real Linux capture tests are added in the Linux backend phase."
-          echo "This workflow reserves the self-hosted KDE Wayland runner path."
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-dev libdbus-1-dev
+
+      - name: Run Linux portal smoke test
+        env:
+          ROLLSHOT_REAL_CAPTURE: "1"
+        run: cargo test -p rollshot-capture --test linux_portal_smoke -- --ignored --nocapture
 
   macos-screencapturekit:
     name: macOS ScreenCaptureKit smoke

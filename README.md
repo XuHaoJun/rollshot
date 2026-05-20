@@ -3,7 +3,8 @@
 `rollshot` is a Rust rewrite of the long screenshot workflow described in
 `rollshot_mvp_design.md`. The project has a platform-independent stitching
 core, fixture-backed capture tests, and a macOS ScreenCaptureKit backend built
-through `scap`. The KDE Wayland backend is still planned for a later phase.
+through `scap`. The Linux Wayland portal backend is available on systems with
+ScreenCast portal and PipeWire support.
 
 ## Workspace
 
@@ -14,7 +15,20 @@ through `scap`. The KDE Wayland backend is still planned for a later phase.
 
 ## Local Development
 
-Install Rust 1.85 or newer with `rustup`, then run:
+Install Rust 1.85 or newer with `rustup`.
+
+On Ubuntu, install the system packages required by the PipeWire and D-Bus
+dependencies:
+
+```bash
+sudo apt-get install -y pkg-config libpipewire-0.3-dev libspa-0.2-dev libclang-18-dev
+```
+
+`libclang-18-dev` provides the `libclang.so` symlink that `bindgen` (used by
+the `pipewire` crate) needs. Without it, set `LIBCLANG_PATH=/usr/lib/llvm-18/lib`
+before building.
+
+Then run:
 
 ```bash
 cargo fmt --all -- --check
@@ -60,29 +74,41 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
 - [ ] `cargo run -p rollshot-cli -- stitch-folder tests/fixtures` exits successfully with bootstrap status text.
 
-## Manual Testing: Future Linux KDE Wayland Capture
+## Manual Testing: Linux Wayland Portal Capture
 
-Use this checklist when the Linux backend phase adds real tests:
+Linux capture uses the XDG Desktop Portal ScreenCast interface and PipeWire.
+KDE Plasma 6 on Wayland is the first validated target. Other Wayland desktops
+can work when their portal implements the standard ScreenCast flow, but
+rectangular portal-region picking is desktop-specific.
 
-- [ ] Test machine is running KDE Plasma 6 on Wayland.
-- [ ] `XDG_SESSION_TYPE=wayland`.
-- [ ] `XDG_CURRENT_DESKTOP` mentions KDE or Plasma.
-- [ ] PipeWire is running.
-- [ ] WirePlumber is running.
-- [ ] `xdg-desktop-portal` is running.
-- [ ] `xdg-desktop-portal-kde` is running.
-- [ ] `rollshot probe` reports portal and PipeWire availability.
-- [ ] Portal source picker opens.
-- [ ] Rectangular Region selection returns frames.
-- [ ] At least three frames are captured.
-- [ ] Captured frames have non-zero width and height.
-- [ ] The first frame can be saved under `target/test-artifacts/`.
-
-Expected future command:
+Install development packages on Debian/Ubuntu:
 
 ```bash
-ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test linux_portal_smoke -- --ignored --nocapture
+sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-18-dev
 ```
+
+Required services:
+
+- PipeWire (`libpipewire-0.3`)
+- WirePlumber or equivalent session manager
+- `xdg-desktop-portal`
+- a desktop portal implementation such as `xdg-desktop-portal-kde`
+
+Manual checks:
+
+- [ ] `XDG_SESSION_TYPE=wayland`.
+- [ ] PipeWire and WirePlumber are running.
+- [ ] `xdg-desktop-portal` is running.
+- [ ] On KDE, `xdg-desktop-portal-kde` is running.
+- [ ] `cargo run -p rollshot-cli -- probe --json` reports `linux-portal` availability.
+- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region portal --max-frames 3 --output target/test-artifacts/linux_portal.png` opens the portal picker and writes a PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region full --max-frames 3 --output target/test-artifacts/linux_full.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region "0,0 900x700" --max-frames 3 --output target/test-artifacts/linux_manual.png` writes a locally cropped PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region portal --max-frames 3 --dump-frames target/test-artifacts/linux-frames --output target/test-artifacts/linux_dumped.png` writes frame dumps.
+- [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test linux_portal_smoke -- --ignored --nocapture` captures at least three frames and writes `target/test-artifacts/linux_portal_first_frame.png`.
+
+The smoke test requires a live human-driven desktop session because the portal
+picker must be clicked. Hosted CI must not run it.
 
 ## Manual Testing: macOS ScreenCaptureKit Capture
 

@@ -11,8 +11,17 @@ anyhow = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true }
+nix = { workspace = true }
+pipewire = { workspace = true }
+tokio = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 scap = { workspace = true }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
