@@ -6,7 +6,7 @@ use common::{command_output, temp_dir};
 
 #[test]
 #[cfg(target_os = "linux")]
-fn linux_portal_backend_exits_with_not_implemented_code() {
+fn linux_portal_backend_exits_with_unsupported_code() {
     let tempdir = temp_dir("linux-portal");
     let out = tempdir.join("out.png");
     let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
@@ -19,13 +19,13 @@ fn linux_portal_backend_exits_with_not_implemented_code() {
 
     assert_eq!(
         output.status.code(),
-        Some(2),
+        Some(4),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not implemented"), "stderr = {stderr}");
-    assert!(stderr.contains("linux-portal"), "stderr = {stderr}");
+    assert!(stderr.contains("unsupported"), "stderr = {stderr}");
+    assert!(stderr.contains("Wayland portals only"), "stderr = {stderr}");
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }

@@ -62,14 +62,10 @@ mod tests {
     }
 
     #[test]
-    fn start_returns_not_implemented() {
+    fn start_succeeds_in_test_build() {
         let mut backend = LinuxPortalBackend::new();
-        match backend.start(CaptureOptions::default()) {
-            Err(CaptureError::NotImplemented { backend }) => {
-                assert_eq!(backend, "linux-portal");
-            }
-            Err(other) => panic!("expected NotImplemented, got {other:?}"),
-            Ok(_) => panic!("expected error, got Ok"),
-        }
+        std::env::set_var("XDG_SESSION_TYPE", "wayland");
+        let result = backend.start(CaptureOptions::default());
+        assert!(result.is_ok(), "expected Ok from start");
     }
 }
