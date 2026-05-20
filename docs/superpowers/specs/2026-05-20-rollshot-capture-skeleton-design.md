@@ -221,7 +221,7 @@ CLI maps these to exit codes:
 ```text
 0  success
 0  UserCancelled       (with a short message on stderr)
-2  NotImplemented      (hint: try --backend fake)
+2  NotImplemented      (hint: try --backend fixture)
 3  PermissionDenied
 4  Unsupported
 1  everything else via anyhow chain
@@ -399,8 +399,8 @@ rollshot probe [--json]
     },
     {
       "name": "linux-portal",
-      "available": false,
-      "message": "not implemented in v0.1 plumbing phase",
+      "available": true,
+      "message": "preconditions look ok; backend is not implemented in v0.1 plumbing phase",
       "details": [
         ["XDG_SESSION_TYPE", "wayland"],
         ["XDG_CURRENT_DESKTOP", "KDE"]

@@ -146,7 +146,13 @@ fn parse_region(flag: &str, kind: BackendKind) -> Result<RegionMode, CliError> {
             | BackendKind::Fixture
             | BackendKind::Unsupported => RegionMode::FullSource,
         }),
-        "portal" => Ok(RegionMode::PortalPicker),
+        "portal" => match kind {
+            BackendKind::LinuxPortalPipeWire => Ok(RegionMode::PortalPicker),
+            _ => Err(CliError::new(
+                "--region portal is only supported with --backend linux-portal",
+                1,
+            )),
+        },
         "full" => Ok(RegionMode::FullSource),
         other => parse_manual_region(other).map(RegionMode::Manual),
     }
