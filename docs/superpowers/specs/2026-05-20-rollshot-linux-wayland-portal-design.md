@@ -331,17 +331,16 @@ persist_mode = DoNot for this phase
 Cursor mode selection:
 
 ```text
-if Metadata is available:
-  use Metadata
-else if options.show_cursor && Embedded is available:
+if options.show_cursor && Embedded is available:
   use Embedded
 else:
   use Hidden
 ```
 
 This keeps cursor pixels out of the stream by default, which is better for
-stitching. Metadata support leaves room for future cursor handling without
-compositing it in this phase.
+stitching. Cursor metadata is not requested in this phase because cursor
+compositing is a non-goal; selecting metadata without compositing would make
+`show_cursor=true` silently omit the cursor.
 
 ### Stream Selection
 
@@ -460,7 +459,6 @@ Request:
 ```text
 SPA_META_Header
 SPA_META_VideoCrop
-SPA_META_Cursor
 SPA_META_VideoTransform
 ```
 
@@ -468,7 +466,6 @@ MVP handling:
 
 - `Header`: reject or skip corrupted buffers.
 - `VideoCrop`: apply crop before returning `RgbaImage`.
-- `Cursor`: parse enough to know it exists, but do not composite cursor pixels.
 - `VideoTransform`: accept identity/none only. Return backend error for rotated
   or flipped frames in this phase.
 
@@ -756,9 +753,8 @@ Happy-path / argument-mapping:
 - `choose_stream()` returns error for no streams.
 - `choose_stream()` returns the only stream for one stream.
 - `choose_stream()` returns the last stream for multiple streams.
-- cursor mode selection prefers metadata.
-- cursor mode selection uses embedded only when requested and metadata is not
-  available.
+- cursor mode selection uses embedded when requested and available.
+- cursor mode selection does not use metadata until cursor compositing exists.
 - cursor mode selection falls back to hidden.
 - manual region rejects negative origins.
 - portal option mapping uses monitor/window, `multiple=false`, and no
@@ -836,7 +832,8 @@ OBS behavior used as reference:
   node id.
 - It handles KDE returning multiple streams by selecting the last stream.
 - It selects cursor mode based on available cursor modes, preferring metadata
-  when supported.
+  when supported; rollshot intentionally diverges for the MVP because it does
+  not composite cursor metadata.
 - It connects PipeWire from the fd returned by `OpenPipeWireRemote`, not from
   the default PipeWire socket.
 - It requests `SPA_META_VideoCrop` and reads crop metadata from buffers.
@@ -866,8 +863,9 @@ Rollshot reimplements the behavior in Rust and keeps only the subset needed for
   `Drop` order (thread loop → stream → context → fd → session); pure test
   asserts the order against fakes.
 - **Probe hangs on a broken portal.** Default DBus timeouts can leave the CLI
-  apparently hung for ~25s. Mitigation: 2-second per-call timeout in `probe`;
-  total wall-clock bound of ~3s; pure test against a sleeping fake proxy.
+  apparently hung for ~25s. Mitigation: launch probe property reads in parallel
+  under one 2-second deadline; total wall-clock bound of ~3s; pure test against
+  a sleeping fake proxy.
 - **`next_frame()` hangs on a stalled compositor.** Mitigation: 5-second
   per-call timeout in `next_frame()`; pure test against a silent fake stream.
 - **Stride/crop mistakes.** PipeWire rows may be padded and portal crop may be

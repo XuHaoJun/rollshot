@@ -257,9 +257,7 @@ pub fn quirks_for_profile(profile: LinuxDesktopProfile) -> Vec<LinuxPortalQuirk>
 }
 
 pub fn choose_cursor_mode(cursors: CursorModes, show_cursor: bool) -> PortalCursorMode {
-    if cursors.metadata {
-        PortalCursorMode::Metadata
-    } else if show_cursor && cursors.embedded {
+    if show_cursor && cursors.embedded {
         PortalCursorMode::Embedded
     } else {
         PortalCursorMode::Hidden
@@ -542,6 +540,8 @@ Tests must verify:
 - Wayland + monitor source + PipeWire returns `available = true` without requiring KDE.
 - X11 returns `Unsupported`-style probe details and `available = false`.
 - a sleeping fake source returns within 300 ms when using a 100 ms test timeout and appends `probe_error` detail.
+- a fake source where every probe call sleeps still returns within one overall
+  timeout budget, not one timeout per field.
 - missing monitor and window source types returns `available = false`.
 - KDE desktop strings include the three quirks in `details`.
 
@@ -567,10 +567,9 @@ fn build_probe_from_source<S: ProbeSource>(
         ("desktop_profile".to_string(), format!("{profile:?}").to_ascii_lowercase()),
     ];
 
-    let version = call_with_timeout("screencast_version", timeout, || source.screencast_version(), &mut details);
-    let source_types = call_with_timeout("available_source_types", timeout, || source.available_source_types(), &mut details);
-    let cursor_modes = call_with_timeout("available_cursor_modes", timeout, || source.available_cursor_modes(), &mut details);
-    let pipewire = call_with_timeout("pipewire_version", timeout, || source.pipewire_version(), &mut details);
+    // Spawn screencast_version, available_source_types,
+    // available_cursor_modes, and pipewire_version together and collect them
+    // through one deadline derived from timeout.
 
     let has_source = source_types.map(|s| s.monitor || s.window).unwrap_or(false);
     let has_pipewire = pipewire.is_some();
@@ -598,7 +597,10 @@ fn build_probe_from_source<S: ProbeSource>(
 }
 ```
 
-Use `std::sync::mpsc` + `std::thread::scope` or a small tokio current-thread runtime for timeout tests. The timeout helper must return `None` and append `("probe_error", "... timed out ...")` when the call exceeds the deadline.
+Use `std::sync::mpsc` + threads or a small tokio current-thread runtime for
+timeout tests. The probe helper must run property reads in parallel under one
+deadline, set timed-out fields to `unavailable`, and append
+`("probe_error", "... timed out ...")` when a call exceeds the deadline.
 
 - [ ] **Step 3: Implement real ashpd probe source**
 
@@ -928,7 +930,6 @@ Implement `PipeWireConnection::connect_fd(portal_fd: OwnedFd, node_id: u32, opti
 In `param_changed`, when a raw video format is negotiated, call `stream.update_params()` with:
 - `SPA_PARAM_Meta` for Header.
 - `SPA_PARAM_Meta` for VideoCrop.
-- `SPA_PARAM_Meta` for Cursor.
 - `SPA_PARAM_Meta` for VideoTransform when supported by available spa constants.
 - `SPA_PARAM_Buffers` with `dataType = 1 << SPA_DATA_MemPtr`.
 

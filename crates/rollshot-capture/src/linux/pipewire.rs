@@ -10,6 +10,23 @@ use super::pixel::LinuxPixelFormat;
 
 pub const NEXT_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub fn requested_metadata_types() -> [u32; 3] {
+    [
+        pipewire::spa::sys::SPA_META_Header,
+        pipewire::spa::sys::SPA_META_VideoCrop,
+        pipewire::spa::sys::SPA_META_VideoTransform,
+    ]
+}
+
+#[cfg(not(test))]
+pub fn requested_metadata_sizes() -> [i32; 3] {
+    [
+        std::mem::size_of::<pipewire::spa::sys::spa_meta_header>() as i32,
+        std::mem::size_of::<pipewire::spa::sys::spa_meta_region>() as i32,
+        std::mem::size_of::<pipewire::spa::sys::spa_meta_videotransform>() as i32,
+    ]
+}
+
 #[allow(unsafe_code)] // OwnedFd::from_raw_fd is the documented bridge from a raw kernel fd.
 pub fn dup_pipewire_fd(
     input: std::os::fd::BorrowedFd<'_>,
@@ -204,25 +221,39 @@ pub fn inspect_dequeued_buffer(
 
     *empty_count = 0;
 
-    if let Some(crop) = buf.metadata.crop {
+    let mut metadata = buf.metadata;
+    if buf.chunk_stride <= 0 {
+        return Err(CaptureError::InvalidConfig {
+            message: format!(
+                "PipeWire buffer stride must be positive, got {}",
+                buf.chunk_stride
+            ),
+        });
+    }
+    metadata.stride = buf.chunk_stride as u32;
+
+    if let Some(crop) = metadata.crop {
+        if crop.x < 0 || crop.y < 0 {
+            return Err(CaptureError::InvalidConfig {
+                message: format!(
+                    "crop region x={},y={},w={},h={} must be non-negative",
+                    crop.x, crop.y, crop.width, crop.height
+                ),
+            });
+        }
         let x2 = crop.x as u32 + crop.width;
         let y2 = crop.y as u32 + crop.height;
-        if x2 > buf.metadata.width || y2 > buf.metadata.height {
+        if x2 > metadata.width || y2 > metadata.height {
             return Err(CaptureError::InvalidConfig {
                 message: format!(
                     "manual crop region x={},y={},w={},h={} is outside available frame {}x{}",
-                    crop.x,
-                    crop.y,
-                    crop.width,
-                    crop.height,
-                    buf.metadata.width,
-                    buf.metadata.height
+                    crop.x, crop.y, crop.width, crop.height, metadata.width, metadata.height
                 ),
             });
         }
     }
 
-    Ok(BufferAction::Produce(buf.metadata))
+    Ok(BufferAction::Produce(metadata))
 }
 
 pub fn map_spa_video_format(
@@ -279,14 +310,14 @@ mod connection {
         pub options: crate::types::CaptureOptions,
     }
 
-    fn build_meta_param_bytes(meta_type: u32) -> Vec<u8> {
+    fn build_meta_param_bytes(meta_type: u32, size: i32) -> Vec<u8> {
         let mut data = Vec::new();
         {
             let mut builder = Builder::new(&mut data);
             let _ = builder_add!(&mut builder,
                 Object(pipewire::spa::sys::SPA_TYPE_OBJECT_ParamMeta, pipewire::spa::sys::SPA_PARAM_Meta) {
                     pipewire::spa::sys::SPA_PARAM_META_type => Id(Id(meta_type)),
-                    pipewire::spa::sys::SPA_PARAM_META_size => Int(64i32)
+                    pipewire::spa::sys::SPA_PARAM_META_size => Int(size)
                 }
             );
         }
@@ -320,6 +351,201 @@ mod connection {
             );
         }
         data
+    }
+
+    fn map_spa_transform(transform: u32) -> LinuxVideoTransform {
+        match transform {
+            pipewire::spa::sys::SPA_META_TRANSFORMATION_None => LinuxVideoTransform::Normal,
+            pipewire::spa::sys::SPA_META_TRANSFORMATION_90 => LinuxVideoTransform::Rotated90,
+            pipewire::spa::sys::SPA_META_TRANSFORMATION_180 => LinuxVideoTransform::Rotated180,
+            pipewire::spa::sys::SPA_META_TRANSFORMATION_270 => LinuxVideoTransform::Rotated270,
+            _ => LinuxVideoTransform::Flipped,
+        }
+    }
+
+    #[allow(unsafe_code)] // PipeWire exposes SPA buffer metadata through raw C pointers.
+    unsafe fn read_spa_buffer_metadata(
+        buffer: *mut pipewire::spa::sys::spa_buffer,
+        fallback_crop: Option<VideoCrop>,
+        fallback_transform: LinuxVideoTransform,
+    ) -> (bool, Option<VideoCrop>, LinuxVideoTransform) {
+        let header = pipewire::spa::sys::spa_buffer_find_meta_data(
+            buffer,
+            pipewire::spa::sys::SPA_META_Header,
+            std::mem::size_of::<pipewire::spa::sys::spa_meta_header>(),
+        ) as *const pipewire::spa::sys::spa_meta_header;
+        let header_corrupted = !header.is_null()
+            && ((*header).flags & pipewire::spa::sys::SPA_META_HEADER_FLAG_CORRUPTED) != 0;
+
+        let region = pipewire::spa::sys::spa_buffer_find_meta_data(
+            buffer,
+            pipewire::spa::sys::SPA_META_VideoCrop,
+            std::mem::size_of::<pipewire::spa::sys::spa_meta_region>(),
+        ) as *const pipewire::spa::sys::spa_meta_region;
+        let crop = if !region.is_null() && pipewire::spa::sys::spa_meta_region_is_valid(region) {
+            Some(VideoCrop {
+                x: (*region).region.position.x,
+                y: (*region).region.position.y,
+                width: (*region).region.size.width,
+                height: (*region).region.size.height,
+            })
+        } else {
+            fallback_crop
+        };
+
+        let transform = pipewire::spa::sys::spa_buffer_find_meta_data(
+            buffer,
+            pipewire::spa::sys::SPA_META_VideoTransform,
+            std::mem::size_of::<pipewire::spa::sys::spa_meta_videotransform>(),
+        ) as *const pipewire::spa::sys::spa_meta_videotransform;
+        let transform = if transform.is_null() {
+            fallback_transform
+        } else {
+            map_spa_transform((*transform).transform)
+        };
+
+        (header_corrupted, crop, transform)
+    }
+
+    #[allow(unsafe_code)] // Raw dequeue is needed to access SPA metadata not exposed by pipewire-rs.
+    unsafe fn process_raw_buffer(
+        raw_buffer: *mut pipewire::sys::pw_buffer,
+        user_data: &mut StreamUserData,
+    ) {
+        let spa_buffer = (*raw_buffer).buffer;
+        if spa_buffer.is_null() || (*spa_buffer).n_datas == 0 || (*spa_buffer).datas.is_null() {
+            return;
+        }
+
+        let data = &mut *(*spa_buffer).datas;
+        if data.chunk.is_null() {
+            return;
+        }
+
+        let chunk = &*data.chunk;
+        let chunk_size = chunk.size;
+        let chunk_stride = chunk.stride;
+        let chunk_corrupted =
+            (chunk.flags & pipewire::spa::sys::SPA_CHUNK_FLAG_CORRUPTED as i32) != 0;
+
+        let buffer_type = if data.type_ == pipewire::spa::sys::SPA_DATA_MemPtr {
+            LinuxBufferType::MemPtr
+        } else if data.type_ == pipewire::spa::sys::SPA_DATA_DmaBuf {
+            LinuxBufferType::DmaBuf
+        } else {
+            user_data.empty_count += 1;
+            return;
+        };
+
+        let raw_data: &[u8] = if buffer_type == LinuxBufferType::MemPtr && !data.data.is_null() {
+            let offset = chunk.offset as usize;
+            let max_size = data.maxsize as usize;
+            if offset <= max_size {
+                std::slice::from_raw_parts((data.data as *const u8).add(offset), max_size - offset)
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        };
+
+        let (header_corrupted, crop, transform) =
+            read_spa_buffer_metadata(spa_buffer, user_data.crop, user_data.transform);
+
+        let metadata = LinuxFrameMetadata {
+            width: user_data.negotiated_width,
+            height: user_data.negotiated_height,
+            stride: user_data.negotiated_stride,
+            format: user_data
+                .negotiated_format
+                .unwrap_or(LinuxPixelFormat::Bgra),
+            crop,
+            transform,
+        };
+
+        let buf_info = DequeuedBuffer {
+            data: raw_data,
+            buffer_type,
+            chunk_size,
+            chunk_stride,
+            chunk_corrupted,
+            header_corrupted,
+            metadata,
+        };
+
+        match inspect_dequeued_buffer(&buf_info, &mut user_data.empty_count) {
+            Ok(BufferAction::Produce(meta)) => {
+                if let Some(pixel_format) = user_data.negotiated_format {
+                    let raw_frame = super::super::pixel::LinuxRawFrame {
+                        data: raw_data,
+                        width: meta.width,
+                        height: meta.height,
+                        stride: meta.stride,
+                        format: pixel_format,
+                        crop: meta.crop.map(|c| crate::types::Region {
+                            x: c.x,
+                            y: c.y,
+                            width: c.width,
+                            height: c.height,
+                        }),
+                    };
+                    match super::super::pixel::raw_frame_to_rgba(raw_frame) {
+                        Ok(image) => {
+                            let effective_region = match meta.crop {
+                                Some(c) => Some(crate::types::Region {
+                                    x: c.x,
+                                    y: c.y,
+                                    width: c.width,
+                                    height: c.height,
+                                }),
+                                None => match &user_data.options.region {
+                                    crate::types::RegionMode::Manual(region) => Some(*region),
+                                    _ => None,
+                                },
+                            };
+                            user_data.queue.push(FrameEvent::Frame(CapturedFrame {
+                                image,
+                                timestamp: std::time::SystemTime::now(),
+                                metadata: crate::types::FrameMetadata {
+                                    source_size: Some(crate::types::Size {
+                                        width: meta.width,
+                                        height: meta.height,
+                                    }),
+                                    effective_region,
+                                    pixel_format: Some(match pixel_format {
+                                        LinuxPixelFormat::Bgra => crate::types::PixelFormat::Bgra,
+                                        LinuxPixelFormat::Rgba => crate::types::PixelFormat::Rgba,
+                                        LinuxPixelFormat::Bgrx => crate::types::PixelFormat::Bgrx,
+                                        LinuxPixelFormat::Rgbx => crate::types::PixelFormat::Rgbx,
+                                        LinuxPixelFormat::Rgb => crate::types::PixelFormat::Rgb,
+                                    }),
+                                    stride: Some(meta.stride),
+                                    backend: "linux-portal",
+                                },
+                            }));
+                        }
+                        Err(e) => user_data.queue.push(FrameEvent::Error(e.to_string())),
+                    }
+                }
+            }
+            Ok(BufferAction::Skip) => {}
+            Err(e) => user_data.queue.push(FrameEvent::Error(e.to_string())),
+        }
+    }
+
+    #[allow(unsafe_code)] // Wrapper pairs PipeWire raw dequeue with queueing on every path.
+    fn process_stream_buffer(stream: &pipewire::stream::StreamRef, user_data: &mut StreamUserData) {
+        // SAFETY: raw dequeue is paired with queue_raw_buffer before returning.
+        // The raw buffer and SPA data are only inspected synchronously inside
+        // this callback, before PipeWire can reuse the buffer.
+        unsafe {
+            let raw_buffer = stream.dequeue_raw_buffer();
+            if raw_buffer.is_null() {
+                return;
+            }
+            process_raw_buffer(raw_buffer, user_data);
+            stream.queue_raw_buffer(raw_buffer);
+        }
     }
 
     impl PipeWireConnection {
@@ -418,12 +644,19 @@ mod connection {
                                     user_data.negotiated_height = size.height;
                                     user_data.negotiated_stride = stride;
 
-                                    let header_data = build_meta_param_bytes(0);
-                                    let crop_data = build_meta_param_bytes(1);
-                                    let cursor_data = build_meta_param_bytes(2);
+                                    let [header_type, crop_type, transform_type] =
+                                        requested_metadata_types();
+                                    let [header_size, crop_size, transform_size] =
+                                        requested_metadata_sizes();
+                                    let header_data =
+                                        build_meta_param_bytes(header_type, header_size);
+                                    let crop_data = build_meta_param_bytes(crop_type, crop_size);
+                                    let transform_data =
+                                        build_meta_param_bytes(transform_type, transform_size);
                                     let buf_data = build_buf_mem_ptr_param_bytes();
 
-                                    let all_data = [header_data, crop_data, cursor_data, buf_data];
+                                    let all_data =
+                                        [header_data, crop_data, transform_data, buf_data];
                                     let mut param_refs: Vec<&Pod> = all_data
                                         .iter()
                                         .filter_map(|d| Pod::from_bytes(d))
@@ -435,138 +668,7 @@ mod connection {
                     }
                 })
                 .process(|stream, user_data| {
-                    let mut buffer = match stream.dequeue_buffer() {
-                        Some(buf) => buf,
-                        None => return,
-                    };
-
-                    let datas = buffer.datas_mut();
-                    if datas.is_empty() {
-                        return;
-                    }
-
-                    let data = &mut datas[0];
-                    let data_type = data.type_();
-                    let chunk = data.chunk();
-                    let chunk_size = chunk.size();
-                    let chunk_stride = chunk.stride();
-                    let chunk_corrupted = chunk
-                        .flags()
-                        .contains(pipewire::spa::buffer::ChunkFlags::CORRUPTED);
-
-                    let buffer_type = if data_type == pipewire::spa::buffer::DataType::MemPtr {
-                        LinuxBufferType::MemPtr
-                    } else if data_type == pipewire::spa::buffer::DataType::DmaBuf {
-                        LinuxBufferType::DmaBuf
-                    } else {
-                        user_data.empty_count += 1;
-                        return;
-                    };
-
-                    let raw_data: &[u8] = if buffer_type == LinuxBufferType::MemPtr {
-                        data.data().map_or(&[][..], |v| v)
-                    } else {
-                        &[]
-                    };
-
-                    let metadata = LinuxFrameMetadata {
-                        width: user_data.negotiated_width,
-                        height: user_data.negotiated_height,
-                        stride: user_data.negotiated_stride,
-                        format: user_data
-                            .negotiated_format
-                            .unwrap_or(LinuxPixelFormat::Bgra),
-                        crop: user_data.crop,
-                        transform: user_data.transform,
-                    };
-
-                    let buf_info = DequeuedBuffer {
-                        data: raw_data,
-                        buffer_type,
-                        chunk_size,
-                        chunk_stride,
-                        chunk_corrupted,
-                        header_corrupted: false,
-                        metadata,
-                    };
-
-                    match inspect_dequeued_buffer(&buf_info, &mut user_data.empty_count) {
-                        Ok(BufferAction::Produce(meta)) => {
-                            if let Some(pixel_format) = user_data.negotiated_format {
-                                let raw_frame = super::super::pixel::LinuxRawFrame {
-                                    data: raw_data,
-                                    width: meta.width,
-                                    height: meta.height,
-                                    stride: meta.stride,
-                                    format: pixel_format,
-                                    crop: meta.crop.map(|c| crate::types::Region {
-                                        x: c.x,
-                                        y: c.y,
-                                        width: c.width,
-                                        height: c.height,
-                                    }),
-                                };
-                                match super::super::pixel::raw_frame_to_rgba(raw_frame) {
-                                    Ok(image) => {
-                                        let effective_region = match meta.crop {
-                                            Some(c) => Some(crate::types::Region {
-                                                x: c.x,
-                                                y: c.y,
-                                                width: c.width,
-                                                height: c.height,
-                                            }),
-                                            None => {
-                                                if let crate::types::RegionMode::Manual(region) =
-                                                    &user_data.options.region
-                                                {
-                                                    Some(*region)
-                                                } else {
-                                                    None
-                                                }
-                                            }
-                                        };
-                                        user_data.queue.push(FrameEvent::Frame(CapturedFrame {
-                                            image,
-                                            timestamp: std::time::SystemTime::now(),
-                                            metadata: crate::types::FrameMetadata {
-                                                source_size: Some(crate::types::Size {
-                                                    width: meta.width,
-                                                    height: meta.height,
-                                                }),
-                                                effective_region,
-                                                pixel_format: Some(match pixel_format {
-                                                    LinuxPixelFormat::Bgra => {
-                                                        crate::types::PixelFormat::Bgra
-                                                    }
-                                                    LinuxPixelFormat::Rgba => {
-                                                        crate::types::PixelFormat::Rgba
-                                                    }
-                                                    LinuxPixelFormat::Bgrx => {
-                                                        crate::types::PixelFormat::Bgrx
-                                                    }
-                                                    LinuxPixelFormat::Rgbx => {
-                                                        crate::types::PixelFormat::Rgbx
-                                                    }
-                                                    LinuxPixelFormat::Rgb => {
-                                                        crate::types::PixelFormat::Rgb
-                                                    }
-                                                }),
-                                                stride: Some(meta.stride),
-                                                backend: "linux-portal",
-                                            },
-                                        }));
-                                    }
-                                    Err(e) => {
-                                        user_data.queue.push(FrameEvent::Error(e.to_string()));
-                                    }
-                                }
-                            }
-                        }
-                        Ok(BufferAction::Skip) => {}
-                        Err(e) => {
-                            user_data.queue.push(FrameEvent::Error(e.to_string()));
-                        }
-                    }
+                    process_stream_buffer(stream, user_data);
                 })
                 .register()
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("listener: {e}")))?;
@@ -1012,15 +1114,54 @@ mod tests {
             data: &[0u8; 40000],
             buffer_type: LinuxBufferType::MemPtr,
             chunk_size: 40000,
-            chunk_stride: 400,
+            chunk_stride: 512,
             chunk_corrupted: false,
             header_corrupted: false,
             metadata: make_meta(100, 100),
         };
         let mut empty_count = 5u8;
         let result = inspect_dequeued_buffer(&buf, &mut empty_count).unwrap();
-        assert_eq!(result, BufferAction::Produce(make_meta(100, 100)));
+        assert_eq!(
+            result,
+            BufferAction::Produce(LinuxFrameMetadata {
+                stride: 512,
+                ..make_meta(100, 100)
+            })
+        );
         assert_eq!(empty_count, 0);
+    }
+
+    #[test]
+    fn negative_chunk_stride_returns_invalid_config() {
+        let buf = DequeuedBuffer {
+            data: &[0u8; 40000],
+            buffer_type: LinuxBufferType::MemPtr,
+            chunk_size: 40000,
+            chunk_stride: -1,
+            chunk_corrupted: false,
+            header_corrupted: false,
+            metadata: make_meta(100, 100),
+        };
+        let mut empty_count = 0u8;
+        let err = inspect_dequeued_buffer(&buf, &mut empty_count).unwrap_err();
+        match err {
+            CaptureError::InvalidConfig { message } => {
+                assert!(message.contains("stride"), "msg = {message}");
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requested_metadata_types_match_spa_constants() {
+        assert_eq!(
+            requested_metadata_types(),
+            [
+                pipewire::spa::sys::SPA_META_Header,
+                pipewire::spa::sys::SPA_META_VideoCrop,
+                pipewire::spa::sys::SPA_META_VideoTransform,
+            ]
+        );
     }
 
     #[test]

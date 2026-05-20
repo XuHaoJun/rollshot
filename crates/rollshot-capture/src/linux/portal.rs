@@ -46,7 +46,6 @@ pub struct LinuxPortalCapabilities {
 pub enum PortalCursorMode {
     Hidden,
     Embedded,
-    Metadata,
 }
 
 #[allow(dead_code)] // used in future portal option mapping
@@ -191,7 +190,6 @@ impl PortalClient {
                 match choose_cursor_mode(capabilities.cursor_modes, options.show_cursor) {
                     PortalCursorMode::Hidden => ashpd::desktop::screencast::CursorMode::Hidden,
                     PortalCursorMode::Embedded => ashpd::desktop::screencast::CursorMode::Embedded,
-                    PortalCursorMode::Metadata => ashpd::desktop::screencast::CursorMode::Metadata,
                 };
 
             screencast
@@ -377,9 +375,7 @@ pub fn quirks_for_profile(profile: LinuxDesktopProfile) -> Vec<LinuxPortalQuirk>
 }
 
 pub fn choose_cursor_mode(cursors: CursorModes, show_cursor: bool) -> PortalCursorMode {
-    if cursors.metadata {
-        PortalCursorMode::Metadata
-    } else if show_cursor && cursors.embedded {
+    if show_cursor && cursors.embedded {
         PortalCursorMode::Embedded
     } else {
         PortalCursorMode::Hidden
@@ -474,35 +470,6 @@ fn format_quirks(quirks: &[LinuxPortalQuirk]) -> String {
         .join(", ")
 }
 
-fn call_with_timeout<T>(
-    name: &str,
-    timeout: std::time::Duration,
-    details: &mut Vec<(String, String)>,
-    f: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Option<T>
-where
-    T: Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(val)) => Some(val),
-        Ok(Err(err)) => {
-            details.push(("probe_error".to_string(), format!("{name}: {err}")));
-            None
-        }
-        Err(_timeout) => {
-            details.push((
-                "probe_error".to_string(),
-                format!("{name}: timed out after {}ms", timeout.as_millis()),
-            ));
-            None
-        }
-    }
-}
-
 fn build_probe_from_source<S: ProbeSource + Send + Sync + 'static>(
     session_type: String,
     desktop: String,
@@ -521,26 +488,126 @@ fn build_probe_from_source<S: ProbeSource + Send + Sync + 'static>(
         ),
     ];
 
+    enum ProbeResult {
+        Version(Result<u32, String>),
+        SourceTypes(Result<SourceTypes, String>),
+        CursorModes(Result<CursorModes, String>),
+        PipeWire(Result<String, String>),
+    }
+
     let arc = std::sync::Arc::new(source);
+    let (tx, rx) = std::sync::mpsc::channel();
 
     let arc_clone = std::sync::Arc::clone(&arc);
-    let version = call_with_timeout("screencast_version", timeout, &mut details, move || {
-        arc_clone.screencast_version()
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx_clone.send(ProbeResult::Version(arc_clone.screencast_version()));
     });
+
     let arc_clone = std::sync::Arc::clone(&arc);
-    let source_types =
-        call_with_timeout("available_source_types", timeout, &mut details, move || {
-            arc_clone.available_source_types()
-        });
-    let arc_clone = std::sync::Arc::clone(&arc);
-    let cursor_modes =
-        call_with_timeout("available_cursor_modes", timeout, &mut details, move || {
-            arc_clone.available_cursor_modes()
-        });
-    let arc_clone = std::sync::Arc::clone(&arc);
-    let pipewire = call_with_timeout("pipewire_version", timeout, &mut details, move || {
-        arc_clone.pipewire_version()
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx_clone.send(ProbeResult::SourceTypes(arc_clone.available_source_types()));
     });
+
+    let arc_clone = std::sync::Arc::clone(&arc);
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx_clone.send(ProbeResult::CursorModes(arc_clone.available_cursor_modes()));
+    });
+
+    let arc_clone = std::sync::Arc::clone(&arc);
+    std::thread::spawn(move || {
+        let _ = tx.send(ProbeResult::PipeWire(arc_clone.pipewire_version()));
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut remaining = 4;
+    let mut version = None;
+    let mut source_types = None;
+    let mut cursor_modes = None;
+    let mut pipewire = None;
+
+    while remaining > 0 {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+
+        match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+            Ok(result) => {
+                remaining -= 1;
+                match result {
+                    ProbeResult::Version(Ok(val)) => version = Some(val),
+                    ProbeResult::Version(Err(err)) => {
+                        details.push((
+                            "probe_error".to_string(),
+                            format!("screencast_version: {err}"),
+                        ));
+                    }
+                    ProbeResult::SourceTypes(Ok(val)) => source_types = Some(val),
+                    ProbeResult::SourceTypes(Err(err)) => {
+                        details.push((
+                            "probe_error".to_string(),
+                            format!("available_source_types: {err}"),
+                        ));
+                    }
+                    ProbeResult::CursorModes(Ok(val)) => cursor_modes = Some(val),
+                    ProbeResult::CursorModes(Err(err)) => {
+                        details.push((
+                            "probe_error".to_string(),
+                            format!("available_cursor_modes: {err}"),
+                        ));
+                    }
+                    ProbeResult::PipeWire(Ok(val)) => pipewire = Some(val),
+                    ProbeResult::PipeWire(Err(err)) => {
+                        details.push((
+                            "probe_error".to_string(),
+                            format!("pipewire_version: {err}"),
+                        ));
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    if version.is_none() {
+        details.push((
+            "probe_error".to_string(),
+            format!(
+                "screencast_version: timed out after {}ms",
+                timeout.as_millis()
+            ),
+        ));
+    }
+    if source_types.is_none() {
+        details.push((
+            "probe_error".to_string(),
+            format!(
+                "available_source_types: timed out after {}ms",
+                timeout.as_millis()
+            ),
+        ));
+    }
+    if cursor_modes.is_none() {
+        details.push((
+            "probe_error".to_string(),
+            format!(
+                "available_cursor_modes: timed out after {}ms",
+                timeout.as_millis()
+            ),
+        ));
+    }
+    if pipewire.is_none() {
+        details.push((
+            "probe_error".to_string(),
+            format!(
+                "pipewire_version: timed out after {}ms",
+                timeout.as_millis()
+            ),
+        ));
+    }
 
     let has_source = source_types.map(|s| s.monitor || s.window).unwrap_or(false);
     let has_pipewire = pipewire.is_some();
@@ -928,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_cursor_mode_metadata_preferred() {
+    fn choose_cursor_mode_avoids_metadata_without_cursor_compositing() {
         let cursors = CursorModes {
             hidden: true,
             embedded: true,
@@ -936,12 +1003,9 @@ mod tests {
         };
         assert_eq!(
             choose_cursor_mode(cursors, true),
-            PortalCursorMode::Metadata
+            PortalCursorMode::Embedded
         );
-        assert_eq!(
-            choose_cursor_mode(cursors, false),
-            PortalCursorMode::Metadata
-        );
+        assert_eq!(choose_cursor_mode(cursors, false), PortalCursorMode::Hidden);
     }
 
     #[test]
@@ -1098,6 +1162,61 @@ mod tests {
         let error = details.get("probe_error").unwrap();
         assert!(error.contains("screencast_version"), "error: {error}");
         assert!(error.contains("timed out"), "error: {error}");
+    }
+
+    struct FakeAllSleepingProbeSource {
+        sleep_duration: std::time::Duration,
+    }
+
+    impl ProbeSource for FakeAllSleepingProbeSource {
+        fn screencast_version(&self) -> Result<u32, String> {
+            std::thread::sleep(self.sleep_duration);
+            Ok(4)
+        }
+
+        fn available_source_types(&self) -> Result<SourceTypes, String> {
+            std::thread::sleep(self.sleep_duration);
+            Ok(SourceTypes {
+                monitor: true,
+                window: false,
+                virtual_source: false,
+            })
+        }
+
+        fn available_cursor_modes(&self) -> Result<CursorModes, String> {
+            std::thread::sleep(self.sleep_duration);
+            Ok(CursorModes {
+                hidden: true,
+                embedded: false,
+                metadata: false,
+            })
+        }
+
+        fn pipewire_version(&self) -> Result<String, String> {
+            std::thread::sleep(self.sleep_duration);
+            Ok("1.0.0".to_string())
+        }
+    }
+
+    #[test]
+    fn probe_uses_one_overall_timeout_budget() {
+        let source = FakeAllSleepingProbeSource {
+            sleep_duration: std::time::Duration::from_millis(500),
+        };
+        let start = std::time::Instant::now();
+        let probe = build_probe_from_source(
+            "wayland".to_string(),
+            "GNOME".to_string(),
+            source,
+            std::time::Duration::from_millis(100),
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 250,
+            "probe took {}ms, expected one overall timeout budget",
+            elapsed.as_millis()
+        );
+        assert!(!probe.available);
     }
 
     #[test]
