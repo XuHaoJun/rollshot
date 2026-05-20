@@ -36,7 +36,7 @@ use std::path::Path;
 
 use image::ImageFormat;
 use rollshot_capture::{
-    BackendKind, CaptureBackend, CaptureError, CaptureOptions, FixtureBackend, RegionMode,
+    BackendKind, CaptureBackend, CaptureError, CaptureOptions, FixtureBackend, Region, RegionMode,
 };
 use rollshot_core::{StitchConfig, StitchOutcome, Stitcher};
 
@@ -46,8 +46,9 @@ use crate::cli_error::CliError;
 pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     let kind = BackendKind::from_cli_flag(&args.backend).map_err(CliError::from_capture)?;
     let mut backend = build_backend(kind, args)?;
+    let region = parse_region(&args.region, kind)?;
     let options = CaptureOptions {
-        region: RegionMode::FullSource,
+        region,
         fps: args.fps,
         show_cursor: args.show_cursor,
         prefer_portal_region: true,
@@ -134,4 +135,45 @@ fn write_dump_frame(dir: &Path, index: u32, image: &image::RgbaImage) -> Result<
         .save_with_format(&path, ImageFormat::Png)
         .map_err(|err| CliError::new(format!("failed to save {}: {err}", path.display()), 1))?;
     Ok(())
+}
+
+fn parse_region(flag: &str, kind: BackendKind) -> Result<RegionMode, CliError> {
+    match flag {
+        "auto" => Ok(match kind {
+            BackendKind::LinuxPortalPipeWire => RegionMode::PortalPicker,
+            BackendKind::MacosScreenCaptureKit
+            | BackendKind::Fixture
+            | BackendKind::Unsupported => RegionMode::FullSource,
+        }),
+        "portal" => Ok(RegionMode::PortalPicker),
+        "full" => Ok(RegionMode::FullSource),
+        other => parse_manual_region(other).map(RegionMode::Manual),
+    }
+}
+
+fn parse_manual_region(s: &str) -> Result<Region, CliError> {
+    let invalid = || {
+        CliError::new(
+            format!("invalid --region '{s}'; expected auto|portal|full|\"X,Y WxH\""),
+            1,
+        )
+    };
+
+    let mut parts = s.split_whitespace();
+    let origin = parts.next().ok_or_else(invalid)?;
+    let size = parts.next().ok_or_else(invalid)?;
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+
+    let (x, y) = origin.split_once(',').ok_or_else(invalid)?;
+    let (w, h) = size.split_once('x').ok_or_else(invalid)?;
+    let x: i32 = x.parse().map_err(|_| invalid())?;
+    let y: i32 = y.parse().map_err(|_| invalid())?;
+    let width: u32 = w.parse().map_err(|_| invalid())?;
+    let height: u32 = h.parse().map_err(|_| invalid())?;
+    if width == 0 || height == 0 {
+        return Err(invalid());
+    }
+    Ok(Region { x, y, width, height })
 }
