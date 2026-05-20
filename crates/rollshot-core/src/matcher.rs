@@ -89,13 +89,7 @@ pub fn estimate_offset(
             y: search_y as u32,
             ..curr_template
         };
-        let score = ncc_score_region(
-            &prev_gray,
-            &curr_gray,
-            width,
-            prev_template,
-            curr_template,
-        );
+        let score = ncc_score_region(&prev_gray, &curr_gray, width, prev_template, curr_template);
 
         if score > best_score {
             second_score = best_score;

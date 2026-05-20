@@ -53,7 +53,9 @@ fn rollshot_stitch_folder_writes_png() {
     assert!(stdout.contains(output_png.to_string_lossy().as_ref()));
 
     assert!(output_png.exists(), "{} should exist", output_png.display());
-    let stitched = image::open(&output_png).expect("decode stitched png").to_rgba8();
+    let stitched = image::open(&output_png)
+        .expect("decode stitched png")
+        .to_rgba8();
     assert_eq!(stitched.width(), 160);
     assert!(stitched.height() > 160, "height = {}", stitched.height());
 

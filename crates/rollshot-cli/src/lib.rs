@@ -70,11 +70,12 @@ fn stitch_folder(args: &[String]) -> Result<String, String> {
         }
     }
 
-    let frames_dir = frames_dir.ok_or_else(|| {
-        String::from("usage: rollshot stitch-folder <frames-dir> --output <png>")
-    })?;
+    let frames_dir = frames_dir
+        .ok_or_else(|| String::from("usage: rollshot stitch-folder <frames-dir> --output <png>"))?;
     let output = output.ok_or_else(|| {
-        String::from("--output is required\n\nusage: rollshot stitch-folder <frames-dir> --output <png>")
+        String::from(
+            "--output is required\n\nusage: rollshot stitch-folder <frames-dir> --output <png>",
+        )
     })?;
 
     if !frames_dir.is_dir() {
@@ -140,13 +141,13 @@ fn stitch_folder(args: &[String]) -> Result<String, String> {
 }
 
 fn collect_frame_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let entries = fs::read_dir(dir)
-        .map_err(|err| format!("failed to read {}: {err}", dir.display()))?;
+    let entries =
+        fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))?;
 
     let mut paths = Vec::new();
     for entry in entries {
-        let entry = entry
-            .map_err(|err| format!("failed to read entry in {}: {err}", dir.display()))?;
+        let entry =
+            entry.map_err(|err| format!("failed to read entry in {}: {err}", dir.display()))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -265,11 +266,7 @@ mod tests {
         for y in (0..height).step_by(36) {
             let accent = ((y / 3) % 180) as u8;
             for x in 24..width.saturating_sub(24) {
-                let stripe = if (x / 7 + y / 11) % 2 == 0 {
-                    220
-                } else {
-                    180
-                };
+                let stripe = if (x / 7 + y / 11) % 2 == 0 { 220 } else { 180 };
                 img.put_pixel(x, y, Rgba([accent, stripe, 80, 255]));
                 if y + 1 < height {
                     img.put_pixel(x, y + 1, Rgba([30, 30, 30, 255]));

@@ -52,7 +52,10 @@ fn duplicate_frame_returns_duplicate_without_growing() {
     let first = crop_frame(&canvas, 0, 320);
 
     let mut stitcher = Stitcher::new(StitchConfig::default());
-    assert_eq!(stitcher.push_frame(first.clone()), StitchOutcome::FirstFrame);
+    assert_eq!(
+        stitcher.push_frame(first.clone()),
+        StitchOutcome::FirstFrame
+    );
     assert_eq!(stitcher.push_frame(first.clone()), StitchOutcome::Duplicate);
 
     let full = stitcher.full_image().expect("image stored");
