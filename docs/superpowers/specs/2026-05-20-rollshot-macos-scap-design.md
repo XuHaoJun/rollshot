@@ -37,6 +37,8 @@ video frames into `image::RgbaImage`, and returns frames through the existing
 - Add pure unit tests for BGRA-to-RGBA conversion and region-to-scap option
   mapping.
 - Add ignored macOS real-capture smoke tests for self-hosted/manual validation.
+- Update `README.md` with concrete manual macOS testing steps for probe,
+  Screen Recording permission, CLI capture, ignored smoke tests, and artifacts.
 
 ## Non-Goals
 
@@ -302,6 +304,27 @@ On macOS, `auto` still resolves to `macos-sck`.
 On non-macOS hosts, `--backend macos-sck` remains unsupported and exits with
 the existing unsupported exit code.
 
+## README Manual Testing
+
+Replace the current "Future macOS ScreenCaptureKit Capture" README section
+with an active manual testing section for this backend phase.
+
+The README must document:
+
+- macOS 12.3+ requirement from ScreenCaptureKit/scap.
+- Rust 1.85+ requirement after the MSRV bump.
+- Screen Recording permission path:
+  `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
+- `cargo run -p rollshot-cli -- probe --json`.
+- A manual full-source capture command.
+- A manual small-region capture command.
+- A `--dump-frames` command for inspecting raw capture frames.
+- The ignored smoke-test command:
+  `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture`.
+- Expected artifact path under `target/test-artifacts/`.
+- Troubleshooting notes for permission denial and needing to restart the
+  terminal after granting permission.
+
 ## Testing Strategy
 
 Pure tests on any host:
@@ -375,5 +398,6 @@ cargo test -p rollshot-capture --target aarch64-apple-darwin
 - Scap BGRA video frames are converted to `RgbaImage`.
 - Pure conversion and option-mapping unit tests pass.
 - Existing Linux and fixture behavior remains unchanged.
+- README includes concrete macOS manual testing instructions for this backend.
 - Full workspace fmt, clippy, and tests pass on the local host.
 - Ignored macOS real-capture smoke test exists for self-hosted/manual runs.
