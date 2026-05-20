@@ -23,11 +23,15 @@ backend dependency in this phase.
 
 - Implement `LinuxPortalBackend::probe()` as real diagnostics for Wayland,
   XDG Desktop Portal ScreenCast, cursor/source capabilities, and PipeWire
-  readiness.
+  readiness, with a hard 2-second timeout per portal call.
 - Implement `LinuxPortalBackend::start()` with the portal lifecycle:
   `CreateSession`, `SelectSources`, `Start`, `OpenPipeWireRemote`.
-- Connect a PipeWire input stream to the selected portal stream node using the
-  fd returned by `OpenPipeWireRemote`.
+- Connect a PipeWire input stream to the selected portal stream node using a
+  `F_DUPFD_CLOEXEC`-duplicated copy of the fd returned by `OpenPipeWireRemote`,
+  with explicit ownership semantics between Rust and PipeWire's C side.
+- Define explicit `Drop` order across portal session, PipeWire context/stream,
+  and the duplicated fd to prevent leaks and double-closes.
+- Make `next_frame()` impossible to hang indefinitely (bounded 5-second wait).
 - Support `RegionMode::PortalPicker`, `RegionMode::FullSource`, and
   `RegionMode::Manual(Region)` on Linux Wayland.
 - Keep the backend generic for KDE, GNOME, wlroots, Hyprland, and future
@@ -41,11 +45,17 @@ backend dependency in this phase.
 - Detect corrupted and empty PipeWire buffers.
 - Reject non-identity video transforms in this MVP instead of returning a
   rotated or flipped image silently.
-- Add pure unit tests for pixel conversion, stride, crop, stream selection, and
-  portal option mapping.
+- Add pure unit tests for pixel conversion, stride, crop, stream selection,
+  portal option mapping, fd ownership, drop order, empty-buffer skip,
+  header-corruption skip, DMA-BUF rejection, `next_frame` timeout, `probe`
+  timeout, and out-of-bounds manual region.
 - Add an ignored real Linux capture smoke test for self-hosted/manual KDE
   Wayland validation.
-- Update `README.md` with concrete Linux portal manual testing steps.
+- Update `README.md` with concrete Linux portal manual testing steps and a
+  note that the smoke test requires a live human-driven desktop session.
+- Update GitHub Actions Linux jobs to install `pkg-config`,
+  `libpipewire-0.3-dev`, `libclang-dev`, and `libdbus-1-dev` so the workspace
+  continues to build on hosted CI.
 
 ## Non-Goals
 
@@ -136,6 +146,10 @@ rollshot-capture
     PipeWireConnection
     PipeWireStream
     PipeWireFrameReceiver
+    LinuxFrameMetadata
+    VideoCrop
+    VideoTransform
+    dup_pipewire_fd()
     connect_fd()
     connect_stream()
     next_frame()
@@ -144,12 +158,12 @@ rollshot-capture
     LinuxPixelFormat
     LinuxRawFrame
     raw_frame_to_rgba()
-
-  linux/metadata.rs
-    LinuxFrameMetadata
-    VideoCrop
-    VideoTransform
 ```
+
+Note: frame metadata types (`LinuxFrameMetadata`, `VideoCrop`, `VideoTransform`)
+live inside `linux/pipewire.rs` rather than a separate `metadata.rs`. They are
+~80 LoC total, tightly coupled to PipeWire buffer parsing, and only used from
+the process callback — splitting them would be premature abstraction.
 
 The public capture trait remains unchanged:
 
@@ -165,31 +179,49 @@ Direct portal and PipeWire dependencies must be Linux-only target dependencies.
 
 ## Dependency Strategy
 
-Use `ashpd` first for the XDG portal API if it exposes the needed ScreenCast
-flow and PipeWire remote fd cleanly:
+Use `ashpd` for the XDG portal API. It covers the full ScreenCast 5.x
+lifecycle (`CreateSession`, `SelectSources`, `Start`, `OpenPipeWireRemote`)
+with idiomatic async APIs and is the standard Rust portal library. Lock this
+in; do not fall back to hand-rolled `zbus`. If a specific MVP behavior is
+blocked by `ashpd`, raise it as a design issue rather than widening the
+dependency surface.
 
-- create session
-- select sources
-- start
-- stream response parsing
-- open PipeWire remote
+`ashpd` requires an async runtime. Use `tokio` with the `current_thread`
+flavor, built and owned inside `linux/portal.rs`. The async runtime must not
+leak into the cross-platform `CaptureBackend` trait or any `rollshot-core`
+type. `CaptureBackend::start()` remains synchronous from the caller's
+perspective and blocks on the in-backend tokio runtime.
 
-If `ashpd` blocks any required MVP behavior, use `zbus` for a focused
-ScreenCast wrapper instead of widening the design. The wrapper should remain
-inside `linux/portal.rs`.
+Use the `pipewire` Rust bindings (crate `pipewire = "0.8"`) for PipeWire stream
+lifecycle. Version 0.8.x is proven against PipeWire 0.3 in production — the
+local `learn-projects/scap` checkout uses `pipewire = "0.8.0"` against a
+PipeWire 0.3 system, which confirms the binding works on the target platform.
+The implementation plan must verify the workspace builds with this version via
+`cargo check` before any further work. Newer pre-1.0 versions of the crate
+exist but are unstable; do not chase them.
 
-Use the `pipewire` Rust bindings for PipeWire stream lifecycle. Prefer the
-current stable crate version that compiles in the rollshot workspace on Linux.
-The implementation plan must verify the version with `cargo check` before
-locking the dependency. If the latest `pipewire` crate creates compile or docs
-gaps, falling back to a proven version such as `0.8.x` is acceptable; the local
-`learn-projects/scap` checkout already demonstrates a Rust PipeWire approach on
-that generation.
+All direct portal and PipeWire dependencies must be Linux-only target
+dependencies:
+
+```toml
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+pipewire = "0.8"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+nix = { version = "0.29", features = ["fs"] }  # for F_DUPFD_CLOEXEC
+```
+
+`nix` is needed for the `fcntl(F_DUPFD_CLOEXEC)` call on the PipeWire fd
+(see "PipeWire fd Ownership" below).
 
 ## Probe Behavior
 
 `probe()` is diagnostic. It must not open an interactive portal picker and must
-not request ScreenCast permission.
+not request ScreenCast permission. It must also never block the CLI: every
+portal property GET in `probe()` runs under a hard **2-second timeout**. On
+timeout, the corresponding field becomes `unavailable` and a `probe_error`
+entry is appended to `details` describing which call timed out. `probe()` as a
+whole must return within ~3 seconds even on a fully broken portal.
 
 Probe should collect:
 
@@ -344,6 +376,33 @@ Map setup errors:
 - `OpenPipeWireRemote` fd failure: `CaptureError::Backend`
 - non-Wayland session: `CaptureError::Unsupported`
 
+## PipeWire fd Ownership
+
+`OpenPipeWireRemote` returns a file descriptor that is owned by the DBus
+response (as an `OwnedFd` in `ashpd`). Passing that fd directly to
+`pw_context_connect_fd` creates an undefined ownership boundary: PipeWire's C
+side closes the fd on `pw_context_destroy`, and Rust's `OwnedFd::drop` also
+closes it — leading to double-close (silent UB at best, "Bad file descriptor"
+log spam under load, occasional `EBADF` panics in unrelated code).
+
+OBS handles this at `pipewire.c:1135` via:
+
+```c
+obs_pw->core = pw_context_connect_fd(
+    obs_pw->context,
+    fcntl(obs_pw->pipewire_fd, F_DUPFD_CLOEXEC, 5),
+    NULL, 0);
+```
+
+Rollshot must mirror this. `linux/pipewire.rs::dup_pipewire_fd()` duplicates
+the incoming `BorrowedFd` with `F_DUPFD_CLOEXEC` (using `nix::fcntl::fcntl`),
+hands the duplicate to PipeWire, and lets the original `OwnedFd` from `ashpd`
+drop normally. The `5` minimum-fd argument keeps the duplicate away from stdio
+slots.
+
+A pure unit test must assert that `dup_pipewire_fd()` does not consume its
+input fd (the borrow remains valid for reading after the call).
+
 ## PipeWire Behavior
 
 PipeWire lifecycle:
@@ -439,6 +498,13 @@ returns:
 - `CaptureError::EndOfStream` when the stream shuts down cleanly,
 - `CaptureError::Backend` for stream errors.
 
+`next_frame()` must use a bounded wait: block up to **5 seconds** waiting for a
+frame to arrive on the bounded queue. If no frame arrives within that window,
+return `CaptureError::Backend("PipeWire stream produced no frames within 5s")`.
+This prevents a hung CLI when the compositor stalls or the stream silently
+falls into a no-data state. The 5s constant is generous enough that healthy
+slow-fps capture (e.g. 1fps debug runs) does not trigger it.
+
 Empty buffers should be skipped up to a small consecutive limit, such as ten
 empty buffers. After that, return `CaptureError::Backend` with a message that
 the PipeWire stream did not produce a usable video frame.
@@ -500,6 +566,28 @@ for y in crop.y .. crop.y + crop.height:
 
 It must never assume `stride == width * bytes_per_pixel`.
 
+### Performance Budget
+
+KDE/KWin's compositor output is typically `XRGB8888` (= `SPA_VIDEO_FORMAT_BGRx`)
+on x86_64. Converting BGRx to RGBA per frame is a hot loop at 4K and the most
+likely chosen format in practice.
+
+Soft budget: `raw_frame_to_rgba()` should complete in **under 10 ms for a 4K
+frame** on a typical x86_64 development laptop. At the default 5 fps capture
+rate this leaves comfortable headroom for stitching.
+
+If the naive scalar implementation exceeds the budget, vectorize the BGRx and
+BGRA paths via 4-byte word swap (`u32` operations). Do not pre-optimize: ship
+the readable scalar version first, then bench. A bench harness under
+`crates/rollshot-capture/benches/pixel.rs` is acceptable but not required for
+MVP — instead include one `#[test]` that converts a synthetic 3840×2160 BGRx
+frame and asserts elapsed time is under 20 ms (a loose ceiling that still
+catches obvious regressions like accidental double-allocation per row).
+
+The helper must not allocate per row. One `Vec<u8>` allocation of size
+`width * height * 4` per call is acceptable for MVP (see "Frame Queue and
+Threading" — buffer pooling is a future optimization).
+
 ## Frame Metadata
 
 Returned `CapturedFrame.metadata`:
@@ -513,12 +601,74 @@ pixel_format = Some(original PipeWire pixel format)
 stride = Some(source stride)
 ```
 
-If `VideoCrop` is present and `Manual(region)` is also requested, this phase
-applies `VideoCrop` first and then applies the manual crop relative to the
-cropped image only if the manual crop is still in bounds. If this proves
-confusing in real use, a later phase can refine the CLI contract. The default
-MVP path should be `--region portal` on KDE and `--region full` or manual crop
-on other DEs.
+### Coordinate Space Rules
+
+`VideoCrop` is portal-driven metadata: it represents a crop that the portal
+already applied (or wants the consumer to apply) on the source-monitor frame.
+It is always honored.
+
+`RegionMode::Manual(region)` is user-supplied and operates on the **frame
+delivered by the portal** — i.e. after any `VideoCrop` has been applied. This
+means:
+
+- `RegionMode::PortalPicker` and `RegionMode::Manual(region)` are already
+  mutually exclusive at the enum level. The CLI parser must continue to
+  enforce this (a `--region portal` flag and a `--region "0,0 800x600"` flag
+  cannot both be passed in one invocation).
+- For `RegionMode::FullSource`: `VideoCrop` is honored if present; no manual
+  crop is applied. The returned image dimensions equal the post-VideoCrop
+  dimensions.
+- For `RegionMode::Manual(region)`: the manual crop coordinates are
+  interpreted relative to the post-VideoCrop frame. If the portal also emits
+  a `VideoCrop` for this stream (uncommon for monitor/window sources, but
+  possible), the manual crop still operates on the already-VideoCropped
+  frame. This matches the principle of "the portal owns its crop; the user
+  owns everything after".
+- If the manual region falls outside the post-VideoCrop image bounds, return
+  `CaptureError::InvalidConfig` with a message identifying both the requested
+  region and the available frame size.
+
+The default MVP path should be `--region portal` on KDE and `--region full` or
+manual crop on other DEs.
+
+## Resource Lifecycle / Drop Order
+
+PipeWire and the portal allocate three kinds of resources that must be
+released in a specific order to avoid hangs, leaks, or double-frees across
+multiple captures in one process:
+
+1. **PipeWire thread loop must be stopped before stream destruction.**
+   Calling `pw_stream_destroy` while the thread loop is still spinning a
+   callback can deadlock. `Drop` on `PipeWireStream` must first
+   `pw_thread_loop_stop`, then disconnect the stream, then destroy it.
+2. **PipeWire context destruction closes the dup'd fd.** Rollshot must not
+   close the dup'd fd directly — `pw_context_destroy` does it. Closing it
+   manually would be a double-close.
+3. **The original `OwnedFd` from `ashpd` is dropped independently** and closes
+   the kernel fd that DBus handed us. The PipeWire side has its own dup, so
+   this is safe.
+4. **Portal session handle should be closed explicitly.** `ashpd` exposes
+   `Session::close()` — call it on `Drop`. If the process exits without
+   closing, KDE will eventually garbage-collect, but long-running processes
+   (the future `rollshot-app` GUI) would leak portal sessions.
+
+Recommended Drop order on `LinuxPortalFrameStream`:
+
+```text
+1. Stop PipeWire thread loop.
+2. Disconnect + destroy PipeWire stream.
+3. Destroy PipeWire context (closes dup'd fd).
+4. Drop the original OwnedFd from ashpd (closes the original fd).
+5. Close the portal session via Session::close().
+6. Drop the DBus connection / tokio runtime.
+```
+
+Each step must be infallible at the Rust level (`Drop` cannot return errors).
+Underlying library errors should be logged but not panicked on.
+
+A pure test must spawn and drop a synthetic `LinuxPortalFrameStream` (built
+against in-process fakes for the PipeWire stream and portal session) and
+assert all fakes observe their close calls in the documented order.
 
 ## CLI Behavior
 
@@ -537,21 +687,57 @@ On Linux Wayland, `--backend auto` continues to resolve to `linux-portal`.
 On Linux X11, `linux-portal` returns unsupported with a clear message that
 rollshot v0.1 supports Linux capture through Wayland portals only.
 
+## CI Build Dependencies
+
+The `pipewire` crate's `build.rs` invokes `pkg-config` against
+`libpipewire-0.3` and uses `bindgen` (which needs `libclang`). Once this phase
+lands, **the workspace will not build on a vanilla Linux GitHub Actions
+runner** without installing system packages first. This is a hard-stop CI
+breakage if not addressed.
+
+The implementation plan must include a task that updates the existing GitHub
+Actions workflows to install, on Linux jobs only:
+
+```text
+pkg-config
+libpipewire-0.3-dev
+libclang-dev
+libdbus-1-dev   # required by ashpd transitively
+```
+
+Concretely, the Linux job should add a step like:
+
+```yaml
+- name: Install Linux capture deps
+  if: runner.os == 'Linux'
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-dev libdbus-1-dev
+```
+
+macOS and Windows jobs are unaffected — the Linux deps live behind a
+`cfg(target_os = "linux")` dependency block.
+
 ## README Manual Testing
 
 The README should document:
 
 - Linux Wayland requirement.
 - KDE Plasma 6 Wayland as the first validated target.
+- The smoke test requires a live desktop session with a human available to
+  click the portal picker. It cannot run unattended and must not be invoked
+  from hosted CI.
 - Required services:
-  - PipeWire
+  - PipeWire (libpipewire-0.3)
   - WirePlumber or equivalent session manager
   - `xdg-desktop-portal`
   - a DE portal implementation such as `xdg-desktop-portal-kde`
-- Required development packages for building on common distributions:
+- Required development packages for building on common distributions
+  (Debian/Ubuntu names; adapt for Fedora/Arch):
   - `pkg-config`
-  - PipeWire development headers
-  - DBus development headers if required by selected Rust crates
+  - `libpipewire-0.3-dev` (PipeWire development headers)
+  - `libclang-dev` (required by `bindgen` in the `pipewire` crate)
+  - `libdbus-1-dev` (required by `ashpd` / `zbus`)
 - `cargo run -p rollshot-cli -- probe --json`.
 - A KDE portal-picker capture command.
 - A full-source capture command.
@@ -564,6 +750,8 @@ The README should document:
 ## Testing Strategy
 
 Pure tests on any Linux host that can compile the module:
+
+Happy-path / argument-mapping:
 
 - `choose_stream()` returns error for no streams.
 - `choose_stream()` returns the only stream for one stream.
@@ -582,6 +770,36 @@ Pure tests on any Linux host that can compile the module:
 - `raw_frame_to_rgba()` applies crop.
 - `raw_frame_to_rgba()` rejects out-of-bounds crop.
 - non-identity transform mapping returns backend error.
+- `raw_frame_to_rgba()` converts a synthetic 3840×2160 BGRx frame in under
+  20 ms (loose perf regression check).
+
+Negative-path / failure-mode tests (close gaps surfaced in design review):
+
+- `dup_pipewire_fd()` does not consume its input — the borrowed fd remains
+  valid for `read()` after the call returns.
+- `LinuxPortalFrameStream::drop` invokes (1) PipeWire thread-loop stop,
+  (2) stream disconnect+destroy, (3) context destroy, (4) original-fd drop,
+  (5) portal session close — in that order, against in-process fakes.
+- Empty-buffer skip terminates: after 10 consecutive empty buffers from a
+  fake PipeWire source, `next_frame()` returns `CaptureError::Backend` with
+  a "did not produce a usable video frame" message.
+- Header-corruption flag drops the buffer: a fake buffer with
+  `SPA_META_HEADER_FLAG_CORRUPTED` set is skipped without erroring; the next
+  valid buffer is returned.
+- DMA-BUF arrival is rejected cleanly: a fake buffer with
+  `type == SPA_DATA_DmaBuf` causes `next_frame()` to return
+  `CaptureError::Unsupported` with a message identifying the unexpected
+  buffer type.
+- `next_frame()` timeout: if no frame is enqueued within 5 seconds (use a
+  test-only override of 100 ms via a `const`/cfg), `next_frame()` returns
+  `CaptureError::Backend("PipeWire stream produced no frames within …")`.
+- `probe()` per-call timeout: when a fake portal proxy sleeps longer than
+  2 seconds on a property GET, `probe()` returns within ~3 seconds with
+  `screencast_available = false` and a `probe_error` entry in `details`.
+- Manual region rejected when outside post-VideoCrop bounds: given a portal
+  frame size of 1000×800 and a requested manual region of `(500, 500,
+  1000×1000)`, `start()` returns `CaptureError::InvalidConfig` mentioning
+  both the requested region and the available frame size.
 
 Default workspace tests:
 
@@ -634,11 +852,24 @@ Rollshot reimplements the behavior in Rust and keeps only the subset needed for
   `FullSource`, and `Manual(region)` as separate behaviors and make probe report
   capabilities clearly.
 - **PipeWire Rust crate churn.** PipeWire bindings have multiple active
-  versions. Mitigation: lock a version only after local compile verification and
-  keep all direct usage inside `linux/pipewire.rs`.
+  versions. Mitigation: lock to `pipewire = "0.8"` (proven via `scap`), keep all
+  direct usage inside `linux/pipewire.rs`.
 - **DMA-BUF-only negotiation.** Some environments may prefer DMA-BUF.
-  Mitigation: request MemPtr explicitly and return a clear unsupported error if
-  CPU-readable buffers are unavailable.
+  Mitigation: request MemPtr explicitly and return a clear `Unsupported` error
+  if a DMA-BUF buffer arrives anyway; pure test covers this path.
+- **fd ownership across the Rust/C boundary.** Naive use of the `OwnedFd`
+  returned by `ashpd` would double-close after `pw_context_destroy`. Mitigation:
+  `dup_pipewire_fd()` with `F_DUPFD_CLOEXEC`; pure test asserts the original fd
+  is not consumed.
+- **Resource leaks across multiple captures.** Long-running processes (future
+  `rollshot-app`) could leak portal sessions and fds. Mitigation: explicit
+  `Drop` order (thread loop → stream → context → fd → session); pure test
+  asserts the order against fakes.
+- **Probe hangs on a broken portal.** Default DBus timeouts can leave the CLI
+  apparently hung for ~25s. Mitigation: 2-second per-call timeout in `probe`;
+  total wall-clock bound of ~3s; pure test against a sleeping fake proxy.
+- **`next_frame()` hangs on a stalled compositor.** Mitigation: 5-second
+  per-call timeout in `next_frame()`; pure test against a silent fake stream.
 - **Stride/crop mistakes.** PipeWire rows may be padded and portal crop may be
   delivered as metadata. Mitigation: unit-test stride and crop conversion as
   pure helpers.
@@ -647,24 +878,53 @@ Rollshot reimplements the behavior in Rust and keeps only the subset needed for
   producing wrong images.
 - **Interactive portal UI.** Real capture requires user interaction and a real
   desktop session. Mitigation: keep it in ignored/self-hosted/manual tests.
+- **CI breakage from new system deps.** The `pipewire` crate needs PipeWire
+  dev headers + libclang; the workspace will not build on a vanilla GitHub
+  Actions Linux runner without them. Mitigation: dedicated task to update
+  Linux CI jobs with the apt install step; tracked in completion criteria.
 
 ## Completion Criteria
 
+Backend behavior:
+
 - `LinuxPortalBackend::probe()` reports real ScreenCast and PipeWire
-  diagnostics.
+  diagnostics within a 3-second wall-clock bound even on a broken portal.
 - `LinuxPortalBackend::start()` runs portal session/start/open-fd lifecycle.
-- PipeWire stream connects to the portal-selected node id using the portal fd.
+- PipeWire stream connects to the portal-selected node id using a
+  `F_DUPFD_CLOEXEC`-duplicated copy of the portal fd; the original `OwnedFd`
+  from `ashpd` is dropped independently without double-closing.
 - KDE multiple-stream response uses the last stream.
 - Cursor mode selection follows metadata/embedded/hidden rules.
 - CPU-readable BGRA/RGBA/BGRx/RGBx/RGB frames convert to `RgbaImage`.
 - Stride is handled correctly.
 - `SPA_META_VideoCrop` is applied when present.
-- Corrupted/empty buffers do not enter the stitcher.
+- Corrupted/empty buffers do not enter the stitcher (header flag check +
+  10-empty-buffer skip limit).
+- DMA-BUF buffers (if delivered despite our MemPtr-only request) produce a
+  clear `CaptureError::Unsupported` rather than UB.
 - Non-identity video transforms fail clearly.
+- `next_frame()` cannot hang indefinitely (5-second per-call timeout).
 - `RegionMode::PortalPicker`, `FullSource`, and `Manual` are supported on Linux
-  Wayland.
+  Wayland, with documented coordinate-space rules for `VideoCrop` interaction.
 - Existing macOS and fixture behavior remains unchanged.
-- README has Linux manual validation steps.
-- Pure tests pass in the default workspace test suite.
+
+Resource lifecycle:
+
+- `LinuxPortalFrameStream::drop` releases resources in the documented order
+  (thread loop → stream → context → original fd → portal session) and is
+  proven by a pure test against in-process fakes.
+- No leaked file descriptors across repeated `probe()` + `start()` cycles in
+  a single process.
+
+Quality / CI / docs:
+
+- Pure tests pass in the default workspace test suite, including all
+  negative-path tests listed in "Testing Strategy".
+- 4K BGRx → RGBA conversion completes within the 20 ms regression ceiling.
+- GitHub Actions Linux jobs install `pkg-config`, `libpipewire-0.3-dev`,
+  `libclang-dev`, and `libdbus-1-dev`; the workspace `cargo build`, `cargo
+  clippy`, and `cargo test` jobs all stay green on the hosted runner.
+- README has Linux manual validation steps and a note that the smoke test
+  requires a live desktop session and a human to drive the picker.
 - Ignored Linux real-capture smoke test exists for self-hosted/manual KDE
   Wayland validation.
