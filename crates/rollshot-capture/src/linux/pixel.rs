@@ -21,7 +21,7 @@ pub struct LinuxRawFrame<'a> {
     pub crop: Option<Region>,
 }
 
-fn bytes_per_pixel(format: LinuxPixelFormat) -> u32 {
+pub(super) fn bytes_per_pixel(format: LinuxPixelFormat) -> u32 {
     match format {
         LinuxPixelFormat::Bgra
         | LinuxPixelFormat::Rgba

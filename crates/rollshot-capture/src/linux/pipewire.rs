@@ -246,7 +246,7 @@ mod connection {
     use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
     use pipewire::spa::pod::builder::{Builder, builder_add};
     use pipewire::spa::pod::*;
-    use pipewire::spa::utils::{Fraction, Id, Rectangle};
+    use pipewire::spa::utils::{Fraction, Id};
 
     pub struct PipeWireConnection {
         thread_loop: pipewire::thread_loop::ThreadLoop,
@@ -305,7 +305,6 @@ mod connection {
                     pipewire::spa::sys::SPA_FORMAT_mediaType => Id(Id(MediaType::Video.as_raw())),
                     pipewire::spa::sys::SPA_FORMAT_mediaSubtype => Id(Id(MediaSubtype::Raw.as_raw())),
                     pipewire::spa::sys::SPA_FORMAT_VIDEO_format => Id(Id(fmt.as_raw())),
-                    pipewire::spa::sys::SPA_FORMAT_VIDEO_size => Rectangle(Rectangle { width: 1920, height: 1080 }),
                     pipewire::spa::sys::SPA_FORMAT_VIDEO_framerate => Fraction(Fraction { num: fps, denom: 1 })
                 }
             );
@@ -313,8 +312,8 @@ mod connection {
         data
     }
 
-    #[allow(unsafe_code)] // ThreadLoop::new is documented as safe but marked unsafe in the crate
     impl PipeWireConnection {
+        #[allow(unsafe_code)] // ThreadLoop::new is documented as safe but marked unsafe in the crate
         pub fn connect_fd(
             portal_fd: std::os::fd::OwnedFd,
             node_id: u32,
@@ -323,6 +322,9 @@ mod connection {
         ) -> Result<Self, CaptureError> {
             pipewire::init();
 
+            // SAFETY: ThreadLoop::new is marked unsafe in the pipewire crate but is
+            // documented as safe to call. We pass valid name/props arguments and the
+            // returned ThreadLoop is immediately owned by this struct.
             let thread_loop = unsafe {
                 pipewire::thread_loop::ThreadLoop::new(Some("rollshot-pipewire"), None)
                     .map_err(|e| CaptureError::Backend(anyhow::anyhow!("thread loop: {e}")))?
@@ -388,7 +390,8 @@ mod connection {
                                 let format = info.format();
                                 if let Ok(pixel_format) = map_spa_video_format(format) {
                                     let size = info.size();
-                                    let stride = size.width * 4;
+                                    let bpp = crate::linux::pixel::bytes_per_pixel(pixel_format);
+                                    let stride = size.width * bpp;
 
                                     user_data.negotiated_format = Some(pixel_format);
                                     user_data.negotiated_width = size.width;
