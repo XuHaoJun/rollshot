@@ -81,6 +81,16 @@ impl std::fmt::Debug for PortalSession {
     }
 }
 
+impl PortalSession {
+    pub fn take_resources(&mut self) -> (std::os::fd::OwnedFd, u32) {
+        let dummy = std::fs::File::open("/dev/null")
+            .expect("open /dev/null for dummy fd")
+            .into();
+        let fd = std::mem::replace(&mut self.pipewire_fd, dummy);
+        (fd, self.node_id)
+    }
+}
+
 impl Drop for PortalSession {
     fn drop(&mut self) {
         if let Some(close) = self.close.take() {

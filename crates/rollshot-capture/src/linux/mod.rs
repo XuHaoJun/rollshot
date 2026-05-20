@@ -39,8 +39,10 @@ impl CaptureBackend for LinuxPortalBackend {
     }
 
     fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
-        self.portal.start(options)?;
-        Ok(Box::new(LinuxPortalFrameStream))
+        let mut session = self.portal.start(options.clone())?;
+        let (fd, node_id) = session.take_resources();
+        let stream = LinuxPortalFrameStream::new(fd, node_id, options)?;
+        Ok(Box::new(stream))
     }
 }
 
@@ -48,7 +50,6 @@ impl CaptureBackend for LinuxPortalBackend {
 mod tests {
     use super::LinuxPortalBackend;
     use crate::backend::CaptureBackend;
-    use crate::error::CaptureError;
     use crate::types::CaptureOptions;
 
     #[test]
