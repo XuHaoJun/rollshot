@@ -1,14 +1,25 @@
 #![cfg(target_os = "linux")]
 
+mod pipewire;
+mod pixel;
+mod portal;
+
 use crate::backend::{CaptureBackend, FrameStream};
 use crate::error::CaptureError;
 use crate::types::{CaptureOptions, CaptureProbe};
 
-pub struct LinuxPortalBackend;
+use pipewire::LinuxPortalFrameStream;
+use portal::PortalClient;
+
+pub struct LinuxPortalBackend {
+    portal: PortalClient,
+}
 
 impl LinuxPortalBackend {
     pub fn new() -> Self {
-        Self
+        Self {
+            portal: PortalClient::new(),
+        }
     }
 }
 
@@ -24,35 +35,12 @@ impl CaptureBackend for LinuxPortalBackend {
     }
 
     fn probe(&self) -> CaptureProbe {
-        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-
-        let is_wayland = session_type == "wayland";
-        let is_kde = desktop.to_ascii_lowercase().contains("kde")
-            || desktop.to_ascii_lowercase().contains("plasma");
-
-        let available = is_wayland && is_kde;
-        let message = if available {
-            "preconditions look ok; backend is not implemented in v0.1 plumbing phase".to_string()
-        } else {
-            "linux-portal requires a KDE/Plasma Wayland session".to_string()
-        };
-
-        CaptureProbe {
-            backend: "linux-portal",
-            available,
-            message,
-            details: vec![
-                ("XDG_SESSION_TYPE".to_string(), session_type),
-                ("XDG_CURRENT_DESKTOP".to_string(), desktop),
-            ],
-        }
+        self.portal.probe()
     }
 
-    fn start(&mut self, _options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
-        Err(CaptureError::NotImplemented {
-            backend: "linux-portal",
-        })
+    fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
+        self.portal.start(options)?;
+        Ok(Box::new(LinuxPortalFrameStream))
     }
 }
 
