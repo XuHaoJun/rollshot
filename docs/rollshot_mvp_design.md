@@ -1,6 +1,6 @@
 # rollshot MVP 設計文件
 
-> 目標：以 Rust 重新設計 wayscrollshot。保留原 原 wayscrollshot 的 scroll stitching 演算法概念，但重寫 capture layer，使第一階段至少支援 **KDE 6 Wayland** 與 **macOS**。  
+> 目標：以 Rust 重新設計 wayscrollshot。保留原 原 wayscrollshot 的 scroll stitching 演算法概念，但重寫 capture layer，使第一階段至少支援 **Linux Wayland portal（KDE 6 Wayland first target）** 與 **macOS**。
 > 專案採用 Cargo workspace，並將 `obs-studio`、`scap` 作為 submodule 放在 `learn-projects/` 下，作為長期參考資料。
 
 ---
@@ -28,7 +28,7 @@ platform-native capture backend
 第一階段明確支援：
 
 ```text
-Linux KDE 6 Wayland：xdg-desktop-portal ScreenCast + PipeWire
+Linux Wayland portal：xdg-desktop-portal ScreenCast + PipeWire（KDE 6 Wayland first target）
 macOS：ScreenCaptureKit / scap-style backend
 ```
 
@@ -38,11 +38,11 @@ macOS：ScreenCaptureKit / scap-style backend
 
 | 決策 | 結論 |
 |---|---|
-| 是否直接 fork scap | 不作為第一選擇。scap 可參考 / macOS 可包裝，但 Linux KDE backend 建議自己寫。 |
+| 是否直接 fork scap | 不作為第一選擇。scap 可參考 / macOS 可包裝，但 Linux Wayland portal backend 建議自己寫。 |
 | 是否直接照搬 OBS | 不直接搬程式碼；OBS GPL 授權與 OBS 架構都不適合直接嵌入。以 OBS Linux PipeWire 流程作為主要參考。 |
 | macOS backend | 優先用 scap 或 scap-style ScreenCaptureKit backend。 |
-| Linux KDE 6 Wayland backend | 參考 OBS `plugins/linux-pipewire`，自己以 Rust 重寫 portal + PipeWire backend。 |
-| select region 誰負責 | KDE Wayland 第一版交給 xdg-desktop-portal-kde picker；macOS 第一版可先手動 region，後續再做 overlay selector。 |
+| Linux Wayland portal backend | 參考 OBS `plugins/linux-pipewire`，自己以 Rust 重寫 portal + PipeWire backend；KDE 6 Wayland 是 first validation target。 |
+| select region 誰負責 | Linux Wayland 第一版使用 portal picker；KDE 可能提供 Rectangular Region，其他 DE 可先走 full source 或 manual local crop。macOS 第一版可先手動 region，後續再做 overlay selector。 |
 | stitching core | 從 wayscrollshot 抽出，與 capture backend 解耦。 |
 | first-class output format | `image::RgbaImage`。所有 backend 都必須轉成 RGBA。 |
 | workspace | 使用 Cargo workspace 拆 crates。 |
@@ -182,7 +182,7 @@ Linux：scap 不作為主 backend 依賴
 用途：
 
 ```text
-Linux KDE 6 Wayland backend 的主要參考
+Linux Wayland portal backend 的主要參考，尤其是 KDE portal quirks、OpenPipeWireRemote、PipeWire stream 與 metadata handling
 ```
 
 重要檔案：
@@ -755,11 +755,11 @@ pub enum PixelFormat {
 
 ---
 
-## 12. Linux KDE 6 Wayland backend
+## 12. Linux Wayland portal backend
 
 ### 12.1 核心決策
 
-Linux KDE 6 Wayland 第一版不使用：
+Linux Wayland 第一版不使用：
 
 ```text
 grim
@@ -772,7 +772,7 @@ X11 fallback
 
 ```text
 xdg-desktop-portal ScreenCast
-xdg-desktop-portal-kde picker
+DE portal picker（KDE 6 Wayland first target）
 PipeWire stream
 OBS-style lifecycle
 ```
@@ -781,18 +781,18 @@ OBS-style lifecycle
 
 ### 12.2 select region 誰負責
 
-KDE 6 Wayland 第一版：
+Linux Wayland 第一版：
 
 ```text
-select region 由 KDE portal picker 負責
+select region 優先由 portal picker 負責
 ```
 
 也就是：
 
 ```text
 rollshot 呼叫 ScreenCast portal
-→ KDE 出現 source picker
-→ 使用者選 Rectangular Region
+→ DE portal 出現 source picker
+→ KDE 使用者可選 Rectangular Region
 → portal 回傳 PipeWire stream
 → wayscrollshot 讀 frame
 ```
@@ -803,10 +803,11 @@ rollshot 呼叫 ScreenCast portal
 
 ```text
 XDG ScreenCast 標準 source type 主要是 monitor / window / virtual。
-KDE 的 Rectangular Region 是 xdg-desktop-portal-kde 實作能力。
+KDE 的 Rectangular Region 是 xdg-desktop-portal-kde 實作能力，不是所有 Wayland DE 都保證提供。
 因此 backend 要能處理：
 A. stream 已經是 region size
 B. stream 是 full source，但帶 SPA_META_VideoCrop
+C. portal 沒有 region picker 時，使用 full source 或 manual local crop fallback
 ```
 
 ---
@@ -1266,7 +1267,7 @@ GitHub hosted runner 通常無法穩定完成真實 capture E2E
 ```text
 Layer 1: pure core algorithm tests
 Layer 2: fake backend integration tests
-Layer 3: real Linux KDE 6 Wayland smoke tests
+Layer 3: real Linux Wayland portal smoke tests（KDE 6 Wayland first target）
 Layer 4: real macOS ScreenCaptureKit smoke tests
 ```
 
@@ -1396,9 +1397,9 @@ rollshot capture --backend fake --fixture tests/fixtures/scroll_frames/simple --
 
 ---
 
-### 18.4 Layer 3：Linux KDE 6 Wayland real capture smoke tests
+### 18.4 Layer 3：Linux Wayland portal real capture smoke tests
 
-這層測真實 KDE 6 Wayland + portal + PipeWire。
+這層測真實 Linux Wayland + portal + PipeWire。第一個驗證目標是 KDE 6 Wayland，後續可加入 GNOME / wlroots / Hyprland 等 portal implementation profile。
 
 建議不要放在一般 GitHub hosted runner 必跑，應放在：
 
@@ -1417,6 +1418,8 @@ xdg-desktop-portal running
 xdg-desktop-portal-kde running
 KWin screencast 可用
 ```
+
+其他 Wayland DE 後續可加入對應 runner label 與 portal package，例如 GNOME 使用 `xdg-desktop-portal-gnome`。
 
 測試命令：
 
@@ -1451,14 +1454,14 @@ crates/rollshot-capture/tests/linux_portal_smoke.rs
 
 ```rust
 #[test]
-#[ignore = "requires real KDE 6 Wayland session, portal picker, PipeWire, and user permission"]
+#[ignore = "requires real Linux Wayland session, portal picker, PipeWire, and user permission"]
 fn linux_portal_receives_frames() {
     if std::env::var("ROLLSHOT_REAL_CAPTURE").ok().as_deref() != Some("1") {
         return;
     }
 
     // Start LinuxPortalPipeWire backend using RegionMode::PortalPicker.
-    // User may need to select Rectangular Region in KDE portal dialog.
+    // KDE users may select Rectangular Region; other DEs may present monitor/window choices.
     todo!()
 }
 ```
@@ -1763,23 +1766,25 @@ macOS 上可以手動 region 取得 scrollshot
 
 ---
 
-### Phase 3：Linux KDE 6 Wayland backend
+### Phase 3：Linux Wayland portal backend
 
 ```text
 實作 portal CreateSession / SelectSources / Start
 實作 OpenPipeWireRemote
 實作 PipeWire stream connect
-支援 KDE multiple-stream workaround
+支援 KDE multiple-stream workaround（作為 quirk，不作為 backend 分支）
 支援 BGRA/RGBA/BGRx/RGBx conversion
 支援 stride
 支援 SPA_META_VideoCrop
+支援 full source 與 manual local crop fallback，方便未來 GNOME / wlroots 等 Wayland DE
 接 stitcher
 ```
 
 完成標準：
 
 ```text
-KDE 6 Wayland 上 portal picker 選 Rectangular Region 後，可以取得 scrollshot
+KDE 6 Wayland 上 portal picker 選 Rectangular Region 後，可以取得 scrollshot。
+同一個 backend architecture 不綁 KDE，其他 Wayland portal implementation 後續只需新增 capability / quirk / smoke profile。
 ```
 
 ---
@@ -1801,13 +1806,13 @@ macOS overlay region selector
 
 ```text
 [ ] 檢查 XDG_SESSION_TYPE=wayland
-[ ] 檢查 XDG_CURRENT_DESKTOP 包含 KDE / plasma
+[ ] 讀 XDG_CURRENT_DESKTOP 並判斷 desktop profile / quirks
 [ ] 建立 DBus connection
 [ ] 建立 ScreenCast proxy
 [ ] 讀 AvailableSourceTypes
 [ ] 讀 AvailableCursorModes
 [ ] CreateSession
-[ ] SelectSources(types=MONITOR|WINDOW, multiple=false, cursor hidden)
+[ ] SelectSources(types=MONITOR|WINDOW, multiple=false, cursor metadata/embedded/hidden)
 [ ] Start
 [ ] parse streams
 [ ] 如果多個 streams，取最後一個並 log warning
@@ -1868,7 +1873,7 @@ macOS overlay region selector
 
 ```text
 macOS：scap / ScreenCaptureKit style backend
-Linux KDE 6 Wayland：OBS-style portal + PipeWire backend
+Linux Wayland portal：OBS-style portal + PipeWire backend（KDE 6 Wayland first target）
 共同抽象：CaptureBackend + FrameStream
 共同輸出：image::RgbaImage
 共同核心：rollshot stitching core（參考原 wayscrollshot 演算法概念）
