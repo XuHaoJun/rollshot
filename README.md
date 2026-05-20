@@ -94,6 +94,7 @@ validating a release on macOS:
 - [ ] The terminal or test binary has Screen Recording permission:
   `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
 - [ ] Main display is visible and unlocked.
+- [ ] `mkdir -p target/test-artifacts` creates the artifact directory.
 - [ ] `cargo run -p rollshot-cli -- probe --json` reports `macos-sck`.
 - [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
 - [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
