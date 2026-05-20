@@ -22,5 +22,5 @@ pub use types::{
     Size,
 };
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
