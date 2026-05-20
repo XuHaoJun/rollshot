@@ -92,6 +92,9 @@ impl CaptureBackend for LinuxPortalBackend {
             validate_manual_crop(region, session.frame_width, session.frame_height)?;
         }
 
+        if std::env::var("ROLLSHOT_CAPTURE_TRACE").ok().as_deref() == Some("1") {
+            eprintln!("rollshot linux-portal: connecting pipewire stream");
+        }
         let stream = LinuxPortalFrameStream::connect(session, options)?;
         Ok(Box::new(stream))
     }
