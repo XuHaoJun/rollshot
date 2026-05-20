@@ -20,5 +20,8 @@ tokio = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 scap = { workspace = true }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
