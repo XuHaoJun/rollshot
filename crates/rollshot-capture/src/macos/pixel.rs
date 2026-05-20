@@ -11,10 +11,16 @@ pub(super) fn captured_frame_from_bgra(
     effective_region: Option<Region>,
 ) -> Result<CapturedFrame, CaptureError> {
     let width = u32::try_from(frame.width).map_err(|_| {
-        CaptureError::Backend(anyhow!("invalid negative BGRA frame width: {}", frame.width))
+        CaptureError::Backend(anyhow!(
+            "invalid negative BGRA frame width: {}",
+            frame.width
+        ))
     })?;
     let height = u32::try_from(frame.height).map_err(|_| {
-        CaptureError::Backend(anyhow!("invalid negative BGRA frame height: {}", frame.height))
+        CaptureError::Backend(anyhow!(
+            "invalid negative BGRA frame height: {}",
+            frame.height
+        ))
     })?;
     let image = bgra_to_rgba_image(width, height, &frame.data)?;
 
@@ -73,8 +79,7 @@ mod tests {
 
     #[test]
     fn bgra_to_rgba_swaps_blue_and_red_channels() {
-        let image = bgra_to_rgba_image(2, 1, &[10, 20, 30, 255, 1, 2, 3, 4])
-            .expect("valid image");
+        let image = bgra_to_rgba_image(2, 1, &[10, 20, 30, 255, 1, 2, 3, 4]).expect("valid image");
         assert_eq!(image.as_raw(), &[30, 20, 10, 255, 3, 2, 1, 4]);
     }
 

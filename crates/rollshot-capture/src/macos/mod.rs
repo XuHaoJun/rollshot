@@ -237,14 +237,13 @@ mod tests {
     #[test]
     fn process_scap_frame_errors_after_empty_frame_limit() {
         let mut empty_frames = EMPTY_FRAME_LIMIT - 1;
-        let frame = scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(
-            scap::frame::BGRAFrame {
+        let frame =
+            scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(scap::frame::BGRAFrame {
                 display_time: std::time::SystemTime::now(),
                 width: 0,
                 height: 0,
                 data: Vec::new(),
-            },
-        ));
+            }));
 
         let err = process_scap_frame(frame, &mut empty_frames, None)
             .expect_err("empty frame limit reached");
