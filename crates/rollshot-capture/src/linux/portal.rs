@@ -179,14 +179,16 @@ impl PortalClient {
 
         let result: Result<PortalSession, CaptureError> = rt.block_on(async {
             trace_capture_stage("creating screencast proxy");
-            let screencast =
-                tokio::time::timeout(PROBE_TIMEOUT, ashpd::desktop::screencast::Screencast::new())
-                    .await
-                    .map_err(|_| portal_timeout("screencast proxy"))?
-                    .map_err(|e| CaptureError::Backend(anyhow::anyhow!("screencast proxy: {e}")))?;
+            let screencast = tokio::time::timeout(
+                CAPTURE_STAGE_TIMEOUT,
+                ashpd::desktop::screencast::Screencast::new(),
+            )
+            .await
+            .map_err(|_| portal_timeout("screencast proxy"))?
+            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("screencast proxy: {e}")))?;
 
             trace_capture_stage("creating portal session");
-            let session = tokio::time::timeout(PROBE_TIMEOUT, screencast.create_session())
+            let session = tokio::time::timeout(CAPTURE_STAGE_TIMEOUT, screencast.create_session())
                 .await
                 .map_err(|_| portal_timeout("create session"))?
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("create session: {e}")))?;
@@ -199,7 +201,7 @@ impl PortalClient {
 
             trace_capture_stage("selecting portal sources");
             tokio::time::timeout(
-                PROBE_TIMEOUT,
+                CAPTURE_STAGE_TIMEOUT,
                 screencast.select_sources(
                     &session,
                     cursor_mode,
@@ -216,7 +218,7 @@ impl PortalClient {
 
             trace_capture_stage("starting portal session");
             let streams = tokio::time::timeout(
-                PROBE_TIMEOUT,
+                CAPTURE_STAGE_TIMEOUT,
                 screencast.start(&session, &ashpd::WindowIdentifier::default()),
             )
             .await
@@ -236,11 +238,13 @@ impl PortalClient {
             let node_id = chosen.node_id;
 
             trace_capture_stage("opening pipewire remote");
-            let fd =
-                tokio::time::timeout(PROBE_TIMEOUT, screencast.open_pipe_wire_remote(&session))
-                    .await
-                    .map_err(|_| portal_timeout("open pipewire"))?
-                    .map_err(|e| CaptureError::Backend(anyhow::anyhow!("open pipewire: {e}")))?;
+            let fd = tokio::time::timeout(
+                CAPTURE_STAGE_TIMEOUT,
+                screencast.open_pipe_wire_remote(&session),
+            )
+            .await
+            .map_err(|_| portal_timeout("open pipewire"))?
+            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("open pipewire: {e}")))?;
 
             let close: Box<dyn FnOnce() + Send> = Box::new(move || {
                 rt_handle.block_on(async {
@@ -353,15 +357,19 @@ fn trace_capture_stage(stage: &str) {
 
 #[cfg(not(test))]
 fn portal_timeout(stage: &str) -> CaptureError {
-    CaptureError::Backend(anyhow::anyhow!(
-        "portal {stage} timed out after {}ms",
-        PROBE_TIMEOUT.as_millis()
-    ))
+    CaptureError::Backend(anyhow::anyhow!(portal_timeout_message(
+        stage,
+        CAPTURE_STAGE_TIMEOUT
+    )))
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
 fn trace_capture_stage(_stage: &str) {}
+
+fn portal_timeout_message(stage: &str, timeout: std::time::Duration) -> String {
+    format!("portal {stage} timed out after {}ms", timeout.as_millis())
+}
 
 #[cfg(not(test))]
 fn map_ashpd_error(e: ashpd::Error) -> CaptureError {
@@ -467,6 +475,7 @@ pub(super) trait ProbeSource {
 
 #[cfg(not(test))]
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const CAPTURE_STAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn format_source_types(s: SourceTypes) -> String {
     let mut parts = Vec::new();
@@ -1380,6 +1389,13 @@ mod tests {
         assert!(capabilities
             .quirks
             .contains(&LinuxPortalQuirk::KdeMayReturnMultipleStreams));
+    }
+
+    #[test]
+    fn portal_timeout_message_uses_capture_stage_timeout() {
+        let message = portal_timeout_message("screencast proxy", CAPTURE_STAGE_TIMEOUT);
+
+        assert_eq!(message, "portal screencast proxy timed out after 15000ms");
     }
 
     use crate::types::{Region, RegionMode};
