@@ -4,7 +4,7 @@ pub mod fake;
 pub mod fixture;
 pub mod types;
 
-pub use backend::{CaptureBackend, FrameStream};
+pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
 pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
