@@ -14,5 +14,8 @@ license = "MIT"
 repository = "https://github.com/xuhaojun/rollshot"
 rust-version = "1.80"
 
+[workspace.dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"

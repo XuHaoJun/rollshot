@@ -11,8 +11,12 @@ name = "rollshot"
 path = "src/main.rs"
 
 [dependencies]
+image = { workspace = true }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-core = { path = "../rollshot-core" }
+
+[dev-dependencies]
+image = { workspace = true }
 
 [lints]
 workspace = true
