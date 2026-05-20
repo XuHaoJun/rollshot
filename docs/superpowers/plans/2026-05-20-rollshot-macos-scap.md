@@ -18,11 +18,18 @@
 - Modify: `Cargo.toml` (MSRV and workspace dependency)
 - Modify: `Cargo.lock` (resolved scap dependency)
 - Modify: `README.md` (active macOS manual testing section)
+- Modify: `.github/workflows/real-capture.yml` (self-hosted macOS smoke test)
 
 **rollshot-capture**
 - Modify: `crates/rollshot-capture/Cargo.toml` (macOS-only scap dependency)
-- Modify: `crates/rollshot-capture/src/macos/mod.rs` (real backend)
+- Modify: `crates/rollshot-capture/src/backend.rs` (remove unused `FrameStream: Send` requirement)
+- Modify: `crates/rollshot-capture/src/macos/mod.rs` (backend lifecycle)
+- Create: `crates/rollshot-capture/src/macos/pixel.rs` (BGRA to RGBA and frame metadata)
+- Create: `crates/rollshot-capture/src/macos/options.rs` (rollshot to scap option mapping)
 - Create: `crates/rollshot-capture/tests/macos_sck_smoke.rs` (ignored real-capture smoke test)
+
+**rollshot-cli**
+- Modify: `crates/rollshot-cli/tests/capture_stubs.rs` (macOS stub contract replaced by non-interactive real-backend contract)
 
 ---
 
@@ -111,31 +118,564 @@ rtk git commit -m "chore: add macos-only scap dependency"
 
 ---
 
-## Task 2: Implement the macOS Scap Backend
+## Task 2: Remove the FrameStream Send Bound
+
+**Files:**
+- Modify: `crates/rollshot-capture/src/backend.rs`
+
+- [ ] **Step 1: Update the trait contract**
+
+In `crates/rollshot-capture/src/backend.rs`, replace:
+
+```rust
+pub trait FrameStream: Send {
+    fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError>;
+}
+```
+
+with:
+
+```rust
+pub trait FrameStream {
+    fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError>;
+}
+```
+
+This matches the current CLI, which consumes the stream synchronously on the same thread that creates it, and avoids requiring native macOS ScreenCaptureKit/scap objects to be `Send`.
+
+- [ ] **Step 2: Verify capture crate tests still pass**
+
+Run:
+
+```bash
+rtk cargo test -p rollshot-capture
+```
+
+Expected: existing capture crate tests pass.
+
+- [ ] **Step 3: Verify CLI fixture path still passes**
+
+Run:
+
+```bash
+rtk cargo test -p rollshot-cli --test capture_fixture
+```
+
+Expected: CLI fixture capture still passes with the relaxed stream trait.
+
+- [ ] **Step 4: Commit**
+
+```bash
+rtk git add crates/rollshot-capture/src/backend.rs
+rtk git commit -m "refactor(capture): relax frame stream thread bound"
+```
+
+---
+
+## Task 3: Implement the macOS Scap Backend
 
 **Files:**
 - Modify: `crates/rollshot-capture/src/macos/mod.rs`
+- Create: `crates/rollshot-capture/src/macos/pixel.rs`
+- Create: `crates/rollshot-capture/src/macos/options.rs`
 
-- [ ] **Step 1: Replace the macOS stub with the real backend and tests**
+- [ ] **Step 1: Write failing pure-helper tests first**
 
-Replace the full contents of `crates/rollshot-capture/src/macos/mod.rs` with:
+Replace `crates/rollshot-capture/src/macos/mod.rs` with a temporary stub that wires the helper modules:
 
 ```rust
 #![cfg(target_os = "macos")]
 
-use anyhow::anyhow;
-use image::RgbaImage;
+mod options;
+mod pixel;
 
 use crate::backend::{CaptureBackend, FrameStream};
 use crate::error::CaptureError;
-use crate::types::{
-    CaptureOptions, CaptureProbe, CapturedFrame, FrameMetadata, PixelFormat, Region, RegionMode,
-    Size,
-};
+use crate::types::{CaptureOptions, CaptureProbe};
 
-const BACKEND_NAME: &str = "macos-sck";
+pub(super) const BACKEND_NAME: &str = "macos-sck";
+
+pub struct MacosScreenCaptureKitBackend;
+
+impl MacosScreenCaptureKitBackend {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MacosScreenCaptureKitBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CaptureBackend for MacosScreenCaptureKitBackend {
+    fn name(&self) -> &'static str {
+        BACKEND_NAME
+    }
+
+    fn probe(&self) -> CaptureProbe {
+        CaptureProbe {
+            backend: BACKEND_NAME,
+            available: true,
+            message: "temporary macOS helper-test stub".to_string(),
+            details: vec![("os".to_string(), "macos".to_string())],
+        }
+    }
+
+    fn start(&mut self, _options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
+        Err(CaptureError::NotImplemented {
+            backend: BACKEND_NAME,
+        })
+    }
+}
+```
+
+Create `crates/rollshot-capture/src/macos/pixel.rs` with tests first:
+
+```rust
+use image::RgbaImage;
+
+use crate::error::CaptureError;
+use crate::types::{CapturedFrame, FrameMetadata, PixelFormat, Region, Size};
+
+use super::BACKEND_NAME;
+
+fn bgra_to_rgba_image(_width: u32, _height: u32, _data: &[u8]) -> Result<RgbaImage, CaptureError> {
+    unimplemented!("implemented in Step 3")
+}
+
+pub(super) fn captured_frame_from_bgra(
+    _frame: scap::frame::BGRAFrame,
+    _effective_region: Option<Region>,
+) -> Result<CapturedFrame, CaptureError> {
+    unimplemented!("implemented in Step 3")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bgra_to_rgba_image;
+
+    #[test]
+    fn bgra_to_rgba_swaps_blue_and_red_channels() {
+        let image = bgra_to_rgba_image(
+            2,
+            1,
+            &[
+                10, 20, 30, 255, //
+                1, 2, 3, 4,
+            ],
+        )
+        .expect("valid image");
+
+        assert_eq!(image.as_raw(), &[30, 20, 10, 255, 3, 2, 1, 4]);
+    }
+
+    #[test]
+    fn bgra_to_rgba_rejects_invalid_length() {
+        let err = bgra_to_rgba_image(2, 1, &[1, 2, 3, 4]).expect_err("invalid length");
+
+        assert!(err.to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn bgra_to_rgba_rejects_empty_dimensions() {
+        let err = bgra_to_rgba_image(0, 1, &[]).expect_err("empty width");
+
+        assert!(err.to_string().contains("empty dimensions"));
+    }
+}
+```
+
+Create `crates/rollshot-capture/src/macos/options.rs` with tests first:
+
+```rust
+use crate::error::CaptureError;
+use crate::types::{CaptureOptions, Region, RegionMode};
+
+pub(super) const NO_PERMISSION_PROMPT_ENV: &str = "ROLLSHOT_NO_PERMISSION_PROMPT";
+
+pub(super) fn options_to_scap_options(
+    _options: &CaptureOptions,
+) -> Result<scap::capturer::Options, CaptureError> {
+    unimplemented!("implemented in Step 3")
+}
+
+pub(super) fn region_to_scap_area(
+    _region: &RegionMode,
+) -> Result<Option<scap::capturer::Area>, CaptureError> {
+    unimplemented!("implemented in Step 3")
+}
+
+pub(super) fn manual_region(region: &RegionMode) -> Option<Region> {
+    match region {
+        RegionMode::Manual(region) => Some(*region),
+        RegionMode::FullSource | RegionMode::PortalPicker => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{options_to_scap_options, region_to_scap_area, NO_PERMISSION_PROMPT_ENV};
+    use crate::error::CaptureError;
+    use crate::types::{CaptureOptions, Region, RegionMode};
+
+    #[test]
+    fn no_permission_prompt_env_name_is_stable() {
+        assert_eq!(NO_PERMISSION_PROMPT_ENV, "ROLLSHOT_NO_PERMISSION_PROMPT");
+    }
+
+    #[test]
+    fn manual_region_maps_to_scap_area() {
+        let area = region_to_scap_area(&RegionMode::Manual(Region {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        }))
+        .expect("valid region")
+        .expect("area");
+
+        assert_eq!(area.origin.x, 10.0);
+        assert_eq!(area.origin.y, 20.0);
+        assert_eq!(area.size.width, 300.0);
+        assert_eq!(area.size.height, 200.0);
+    }
+
+    #[test]
+    fn negative_manual_region_origin_is_rejected() {
+        let err = region_to_scap_area(&RegionMode::Manual(Region {
+            x: -1,
+            y: 0,
+            width: 300,
+            height: 200,
+        }))
+        .expect_err("negative origin rejected");
+
+        assert!(matches!(err, CaptureError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn portal_picker_is_rejected_on_macos() {
+        let err = region_to_scap_area(&RegionMode::PortalPicker).expect_err("portal rejected");
+
+        assert!(matches!(err, CaptureError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn capture_options_map_to_scap_options() {
+        let options = CaptureOptions {
+            region: RegionMode::Manual(Region {
+                x: 4,
+                y: 5,
+                width: 640,
+                height: 480,
+            }),
+            fps: 12,
+            show_cursor: true,
+            prefer_portal_region: true,
+        };
+
+        let scap_options = options_to_scap_options(&options).expect("valid options");
+
+        assert_eq!(scap_options.fps, 12);
+        assert!(scap_options.show_cursor);
+        assert!(!scap_options.show_highlight);
+        assert!(!scap_options.captures_audio);
+        assert!(!scap_options.exclude_current_process_audio);
+        assert!(matches!(
+            scap_options.output_type,
+            scap::frame::FrameType::BGRAFrame
+        ));
+        assert!(matches!(
+            scap_options.output_resolution,
+            scap::capturer::Resolution::Captured
+        ));
+        assert!(scap_options.crop_area.is_some());
+    }
+}
+```
+
+- [ ] **Step 2: Run helper tests to verify RED**
+
+Run on macOS:
+
+```bash
+rtk cargo test -p rollshot-capture macos:: --lib
+```
+
+Expected: FAIL because the helper functions still contain `unimplemented!()`.
+
+- [ ] **Step 3: Implement `pixel.rs`**
+
+Replace `crates/rollshot-capture/src/macos/pixel.rs` with:
+
+```rust
+use anyhow::anyhow;
+use image::RgbaImage;
+
+use crate::error::CaptureError;
+use crate::types::{CapturedFrame, FrameMetadata, PixelFormat, Region, Size};
+
+use super::BACKEND_NAME;
+
+pub(super) fn captured_frame_from_bgra(
+    frame: scap::frame::BGRAFrame,
+    effective_region: Option<Region>,
+) -> Result<CapturedFrame, CaptureError> {
+    let width = u32::try_from(frame.width).map_err(|_| {
+        CaptureError::Backend(anyhow!("invalid negative BGRA frame width: {}", frame.width))
+    })?;
+    let height = u32::try_from(frame.height).map_err(|_| {
+        CaptureError::Backend(anyhow!("invalid negative BGRA frame height: {}", frame.height))
+    })?;
+    let image = bgra_to_rgba_image(width, height, &frame.data)?;
+
+    Ok(CapturedFrame {
+        image,
+        timestamp: frame.display_time,
+        metadata: FrameMetadata {
+            source_size: Some(Size { width, height }),
+            effective_region,
+            pixel_format: Some(PixelFormat::Bgra),
+            stride: Some(width * 4),
+            backend: BACKEND_NAME,
+        },
+    })
+}
+
+fn bgra_to_rgba_image(width: u32, height: u32, data: &[u8]) -> Result<RgbaImage, CaptureError> {
+    if width == 0 || height == 0 {
+        return Err(CaptureError::Backend(anyhow!(
+            "BGRA frame has empty dimensions: {width}x{height}"
+        )));
+    }
+
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            CaptureError::Backend(anyhow!("BGRA frame dimensions overflow: {width}x{height}"))
+        })?;
+
+    if data.len() != expected_len {
+        return Err(CaptureError::Backend(anyhow!(
+            "BGRA frame length mismatch: got {}, expected {} for {}x{}",
+            data.len(),
+            expected_len,
+            width,
+            height
+        )));
+    }
+
+    let mut rgba = vec![0; data.len()];
+    for (src, dst) in data.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = src[3];
+    }
+
+    RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| CaptureError::Backend(anyhow!("failed to create RGBA image")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bgra_to_rgba_image;
+
+    #[test]
+    fn bgra_to_rgba_swaps_blue_and_red_channels() {
+        let image = bgra_to_rgba_image(2, 1, &[10, 20, 30, 255, 1, 2, 3, 4])
+            .expect("valid image");
+        assert_eq!(image.as_raw(), &[30, 20, 10, 255, 3, 2, 1, 4]);
+    }
+
+    #[test]
+    fn bgra_to_rgba_rejects_invalid_length() {
+        let err = bgra_to_rgba_image(2, 1, &[1, 2, 3, 4]).expect_err("invalid length");
+        assert!(err.to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn bgra_to_rgba_rejects_empty_dimensions() {
+        let err = bgra_to_rgba_image(0, 1, &[]).expect_err("empty width");
+        assert!(err.to_string().contains("empty dimensions"));
+    }
+}
+```
+
+- [ ] **Step 4: Implement `options.rs`**
+
+Replace `crates/rollshot-capture/src/macos/options.rs` with:
+
+```rust
+use crate::error::CaptureError;
+use crate::types::{CaptureOptions, Region, RegionMode};
+
+pub(super) const NO_PERMISSION_PROMPT_ENV: &str = "ROLLSHOT_NO_PERMISSION_PROMPT";
+
+pub(super) fn options_to_scap_options(
+    options: &CaptureOptions,
+) -> Result<scap::capturer::Options, CaptureError> {
+    let crop_area = region_to_scap_area(&options.region)?;
+
+    Ok(scap::capturer::Options {
+        fps: options.fps,
+        show_cursor: options.show_cursor,
+        show_highlight: false,
+        target: None,
+        crop_area,
+        output_type: scap::frame::FrameType::BGRAFrame,
+        output_resolution: scap::capturer::Resolution::Captured,
+        excluded_targets: None,
+        captures_audio: false,
+        exclude_current_process_audio: false,
+    })
+}
+
+pub(super) fn region_to_scap_area(
+    region: &RegionMode,
+) -> Result<Option<scap::capturer::Area>, CaptureError> {
+    match region {
+        RegionMode::FullSource => Ok(None),
+        RegionMode::PortalPicker => Err(CaptureError::InvalidConfig {
+            message: "--region portal is only supported with --backend linux-portal".to_string(),
+        }),
+        RegionMode::Manual(region) => {
+            if region.x < 0 || region.y < 0 {
+                return Err(CaptureError::InvalidConfig {
+                    message: "macOS manual region origin must be non-negative".to_string(),
+                });
+            }
+
+            Ok(Some(scap::capturer::Area {
+                origin: scap::capturer::Point {
+                    x: region.x as f64,
+                    y: region.y as f64,
+                },
+                size: scap::capturer::Size {
+                    width: region.width as f64,
+                    height: region.height as f64,
+                },
+            }))
+        }
+    }
+}
+
+pub(super) fn manual_region(region: &RegionMode) -> Option<Region> {
+    match region {
+        RegionMode::Manual(region) => Some(*region),
+        RegionMode::FullSource | RegionMode::PortalPicker => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{options_to_scap_options, region_to_scap_area, NO_PERMISSION_PROMPT_ENV};
+    use crate::error::CaptureError;
+    use crate::types::{CaptureOptions, Region, RegionMode};
+
+    #[test]
+    fn no_permission_prompt_env_name_is_stable() {
+        assert_eq!(NO_PERMISSION_PROMPT_ENV, "ROLLSHOT_NO_PERMISSION_PROMPT");
+    }
+
+    #[test]
+    fn manual_region_maps_to_scap_area() {
+        let area = region_to_scap_area(&RegionMode::Manual(Region {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        }))
+        .expect("valid region")
+        .expect("area");
+        assert_eq!(area.origin.x, 10.0);
+        assert_eq!(area.origin.y, 20.0);
+        assert_eq!(area.size.width, 300.0);
+        assert_eq!(area.size.height, 200.0);
+    }
+
+    #[test]
+    fn negative_manual_region_origin_is_rejected() {
+        let err = region_to_scap_area(&RegionMode::Manual(Region {
+            x: -1,
+            y: 0,
+            width: 300,
+            height: 200,
+        }))
+        .expect_err("negative origin rejected");
+        assert!(matches!(err, CaptureError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn portal_picker_is_rejected_on_macos() {
+        let err = region_to_scap_area(&RegionMode::PortalPicker).expect_err("portal rejected");
+        assert!(matches!(err, CaptureError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn capture_options_map_to_scap_options() {
+        let options = CaptureOptions {
+            region: RegionMode::Manual(Region {
+                x: 4,
+                y: 5,
+                width: 640,
+                height: 480,
+            }),
+            fps: 12,
+            show_cursor: true,
+            prefer_portal_region: true,
+        };
+        let scap_options = options_to_scap_options(&options).expect("valid options");
+        assert_eq!(scap_options.fps, 12);
+        assert!(scap_options.show_cursor);
+        assert!(!scap_options.show_highlight);
+        assert!(!scap_options.captures_audio);
+        assert!(!scap_options.exclude_current_process_audio);
+        assert!(matches!(
+            scap_options.output_type,
+            scap::frame::FrameType::BGRAFrame
+        ));
+        assert!(matches!(
+            scap_options.output_resolution,
+            scap::capturer::Resolution::Captured
+        ));
+        assert!(scap_options.crop_area.is_some());
+    }
+}
+```
+
+- [ ] **Step 5: Replace `mod.rs` with the lifecycle adapter**
+
+Replace `crates/rollshot-capture/src/macos/mod.rs` with:
+
+```rust
+#![cfg(target_os = "macos")]
+
+mod options;
+mod pixel;
+
+use anyhow::anyhow;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use crate::backend::{CaptureBackend, FrameStream};
+use crate::error::CaptureError;
+use crate::types::{CaptureOptions, CaptureProbe, CapturedFrame, Region};
+
+use options::{manual_region, options_to_scap_options, NO_PERMISSION_PROMPT_ENV};
+use pixel::captured_frame_from_bgra;
+
+pub(super) const BACKEND_NAME: &str = "macos-sck";
 const SCAP_VERSION: &str = "0.1.0-beta.1";
 const EMPTY_FRAME_LIMIT: u8 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameProcessOutcome {
+    Audio,
+    Empty,
+}
 
 pub struct MacosScreenCaptureKitBackend;
 
@@ -194,17 +734,27 @@ impl CaptureBackend for MacosScreenCaptureKitBackend {
             });
         }
 
-        if !scap::has_permission() && !scap::request_permission() {
-            return Err(CaptureError::PermissionDenied {
-                message: "Screen Recording permission is required for macOS capture".to_string(),
-            });
+        if !scap::has_permission() {
+            if std::env::var(NO_PERMISSION_PROMPT_ENV).ok().as_deref() == Some("1")
+                || !scap::request_permission()
+            {
+                return Err(CaptureError::PermissionDenied {
+                    message: "Screen Recording permission is required for macOS capture"
+                        .to_string(),
+                });
+            }
         }
 
         let effective_region = manual_region(&options.region);
         let scap_options = options_to_scap_options(&options)?;
         let mut capturer = scap::capturer::Capturer::build(scap_options)
             .map_err(capturer_build_error_to_capture_error)?;
-        capturer.start_capture();
+        catch_unwind(AssertUnwindSafe(|| capturer.start_capture())).map_err(|payload| {
+            CaptureError::Backend(anyhow!(
+                "scap failed to start macOS capture: {}",
+                panic_payload_to_string(payload)
+            ))
+        })?;
 
         Ok(Box::new(MacosScapFrameStream {
             capturer,
@@ -220,7 +770,7 @@ pub struct MacosScapFrameStream {
 
 impl Drop for MacosScapFrameStream {
     fn drop(&mut self) {
-        self.capturer.stop_capture();
+        let _ = catch_unwind(AssertUnwindSafe(|| self.capturer.stop_capture()));
     }
 }
 
@@ -234,28 +784,37 @@ impl FrameStream for MacosScapFrameStream {
                 .get_next_frame()
                 .map_err(|_| CaptureError::EndOfStream)?;
 
-            match frame {
-                scap::frame::Frame::Audio(_) => continue,
-                scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(frame)) => {
-                    if frame.width <= 0 || frame.height <= 0 || frame.data.is_empty() {
-                        empty_frames += 1;
-                        if empty_frames >= EMPTY_FRAME_LIMIT {
-                            return Err(CaptureError::Backend(anyhow!(
-                                "macOS stream did not produce a usable video frame"
-                            )));
-                        }
-                        continue;
-                    }
-
-                    return captured_frame_from_bgra(frame, self.effective_region);
-                }
-                scap::frame::Frame::Video(other) => {
-                    return Err(CaptureError::Backend(anyhow!(
-                        "unsupported scap video frame type: {other:?}"
-                    )));
-                }
+            match process_scap_frame(frame, &mut empty_frames, self.effective_region)? {
+                Ok(captured) => return Ok(captured),
+                Err(FrameProcessOutcome::Audio | FrameProcessOutcome::Empty) => continue,
             }
         }
+    }
+}
+
+fn process_scap_frame(
+    frame: scap::frame::Frame,
+    empty_frames: &mut u8,
+    effective_region: Option<Region>,
+) -> Result<Result<CapturedFrame, FrameProcessOutcome>, CaptureError> {
+    match frame {
+        scap::frame::Frame::Audio(_) => Ok(Err(FrameProcessOutcome::Audio)),
+        scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(frame)) => {
+            if frame.width <= 0 || frame.height <= 0 || frame.data.is_empty() {
+                *empty_frames += 1;
+                if *empty_frames >= EMPTY_FRAME_LIMIT {
+                    return Err(CaptureError::Backend(anyhow!(
+                        "macOS stream did not produce a usable video frame"
+                    )));
+                }
+                return Ok(Err(FrameProcessOutcome::Empty));
+            }
+
+            captured_frame_from_bgra(frame, effective_region).map(Ok)
+        }
+        scap::frame::Frame::Video(other) => Err(CaptureError::Backend(anyhow!(
+            "unsupported scap video frame type: {other:?}"
+        ))),
     }
 }
 
@@ -272,126 +831,24 @@ fn capturer_build_error_to_capture_error(err: scap::capturer::CapturerBuildError
     }
 }
 
-fn captured_frame_from_bgra(
-    frame: scap::frame::BGRAFrame,
-    effective_region: Option<Region>,
-) -> Result<CapturedFrame, CaptureError> {
-    let width = u32::try_from(frame.width).map_err(|_| {
-        CaptureError::Backend(anyhow!("invalid negative BGRA frame width: {}", frame.width))
-    })?;
-    let height = u32::try_from(frame.height).map_err(|_| {
-        CaptureError::Backend(anyhow!("invalid negative BGRA frame height: {}", frame.height))
-    })?;
-    let image = bgra_to_rgba_image(width, height, &frame.data)?;
-
-    Ok(CapturedFrame {
-        image,
-        timestamp: frame.display_time,
-        metadata: FrameMetadata {
-            source_size: Some(Size { width, height }),
-            effective_region,
-            pixel_format: Some(PixelFormat::Bgra),
-            stride: Some(width * 4),
-            backend: BACKEND_NAME,
-        },
-    })
-}
-
-fn bgra_to_rgba_image(width: u32, height: u32, data: &[u8]) -> Result<RgbaImage, CaptureError> {
-    if width == 0 || height == 0 {
-        return Err(CaptureError::Backend(anyhow!(
-            "BGRA frame has empty dimensions: {width}x{height}"
-        )));
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
     }
-
-    let expected_len = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| {
-            CaptureError::Backend(anyhow!("BGRA frame dimensions overflow: {width}x{height}"))
-        })?;
-
-    if data.len() != expected_len {
-        return Err(CaptureError::Backend(anyhow!(
-            "BGRA frame length mismatch: got {}, expected {} for {}x{}",
-            data.len(),
-            expected_len,
-            width,
-            height
-        )));
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
     }
-
-    let mut rgba = Vec::with_capacity(data.len());
-    for pixel in data.chunks_exact(4) {
-        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
-    }
-
-    RgbaImage::from_raw(width, height, rgba)
-        .ok_or_else(|| CaptureError::Backend(anyhow!("failed to create RGBA image")))
-}
-
-fn options_to_scap_options(
-    options: &CaptureOptions,
-) -> Result<scap::capturer::Options, CaptureError> {
-    let crop_area = region_to_scap_area(&options.region)?;
-
-    Ok(scap::capturer::Options {
-        fps: options.fps,
-        show_cursor: options.show_cursor,
-        show_highlight: false,
-        target: None,
-        crop_area,
-        output_type: scap::frame::FrameType::BGRAFrame,
-        output_resolution: scap::capturer::Resolution::Captured,
-        excluded_targets: None,
-        captures_audio: false,
-        exclude_current_process_audio: false,
-    })
-}
-
-fn region_to_scap_area(
-    region: &RegionMode,
-) -> Result<Option<scap::capturer::Area>, CaptureError> {
-    match region {
-        RegionMode::FullSource => Ok(None),
-        RegionMode::PortalPicker => Err(CaptureError::InvalidConfig {
-            message: "--region portal is only supported with --backend linux-portal".to_string(),
-        }),
-        RegionMode::Manual(region) => {
-            if region.x < 0 || region.y < 0 {
-                return Err(CaptureError::InvalidConfig {
-                    message: "macOS manual region origin must be non-negative".to_string(),
-                });
-            }
-
-            Ok(Some(scap::capturer::Area {
-                origin: scap::capturer::Point {
-                    x: region.x as f64,
-                    y: region.y as f64,
-                },
-                size: scap::capturer::Size {
-                    width: region.width as f64,
-                    height: region.height as f64,
-                },
-            }))
-        }
-    }
-}
-
-fn manual_region(region: &RegionMode) -> Option<Region> {
-    match region {
-        RegionMode::Manual(region) => Some(*region),
-        RegionMode::FullSource | RegionMode::PortalPicker => None,
-    }
+    "non-string panic payload".to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bgra_to_rgba_image, options_to_scap_options, region_to_scap_area, SCAP_VERSION};
+    use super::{
+        process_scap_frame, FrameProcessOutcome, MacosScreenCaptureKitBackend, EMPTY_FRAME_LIMIT,
+        SCAP_VERSION,
+    };
     use crate::backend::CaptureBackend;
     use crate::error::CaptureError;
-    use crate::macos::MacosScreenCaptureKitBackend;
-    use crate::types::{CaptureOptions, Region, RegionMode};
 
     #[test]
     fn probe_reports_scap_details() {
@@ -410,113 +867,49 @@ mod tests {
     }
 
     #[test]
-    fn bgra_to_rgba_swaps_blue_and_red_channels() {
-        let image = bgra_to_rgba_image(
-            2,
-            1,
-            &[
-                10, 20, 30, 255, //
-                1, 2, 3, 4,
-            ],
+    fn process_scap_frame_skips_audio() {
+        let mut empty_frames = 0;
+        let outcome = process_scap_frame(
+            scap::frame::Frame::Audio(scap::frame::AudioFrame::new(
+                scap::frame::AudioFormat::F32,
+                2,
+                false,
+                Vec::new(),
+                0,
+                48_000,
+                std::time::SystemTime::now(),
+            )),
+            &mut empty_frames,
+            None,
         )
-        .expect("valid image");
+        .expect("audio frame handled");
 
-        assert_eq!(image.as_raw(), &[30, 20, 10, 255, 3, 2, 1, 4]);
+        assert_eq!(outcome, Err(FrameProcessOutcome::Audio));
+        assert_eq!(empty_frames, 0);
     }
 
     #[test]
-    fn bgra_to_rgba_rejects_invalid_length() {
-        let err = bgra_to_rgba_image(2, 1, &[1, 2, 3, 4]).expect_err("invalid length");
-
-        assert!(err.to_string().contains("length mismatch"));
-    }
-
-    #[test]
-    fn bgra_to_rgba_rejects_empty_dimensions() {
-        let err = bgra_to_rgba_image(0, 1, &[]).expect_err("empty width");
-
-        assert!(err.to_string().contains("empty dimensions"));
-    }
-
-    #[test]
-    fn manual_region_maps_to_scap_area() {
-        let area = region_to_scap_area(&RegionMode::Manual(Region {
-            x: 10,
-            y: 20,
-            width: 300,
-            height: 200,
-        }))
-        .expect("valid region")
-        .expect("area");
-
-        assert_eq!(area.origin.x, 10.0);
-        assert_eq!(area.origin.y, 20.0);
-        assert_eq!(area.size.width, 300.0);
-        assert_eq!(area.size.height, 200.0);
-    }
-
-    #[test]
-    fn full_source_has_no_crop_area() {
-        let area = region_to_scap_area(&RegionMode::FullSource).expect("full source");
-
-        assert!(area.is_none());
-    }
-
-    #[test]
-    fn negative_manual_region_origin_is_rejected() {
-        let err = region_to_scap_area(&RegionMode::Manual(Region {
-            x: -1,
-            y: 0,
-            width: 300,
-            height: 200,
-        }))
-        .expect_err("negative origin rejected");
-
-        assert!(matches!(err, CaptureError::InvalidConfig { .. }));
-    }
-
-    #[test]
-    fn portal_picker_is_rejected_on_macos() {
-        let err = region_to_scap_area(&RegionMode::PortalPicker).expect_err("portal rejected");
-
-        assert!(matches!(err, CaptureError::InvalidConfig { .. }));
-    }
-
-    #[test]
-    fn capture_options_map_to_scap_options() {
-        let options = CaptureOptions {
-            region: RegionMode::Manual(Region {
-                x: 4,
-                y: 5,
-                width: 640,
-                height: 480,
-            }),
-            fps: 12,
-            show_cursor: true,
-            prefer_portal_region: true,
-        };
-
-        let scap_options = options_to_scap_options(&options).expect("valid options");
-
-        assert_eq!(scap_options.fps, 12);
-        assert!(scap_options.show_cursor);
-        assert!(!scap_options.show_highlight);
-        assert!(!scap_options.captures_audio);
-        assert!(!scap_options.exclude_current_process_audio);
-        assert!(matches!(
-            scap_options.output_type,
-            scap::frame::FrameType::BGRAFrame
+    fn process_scap_frame_errors_after_empty_frame_limit() {
+        let mut empty_frames = EMPTY_FRAME_LIMIT - 1;
+        let frame = scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(
+            scap::frame::BGRAFrame {
+                display_time: std::time::SystemTime::now(),
+                width: 0,
+                height: 0,
+                data: Vec::new(),
+            },
         ));
-        assert!(matches!(
-            scap_options.output_resolution,
-            scap::capturer::Resolution::Captured
-        ));
-        assert!(scap_options.crop_area.is_some());
+
+        let err = process_scap_frame(frame, &mut empty_frames, None)
+            .expect_err("empty frame limit reached");
+
+        assert!(matches!(err, CaptureError::Backend(_)));
+        assert_eq!(empty_frames, EMPTY_FRAME_LIMIT);
     }
 }
 ```
 
-- [ ] **Step 2: Run macOS unit tests on a macOS host**
+- [ ] **Step 6: Run macOS unit tests on a macOS host**
 
 Run on macOS:
 
@@ -524,9 +917,9 @@ Run on macOS:
 rtk cargo test -p rollshot-capture macos:: --lib
 ```
 
-Expected: macOS unit tests pass. On Linux, this module is cfg-gated and this command does not exercise macOS tests.
+Expected: macOS unit tests pass.
 
-- [ ] **Step 3: Verify non-macOS behavior still compiles locally**
+- [ ] **Step 7: Verify non-macOS behavior still compiles locally**
 
 Run:
 
@@ -536,16 +929,189 @@ rtk cargo check -p rollshot-capture
 
 Expected: PASS on the local host.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-rtk git add crates/rollshot-capture/src/macos/mod.rs
+rtk git add crates/rollshot-capture/src/macos/mod.rs crates/rollshot-capture/src/macos/pixel.rs crates/rollshot-capture/src/macos/options.rs
 rtk git commit -m "feat(capture): implement macos scap backend"
 ```
 
 ---
 
-## Task 3: Add Ignored macOS Real-Capture Smoke Test
+## Task 4: Update CLI Stub Tests for Real macOS Backend
+
+**Files:**
+- Modify: `crates/rollshot-cli/tests/capture_stubs.rs`
+
+- [ ] **Step 1: Replace the macOS NotImplemented test**
+
+In `crates/rollshot-cli/tests/capture_stubs.rs`, replace the full macOS-only test:
+
+```rust
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_sck_backend_exits_with_not_implemented_code() {
+    let tempdir = temp_dir("macos-sck");
+    let out = tempdir.join("out.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "macos-sck"])
+        .args(["--output"])
+        .arg(&out)
+        .output()
+        .expect("run rollshot capture");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not implemented"), "stderr = {stderr}");
+    assert!(stderr.contains("macos-sck"), "stderr = {stderr}");
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+```
+
+with this non-interactive hosted-CI contract:
+
+```rust
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_sck_backend_without_permission_prompt_exits_cleanly() {
+    if std::env::var("ROLLSHOT_REAL_CAPTURE").ok().as_deref() == Some("1") {
+        eprintln!("real macOS capture is covered by macos_sck_smoke");
+        return;
+    }
+
+    let tempdir = temp_dir("macos-sck");
+    let out = tempdir.join("out.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "macos-sck"])
+        .args(["--output"])
+        .arg(&out)
+        .args(["--max-frames", "1"])
+        .env("ROLLSHOT_NO_PERMISSION_PROMPT", "1")
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success() || output.status.code() == Some(3),
+        "expected success with existing permission or permission-denied without prompt; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "macos-sck should no longer be a NotImplemented stub; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+```
+
+- [ ] **Step 2: Update the auto-backend expectation**
+
+In `backend_auto_exits_with_host_appropriate_code`, first replace the command construction:
+
+```rust
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "auto"])
+        .args(["--output"])
+        .arg(&out)
+        .output()
+        .expect("run rollshot capture");
+```
+
+with:
+
+```rust
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+    command
+        .arg("capture")
+        .args(["--backend", "auto"])
+        .args(["--output"])
+        .arg(&out)
+        .args(["--max-frames", "1"]);
+    if cfg!(target_os = "macos") {
+        command.env("ROLLSHOT_NO_PERMISSION_PROMPT", "1");
+    }
+    let output = command.output().expect("run rollshot capture");
+```
+
+Then replace:
+
+```rust
+    let is_stub_backend = cfg!(target_os = "macos")
+        || (cfg!(target_os = "linux")
+            && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"));
+    let expected_code = if is_stub_backend { 2 } else { 4 };
+```
+
+with:
+
+```rust
+    let expected_code = if cfg!(target_os = "macos") {
+        // macOS auto now reaches the real backend. Hosted CI normally lacks
+        // Screen Recording permission, so permission denied is the expected
+        // non-interactive result. The env var prevents a system permission
+        // prompt during tests. If permission is already granted, the command may
+        // succeed after one frame.
+        if output.status.success() {
+            0
+        } else {
+            3
+        }
+    } else if cfg!(target_os = "linux")
+        && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+    {
+        2
+    } else {
+        4
+    };
+```
+
+- [ ] **Step 3: Run the CLI stub tests on macOS**
+
+Before running, ensure the test command uses the non-interactive permission mode:
+
+```rust
+        .env("ROLLSHOT_NO_PERMISSION_PROMPT", "1")
+```
+
+Run on macOS:
+
+```bash
+rtk cargo test -p rollshot-cli --test capture_stubs
+```
+
+Expected: tests pass without expecting `macos-sck` to return `NotImplemented`.
+
+- [ ] **Step 4: Run the CLI stub tests on Linux**
+
+Run on Linux:
+
+```bash
+rtk cargo test -p rollshot-cli --test capture_stubs
+```
+
+Expected: Linux unsupported/stub behavior still passes.
+
+- [ ] **Step 5: Commit**
+
+```bash
+rtk git add crates/rollshot-cli/tests/capture_stubs.rs
+rtk git commit -m "test(cli): update macos backend contract"
+```
+
+---
+
+## Task 5: Add Ignored macOS Real-Capture Smoke Test
 
 **Files:**
 - Create: `crates/rollshot-capture/tests/macos_sck_smoke.rs`
@@ -638,7 +1204,51 @@ rtk git commit -m "test(capture): add macos scap smoke test"
 
 ---
 
-## Task 4: Update README macOS Manual Testing
+## Task 6: Wire the macOS Real-Capture Workflow
+
+**Files:**
+- Modify: `.github/workflows/real-capture.yml`
+
+- [ ] **Step 1: Replace the macOS placeholder command**
+
+In `.github/workflows/real-capture.yml`, replace the `macos-screencapturekit` job's final step:
+
+```yaml
+      - name: Explain current bootstrap status
+        run: |
+          echo "Real macOS capture tests are added in the macOS backend phase."
+          echo "This workflow reserves the self-hosted ScreenCaptureKit runner path."
+```
+
+with:
+
+```yaml
+      - name: Run macOS ScreenCaptureKit smoke test
+        env:
+          ROLLSHOT_REAL_CAPTURE: "1"
+        run: cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture
+```
+
+- [ ] **Step 2: Verify the workflow text**
+
+Run:
+
+```bash
+rtk rg -n "Run macOS ScreenCaptureKit smoke test|ROLLSHOT_REAL_CAPTURE|macos_sck_smoke" .github/workflows/real-capture.yml
+```
+
+Expected: the macOS self-hosted job contains the real smoke-test command.
+
+- [ ] **Step 3: Commit**
+
+```bash
+rtk git add .github/workflows/real-capture.yml
+rtk git commit -m "ci: run macos real capture smoke test"
+```
+
+---
+
+## Task 7: Update README macOS Manual Testing
 
 **Files:**
 - Modify: `README.md`
@@ -730,7 +1340,7 @@ rtk git commit -m "docs: document macos manual capture testing"
 
 ---
 
-## Task 5: CLI and Backend Integration Checks
+## Task 8: CLI and Backend Integration Checks
 
 **Files:**
 - No source changes expected.
@@ -771,7 +1381,7 @@ If any compatibility check fails, stop this task and fix the specific failing fi
 
 ---
 
-## Task 6: Final Verification
+## Task 9: Final Verification
 
 **Files:**
 - No source changes expected unless verification exposes a real issue.
