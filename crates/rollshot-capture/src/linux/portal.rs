@@ -1477,6 +1477,37 @@ mod tests {
         );
     }
 
+    use std::cell::{Cell, RefCell};
+    use std::sync::MutexGuard;
+
+    thread_local! {
+        static ENV_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+        static ENV_GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+
+    fn acquire_env_lock() {
+        ENV_LOCK_DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                ENV_GUARD.with(|guard| {
+                    *guard.borrow_mut() = Some(crate::ENV_MUTEX.lock().unwrap());
+                });
+            }
+            depth.set(depth.get() + 1);
+        });
+    }
+
+    fn release_env_lock() {
+        ENV_LOCK_DEPTH.with(|depth| {
+            let d = depth.get() - 1;
+            if d == 0 {
+                ENV_GUARD.with(|guard| {
+                    *guard.borrow_mut() = None;
+                });
+            }
+            depth.set(d);
+        });
+    }
+
     struct EnvGuard {
         key: &'static str,
         original: Option<String>,
@@ -1484,6 +1515,7 @@ mod tests {
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            acquire_env_lock();
             let original = std::env::var(key).ok();
             std::env::set_var(key, value);
             Self { key, original }
@@ -1496,6 +1528,7 @@ mod tests {
                 Some(val) => std::env::set_var(self.key, val),
                 None => std::env::remove_var(self.key),
             }
+            release_env_lock();
         }
     }
 }
