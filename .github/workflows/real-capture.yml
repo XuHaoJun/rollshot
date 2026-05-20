@@ -29,7 +29,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Explain current bootstrap status
-        run: |
-          echo "Real macOS capture tests are added in the macOS backend phase."
-          echo "This workflow reserves the self-hosted ScreenCaptureKit runner path."
+      - name: Run macOS ScreenCaptureKit smoke test
+        env:
+          ROLLSHOT_REAL_CAPTURE: "1"
+        run: cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture
