@@ -14,7 +14,20 @@ through `scap`. The KDE Wayland backend is still planned for a later phase.
 
 ## Local Development
 
-Install Rust 1.85 or newer with `rustup`, then run:
+Install Rust 1.85 or newer with `rustup`.
+
+On Ubuntu, install the system packages required by the PipeWire and D-Bus
+dependencies:
+
+```bash
+sudo apt-get install -y pkg-config libpipewire-0.3-dev libspa-0.2-dev libclang-18-dev
+```
+
+`libclang-18-dev` provides the `libclang.so` symlink that `bindgen` (used by
+the `pipewire` crate) needs. Without it, set `LIBCLANG_PATH=/usr/lib/llvm-18/lib`
+before building.
+
+Then run:
 
 ```bash
 cargo fmt --all -- --check
