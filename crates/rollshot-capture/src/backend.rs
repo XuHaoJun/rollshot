@@ -45,6 +45,45 @@ impl BackendKind {
             }),
         }
     }
+
+    pub fn create(self) -> Result<Box<dyn CaptureBackend>, CaptureError> {
+        match self {
+            BackendKind::Fixture => Err(CaptureError::InvalidConfig {
+                message: "fixture backend requires --fixture <DIR>".to_string(),
+            }),
+            BackendKind::LinuxPortalPipeWire => {
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(Box::new(crate::linux::LinuxPortalBackend::new()))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err(CaptureError::Unsupported {
+                        message: "linux-portal backend requires a Linux host".to_string(),
+                    })
+                }
+            }
+            BackendKind::MacosScreenCaptureKit => {
+                #[cfg(target_os = "macos")]
+                {
+                    Ok(Box::new(crate::macos::MacosScreenCaptureKitBackend::new()))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Err(CaptureError::Unsupported {
+                        message: "macos-sck backend requires a macOS host".to_string(),
+                    })
+                }
+            }
+            BackendKind::Unsupported => Err(CaptureError::Unsupported {
+                message: format!(
+                    "no capture backend is available on os={} session={}",
+                    std::env::consts::OS,
+                    std::env::var("XDG_SESSION_TYPE").unwrap_or_default()
+                ),
+            }),
+        }
+    }
 }
 
 pub fn default_backend() -> BackendKind {
@@ -133,5 +172,25 @@ mod tests {
         );
         assert_eq!(default_backend_for("linux", None), BackendKind::Unsupported);
         assert_eq!(default_backend_for("windows", None), BackendKind::Unsupported);
+    }
+
+    #[test]
+    fn fixture_kind_create_requires_path() {
+        match BackendKind::Fixture.create() {
+            Err(CaptureError::InvalidConfig { message }) => {
+                assert!(message.contains("--fixture"), "msg = {message}");
+            }
+            Err(other) => panic!("expected InvalidConfig, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn unsupported_kind_create_returns_unsupported() {
+        match BackendKind::Unsupported.create() {
+            Err(CaptureError::Unsupported { .. }) => {}
+            Err(other) => panic!("expected Unsupported, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }
