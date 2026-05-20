@@ -1,9 +1,15 @@
 //! Shared helpers for CLI integration tests. Each test file declares
 //! `mod common;` to pull these in.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
+};
 
 use image::{imageops, Rgba, RgbaImage};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn temp_dir(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -16,6 +22,32 @@ pub fn temp_dir(label: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&path).expect("create temp dir");
     path
+}
+
+#[allow(dead_code)]
+pub fn command_output(command: &mut Command) -> Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn command");
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait().expect("poll command").is_some() {
+            return child.wait_with_output().expect("collect command output");
+        }
+
+        if started.elapsed() >= COMMAND_TIMEOUT {
+            let _ = child.kill();
+            let output = child.wait_with_output().expect("collect timed-out output");
+            panic!(
+                "command timed out after {:?}\nstdout: {}\nstderr: {}",
+                COMMAND_TIMEOUT,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[allow(dead_code)]

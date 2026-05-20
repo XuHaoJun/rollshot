@@ -941,9 +941,17 @@ rtk git commit -m "feat(capture): implement macos scap backend"
 ## Task 4: Update CLI Stub Tests for Real macOS Backend
 
 **Files:**
+- Modify: `crates/rollshot-cli/tests/common/mod.rs` (CLI subprocess timeout helper)
 - Modify: `crates/rollshot-cli/tests/capture_stubs.rs`
 
-- [ ] **Step 1: Replace the macOS NotImplemented test**
+- [ ] **Step 1: Add a CLI subprocess timeout helper**
+
+In `crates/rollshot-cli/tests/common/mod.rs`, add a helper that runs a
+`Command` with piped stdout/stderr and panics after 10 seconds with captured
+output. Use this helper in the capture stub tests so a regression that reaches
+blocking capture code fails fast instead of hanging CI.
+
+- [ ] **Step 2: Replace the macOS NotImplemented test**
 
 In `crates/rollshot-cli/tests/capture_stubs.rs`, replace the full macOS-only test:
 
@@ -975,46 +983,39 @@ fn macos_sck_backend_exits_with_not_implemented_code() {
 }
 ```
 
-with this non-interactive hosted-CI contract:
+with this hosted-CI-safe contract. It must not start ScreenCaptureKit in the
+default `cargo test --workspace` path:
 
 ```rust
 #[test]
 #[cfg(target_os = "macos")]
-fn macos_sck_backend_without_permission_prompt_exits_cleanly() {
-    if std::env::var("ROLLSHOT_REAL_CAPTURE").ok().as_deref() == Some("1") {
-        eprintln!("real macOS capture is covered by macos_sck_smoke");
-        return;
-    }
-
+fn macos_sck_backend_rejects_portal_region_without_starting_capture() {
     let tempdir = temp_dir("macos-sck");
     let out = tempdir.join("out.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
         .args(["--backend", "macos-sck"])
+        .args(["--region", "portal"])
         .args(["--output"])
         .arg(&out)
-        .args(["--max-frames", "1"])
-        .env("ROLLSHOT_NO_PERMISSION_PROMPT", "1")
         .output()
         .expect("run rollshot capture");
 
-    assert!(
-        output.status.success() || output.status.code() == Some(3),
-        "expected success with existing permission or permission-denied without prompt; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(2),
-        "macos-sck should no longer be a NotImplemented stub; stderr: {}",
+        Some(1),
+        "expected invalid config before macOS capture starts; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--region portal"), "stderr = {stderr}");
+    assert!(stderr.contains("linux-portal"), "stderr = {stderr}");
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
 ```
 
-- [ ] **Step 2: Update the auto-backend expectation**
+- [ ] **Step 3: Update the auto-backend expectation**
 
 In `backend_auto_exits_with_host_appropriate_code`, first replace the command construction:
 
@@ -1036,10 +1037,11 @@ with:
         .arg("capture")
         .args(["--backend", "auto"])
         .args(["--output"])
-        .arg(&out)
-        .args(["--max-frames", "1"]);
+        .arg(&out);
     if cfg!(target_os = "macos") {
-        command.env("ROLLSHOT_NO_PERMISSION_PROMPT", "1");
+        command.args(["--region", "portal"]);
+    } else {
+        command.args(["--max-frames", "1"]);
     }
     let output = command.output().expect("run rollshot capture");
 ```
@@ -1057,16 +1059,10 @@ with:
 
 ```rust
     let expected_code = if cfg!(target_os = "macos") {
-        // macOS auto now reaches the real backend. Hosted CI normally lacks
-        // Screen Recording permission, so permission denied is the expected
-        // non-interactive result. The env var prevents a system permission
-        // prompt during tests. If permission is already granted, the command may
-        // succeed after one frame.
-        if output.status.success() {
-            0
-        } else {
-            3
-        }
+        // Hosted macOS CI must not start ScreenCaptureKit. `auto` still
+        // resolves to macos-sck, and `portal` fails during argument validation
+        // before backend startup.
+        1
     } else if cfg!(target_os = "linux")
         && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
     {
@@ -1076,12 +1072,14 @@ with:
     };
 ```
 
-- [ ] **Step 3: Run the CLI stub tests on macOS**
+- [ ] **Step 4: Run the CLI stub tests on macOS**
 
-Before running, ensure the test command uses the non-interactive permission mode:
+Before running, ensure the macOS test command does not use the real-capture
+path. The default macOS test must reject `--region portal` before
+ScreenCaptureKit startup:
 
 ```rust
-        .env("ROLLSHOT_NO_PERMISSION_PROMPT", "1")
+        .args(["--region", "portal"])
 ```
 
 Run on macOS:
@@ -1090,9 +1088,10 @@ Run on macOS:
 rtk cargo test -p rollshot-cli --test capture_stubs
 ```
 
-Expected: tests pass without expecting `macos-sck` to return `NotImplemented`.
+Expected: tests pass without starting real macOS capture. Real capture remains
+covered by the ignored `macos_sck_smoke` test.
 
-- [ ] **Step 4: Run the CLI stub tests on Linux**
+- [ ] **Step 5: Run the CLI stub tests on Linux**
 
 Run on Linux:
 
@@ -1102,10 +1101,10 @@ rtk cargo test -p rollshot-cli --test capture_stubs
 
 Expected: Linux unsupported/stub behavior still passes.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-rtk git add crates/rollshot-cli/tests/capture_stubs.rs
+rtk git add crates/rollshot-cli/tests/common/mod.rs crates/rollshot-cli/tests/capture_stubs.rs
 rtk git commit -m "test(cli): update macos backend contract"
 ```
 
@@ -1414,7 +1413,9 @@ Run:
 rtk cargo test --workspace
 ```
 
-Expected: PASS on the local host. The ignored macOS real-capture smoke test does not run unless explicitly requested.
+Expected: PASS on the local host. Hosted macOS workspace tests do not start
+ScreenCaptureKit, and the ignored macOS real-capture smoke test does not run
+unless explicitly requested.
 
 - [ ] **Step 4: macOS backend verification on macOS**
 
