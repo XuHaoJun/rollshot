@@ -116,8 +116,17 @@ impl PortalSession {
 
 impl Drop for PortalSession {
     fn drop(&mut self) {
+        // Best-effort: run close() on a dedicated background thread so a hung
+        // D-Bus call cannot block process exit. Give it a short window, then
+        // detach. The portal session is also released when the bus connection
+        // dies with the process.
         if let Some(close) = self.close.take() {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(close));
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(close));
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
         }
     }
 }
@@ -161,16 +170,8 @@ impl PortalClient {
     fn run_screencast_lifecycle(
         &self,
         options: CaptureOptions,
-        _session_type: String,
+        session_type: String,
     ) -> Result<PortalSession, CaptureError> {
-        trace_capture_stage("probing capabilities");
-        let capabilities = self.probe_inner_capabilities();
-        if !capabilities.source_types.monitor && !capabilities.source_types.window {
-            return Err(CaptureError::Unsupported {
-                message: "portal reports neither monitor nor window capture available".to_string(),
-            });
-        }
-
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -186,6 +187,56 @@ impl PortalClient {
             .await
             .map_err(|_| portal_timeout("screencast proxy"))?
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("screencast proxy: {e}")))?;
+
+            trace_capture_stage("probing capabilities");
+            let source_types_raw = tokio::time::timeout(
+                CAPTURE_STAGE_TIMEOUT,
+                screencast.available_source_types(),
+            )
+            .await
+            .map_err(|_| portal_timeout("available source types"))?
+            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("available source types: {e}")))?;
+            let source_types = SourceTypes {
+                monitor: source_types_raw
+                    .contains(ashpd::desktop::screencast::SourceType::Monitor),
+                window: source_types_raw.contains(ashpd::desktop::screencast::SourceType::Window),
+                virtual_source: source_types_raw
+                    .contains(ashpd::desktop::screencast::SourceType::Virtual),
+            };
+            if !source_types.monitor && !source_types.window {
+                return Err(CaptureError::Unsupported {
+                    message: "portal reports neither monitor nor window capture available"
+                        .to_string(),
+                });
+            }
+
+            let cursor_modes_raw = tokio::time::timeout(
+                CAPTURE_STAGE_TIMEOUT,
+                screencast.available_cursor_modes(),
+            )
+            .await
+            .map_err(|_| portal_timeout("available cursor modes"))?
+            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("available cursor modes: {e}")))?;
+            let cursor_modes = CursorModes {
+                hidden: cursor_modes_raw.contains(ashpd::desktop::screencast::CursorMode::Hidden),
+                embedded: cursor_modes_raw
+                    .contains(ashpd::desktop::screencast::CursorMode::Embedded),
+                metadata: cursor_modes_raw
+                    .contains(ashpd::desktop::screencast::CursorMode::Metadata),
+            };
+
+            let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+            let profile = classify_desktop(&desktop);
+            let quirks = quirks_for_profile(profile);
+            let capabilities = LinuxPortalCapabilities {
+                desktop,
+                session_type,
+                portal_version: Some(4),
+                source_types,
+                cursor_modes,
+                profile,
+                quirks,
+            };
 
             trace_capture_stage("creating portal session");
             let session = tokio::time::timeout(CAPTURE_STAGE_TIMEOUT, screencast.create_session())
@@ -505,75 +556,12 @@ fn format_cursor_modes(c: CursorModes) -> String {
     parts.join("|")
 }
 
-fn parse_source_types(value: Option<&str>) -> SourceTypes {
-    let mut source_types = SourceTypes {
-        monitor: false,
-        window: false,
-        virtual_source: false,
-    };
-    if let Some(value) = value {
-        for part in value.split('|') {
-            match part {
-                "monitor" => source_types.monitor = true,
-                "window" => source_types.window = true,
-                "virtual" => source_types.virtual_source = true,
-                _ => {}
-            }
-        }
-    }
-    source_types
-}
-
-fn parse_cursor_modes(value: Option<&str>) -> CursorModes {
-    let mut cursor_modes = CursorModes {
-        hidden: false,
-        embedded: false,
-        metadata: false,
-    };
-    if let Some(value) = value {
-        for part in value.split('|') {
-            match part {
-                "hidden" => cursor_modes.hidden = true,
-                "embedded" => cursor_modes.embedded = true,
-                "metadata" => cursor_modes.metadata = true,
-                _ => {}
-            }
-        }
-    }
-    cursor_modes
-}
-
 fn format_quirks(quirks: &[LinuxPortalQuirk]) -> String {
     quirks
         .iter()
         .map(|q| format!("{q:?}"))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn capabilities_from_probe(
-    session_type: String,
-    desktop: String,
-    probe: &CaptureProbe,
-) -> LinuxPortalCapabilities {
-    let profile = classify_desktop(&desktop);
-    let quirks = quirks_for_profile(profile);
-    let detail = |key: &str| {
-        probe
-            .details
-            .iter()
-            .find_map(|(k, v)| if k == key { Some(v.as_str()) } else { None })
-    };
-
-    LinuxPortalCapabilities {
-        desktop,
-        session_type,
-        portal_version: detail("screencast_version").and_then(|v| v.parse().ok()),
-        source_types: parse_source_types(detail("available_source_types")),
-        cursor_modes: parse_cursor_modes(detail("available_cursor_modes")),
-        profile,
-        quirks,
-    }
 }
 
 fn build_probe_from_source<S: ProbeSource + Send + Sync + 'static>(
@@ -887,39 +875,6 @@ impl PortalClient {
         }
     }
 
-    fn probe_inner_capabilities(&self) -> LinuxPortalCapabilities {
-        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        let profile = classify_desktop(&desktop);
-        let quirks = quirks_for_profile(profile);
-
-        let source = match AshpdProbeSource::new() {
-            Ok(s) => s,
-            Err(_) => {
-                return LinuxPortalCapabilities {
-                    desktop,
-                    session_type,
-                    portal_version: None,
-                    source_types: SourceTypes {
-                        monitor: false,
-                        window: false,
-                        virtual_source: false,
-                    },
-                    cursor_modes: CursorModes {
-                        hidden: false,
-                        embedded: false,
-                        metadata: false,
-                    },
-                    profile,
-                    quirks,
-                };
-            }
-        };
-
-        let probe =
-            build_probe_from_source(session_type.clone(), desktop.clone(), source, PROBE_TIMEOUT);
-        capabilities_from_probe(session_type, desktop, &probe)
-    }
 }
 
 #[cfg(test)]
@@ -1354,41 +1309,6 @@ mod tests {
             quirks.contains("RegionPickerMayReturnVideoCrop"),
             "quirks: {quirks}"
         );
-    }
-
-    #[test]
-    fn capabilities_from_probe_parses_probe_details() {
-        let probe = CaptureProbe {
-            backend: "linux-portal",
-            available: true,
-            message: "ready".to_string(),
-            details: vec![
-                ("screencast_version".to_string(), "4".to_string()),
-                (
-                    "available_source_types".to_string(),
-                    "monitor|window|virtual".to_string(),
-                ),
-                (
-                    "available_cursor_modes".to_string(),
-                    "hidden|embedded|metadata".to_string(),
-                ),
-            ],
-        };
-
-        let capabilities =
-            capabilities_from_probe("wayland".to_string(), "KDE".to_string(), &probe);
-
-        assert_eq!(capabilities.portal_version, Some(4));
-        assert!(capabilities.source_types.monitor);
-        assert!(capabilities.source_types.window);
-        assert!(capabilities.source_types.virtual_source);
-        assert!(capabilities.cursor_modes.hidden);
-        assert!(capabilities.cursor_modes.embedded);
-        assert!(capabilities.cursor_modes.metadata);
-        assert_eq!(capabilities.profile, LinuxDesktopProfile::Kde);
-        assert!(capabilities
-            .quirks
-            .contains(&LinuxPortalQuirk::KdeMayReturnMultipleStreams));
     }
 
     #[test]

@@ -282,11 +282,13 @@ pub struct LinuxPortalFrameStream {
 #[cfg(not(test))]
 mod connection {
     use super::*;
-    use pipewire::spa::param::format::{MediaSubtype, MediaType};
+    use pipewire::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
+    use pipewire::spa::param::ParamType;
     use pipewire::spa::pod::builder::{builder_add, Builder};
-    use pipewire::spa::pod::*;
-    use pipewire::spa::utils::{Fraction, Id};
+    use pipewire::spa::pod::serialize::PodSerializer;
+    use pipewire::spa::pod::{object, property, Pod, Value};
+    use pipewire::spa::utils::{Fraction, Id, Rectangle, SpaTypes};
     use std::os::fd::AsFd;
 
     pub struct PipeWireConnection {
@@ -325,12 +327,16 @@ mod connection {
     }
 
     fn build_buf_mem_ptr_param_bytes() -> Vec<u8> {
+        // Accept either MemPtr (raw pointer) or MemFd (memfd that MAP_BUFFERS
+        // will mmap for us). KDE's screencast producer hands out MemFd buffers.
+        let accepted = (1i32 << pipewire::spa::sys::SPA_DATA_MemPtr)
+            | (1i32 << pipewire::spa::sys::SPA_DATA_MemFd);
         let mut data = Vec::new();
         {
             let mut builder = Builder::new(&mut data);
             let _ = builder_add!(&mut builder,
                 Object(pipewire::spa::sys::SPA_TYPE_OBJECT_ParamBuffers, pipewire::spa::sys::SPA_PARAM_Buffers) {
-                    pipewire::spa::sys::SPA_PARAM_BUFFERS_dataType => Int(1i32 << 1)
+                    pipewire::spa::sys::SPA_PARAM_BUFFERS_dataType => Int(accepted)
                 }
             );
         }
@@ -338,19 +344,38 @@ mod connection {
     }
 
     fn build_format_pod_bytes(fmt: VideoFormat, fps: u32) -> Vec<u8> {
-        let mut data = Vec::new();
-        {
-            let mut builder = Builder::new(&mut data);
-            let _ = builder_add!(&mut builder,
-                Object(pipewire::spa::sys::SPA_TYPE_OBJECT_Format, pipewire::spa::sys::SPA_PARAM_EnumFormat) {
-                    pipewire::spa::sys::SPA_FORMAT_mediaType => Id(Id(MediaType::Video.as_raw())),
-                    pipewire::spa::sys::SPA_FORMAT_mediaSubtype => Id(Id(MediaSubtype::Raw.as_raw())),
-                    pipewire::spa::sys::SPA_FORMAT_VIDEO_format => Id(Id(fmt.as_raw())),
-                    pipewire::spa::sys::SPA_FORMAT_VIDEO_framerate => Fraction(Fraction { num: fps, denom: 1 })
-                }
-            );
-        }
-        data
+        // EnumFormat must advertise acceptable size and framerate as CHOICE_RANGE
+        // so the producer (compositor) can pick its native resolution / rate. A
+        // fixed framerate or absent size blocks negotiation on most portals.
+        let obj = object!(
+            SpaTypes::ObjectParamFormat,
+            ParamType::EnumFormat,
+            property!(FormatProperties::MediaType, Id, MediaType::Video),
+            property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+            property!(FormatProperties::VideoFormat, Id, fmt),
+            property!(
+                FormatProperties::VideoSize,
+                Choice,
+                Range,
+                Rectangle,
+                Rectangle { width: 1920, height: 1080 },
+                Rectangle { width: 1, height: 1 },
+                Rectangle { width: 8192, height: 4320 }
+            ),
+            property!(
+                FormatProperties::VideoFramerate,
+                Choice,
+                Range,
+                Fraction,
+                Fraction { num: fps, denom: 1 },
+                Fraction { num: 0, denom: 1 },
+                Fraction { num: 360, denom: 1 }
+            ),
+        );
+        let (cursor, _) =
+            PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
+                .expect("serialize EnumFormat pod");
+        cursor.into_inner()
     }
 
     fn map_spa_transform(transform: u32) -> LinuxVideoTransform {
@@ -428,12 +453,16 @@ mod connection {
         let chunk_corrupted =
             (chunk.flags & pipewire::spa::sys::SPA_CHUNK_FLAG_CORRUPTED as i32) != 0;
 
-        let buffer_type = if data.type_ == pipewire::spa::sys::SPA_DATA_MemPtr {
+        // MemFd is mmap'd into our address space by the MAP_BUFFERS flag, so
+        // data.data is a valid pointer just like MemPtr.
+        let buffer_type = if data.type_ == pipewire::spa::sys::SPA_DATA_MemPtr
+            || data.type_ == pipewire::spa::sys::SPA_DATA_MemFd
+        {
             LinuxBufferType::MemPtr
         } else if data.type_ == pipewire::spa::sys::SPA_DATA_DmaBuf {
             LinuxBufferType::DmaBuf
         } else {
-            user_data.empty_count += 1;
+            user_data.empty_count = user_data.empty_count.saturating_add(1);
             return;
         };
 
