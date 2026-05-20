@@ -15,6 +15,7 @@
 **Assumptions:**
 - The workspace remains on Rust 1.85.
 - `ashpd 0.9.x` is the intended API line even though newer versions exist; the spec locks this phase to 0.9.
+- The ashpd / PipeWire method calls shown in step code blocks are **illustrative**, not literal. ashpd 0.9 uses a builder pattern (`Screencast::new()` returns a proxy builder; `select_sources` takes a session reference plus several positional args). The implementer must reconcile the exact method shapes against the installed ashpd 0.9 docs during implementation; tests pin behavior, not method names.
 - Real PipeWire buffer metadata requires a tiny raw-pointer boundary. Keep that boundary in one module and test behavior through safe helper inputs.
 - No git worktree is created for execution. If a branch is needed, create it in place with `git checkout -b linux-wayland-portal`.
 
@@ -53,8 +54,10 @@ Edit the root `Cargo.toml` `[workspace.dependencies]` block so it includes these
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
 pipewire = "0.8"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-nix = { version = "0.29", features = ["fs"] }
+nix = { version = "0.29", features = ["fs", "fcntl"] }
 ```
+
+`nix` needs both `fs` (for the file constants module) and `fcntl` (for the `fcntl::fcntl` function used by `dup_pipewire_fd`).
 
 - [ ] **Step 2: Add Linux-only capture deps**
 
@@ -385,7 +388,9 @@ Add tests covering:
 - crop is applied.
 - crop outside bounds returns `CaptureError::InvalidConfig`.
 - empty dimensions and too-short data return `InvalidConfig`.
-- synthetic 3840x2160 BGRx conversion completes under 20 ms.
+- synthetic 3840x2160 BGRx conversion completes under 20 ms — write this test with `#[cfg_attr(debug_assertions, ignore)]` so it only runs in release builds. Debug bounds-check overhead makes the 20 ms ceiling unreliable, and CI runs `cargo test` in debug. Document the release-mode command in the README perf note.
+
+MVP allocation note: `raw_frame_to_rgba()` allocates one `Vec<u8>` of size `width * height * 4` per call. At 4K BGRx @ 5 fps this is ~160 MB/s of allocation churn. Buffer pooling is a future optimization (see spec); the pure helper API is designed to allow it later (caller can preallocate and pass a `&mut Vec<u8>` if profile shows allocation is the bottleneck).
 
 Use a two-pixel BGRA case like:
 
@@ -499,7 +504,7 @@ pub fn raw_frame_to_rgba(frame: LinuxRawFrame<'_>) -> Result<RgbaImage, CaptureE
 
 Run: `cargo test -p rollshot-capture --lib linux::pixel::`
 
-Expected: all pixel tests pass. If the 4K perf test is noisy on CI, mark only that test `#[ignore]` and document the exact local command in README; keep correctness tests enabled.
+Expected: all correctness pixel tests pass. The 4K perf test is `#[cfg_attr(debug_assertions, ignore)]` and skipped by default. Run it explicitly in release: `cargo test --release -p rollshot-capture --lib linux::pixel::four_k -- --ignored`.
 
 - [ ] **Step 5: Commit**
 
@@ -518,16 +523,18 @@ git commit -m "feat(capture): convert linux raw frames to rgba"
 
 - [ ] **Step 1: Add probe abstraction tests**
 
-Add a test-only trait-backed probe source:
+Add a `ProbeSource` trait. The trait itself is `pub(super)` (production code uses it via `AshpdProbeSource`); only the fake implementation and the test harness are `#[cfg(test)]`:
 
 ```rust
-trait ProbeSource {
+pub(super) trait ProbeSource {
     fn screencast_version(&self) -> Result<u32, String>;
     fn available_source_types(&self) -> Result<SourceTypes, String>;
     fn available_cursor_modes(&self) -> Result<CursorModes, String>;
     fn pipewire_version(&self) -> Result<String, String>;
 }
 ```
+
+Place fake implementations and tests inside `#[cfg(test)] mod tests { ... }` so they don't bloat the production binary.
 
 Tests must verify:
 - Wayland + monitor source + PipeWire returns `available = true` without requiring KDE.
@@ -563,14 +570,15 @@ fn build_probe_from_source<S: ProbeSource>(
     let cursor_modes = call_with_timeout("available_cursor_modes", timeout, || source.available_cursor_modes(), &mut details);
     let pipewire = call_with_timeout("pipewire_version", timeout, || source.pipewire_version(), &mut details);
 
+    let has_source = source_types.map(|s| s.monitor || s.window).unwrap_or(false);
+    let has_pipewire = pipewire.is_some();
+
     details.push(("screencast_version".to_string(), version.map(|v| v.to_string()).unwrap_or_else(|| "unavailable".to_string())));
     details.push(("available_source_types".to_string(), source_types.map(format_source_types).unwrap_or_else(|| "unavailable".to_string())));
     details.push(("available_cursor_modes".to_string(), cursor_modes.map(format_cursor_modes).unwrap_or_else(|| "unavailable".to_string())));
     details.push(("pipewire_library_version".to_string(), pipewire.unwrap_or_else(|| "unavailable".to_string())));
     details.push(("quirks".to_string(), format_quirks(&quirks)));
 
-    let has_source = source_types.map(|s| s.monitor || s.window).unwrap_or(false);
-    let has_pipewire = details.iter().any(|(k, v)| k == "pipewire_library_version" && v != "unavailable");
     let available = session_type == "wayland" && has_source && has_pipewire;
 
     CaptureProbe {
@@ -647,19 +655,39 @@ pub struct PortalSession {
     pub node_id: u32,
     pub pipewire_fd: std::os::fd::OwnedFd,
     pub capabilities: LinuxPortalCapabilities,
+    // close is declared LAST so it drops AFTER pipewire_fd. The PipeWire
+    // teardown in LinuxPortalFrameStream::drop already closed the dup'd fd;
+    // pipewire_fd here is the *original* ashpd fd, which must drop before
+    // the portal session closes — matches spec drop order steps 4 → 5.
     close: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Drop for PortalSession {
     fn drop(&mut self) {
         if let Some(close) = self.close.take() {
-            close();
+            // Drop closures cannot panic across FFI/async boundaries;
+            // catch_unwind isolates any panic from ashpd's async close.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(close));
         }
     }
 }
 ```
 
-The `close` closure owns the `ashpd::desktop::Session` and a tokio runtime handle needed to call `Session::close().await` during drop. It must ignore close errors.
+The `close` closure captures the `ashpd::desktop::Session` plus an `Arc<tokio::runtime::Runtime>` (or `tokio::runtime::Handle`) and looks like:
+
+```rust
+let close: Box<dyn FnOnce() + Send> = Box::new(move || {
+    // Sync Drop calling async Session::close — block on the captured runtime.
+    // Ignore the result: drop must not return errors, and ashpd may have
+    // already cleaned up if the portal disconnected.
+    rt.block_on(async { let _ = session.close().await; });
+});
+```
+
+Notes:
+- Field declaration order is load-bearing: Rust drops fields top-to-bottom, so `pipewire_fd` drops before `close` runs. Do not reorder.
+- The closure must take ownership of the runtime (or a handle) — calling `block_on` on a runtime that has already been dropped will panic.
+- The owning `LinuxPortalFrameStream` keeps `PortalSession` in a field declared AFTER the PipeWire connection so PipeWire teardown (thread loop stop → stream destroy → context destroy) runs first.
 
 - [ ] **Step 3: Implement ashpd lifecycle**
 
@@ -701,17 +729,23 @@ git commit -m "feat(capture): run xdg screencast portal lifecycle"
 
 - [ ] **Step 1: Scope the unsafe lint decision**
 
-PipeWire metadata lookup needs one small unsafe boundary. Replace the `[lints] workspace = true` block in `crates/rollshot-capture/Cargo.toml` with crate-local lints:
+PipeWire metadata lookup and `OwnedFd::from_raw_fd` need a small unsafe boundary. The workspace currently sets `unsafe_code = "forbid"`, which cannot be overridden by `#[allow]` anywhere in the crate. Replace the inherited `[lints] workspace = true` block in `crates/rollshot-capture/Cargo.toml` with a crate-local policy that keeps unsafe code denied by default but allows it on individual annotated functions:
 
 ```toml
 [lints.rust]
-unsafe_code = "allow"
+unsafe_code = "deny"
 
 [lints.clippy]
 all = "warn"
 ```
 
-Then put any `unsafe` code only in `linux/pipewire.rs`, each block preceded by a `// SAFETY:` comment describing pointer validity and lifetime. Do not add unsafe code to portal or pixel modules. `unsafe_code = "allow"` is intentional because `cargo clippy -- -D warnings` would turn a warning-level unsafe lint into a hard failure.
+Then in `linux/pipewire.rs`, every unsafe block must:
+
+1. Sit inside a function annotated `#[allow(unsafe_code)]` (this is the explicit per-callsite escape).
+2. Be preceded by a `// SAFETY:` comment describing pointer validity, lifetime, and ownership transfer.
+3. Stay in `linux/pipewire.rs` only — portal, pixel, and shared modules must remain `unsafe_code`-clean.
+
+Rationale: `deny` keeps unsafe out of the rest of the crate while still allowing the documented per-function exceptions. `forbid` cannot be relaxed (that's the entire point of `forbid` vs `deny` in rustc). Don't blanket-allow unsafe at the crate level — that loses the safety net everywhere except where you actually need it.
 
 - [ ] **Step 2: Add fd ownership tests**
 
@@ -736,13 +770,17 @@ fn dup_pipewire_fd_does_not_consume_input() {
 Implementation:
 
 ```rust
+#[allow(unsafe_code)] // OwnedFd::from_raw_fd is the documented bridge from a raw kernel fd.
 pub fn dup_pipewire_fd(input: std::os::fd::BorrowedFd<'_>) -> Result<std::os::fd::OwnedFd, CaptureError> {
     use nix::fcntl::{fcntl, FcntlArg};
     use std::os::fd::FromRawFd;
 
     let duplicated = fcntl(input, FcntlArg::F_DUPFD_CLOEXEC(5))
         .map_err(|err| CaptureError::Backend(anyhow::anyhow!("failed to duplicate PipeWire fd: {err}")))?;
-    // SAFETY: fcntl(F_DUPFD_CLOEXEC) returns a new owned fd on success.
+    // SAFETY: fcntl(F_DUPFD_CLOEXEC) returns a fresh, exclusively-owned RawFd
+    // with the CLOEXEC flag set. No other code path in this crate touches that
+    // numeric fd before this OwnedFd is constructed, so ownership transfer is
+    // unambiguous. The original `input` BorrowedFd is unaffected by F_DUPFD.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicated) })
 }
 ```
@@ -759,7 +797,30 @@ enum FrameEvent {
 }
 ```
 
-Use `std::sync::mpsc::sync_channel(3)`. Provide a helper `send_latest()` that drops one stale queued frame when the channel is full, then sends the newest frame. Tests assert newest frames are retained and `next_frame_with_timeout()` returns a backend timeout after a 100 ms test timeout.
+Queue primitive: `std::sync::Mutex<VecDeque<FrameEvent>>` with logical capacity 3, paired with a `std::sync::Condvar` (no new dependency; `sync_channel`'s drop-oldest semantics require a fragile sender/receiver dance, the Mutex+VecDeque approach matches what scap does on Linux).
+
+Producer `push(event)`:
+1. Lock the mutex.
+2. If `len() >= 3`, `pop_front()` (drop the oldest frame).
+3. `push_back(event)`.
+4. `notify_one()` on the condvar; drop the lock.
+
+Consumer `next_frame_with_timeout(timeout)`:
+1. Lock the mutex.
+2. `wait_timeout_while` on the condvar until the deque is non-empty or the timeout elapses.
+3. If timed out with empty deque → `CaptureError::Backend("PipeWire stream produced no frames within {timeout:?}")`.
+4. Otherwise `pop_front()` and translate the `FrameEvent`:
+   - `Frame(f)` → `Ok(f)`
+   - `End` → `Err(CaptureError::EndOfStream)`
+   - `Error(msg)` → `Err(CaptureError::Backend(anyhow::anyhow!(msg)))`
+
+Poison handling: a `PoisonError` from `lock()` means the producer thread panicked. Treat this as stream-fatal — log via `eprintln!` (no `tracing` dep yet) and return `CaptureError::EndOfStream` so the caller exits cleanly rather than retrying into the panic.
+
+Tests must assert:
+- Producing 5 frames into a capacity-3 queue retains only the newest 3 (frames 3, 4, 5).
+- `next_frame_with_timeout(Duration::from_millis(100))` returns `CaptureError::Backend` containing "no frames within" when the queue is empty and no producer pushes.
+- After producer enqueues `FrameEvent::End`, `next_frame()` returns `CaptureError::EndOfStream` (not `Backend`, not a frame).
+- After producer enqueues `FrameEvent::Error(msg)`, `next_frame()` returns `CaptureError::Backend` whose message contains `msg`.
 
 - [ ] **Step 4: Add drop order fake test**
 
@@ -839,7 +900,7 @@ Tests must verify:
 - DMA-BUF maps to `CaptureError::Unsupported`.
 - corrupted header skips the buffer without error.
 - chunk corrupted flag skips the buffer without error.
-- 10 consecutive empty buffers return backend error containing "did not produce a usable video frame".
+- 10 consecutive empty buffers return backend error containing "did not produce a usable video frame". The empty-buffer counter lives **in the pure mapper as a `&mut u8` parameter**, mirroring macOS's `process_scap_frame(frame, empty_frames: &mut u8, ...)` pattern (see `crates/rollshot-capture/src/macos/mod.rs`). This keeps the loop state outside callbacks and unit-testable; the PipeWire `process` callback owns one `u8` field and passes a mutable borrow to the mapper.
 - non-identity transform returns backend error naming the transform.
 - manual crop outside post-VideoCrop frame returns `InvalidConfig` mentioning requested region and available size.
 
@@ -896,7 +957,8 @@ git commit -m "feat(capture): connect pipewire portal stream"
 - Modify: `crates/rollshot-capture/src/linux/mod.rs`
 - Modify: `crates/rollshot-capture/src/linux/portal.rs`
 - Modify: `crates/rollshot-capture/src/linux/pipewire.rs`
-- Modify: `crates/rollshot-capture/src/types.rs` if metadata needs `scale_factor: Option<f32>`
+
+Do not modify `crates/rollshot-capture/src/types.rs` in this task. The spec mentions `scale_factor` but the current `FrameMetadata` has no such field and this plan deliberately defers adding it. If a later task or reviewer requires metadata parity, add `types.rs` to a follow-up task's Files list at that point.
 
 - [ ] **Step 1: Add backend integration unit tests with fakes**
 
@@ -918,7 +980,23 @@ Keep `LinuxPortalBackend::new()` as the production constructor. Add a `#[cfg(tes
 2. `let stream = LinuxPortalFrameStream::connect(portal_session, options)?;`
 3. `Ok(Box::new(stream))`.
 
-`LinuxPortalFrameStream::connect()` owns the portal session so drop order stays in one object.
+`LinuxPortalFrameStream::connect()` owns the portal session so drop order stays in one object. The struct's field order is **load-bearing** — Rust drops fields top-to-bottom, so PipeWire teardown (loop stop → stream destroy → context destroy) must precede portal-session close per the spec's drop order:
+
+```rust
+pub struct LinuxPortalFrameStream {
+    // 1. PipeWire connection drops FIRST: stops thread loop, disconnects/destroys
+    //    stream, destroys context (which closes the dup'd fd from F_DUPFD_CLOEXEC).
+    pipewire: PipeWireConnection,
+    // 2. PortalSession drops SECOND: drops original ashpd OwnedFd, then runs the
+    //    block_on(session.close().await) closure (see Task 5 Step 2).
+    portal: PortalSession,
+    // 3. Tokio runtime (if owned at stream scope rather than inside PortalSession)
+    //    drops LAST. Keep this field at the bottom or in PortalSession's close
+    //    closure. Never drop the runtime before block_on-ing the session close.
+}
+```
+
+Do not reorder these fields. Add a comment in the source pinning this requirement.
 
 - [ ] **Step 4: Apply frame metadata rules**
 
@@ -1037,9 +1115,9 @@ git commit -m "test(capture): add linux portal smoke test"
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Add apt install step after Rust setup**
+- [ ] **Step 1: Add apt install step between Rust setup and Format**
 
-In `.github/workflows/ci.yml`, add:
+In `.github/workflows/ci.yml`, insert the install step **after** the `Install Rust` step and **before** the `Format` step. (Format itself doesn't need the libs, but Clippy and Test will fail to build `pipewire-sys` without them, so the deps must be present before any cargo invocation reaches the capture crate.)
 
 ```yaml
       - name: Install Linux capture deps
@@ -1178,8 +1256,15 @@ git commit -m "fix(capture): address linux portal verification"
 
 **Spec coverage:** This plan covers real `probe()`, `CreateSession` / `SelectSources` / `Start` / `OpenPipeWireRemote`, `F_DUPFD_CLOEXEC`, drop order, 5-second `next_frame()` timeout, `PortalPicker` / `FullSource` / `Manual`, CPU-readable raw formats, stride, `VideoCrop`, corrupted/empty buffers, non-identity transforms, pure tests, ignored KDE smoke test, README, and CI apt packages.
 
-**Known design issue surfaced:** The workspace forbids unsafe code globally. The plan scopes the required PipeWire metadata raw-pointer boundary to `rollshot-capture/src/linux/pipewire.rs` and changes that crate's lint policy from `forbid` to `allow` for `unsafe_code`. If reviewers reject that tradeoff, the alternative is a tiny Linux-only helper crate with no workspace lint inheritance and a safe API exposed back to `rollshot-capture`.
+**Known design issue surfaced:** The workspace forbids unsafe code globally. The plan scopes the required `OwnedFd::from_raw_fd` boundary to `rollshot-capture/src/linux/pipewire.rs` and changes that crate's lint policy from `forbid` to `deny` (not `allow`), so individual functions can opt in with `#[allow(unsafe_code)]` while the rest of the crate stays unsafe-clean. If reviewers reject that tradeoff, the alternative is a tiny Linux-only helper crate with no workspace lint inheritance and a safe API exposed back to `rollshot-capture`.
 
-**Placeholder scan:** The plan intentionally avoids deferred requirements. Every task has concrete files, commands, expected outcomes, and commits. Real ashpd/PipeWire API use is named against the 0.9.2 and 0.8.0 sources checked during planning.
+**ashpd API specifics:** Method calls in the plan (`Screencast::new()`, `select_sources(..., PersistMode::DoNot)`, `WindowIdentifier::default()`, etc.) are illustrative. ashpd 0.9 uses a builder pattern with positional cursor/source/persist args; the implementer reconciles exact shapes during Task 5 against installed ashpd 0.9 documentation. Tests pin behavior, not method names.
+
+**Placeholder scan:** The plan intentionally avoids deferred requirements. Every task has concrete files, commands, expected outcomes, and commits. The pipewire queue, drop order, probe assembly, and pixel conversion are all specified concretely with both the pure helper signature and the test fixture shape.
+
+**Drop order invariants (encoded in code, not just docs):**
+- `LinuxPortalFrameStream` field order: `pipewire` first, then `portal` — Rust drops fields top-to-bottom.
+- `PortalSession` field order: `pipewire_fd` (the original ashpd `OwnedFd`) before `close` (the boxed `block_on(session.close())` closure).
+- Reordering either struct silently violates the spec's required drop order.
 
 **Completion handoff:** Execute tasks in order. Do not start Task 7 until Tasks 3, 5, and 6 pass, because real PipeWire processing depends on the pure pixel, portal, fd, queue, and lifecycle helpers.
