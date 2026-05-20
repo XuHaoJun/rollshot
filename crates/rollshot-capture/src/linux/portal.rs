@@ -189,16 +189,15 @@ impl PortalClient {
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("screencast proxy: {e}")))?;
 
             trace_capture_stage("probing capabilities");
-            let source_types_raw = tokio::time::timeout(
-                CAPTURE_STAGE_TIMEOUT,
-                screencast.available_source_types(),
-            )
-            .await
-            .map_err(|_| portal_timeout("available source types"))?
-            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("available source types: {e}")))?;
+            let source_types_raw =
+                tokio::time::timeout(CAPTURE_STAGE_TIMEOUT, screencast.available_source_types())
+                    .await
+                    .map_err(|_| portal_timeout("available source types"))?
+                    .map_err(|e| {
+                        CaptureError::Backend(anyhow::anyhow!("available source types: {e}"))
+                    })?;
             let source_types = SourceTypes {
-                monitor: source_types_raw
-                    .contains(ashpd::desktop::screencast::SourceType::Monitor),
+                monitor: source_types_raw.contains(ashpd::desktop::screencast::SourceType::Monitor),
                 window: source_types_raw.contains(ashpd::desktop::screencast::SourceType::Window),
                 virtual_source: source_types_raw
                     .contains(ashpd::desktop::screencast::SourceType::Virtual),
@@ -210,13 +209,13 @@ impl PortalClient {
                 });
             }
 
-            let cursor_modes_raw = tokio::time::timeout(
-                CAPTURE_STAGE_TIMEOUT,
-                screencast.available_cursor_modes(),
-            )
-            .await
-            .map_err(|_| portal_timeout("available cursor modes"))?
-            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("available cursor modes: {e}")))?;
+            let cursor_modes_raw =
+                tokio::time::timeout(CAPTURE_STAGE_TIMEOUT, screencast.available_cursor_modes())
+                    .await
+                    .map_err(|_| portal_timeout("available cursor modes"))?
+                    .map_err(|e| {
+                        CaptureError::Backend(anyhow::anyhow!("available cursor modes: {e}"))
+                    })?;
             let cursor_modes = CursorModes {
                 hidden: cursor_modes_raw.contains(ashpd::desktop::screencast::CursorMode::Hidden),
                 embedded: cursor_modes_raw
@@ -874,7 +873,6 @@ impl PortalClient {
             }
         }
     }
-
 }
 
 #[cfg(test)]

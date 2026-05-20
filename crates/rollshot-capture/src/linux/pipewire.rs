@@ -358,9 +358,18 @@ mod connection {
                 Choice,
                 Range,
                 Rectangle,
-                Rectangle { width: 1920, height: 1080 },
-                Rectangle { width: 1, height: 1 },
-                Rectangle { width: 8192, height: 4320 }
+                Rectangle {
+                    width: 1920,
+                    height: 1080
+                },
+                Rectangle {
+                    width: 1,
+                    height: 1
+                },
+                Rectangle {
+                    width: 8192,
+                    height: 4320
+                }
             ),
             property!(
                 FormatProperties::VideoFramerate,
