@@ -1,9 +1,9 @@
 # rollshot
 
 `rollshot` is a Rust rewrite of the long screenshot workflow described in
-`rollshot_mvp_design.md`. The project is in bootstrap phase: the workspace,
-crate boundaries, CI, and tests exist, while real KDE Wayland and macOS capture
-backends are not available yet.
+`rollshot_mvp_design.md`. The project has a platform-independent stitching
+core, fixture-backed capture tests, and a macOS ScreenCaptureKit backend built
+through `scap`. The KDE Wayland backend is still planned for a later phase.
 
 ## Workspace
 
@@ -14,7 +14,7 @@ backends are not available yet.
 
 ## Local Development
 
-Install a stable Rust toolchain with `rustup`, then run:
+Install Rust 1.85 or newer with `rustup`, then run:
 
 ```bash
 cargo fmt --all -- --check
@@ -84,24 +84,28 @@ Expected future command:
 ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test linux_portal_smoke -- --ignored --nocapture
 ```
 
-## Manual Testing: Future macOS ScreenCaptureKit Capture
+## Manual Testing: macOS ScreenCaptureKit Capture
 
-Use this checklist when the macOS backend phase adds real tests:
+Use this checklist after changing the macOS `macos-sck` backend or before
+validating a release on macOS:
 
-- [ ] Test runner has Screen Recording permission.
+- [ ] Test machine is running macOS 12.3 or newer.
+- [ ] Rust 1.85 or newer is installed.
+- [ ] The terminal or test binary has Screen Recording permission:
+  `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
 - [ ] Main display is visible and unlocked.
-- [ ] `rollshot probe` reports macOS capture status.
-- [ ] A small manual region can be selected or configured.
-- [ ] At least three frames are captured.
-- [ ] Captured frames have non-zero width and height.
-- [ ] BGRA to RGBA conversion is visually correct.
-- [ ] The first frame can be saved under `target/test-artifacts/`.
+- [ ] `mkdir -p target/test-artifacts` creates the artifact directory.
+- [ ] `cargo run -p rollshot-cli -- probe --json` reports `macos-sck`.
+- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --dump-frames target/test-artifacts/macos_frames --output target/test-artifacts/macos_region_stitched.png` writes frame dumps.
+- [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture` passes.
+- [ ] `target/test-artifacts/macos_sck_first_frame.png` exists and is visually plausible.
 
-Expected future command:
-
-```bash
-ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture
-```
+If permission was just granted, restart the terminal before rerunning the
+commands. If `probe` reports missing Screen Recording permission, run a capture
+command once to trigger the permission prompt, grant access, restart the
+terminal, and rerun `probe`.
 
 ## Manual Self-Hosted Workflow
 
@@ -112,4 +116,5 @@ self-hosted runners:
 - macOS runner labels: `self-hosted`, `macos`, `screencapturekit`
 
 Run it from GitHub Actions with `workflow_dispatch`. In bootstrap phase the jobs
-only explain that real backend smoke tests are added in later backend phases.
+run the ignored real-capture smoke tests on machines with the required desktop
+permissions.

@@ -50,8 +50,10 @@ video frames into `image::RgbaImage`, and returns frames through the existing
 - No multi-display selection UI.
 - No audio capture.
 - No Linux backend changes.
-- No attempt to make real macOS capture pass on hosted CI without Screen
-  Recording permission.
+- No attempt to run real macOS ScreenCaptureKit capture in hosted CI. Hosted
+  macOS jobs may compile the backend and run non-runtime tests, but they must
+  not depend on Screen Recording permission, an interactive desktop stream, or
+  `scap::capturer::Capturer::get_next_frame()` returning.
 
 ## Decision: crates.io Scap, Not Fork
 
@@ -256,6 +258,11 @@ frames, `next_frame()` returns `CaptureError::Backend` with a message that the
 macOS stream did not produce a usable video frame. This keeps the CLI from
 waiting forever before it has counted any captured frames.
 
+This limit only applies after scap has delivered sample buffers. The upstream
+scap API waits on a blocking channel receive when no frame arrives, so hosted
+macOS CI must not start real capture as part of the default workspace test
+suite.
+
 Unit tests cover the converter rejecting empty inputs; the smoke test verifies
 real frames arrive.
 
@@ -304,6 +311,12 @@ On macOS, `auto` still resolves to `macos-sck`.
 On non-macOS hosts, `--backend macos-sck` remains unsupported and exits with
 the existing unsupported exit code.
 
+Hosted macOS CI must not exercise `rollshot capture --backend macos-sck` or
+`rollshot capture --backend auto` in a way that starts ScreenCaptureKit. CLI
+integration tests that run by default on hosted macOS should use paths that
+fail before backend startup, such as argument validation. Real capture behavior
+belongs in the ignored smoke test and the self-hosted/manual workflow.
+
 ## README Manual Testing
 
 Replace the current "Future macOS ScreenCaptureKit Capture" README section
@@ -333,6 +346,10 @@ Pure tests on any host:
 - Non-macOS `BackendKind::MacosScreenCaptureKit.create()` still returns
   `Unsupported`.
 - CLI parsing behavior for `macos-sck` remains covered by existing tests.
+- Hosted macOS CLI integration tests do not start ScreenCaptureKit in the
+  default `cargo test --workspace` path.
+- CLI integration tests that spawn `rollshot` use a short subprocess timeout so
+  regressions fail fast instead of hanging CI.
 
 macOS-only unit tests:
 
@@ -383,7 +400,10 @@ cargo test -p rollshot-capture --target aarch64-apple-darwin
   restart the terminal or binary. Mitigation: map denial to
   `PermissionDenied` with a clear message.
 - **Hosted CI limits.** Real capture needs an interactive desktop permission
-  state. Mitigation: use ignored smoke tests and self-hosted/manual execution.
+  state, and scap's frame receive can block indefinitely when no sample buffer
+  arrives. Mitigation: keep hosted macOS CI to compile/unit/non-runtime CLI
+  tests, and use ignored smoke tests plus self-hosted/manual execution for real
+  capture.
 
 ## Completion Criteria
 
@@ -400,4 +420,6 @@ cargo test -p rollshot-capture --target aarch64-apple-darwin
 - Existing Linux and fixture behavior remains unchanged.
 - README includes concrete macOS manual testing instructions for this backend.
 - Full workspace fmt, clippy, and tests pass on the local host.
+- Default hosted macOS workspace tests do not launch real ScreenCaptureKit
+  capture.
 - Ignored macOS real-capture smoke test exists for self-hosted/manual runs.

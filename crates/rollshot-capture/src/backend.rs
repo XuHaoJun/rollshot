@@ -7,7 +7,7 @@ pub trait CaptureBackend {
     fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError>;
 }
 
-pub trait FrameStream: Send {
+pub trait FrameStream {
     fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError>;
 }
 
