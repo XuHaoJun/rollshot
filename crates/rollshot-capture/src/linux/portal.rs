@@ -67,6 +67,7 @@ pub struct PortalSession {
     pub node_id: u32,
     pub pipewire_fd: std::os::fd::OwnedFd,
     pub capabilities: LinuxPortalCapabilities,
+    _rt: Option<tokio::runtime::Runtime>,
     close: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -139,8 +140,9 @@ impl PortalClient {
             .enable_all()
             .build()
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("tokio runtime: {e}")))?;
+        let rt_handle = rt.handle().clone();
 
-        rt.block_on(async {
+        let result: Result<PortalSession, CaptureError> = rt.block_on(async {
             let screencast = ashpd::desktop::screencast::Screencast::new()
                 .await
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("screencast proxy: {e}")))?;
@@ -191,7 +193,6 @@ impl PortalClient {
                 .await
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("open pipewire: {e}")))?;
 
-            let rt_handle = tokio::runtime::Handle::current();
             let close: Box<dyn FnOnce() + Send> = Box::new(move || {
                 rt_handle.block_on(async {
                     let _ = session.close().await;
@@ -202,8 +203,14 @@ impl PortalClient {
                 node_id,
                 pipewire_fd: fd,
                 capabilities,
+                _rt: None,
                 close: Some(close),
             })
+        });
+
+        result.map(|mut session| {
+            session._rt = Some(rt);
+            session
         })
     }
 
@@ -271,6 +278,7 @@ impl PortalClient {
                 profile: LinuxDesktopProfile::Unknown,
                 quirks: Vec::new(),
             },
+            _rt: None,
             close: None,
         })
     }
@@ -1225,6 +1233,7 @@ mod tests {
             node_id: 42,
             pipewire_fd: fd,
             capabilities: default_capabilities(),
+            _rt: None,
             close: Some(Box::new(move || {
                 closed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             })),

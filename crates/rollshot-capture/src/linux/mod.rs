@@ -61,10 +61,32 @@ mod tests {
         assert!(keys.contains(&"XDG_CURRENT_DESKTOP"));
     }
 
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn start_succeeds_in_test_build() {
         let mut backend = LinuxPortalBackend::new();
-        std::env::set_var("XDG_SESSION_TYPE", "wayland");
+        let _guard = EnvGuard::set("XDG_SESSION_TYPE", "wayland");
         let result = backend.start(CaptureOptions::default());
         assert!(result.is_ok(), "expected Ok from start");
     }
