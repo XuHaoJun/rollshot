@@ -1,9 +1,10 @@
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use image::RgbaImage;
+
+#[derive(Debug, Clone)]
 pub struct CapturedFrame {
-    pub pixels: Vec<u8>,
-    pub size: Size,
+    pub image: RgbaImage,
     pub timestamp: SystemTime,
     pub metadata: FrameMetadata,
 }
@@ -32,6 +33,7 @@ pub struct CaptureProbe {
     pub backend: &'static str,
     pub available: bool,
     pub message: String,
+    pub details: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,16 @@ impl FrameMetadata {
             pixel_format: Some(PixelFormat::Rgba),
             stride: None,
             backend: "fake",
+        }
+    }
+
+    pub fn fixture() -> Self {
+        Self {
+            source_size: None,
+            effective_region: None,
+            pixel_format: Some(PixelFormat::Rgba),
+            stride: None,
+            backend: "fixture",
         }
     }
 }
