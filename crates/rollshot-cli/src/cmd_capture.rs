@@ -98,7 +98,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     let stitched = stitcher
         .full_image()
         .ok_or_else(|| CliError::new("no frames produced an output image", 1))?;
-    save_png(&stitched, &args.output)?;
+    save_png(stitched, &args.output)?;
 
     Ok(format!(
         "captured {captured} frames, appended {appended} (duplicates {duplicates}, no-progress {no_progress}, no-match {no_match})\noutput: {out} ({w}x{h})\n",
@@ -114,9 +114,10 @@ fn build_backend(
 ) -> Result<Box<dyn CaptureBackend>, CliError> {
     match kind {
         BackendKind::Fixture => {
-            let dir = args.fixture.as_ref().ok_or_else(|| {
-                CliError::new("--backend fixture requires --fixture <DIR>", 1)
-            })?;
+            let dir = args
+                .fixture
+                .as_ref()
+                .ok_or_else(|| CliError::new("--backend fixture requires --fixture <DIR>", 1))?;
             Ok(Box::new(FixtureBackend::new(dir.clone())))
         }
         other => other.create().map_err(CliError::from_capture),
@@ -175,5 +176,10 @@ fn parse_manual_region(s: &str) -> Result<Region, CliError> {
     if width == 0 || height == 0 {
         return Err(invalid());
     }
-    Ok(Region { x, y, width, height })
+    Ok(Region {
+        x,
+        y,
+        width,
+        height,
+    })
 }

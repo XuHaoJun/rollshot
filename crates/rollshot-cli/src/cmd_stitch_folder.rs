@@ -85,7 +85,10 @@ fn collect_frame_paths(dir: &Path) -> Result<Vec<PathBuf>, CliError> {
     let mut paths = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|err| {
-            CliError::new(format!("failed to read entry in {}: {err}", dir.display()), 1)
+            CliError::new(
+                format!("failed to read entry in {}: {err}", dir.display()),
+                1,
+            )
         })?;
         let path = entry.path();
         let file_type = entry.file_type().map_err(|err| {

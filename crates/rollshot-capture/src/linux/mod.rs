@@ -49,10 +49,7 @@ impl CaptureBackend for LinuxPortalBackend {
         }
     }
 
-    fn start(
-        &mut self,
-        _options: CaptureOptions,
-    ) -> Result<Box<dyn FrameStream>, CaptureError> {
+    fn start(&mut self, _options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
         Err(CaptureError::NotImplemented {
             backend: "linux-portal",
         })

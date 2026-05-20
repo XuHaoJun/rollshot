@@ -4,10 +4,7 @@ use crate::types::{CaptureOptions, CaptureProbe, CapturedFrame};
 pub trait CaptureBackend {
     fn name(&self) -> &'static str;
     fn probe(&self) -> CaptureProbe;
-    fn start(
-        &mut self,
-        options: CaptureOptions,
-    ) -> Result<Box<dyn FrameStream>, CaptureError>;
+    fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError>;
 }
 
 pub trait FrameStream: Send {
@@ -145,10 +142,7 @@ mod tests {
             BackendKind::LinuxPortalPipeWire,
             BackendKind::MacosScreenCaptureKit,
         ] {
-            assert_eq!(
-                BackendKind::from_cli_flag(kind.as_flag()).unwrap(),
-                kind
-            );
+            assert_eq!(BackendKind::from_cli_flag(kind.as_flag()).unwrap(), kind);
         }
     }
 
@@ -171,7 +165,10 @@ mod tests {
             BackendKind::Unsupported
         );
         assert_eq!(default_backend_for("linux", None), BackendKind::Unsupported);
-        assert_eq!(default_backend_for("windows", None), BackendKind::Unsupported);
+        assert_eq!(
+            default_backend_for("windows", None),
+            BackendKind::Unsupported
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use rollshot_capture::{default_backend, BackendKind, CaptureBackend, CaptureProbe};
+use rollshot_capture::{default_backend, CaptureBackend, CaptureProbe};
 use serde::Serialize;
 
 use crate::args::ProbeArgs;
@@ -92,7 +92,11 @@ fn render_text(report: &ProbeReport) -> String {
     let _ = writeln!(out, "  default backend: {}", report.default_backend);
     let _ = writeln!(out, "  backends:");
     for b in &report.backends {
-        let status = if b.available { "available" } else { "unavailable" };
+        let status = if b.available {
+            "available"
+        } else {
+            "unavailable"
+        };
         let _ = writeln!(out, "    - {} ({status}): {}", b.name, b.message);
         for (k, v) in &b.details {
             let _ = writeln!(out, "        {k}: {v}");

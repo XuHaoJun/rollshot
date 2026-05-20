@@ -103,7 +103,10 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
     for (idx, path) in dumped.iter().enumerate() {
         let expected = format!("frame_{:04}.png", idx);
         assert!(
-            path.file_name().unwrap().to_string_lossy().contains(&expected),
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&expected),
             "file {} should match {expected}",
             path.display()
         );

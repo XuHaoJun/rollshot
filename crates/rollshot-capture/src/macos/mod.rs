@@ -33,10 +33,7 @@ impl CaptureBackend for MacosScreenCaptureKitBackend {
         }
     }
 
-    fn start(
-        &mut self,
-        _options: CaptureOptions,
-    ) -> Result<Box<dyn FrameStream>, CaptureError> {
+    fn start(&mut self, _options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
         Err(CaptureError::NotImplemented {
             backend: "macos-sck",
         })

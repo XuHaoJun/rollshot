@@ -96,15 +96,10 @@ fn backend_auto_exits_with_host_appropriate_code() {
         .output()
         .expect("run rollshot capture");
 
-    let expected_code = if cfg!(target_os = "macos") {
-        2
-    } else if cfg!(target_os = "linux")
-        && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
-    {
-        2
-    } else {
-        4
-    };
+    let is_stub_backend = cfg!(target_os = "macos")
+        || (cfg!(target_os = "linux")
+            && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"));
+    let expected_code = if is_stub_backend { 2 } else { 4 };
 
     assert_eq!(
         output.status.code(),

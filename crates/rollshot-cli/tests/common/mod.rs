@@ -18,6 +18,7 @@ pub fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
+#[allow(dead_code)]
 pub fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([245, 245, 245, 255]));
     for y in (0..height).step_by(36) {
@@ -43,6 +44,7 @@ pub fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
     img
 }
 
+#[allow(dead_code)]
 pub fn write_scroll_fixture(dir: &Path) {
     let canvas = make_scroll_canvas(160, 600);
     for (idx, y) in [0u32, 40, 80, 120].iter().enumerate() {

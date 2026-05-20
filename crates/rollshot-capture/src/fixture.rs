@@ -25,10 +25,8 @@ impl FixtureBackend {
             });
         }
 
-        let entries = fs::read_dir(&self.dir).map_err(|err| {
-            CaptureError::InvalidConfig {
-                message: format!("failed to read {}: {err}", self.dir.display()),
-            }
+        let entries = fs::read_dir(&self.dir).map_err(|err| CaptureError::InvalidConfig {
+            message: format!("failed to read {}: {err}", self.dir.display()),
         })?;
 
         let mut paths = Vec::new();
@@ -37,10 +35,7 @@ impl FixtureBackend {
                 message: format!("failed to read entry in {}: {err}", self.dir.display()),
             })?;
             let path = entry.path();
-            let is_file = entry
-                .file_type()
-                .map(|t| t.is_file())
-                .unwrap_or(false);
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
             if !is_file {
                 continue;
             }
@@ -81,15 +76,9 @@ impl CaptureBackend for FixtureBackend {
         }
     }
 
-    fn start(
-        &mut self,
-        _options: CaptureOptions,
-    ) -> Result<Box<dyn FrameStream>, CaptureError> {
+    fn start(&mut self, _options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
         let paths = self.collect_frames()?;
-        Ok(Box::new(FixtureFrameStream {
-            paths,
-            index: 0,
-        }))
+        Ok(Box::new(FixtureFrameStream { paths, index: 0 }))
     }
 }
 
@@ -106,10 +95,8 @@ impl FrameStream for FixtureFrameStream {
         };
         self.index += 1;
 
-        let decoded = image::open(&path).map_err(|err| {
-            CaptureError::InvalidConfig {
-                message: format!("failed to decode {}: {err}", path.display()),
-            }
+        let decoded = image::open(&path).map_err(|err| CaptureError::InvalidConfig {
+            message: format!("failed to decode {}: {err}", path.display()),
         })?;
         let image = into_rgba(decoded);
 
@@ -160,7 +147,10 @@ mod tests {
         let mut backend = FixtureBackend::new("/tmp/rollshot-fixture-does-not-exist");
         match backend.start(CaptureOptions::default()) {
             Err(CaptureError::InvalidConfig { message }) => {
-                assert!(message.contains("fixture directory not found"), "msg = {message}");
+                assert!(
+                    message.contains("fixture directory not found"),
+                    "msg = {message}"
+                );
             }
             Err(other) => panic!("expected InvalidConfig, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),
