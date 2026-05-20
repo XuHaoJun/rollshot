@@ -111,3 +111,42 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
+
+#[test]
+fn rollshot_capture_respects_max_frames() {
+    let tempdir = temp_dir("max-frames");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let dump_dir = tempdir.join("dump");
+    std::fs::create_dir_all(&dump_dir).expect("create dump dir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--dump-frames"])
+        .arg(&dump_dir)
+        .args(["--max-frames", "2"])
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dumped = std::fs::read_dir(&dump_dir).expect("read dump dir").count();
+    assert_eq!(dumped, 2, "expected exactly 2 dumped frames");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(stdout.contains("captured 2 frames"), "stdout = {stdout}");
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}

@@ -85,6 +85,9 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                     StitchOutcome::NoMatch { .. } => no_match += 1,
                     StitchOutcome::NoProgress => no_progress += 1,
                 }
+                if captured >= args.max_frames {
+                    break;
+                }
             }
             Err(CaptureError::EndOfStream) => break,
             Err(err) => return Err(CliError::from_capture(err)),
