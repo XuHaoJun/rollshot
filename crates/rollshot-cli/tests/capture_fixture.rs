@@ -63,3 +63,51 @@ fn rollshot_capture_fixture_requires_fixture_path() {
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
+
+#[test]
+fn rollshot_capture_dump_frames_writes_each_frame() {
+    let tempdir = temp_dir("dump-frames");
+    let frames_dir = tempdir.join("frames");
+    let dump_dir = tempdir.join("dump");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    std::fs::create_dir_all(&dump_dir).expect("create dump dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--dump-frames"])
+        .arg(&dump_dir)
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut dumped: Vec<_> = std::fs::read_dir(&dump_dir)
+        .expect("read dump dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    dumped.sort();
+    assert_eq!(dumped.len(), 4, "dumped = {dumped:?}");
+    for (idx, path) in dumped.iter().enumerate() {
+        let expected = format!("frame_{:04}.png", idx);
+        assert!(
+            path.file_name().unwrap().to_string_lossy().contains(&expected),
+            "file {} should match {expected}",
+            path.display()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}

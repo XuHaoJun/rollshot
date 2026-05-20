@@ -55,6 +55,15 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
 
     let mut stream = backend.start(options).map_err(CliError::from_capture)?;
 
+    if let Some(dir) = args.dump_frames.as_ref() {
+        std::fs::create_dir_all(dir).map_err(|err| {
+            CliError::new(
+                format!("failed to create dump dir {}: {err}", dir.display()),
+                1,
+            )
+        })?;
+    }
+
     let mut stitcher = Stitcher::new(StitchConfig::default());
     let mut captured: u32 = 0;
     let mut appended: u32 = 0;
@@ -65,6 +74,9 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     loop {
         match stream.next_frame() {
             Ok(frame) => {
+                if let Some(dir) = args.dump_frames.as_ref() {
+                    write_dump_frame(dir, captured, &frame.image)?;
+                }
                 captured += 1;
                 match stitcher.push_frame(frame.image) {
                     StitchOutcome::FirstFrame => {}
@@ -111,4 +123,12 @@ fn save_png(image: &image::RgbaImage, path: &Path) -> Result<(), CliError> {
     image
         .save_with_format(path, ImageFormat::Png)
         .map_err(|err| CliError::new(format!("failed to save {}: {err}", path.display()), 1))
+}
+
+fn write_dump_frame(dir: &Path, index: u32, image: &image::RgbaImage) -> Result<(), CliError> {
+    let path = dir.join(format!("frame_{index:04}.png"));
+    image
+        .save_with_format(&path, ImageFormat::Png)
+        .map_err(|err| CliError::new(format!("failed to save {}: {err}", path.display()), 1))?;
+    Ok(())
 }
