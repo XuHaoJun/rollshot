@@ -80,15 +80,13 @@ impl CaptureBackend for MacosScreenCaptureKitBackend {
             });
         }
 
-        if !scap::has_permission() {
-            if std::env::var(NO_PERMISSION_PROMPT_ENV).ok().as_deref() == Some("1")
-                || !scap::request_permission()
-            {
-                return Err(CaptureError::PermissionDenied {
-                    message: "Screen Recording permission is required for macOS capture"
-                        .to_string(),
-                });
-            }
+        if !scap::has_permission()
+            && (std::env::var(NO_PERMISSION_PROMPT_ENV).ok().as_deref() == Some("1")
+                || !scap::request_permission())
+        {
+            return Err(CaptureError::PermissionDenied {
+                message: "Screen Recording permission is required for macOS capture".to_string(),
+            });
         }
 
         let effective_region = manual_region(&options.region);
