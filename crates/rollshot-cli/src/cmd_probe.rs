@@ -68,7 +68,7 @@ fn build_report() -> ProbeReport {
         let backend = rollshot_capture::LinuxPortalBackend::new();
         backends.push(backend.probe().into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macos-sck"))]
     {
         let backend = rollshot_capture::MacosScreenCaptureKitBackend::new();
         backends.push(backend.probe().into());

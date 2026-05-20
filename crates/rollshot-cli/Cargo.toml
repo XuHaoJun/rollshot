@@ -19,6 +19,10 @@ rollshot-core = { path = "../rollshot-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+default = []
+macos-sck = ["rollshot-capture/macos-sck"]
+
 [dev-dependencies]
 image = { workspace = true }
 

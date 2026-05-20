@@ -290,11 +290,11 @@ mod connection {
     use std::os::fd::AsFd;
 
     pub struct PipeWireConnection {
-        thread_loop: pipewire::thread_loop::ThreadLoop,
+        thread_loop: pipewire::thread_loop::ThreadLoopRc,
         _listener: pipewire::stream::StreamListener<StreamUserData>,
-        stream: pipewire::stream::Stream,
-        _context: pipewire::context::Context,
-        _core: pipewire::core::Core,
+        stream: pipewire::stream::StreamRc,
+        _context: pipewire::context::ContextRc,
+        _core: pipewire::core::CoreRc,
         _format_data: Vec<Vec<u8>>,
     }
 
@@ -534,7 +534,7 @@ mod connection {
     }
 
     #[allow(unsafe_code)] // Wrapper pairs PipeWire raw dequeue with queueing on every path.
-    fn process_stream_buffer(stream: &pipewire::stream::StreamRef, user_data: &mut StreamUserData) {
+    fn process_stream_buffer(stream: &pipewire::stream::Stream, user_data: &mut StreamUserData) {
         // SAFETY: raw dequeue is paired with queue_raw_buffer before returning.
         // The raw buffer and SPA data are only inspected synchronously inside
         // this callback, before PipeWire can reuse the buffer.
@@ -562,25 +562,25 @@ mod connection {
             // documented as safe to call. We pass valid name/props arguments and the
             // returned ThreadLoop is immediately owned by this struct.
             let thread_loop = unsafe {
-                pipewire::thread_loop::ThreadLoop::new(Some("rollshot-pipewire"), None)
+                pipewire::thread_loop::ThreadLoopRc::new(Some("rollshot-pipewire"), None)
                     .map_err(|e| CaptureError::Backend(anyhow::anyhow!("thread loop: {e}")))?
             };
 
-            let context = pipewire::context::Context::new(&thread_loop)
+            let context = pipewire::context::ContextRc::new(&thread_loop, None)
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("context: {e}")))?;
 
             let dup_fd = dup_pipewire_fd(portal_fd.as_fd())?;
 
             let core = context
-                .connect_fd(dup_fd, None)
+                .connect_fd_rc(dup_fd, None)
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("connect_fd: {e}")))?;
 
-            let mut props = pipewire::properties::Properties::new();
+            let mut props = pipewire::properties::PropertiesBox::new();
             props.insert("media.type", "Video");
             props.insert("media.category", "Capture");
             props.insert("media.role", "Screen");
 
-            let stream = pipewire::stream::Stream::new(&core, "rollshot-screen", props)
+            let stream = pipewire::stream::StreamRc::new(core.clone(), "rollshot-screen", props)
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("stream: {e}")))?;
 
             let initial_crop = match &options.region {

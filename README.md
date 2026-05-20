@@ -2,9 +2,10 @@
 
 `rollshot` is a Rust rewrite of the long screenshot workflow described in
 `rollshot_mvp_design.md`. The project has a platform-independent stitching
-core, fixture-backed capture tests, and a macOS ScreenCaptureKit backend built
-through `scap`. The Linux Wayland portal backend is available on systems with
-ScreenCast portal and PipeWire support.
+core, fixture-backed capture tests, and a feature-gated macOS
+ScreenCaptureKit backend built through a `scap`-compatible crate. The Linux
+Wayland portal backend is available on systems with ScreenCast portal and
+PipeWire support.
 
 ## Workspace
 
@@ -121,11 +122,11 @@ validating a release on macOS:
   `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
 - [ ] Main display is visible and unlocked.
 - [ ] `mkdir -p target/test-artifacts` creates the artifact directory.
-- [ ] `cargo run -p rollshot-cli -- probe --json` reports `macos-sck`.
-- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --dump-frames target/test-artifacts/macos_frames --output target/test-artifacts/macos_region_stitched.png` writes frame dumps.
-- [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture` passes.
+- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- probe --json` reports `macos-sck`.
+- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --dump-frames target/test-artifacts/macos_frames --output target/test-artifacts/macos_region_stitched.png` writes frame dumps.
+- [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --no-default-features --features macos-sck --test macos_sck_smoke -- --ignored --nocapture` passes.
 - [ ] `target/test-artifacts/macos_sck_first_frame.png` exists and is visually plausible.
 
 If permission was just granted, restart the terminal before rerunning the
