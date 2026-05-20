@@ -167,28 +167,52 @@ mod tests {
 
     #[test]
     fn bgra_converts_to_rgba() {
-        let frame = make_frame(&[10, 20, 30, 40, 50, 60, 70, 80], 2, 1, 8, LinuxPixelFormat::Bgra);
+        let frame = make_frame(
+            &[10, 20, 30, 40, 50, 60, 70, 80],
+            2,
+            1,
+            8,
+            LinuxPixelFormat::Bgra,
+        );
         let img = raw_frame_to_rgba(frame).unwrap();
         assert_eq!(img.as_raw(), &[30, 20, 10, 40, 70, 60, 50, 80]);
     }
 
     #[test]
     fn rgba_is_preserved() {
-        let frame = make_frame(&[10, 20, 30, 40, 50, 60, 70, 80], 2, 1, 8, LinuxPixelFormat::Rgba);
+        let frame = make_frame(
+            &[10, 20, 30, 40, 50, 60, 70, 80],
+            2,
+            1,
+            8,
+            LinuxPixelFormat::Rgba,
+        );
         let img = raw_frame_to_rgba(frame).unwrap();
         assert_eq!(img.as_raw(), &[10, 20, 30, 40, 50, 60, 70, 80]);
     }
 
     #[test]
     fn bgrx_sets_alpha_to_255() {
-        let frame = make_frame(&[10, 20, 30, 0, 50, 60, 70, 0], 2, 1, 8, LinuxPixelFormat::Bgrx);
+        let frame = make_frame(
+            &[10, 20, 30, 0, 50, 60, 70, 0],
+            2,
+            1,
+            8,
+            LinuxPixelFormat::Bgrx,
+        );
         let img = raw_frame_to_rgba(frame).unwrap();
         assert_eq!(img.as_raw(), &[30, 20, 10, 255, 70, 60, 50, 255]);
     }
 
     #[test]
     fn rgbx_sets_alpha_to_255() {
-        let frame = make_frame(&[10, 20, 30, 0, 50, 60, 70, 0], 2, 1, 8, LinuxPixelFormat::Rgbx);
+        let frame = make_frame(
+            &[10, 20, 30, 0, 50, 60, 70, 0],
+            2,
+            1,
+            8,
+            LinuxPixelFormat::Rgbx,
+        );
         let img = raw_frame_to_rgba(frame).unwrap();
         assert_eq!(img.as_raw(), &[10, 20, 30, 255, 50, 60, 70, 255]);
     }
@@ -220,7 +244,7 @@ mod tests {
             img.as_raw(),
             &[
                 30, 20, 10, 40, 70, 60, 50, 80, // row 0
-                31, 21, 11, 41, 71, 61, 51, 81  // row 1
+                31, 21, 11, 41, 71, 61, 51, 81 // row 1
             ]
         );
     }

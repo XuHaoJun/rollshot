@@ -30,6 +30,7 @@ pub fn dup_pipewire_fd(
 
 pub enum FrameEvent {
     Frame(CapturedFrame),
+    #[allow(dead_code)] // used when stream ends cleanly
     End,
     Error(String),
 }
@@ -68,7 +69,9 @@ impl FrameQueue {
             }
         };
 
-        let result = self.condvar.wait_timeout_while(deque, timeout, |d| d.is_empty());
+        let result = self
+            .condvar
+            .wait_timeout_while(deque, timeout, |d| d.is_empty());
 
         let (mut deque, wait_result) = match result {
             Ok(pair) => pair,
@@ -87,9 +90,7 @@ impl FrameQueue {
         match deque.pop_front() {
             Some(FrameEvent::Frame(f)) => Ok(f),
             Some(FrameEvent::End) => Err(CaptureError::EndOfStream),
-            Some(FrameEvent::Error(msg)) => {
-                Err(CaptureError::Backend(anyhow::anyhow!(msg)))
-            }
+            Some(FrameEvent::Error(msg)) => Err(CaptureError::Backend(anyhow::anyhow!(msg))),
             None => Err(CaptureError::Backend(anyhow::anyhow!(
                 "PipeWire stream produced no frames within {timeout:?}"
             ))),
@@ -103,6 +104,7 @@ impl Default for FrameQueue {
     }
 }
 
+#[allow(dead_code)] // variants used when parsing SPA_META_VideoTransform
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxVideoTransform {
     Normal,
@@ -209,7 +211,12 @@ pub fn inspect_dequeued_buffer(
             return Err(CaptureError::InvalidConfig {
                 message: format!(
                     "manual crop region x={},y={},w={},h={} is outside available frame {}x{}",
-                    crop.x, crop.y, crop.width, crop.height, buf.metadata.width, buf.metadata.height
+                    crop.x,
+                    crop.y,
+                    crop.width,
+                    crop.height,
+                    buf.metadata.width,
+                    buf.metadata.height
                 ),
             });
         }
@@ -244,12 +251,12 @@ pub struct LinuxPortalFrameStream {
 #[cfg(not(test))]
 mod connection {
     use super::*;
-    use std::os::fd::AsFd;
     use pipewire::spa::param::format::{MediaSubtype, MediaType};
     use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
-    use pipewire::spa::pod::builder::{Builder, builder_add};
+    use pipewire::spa::pod::builder::{builder_add, Builder};
     use pipewire::spa::pod::*;
     use pipewire::spa::utils::{Fraction, Id};
+    use std::os::fd::AsFd;
 
     pub struct PipeWireConnection {
         thread_loop: pipewire::thread_loop::ThreadLoop,
@@ -443,8 +450,9 @@ mod connection {
                     let chunk = data.chunk();
                     let chunk_size = chunk.size();
                     let chunk_stride = chunk.stride();
-                    let chunk_corrupted =
-                        chunk.flags().contains(pipewire::spa::buffer::ChunkFlags::CORRUPTED);
+                    let chunk_corrupted = chunk
+                        .flags()
+                        .contains(pipewire::spa::buffer::ChunkFlags::CORRUPTED);
 
                     let buffer_type = if data_type == pipewire::spa::buffer::DataType::MemPtr {
                         LinuxBufferType::MemPtr
@@ -634,12 +642,8 @@ impl LinuxPortalFrameStream {
     ) -> Result<Self, CaptureError> {
         let queue = Arc::new(FrameQueue::new());
         let (fd, node_id) = portal.take_resources();
-        let pipewire = connection::PipeWireConnection::connect_fd(
-            fd,
-            node_id,
-            options,
-            Arc::clone(&queue),
-        )?;
+        let pipewire =
+            connection::PipeWireConnection::connect_fd(fd, node_id, options, Arc::clone(&queue))?;
         Ok(Self {
             pipewire,
             portal,
@@ -700,9 +704,15 @@ mod tests {
         for i in 1..=5 {
             queue.push(FrameEvent::Frame(dummy_frame(i)));
         }
-        let f3 = queue.next_frame_with_timeout(Duration::from_millis(50)).unwrap();
-        let f4 = queue.next_frame_with_timeout(Duration::from_millis(50)).unwrap();
-        let f5 = queue.next_frame_with_timeout(Duration::from_millis(50)).unwrap();
+        let f3 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
+        let f4 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
+        let f5 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
         assert_eq!(f3.image.width(), 3);
         assert_eq!(f4.image.width(), 4);
         assert_eq!(f5.image.width(), 5);
@@ -716,11 +726,7 @@ mod tests {
             .unwrap_err();
         match err {
             CaptureError::Backend(e) => {
-                assert!(
-                    e.to_string().contains("no frames within"),
-                    "msg = {}",
-                    e
-                );
+                assert!(e.to_string().contains("no frames within"), "msg = {}", e);
             }
             other => panic!("expected Backend, got {other:?}"),
         }
@@ -745,11 +751,7 @@ mod tests {
             .unwrap_err();
         match err {
             CaptureError::Backend(e) => {
-                assert!(
-                    e.to_string().contains("bad pixel data"),
-                    "msg = {}",
-                    e
-                );
+                assert!(e.to_string().contains("bad pixel data"), "msg = {}", e);
             }
             other => panic!("expected Backend, got {other:?}"),
         }
@@ -931,7 +933,8 @@ mod tests {
         match err {
             CaptureError::Backend(e) => {
                 assert!(
-                    e.to_string().contains("did not produce a usable video frame"),
+                    e.to_string()
+                        .contains("did not produce a usable video frame"),
                     "msg = {e}"
                 );
             }
@@ -1016,10 +1019,7 @@ mod tests {
         };
         let mut empty_count = 5u8;
         let result = inspect_dequeued_buffer(&buf, &mut empty_count).unwrap();
-        assert_eq!(
-            result,
-            BufferAction::Produce(make_meta(100, 100))
-        );
+        assert_eq!(result, BufferAction::Produce(make_meta(100, 100)));
         assert_eq!(empty_count, 0);
     }
 
@@ -1054,7 +1054,10 @@ mod tests {
         let err = map_spa_video_format(VideoFormat::NV12).unwrap_err();
         match err {
             CaptureError::Unsupported { message } => {
-                assert!(message.contains("unsupported PipeWire raw video format"), "msg = {message}");
+                assert!(
+                    message.contains("unsupported PipeWire raw video format"),
+                    "msg = {message}"
+                );
                 assert!(message.contains("NV12"), "msg = {message}");
             }
             other => panic!("expected Unsupported, got {other:?}"),

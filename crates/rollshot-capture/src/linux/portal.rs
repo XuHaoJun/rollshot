@@ -49,6 +49,7 @@ pub enum PortalCursorMode {
     Metadata,
 }
 
+#[allow(dead_code)] // used in future portal option mapping
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortalSelectSourcesOptions {
     pub monitor: bool,
@@ -141,7 +142,8 @@ impl PortalClient {
         let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
         if session_type != "wayland" {
             return Err(CaptureError::Unsupported {
-                message: "linux-portal supports Linux capture through Wayland portals only".to_string(),
+                message: "linux-portal supports Linux capture through Wayland portals only"
+                    .to_string(),
             });
         }
 
@@ -185,11 +187,12 @@ impl PortalClient {
                 .await
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("create session: {e}")))?;
 
-            let cursor_mode = match choose_cursor_mode(capabilities.cursor_modes, options.show_cursor) {
-                PortalCursorMode::Hidden => ashpd::desktop::screencast::CursorMode::Hidden,
-                PortalCursorMode::Embedded => ashpd::desktop::screencast::CursorMode::Embedded,
-                PortalCursorMode::Metadata => ashpd::desktop::screencast::CursorMode::Metadata,
-            };
+            let cursor_mode =
+                match choose_cursor_mode(capabilities.cursor_modes, options.show_cursor) {
+                    PortalCursorMode::Hidden => ashpd::desktop::screencast::CursorMode::Hidden,
+                    PortalCursorMode::Embedded => ashpd::desktop::screencast::CursorMode::Embedded,
+                    PortalCursorMode::Metadata => ashpd::desktop::screencast::CursorMode::Metadata,
+                };
 
             screencast
                 .select_sources(
@@ -255,8 +258,7 @@ impl PortalClient {
         _options: CaptureOptions,
         _session_type: String,
     ) -> Result<PortalSession, CaptureError> {
-        let no_monitor_window =
-            std::env::var("XDG_PORTAL_NO_MONITOR_WINDOW").is_ok();
+        let no_monitor_window = std::env::var("XDG_PORTAL_NO_MONITOR_WINDOW").is_ok();
         let source_types = if no_monitor_window {
             SourceTypes {
                 monitor: false,
@@ -293,9 +295,8 @@ impl PortalClient {
             42
         };
 
-        let fd = fake_portal_fd().map_err(|e| {
-            CaptureError::Backend(anyhow::anyhow!("fake fd: {e}"))
-        })?;
+        let fd =
+            fake_portal_fd().map_err(|e| CaptureError::Backend(anyhow::anyhow!("fake fd: {e}")))?;
 
         let frame_width: u32 = std::env::var("XDG_PORTAL_FRAME_WIDTH")
             .ok()
@@ -385,6 +386,7 @@ pub fn choose_cursor_mode(cursors: CursorModes, show_cursor: bool) -> PortalCurs
     }
 }
 
+#[allow(dead_code)] // used in future portal option mapping
 pub fn select_sources_options(
     cursors: CursorModes,
     show_cursor: bool,
@@ -405,6 +407,7 @@ pub fn choose_stream(streams: &[PortalStreamInfo]) -> Result<PortalStreamInfo, C
         .ok_or_else(|| CaptureError::Backend(anyhow::anyhow!("portal returned no streams")))
 }
 
+#[cfg(test)]
 fn probe_from_env(session_type: Option<String>, desktop: Option<String>) -> CaptureProbe {
     let session_type = session_type.unwrap_or_default();
     let desktop = desktop.unwrap_or_default();
@@ -432,6 +435,7 @@ pub(super) trait ProbeSource {
     fn pipewire_version(&self) -> Result<String, String>;
 }
 
+#[cfg(not(test))]
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn format_source_types(s: SourceTypes) -> String {
@@ -524,13 +528,15 @@ fn build_probe_from_source<S: ProbeSource + Send + Sync + 'static>(
         arc_clone.screencast_version()
     });
     let arc_clone = std::sync::Arc::clone(&arc);
-    let source_types = call_with_timeout("available_source_types", timeout, &mut details, move || {
-        arc_clone.available_source_types()
-    });
+    let source_types =
+        call_with_timeout("available_source_types", timeout, &mut details, move || {
+            arc_clone.available_source_types()
+        });
     let arc_clone = std::sync::Arc::clone(&arc);
-    let cursor_modes = call_with_timeout("available_cursor_modes", timeout, &mut details, move || {
-        arc_clone.available_cursor_modes()
-    });
+    let cursor_modes =
+        call_with_timeout("available_cursor_modes", timeout, &mut details, move || {
+            arc_clone.available_cursor_modes()
+        });
     let arc_clone = std::sync::Arc::clone(&arc);
     let pipewire = call_with_timeout("pipewire_version", timeout, &mut details, move || {
         arc_clone.pipewire_version()
@@ -598,6 +604,7 @@ fn get_pipewire_version() -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // available for future test probe integration
 fn get_pipewire_version() -> Result<String, String> {
     Ok("1.0.0".to_string())
 }
@@ -623,7 +630,10 @@ impl ProbeSource for AshpdProbeSource {
             let proxy = ashpd::desktop::screencast::Screencast::new()
                 .await
                 .map_err(|e| e.to_string())?;
-            let _ = proxy.available_source_types().await.map_err(|e| e.to_string())?;
+            let _ = proxy
+                .available_source_types()
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(4)
         })
     }
@@ -637,12 +647,14 @@ impl ProbeSource for AshpdProbeSource {
             let proxy = ashpd::desktop::screencast::Screencast::new()
                 .await
                 .map_err(|e| e.to_string())?;
-            let sources = proxy.available_source_types().await.map_err(|e| e.to_string())?;
+            let sources = proxy
+                .available_source_types()
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(SourceTypes {
                 monitor: sources.contains(ashpd::desktop::screencast::SourceType::Monitor),
                 window: sources.contains(ashpd::desktop::screencast::SourceType::Window),
-                virtual_source: sources
-                    .contains(ashpd::desktop::screencast::SourceType::Virtual),
+                virtual_source: sources.contains(ashpd::desktop::screencast::SourceType::Virtual),
             })
         })
     }
@@ -656,7 +668,10 @@ impl ProbeSource for AshpdProbeSource {
             let proxy = ashpd::desktop::screencast::Screencast::new()
                 .await
                 .map_err(|e| e.to_string())?;
-            let cursors = proxy.available_cursor_modes().await.map_err(|e| e.to_string())?;
+            let cursors = proxy
+                .available_cursor_modes()
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(CursorModes {
                 hidden: cursors.contains(ashpd::desktop::screencast::CursorMode::Hidden),
                 embedded: cursors.contains(ashpd::desktop::screencast::CursorMode::Embedded),
@@ -684,11 +699,9 @@ impl PortalClient {
                     ("XDG_SESSION_TYPE".to_string(), session_type),
                     ("XDG_CURRENT_DESKTOP".to_string(), desktop),
                 ];
-                let pipewire_version = get_pipewire_version().unwrap_or_else(|_| "unavailable".to_string());
-                details.push((
-                    "pipewire_library_version".to_string(),
-                    pipewire_version,
-                ));
+                let pipewire_version =
+                    get_pipewire_version().unwrap_or_else(|_| "unavailable".to_string());
+                details.push(("pipewire_library_version".to_string(), pipewire_version));
                 details.push(("probe_error".to_string(), err));
                 CaptureProbe {
                     backend: "linux-portal",
@@ -951,10 +964,7 @@ mod tests {
             embedded: true,
             metadata: false,
         };
-        assert_eq!(
-            choose_cursor_mode(cursors, false),
-            PortalCursorMode::Hidden
-        );
+        assert_eq!(choose_cursor_mode(cursors, false), PortalCursorMode::Hidden);
     }
 
     #[test]
@@ -1127,9 +1137,18 @@ mod tests {
         );
         let details: std::collections::HashMap<_, _> = probe.details.into_iter().collect();
         let quirks = details.get("quirks").unwrap();
-        assert!(quirks.contains("KdeMayReturnMultipleStreams"), "quirks: {quirks}");
-        assert!(quirks.contains("PortalRegionPickerLikelyAvailable"), "quirks: {quirks}");
-        assert!(quirks.contains("RegionPickerMayReturnVideoCrop"), "quirks: {quirks}");
+        assert!(
+            quirks.contains("KdeMayReturnMultipleStreams"),
+            "quirks: {quirks}"
+        );
+        assert!(
+            quirks.contains("PortalRegionPickerLikelyAvailable"),
+            "quirks: {quirks}"
+        );
+        assert!(
+            quirks.contains("RegionPickerMayReturnVideoCrop"),
+            "quirks: {quirks}"
+        );
     }
 
     use crate::types::{Region, RegionMode};
