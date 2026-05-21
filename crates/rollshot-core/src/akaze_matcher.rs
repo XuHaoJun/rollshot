@@ -6,6 +6,7 @@ use crate::types::{AkazeConfig, MotionCandidate};
 use crate::types::MatchMethod;
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(feature = "akaze"), allow(dead_code))]
 pub(crate) enum AkazeCandidateOutcome {
     Disabled,
     NotEnoughFeatures { prev: usize, curr: usize },

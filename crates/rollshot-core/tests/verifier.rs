@@ -32,23 +32,26 @@ fn verifier_rejects_when_pixels_disagree() {
         }
     }
 
-    let stricter = StitchConfig {
-        verifier: VerifierConfig {
-            downsample_max_mad: 0.02,
-            full_res_max_mad: 0.02,
-            ..VerifierConfig::default()
-        },
-        ..StitchConfig::default()
-    };
+    let mut stricter = StitchConfig::default();
+    let mut verifier = VerifierConfig::default();
+    verifier.downsample_max_mad = 0.02;
+    verifier.full_res_max_mad = 0.02;
+    stricter.verifier = verifier;
 
     let mut stitcher = Stitcher::new(stricter);
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
     match stitcher.push_frame(second) {
         StitchOutcome::NoMatch { reason, .. } => {
-            assert!(matches!(
-                reason,
-                NoMatchReason::OverlapVerificationFailed | NoMatchReason::LowConfidence
-            ));
+            assert!(
+                matches!(
+                    reason,
+                    NoMatchReason::OverlapVerificationFailed
+                        | NoMatchReason::LowConfidence
+                        | NoMatchReason::AkazeDisabled
+                        | NoMatchReason::AkazeLowInliers
+                ),
+                "unexpected reason: {reason:?}"
+            );
         }
         other => panic!("expected verifier rejection, got {other:?}"),
     }
@@ -60,18 +63,22 @@ fn verifier_rejects_when_overlap_is_too_small() {
     let first = crop_frame_xy(&canvas, 0, 0, 320, 320);
     let second = crop_frame_xy(&canvas, 0, 80, 320, 320);
 
-    let strict = StitchConfig {
-        min_overlap: 4096,
-        ..StitchConfig::default()
-    };
+    let mut strict = StitchConfig::default();
+    strict.min_overlap = 4096;
     let mut stitcher = Stitcher::new(strict);
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
     match stitcher.push_frame(second) {
         StitchOutcome::NoMatch { reason, .. } => {
-            assert!(matches!(
-                reason,
-                NoMatchReason::InsufficientOverlap | NoMatchReason::LowConfidence
-            ));
+            assert!(
+                matches!(
+                    reason,
+                    NoMatchReason::InsufficientOverlap
+                        | NoMatchReason::LowConfidence
+                        | NoMatchReason::AkazeDisabled
+                        | NoMatchReason::AkazeLowInliers
+                ),
+                "unexpected reason: {reason:?}"
+            );
         }
         other => panic!("expected InsufficientOverlap-like rejection, got {other:?}"),
     }

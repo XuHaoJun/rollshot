@@ -1,9 +1,9 @@
 use image::{Rgba, RgbaImage};
 
+use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::overlap::compute_overlap;
 use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
-use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
@@ -691,10 +691,15 @@ fn ncc_score_shifted(
 
 #[cfg(test)]
 mod tests {
-    use super::{coarse_sample_dimensions, content_roi, estimate_motion, MotionSearchOutcome, COARSE_DOWNSAMPLE_STEP};
-    use crate::types::{AkazeConfig, MotionCandidate, ScrollAxis, StitchConfig};
+    use super::{
+        coarse_sample_dimensions, content_roi, estimate_motion, MotionSearchOutcome,
+        COARSE_DOWNSAMPLE_STEP,
+    };
+    #[cfg(feature = "akaze")]
+    use crate::types::AkazeConfig;
     #[cfg(feature = "akaze")]
     use crate::types::{MatchMethod, NoMatchReason};
+    use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -773,6 +778,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "akaze")]
     fn make_sparse_feature_canvas(width: u32, height: u32) -> RgbaImage {
         let mut img = make_repeated_grid(width, height);
         for i in 0..64u32 {
@@ -789,6 +795,7 @@ mod tests {
         img
     }
 
+    #[cfg(feature = "akaze")]
     fn fallback_config() -> StitchConfig {
         StitchConfig {
             second_best_margin: 0.25,
@@ -822,8 +829,7 @@ mod tests {
             min_overlap: 280,
             ..StitchConfig::default()
         };
-        let candidate =
-            unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &config));
+        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &config));
         assert!(
             candidate.dy <= 40,
             "dy = {} exceeds bounded search",
@@ -836,7 +842,13 @@ mod tests {
         let canvas = make_textured_canvas(160, 600);
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
-        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
+        let candidate = unwrap_candidate(estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+        ));
         assert_eq!(candidate.dx, 0);
         assert!(
             (candidate.dy - 40).abs() <= 2,
@@ -849,14 +861,20 @@ mod tests {
     fn estimate_motion_returns_none_for_unrelated_frames() {
         let prev = make_textured_canvas(160, 160);
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
-        assert!(matches!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()), MotionSearchOutcome::NoMatch { .. }));
+        assert!(matches!(
+            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()),
+            MotionSearchOutcome::NoMatch { .. }
+        ));
     }
 
     #[test]
     fn estimate_motion_returns_none_for_dimension_mismatch() {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
-        assert!(matches!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()), MotionSearchOutcome::NoMatch { .. }));
+        assert!(matches!(
+            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()),
+            MotionSearchOutcome::NoMatch { .. }
+        ));
     }
 
     #[test]
@@ -865,7 +883,13 @@ mod tests {
         let prev = crop(&canvas, 220, 160);
         let curr = crop(&canvas, 180, 160);
 
-        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
+        let candidate = unwrap_candidate(estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+        ));
 
         assert_eq!(candidate.dx, 0);
         assert!(
@@ -881,7 +905,13 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 40, 0, 160, 160);
 
-        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
+        let candidate = unwrap_candidate(estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+        ));
 
         assert_eq!(candidate.dy, 0);
         assert!(

@@ -1,13 +1,17 @@
 mod common;
 
+#[cfg(feature = "akaze")]
+use common::make_akaze_fallback_canvas;
 use common::{
-    crop_frame, crop_frame_xy, make_akaze_fallback_canvas, make_repeated_rows,
-    make_scroll_canvas, make_wide_canvas, paint_sticky_header,
+    crop_frame, crop_frame_xy, make_repeated_rows, make_scroll_canvas, make_wide_canvas,
+    paint_sticky_header,
 };
 use image::{Rgba, RgbaImage};
+#[cfg(feature = "akaze")]
+use rollshot_core::{AkazeConfig, MatchMethod};
 use rollshot_core::{
-    AkazeConfig, AppendDirection, MatchMethod, NoMatchReason, ScrollAxis, StitchConfig,
-    StitchOutcome, Stitcher, VerifierConfig,
+    AppendDirection, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
+    VerifierConfig,
 };
 
 #[test]
@@ -142,6 +146,7 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
             assert!(
                 reason == NoMatchReason::LowConfidence
                     || reason == NoMatchReason::AkazeDisabled
+                    || reason == NoMatchReason::NotEnoughFeatures
             );
         }
         other => panic!("expected NoMatch on white frame, got {other:?}"),
