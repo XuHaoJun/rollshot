@@ -163,12 +163,13 @@ akaze = ["rollshot-core/akaze"]
 macos-sck = ["rollshot-capture/macos-sck"]
 ```
 
-- [ ] **Step 6: Add `AkazeConfig` to public core types**
+- [ ] **Step 6: Add `AkazeConfig`, new `NoMatchReason` variants, and `#[non_exhaustive]` on public config structs**
 
 In `crates/rollshot-core/src/types.rs`, add this struct before `StitchConfig`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AkazeConfig {
     pub enabled: bool,
     pub max_features: usize,
@@ -192,6 +193,8 @@ impl Default for AkazeConfig {
 }
 ```
 
+Mark the existing `StitchConfig` and `VerifierConfig` declarations `#[non_exhaustive]` (add the attribute on the line immediately above each `pub struct`). All in-workspace constructions already use `StitchConfig::default()` + field mutation or `..StitchConfig::default()` spread, so this is non-breaking internally. External downstream crates must now spread `..Default::default()` or use the builder pattern; integration tests in `crates/rollshot-core/tests/` need to use the `..AkazeConfig::default()` spread when overriding only a subset of AkazeConfig fields (Task 4 and Task 5 fixtures already follow this convention below).
+
 In the `StitchConfig` struct, add:
 
 ```rust
@@ -203,6 +206,24 @@ In `impl Default for StitchConfig`, add:
 ```rust
 akaze: AkazeConfig::default(),
 ```
+
+Extend the existing `NoMatchReason` enum with two variants that surface AKAZE-specific failure modes. Append them at the end of the enum so existing match arms stay ordered:
+
+```rust
+    /// AKAZE fallback was attempted but disabled: either the `akaze` Cargo
+    /// feature is not compiled, `AkazeConfig::enabled` is `false`, or
+    /// `--disable-akaze` was passed.
+    AkazeDisabled,
+    /// AKAZE produced descriptors and matches but the inlier count fell
+    /// below `min_inliers`, the inlier ratio fell below `min_inlier_ratio`,
+    /// or every produced candidate was rejected by the pixel-overlap
+    /// verifier. When verifier rejection is the cause, `best_estimate` on
+    /// the resulting `StitchOutcome::NoMatch` carries the best AKAZE
+    /// candidate for diagnostics.
+    AkazeLowInliers,
+```
+
+The enum already derives `Debug, Clone, Copy, PartialEq, Eq`; no other change is required. Downstream `match` statements that exhaustively cover `NoMatchReason` will need to add arms for the two new variants — the CLI debug-report mapping in Task 6 already handles this via `format!("{reason:?}")`, which is exhaustive for free.
 
 - [ ] **Step 7: Export `AkazeConfig`**
 
@@ -337,9 +358,11 @@ rtk cargo test -p rollshot-core --features akaze --lib akaze_matcher::tests -- -
 
 Expected: FAIL because `akaze_candidates` and `AkazeCandidateOutcome` are not defined.
 
-- [ ] **Step 3: Add the feature-gated module implementation**
+- [ ] **Step 3: Prepend the feature-gated module implementation above the existing `mod tests` block**
 
-Replace `crates/rollshot-core/src/akaze_matcher.rs` with:
+In `crates/rollshot-core/src/akaze_matcher.rs` (created in Step 1 with the test module only), PREPEND the production code below so it sits above the `#[cfg(all(test, feature = "akaze"))] mod tests { ... }` block. Do NOT duplicate the test module — leave the existing one untouched.
+
+The production code is:
 
 ```rust
 use image::RgbaImage;
@@ -363,6 +386,22 @@ pub(crate) fn akaze_candidates(
     AkazeCandidateOutcome::Disabled
 }
 
+/// Score AKAZE-derived candidates so realistic outputs pass the default
+/// `StitchConfig::accept_confidence` gate (0.15).
+///
+/// Acceptance budget at `min_inlier_ratio = 0.35` and worst-case residual of
+/// `TRANSLATION_BUCKET_PX` pixels: `0.65 * 0.08 + 1.0 * 0.04 = 0.092`,
+/// comfortably below the 0.15 gate. Median quality (`ratio = 0.6`,
+/// `residual ≈ 1px`) scores around 0.042. AKAZE candidates never share a
+/// ranker with cheap matchers (AKAZE is fallback-only), so this scale is
+/// independent of the cheap-matcher NCC regime.
+#[cfg(feature = "akaze")]
+fn akaze_score(inlier_ratio: f32, residual_px: f32) -> f32 {
+    let ratio_term = 1.0 - inlier_ratio.clamp(0.0, 1.0);
+    let residual_term = (residual_px / 4.0).clamp(0.0, 1.0);
+    (ratio_term * 0.08 + residual_term * 0.04).clamp(0.0, 1.0)
+}
+
 #[cfg(feature = "akaze")]
 pub(crate) fn akaze_candidates(
     prev: &RgbaImage,
@@ -371,7 +410,6 @@ pub(crate) fn akaze_candidates(
 ) -> AkazeCandidateOutcome {
     use akaze::{Akaze, KeyPoint};
     use bitarray::{BitArray, Hamming};
-    use image::DynamicImage;
     use space::{Knn, LinearKnn};
     use std::collections::BTreeMap;
 
@@ -473,12 +511,6 @@ pub(crate) fn akaze_candidates(
         Some((dx.round() as i32, dy.round() as i32, inliers.len(), residual))
     }
 
-    fn akaze_score(inlier_ratio: f32, residual_px: f32) -> f32 {
-        let ratio_term = 1.0 - inlier_ratio.clamp(0.0, 1.0);
-        let residual_term = (residual_px / 4.0).clamp(0.0, 1.0);
-        (ratio_term * 0.20 + residual_term * 0.80).clamp(0.0, 1.0)
-    }
-
     if !config.enabled {
         return AkazeCandidateOutcome::Disabled;
     }
@@ -486,8 +518,12 @@ pub(crate) fn akaze_candidates(
     let mut extractor = Akaze::new(config.detector_threshold);
     extractor.maximum_features = config.max_features;
 
-    let prev_image = DynamicImage::ImageRgba8(prev.clone());
-    let curr_image = DynamicImage::ImageRgba8(curr.clone());
+    // Pre-convert to single-channel Luma8 so AKAZE's internal grayscale pass
+    // is a no-op. Halves transient memory vs cloning an `RgbaImage` (upstream
+    // verified at rust-cv rev d271a9ac: see akaze/src/image.rs `from_dynamic`
+    // ImageLuma8 arm). Mathematically equivalent up to one rounding step.
+    let prev_image = image::DynamicImage::ImageLuma8(image::imageops::grayscale(prev));
+    let curr_image = image::DynamicImage::ImageLuma8(image::imageops::grayscale(curr));
     let (prev_keypoints, prev_descriptors) = extractor.extract(&prev_image);
     let (curr_keypoints, curr_descriptors) = extractor.extract(&curr_image);
 
@@ -525,90 +561,9 @@ pub(crate) fn akaze_candidates(
         raw_matches: Some(raw_matches),
     }])
 }
-
-#[cfg(all(test, feature = "akaze"))]
-mod tests {
-    use image::{imageops, Rgba, RgbaImage};
-
-    use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
-    use crate::types::{AkazeConfig, MatchMethod};
-
-    fn feature_canvas(width: u32, height: u32) -> RgbaImage {
-        let mut img = RgbaImage::from_pixel(width, height, Rgba([238, 238, 238, 255]));
-        for i in 0..48u32 {
-            let x = 24 + ((i * 37) % width.saturating_sub(48).max(1));
-            let y = 24 + ((i * 53) % height.saturating_sub(48).max(1));
-            let c = [
-                (40 + (i * 17) % 180) as u8,
-                (70 + (i * 29) % 170) as u8,
-                (90 + (i * 31) % 150) as u8,
-                255,
-            ];
-            for yy in y..(y + 9).min(height) {
-                for xx in x..(x + 9).min(width) {
-                    if xx == x
-                        || yy == y
-                        || xx + 1 == x + 9
-                        || yy + 1 == y + 9
-                        || xx == x + yy - y
-                    {
-                        img.put_pixel(xx, yy, Rgba(c));
-                    }
-                }
-            }
-        }
-        img
-    }
-
-    fn crop_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
-        imageops::crop_imm(canvas, x, y, w, h).to_image()
-    }
-
-    fn test_config() -> AkazeConfig {
-        AkazeConfig {
-            enabled: true,
-            max_features: 800,
-            detector_threshold: 0.0005,
-            min_raw_matches: 8,
-            min_inliers: 6,
-            min_inlier_ratio: 0.25,
-        }
-    }
-
-    #[test]
-    fn akaze_candidates_estimate_translation() {
-        let canvas = feature_canvas(420, 420);
-        let prev = crop_xy(&canvas, 20, 30, 220, 220);
-        let curr = crop_xy(&canvas, 58, 92, 220, 220);
-
-        let outcome = akaze_candidates(&prev, &curr, &test_config());
-        let candidates = match outcome {
-            AkazeCandidateOutcome::Candidates(candidates) => candidates,
-            other => panic!("expected AKAZE candidates, got {other:?}"),
-        };
-
-        let candidate = candidates.first().expect("one candidate");
-        assert_eq!(candidate.method, MatchMethod::Akaze);
-        assert!((candidate.dx - 38).abs() <= 3, "dx = {}", candidate.dx);
-        assert!((candidate.dy - 62).abs() <= 3, "dy = {}", candidate.dy);
-        assert!(candidate.raw_matches.unwrap_or(0) >= 8);
-        assert!(candidate.inliers.unwrap_or(0) >= 6);
-    }
-
-    #[test]
-    fn solid_frames_report_not_enough_features() {
-        let prev = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
-        let curr = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
-
-        let outcome = akaze_candidates(&prev, &curr, &test_config());
-
-        assert!(matches!(
-            outcome,
-            AkazeCandidateOutcome::NotEnoughFeatures { .. }
-        ));
-    }
-}
 ```
+
+The `mod tests` block from Step 1 remains unchanged below this prepended code.
 
 - [ ] **Step 4: Run AKAZE matcher tests**
 
@@ -620,7 +575,45 @@ rtk cargo test -p rollshot-core --features akaze --lib akaze_matcher::tests -- -
 
 Expected: PASS. If the translation test has too few features, lower only the test's `detector_threshold` to `0.0001` and keep production default unchanged.
 
-- [ ] **Step 5: Run baseline compile without the feature**
+- [ ] **Step 5: Add an `akaze_score` unit test**
+
+Append this feature-gated test inside the existing `#[cfg(all(test, feature = "akaze"))] mod tests` block in `crates/rollshot-core/src/akaze_matcher.rs`:
+
+```rust
+    #[test]
+    fn akaze_score_passes_default_accept_confidence() {
+        use crate::types::StitchConfig;
+
+        let accept = StitchConfig::default().accept_confidence;
+
+        // Floor case: minimum allowed inlier ratio + worst-case residual.
+        // Must still clear the gate, otherwise AKAZE never accepts in production.
+        let floor = super::akaze_score(0.35, 4.0);
+        assert!(
+            floor <= accept,
+            "floor {floor} exceeds accept_confidence {accept}"
+        );
+
+        // Median quality: realistic AKAZE outcome should score well below the gate.
+        let mid = super::akaze_score(0.6, 1.0);
+        assert!(mid < floor, "mid {mid} >= floor {floor}");
+
+        // Top quality: near-perfect AKAZE result scores near zero.
+        let top = super::akaze_score(0.9, 0.0);
+        assert!(top < mid, "top {top} >= mid {mid}");
+        assert!(top <= 0.01, "top {top} > 0.01");
+    }
+```
+
+Run:
+
+```bash
+rtk cargo test -p rollshot-core --features akaze --lib akaze_matcher::tests::akaze_score_passes_default_accept_confidence
+```
+
+Expected: PASS. The floor case asserts AKAZE's worst-acceptable inputs still clear `accept_confidence`; if this test fails after a future weight tweak, AKAZE will silently stop accepting candidates in production.
+
+- [ ] **Step 6: Run baseline compile without the feature**
 
 Run:
 
@@ -630,7 +623,7 @@ rtk cargo test -p rollshot-core --lib types::tests::default_config_picks_auto_hy
 
 Expected: PASS and no compile attempt for the git `akaze` crate in the non-feature build.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 rtk git add crates/rollshot-core/src/lib.rs crates/rollshot-core/src/akaze_matcher.rs Cargo.lock
@@ -716,7 +709,44 @@ fn akaze_attempt_with_blank_frames_reports_not_enough_features() {
 
     let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
 
-    assert_eq!(outcome, MotionSearchOutcome::NoMatch(NoMatchReason::NotEnoughFeatures));
+    assert!(matches!(
+        outcome,
+        MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::NotEnoughFeatures,
+            best_candidate: None,
+        }
+    ));
+}
+
+#[cfg(feature = "akaze")]
+#[test]
+fn akaze_candidate_rejected_by_verifier_preserves_best_estimate() {
+    // Build a frame pair where AKAZE keypoints in the un-corrupted top half
+    // produce a plausible translation candidate, but the bottom half of
+    // `curr` is overwritten with high-contrast noise so the pixel-overlap
+    // verifier's MAD threshold rejects every AKAZE proposal. Cheap matchers
+    // also fail because >40% of the overlap is noise.
+    let canvas = make_sparse_feature_canvas(360, 760);
+    let prev = crop_xy(&canvas, 0, 0, 240, 240);
+    let mut curr = crop_xy(&canvas, 0, 72, 240, 240);
+    for y in 120..240 {
+        for x in 0..240 {
+            let v = ((x * 41 + y * 67) % 255) as u8;
+            curr.put_pixel(x, y, Rgba([v, 255 - v, v / 2, 255]));
+        }
+    }
+
+    let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
+
+    let best = match outcome {
+        MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::AkazeLowInliers,
+            best_candidate: Some(candidate),
+        } => candidate,
+        other => panic!("expected AkazeLowInliers with best_candidate, got {other:?}"),
+    };
+    assert_eq!(best.method, MatchMethod::Akaze);
+    assert!((best.dy - 72).abs() <= 8, "best dy = {}", best.dy);
 }
 ```
 
@@ -739,13 +769,16 @@ use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
 ```
 
-Add this enum after `SearchAxis`:
+Add this enum after `SearchAxis`. `NoMatch` carries an `Option<MotionCandidate>` so the stitcher can surface diagnostic info on `best_estimate` when AKAZE produced a candidate that the verifier later rejected:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum MotionSearchOutcome {
     Candidate(MotionCandidate),
-    NoMatch(NoMatchReason),
+    NoMatch {
+        reason: NoMatchReason,
+        best_candidate: Option<MotionCandidate>,
+    },
 }
 ```
 
@@ -760,7 +793,10 @@ pub(crate) fn estimate_motion(
     config: &StitchConfig,
 ) -> MotionSearchOutcome {
     if prev.dimensions() != curr.dimensions() {
-        return MotionSearchOutcome::NoMatch(NoMatchReason::DimensionMismatch);
+        return MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::DimensionMismatch,
+            best_candidate: None,
+        };
     }
 
     let width = prev.width();
@@ -800,15 +836,28 @@ pub(crate) fn estimate_motion(
     }
 
     match akaze_candidates(prev, curr, &config.akaze) {
-        AkazeCandidateOutcome::Disabled => MotionSearchOutcome::NoMatch(NoMatchReason::LowConfidence),
-        AkazeCandidateOutcome::NotEnoughFeatures { .. }
-        | AkazeCandidateOutcome::NotEnoughMatches { .. } => {
-            MotionSearchOutcome::NoMatch(NoMatchReason::NotEnoughFeatures)
-        }
-        AkazeCandidateOutcome::Candidates(candidates) => {
-            match rank_verified_candidates(prev, curr, locked_axis, candidates, config) {
+        AkazeCandidateOutcome::Disabled => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::AkazeDisabled,
+            best_candidate: None,
+        },
+        AkazeCandidateOutcome::NotEnoughFeatures { .. } => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::NotEnoughFeatures,
+            best_candidate: None,
+        },
+        AkazeCandidateOutcome::NotEnoughMatches { .. } => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::AkazeLowInliers,
+            best_candidate: None,
+        },
+        AkazeCandidateOutcome::Candidates(akaze_candidates) => {
+            // Preserve the best AKAZE proposal even when the verifier rejects
+            // every candidate, so debug-match reports can show the near-miss.
+            let best = akaze_candidates.first().copied();
+            match rank_verified_candidates(prev, curr, locked_axis, akaze_candidates, config) {
                 Some(candidate) => MotionSearchOutcome::Candidate(candidate),
-                None => MotionSearchOutcome::NoMatch(NoMatchReason::LowConfidence),
+                None => MotionSearchOutcome::NoMatch {
+                    reason: NoMatchReason::AkazeLowInliers,
+                    best_candidate: best,
+                },
             }
         }
     }
@@ -835,24 +884,46 @@ fn unwrap_candidate(outcome: MotionSearchOutcome) -> MotionCandidate {
 }
 ```
 
-Update existing matcher tests:
+Migrate every existing test in `matcher::tests` that calls `estimate_motion(...)`. Two mechanical patterns cover all 10:
+
+For tests that previously used `.expect("...")`, replace with `unwrap_candidate(...)`:
 
 ```rust
-let candidate = unwrap_candidate(estimate_motion(
-    &prev,
-    &curr,
-    None,
-    (0, 0),
-    &StitchConfig::default(),
-));
+let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
 ```
 
-For existing no-match tests, update assertions to:
+For tests that previously used `.is_none()`, replace with a `matches!` check:
 
 ```rust
 assert!(matches!(
     estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()),
-    MotionSearchOutcome::NoMatch(_)
+    MotionSearchOutcome::NoMatch { .. }
+));
+```
+
+The full list of tests to migrate (all in `crates/rollshot-core/src/matcher.rs` mod tests):
+
+| Test | Previous shape | New shape |
+| --- | --- | --- |
+| `estimate_motion_respects_min_overlap` | `.expect("template candidate")` | `unwrap_candidate(...)` |
+| `estimate_motion_finds_known_scroll` | `.expect("template candidate")` | `unwrap_candidate(...)` |
+| `estimate_motion_returns_none_for_unrelated_frames` | `.is_none()` | `matches!(..., MotionSearchOutcome::NoMatch { .. })` |
+| `estimate_motion_returns_none_for_dimension_mismatch` | `.is_none()` | `matches!(..., MotionSearchOutcome::NoMatch { .. })` |
+| `estimate_motion_finds_vertical_up_scroll` | `.expect("template candidate")` | `unwrap_candidate(...)` |
+| `estimate_motion_finds_horizontal_right_scroll` | `.expect("horizontal candidate")` | `unwrap_candidate(...)` |
+| `estimate_motion_finds_horizontal_left_scroll` | `.expect("horizontal candidate")` | `unwrap_candidate(...)` |
+| `locked_vertical_hint_rejects_unrelated_frame` | `.is_none()` | `matches!(..., MotionSearchOutcome::NoMatch { .. })` |
+| `repeated_grid_is_rejected_by_second_best_margin` | `.is_none()` | `matches!(..., MotionSearchOutcome::NoMatch { .. })` |
+| `locked_vertical_still_returns_reliable_axis_change_candidate` | `.expect("axis-change candidate")` | `unwrap_candidate(...)` |
+
+Run `rtk cargo build -p rollshot-core --tests` after migrating to confirm zero compile errors before moving to Step 4. Any remaining `.expect(`/`.is_none()` calls on `estimate_motion` will show up as type errors.
+
+Also update the two new feature-gated tests from Step 1 (`akaze_fallback_recovers_repeated_grid_with_sparse_features` and `akaze_attempt_with_blank_frames_reports_not_enough_features`): change the `NoMatchReason` assertion in the second test to use the new struct variant:
+
+```rust
+assert!(matches!(
+    outcome,
+    MotionSearchOutcome::NoMatch { reason: NoMatchReason::NotEnoughFeatures, .. }
 ));
 ```
 
@@ -864,7 +935,7 @@ Change the matcher import:
 use crate::matcher::{estimate_motion, MotionSearchOutcome};
 ```
 
-Replace the `let candidate = match estimate_motion(...)` block with:
+Replace the `let candidate = match estimate_motion(...)` block with the form below. When the matcher returns `NoMatch` with a `best_candidate` (today: only AKAZE-fail-verifier path), convert it to a `MotionEstimate` via the existing `build_estimate` helper so debug-match reports can show the near-miss:
 
 ```rust
 let candidate = match estimate_motion(
@@ -875,10 +946,16 @@ let candidate = match estimate_motion(
     &self.config,
 ) {
     MotionSearchOutcome::Candidate(candidate) => candidate,
-    MotionSearchOutcome::NoMatch(reason) => {
+    MotionSearchOutcome::NoMatch {
+        reason,
+        best_candidate,
+    } => {
+        let best_estimate = best_candidate.and_then(|candidate| {
+            build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
+        });
         return StitchOutcome::NoMatch {
             reason,
-            best_estimate: None,
+            best_estimate,
         };
     }
 };
@@ -973,15 +1050,17 @@ fn akaze_fallback_appends_when_template_is_ambiguous() {
     let first = crop_frame(&canvas, 0, 320);
     let scrolled = crop_frame(&canvas, 96, 320);
 
+    // AkazeConfig is `#[non_exhaustive]`, so this integration-test crate must
+    // spread `..AkazeConfig::default()` instead of listing every field.
     let config = StitchConfig {
         second_best_margin: 0.25,
         akaze: AkazeConfig {
             enabled: true,
-            max_features: 1200,
             detector_threshold: 0.0005,
             min_raw_matches: 8,
             min_inliers: 6,
             min_inlier_ratio: 0.25,
+            ..AkazeConfig::default()
         },
         ..StitchConfig::default()
     };
@@ -1054,6 +1133,15 @@ use serde::Deserialize;
 
 const FIXTURE_ROOT: &str = "tests/fixtures/linearscroll_v2";
 
+// Golden fixtures compare stitched PNGs across architectures (Linux x86 +
+// macOS ARM in CI). f32 NCC summation order can shift the chosen offset by
+// 1 px on some fixtures, which propagates as a full-image shift. We allow a
+// small per-pixel channel diff and a budget of mismatched pixels so the
+// goldens survive cross-arch f32 drift but still catch real regressions.
+// `motions.json` is still compared exactly.
+const MAX_PIXEL_CHANNEL_DIFF: u8 = 4;
+const MAX_MISMATCHED_PIXEL_RATIO: f32 = 0.005;
+
 #[derive(Debug, Deserialize)]
 struct ExpectedMotion {
     frame: usize,
@@ -1093,17 +1181,19 @@ fn golden_fixtures_match_expected_outputs() {
 #[cfg(feature = "akaze")]
 #[test]
 fn akaze_golden_fixture_uses_akaze_fallback() {
+    // AkazeConfig is `#[non_exhaustive]`; spread the default to fill any
+    // future fields without breaking this integration-test crate.
     let observed = run_fixture(
         "akaze_fallback",
         StitchConfig {
             second_best_margin: 0.25,
             akaze: AkazeConfig {
                 enabled: true,
-                max_features: 1200,
                 detector_threshold: 0.0005,
                 min_raw_matches: 8,
                 min_inliers: 6,
                 min_inlier_ratio: 0.25,
+                ..AkazeConfig::default()
             },
             ..StitchConfig::default()
         },
@@ -1147,17 +1237,47 @@ fn run_fixture(family: &str, config: StitchConfig) -> Vec<ObservedMotion> {
     }
 
     let actual = stitcher.full_image().expect("stitched output");
-    if actual != &expected_output || !motions_match(&observed, &expected_motions) {
+    let image_ok = images_within_tolerance(actual, &expected_output);
+    let motions_ok = motions_match(&observed, &expected_motions);
+    if !image_ok || !motions_ok {
         write_failure_artifacts(family, actual, &expected_output, &observed, &expected_motions);
     }
 
-    assert_eq!(actual, &expected_output, "{family} output mismatch");
+    assert!(image_ok, "{family} output mismatch beyond tolerance");
     assert!(
-        motions_match(&observed, &expected_motions),
+        motions_ok,
         "{family} motions mismatch: observed={observed:?}, expected={expected_motions:?}"
     );
 
     observed
+}
+
+/// Per-pixel tolerance compare. Returns true when:
+/// - the two images have identical dimensions, AND
+/// - every pixel's max channel diff is `<= MAX_PIXEL_CHANNEL_DIFF`, AND
+/// - the fraction of pixels with any non-zero channel diff is
+///   `<= MAX_MISMATCHED_PIXEL_RATIO`.
+fn images_within_tolerance(actual: &RgbaImage, expected: &RgbaImage) -> bool {
+    if actual.dimensions() != expected.dimensions() {
+        return false;
+    }
+    let total = (actual.width() as u64) * (actual.height() as u64);
+    let mut mismatched = 0u64;
+    for (a, e) in actual.pixels().zip(expected.pixels()) {
+        let dr = a[0].abs_diff(e[0]);
+        let dg = a[1].abs_diff(e[1]);
+        let db = a[2].abs_diff(e[2]);
+        let da = a[3].abs_diff(e[3]);
+        let max_chan = dr.max(dg).max(db).max(da);
+        if max_chan > MAX_PIXEL_CHANNEL_DIFF {
+            return false;
+        }
+        if max_chan > 0 {
+            mismatched += 1;
+        }
+    }
+    let ratio = mismatched as f32 / total.max(1) as f32;
+    ratio <= MAX_MISMATCHED_PIXEL_RATIO
 }
 
 fn load_frames(dir: &Path) -> Vec<RgbaImage> {
@@ -1298,29 +1418,107 @@ fn refresh_linearscroll_v2_fixtures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_ROOT);
     fs::create_dir_all(&root).expect("create fixture root");
 
-    write_vertical_fixture(&root, "linear_vertical_down", [0, 180, 356], 0, 320, false);
-    write_vertical_fixture(&root, "linear_vertical_up", [356, 176, 0], 0, 320, false);
+    // Vertical / horizontal / sticky_header use the rich procedural texture
+    // (`make_fixture_canvas`) so cheap matchers reliably succeed.
+    write_vertical_fixture(
+        &root,
+        "linear_vertical_down",
+        FixtureCanvas::Generic,
+        [0, 180, 356],
+        0,
+        320,
+        false,
+    );
+    write_vertical_fixture(
+        &root,
+        "linear_vertical_up",
+        FixtureCanvas::Generic,
+        [356, 176, 0],
+        0,
+        320,
+        false,
+    );
     write_horizontal_fixture(&root, "linear_horizontal_right", [0, 180, 356], 0, 320);
     write_horizontal_fixture(&root, "linear_horizontal_left", [356, 176, 0], 0, 320);
-    write_vertical_fixture(&root, "sticky_header", [0, 160, 318], 0, 320, true);
-    write_vertical_fixture(&root, "low_feature_text", [0, 150, 300], 0, 320, false);
-    write_rejected_fixture(&root, "repeated_rows");
-    write_rejected_fixture(&root, "repeated_grid");
-    write_vertical_fixture(&root, "image_cards", [0, 170, 340], 0, 320, false);
+    write_vertical_fixture(
+        &root,
+        "sticky_header",
+        FixtureCanvas::Generic,
+        [0, 160, 318],
+        0,
+        320,
+        true,
+    );
+
+    // Distinct canvases per fixture family so the test name matches behavior.
+    write_vertical_fixture(
+        &root,
+        "low_feature_text",
+        FixtureCanvas::LowFeatureText,
+        [0, 150, 300],
+        0,
+        320,
+        false,
+    );
+    write_vertical_fixture(
+        &root,
+        "image_cards",
+        FixtureCanvas::ImageCards,
+        [0, 170, 340],
+        0,
+        320,
+        false,
+    );
+
+    // Genuine ambiguity, not blank canvases: matcher should refuse to append.
+    write_rejected_fixture(&root, "repeated_rows", FixtureCanvas::RepeatedRows);
+    write_rejected_fixture(&root, "repeated_grid", FixtureCanvas::RepeatedGrid);
+
     write_bad_frame_fixture(&root);
     write_duplicate_fixture(&root);
     write_akaze_fixture(&root);
 }
 
+/// Selects the canvas builder used by the fixture writers. Different fixture
+/// families need genuinely different content so each test name matches a
+/// distinct failure-mode behavior, not the same texture under many names.
+#[derive(Debug, Clone, Copy)]
+enum FixtureCanvas {
+    /// Rich procedural texture; cheap matchers succeed easily.
+    Generic,
+    /// Mostly white with sparse word-shaped dark blocks; tests the
+    /// "low-feature-text page" case.
+    LowFeatureText,
+    /// Large flat color cards with thin borders; tests the
+    /// "image-grid / image-card" case.
+    ImageCards,
+    /// Tightly repeated horizontal stripe pattern; ambiguity test for
+    /// row-major repetition.
+    RepeatedRows,
+    /// Tightly repeated 2D grid pattern; ambiguity test for grid repetition.
+    RepeatedGrid,
+}
+
+fn build_canvas(kind: FixtureCanvas, width: u32, height: u32) -> RgbaImage {
+    match kind {
+        FixtureCanvas::Generic => make_fixture_canvas(width, height),
+        FixtureCanvas::LowFeatureText => make_low_feature_text_canvas(width, height),
+        FixtureCanvas::ImageCards => make_image_card_canvas(width, height),
+        FixtureCanvas::RepeatedRows => make_repeated_rows_canvas(width, height),
+        FixtureCanvas::RepeatedGrid => make_repeated_grid_canvas(width, height),
+    }
+}
+
 fn write_vertical_fixture(
     root: &Path,
     name: &str,
+    canvas_kind: FixtureCanvas,
     offsets: [u32; 3],
     x: u32,
     viewport: u32,
     sticky: bool,
 ) {
-    let canvas = make_fixture_canvas(480, 1100);
+    let canvas = build_canvas(canvas_kind, 480, 1100);
     let dir = root.join(name);
     let frames_dir = dir.join("frames");
     let expected_dir = dir.join("expected");
@@ -1420,8 +1618,12 @@ fn write_akaze_fixture(root: &Path) {
     );
 }
 
-fn write_rejected_fixture(root: &Path, name: &str) {
-    let canvas = RgbaImage::from_pixel(320, 700, Rgba([230, 230, 230, 255]));
+/// Builds a fixture where every frame uses the same ambiguous canvas with a
+/// small offset. The matcher must reject the append for either
+/// `AmbiguousAxis`/second-best-margin reasons or `MotionTooSmall`; the
+/// stitched output equals the first frame, and `motions.json` is empty.
+fn write_rejected_fixture(root: &Path, name: &str, canvas_kind: FixtureCanvas) {
+    let canvas = build_canvas(canvas_kind, 320, 700);
     let dir = root.join(name);
     let frames_dir = dir.join("frames");
     let expected_dir = dir.join("expected");
@@ -1529,6 +1731,102 @@ fn make_fixture_canvas(width: u32, height: u32) -> RgbaImage {
                     img.put_pixel(xx, yy, color);
                 }
             }
+        }
+    }
+    img
+}
+
+/// Mostly-white canvas with sparse word-shaped dark blocks. Simulates a
+/// text-heavy page that has few strong corner features per viewport — the
+/// matcher should still succeed because line ends and letter clusters are
+/// locally distinctive across vertical scroll, but cheap matchers operate
+/// with a thinner confidence margin.
+fn make_low_feature_text_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([252, 252, 252, 255]));
+    // Word-shaped blobs: 6-12 px tall, 20-60 px wide, deterministic positions.
+    for line in 0..(height / 28) {
+        let y = 16 + line * 28;
+        if y + 12 >= height {
+            break;
+        }
+        let mut x = 20u32;
+        let mut word_idx = 0u32;
+        while x + 24 < width.saturating_sub(20) {
+            let word_w = 24 + ((line * 7 + word_idx * 11) % 38);
+            let gray = (28 + (word_idx * 23) % 60) as u8;
+            for yy in y..(y + 10).min(height) {
+                for xx in x..(x + word_w).min(width) {
+                    img.put_pixel(xx, yy, Rgba([gray, gray, gray, 255]));
+                }
+            }
+            x += word_w + 12 + ((word_idx * 5) % 14);
+            word_idx += 1;
+        }
+    }
+    img
+}
+
+/// Canvas of large flat color cards with thin borders, like a feed of image
+/// cards. Each card spans full width with consistent vertical rhythm so
+/// matchers must distinguish between adjacent cards rather than picking any
+/// repeated card. Cards have distinct interior colors to disambiguate.
+fn make_image_card_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([248, 248, 248, 255]));
+    let card_h = 140u32;
+    let gap = 24u32;
+    let mut idx = 0u32;
+    let mut y = 16u32;
+    while y + card_h < height {
+        let interior = Rgba([
+            (40 + (idx * 47) % 180) as u8,
+            (60 + (idx * 53) % 170) as u8,
+            (80 + (idx * 59) % 160) as u8,
+            255,
+        ]);
+        let border = Rgba([30, 30, 30, 255]);
+        for yy in y..(y + card_h).min(height) {
+            for xx in 16..width.saturating_sub(16) {
+                let on_border = yy == y
+                    || yy + 1 == y + card_h
+                    || xx == 16
+                    || xx + 1 == width.saturating_sub(16);
+                img.put_pixel(xx, yy, if on_border { border } else { interior });
+            }
+        }
+        y += card_h + gap;
+        idx += 1;
+    }
+    img
+}
+
+/// Tightly repeating horizontal stripes. Any vertical offset that's a
+/// multiple of the stripe period looks equally plausible to a template
+/// matcher, so this fixture confirms the second-best-margin rejection.
+fn make_repeated_rows_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([250, 250, 250, 255]));
+    for y in 0..height {
+        let band = (y / 16) % 2;
+        let color = if band == 0 {
+            Rgba([40, 40, 40, 255])
+        } else {
+            Rgba([210, 210, 210, 255])
+        };
+        for x in 0..width {
+            img.put_pixel(x, y, color);
+        }
+    }
+    img
+}
+
+/// Tightly repeating 2D grid. Both axes look ambiguous, so any offset that
+/// aligns the grid is plausible. Stitcher must reject via second-best
+/// margin and overlap verification.
+fn make_repeated_grid_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([245, 245, 245, 255]));
+    for y in 0..height {
+        for x in 0..width {
+            let v = if (x / 16 + y / 16) % 2 == 0 { 48 } else { 208 };
+            img.put_pixel(x, y, Rgba([v, v, v, 255]));
         }
     }
     img
@@ -1659,7 +1957,121 @@ fn rollshot_stitch_folder_writes_debug_report() {
     assert!(report.contains("\"outcome\""), "report = {report}");
     assert!(debug_dir.exists(), "{} should exist", debug_dir.display());
 
+    // The cheap matchers handle this canvas, so at least one Appended frame
+    // (frame_001) should have written overlap_prev.png. A debug dir that
+    // exists but is empty would mean the artifact-writing path silently
+    // never fired.
+    let overlap_entries: Vec<_> = std::fs::read_dir(&debug_dir)
+        .expect("read debug dir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.contains("overlap_prev") && n.ends_with(".png"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        !overlap_entries.is_empty(),
+        "expected at least one overlap_prev PNG in {}, found {:?}",
+        debug_dir.display(),
+        std::fs::read_dir(&debug_dir)
+            .map(|it| it.filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+
     let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+/// Verifies that `--disable-akaze` actually skips AKAZE: feeds the binary an
+/// AKAZE-fallback canvas (repeated grid + sparse corners), then runs twice —
+/// once with the feature available, once with `--disable-akaze`. The report
+/// from the first run must contain at least one `"method": "Akaze"` entry;
+/// the second must contain none. If `--disable-akaze` is silently broken,
+/// the second assertion fails.
+#[cfg(feature = "akaze")]
+#[test]
+fn rollshot_stitch_folder_disable_akaze_skips_akaze() {
+    let tempdir = tempdir_for_test("rollshot-stitch-folder-disable-akaze");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+
+    let canvas = make_akaze_fallback_smoke_canvas(320, 820);
+    for (idx, y) in [0u32, 96, 192].iter().enumerate() {
+        let frame = imageops::crop_imm(&canvas, 0, *y, 320, 320).to_image();
+        frame
+            .save(frames_dir.join(format!("frame_{idx:03}.png")))
+            .expect("save frame");
+    }
+
+    let run = |label: &str, extra_args: &[&str]| -> String {
+        let output_png = tempdir.join(format!("stitched_{label}.png"));
+        let report_json = tempdir.join(format!("report_{label}.json"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+        cmd.arg("stitch-folder")
+            .arg(&frames_dir)
+            .arg("--output")
+            .arg(&output_png)
+            .arg("--debug-match-report")
+            .arg(&report_json);
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        let output = cmd.output().expect("run rollshot stitch-folder");
+        assert!(
+            output.status.success(),
+            "{label} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(&report_json).expect("read report")
+    };
+
+    let with_akaze = run("with", &[]);
+    let without_akaze = run("without", &["--disable-akaze"]);
+
+    assert!(
+        with_akaze.contains("\"method\": \"Akaze\""),
+        "expected AKAZE to fire in baseline run, report = {with_akaze}"
+    );
+    assert!(
+        !without_akaze.contains("\"method\": \"Akaze\""),
+        "--disable-akaze should suppress AKAZE entirely, report = {without_akaze}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+/// AKAZE-friendly canvas: repeated grid (cheap matchers can't disambiguate)
+/// with sparse unique corners (AKAZE can vote). Mirrors the
+/// `make_akaze_fixture_canvas` used by the golden fixture.
+#[cfg(feature = "akaze")]
+fn make_akaze_fallback_smoke_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([246, 246, 246, 255]));
+    for y in 0..height {
+        for x in 0..width {
+            let v = if (x / 18 + y / 18) % 2 == 0 { 232 } else { 214 };
+            img.put_pixel(x, y, Rgba([v, v, v, 255]));
+        }
+    }
+    for i in 0..90u32 {
+        let x = 20 + ((i * 43) % width.saturating_sub(40).max(1));
+        let y = 20 + ((i * 61) % height.saturating_sub(40).max(1));
+        let color = Rgba([
+            (20 + (i * 19) % 180) as u8,
+            (30 + (i * 23) % 160) as u8,
+            (40 + (i * 29) % 150) as u8,
+            255,
+        ]);
+        for yy in y..(y + 9).min(height) {
+            for xx in x..(x + 9).min(width) {
+                if xx == x || yy == y || xx + 1 == x + 9 || yy + 1 == y + 9 || xx == x + yy - y {
+                    img.put_pixel(xx, yy, color);
+                }
+            }
+        }
+    }
+    img
 }
 ```
 
@@ -1917,15 +2329,16 @@ if let Some(path) = args.debug_match_report.as_ref() {
 }
 ```
 
-- [ ] **Step 6: Run CLI debug test**
+- [ ] **Step 6: Run CLI debug tests**
 
 Run:
 
 ```bash
 rtk cargo test -p rollshot-cli --test cli_smoke rollshot_stitch_folder_writes_debug_report -- --nocapture
+rtk cargo test -p rollshot-cli --features akaze --test cli_smoke rollshot_stitch_folder_disable_akaze_skips_akaze -- --nocapture
 ```
 
-Expected: PASS. The report JSON contains frame outcomes and the debug directory contains overlap images for appended frames.
+Expected: PASS for both. The baseline test asserts the report JSON contains frame outcomes AND that the debug directory contains at least one `*_overlap_prev.png`. The AKAZE-feature test asserts that `--disable-akaze` produces a report without any `"method": "Akaze"` entry while the same fixture WITH AKAZE enabled produces at least one such entry — proving the diagnostic switch actually fires.
 
 - [ ] **Step 7: Run normal CLI smoke test**
 
