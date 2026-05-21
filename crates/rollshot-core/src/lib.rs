@@ -5,4 +5,7 @@ mod stitcher;
 mod types;
 
 pub use stitcher::Stitcher;
-pub use types::{MatchAlgorithm, OffsetEstimate, StitchConfig, StitchOutcome, StitchStats};
+pub use types::{
+    AppendDirection, MatchMethod, MatchStrategy, MotionCandidate, MotionEstimate, NoMatchReason,
+    OverlapRegion, ScrollAxis, StitchConfig, StitchOutcome, StitchStats, VerifierConfig,
+};
