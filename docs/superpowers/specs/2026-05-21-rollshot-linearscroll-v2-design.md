@@ -392,6 +392,53 @@ not assume rollshot's `image::RgbaImage` can be passed directly to
 - verify a better crates.io release exists before implementation and update this
   spec or plan with the exact version.
 
+The relevant crates.io `akaze 0.7.0` API shape is:
+
+```rust
+pub struct Akaze {
+    pub detector_threshold: f64,
+    pub num_sublevels: u32,
+    pub max_octave_evolution: u32,
+    pub base_scale_offset: f64,
+    pub initial_contrast: f64,
+    pub contrast_percentile: f64,
+    pub contrast_factor_num_bins: usize,
+    pub derivative_factor: f64,
+    pub descriptor_channels: usize,
+    pub descriptor_pattern_size: usize,
+}
+
+pub struct KeyPoint {
+    pub point: (f32, f32),
+    pub response: f32,
+    pub size: f32,
+    pub octave: usize,
+    pub class_id: usize,
+    pub angle: f32,
+}
+
+impl Akaze {
+    pub fn new(threshold: f64) -> Self;
+    pub fn sparse() -> Self;
+    pub fn dense() -> Self;
+    pub fn extract(&self, image: &DynamicImage) -> (Vec<KeyPoint>, Vec<BitArray<64>>);
+}
+```
+
+`learn-projects/rust-cv` currently shows a newer local `Akaze` shape with a
+`maximum_features` field, but crates.io `akaze 0.7.0` does not expose that
+field. Therefore rollshot's `AkazeConfig::max_features` is an internal cap
+applied after extraction, keeping keypoints and `BitArray<64>` descriptors
+aligned. It is not assigned to an `akaze::Akaze` field unless a future crates.io
+release exposes one.
+
+The feature-matching tutorial under `learn-projects/rust-cv` uses the umbrella
+`cv` crate's re-exported `LinearKnn` API. Rollshot should not depend on that
+umbrella crate for v0.2. With direct crates.io dependencies, descriptor matching
+should use `bitarray::BitArray<64>` plus either `space 0.10.3`'s
+`linear_knn`/`Neighbor` API or a small brute-force Hamming matcher local to
+rollshot if the direct `space` API is simpler than pulling `cv`.
+
 The intended default is:
 
 - `AutoHybrid` can call AKAZE when the binary is built with AKAZE support.
@@ -423,7 +470,7 @@ Initial config:
 pub struct AkazeConfig {
     pub enabled: bool,
     pub max_features: usize,
-    pub detector_threshold: f32,
+    pub detector_threshold: f64,
     pub min_raw_matches: usize,
     pub min_inliers: usize,
     pub min_inlier_ratio: f32,
@@ -434,7 +481,7 @@ Defaults:
 
 ```text
 enabled = true when AKAZE support is compiled
-max_features = 1200
+max_features = 1200, applied after extraction for crates.io akaze 0.7.0
 detector_threshold = 0.001
 min_raw_matches = 24
 min_inliers = 16
