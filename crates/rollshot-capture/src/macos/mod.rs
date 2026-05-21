@@ -19,7 +19,6 @@ const EMPTY_FRAME_LIMIT: u8 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameProcessOutcome {
-    Audio,
     Empty,
 }
 
@@ -130,7 +129,7 @@ impl FrameStream for MacosScapFrameStream {
 
             match process_scap_frame(frame, &mut empty_frames, self.effective_region)? {
                 Ok(captured) => return Ok(captured),
-                Err(FrameProcessOutcome::Audio | FrameProcessOutcome::Empty) => continue,
+                Err(FrameProcessOutcome::Empty) => continue,
             }
         }
     }
@@ -142,8 +141,7 @@ fn process_scap_frame(
     effective_region: Option<Region>,
 ) -> Result<Result<CapturedFrame, FrameProcessOutcome>, CaptureError> {
     match frame {
-        scap::frame::Frame::Audio(_) => Ok(Err(FrameProcessOutcome::Audio)),
-        scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(frame)) => {
+        scap::frame::Frame::BGRA(frame) => {
             if frame.width <= 0 || frame.height <= 0 || frame.data.is_empty() {
                 *empty_frames += 1;
                 if *empty_frames >= EMPTY_FRAME_LIMIT {
@@ -156,14 +154,18 @@ fn process_scap_frame(
 
             captured_frame_from_bgra(frame, effective_region).map(Ok)
         }
-        scap::frame::Frame::Video(other) => Err(CaptureError::Backend(anyhow!(
+        other => Err(CaptureError::Backend(anyhow!(
             "unsupported scap video frame type: {other:?}"
         ))),
     }
 }
 
-fn capturer_build_error_to_capture_error(err: scap::capturer::CapturerBuildError) -> CaptureError {
-    match err {
+fn capturer_build_error_to_capture_error(err: anyhow::Error) -> CaptureError {
+    let Some(build_error) = err.downcast_ref::<scap::capturer::CapturerBuildError>() else {
+        return CaptureError::Backend(err);
+    };
+
+    match build_error {
         scap::capturer::CapturerBuildError::NotSupported => CaptureError::Unsupported {
             message: "scap macOS capture is not supported on this host".to_string(),
         },
@@ -212,13 +214,12 @@ mod tests {
     #[test]
     fn process_scap_frame_errors_after_empty_frame_limit() {
         let mut empty_frames = EMPTY_FRAME_LIMIT - 1;
-        let frame =
-            scap::frame::Frame::Video(scap::frame::VideoFrame::BGRA(scap::frame::BGRAFrame {
-                display_time: std::time::SystemTime::now(),
-                width: 0,
-                height: 0,
-                data: Vec::new(),
-            }));
+        let frame = scap::frame::Frame::BGRA(scap::frame::BGRAFrame {
+            display_time: 0,
+            width: 0,
+            height: 0,
+            data: Vec::new(),
+        });
 
         let err = process_scap_frame(frame, &mut empty_frames, None)
             .expect_err("empty frame limit reached");

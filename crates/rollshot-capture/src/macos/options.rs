@@ -17,8 +17,6 @@ pub(super) fn options_to_scap_options(
         output_type: scap::frame::FrameType::BGRAFrame,
         output_resolution: scap::capturer::Resolution::Captured,
         excluded_targets: None,
-        captures_audio: false,
-        exclude_current_process_audio: false,
     })
 }
 
@@ -120,8 +118,6 @@ mod tests {
         assert_eq!(scap_options.fps, 12);
         assert!(scap_options.show_cursor);
         assert!(!scap_options.show_highlight);
-        assert!(!scap_options.captures_audio);
-        assert!(!scap_options.exclude_current_process_audio);
         assert!(matches!(
             scap_options.output_type,
             scap::frame::FrameType::BGRAFrame

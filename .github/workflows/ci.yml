@@ -37,3 +37,9 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Check macOS ScreenCaptureKit feature
+        if: runner.os == 'macOS'
+        run: |
+          cargo check -p rollshot-capture --all-targets --no-default-features --features macos-sck
+          cargo check -p rollshot-cli --all-targets --no-default-features --features macos-sck

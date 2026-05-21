@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use image::RgbaImage;
+use std::time::SystemTime;
 
 use crate::error::CaptureError;
 use crate::types::{CapturedFrame, FrameMetadata, PixelFormat, Region, Size};
@@ -26,7 +27,7 @@ pub(super) fn captured_frame_from_bgra(
 
     Ok(CapturedFrame {
         image,
-        timestamp: frame.display_time,
+        timestamp: SystemTime::now(),
         metadata: FrameMetadata {
             source_size: Some(Size { width, height }),
             effective_region,
