@@ -9,7 +9,6 @@ const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
 const SIDE_IGNORE_RATIO: f32 = 0.04;
 const MIN_IGNORE_PX: u32 = 24;
-const TEMPLATE_MIN_HEIGHT: u32 = 48;
 const COARSE_DOWNSAMPLE_STEP: u32 = 4;
 const EDGE_PROJECTION_STEP: u32 = 2;
 
@@ -102,8 +101,9 @@ fn rank_verified_candidates(
 
         let verifier_score = match verifier.verify(prev, curr, &candidate) {
             VerifierOutcome::Pass { score, .. } => score,
-            VerifierOutcome::InsufficientOverlap
-            | VerifierOutcome::OverlapDisagreement { .. } => continue,
+            VerifierOutcome::InsufficientOverlap | VerifierOutcome::OverlapDisagreement { .. } => {
+                continue
+            }
         };
 
         candidate.score = (candidate.score + verifier_score * 0.5).clamp(0.0, 1.0);
@@ -219,6 +219,7 @@ fn template_candidates(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_template_axis(
     prev_gray: &[f32],
     curr_gray: &[f32],
@@ -251,24 +252,12 @@ fn search_template_axis(
 
     for offset in signed_predict_iter(max_offset, last_offset) {
         let score = match axis {
-            SearchAxis::Vertical => ncc_score_shifted(
-                prev_gray,
-                curr_gray,
-                width,
-                height,
-                region,
-                0,
-                offset,
-            ),
-            SearchAxis::Horizontal => ncc_score_shifted(
-                prev_gray,
-                curr_gray,
-                width,
-                height,
-                region,
-                offset,
-                0,
-            ),
+            SearchAxis::Vertical => {
+                ncc_score_shifted(prev_gray, curr_gray, width, height, region, 0, offset)
+            }
+            SearchAxis::Horizontal => {
+                ncc_score_shifted(prev_gray, curr_gray, width, height, region, offset, 0)
+            }
         };
 
         if score > best_score {
@@ -340,12 +329,20 @@ fn coarse_candidates(
     let mut scored = Vec::new();
 
     let dx_values: Vec<i32> = match locked_axis {
-        Some(ScrollAxis::Vertical) => (-config.max_cross_axis_px..=config.max_cross_axis_px).collect(),
-        _ => ((-max_dx / step)..=(max_dx / step)).map(|n| n * step).collect(),
+        Some(ScrollAxis::Vertical) => {
+            (-config.max_cross_axis_px..=config.max_cross_axis_px).collect()
+        }
+        _ => ((-max_dx / step)..=(max_dx / step))
+            .map(|n| n * step)
+            .collect(),
     };
     let dy_values: Vec<i32> = match locked_axis {
-        Some(ScrollAxis::Horizontal) => (-config.max_cross_axis_px..=config.max_cross_axis_px).collect(),
-        _ => ((-max_dy / step)..=(max_dy / step)).map(|n| n * step).collect(),
+        Some(ScrollAxis::Horizontal) => {
+            (-config.max_cross_axis_px..=config.max_cross_axis_px).collect()
+        }
+        _ => ((-max_dy / step)..=(max_dy / step))
+            .map(|n| n * step)
+            .collect(),
     };
 
     for dy in dy_values {
@@ -432,14 +429,9 @@ fn edge_projection_candidates(
     let mut out = Vec::new();
 
     for axis in search_axes(locked_axis) {
-        if let Some(candidate) = edge_projection_axis(
-            prev_gray,
-            curr_gray,
-            width,
-            height,
-            *axis,
-            config,
-        ) {
+        if let Some(candidate) =
+            edge_projection_axis(prev_gray, curr_gray, width, height, *axis, config)
+        {
             out.push(candidate);
         }
     }
@@ -467,7 +459,12 @@ fn edge_projection_axis(
     let curr_proj = edge_projection(curr_gray, width, height, axis);
     let mut scored = Vec::new();
     for offset in signed_predict_iter(max_offset, 0) {
-        let score = projection_mad(&prev_proj, &curr_proj, offset, EDGE_PROJECTION_STEP as usize);
+        let score = projection_mad(
+            &prev_proj,
+            &curr_proj,
+            offset,
+            EDGE_PROJECTION_STEP as usize,
+        );
         if score.is_finite() {
             scored.push((score, offset));
         }
@@ -627,7 +624,7 @@ fn ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{content_roi, estimate_motion};
-    use crate::types::{MatchMethod, ScrollAxis, StitchConfig};
+    use crate::types::{ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -717,7 +714,8 @@ mod tests {
             min_overlap: 280,
             ..StitchConfig::default()
         };
-        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &config).expect("template candidate");
+        let candidate =
+            estimate_motion(&prev, &curr, None, (0, 0), &config).expect("template candidate");
         assert!(
             candidate.dy <= 40,
             "dy = {} exceeds bounded search",
@@ -730,8 +728,8 @@ mod tests {
         let canvas = make_textured_canvas(160, 600);
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
-        let candidate =
-            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).expect("template candidate");
+        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default())
+            .expect("template candidate");
         assert_eq!(candidate.dx, 0);
         assert!(
             (candidate.dy - 40).abs() <= 2,
@@ -760,14 +758,8 @@ mod tests {
         let prev = crop(&canvas, 220, 160);
         let curr = crop(&canvas, 180, 160);
 
-        let candidate = estimate_motion(
-            &prev,
-            &curr,
-            None,
-            (0, 0),
-            &StitchConfig::default(),
-        )
-        .expect("template candidate");
+        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default())
+            .expect("template candidate");
 
         assert_eq!(candidate.dx, 0);
         assert!(
@@ -783,14 +775,8 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 40, 0, 160, 160);
 
-        let candidate = estimate_motion(
-            &prev,
-            &curr,
-            None,
-            (0, 0),
-            &StitchConfig::default(),
-        )
-        .expect("horizontal candidate");
+        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default())
+            .expect("horizontal candidate");
 
         assert_eq!(candidate.dy, 0);
         assert!(
@@ -846,13 +832,7 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 0, 32, 160, 160);
 
-        let candidate = estimate_motion(
-            &prev,
-            &curr,
-            None,
-            (0, 0),
-            &StitchConfig::default(),
-        );
+        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default());
 
         assert!(candidate.is_none());
     }
