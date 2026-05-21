@@ -340,22 +340,26 @@ through ROI exclusion. Semantic masks are out of scope for v0.2.
 AKAZE fallback is required behavior for v0.2, but the external dependency may
 be Cargo-feature-gated.
 
-Use crates.io releases, not local path crates from `learn-projects/rust-cv`.
-`learn-projects/rust-cv` is reference material for API shape and examples only.
+Use the upstream rust-cv git repository pinned to an exact commit. Do not use
+local path crates from `learn-projects/rust-cv`; that checkout is reference
+material for API shape and examples only.
 
-As of 2026-05-21, the crates.io dependency contract is:
+As of 2026-05-21, crates.io `akaze 0.7.0` is too stale for v0.2 planning. It
+uses old dependency versions, including `image 0.23.6`, while rust-cv main at
+commit `d271a9ac6a9d7b39c6f22573d26d63b5ce94f3cb` uses `image 0.25` and exposes
+the current `Akaze` API this plan expects.
+
+The dependency contract is:
 
 ```toml
 [workspace.dependencies]
-# Direct feature extractor. Latest crates.io release checked for v0.2 planning.
-akaze = "0.7.0"
+# Direct feature extractor from the upstream rust-cv workspace.
+# Cargo can find the `akaze` workspace member from the repository root URL.
+akaze = { git = "https://github.com/rust-cv/cv.git", rev = "d271a9ac6a9d7b39c6f22573d26d63b5ce94f3cb" }
 
-# Match the descriptor/matching ecosystem used by crates.io akaze 0.7.0.
-# Do not use bitarray 0.10.x or space 0.19.x unless akaze publishes a compatible
-# release; those are newer crates.io releases but are not the versions akaze 0.7.0
-# exposes through its descriptor types.
-bitarray = { version = "0.2.3", features = ["space"] }
-space = "0.10.3"
+# Match the descriptor/matching ecosystem used by that commit.
+bitarray = { version = "0.9.0", features = ["space"] }
+space = "0.17.0"
 ```
 
 ```toml
@@ -370,32 +374,25 @@ default = []
 akaze = ["dep:akaze", "dep:bitarray", "dep:space"]
 ```
 
-The relevant crates.io feature surface is:
+The relevant feature surface is:
 
-- `akaze 0.7.0`: no crate features are required for rollshot's matcher path in
-  the crates.io release.
-- `bitarray 0.2.3`: feature `space` integrates descriptors with the `space`
+- git `akaze` at `d271a9ac6a9d7b39c6f22573d26d63b5ce94f3cb`: no crate feature
+  is required for rollshot's matcher path. Optional upstream features such as
+  `serde` and `rayon` are not part of the v0.2 baseline.
+- `bitarray 0.9.0`: feature `space` integrates descriptors with the `space`
   metric traits.
-- `space 0.10.3`: no feature is required for `linear_knn`; optional features
-  such as `alloc`, `candidates-vec`, `hamming-vec`, and SIMD variants are not
-  part of the v0.2 plan.
+- `space 0.17.0`: default features are acceptable for v0.2. Do not enable
+  optional SIMD features unless profiling shows descriptor matching is a real
+  bottleneck.
 - `cv 0.6.0`: has feature `akaze`, but the umbrella crate enables many
   unrelated computer-vision features by default. Do not use `cv` unless direct
   `akaze` integration fails for a concrete technical reason.
 
-There is one important version mismatch: crates.io `akaze 0.7.0` depends on
-`image 0.23.6`, while rollshot currently uses `image 0.25`. The AKAZE plan must
-not assume rollshot's `image::RgbaImage` can be passed directly to
-`akaze::Akaze::extract`. The implementation should either:
-
-- create an `image 0.23.6` `DynamicImage` adapter under the `akaze` feature, or
-- verify a better crates.io release exists before implementation and update this
-  spec or plan with the exact version.
-
-The relevant crates.io `akaze 0.7.0` API shape is:
+The relevant git `akaze` API shape at the pinned commit is:
 
 ```rust
 pub struct Akaze {
+    pub maximum_features: usize,
     pub detector_threshold: f64,
     pub num_sublevels: u32,
     pub max_octave_evolution: u32,
@@ -425,17 +422,14 @@ impl Akaze {
 }
 ```
 
-`learn-projects/rust-cv` currently shows a newer local `Akaze` shape with a
-`maximum_features` field, but crates.io `akaze 0.7.0` does not expose that
-field. Therefore rollshot's `AkazeConfig::max_features` is an internal cap
-applied after extraction, keeping keypoints and `BitArray<64>` descriptors
-aligned. It is not assigned to an `akaze::Akaze` field unless a future crates.io
-release exposes one.
+`AkazeConfig::max_features` maps to `akaze::Akaze::maximum_features` at the
+pinned git commit. If a future rust-cv commit changes this field or publishes a
+fresh crates.io release, update this spec and the implementation plan together.
 
 The feature-matching tutorial under `learn-projects/rust-cv` uses the umbrella
 `cv` crate's re-exported `LinearKnn` API. Rollshot should not depend on that
-umbrella crate for v0.2. With direct crates.io dependencies, descriptor matching
-should use `bitarray::BitArray<64>` plus either `space 0.10.3`'s
+umbrella crate for v0.2. With direct dependencies, descriptor matching should
+use `bitarray::BitArray<64>` plus either `space 0.17.0`'s
 `linear_knn`/`Neighbor` API or a small brute-force Hamming matcher local to
 rollshot if the direct `space` API is simpler than pulling `cv`.
 
@@ -481,7 +475,7 @@ Defaults:
 
 ```text
 enabled = true when AKAZE support is compiled
-max_features = 1200, applied after extraction for crates.io akaze 0.7.0
+max_features = 1200, assigned to akaze::Akaze::maximum_features
 detector_threshold = 0.001
 min_raw_matches = 24
 min_inliers = 16
