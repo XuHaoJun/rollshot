@@ -142,6 +142,11 @@ pub struct MotionEstimate {
 pub enum NoMatchReason {
     LowConfidence,
     AmbiguousAxis,
+    /// The candidate's cross-axis movement exceeded `max_cross_axis_px` while a
+    /// scroll axis was already locked. Plan 1 cannot reach this through real
+    /// frames (matcher always returns `dx = 0`); Plan 2's horizontal matching
+    /// exercises it.
+    CrossAxisTooLarge,
     InsufficientOverlap,
     OverlapVerificationFailed,
     NotEnoughFeatures,
@@ -350,7 +355,7 @@ git commit -m "feat(core): introduce v0.2 motion/canvas type vocabulary"
 - Create: `crates/rollshot-core/src/overlap.rs`
 - Modify: `crates/rollshot-core/src/lib.rs`
 
-- [ ] **Step 1: Add the `overlap` module declaration**
+- [ ] **Step 1: Add module declaration + stub `compute_overlap` alongside failing tests**
 
 Edit `crates/rollshot-core/src/lib.rs` and insert `mod overlap;` alphabetically:
 
@@ -363,9 +368,7 @@ mod stitcher;
 mod types;
 ```
 
-- [ ] **Step 2: Create `overlap.rs` with the failing tests**
-
-Create `crates/rollshot-core/src/overlap.rs` with this body:
+Create `crates/rollshot-core/src/overlap.rs` with the function signature stubbed via `unimplemented!()` and the full test suite already in place:
 
 ```rust
 //! Generic 2D overlap rectangle math, independent of any matcher.
@@ -385,35 +388,8 @@ pub fn compute_overlap(
     dx: i32,
     dy: i32,
 ) -> Option<OverlapRegion> {
-    let prev_w_i = prev_w as i32;
-    let prev_h_i = prev_h as i32;
-    let curr_w_i = curr_w as i32;
-    let curr_h_i = curr_h as i32;
-
-    let x_lo = dx.max(0);
-    let y_lo = dy.max(0);
-    let x_hi = (dx + curr_w_i).min(prev_w_i);
-    let y_hi = (dy + curr_h_i).min(prev_h_i);
-
-    if x_hi <= x_lo || y_hi <= y_lo {
-        return None;
-    }
-
-    let width = (x_hi - x_lo) as u32;
-    let height = (y_hi - y_lo) as u32;
-    let prev_x = x_lo as u32;
-    let prev_y = y_lo as u32;
-    let curr_x = (x_lo - dx) as u32;
-    let curr_y = (y_lo - dy) as u32;
-
-    Some(OverlapRegion {
-        prev_x,
-        prev_y,
-        curr_x,
-        curr_y,
-        width,
-        height,
-    })
+    let _ = (prev_w, prev_h, curr_w, curr_h, dx, dy);
+    unimplemented!("Task 2 Step 3 fills this in")
 }
 
 #[cfg(test)]
@@ -493,12 +469,62 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the overlap tests**
+- [ ] **Step 2: Run tests to confirm RED**
+
+Run: `rtk cargo test -p rollshot-core --lib overlap::tests`
+Expected: FAIL — every test panics with `not implemented: Task 2 Step 3 fills this in`.
+
+- [ ] **Step 3: Implement `compute_overlap`**
+
+Replace the stubbed body in `crates/rollshot-core/src/overlap.rs` with the real implementation:
+
+```rust
+pub fn compute_overlap(
+    prev_w: u32,
+    prev_h: u32,
+    curr_w: u32,
+    curr_h: u32,
+    dx: i32,
+    dy: i32,
+) -> Option<OverlapRegion> {
+    let prev_w_i = prev_w as i32;
+    let prev_h_i = prev_h as i32;
+    let curr_w_i = curr_w as i32;
+    let curr_h_i = curr_h as i32;
+
+    let x_lo = dx.max(0);
+    let y_lo = dy.max(0);
+    let x_hi = (dx + curr_w_i).min(prev_w_i);
+    let y_hi = (dy + curr_h_i).min(prev_h_i);
+
+    if x_hi <= x_lo || y_hi <= y_lo {
+        return None;
+    }
+
+    let width = (x_hi - x_lo) as u32;
+    let height = (y_hi - y_lo) as u32;
+    let prev_x = x_lo as u32;
+    let prev_y = y_lo as u32;
+    let curr_x = (x_lo - dx) as u32;
+    let curr_y = (y_lo - dy) as u32;
+
+    Some(OverlapRegion {
+        prev_x,
+        prev_y,
+        curr_x,
+        curr_y,
+        width,
+        height,
+    })
+}
+```
+
+- [ ] **Step 4: Run tests to confirm GREEN**
 
 Run: `rtk cargo test -p rollshot-core --lib overlap::tests`
 Expected: PASS — all seven test cases.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/rollshot-core/src/overlap.rs crates/rollshot-core/src/lib.rs
@@ -513,7 +539,7 @@ git commit -m "feat(core): add generic 2D overlap rectangle helper"
 - Create: `crates/rollshot-core/src/verifier.rs`
 - Modify: `crates/rollshot-core/src/lib.rs`
 
-- [ ] **Step 1: Add the `verifier` module declaration**
+- [ ] **Step 1: Add module declaration + stub `verify` alongside failing tests**
 
 Edit `crates/rollshot-core/src/lib.rs`, insert `mod verifier;` alphabetically:
 
@@ -527,16 +553,13 @@ mod types;
 mod verifier;
 ```
 
-- [ ] **Step 2: Create `verifier.rs` with the verifier implementation and tests**
-
-Create `crates/rollshot-core/src/verifier.rs`:
+Create `crates/rollshot-core/src/verifier.rs` with the public types in place, `verify` stubbed via `unimplemented!()`, and the full test suite:
 
 ```rust
 //! Pixel-overlap verifier shared by every motion candidate.
 
-use image::{Rgba, RgbaImage};
+use image::RgbaImage;
 
-use crate::overlap::compute_overlap;
 use crate::types::{MotionCandidate, OverlapRegion, VerifierConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -572,104 +595,9 @@ impl<'a> PixelOverlapVerifier<'a> {
         curr: &RgbaImage,
         candidate: &MotionCandidate,
     ) -> VerifierOutcome {
-        let region = match compute_overlap(
-            prev.width(),
-            prev.height(),
-            curr.width(),
-            curr.height(),
-            candidate.dx,
-            candidate.dy,
-        ) {
-            Some(r) => r,
-            None => return VerifierOutcome::InsufficientOverlap,
-        };
-
-        if region.area() < self.min_overlap_area {
-            return VerifierOutcome::InsufficientOverlap;
-        }
-
-        let downsample_mad = downsampled_mad(prev, curr, region, self.config.downsample_step);
-        if !downsample_mad.is_finite() || downsample_mad > self.config.downsample_max_mad {
-            return VerifierOutcome::OverlapDisagreement {
-                downsample_mad,
-                full_mad: f32::NAN,
-            };
-        }
-
-        let full_mad = sample_band_mad(prev, curr, region, self.config.sample_band);
-        if !full_mad.is_finite() || full_mad > self.config.full_res_max_mad {
-            return VerifierOutcome::OverlapDisagreement {
-                downsample_mad,
-                full_mad,
-            };
-        }
-
-        let score = full_mad.clamp(0.0, 1.0);
-        VerifierOutcome::Pass {
-            overlap: region,
-            score,
-        }
+        let _ = (prev, curr, candidate, self.config, self.min_overlap_area);
+        unimplemented!("Task 3 Step 3 fills this in")
     }
-}
-
-fn pixel_gray(img: &RgbaImage, x: u32, y: u32) -> f32 {
-    let Rgba([r, g, b, _]) = *img.get_pixel(x, y);
-    0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
-}
-
-fn downsampled_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, step: u32) -> f32 {
-    let step = step.max(1);
-    let mut sum = 0.0f32;
-    let mut count = 0u32;
-    let mut row = 0u32;
-    while row < r.height {
-        let mut col = 0u32;
-        while col < r.width {
-            let p = pixel_gray(prev, r.prev_x + col, r.prev_y + row);
-            let c = pixel_gray(curr, r.curr_x + col, r.curr_y + row);
-            sum += (p - c).abs();
-            count += 1;
-            col += step;
-        }
-        row += step;
-    }
-    if count == 0 {
-        return f32::INFINITY;
-    }
-    sum / (count as f32 * 255.0)
-}
-
-fn sample_band_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, sample_band: u32) -> f32 {
-    if r.width == 0 || r.height == 0 {
-        return f32::INFINITY;
-    }
-    let band_h = sample_band.min(r.height).max(1);
-    let band_w = sample_band.min(r.width).max(1);
-    // Walk the trailing band along the longer axis so vertical motion samples
-    // the bottom rows of the overlap and horizontal motion samples its right
-    // columns. This mirrors how scrolling content presents new pixels.
-    let (use_h, use_w) = if r.height >= r.width {
-        (band_h, r.width)
-    } else {
-        (r.height, band_w)
-    };
-    let row_start = r.height - use_h;
-    let col_start = r.width - use_w;
-
-    let mut sum = 0.0f32;
-    let mut count = 0u32;
-    for row in 0..use_h {
-        for col in 0..use_w {
-            let p = pixel_gray(prev, r.prev_x + col_start + col, r.prev_y + row_start + row);
-            let c = pixel_gray(curr, r.curr_x + col_start + col, r.curr_y + row_start + row);
-            sum += (p - c).abs();
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return f32::INFINITY;
-    }
-    sum / (count as f32 * 255.0)
 }
 
 #[cfg(test)]
@@ -776,12 +704,143 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the verifier tests**
+- [ ] **Step 2: Run tests to confirm RED**
+
+Run: `rtk cargo test -p rollshot-core --lib verifier::tests`
+Expected: FAIL — every test panics with `not implemented: Task 3 Step 3 fills this in`.
+
+- [ ] **Step 3: Implement `verify` and its grayscale-MAD helpers**
+
+In `crates/rollshot-core/src/verifier.rs`, replace the `use` lines to add `Rgba` and the overlap import, replace the stubbed `verify` body with the real implementation, and add the three private helpers below the `impl` block.
+
+First, replace the top of the file (`use image::RgbaImage;` and `use crate::types::...`) with:
+
+```rust
+use image::{Rgba, RgbaImage};
+
+use crate::overlap::compute_overlap;
+use crate::types::{MotionCandidate, OverlapRegion, VerifierConfig};
+```
+
+Then replace the stubbed `verify` body:
+
+```rust
+    pub fn verify(
+        &self,
+        prev: &RgbaImage,
+        curr: &RgbaImage,
+        candidate: &MotionCandidate,
+    ) -> VerifierOutcome {
+        let region = match compute_overlap(
+            prev.width(),
+            prev.height(),
+            curr.width(),
+            curr.height(),
+            candidate.dx,
+            candidate.dy,
+        ) {
+            Some(r) => r,
+            None => return VerifierOutcome::InsufficientOverlap,
+        };
+
+        if region.area() < self.min_overlap_area {
+            return VerifierOutcome::InsufficientOverlap;
+        }
+
+        let downsample_mad = downsampled_mad(prev, curr, region, self.config.downsample_step);
+        if !downsample_mad.is_finite() || downsample_mad > self.config.downsample_max_mad {
+            return VerifierOutcome::OverlapDisagreement {
+                downsample_mad,
+                full_mad: f32::NAN,
+            };
+        }
+
+        let full_mad = sample_band_mad(prev, curr, region, self.config.sample_band);
+        if !full_mad.is_finite() || full_mad > self.config.full_res_max_mad {
+            return VerifierOutcome::OverlapDisagreement {
+                downsample_mad,
+                full_mad,
+            };
+        }
+
+        let score = full_mad.clamp(0.0, 1.0);
+        VerifierOutcome::Pass {
+            overlap: region,
+            score,
+        }
+    }
+```
+
+Then add these three private helpers immediately after the `impl PixelOverlapVerifier` block (before `#[cfg(test)]`):
+
+```rust
+fn pixel_gray(img: &RgbaImage, x: u32, y: u32) -> f32 {
+    let Rgba([r, g, b, _]) = *img.get_pixel(x, y);
+    0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+}
+
+fn downsampled_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, step: u32) -> f32 {
+    let step = step.max(1);
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    let mut row = 0u32;
+    while row < r.height {
+        let mut col = 0u32;
+        while col < r.width {
+            let p = pixel_gray(prev, r.prev_x + col, r.prev_y + row);
+            let c = pixel_gray(curr, r.curr_x + col, r.curr_y + row);
+            sum += (p - c).abs();
+            count += 1;
+            col += step;
+        }
+        row += step;
+    }
+    if count == 0 {
+        return f32::INFINITY;
+    }
+    sum / (count as f32 * 255.0)
+}
+
+fn sample_band_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, sample_band: u32) -> f32 {
+    if r.width == 0 || r.height == 0 {
+        return f32::INFINITY;
+    }
+    let band_h = sample_band.min(r.height).max(1);
+    let band_w = sample_band.min(r.width).max(1);
+    // Walk the trailing band along the longer axis so vertical motion samples
+    // the bottom rows of the overlap and horizontal motion samples its right
+    // columns. This mirrors how scrolling content presents new pixels.
+    let (use_h, use_w) = if r.height >= r.width {
+        (band_h, r.width)
+    } else {
+        (r.height, band_w)
+    };
+    let row_start = r.height - use_h;
+    let col_start = r.width - use_w;
+
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for row in 0..use_h {
+        for col in 0..use_w {
+            let p = pixel_gray(prev, r.prev_x + col_start + col, r.prev_y + row_start + row);
+            let c = pixel_gray(curr, r.curr_x + col_start + col, r.curr_y + row_start + row);
+            sum += (p - c).abs();
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return f32::INFINITY;
+    }
+    sum / (count as f32 * 255.0)
+}
+```
+
+- [ ] **Step 4: Run tests to confirm GREEN**
 
 Run: `rtk cargo test -p rollshot-core --lib verifier::tests`
 Expected: PASS — five test cases.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/rollshot-core/src/verifier.rs crates/rollshot-core/src/lib.rs
@@ -796,7 +855,7 @@ git commit -m "feat(core): add generic pixel overlap verifier"
 - Create: `crates/rollshot-core/src/canvas.rs`
 - Modify: `crates/rollshot-core/src/lib.rs`
 
-- [ ] **Step 1: Add the `canvas` module declaration and re-export**
+- [ ] **Step 1: Add module declaration + re-export, then stub `append` alongside failing tests**
 
 Edit `crates/rollshot-core/src/lib.rs`:
 
@@ -818,14 +877,12 @@ pub use types::{
 };
 ```
 
-- [ ] **Step 2: Create `canvas.rs` with `LinearCanvas` and unit tests**
-
-Create `crates/rollshot-core/src/canvas.rs`:
+Create `crates/rollshot-core/src/canvas.rs` with the public types in place, the `append` body stubbed via `unimplemented!()`, and the full test suite (nine tests):
 
 ```rust
 //! Single-axis stitched canvas that can grow in four directions.
 
-use image::{GenericImage, GenericImageView, RgbaImage};
+use image::RgbaImage;
 
 use crate::types::{AppendDirection, ScrollAxis};
 
@@ -888,102 +945,8 @@ impl LinearCanvas {
         frame: &RgbaImage,
         slice_px: u32,
     ) -> Result<u32, CanvasAppendError> {
-        let target_axis = direction.axis();
-        if let Some(locked) = self.axis {
-            if locked != target_axis {
-                return Err(CanvasAppendError::AxisMismatch {
-                    locked,
-                    attempted: target_axis,
-                });
-            }
-        }
-
-        match target_axis {
-            ScrollAxis::Vertical => {
-                if frame.width() != self.image.width() {
-                    return Err(CanvasAppendError::DimensionMismatch {
-                        canvas: self.image.width(),
-                        frame: frame.width(),
-                    });
-                }
-            }
-            ScrollAxis::Horizontal => {
-                if frame.height() != self.image.height() {
-                    return Err(CanvasAppendError::DimensionMismatch {
-                        canvas: self.image.height(),
-                        frame: frame.height(),
-                    });
-                }
-            }
-        }
-
-        if slice_px == 0 {
-            return Err(CanvasAppendError::EmptyAppend);
-        }
-
-        let added = match direction {
-            AppendDirection::Bottom => self.append_bottom(frame, slice_px),
-            AppendDirection::Top => self.prepend_top(frame, slice_px),
-            AppendDirection::Right => self.append_right(frame, slice_px),
-            AppendDirection::Left => self.prepend_left(frame, slice_px),
-        };
-
-        self.axis = Some(target_axis);
-        Ok(added)
-    }
-
-    fn append_bottom(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.height());
-        let overlap = frame.height() - slice_px;
-        let slice = frame
-            .view(0, overlap, frame.width(), slice_px)
-            .to_image();
-        let mut combined = RgbaImage::new(self.image.width(), self.image.height() + slice_px);
-        combined.copy_from(&self.image, 0, 0).expect("copy base");
-        combined
-            .copy_from(&slice, 0, self.image.height())
-            .expect("copy slice");
-        self.image = combined;
-        slice_px
-    }
-
-    fn prepend_top(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.height());
-        let slice = frame.view(0, 0, frame.width(), slice_px).to_image();
-        let mut combined = RgbaImage::new(self.image.width(), self.image.height() + slice_px);
-        combined.copy_from(&slice, 0, 0).expect("copy slice");
-        combined
-            .copy_from(&self.image, 0, slice_px)
-            .expect("copy base");
-        self.image = combined;
-        slice_px
-    }
-
-    fn append_right(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.width());
-        let overlap = frame.width() - slice_px;
-        let slice = frame
-            .view(overlap, 0, slice_px, frame.height())
-            .to_image();
-        let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
-        combined.copy_from(&self.image, 0, 0).expect("copy base");
-        combined
-            .copy_from(&slice, self.image.width(), 0)
-            .expect("copy slice");
-        self.image = combined;
-        slice_px
-    }
-
-    fn prepend_left(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.width());
-        let slice = frame.view(0, 0, slice_px, frame.height()).to_image();
-        let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
-        combined.copy_from(&slice, 0, 0).expect("copy slice");
-        combined
-            .copy_from(&self.image, slice_px, 0)
-            .expect("copy base");
-        self.image = combined;
-        slice_px
+        let _ = (direction, frame, slice_px);
+        unimplemented!("Task 4 Step 3 fills this in")
     }
 }
 
@@ -1082,6 +1045,22 @@ mod tests {
     }
 
     #[test]
+    fn dimension_mismatch_in_horizontal_mode_is_reported() {
+        let mut canvas = LinearCanvas::new(solid(4, 4, [0, 0, 0, 255]));
+        let frame = solid(4, 6, [1, 1, 1, 255]);
+        let err = canvas
+            .append(AppendDirection::Right, &frame, 1)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CanvasAppendError::DimensionMismatch {
+                canvas: 4,
+                frame: 6,
+            }
+        );
+    }
+
+    #[test]
     fn zero_slice_px_is_rejected() {
         let mut canvas = LinearCanvas::new(solid(4, 4, [0, 0, 0, 255]));
         let frame = solid(4, 4, [1, 1, 1, 255]);
@@ -1103,12 +1082,137 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the canvas tests**
+- [ ] **Step 2: Run tests to confirm RED**
 
 Run: `rtk cargo test -p rollshot-core --lib canvas::tests`
-Expected: PASS — eight test cases.
+Expected: FAIL — every test panics with `not implemented: Task 4 Step 3 fills this in`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Implement `append` and the four direction helpers**
+
+In `crates/rollshot-core/src/canvas.rs`, replace the top use line `use image::RgbaImage;` with the wider import needed by the helpers:
+
+```rust
+use image::{GenericImage, GenericImageView, RgbaImage};
+```
+
+Replace the stubbed `append` body with the real implementation:
+
+```rust
+    pub fn append(
+        &mut self,
+        direction: AppendDirection,
+        frame: &RgbaImage,
+        slice_px: u32,
+    ) -> Result<u32, CanvasAppendError> {
+        let target_axis = direction.axis();
+        if let Some(locked) = self.axis {
+            if locked != target_axis {
+                return Err(CanvasAppendError::AxisMismatch {
+                    locked,
+                    attempted: target_axis,
+                });
+            }
+        }
+
+        match target_axis {
+            ScrollAxis::Vertical => {
+                if frame.width() != self.image.width() {
+                    return Err(CanvasAppendError::DimensionMismatch {
+                        canvas: self.image.width(),
+                        frame: frame.width(),
+                    });
+                }
+            }
+            ScrollAxis::Horizontal => {
+                if frame.height() != self.image.height() {
+                    return Err(CanvasAppendError::DimensionMismatch {
+                        canvas: self.image.height(),
+                        frame: frame.height(),
+                    });
+                }
+            }
+        }
+
+        if slice_px == 0 {
+            return Err(CanvasAppendError::EmptyAppend);
+        }
+
+        let added = match direction {
+            AppendDirection::Bottom => self.append_bottom(frame, slice_px),
+            AppendDirection::Top => self.prepend_top(frame, slice_px),
+            AppendDirection::Right => self.append_right(frame, slice_px),
+            AppendDirection::Left => self.prepend_left(frame, slice_px),
+        };
+
+        self.axis = Some(target_axis);
+        Ok(added)
+    }
+```
+
+Then add these four private helpers inside the `impl LinearCanvas` block (immediately below `append`):
+
+```rust
+    fn append_bottom(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
+        let slice_px = slice_px.min(frame.height());
+        let overlap = frame.height() - slice_px;
+        let slice = frame
+            .view(0, overlap, frame.width(), slice_px)
+            .to_image();
+        let mut combined = RgbaImage::new(self.image.width(), self.image.height() + slice_px);
+        combined.copy_from(&self.image, 0, 0).expect("copy base");
+        combined
+            .copy_from(&slice, 0, self.image.height())
+            .expect("copy slice");
+        self.image = combined;
+        slice_px
+    }
+
+    fn prepend_top(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
+        let slice_px = slice_px.min(frame.height());
+        let slice = frame.view(0, 0, frame.width(), slice_px).to_image();
+        let mut combined = RgbaImage::new(self.image.width(), self.image.height() + slice_px);
+        combined.copy_from(&slice, 0, 0).expect("copy slice");
+        combined
+            .copy_from(&self.image, 0, slice_px)
+            .expect("copy base");
+        self.image = combined;
+        slice_px
+    }
+
+    fn append_right(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
+        let slice_px = slice_px.min(frame.width());
+        let overlap = frame.width() - slice_px;
+        let slice = frame
+            .view(overlap, 0, slice_px, frame.height())
+            .to_image();
+        let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
+        combined.copy_from(&self.image, 0, 0).expect("copy base");
+        combined
+            .copy_from(&slice, self.image.width(), 0)
+            .expect("copy slice");
+        self.image = combined;
+        slice_px
+    }
+
+    fn prepend_left(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
+        let slice_px = slice_px.min(frame.width());
+        let slice = frame.view(0, 0, slice_px, frame.height()).to_image();
+        let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
+        combined.copy_from(&slice, 0, 0).expect("copy slice");
+        combined
+            .copy_from(&self.image, slice_px, 0)
+            .expect("copy base");
+        self.image = combined;
+        slice_px
+    }
+```
+
+- [ ] **Step 4: Run tests to confirm GREEN**
+
+Run: `rtk cargo test -p rollshot-core --lib canvas::tests`
+Expected: PASS — nine test cases.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/rollshot-core/src/canvas.rs crates/rollshot-core/src/lib.rs
@@ -1123,7 +1227,7 @@ git commit -m "feat(core): add LinearCanvas with four-direction append"
 - Create: `crates/rollshot-core/src/axis.rs`
 - Modify: `crates/rollshot-core/src/lib.rs`
 
-- [ ] **Step 1: Add the `axis` module declaration**
+- [ ] **Step 1: Add module declaration + stub `classify_axis` and `validate_with_lock` alongside failing tests**
 
 Edit `crates/rollshot-core/src/lib.rs`, insert `mod axis;` alphabetically (before `canvas`):
 
@@ -1139,9 +1243,7 @@ mod types;
 mod verifier;
 ```
 
-- [ ] **Step 2: Create `axis.rs` with classification + lock validation and tests**
-
-Create `crates/rollshot-core/src/axis.rs`:
+Create `crates/rollshot-core/src/axis.rs` with the public types in place, both functions stubbed via `unimplemented!()`, and the full test suite:
 
 ```rust
 //! Axis detection and single-axis lock validation.
@@ -1167,32 +1269,8 @@ pub enum AxisValidation {
 
 /// Classifies a `(dx, dy)` candidate using the rollshot axis-ratio rule.
 pub fn classify_axis(dx: i32, dy: i32, ratio_threshold: f32) -> AxisClassification {
-    let adx = dx.unsigned_abs() as f32;
-    let ady = dy.unsigned_abs() as f32;
-
-    if adx == 0.0 && ady == 0.0 {
-        return AxisClassification::Ambiguous;
-    }
-
-    if ady > adx * ratio_threshold {
-        let direction = if dy >= 0 {
-            AppendDirection::Bottom
-        } else {
-            AppendDirection::Top
-        };
-        return AxisClassification::Vertical { direction };
-    }
-
-    if adx > ady * ratio_threshold {
-        let direction = if dx >= 0 {
-            AppendDirection::Right
-        } else {
-            AppendDirection::Left
-        };
-        return AxisClassification::Horizontal { direction };
-    }
-
-    AxisClassification::Ambiguous
+    let _ = (dx, dy, ratio_threshold);
+    unimplemented!("Task 5 Step 3 fills this in")
 }
 
 /// Validates a candidate against a locked axis. Cross-axis movement above the
@@ -1203,45 +1281,8 @@ pub fn validate_with_lock(
     dy: i32,
     max_cross_axis_px: i32,
 ) -> AxisValidation {
-    let cross = match locked {
-        ScrollAxis::Vertical => dx.abs(),
-        ScrollAxis::Horizontal => dy.abs(),
-    };
-
-    if cross <= max_cross_axis_px {
-        let direction = match locked {
-            ScrollAxis::Vertical => {
-                if dy >= 0 {
-                    AppendDirection::Bottom
-                } else {
-                    AppendDirection::Top
-                }
-            }
-            ScrollAxis::Horizontal => {
-                if dx >= 0 {
-                    AppendDirection::Right
-                } else {
-                    AppendDirection::Left
-                }
-            }
-        };
-        return AxisValidation::OnAxis { direction };
-    }
-
-    let main = match locked {
-        ScrollAxis::Vertical => dy.abs(),
-        ScrollAxis::Horizontal => dx.abs(),
-    };
-
-    if cross > main {
-        let new_axis = match locked {
-            ScrollAxis::Vertical => ScrollAxis::Horizontal,
-            ScrollAxis::Horizontal => ScrollAxis::Vertical,
-        };
-        AxisValidation::AxisChanged { new_axis }
-    } else {
-        AxisValidation::CrossAxisTooLarge
-    }
+    let _ = (locked, dx, dy, max_cross_axis_px);
+    unimplemented!("Task 5 Step 3 fills this in")
 }
 
 #[cfg(test)]
@@ -1343,12 +1384,103 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the axis tests**
+- [ ] **Step 2: Run tests to confirm RED**
+
+Run: `rtk cargo test -p rollshot-core --lib axis::tests`
+Expected: FAIL — every test panics with `not implemented: Task 5 Step 3 fills this in`.
+
+- [ ] **Step 3: Implement `classify_axis` and `validate_with_lock`**
+
+In `crates/rollshot-core/src/axis.rs`, replace the stubbed `classify_axis` body with:
+
+```rust
+pub fn classify_axis(dx: i32, dy: i32, ratio_threshold: f32) -> AxisClassification {
+    let adx = dx.unsigned_abs() as f32;
+    let ady = dy.unsigned_abs() as f32;
+
+    if adx == 0.0 && ady == 0.0 {
+        return AxisClassification::Ambiguous;
+    }
+
+    if ady > adx * ratio_threshold {
+        let direction = if dy >= 0 {
+            AppendDirection::Bottom
+        } else {
+            AppendDirection::Top
+        };
+        return AxisClassification::Vertical { direction };
+    }
+
+    if adx > ady * ratio_threshold {
+        let direction = if dx >= 0 {
+            AppendDirection::Right
+        } else {
+            AppendDirection::Left
+        };
+        return AxisClassification::Horizontal { direction };
+    }
+
+    AxisClassification::Ambiguous
+}
+```
+
+Then replace the stubbed `validate_with_lock` body with:
+
+```rust
+pub fn validate_with_lock(
+    locked: ScrollAxis,
+    dx: i32,
+    dy: i32,
+    max_cross_axis_px: i32,
+) -> AxisValidation {
+    let cross = match locked {
+        ScrollAxis::Vertical => dx.abs(),
+        ScrollAxis::Horizontal => dy.abs(),
+    };
+
+    if cross <= max_cross_axis_px {
+        let direction = match locked {
+            ScrollAxis::Vertical => {
+                if dy >= 0 {
+                    AppendDirection::Bottom
+                } else {
+                    AppendDirection::Top
+                }
+            }
+            ScrollAxis::Horizontal => {
+                if dx >= 0 {
+                    AppendDirection::Right
+                } else {
+                    AppendDirection::Left
+                }
+            }
+        };
+        return AxisValidation::OnAxis { direction };
+    }
+
+    let main = match locked {
+        ScrollAxis::Vertical => dy.abs(),
+        ScrollAxis::Horizontal => dx.abs(),
+    };
+
+    if cross > main {
+        let new_axis = match locked {
+            ScrollAxis::Vertical => ScrollAxis::Horizontal,
+            ScrollAxis::Horizontal => ScrollAxis::Vertical,
+        };
+        AxisValidation::AxisChanged { new_axis }
+    } else {
+        AxisValidation::CrossAxisTooLarge
+    }
+}
+```
+
+- [ ] **Step 4: Run tests to confirm GREEN**
 
 Run: `rtk cargo test -p rollshot-core --lib axis::tests`
 Expected: PASS — ten test cases.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/rollshot-core/src/axis.rs crates/rollshot-core/src/lib.rs
@@ -1707,6 +1839,54 @@ impl Stitcher {
         }
     }
 
+    /// Feeds a frame through the v0.2 stitching pipeline.
+    ///
+    /// State machine:
+    ///
+    /// ```text
+    ///                  push_frame(frame)
+    ///                         |
+    ///              canvas empty? --yes--> accept_first_frame --> FirstFrame
+    ///                         | no
+    ///                         v
+    ///              dims == anchor? --no--> NoMatch { DimensionMismatch }
+    ///                         | yes
+    ///                         v
+    ///              duplicate(anchor, frame)? --yes--> Duplicate
+    ///                         | no
+    ///                         v
+    ///              estimate_motion(anchor, frame) --None--> NoMatch { LowConfidence }
+    ///                         | Some(c)
+    ///                         v
+    ///              c.score > accept_confidence? --yes--> NoMatch { LowConfidence }
+    ///                         | no
+    ///                         v
+    ///              classify_direction(c):
+    ///                Ambiguous              -> NoMatch { AmbiguousAxis }
+    ///                CrossAxisTooLarge      -> NoMatch { CrossAxisTooLarge }
+    ///                AxisChanged            -> AxisChanged
+    ///                Direction(dir)         v
+    ///                         |
+    ///                         v
+    ///              slice_px < min_append? --yes--> NoProgress { estimate }
+    ///                         | no
+    ///                         v
+    ///              verifier.verify(anchor, frame, c):
+    ///                InsufficientOverlap    -> NoMatch { InsufficientOverlap }
+    ///                OverlapDisagreement    -> NoMatch { OverlapVerificationFailed }
+    ///                Pass(overlap, _)       v
+    ///                         |
+    ///                         v
+    ///              canvas.append(dir, frame, slice_px):
+    ///                AxisMismatch           -> AxisChanged (defensive)
+    ///                DimensionMismatch      -> NoMatch { DimensionMismatch }
+    ///                EmptyAppend            -> NoProgress { estimate }
+    ///                Ok(added)              -> Appended { dir, added, estimate }
+    /// ```
+    ///
+    /// Bad frames never poison the anchor: any branch ending in `NoMatch`,
+    /// `NoProgress`, `Duplicate`, or `AxisChanged` leaves `last_good_frame`,
+    /// `last_good_signature`, and `last_offset` unchanged.
     pub fn push_frame(&mut self, frame: RgbaImage) -> StitchOutcome {
         if self.canvas.is_none() {
             return self.accept_first_frame(frame);
@@ -1744,7 +1924,7 @@ impl Stitcher {
         if candidate.score > self.config.accept_confidence {
             return StitchOutcome::NoMatch {
                 reason: NoMatchReason::LowConfidence,
-                best_estimate: build_estimate(anchor, &frame, &candidate),
+                best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
             };
         }
 
@@ -1753,17 +1933,22 @@ impl Stitcher {
             DirectionResult::Ambiguous => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::AmbiguousAxis,
-                    best_estimate: build_estimate(anchor, &frame, &candidate),
+                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
                 };
             }
             DirectionResult::CrossAxisTooLarge => {
                 return StitchOutcome::NoMatch {
-                    reason: NoMatchReason::LowConfidence,
-                    best_estimate: build_estimate(anchor, &frame, &candidate),
+                    reason: NoMatchReason::CrossAxisTooLarge,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
                 };
             }
             DirectionResult::AxisChanged { new_axis, locked } => {
-                let estimate = build_estimate(anchor, &frame, &candidate)
+                let estimate = build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
                     .expect("axis-change estimate must compute overlap");
                 return StitchOutcome::AxisChanged {
                     previous_axis: locked,
@@ -1779,7 +1964,7 @@ impl Stitcher {
         };
         if slice_px < self.config.min_append {
             return StitchOutcome::NoProgress {
-                estimate: build_estimate(anchor, &frame, &candidate),
+                estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
             };
         }
 
@@ -1789,13 +1974,13 @@ impl Stitcher {
             VerifierOutcome::InsufficientOverlap => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::InsufficientOverlap,
-                    best_estimate: build_estimate(anchor, &frame, &candidate),
+                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
                 };
             }
             VerifierOutcome::OverlapDisagreement { .. } => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::OverlapVerificationFailed,
-                    best_estimate: build_estimate(anchor, &frame, &candidate),
+                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
                 };
             }
         };
@@ -1827,12 +2012,12 @@ impl Stitcher {
             Err(CanvasAppendError::DimensionMismatch { .. }) => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::DimensionMismatch,
-                    best_estimate: build_estimate(anchor, &frame, &candidate),
+                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
                 };
             }
             Err(CanvasAppendError::EmptyAppend) => {
                 return StitchOutcome::NoProgress {
-                    estimate: build_estimate(anchor, &frame, &candidate),
+                    estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
                 };
             }
         };
@@ -1932,6 +2117,7 @@ fn build_estimate(
     prev: &RgbaImage,
     curr: &RgbaImage,
     candidate: &MotionCandidate,
+    axis_ratio_threshold: f32,
 ) -> Option<MotionEstimate> {
     let overlap = compute_overlap(
         prev.width(),
@@ -1941,16 +2127,20 @@ fn build_estimate(
         candidate.dx,
         candidate.dy,
     )?;
-    let direction = if candidate.dx.abs() > candidate.dy.abs() {
-        if candidate.dx >= 0 {
-            AppendDirection::Right
-        } else {
-            AppendDirection::Left
+    // Diagnostic-only direction tag. Reuses `classify_axis` so the rejection-
+    // path direction stays consistent with the accept-path classifier. If the
+    // candidate is `Ambiguous`, fall back to a sign-based vertical default
+    // since `MotionEstimate` cannot carry an "ambiguous" direction.
+    let direction = match classify_axis(candidate.dx, candidate.dy, axis_ratio_threshold) {
+        AxisClassification::Vertical { direction }
+        | AxisClassification::Horizontal { direction } => direction,
+        AxisClassification::Ambiguous => {
+            if candidate.dy >= 0 {
+                AppendDirection::Bottom
+            } else {
+                AppendDirection::Top
+            }
         }
-    } else if candidate.dy >= 0 {
-        AppendDirection::Bottom
-    } else {
-        AppendDirection::Top
     };
     Some(MotionEstimate {
         dx: candidate.dx,
