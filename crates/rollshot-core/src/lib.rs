@@ -1,3 +1,4 @@
+mod axis;
 mod canvas;
 mod duplicate;
 mod image_ext;
