@@ -340,6 +340,58 @@ through ROI exclusion. Semantic masks are out of scope for v0.2.
 AKAZE fallback is required behavior for v0.2, but the external dependency may
 be Cargo-feature-gated.
 
+Use crates.io releases, not local path crates from `learn-projects/rust-cv`.
+`learn-projects/rust-cv` is reference material for API shape and examples only.
+
+As of 2026-05-21, the crates.io dependency contract is:
+
+```toml
+[workspace.dependencies]
+# Direct feature extractor. Latest crates.io release checked for v0.2 planning.
+akaze = "0.7.0"
+
+# Match the descriptor/matching ecosystem used by crates.io akaze 0.7.0.
+# Do not use bitarray 0.10.x or space 0.19.x unless akaze publishes a compatible
+# release; those are newer crates.io releases but are not the versions akaze 0.7.0
+# exposes through its descriptor types.
+bitarray = { version = "0.2.3", features = ["space"] }
+space = "0.10.3"
+```
+
+```toml
+# crates/rollshot-core/Cargo.toml
+[dependencies]
+akaze = { workspace = true, optional = true }
+bitarray = { workspace = true, optional = true }
+space = { workspace = true, optional = true }
+
+[features]
+default = []
+akaze = ["dep:akaze", "dep:bitarray", "dep:space"]
+```
+
+The relevant crates.io feature surface is:
+
+- `akaze 0.7.0`: no crate features are required for rollshot's matcher path in
+  the crates.io release.
+- `bitarray 0.2.3`: feature `space` integrates descriptors with the `space`
+  metric traits.
+- `space 0.10.3`: no feature is required for `linear_knn`; optional features
+  such as `alloc`, `candidates-vec`, `hamming-vec`, and SIMD variants are not
+  part of the v0.2 plan.
+- `cv 0.6.0`: has feature `akaze`, but the umbrella crate enables many
+  unrelated computer-vision features by default. Do not use `cv` unless direct
+  `akaze` integration fails for a concrete technical reason.
+
+There is one important version mismatch: crates.io `akaze 0.7.0` depends on
+`image 0.23.6`, while rollshot currently uses `image 0.25`. The AKAZE plan must
+not assume rollshot's `image::RgbaImage` can be passed directly to
+`akaze::Akaze::extract`. The implementation should either:
+
+- create an `image 0.23.6` `DynamicImage` adapter under the `akaze` feature, or
+- verify a better crates.io release exists before implementation and update this
+  spec or plan with the exact version.
+
 The intended default is:
 
 - `AutoHybrid` can call AKAZE when the binary is built with AKAZE support.
