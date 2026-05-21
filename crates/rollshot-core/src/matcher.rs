@@ -298,7 +298,7 @@ fn overlap_mean_abs_diff(
 #[cfg(test)]
 mod tests {
     use super::{content_roi, estimate_motion};
-    use crate::types::{MatchMethod, StitchConfig};
+    use crate::types::{MatchMethod, ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -328,6 +328,46 @@ mod tests {
 
     fn crop(canvas: &RgbaImage, y: u32, h: u32) -> RgbaImage {
         imageops::crop_imm(canvas, 0, y, canvas.width(), h).to_image()
+    }
+
+    fn make_wide_canvas(width: u32, height: u32) -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(width, height, Rgba([240, 240, 240, 255]));
+        for x in (0..width).step_by(11) {
+            let accent = ((x / 3) % 180) as u8;
+            for y in 8..height.saturating_sub(8) {
+                let stripe = if (x / 5 + y / 7) % 2 == 0 { 220 } else { 180 };
+                img.put_pixel(x, y, Rgba([stripe, accent, 80, 255]));
+                if x + 1 < width {
+                    img.put_pixel(x + 1, y, Rgba([30, 30, 30, 255]));
+                }
+            }
+        }
+        for row in [21u32, 47, 73, 99, 125] {
+            if row >= height {
+                continue;
+            }
+            for x in 12..width.saturating_sub(12) {
+                if (x / 13) % 3 != 0 {
+                    img.put_pixel(x, row, Rgba([20, 20, 20, 255]));
+                }
+            }
+        }
+        img
+    }
+
+    fn make_repeated_grid(width: u32, height: u32) -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(width, height, Rgba([245, 245, 245, 255]));
+        for y in 0..height {
+            for x in 0..width {
+                let v = if (x / 16 + y / 16) % 2 == 0 { 48 } else { 208 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        img
+    }
+
+    fn crop_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
+        imageops::crop_imm(canvas, x, y, w, h).to_image()
     }
 
     #[test]
@@ -384,5 +424,109 @@ mod tests {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
         assert!(estimate_motion(&prev, &curr, 0, &StitchConfig::default()).is_none());
+    }
+
+    #[test]
+    fn estimate_motion_finds_vertical_up_scroll() {
+        let canvas = make_textured_canvas(160, 700);
+        let prev = crop(&canvas, 220, 160);
+        let curr = crop(&canvas, 180, 160);
+
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+        )
+        .expect("template candidate");
+
+        assert_eq!(candidate.method, MatchMethod::Template);
+        assert_eq!(candidate.dx, 0);
+        assert!(
+            (candidate.dy + 40).abs() <= 2,
+            "dy = {} (expected ~-40)",
+            candidate.dy
+        );
+    }
+
+    #[test]
+    fn estimate_motion_finds_horizontal_right_scroll() {
+        let canvas = make_wide_canvas(700, 160);
+        let prev = crop_xy(&canvas, 0, 0, 160, 160);
+        let curr = crop_xy(&canvas, 40, 0, 160, 160);
+
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+        )
+        .expect("horizontal candidate");
+
+        assert_eq!(candidate.dy, 0);
+        assert!(
+            (candidate.dx - 40).abs() <= 2,
+            "dx = {} (expected ~40)",
+            candidate.dx
+        );
+    }
+
+    #[test]
+    fn estimate_motion_finds_horizontal_left_scroll() {
+        let canvas = make_wide_canvas(700, 160);
+        let prev = crop_xy(&canvas, 220, 0, 160, 160);
+        let curr = crop_xy(&canvas, 180, 0, 160, 160);
+
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            Some(ScrollAxis::Horizontal),
+            (40, 0),
+            &StitchConfig::default(),
+        )
+        .expect("horizontal candidate");
+
+        assert_eq!(candidate.dy, 0);
+        assert!(
+            (candidate.dx + 40).abs() <= 2,
+            "dx = {} (expected ~-40)",
+            candidate.dx
+        );
+    }
+
+    #[test]
+    fn locked_vertical_hint_rejects_horizontal_candidate() {
+        let canvas = make_wide_canvas(700, 160);
+        let prev = crop_xy(&canvas, 0, 0, 160, 160);
+        let curr = crop_xy(&canvas, 40, 0, 160, 160);
+
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            Some(ScrollAxis::Vertical),
+            (0, 40),
+            &StitchConfig::default(),
+        );
+
+        assert!(candidate.is_none());
+    }
+
+    #[test]
+    fn repeated_grid_is_rejected_by_second_best_margin() {
+        let canvas = make_repeated_grid(240, 560);
+        let prev = crop_xy(&canvas, 0, 0, 160, 160);
+        let curr = crop_xy(&canvas, 0, 32, 160, 160);
+
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+        );
+
+        assert!(candidate.is_none());
     }
 }
