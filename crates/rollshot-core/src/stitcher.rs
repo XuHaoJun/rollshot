@@ -3,7 +3,7 @@ use image::RgbaImage;
 use crate::duplicate;
 use crate::image_ext::append_below;
 use crate::matcher::estimate_offset;
-use crate::types::{StitchConfig, StitchOutcome, StitchStats};
+use crate::types::{AppendDirection, NoMatchReason, StitchConfig, StitchOutcome, StitchStats};
 
 pub struct Stitcher {
     config: StitchConfig,
@@ -38,7 +38,8 @@ impl Stitcher {
 
         if anchor.dimensions() != frame.dimensions() {
             return StitchOutcome::NoMatch {
-                confidence: f32::INFINITY,
+                reason: NoMatchReason::DimensionMismatch,
+                best_estimate: None,
             };
         }
 
@@ -50,15 +51,16 @@ impl Stitcher {
         }
 
         let estimate = estimate_offset(anchor, &frame, self.last_offset, &self.config);
-        if estimate.confidence > self.config.accept_diff {
+        if estimate.confidence > self.config.accept_confidence {
             return StitchOutcome::NoMatch {
-                confidence: estimate.confidence,
+                reason: NoMatchReason::LowConfidence,
+                best_estimate: Some(estimate),
             };
         }
 
         let dy = estimate.dy.max(0) as u32;
         if dy < self.config.min_append {
-            return StitchOutcome::NoProgress;
+            return StitchOutcome::NoProgress { estimate: Some(estimate) };
         }
 
         let combined = append_below(
@@ -78,7 +80,11 @@ impl Stitcher {
         self.stats.total_height = total_height;
         self.stats.last_append = dy;
 
-        StitchOutcome::Appended { added: dy }
+        StitchOutcome::Appended {
+            direction: AppendDirection::Bottom,
+            added: dy,
+            estimate,
+        }
     }
 
     pub fn full_image(&self) -> Option<&RgbaImage> {
@@ -94,6 +100,7 @@ impl Stitcher {
         self.stats = StitchStats {
             frame_count: 1,
             total_height: height,
+            total_width: frame.width(),
             last_append: height,
         };
         self.last_good_signature = Some(duplicate::signature(&frame));

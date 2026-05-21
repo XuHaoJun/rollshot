@@ -1,6 +1,6 @@
 use image::{Rgba, RgbaImage};
 
-use crate::types::{OffsetEstimate, StitchConfig};
+use crate::types::{MotionEstimate, StitchConfig};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
@@ -32,11 +32,24 @@ pub fn estimate_offset(
     curr: &RgbaImage,
     last_offset: i32,
     config: &StitchConfig,
-) -> OffsetEstimate {
-    let no_match = OffsetEstimate {
+) -> MotionEstimate {
+    let no_match = MotionEstimate {
+        dx: 0,
         dy: 0,
+        axis: crate::types::ScrollAxis::Vertical,
+        direction: crate::types::AppendDirection::Bottom,
         confidence: f32::INFINITY,
-        method: config.algorithm,
+        method: crate::types::MatchMethod::Template,
+        overlap: crate::types::OverlapRegion {
+            prev_x: 0,
+            prev_y: 0,
+            curr_x: 0,
+            curr_y: 0,
+            width: 0,
+            height: 0,
+        },
+        inliers: None,
+        raw_matches: None,
     };
 
     if prev.dimensions() != curr.dimensions() {
@@ -124,10 +137,23 @@ pub fn estimate_offset(
     }
 
     let confidence = (1.0 - best_score.clamp(0.0, 1.0)) + verify * 0.5;
-    OffsetEstimate {
+    MotionEstimate {
+        dx: 0,
         dy: best_offset,
+        axis: crate::types::ScrollAxis::Vertical,
+        direction: crate::types::AppendDirection::Bottom,
         confidence,
-        method: config.algorithm,
+        method: crate::types::MatchMethod::Template,
+        overlap: crate::types::OverlapRegion {
+            prev_x: 0,
+            prev_y: 0,
+            curr_x: 0,
+            curr_y: 0,
+            width: 0,
+            height: 0,
+        },
+        inliers: None,
+        raw_matches: None,
     }
 }
 
@@ -263,7 +289,7 @@ fn overlap_mean_abs_diff(
 #[cfg(test)]
 mod tests {
     use super::{content_roi, estimate_offset};
-    use crate::types::{MatchAlgorithm, StitchConfig};
+    use crate::types::{MatchMethod, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -332,17 +358,17 @@ mod tests {
 
         let estimate = estimate_offset(&prev, &curr, 0, &StitchConfig::default());
 
-        assert_eq!(estimate.method, MatchAlgorithm::Template);
+        assert_eq!(estimate.method, MatchMethod::Template);
         assert!(
             (estimate.dy - 40).abs() <= 2,
             "dy = {} (expected ~40)",
             estimate.dy
         );
         assert!(
-            estimate.confidence < StitchConfig::default().accept_diff,
+            estimate.confidence < StitchConfig::default().accept_confidence,
             "confidence = {} (expected < {})",
             estimate.confidence,
-            StitchConfig::default().accept_diff
+            StitchConfig::default().accept_confidence
         );
     }
 
@@ -354,7 +380,7 @@ mod tests {
         let estimate = estimate_offset(&prev, &curr, 0, &StitchConfig::default());
 
         assert!(
-            estimate.confidence > StitchConfig::default().accept_diff,
+            estimate.confidence > StitchConfig::default().accept_confidence,
             "confidence = {} (expected > accept_diff)",
             estimate.confidence
         );

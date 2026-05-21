@@ -1,6 +1,7 @@
 mod duplicate;
 mod image_ext;
 mod matcher;
+mod overlap;
 mod stitcher;
 mod types;
 
