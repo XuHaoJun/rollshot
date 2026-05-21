@@ -4,6 +4,7 @@ mod matcher;
 mod overlap;
 mod stitcher;
 mod types;
+mod verifier;
 
 pub use stitcher::Stitcher;
 pub use types::{
