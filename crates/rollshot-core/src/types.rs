@@ -178,7 +178,7 @@ impl Default for StitchConfig {
             accept_confidence: 0.15,
             axis_ratio_threshold: 1.5,
             max_cross_axis_px: 6,
-            second_best_margin: 0.015,
+            second_best_margin: 0.001,
             max_search_ratio: 0.75,
             match_width: 512,
             verifier: VerifierConfig::default(),

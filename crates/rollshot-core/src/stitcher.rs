@@ -16,7 +16,7 @@ pub struct Stitcher {
     canvas: Option<LinearCanvas>,
     last_good_frame: Option<RgbaImage>,
     last_good_signature: Option<Vec<u8>>,
-    last_offset: i32,
+    last_motion: (i32, i32),
     locked_axis: Option<ScrollAxis>,
     stats: StitchStats,
 }
@@ -28,7 +28,7 @@ impl Stitcher {
             canvas: None,
             last_good_frame: None,
             last_good_signature: None,
-            last_offset: 0,
+            last_motion: (0, 0),
             locked_axis: None,
             stats: StitchStats::default(),
         }
@@ -58,7 +58,13 @@ impl Stitcher {
             }
         }
 
-        let candidate = match estimate_motion(anchor, &frame, self.last_offset, &self.config) {
+        let candidate = match estimate_motion(
+            anchor,
+            &frame,
+            self.locked_axis,
+            self.last_motion,
+            &self.config,
+        ) {
             Some(c) => c,
             None => {
                 return StitchOutcome::NoMatch {
@@ -206,7 +212,7 @@ impl Stitcher {
         };
 
         self.locked_axis = Some(direction.axis());
-        self.last_offset = candidate.dy;
+        self.last_motion = (candidate.dx, candidate.dy);
 
         let estimate = MotionEstimate {
             dx: candidate.dx,

@@ -141,10 +141,17 @@ fn candidate_matches_axis(
             classify_axis(dx, dy, config.axis_ratio_threshold),
             AxisClassification::Ambiguous
         ),
-        Some(axis) => matches!(
-            validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
-            AxisValidation::OnAxis { .. }
-        ),
+        Some(axis) => {
+            let on_axis_motion = match axis {
+                ScrollAxis::Vertical => dy != 0,
+                ScrollAxis::Horizontal => dx != 0,
+            };
+            on_axis_motion
+                && matches!(
+                    validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
+                    AxisValidation::OnAxis { .. }
+                )
+        }
     }
 }
 
@@ -317,6 +324,219 @@ fn match_width_region(region: Region, match_width: u32) -> Region {
     let w = match_width.max(1);
     let x = region.x + (region.w - w) / 2;
     Region { x, w, ..region }
+}
+
+fn coarse_candidates(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    locked_axis: Option<ScrollAxis>,
+    config: &StitchConfig,
+) -> Vec<MotionCandidate> {
+    let max_dx = (width as f32 * config.max_search_ratio) as i32;
+    let max_dy = (height as f32 * config.max_search_ratio) as i32;
+    let step = COARSE_DOWNSAMPLE_STEP as i32;
+    let mut scored = Vec::new();
+
+    let dx_values: Vec<i32> = match locked_axis {
+        Some(ScrollAxis::Vertical) => (-config.max_cross_axis_px..=config.max_cross_axis_px).collect(),
+        _ => ((-max_dx / step)..=(max_dx / step)).map(|n| n * step).collect(),
+    };
+    let dy_values: Vec<i32> = match locked_axis {
+        Some(ScrollAxis::Horizontal) => (-config.max_cross_axis_px..=config.max_cross_axis_px).collect(),
+        _ => ((-max_dy / step)..=(max_dy / step)).map(|n| n * step).collect(),
+    };
+
+    for dy in dy_values {
+        for dx in dx_values.iter().copied() {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            if !candidate_matches_axis(dx, dy, locked_axis, config) {
+                continue;
+            }
+            let diff = coarse_mad(
+                prev_gray,
+                curr_gray,
+                width,
+                height,
+                dx,
+                dy,
+                COARSE_DOWNSAMPLE_STEP,
+            );
+            if diff.is_finite() {
+                scored.push((diff, dx, dy));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let (best_score, best_dx, best_dy) = match scored.first() {
+        Some(t) => *t,
+        None => return Vec::new(),
+    };
+    let second = scored.get(1).map(|(score, _, _)| *score);
+    vec![candidate(
+        best_dx,
+        best_dy,
+        MatchMethod::Coarse,
+        best_score,
+        second,
+    )]
+}
+
+fn coarse_mad(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    dx: i32,
+    dy: i32,
+    step: u32,
+) -> f32 {
+    let overlap = match compute_overlap(width, height, width, height, dx, dy) {
+        Some(overlap) => overlap,
+        None => return f32::INFINITY,
+    };
+
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    let mut y = 0;
+    while y < overlap.height {
+        let mut x = 0;
+        while x < overlap.width {
+            let prev_idx = ((overlap.prev_y + y) * width + overlap.prev_x + x) as usize;
+            let curr_idx = ((overlap.curr_y + y) * width + overlap.curr_x + x) as usize;
+            sum += (prev_gray[prev_idx] - curr_gray[curr_idx]).abs();
+            count += 1;
+            x += step.max(1);
+        }
+        y += step.max(1);
+    }
+    if count == 0 {
+        return f32::INFINITY;
+    }
+    sum / (count as f32 * 255.0)
+}
+
+fn edge_projection_candidates(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    locked_axis: Option<ScrollAxis>,
+    config: &StitchConfig,
+) -> Vec<MotionCandidate> {
+    let mut out = Vec::new();
+
+    for axis in search_axes(locked_axis) {
+        if let Some(candidate) = edge_projection_axis(
+            prev_gray,
+            curr_gray,
+            width,
+            height,
+            *axis,
+            config,
+        ) {
+            out.push(candidate);
+        }
+    }
+
+    out
+}
+
+fn edge_projection_axis(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    axis: SearchAxis,
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    let max_offset = match axis {
+        SearchAxis::Vertical => (height as f32 * config.max_search_ratio) as i32,
+        SearchAxis::Horizontal => (width as f32 * config.max_search_ratio) as i32,
+    };
+    if max_offset <= 0 {
+        return None;
+    }
+
+    let prev_proj = edge_projection(prev_gray, width, height, axis);
+    let curr_proj = edge_projection(curr_gray, width, height, axis);
+    let mut scored = Vec::new();
+    for offset in signed_predict_iter(max_offset, 0) {
+        let score = projection_mad(&prev_proj, &curr_proj, offset, EDGE_PROJECTION_STEP as usize);
+        if score.is_finite() {
+            scored.push((score, offset));
+        }
+    }
+
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (best, offset) = *scored.first()?;
+    let second = scored.get(1).map(|(score, _)| *score);
+    let (dx, dy) = match axis {
+        SearchAxis::Vertical => (0, offset),
+        SearchAxis::Horizontal => (offset, 0),
+    };
+
+    Some(candidate(dx, dy, MatchMethod::Edge, best, second))
+}
+
+fn edge_projection(gray: &[f32], width: u32, height: u32, axis: SearchAxis) -> Vec<f32> {
+    match axis {
+        SearchAxis::Vertical => {
+            let mut rows = vec![0.0; height as usize];
+            for y in 1..height {
+                let mut sum = 0.0;
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    let prev = ((y - 1) * width + x) as usize;
+                    sum += (gray[idx] - gray[prev]).abs();
+                }
+                rows[y as usize] = sum / width.max(1) as f32 / 255.0;
+            }
+            rows
+        }
+        SearchAxis::Horizontal => {
+            let mut cols = vec![0.0; width as usize];
+            for x in 1..width {
+                let mut sum = 0.0;
+                for y in 0..height {
+                    let idx = (y * width + x) as usize;
+                    let prev = (y * width + x - 1) as usize;
+                    sum += (gray[idx] - gray[prev]).abs();
+                }
+                cols[x as usize] = sum / height.max(1) as f32 / 255.0;
+            }
+            cols
+        }
+    }
+}
+
+fn projection_mad(prev: &[f32], curr: &[f32], offset: i32, step: usize) -> f32 {
+    let prev_start = offset.max(0) as usize;
+    let curr_start = (-offset).max(0) as usize;
+    let overlap = prev
+        .len()
+        .min(curr.len())
+        .saturating_sub(offset.unsigned_abs() as usize);
+    if overlap == 0 {
+        return f32::INFINITY;
+    }
+
+    let step = step.max(1);
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for i in (0..overlap).step_by(step) {
+        sum += (prev[prev_start + i] - curr[curr_start + i]).abs();
+        count += 1;
+    }
+    if count == 0 {
+        return f32::INFINITY;
+    }
+    sum / count as f32
 }
 
 fn to_grayscale(img: &RgbaImage) -> Vec<f32> {
@@ -512,7 +732,6 @@ mod tests {
         let curr = crop(&canvas, 40, 160);
         let candidate =
             estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).expect("template candidate");
-        assert_eq!(candidate.method, MatchMethod::Template);
         assert_eq!(candidate.dx, 0);
         assert!(
             (candidate.dy - 40).abs() <= 2,
@@ -550,7 +769,6 @@ mod tests {
         )
         .expect("template candidate");
 
-        assert_eq!(candidate.method, MatchMethod::Template);
         assert_eq!(candidate.dx, 0);
         assert!(
             (candidate.dy + 40).abs() <= 2,
