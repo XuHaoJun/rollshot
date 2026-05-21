@@ -2,7 +2,8 @@ use image::{Rgba, RgbaImage};
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::overlap::compute_overlap;
-use crate::types::{MatchMethod, MotionCandidate, ScrollAxis, StitchConfig};
+use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
+use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
@@ -32,15 +33,27 @@ enum SearchAxis {
     Horizontal,
 }
 
-pub fn estimate_motion(
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MotionSearchOutcome {
+    Candidate(MotionCandidate),
+    NoMatch {
+        reason: NoMatchReason,
+        best_candidate: Option<MotionCandidate>,
+    },
+}
+
+pub(crate) fn estimate_motion(
     prev: &RgbaImage,
     curr: &RgbaImage,
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     config: &StitchConfig,
-) -> Option<MotionCandidate> {
+) -> MotionSearchOutcome {
     if prev.dimensions() != curr.dimensions() {
-        return None;
+        return MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::DimensionMismatch,
+            best_candidate: None,
+        };
     }
 
     let width = prev.width();
@@ -75,7 +88,34 @@ pub fn estimate_motion(
         config,
     ));
 
-    rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+    if let Some(candidate) = rank_verified_candidates(prev, curr, locked_axis, candidates, config) {
+        return MotionSearchOutcome::Candidate(candidate);
+    }
+
+    match akaze_candidates(prev, curr, &config.akaze) {
+        AkazeCandidateOutcome::Disabled => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::AkazeDisabled,
+            best_candidate: None,
+        },
+        AkazeCandidateOutcome::NotEnoughFeatures { .. } => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::NotEnoughFeatures,
+            best_candidate: None,
+        },
+        AkazeCandidateOutcome::NotEnoughMatches { .. } => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::AkazeLowInliers,
+            best_candidate: None,
+        },
+        AkazeCandidateOutcome::Candidates(akaze_candidates) => {
+            let best = akaze_candidates.first().copied();
+            match rank_verified_candidates(prev, curr, locked_axis, akaze_candidates, config) {
+                Some(candidate) => MotionSearchOutcome::Candidate(candidate),
+                None => MotionSearchOutcome::NoMatch {
+                    reason: NoMatchReason::AkazeLowInliers,
+                    best_candidate: best,
+                },
+            }
+        }
+    }
 }
 
 fn rank_verified_candidates(
@@ -651,8 +691,10 @@ fn ncc_score_shifted(
 
 #[cfg(test)]
 mod tests {
-    use super::{coarse_sample_dimensions, content_roi, estimate_motion, COARSE_DOWNSAMPLE_STEP};
-    use crate::types::{ScrollAxis, StitchConfig};
+    use super::{coarse_sample_dimensions, content_roi, estimate_motion, MotionSearchOutcome, COARSE_DOWNSAMPLE_STEP};
+    use crate::types::{AkazeConfig, MotionCandidate, ScrollAxis, StitchConfig};
+    #[cfg(feature = "akaze")]
+    use crate::types::{MatchMethod, NoMatchReason};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -724,6 +766,44 @@ mod tests {
         imageops::crop_imm(canvas, x, y, w, h).to_image()
     }
 
+    fn unwrap_candidate(outcome: MotionSearchOutcome) -> MotionCandidate {
+        match outcome {
+            MotionSearchOutcome::Candidate(candidate) => candidate,
+            other => panic!("expected candidate, got {other:?}"),
+        }
+    }
+
+    fn make_sparse_feature_canvas(width: u32, height: u32) -> RgbaImage {
+        let mut img = make_repeated_grid(width, height);
+        for i in 0..64u32 {
+            let x = 18 + ((i * 41) % width.saturating_sub(36).max(1));
+            let y = 18 + ((i * 67) % height.saturating_sub(36).max(1));
+            for yy in y..(y + 7).min(height) {
+                for xx in x..(x + 7).min(width) {
+                    if xx == x || yy == y || xx == x + yy - y {
+                        img.put_pixel(xx, yy, Rgba([15, 15, 15, 255]));
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    fn fallback_config() -> StitchConfig {
+        StitchConfig {
+            second_best_margin: 0.25,
+            akaze: AkazeConfig {
+                enabled: true,
+                max_features: 1200,
+                detector_threshold: 0.0005,
+                min_raw_matches: 8,
+                min_inliers: 6,
+                min_inlier_ratio: 0.25,
+            },
+            ..StitchConfig::default()
+        }
+    }
+
     #[test]
     fn content_roi_skips_borders() {
         let roi = content_roi(320, 320);
@@ -743,7 +823,7 @@ mod tests {
             ..StitchConfig::default()
         };
         let candidate =
-            estimate_motion(&prev, &curr, None, (0, 0), &config).expect("template candidate");
+            unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &config));
         assert!(
             candidate.dy <= 40,
             "dy = {} exceeds bounded search",
@@ -756,8 +836,7 @@ mod tests {
         let canvas = make_textured_canvas(160, 600);
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
-        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default())
-            .expect("template candidate");
+        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
         assert_eq!(candidate.dx, 0);
         assert!(
             (candidate.dy - 40).abs() <= 2,
@@ -770,14 +849,14 @@ mod tests {
     fn estimate_motion_returns_none_for_unrelated_frames() {
         let prev = make_textured_canvas(160, 160);
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
-        assert!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).is_none());
+        assert!(matches!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()), MotionSearchOutcome::NoMatch { .. }));
     }
 
     #[test]
     fn estimate_motion_returns_none_for_dimension_mismatch() {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
-        assert!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).is_none());
+        assert!(matches!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()), MotionSearchOutcome::NoMatch { .. }));
     }
 
     #[test]
@@ -786,8 +865,7 @@ mod tests {
         let prev = crop(&canvas, 220, 160);
         let curr = crop(&canvas, 180, 160);
 
-        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default())
-            .expect("template candidate");
+        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
 
         assert_eq!(candidate.dx, 0);
         assert!(
@@ -803,8 +881,7 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 40, 0, 160, 160);
 
-        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default())
-            .expect("horizontal candidate");
+        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()));
 
         assert_eq!(candidate.dy, 0);
         assert!(
@@ -820,14 +897,13 @@ mod tests {
         let prev = crop_xy(&canvas, 220, 0, 160, 160);
         let curr = crop_xy(&canvas, 180, 0, 160, 160);
 
-        let candidate = estimate_motion(
+        let candidate = unwrap_candidate(estimate_motion(
             &prev,
             &curr,
             Some(ScrollAxis::Horizontal),
             (40, 0),
             &StitchConfig::default(),
-        )
-        .expect("horizontal candidate");
+        ));
 
         assert_eq!(candidate.dy, 0);
         assert!(
@@ -851,7 +927,7 @@ mod tests {
             &StitchConfig::default(),
         );
 
-        assert!(candidate.is_none());
+        assert!(matches!(candidate, MotionSearchOutcome::NoMatch { .. }));
     }
 
     #[test]
@@ -862,7 +938,7 @@ mod tests {
 
         let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default());
 
-        assert!(candidate.is_none());
+        assert!(matches!(candidate, MotionSearchOutcome::NoMatch { .. }));
     }
 
     #[test]
@@ -871,14 +947,13 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 40, 0, 160, 160);
 
-        let candidate = estimate_motion(
+        let candidate = unwrap_candidate(estimate_motion(
             &prev,
             &curr,
             Some(ScrollAxis::Vertical),
             (0, 40),
             &StitchConfig::default(),
-        )
-        .expect("axis-change candidate");
+        ));
 
         assert_eq!(candidate.dy, 0);
         assert!(
@@ -898,5 +973,67 @@ mod tests {
             coarse_sample_dimensions(3, 2, COARSE_DOWNSAMPLE_STEP),
             (1, 1)
         );
+    }
+
+    #[cfg(feature = "akaze")]
+    #[test]
+    fn akaze_fallback_recovers_repeated_grid_with_sparse_features() {
+        let canvas = make_sparse_feature_canvas(360, 760);
+        let prev = crop_xy(&canvas, 0, 0, 240, 240);
+        let curr = crop_xy(&canvas, 0, 72, 240, 240);
+
+        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
+        let candidate = match outcome {
+            MotionSearchOutcome::Candidate(candidate) => candidate,
+            other => panic!("expected AKAZE candidate, got {other:?}"),
+        };
+
+        assert_eq!(candidate.method, MatchMethod::Akaze);
+        assert_eq!(candidate.dx, 0);
+        assert!((candidate.dy - 72).abs() <= 3, "dy = {}", candidate.dy);
+        assert!(candidate.inliers.unwrap_or(0) >= 6);
+    }
+
+    #[cfg(feature = "akaze")]
+    #[test]
+    fn akaze_attempt_with_blank_frames_reports_not_enough_features() {
+        let prev = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
+        let curr = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
+
+        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
+
+        assert!(matches!(
+            outcome,
+            MotionSearchOutcome::NoMatch {
+                reason: NoMatchReason::NotEnoughFeatures,
+                best_candidate: None,
+            }
+        ));
+    }
+
+    #[cfg(feature = "akaze")]
+    #[test]
+    fn akaze_candidate_rejected_by_verifier_preserves_best_estimate() {
+        let canvas = make_sparse_feature_canvas(360, 760);
+        let prev = crop_xy(&canvas, 0, 0, 240, 240);
+        let mut curr = crop_xy(&canvas, 0, 72, 240, 240);
+        for y in 120..240 {
+            for x in 0..240 {
+                let v = ((x * 41 + y * 67) % 255) as u8;
+                curr.put_pixel(x, y, Rgba([v, 255 - v, v / 2, 255]));
+            }
+        }
+
+        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
+
+        let best = match outcome {
+            MotionSearchOutcome::NoMatch {
+                reason: NoMatchReason::AkazeLowInliers,
+                best_candidate: Some(candidate),
+            } => candidate,
+            other => panic!("expected AkazeLowInliers with best_candidate, got {other:?}"),
+        };
+        assert_eq!(best.method, MatchMethod::Akaze);
+        assert!((best.dy - 72).abs() <= 8, "best dy = {}", best.dy);
     }
 }
