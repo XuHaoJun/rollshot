@@ -7,3 +7,6 @@
 [submodule "learn-projects/wayscrollshot"]
 	path = learn-projects/wayscrollshot
 	url = https://github.com/jswysnemc/wayscrollshot.git
+[submodule "learn-projects/rust-cv"]
+	path = learn-projects/rust-cv
+	url = https://github.com/rust-cv/cv.git
