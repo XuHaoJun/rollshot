@@ -142,15 +142,14 @@ fn candidate_matches_axis(
             AxisClassification::Ambiguous
         ),
         Some(axis) => {
-            let on_axis_motion = match axis {
-                ScrollAxis::Vertical => dy != 0,
-                ScrollAxis::Horizontal => dx != 0,
-            };
-            on_axis_motion
-                && matches!(
-                    validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
-                    AxisValidation::OnAxis { .. }
-                )
+            if dx == 0 && dy == 0 {
+                return false;
+            }
+
+            matches!(
+                validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
+                AxisValidation::OnAxis { .. } | AxisValidation::AxisChanged { .. }
+            )
         }
     }
 }
@@ -175,8 +174,9 @@ fn candidate(
 
 fn search_axes(locked_axis: Option<ScrollAxis>) -> &'static [SearchAxis] {
     match locked_axis {
-        Some(ScrollAxis::Vertical) => &[SearchAxis::Vertical],
-        Some(ScrollAxis::Horizontal) => &[SearchAxis::Horizontal],
+        Some(ScrollAxis::Vertical) | Some(ScrollAxis::Horizontal) => {
+            &[SearchAxis::Vertical, SearchAxis::Horizontal]
+        }
         None => &[SearchAxis::Vertical, SearchAxis::Horizontal],
     }
 }
@@ -323,30 +323,29 @@ fn coarse_candidates(
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
-    let max_dx = (width as f32 * config.max_search_ratio) as i32;
-    let max_dy = (height as f32 * config.max_search_ratio) as i32;
     let step = COARSE_DOWNSAMPLE_STEP as i32;
+    let (sample_w, sample_h) = coarse_sample_dimensions(width, height, COARSE_DOWNSAMPLE_STEP);
+    let prev_samples = coarse_samples(prev_gray, width, height, COARSE_DOWNSAMPLE_STEP);
+    let curr_samples = coarse_samples(curr_gray, width, height, COARSE_DOWNSAMPLE_STEP);
+    let max_dx = ((width as f32 * config.max_search_ratio) as i32 / step).max(0);
+    let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
     let mut scored = Vec::new();
 
-    let dx_values: Vec<i32> = match locked_axis {
-        Some(ScrollAxis::Vertical) => {
-            (-config.max_cross_axis_px..=config.max_cross_axis_px).collect()
-        }
-        _ => ((-max_dx / step)..=(max_dx / step))
-            .map(|n| n * step)
-            .collect(),
+    let dx_values: Vec<i32> = if locked_axis == Some(ScrollAxis::Vertical) {
+        vec![0]
+    } else {
+        (-max_dx..=max_dx).collect()
     };
-    let dy_values: Vec<i32> = match locked_axis {
-        Some(ScrollAxis::Horizontal) => {
-            (-config.max_cross_axis_px..=config.max_cross_axis_px).collect()
-        }
-        _ => ((-max_dy / step)..=(max_dy / step))
-            .map(|n| n * step)
-            .collect(),
+    let dy_values: Vec<i32> = if locked_axis == Some(ScrollAxis::Horizontal) {
+        vec![0]
+    } else {
+        (-max_dy..=max_dy).collect()
     };
 
-    for dy in dy_values {
-        for dx in dx_values.iter().copied() {
+    for sample_dy in dy_values {
+        for sample_dx in dx_values.iter().copied() {
+            let dx = sample_dx * step;
+            let dy = sample_dy * step;
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -354,13 +353,13 @@ fn coarse_candidates(
                 continue;
             }
             let diff = coarse_mad(
-                prev_gray,
-                curr_gray,
-                width,
-                height,
-                dx,
-                dy,
-                COARSE_DOWNSAMPLE_STEP,
+                &prev_samples,
+                &curr_samples,
+                sample_w,
+                sample_h,
+                sample_dx,
+                sample_dy,
+                1,
             );
             if diff.is_finite() {
                 scored.push((diff, dx, dy));
@@ -382,6 +381,35 @@ fn coarse_candidates(
         best_score,
         second,
     )]
+}
+
+fn coarse_sample_dimensions(width: u32, height: u32, step: u32) -> (u32, u32) {
+    let step = step.max(1);
+    (width.div_ceil(step).max(1), height.div_ceil(step).max(1))
+}
+
+fn coarse_samples(gray: &[f32], width: u32, height: u32, step: u32) -> Vec<f32> {
+    let step = step.max(1);
+    let (sample_w, sample_h) = coarse_sample_dimensions(width, height, step);
+    let mut out = Vec::with_capacity((sample_w * sample_h) as usize);
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
+            for yy in y..(y + step).min(height) {
+                for xx in x..(x + step).min(width) {
+                    sum += gray[(yy * width + xx) as usize];
+                    count += 1;
+                }
+            }
+            out.push(sum / count.max(1) as f32);
+            x += step;
+        }
+        y += step;
+    }
+    out
 }
 
 fn coarse_mad(
@@ -623,7 +651,7 @@ fn ncc_score_shifted(
 
 #[cfg(test)]
 mod tests {
-    use super::{content_roi, estimate_motion};
+    use super::{coarse_sample_dimensions, content_roi, estimate_motion, COARSE_DOWNSAMPLE_STEP};
     use crate::types::{ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
@@ -810,10 +838,10 @@ mod tests {
     }
 
     #[test]
-    fn locked_vertical_hint_rejects_horizontal_candidate() {
+    fn locked_vertical_hint_rejects_unrelated_frame() {
         let canvas = make_wide_canvas(700, 160);
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
-        let curr = crop_xy(&canvas, 40, 0, 160, 160);
+        let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
 
         let candidate = estimate_motion(
             &prev,
@@ -835,5 +863,40 @@ mod tests {
         let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default());
 
         assert!(candidate.is_none());
+    }
+
+    #[test]
+    fn locked_vertical_still_returns_reliable_axis_change_candidate() {
+        let canvas = make_wide_canvas(700, 160);
+        let prev = crop_xy(&canvas, 0, 0, 160, 160);
+        let curr = crop_xy(&canvas, 40, 0, 160, 160);
+
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            Some(ScrollAxis::Vertical),
+            (0, 40),
+            &StitchConfig::default(),
+        )
+        .expect("axis-change candidate");
+
+        assert_eq!(candidate.dy, 0);
+        assert!(
+            (candidate.dx - 40).abs() <= 2,
+            "dx = {} (expected ~40)",
+            candidate.dx
+        );
+    }
+
+    #[test]
+    fn coarse_matching_uses_subsampled_dimensions() {
+        assert_eq!(
+            coarse_sample_dimensions(1920, 1080, COARSE_DOWNSAMPLE_STEP),
+            (480, 270)
+        );
+        assert_eq!(
+            coarse_sample_dimensions(3, 2, COARSE_DOWNSAMPLE_STEP),
+            (1, 1)
+        );
     }
 }

@@ -281,11 +281,10 @@ fn horizontal_left_scroll_prepends_left() {
 
 #[test]
 fn horizontal_after_vertical_lock_is_rejected_as_axis_change() {
-    let vertical = make_scroll_canvas(320, 1200);
-    let first = crop_frame(&vertical, 0, 320);
-    let down = crop_frame(&vertical, 80, 320);
-    let horizontal = make_wide_canvas(1400, 320);
-    let right = crop_frame_xy(&horizontal, 160, 0, 320, 320);
+    let canvas = make_scroll_canvas(900, 1200);
+    let first = crop_frame_xy(&canvas, 200, 0, 320, 320);
+    let down = crop_frame_xy(&canvas, 200, 80, 320, 320);
+    let right = crop_frame_xy(&canvas, 280, 80, 320, 320);
 
     let mut stitcher = Stitcher::new(StitchConfig::default());
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
@@ -298,11 +297,7 @@ fn horizontal_after_vertical_lock_is_rejected_as_axis_change() {
     ));
 
     match stitcher.push_frame(right) {
-        StitchOutcome::NoMatch {
-            reason: NoMatchReason::LowConfidence | NoMatchReason::CrossAxisTooLarge,
-            ..
-        }
-        | StitchOutcome::AxisChanged {
+        StitchOutcome::AxisChanged {
             previous_axis: ScrollAxis::Vertical,
             new_axis: ScrollAxis::Horizontal,
             ..

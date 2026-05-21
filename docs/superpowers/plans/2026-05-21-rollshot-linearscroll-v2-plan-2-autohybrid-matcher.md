@@ -4,7 +4,7 @@
 
 **Goal:** Evolve `rollshot-core` from the Plan 1 vertical-only template wrapper into the default non-AKAZE `AutoHybrid` matcher that finds verified vertical and horizontal linear scroll motion.
 
-**Architecture:** Keep all Plan 2 matcher work inside `rollshot-core` and avoid new dependencies. `matcher.rs` becomes a small internal pipeline: generate coarse 2D, axis-aware template, and edge-projection candidates; verify candidates with `PixelOverlapVerifier`; rank the verified candidates by normalized confidence and second-best margin; return one `MotionCandidate` to `Stitcher`. `Stitcher` passes the locked axis and last accepted motion into the matcher, then keeps using Plan 1 axis validation, verifier, and `LinearCanvas` append behavior.
+**Architecture:** Keep all Plan 2 matcher work inside `rollshot-core` and avoid new dependencies. `matcher.rs` becomes a small internal pipeline: generate coarse 2D on a subsampled grid, axis-aware template, and edge-projection candidates; verify candidates with `PixelOverlapVerifier`; rank the verified candidates by normalized confidence and second-best margin; return one `MotionCandidate` to `Stitcher`. `Stitcher` passes the locked axis and last accepted motion into the matcher, then keeps using Plan 1 axis validation, verifier, and `LinearCanvas` append behavior. While an axis is locked, the matcher still probes verified opposite-axis candidates so `Stitcher` can return `AxisChanged` for a reliable real axis switch.
 
 ```text
 estimate_motion(prev, curr, locked_axis, last_motion, config)
@@ -12,14 +12,14 @@ estimate_motion(prev, curr, locked_axis, last_motion, config)
    |-- prev_gray, curr_gray = to_grayscale(prev/curr)   // computed ONCE
    |
    |    parallel fan-out (not a fallback chain):
-   |-- coarse_candidates(prev_gray, curr_gray, ...)     // best (dx, dy) on stepped grid
+   |-- coarse_candidates(prev_gray, curr_gray, ...)     // best (dx, dy) on subsampled grid
    |-- template_candidates(prev_gray, curr_gray, ...)   // axis-aware NCC search
    |-- edge_projection_candidates(prev_gray, curr_gray, ...) // 1-D MAD on edges
    |
    v
 rank_verified_candidates(prev, curr, candidates, ...)
    |
-   |-- filter: accept_confidence, second_best_margin, axis lock
+   |-- filter: accept_confidence, second_best_margin, axis lock/axis-change validity
    |-- verify: PixelOverlapVerifier per surviving candidate
    |-- combine score + verifier MAD
    |
@@ -39,6 +39,7 @@ Design note: the v0.2 spec lists Coarse / Template / Edge / AKAZE as a numbered 
 - `MotionCandidate.score` is treated as normalized confidence where lower is better, in roughly `[0.0, 1.0]`. Plan 2 makes every candidate generator follow that convention (Template uses `1.0 - NCC.clamp(0, 1)`; Coarse and Edge use normalized MAD).
 - `MotionCandidate.second_best_score` is also normalized lower-is-better confidence. The second-best margin check is `second_best_score - score >= config.second_best_margin` (i.e. the runner-up must be measurably *worse*, meaning higher score).
 - `match_width` (and its derived ROI) was sized for vertical scroll. Plan 2 reuses it unchanged for horizontal search; the synthetic fixtures have `match_width >= roi.w` so the ROI collapses to "full content rectangle" and the asymmetry is inert. TODO (future tuning, not in this plan): introduce an axis-aware band ROI for horizontal scroll on wide content.
+- A locked axis narrows normal matching but must not hide a verified opposite-axis candidate; that candidate is returned to `Stitcher`, which emits `AxisChanged` and preserves the anchor.
 - AKAZE, golden fixtures, debug match reports, and CI feature work stay in Plan 3. That includes targeted fixtures where the Coarse and Edge candidate paths *win* over Template; in Plan 2 they are tested as fallbacks-of-last-resort that produce verified candidates, but Template is expected to win on the synthetic textures used here.
 
 ## File Structure
@@ -418,10 +419,15 @@ fn candidate_matches_axis(
             classify_axis(dx, dy, config.axis_ratio_threshold),
             AxisClassification::Ambiguous
         ),
-        Some(axis) => matches!(
-            validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
-            AxisValidation::OnAxis { .. }
-        ),
+        Some(axis) => {
+            if dx == 0 && dy == 0 {
+                return false;
+            }
+            matches!(
+                validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
+                AxisValidation::OnAxis { .. } | AxisValidation::AxisChanged { .. }
+            )
+        }
     }
 }
 
@@ -475,8 +481,9 @@ Add:
 ```rust
 fn search_axes(locked_axis: Option<ScrollAxis>) -> &'static [SearchAxis] {
     match locked_axis {
-        Some(ScrollAxis::Vertical) => &[SearchAxis::Vertical],
-        Some(ScrollAxis::Horizontal) => &[SearchAxis::Horizontal],
+        Some(ScrollAxis::Vertical) | Some(ScrollAxis::Horizontal) => {
+            &[SearchAxis::Vertical, SearchAxis::Horizontal]
+        }
         None => &[SearchAxis::Vertical, SearchAxis::Horizontal],
     }
 }
@@ -735,7 +742,12 @@ git commit -m "feat(core): add axis-aware template matching"
 
 - [ ] **Step 1: Add coarse 2D candidate generation**
 
-Performance note: with `max_search_ratio = 0.75` and an unlocked axis (only happens on frame 2), the dense `(dx, dy)` grid contains up to `(121 * 121)` candidates for a 320-square frame. `coarse_mad` itself steps with `COARSE_DOWNSAMPLE_STEP`, so each candidate samples ~`(overlap_w / 4) * (overlap_h / 4)` cells. Total work is bounded at ~50M ops on frame 2 (one-shot) and ~5M ops on subsequent frames (axis locked → `dx` constrained to `±max_cross_axis_px`). Acceptable for Plan 2. If profiling later shows this is the matcher's hot spot, the follow-up is to build a true ¼-resolution image once and exhaustively search there (Plan 3 or later, not in scope here).
+Performance note: build a true coarse grayscale grid once per frame pair, then
+search offsets in that grid. With `COARSE_DOWNSAMPLE_STEP = 4`, a 1920x1080
+frame is searched as 480x270 samples instead of repeatedly walking the
+full-resolution image for every offset. Locked-axis matching constrains the
+normal on-axis coarse grid to the primary axis; template and edge probes still
+cover the opposite axis so reliable axis switches can become `AxisChanged`.
 
 Add:
 
@@ -748,22 +760,29 @@ fn coarse_candidates(
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
-    let max_dx = (width as f32 * config.max_search_ratio) as i32;
-    let max_dy = (height as f32 * config.max_search_ratio) as i32;
     let step = COARSE_DOWNSAMPLE_STEP as i32;
+    let (sample_w, sample_h) = coarse_sample_dimensions(width, height, COARSE_DOWNSAMPLE_STEP);
+    let prev_samples = coarse_samples(prev_gray, width, height, COARSE_DOWNSAMPLE_STEP);
+    let curr_samples = coarse_samples(curr_gray, width, height, COARSE_DOWNSAMPLE_STEP);
+    let max_dx = ((width as f32 * config.max_search_ratio) as i32 / step).max(0);
+    let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
     let mut scored = Vec::new();
 
-    let dx_values: Vec<i32> = match locked_axis {
-        Some(ScrollAxis::Vertical) => (-config.max_cross_axis_px..=config.max_cross_axis_px).collect(),
-        _ => ((-max_dx / step)..=(max_dx / step)).map(|n| n * step).collect(),
+    let dx_values: Vec<i32> = if locked_axis == Some(ScrollAxis::Vertical) {
+        vec![0]
+    } else {
+        (-max_dx..=max_dx).collect()
     };
-    let dy_values: Vec<i32> = match locked_axis {
-        Some(ScrollAxis::Horizontal) => (-config.max_cross_axis_px..=config.max_cross_axis_px).collect(),
-        _ => ((-max_dy / step)..=(max_dy / step)).map(|n| n * step).collect(),
+    let dy_values: Vec<i32> = if locked_axis == Some(ScrollAxis::Horizontal) {
+        vec![0]
+    } else {
+        (-max_dy..=max_dy).collect()
     };
 
-    for dy in dy_values {
-        for dx in dx_values.iter().copied() {
+    for sample_dy in dy_values {
+        for sample_dx in dx_values.iter().copied() {
+            let dx = sample_dx * step;
+            let dy = sample_dy * step;
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -771,13 +790,13 @@ fn coarse_candidates(
                 continue;
             }
             let diff = coarse_mad(
-                prev_gray,
-                curr_gray,
-                width,
-                height,
-                dx,
-                dy,
-                COARSE_DOWNSAMPLE_STEP,
+                &prev_samples,
+                &curr_samples,
+                sample_w,
+                sample_h,
+                sample_dx,
+                sample_dy,
+                1,
             );
             if diff.is_finite() {
                 scored.push((diff, dx, dy));
@@ -840,6 +859,10 @@ fn coarse_mad(
     sum / (count as f32 * 255.0)
 }
 ```
+
+Also add the `coarse_sample_dimensions` and `coarse_samples` helpers used
+above. They should average each `COARSE_DOWNSAMPLE_STEP` square into one
+grayscale sample and clamp tiny frames to at least a 1x1 sample grid.
 
 - [ ] **Step 2: Add edge projection candidate generation**
 
@@ -1215,11 +1238,10 @@ Add:
 ```rust
 #[test]
 fn horizontal_after_vertical_lock_is_rejected_as_axis_change() {
-    let vertical = make_scroll_canvas(320, 1200);
-    let first = crop_frame(&vertical, 0, 320);
-    let down = crop_frame(&vertical, 80, 320);
-    let horizontal = make_wide_canvas(1400, 320);
-    let right = crop_frame_xy(&horizontal, 160, 0, 320, 320);
+    let canvas = make_scroll_canvas(900, 1200);
+    let first = crop_frame_xy(&canvas, 200, 0, 320, 320);
+    let down = crop_frame_xy(&canvas, 200, 80, 320, 320);
+    let right = crop_frame_xy(&canvas, 280, 80, 320, 320);
 
     let mut stitcher = Stitcher::new(StitchConfig::default());
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
@@ -1232,11 +1254,7 @@ fn horizontal_after_vertical_lock_is_rejected_as_axis_change() {
     ));
 
     match stitcher.push_frame(right) {
-        StitchOutcome::NoMatch {
-            reason: NoMatchReason::LowConfidence | NoMatchReason::CrossAxisTooLarge,
-            ..
-        }
-        | StitchOutcome::AxisChanged {
+        StitchOutcome::AxisChanged {
             previous_axis: ScrollAxis::Vertical,
             new_axis: ScrollAxis::Horizontal,
             ..
