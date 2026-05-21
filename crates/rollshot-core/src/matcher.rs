@@ -1,13 +1,17 @@
 use image::{Rgba, RgbaImage};
 
-use crate::types::{MatchMethod, MotionCandidate, StitchConfig};
+use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
+use crate::overlap::compute_overlap;
+use crate::types::{MatchMethod, MotionCandidate, ScrollAxis, StitchConfig};
+use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
 const SIDE_IGNORE_RATIO: f32 = 0.04;
 const MIN_IGNORE_PX: u32 = 24;
 const TEMPLATE_MIN_HEIGHT: u32 = 48;
-const VERIFY_MAX_NORMALIZED_DIFF: f32 = 18.0 / 255.0;
+const COARSE_DOWNSAMPLE_STEP: u32 = 4;
+const EDGE_PROJECTION_STEP: u32 = 2;
 
 #[derive(Clone, Copy)]
 struct Region {
@@ -17,153 +21,149 @@ struct Region {
     h: u32,
 }
 
-/// Internal vertical-template result.
-///
-/// `confidence` follows the rollshot v0.1 convention: lower is better, and a
-/// caller-facing accept threshold of `StitchConfig::accept_confidence` decides
-/// whether the candidate is usable. `f32::INFINITY` means the inputs were not
-/// usable at all (dimension mismatch, ROI empty, second-best margin too tight,
-/// verification disagreement).
-struct VerticalTemplateEstimate {
-    dy: i32,
-    confidence: f32,
-    second_best_score: Option<f32>,
+#[derive(Debug, Clone, Copy)]
+struct CandidateScore {
+    candidate: MotionCandidate,
+    verifier_score: f32,
 }
 
-fn estimate_vertical_template(
+#[derive(Debug, Clone, Copy)]
+enum SearchAxis {
+    Vertical,
+    Horizontal,
+}
+
+pub fn estimate_motion(
     prev: &RgbaImage,
     curr: &RgbaImage,
-    last_offset: i32,
+    locked_axis: Option<ScrollAxis>,
+    last_motion: (i32, i32),
     config: &StitchConfig,
-) -> VerticalTemplateEstimate {
-    let no_match = VerticalTemplateEstimate {
-        dy: 0,
-        confidence: f32::INFINITY,
-        second_best_score: None,
-    };
-
+) -> Option<MotionCandidate> {
     if prev.dimensions() != curr.dimensions() {
-        return no_match;
+        return None;
     }
 
     let width = prev.width();
     let height = prev.height();
-    if height < 100 || width < 50 {
-        return no_match;
-    }
-
-    let roi = content_roi(width, height);
-    let match_region = match_width_region(roi, config.match_width);
-    if roi.h < TEMPLATE_MIN_HEIGHT * 2 || match_region.w < 40 {
-        return no_match;
-    }
-
-    let template_h = (roi.h / 3).max(TEMPLATE_MIN_HEIGHT).min(roi.h - 1);
-    let search_start = roi.y as i32;
-    let search_end = (roi.y + roi.h - template_h) as i32;
-    if search_end <= search_start {
-        return no_match;
-    }
-
     let prev_gray = to_grayscale(prev);
     let curr_gray = to_grayscale(curr);
 
-    let max_offset = (height as i32 - config.min_overlap as i32)
-        .max(0)
-        .min(search_end - search_start);
-    let predict = last_offset.clamp(0, max_offset);
-
-    let mut best_offset = 0i32;
-    let mut best_score = f32::MIN;
-    let mut second_score = f32::MIN;
-
-    for offset in predict_iter(max_offset, predict) {
-        let search_y = search_start + offset;
-
-        let curr_template = Region {
-            y: roi.y,
-            h: template_h,
-            ..match_region
-        };
-        let prev_template = Region {
-            y: search_y as u32,
-            ..curr_template
-        };
-        let score = ncc_score_region(&prev_gray, &curr_gray, width, prev_template, curr_template);
-
-        if score > best_score {
-            second_score = best_score;
-            best_score = score;
-            best_offset = offset;
-        } else if score > second_score {
-            second_score = score;
-        }
-    }
-
-    if !best_score.is_finite() || best_score <= 0.0 {
-        return no_match;
-    }
-
-    if second_score.is_finite() && best_score - second_score < config.second_best_margin {
-        return no_match;
-    }
-
-    let overlap_h = height.saturating_sub(best_offset as u32);
-    let overlap_region = Region {
-        y: 0,
-        h: overlap_h,
-        ..match_region
-    };
-    let verify = overlap_mean_abs_diff(
+    let mut candidates = Vec::new();
+    candidates.extend(coarse_candidates(
         &prev_gray,
         &curr_gray,
         width,
-        overlap_region,
-        best_offset as u32,
-    );
+        height,
+        locked_axis,
+        config,
+    ));
+    candidates.extend(template_candidates(
+        &prev_gray,
+        &curr_gray,
+        width,
+        height,
+        locked_axis,
+        last_motion,
+        config,
+    ));
+    candidates.extend(edge_projection_candidates(
+        &prev_gray,
+        &curr_gray,
+        width,
+        height,
+        locked_axis,
+        config,
+    ));
 
-    if !verify.is_finite() || verify > VERIFY_MAX_NORMALIZED_DIFF {
-        return no_match;
+    rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+}
+
+fn rank_verified_candidates(
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    locked_axis: Option<ScrollAxis>,
+    candidates: Vec<MotionCandidate>,
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    let verifier = PixelOverlapVerifier::new(&config.verifier, config.min_overlap);
+    let mut scored = Vec::new();
+
+    for mut candidate in candidates {
+        if candidate.score > config.accept_confidence {
+            continue;
+        }
+        if !passes_second_best_margin(&candidate, config.second_best_margin) {
+            continue;
+        }
+        if !candidate_matches_axis(candidate.dx, candidate.dy, locked_axis, config) {
+            continue;
+        }
+
+        let verifier_score = match verifier.verify(prev, curr, &candidate) {
+            VerifierOutcome::Pass { score, .. } => score,
+            VerifierOutcome::InsufficientOverlap
+            | VerifierOutcome::OverlapDisagreement { .. } => continue,
+        };
+
+        candidate.score = (candidate.score + verifier_score * 0.5).clamp(0.0, 1.0);
+        scored.push(CandidateScore {
+            candidate,
+            verifier_score,
+        });
     }
 
-    let confidence = (1.0 - best_score.clamp(0.0, 1.0)) + verify * 0.5;
-    VerticalTemplateEstimate {
-        dy: best_offset,
-        confidence,
-        second_best_score: if second_score.is_finite() {
-            Some(second_score)
-        } else {
-            None
-        },
+    scored.sort_by(|a, b| {
+        a.candidate
+            .score
+            .total_cmp(&b.candidate.score)
+            .then(a.verifier_score.total_cmp(&b.verifier_score))
+    });
+
+    scored.first().map(|s| s.candidate)
+}
+
+fn passes_second_best_margin(candidate: &MotionCandidate, margin: f32) -> bool {
+    match candidate.second_best_score {
+        Some(second) => second - candidate.score >= margin,
+        None => true,
     }
 }
 
-/// Public v0.2 entrypoint. Produces a single vertical `MotionCandidate` from
-/// the template matcher. Plan 2 evolves this into a multi-candidate hybrid
-/// generator; Plan 1 ships only the vertical template path.
-///
-/// Returns `None` when the template path could not produce a usable estimate
-/// at all. Callers downstream still run the candidate through the pixel
-/// overlap verifier.
-pub fn estimate_motion(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
-    last_offset: i32,
+fn candidate_matches_axis(
+    dx: i32,
+    dy: i32,
+    locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
-) -> Option<MotionCandidate> {
-    let raw = estimate_vertical_template(prev, curr, last_offset, config);
-    if !raw.confidence.is_finite() {
-        return None;
+) -> bool {
+    match locked_axis {
+        None => !matches!(
+            classify_axis(dx, dy, config.axis_ratio_threshold),
+            AxisClassification::Ambiguous
+        ),
+        Some(axis) => matches!(
+            validate_with_lock(axis, dx, dy, config.max_cross_axis_px),
+            AxisValidation::OnAxis { .. }
+        ),
     }
-    Some(MotionCandidate {
-        dx: 0,
-        dy: raw.dy,
-        method: MatchMethod::Template,
-        score: raw.confidence,
-        second_best_score: raw.second_best_score,
+}
+
+fn candidate(
+    dx: i32,
+    dy: i32,
+    method: MatchMethod,
+    score: f32,
+    second_best_score: Option<f32>,
+) -> MotionCandidate {
+    MotionCandidate {
+        dx,
+        dy,
+        method,
+        score,
+        second_best_score,
         inliers: None,
         raw_matches: None,
-    })
+    }
 }
 
 fn content_roi(width: u32, height: u32) -> Region {
@@ -388,7 +388,7 @@ mod tests {
             min_overlap: 280,
             ..StitchConfig::default()
         };
-        let candidate = estimate_motion(&prev, &curr, 0, &config).expect("template candidate");
+        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &config).expect("template candidate");
         assert!(
             candidate.dy <= 40,
             "dy = {} exceeds bounded search",
@@ -402,7 +402,7 @@ mod tests {
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
         let candidate =
-            estimate_motion(&prev, &curr, 0, &StitchConfig::default()).expect("template candidate");
+            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).expect("template candidate");
         assert_eq!(candidate.method, MatchMethod::Template);
         assert_eq!(candidate.dx, 0);
         assert!(
@@ -416,14 +416,14 @@ mod tests {
     fn estimate_motion_returns_none_for_unrelated_frames() {
         let prev = make_textured_canvas(160, 160);
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
-        assert!(estimate_motion(&prev, &curr, 0, &StitchConfig::default()).is_none());
+        assert!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).is_none());
     }
 
     #[test]
     fn estimate_motion_returns_none_for_dimension_mismatch() {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
-        assert!(estimate_motion(&prev, &curr, 0, &StitchConfig::default()).is_none());
+        assert!(estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()).is_none());
     }
 
     #[test]
