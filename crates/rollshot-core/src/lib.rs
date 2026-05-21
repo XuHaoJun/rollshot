@@ -1,7 +1,6 @@
 mod axis;
 mod canvas;
 mod duplicate;
-mod image_ext;
 mod matcher;
 mod overlap;
 mod stitcher;

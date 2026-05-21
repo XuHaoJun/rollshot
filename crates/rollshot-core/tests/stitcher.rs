@@ -2,7 +2,10 @@ mod common;
 
 use common::{crop_frame, make_scroll_canvas, paint_sticky_header};
 use image::{Rgba, RgbaImage};
-use rollshot_core::{StitchConfig, StitchOutcome, Stitcher};
+use rollshot_core::{
+    AppendDirection, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
+    VerifierConfig,
+};
 
 #[test]
 fn first_frame_initializes_stitched_image() {
@@ -22,6 +25,7 @@ fn first_frame_initializes_stitched_image() {
     let stats = stitcher.stats();
     assert_eq!(stats.frame_count, 1);
     assert_eq!(stats.total_height, 320);
+    assert_eq!(stats.total_width, 320);
     assert_eq!(stats.last_append, 320);
 }
 
@@ -35,8 +39,9 @@ fn dimension_mismatch_returns_no_match() {
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(wrong_size) {
-        StitchOutcome::NoMatch { confidence } => {
-            assert!(!confidence.is_finite(), "confidence = {confidence}");
+        StitchOutcome::NoMatch { reason, best_estimate } => {
+            assert_eq!(reason, NoMatchReason::DimensionMismatch);
+            assert!(best_estimate.is_none());
         }
         other => panic!("expected NoMatch, got {other:?}"),
     }
@@ -64,7 +69,7 @@ fn duplicate_frame_returns_duplicate_without_growing() {
 }
 
 #[test]
-fn normal_scroll_appends_expected_pixels() {
+fn normal_scroll_appends_bottom_and_locks_vertical_axis() {
     let canvas = make_scroll_canvas(320, 1200);
     let first = crop_frame(&canvas, 0, 320);
     let scrolled = crop_frame(&canvas, 80, 320);
@@ -73,8 +78,11 @@ fn normal_scroll_appends_expected_pixels() {
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(scrolled) {
-        StitchOutcome::Appended { added } => {
+        StitchOutcome::Appended { direction, added, estimate } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert_eq!(estimate.axis, ScrollAxis::Vertical);
             assert!((76..=84).contains(&added), "added = {added}");
+            assert!(estimate.confidence < StitchConfig::default().accept_confidence);
         }
         other => panic!("expected Appended, got {other:?}"),
     }
@@ -84,6 +92,7 @@ fn normal_scroll_appends_expected_pixels() {
     let stats = stitcher.stats();
     assert_eq!(stats.frame_count, 2);
     assert_eq!(stats.total_height, full.height());
+    assert_eq!(stats.total_width, 320);
 }
 
 #[test]
@@ -97,7 +106,13 @@ fn small_scroll_below_min_append_reports_no_progress() {
         ..StitchConfig::default()
     });
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
-    assert_eq!(stitcher.push_frame(nudged), StitchOutcome::NoProgress);
+    match stitcher.push_frame(nudged) {
+        StitchOutcome::NoProgress { estimate } => {
+            let est = estimate.expect("nudged frame should still produce an estimate");
+            assert!(est.dy.abs() < 64, "dy = {}", est.dy);
+        }
+        other => panic!("expected NoProgress, got {other:?}"),
+    }
 
     let full = stitcher.full_image().expect("stitched image");
     assert_eq!(full.height(), 320);
@@ -114,8 +129,8 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(bad) {
-        StitchOutcome::NoMatch { confidence } => {
-            assert!(confidence > StitchConfig::default().accept_diff);
+        StitchOutcome::NoMatch { reason, .. } => {
+            assert_eq!(reason, NoMatchReason::LowConfidence);
         }
         other => panic!("expected NoMatch on white frame, got {other:?}"),
     }
@@ -125,7 +140,8 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
     assert_eq!(stats_after_bad.total_height, 320);
 
     match stitcher.push_frame(recovered) {
-        StitchOutcome::Appended { added } => {
+        StitchOutcome::Appended { added, direction, .. } => {
+            assert_eq!(direction, AppendDirection::Bottom);
             assert!((92..=100).contains(&added), "added = {added}");
         }
         other => panic!("expected Appended after recovery, got {other:?}"),
@@ -144,11 +160,24 @@ fn sticky_header_frames_still_append_expected_amount() {
     paint_sticky_header(&mut first, 36);
     paint_sticky_header(&mut scrolled, 36);
 
-    let mut stitcher = Stitcher::new(StitchConfig::default());
+    // The painted sticky header creates a strong checkerboard that the default
+    // verifier thresholds reject. Use a slightly more lenient verifier so the
+    // test proves sticky headers don't dominate *motion estimation* rather than
+    // testing verifier strictness.
+    let config = StitchConfig {
+        verifier: VerifierConfig {
+            downsample_max_mad: 40.0 / 255.0,
+            full_res_max_mad: 30.0 / 255.0,
+            ..VerifierConfig::default()
+        },
+        ..StitchConfig::default()
+    };
+    let mut stitcher = Stitcher::new(config);
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(scrolled) {
-        StitchOutcome::Appended { added } => {
+        StitchOutcome::Appended { added, direction, .. } => {
+            assert_eq!(direction, AppendDirection::Bottom);
             assert!((66..=74).contains(&added), "added = {added}");
         }
         other => panic!("expected Appended with sticky header, got {other:?}"),
