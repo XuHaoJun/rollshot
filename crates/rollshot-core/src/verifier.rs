@@ -5,10 +5,7 @@ use crate::types::{MotionCandidate, OverlapRegion, VerifierConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VerifierOutcome {
-    Pass {
-        overlap: OverlapRegion,
-        score: f32,
-    },
+    Pass { overlap: OverlapRegion, score: f32 },
     InsufficientOverlap,
     OverlapDisagreement { downsample_mad: f32, full_mad: f32 },
 }
@@ -139,7 +136,11 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 if (x / 4 + y / 6) % 2 == 0 {
-                    img.put_pixel(x, y, Rgba([30, ((x * 7) % 200) as u8, ((y * 11) % 200) as u8, 255]));
+                    img.put_pixel(
+                        x,
+                        y,
+                        Rgba([30, ((x * 7) % 200) as u8, ((y * 11) % 200) as u8, 255]),
+                    );
                 }
             }
         }

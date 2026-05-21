@@ -144,10 +144,7 @@ mod tests {
 
     #[test]
     fn diagonal_motion_within_ratio_is_ambiguous() {
-        assert_eq!(
-            classify_axis(20, 25, 1.5),
-            AxisClassification::Ambiguous
-        );
+        assert_eq!(classify_axis(20, 25, 1.5), AxisClassification::Ambiguous);
     }
 
     #[test]

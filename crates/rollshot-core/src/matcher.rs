@@ -349,7 +349,11 @@ mod tests {
             ..StitchConfig::default()
         };
         let candidate = estimate_motion(&prev, &curr, 0, &config).expect("template candidate");
-        assert!(candidate.dy <= 40, "dy = {} exceeds bounded search", candidate.dy);
+        assert!(
+            candidate.dy <= 40,
+            "dy = {} exceeds bounded search",
+            candidate.dy
+        );
     }
 
     #[test]
@@ -357,8 +361,8 @@ mod tests {
         let canvas = make_textured_canvas(160, 600);
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
-        let candidate = estimate_motion(&prev, &curr, 0, &StitchConfig::default())
-            .expect("template candidate");
+        let candidate =
+            estimate_motion(&prev, &curr, 0, &StitchConfig::default()).expect("template candidate");
         assert_eq!(candidate.method, MatchMethod::Template);
         assert_eq!(candidate.dx, 0);
         assert!(

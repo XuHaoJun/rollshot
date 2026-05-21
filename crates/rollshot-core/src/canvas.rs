@@ -110,9 +110,7 @@ impl LinearCanvas {
     fn append_bottom(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
         let slice_px = slice_px.min(frame.height());
         let overlap = frame.height() - slice_px;
-        let slice = frame
-            .view(0, overlap, frame.width(), slice_px)
-            .to_image();
+        let slice = frame.view(0, overlap, frame.width(), slice_px).to_image();
         let mut combined = RgbaImage::new(self.image.width(), self.image.height() + slice_px);
         combined.copy_from(&self.image, 0, 0).expect("copy base");
         combined
@@ -137,9 +135,7 @@ impl LinearCanvas {
     fn append_right(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
         let slice_px = slice_px.min(frame.width());
         let overlap = frame.width() - slice_px;
-        let slice = frame
-            .view(overlap, 0, slice_px, frame.height())
-            .to_image();
+        let slice = frame.view(overlap, 0, slice_px, frame.height()).to_image();
         let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
         combined.copy_from(&self.image, 0, 0).expect("copy base");
         combined

@@ -39,7 +39,10 @@ fn dimension_mismatch_returns_no_match() {
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(wrong_size) {
-        StitchOutcome::NoMatch { reason, best_estimate } => {
+        StitchOutcome::NoMatch {
+            reason,
+            best_estimate,
+        } => {
             assert_eq!(reason, NoMatchReason::DimensionMismatch);
             assert!(best_estimate.is_none());
         }
@@ -78,7 +81,11 @@ fn normal_scroll_appends_bottom_and_locks_vertical_axis() {
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(scrolled) {
-        StitchOutcome::Appended { direction, added, estimate } => {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
             assert_eq!(direction, AppendDirection::Bottom);
             assert_eq!(estimate.axis, ScrollAxis::Vertical);
             assert!((76..=84).contains(&added), "added = {added}");
@@ -140,7 +147,9 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
     assert_eq!(stats_after_bad.total_height, 320);
 
     match stitcher.push_frame(recovered) {
-        StitchOutcome::Appended { added, direction, .. } => {
+        StitchOutcome::Appended {
+            added, direction, ..
+        } => {
             assert_eq!(direction, AppendDirection::Bottom);
             assert!((92..=100).contains(&added), "added = {added}");
         }
@@ -176,7 +185,9 @@ fn sticky_header_frames_still_append_expected_amount() {
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(scrolled) {
-        StitchOutcome::Appended { added, direction, .. } => {
+        StitchOutcome::Appended {
+            added, direction, ..
+        } => {
             assert_eq!(direction, AppendDirection::Bottom);
             assert!((66..=74).contains(&added), "added = {added}");
         }

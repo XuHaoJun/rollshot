@@ -71,7 +71,12 @@ impl Stitcher {
         if candidate.score > self.config.accept_confidence {
             return StitchOutcome::NoMatch {
                 reason: NoMatchReason::LowConfidence,
-                best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                best_estimate: build_estimate(
+                    anchor,
+                    &frame,
+                    &candidate,
+                    self.config.axis_ratio_threshold,
+                ),
             };
         }
 
@@ -80,7 +85,12 @@ impl Stitcher {
             DirectionResult::Ambiguous => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::AmbiguousAxis,
-                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
                 };
             }
             DirectionResult::CrossAxisTooLarge => {
@@ -95,8 +105,9 @@ impl Stitcher {
                 };
             }
             DirectionResult::AxisChanged { new_axis, locked } => {
-                let estimate = build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
-                    .expect("axis-change estimate must compute overlap");
+                let estimate =
+                    build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
+                        .expect("axis-change estimate must compute overlap");
                 return StitchOutcome::AxisChanged {
                     previous_axis: locked,
                     new_axis,
@@ -111,7 +122,12 @@ impl Stitcher {
         };
         if slice_px < self.config.min_append {
             return StitchOutcome::NoProgress {
-                estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                estimate: build_estimate(
+                    anchor,
+                    &frame,
+                    &candidate,
+                    self.config.axis_ratio_threshold,
+                ),
             };
         }
 
@@ -121,13 +137,23 @@ impl Stitcher {
             VerifierOutcome::InsufficientOverlap => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::InsufficientOverlap,
-                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
                 };
             }
             VerifierOutcome::OverlapDisagreement { .. } => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::OverlapVerificationFailed,
-                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
                 };
             }
         };
@@ -159,12 +185,22 @@ impl Stitcher {
             Err(CanvasAppendError::DimensionMismatch { .. }) => {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::DimensionMismatch,
-                    best_estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
                 };
             }
             Err(CanvasAppendError::EmptyAppend) => {
                 return StitchOutcome::NoProgress {
-                    estimate: build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold),
+                    estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
                 };
             }
         };
@@ -223,17 +259,15 @@ impl Stitcher {
 
     fn classify_direction(&self, candidate: &MotionCandidate) -> DirectionResult {
         match self.locked_axis {
-            None => match classify_axis(
-                candidate.dx,
-                candidate.dy,
-                self.config.axis_ratio_threshold,
-            ) {
-                AxisClassification::Vertical { direction }
-                | AxisClassification::Horizontal { direction } => {
-                    DirectionResult::Direction(direction)
+            None => {
+                match classify_axis(candidate.dx, candidate.dy, self.config.axis_ratio_threshold) {
+                    AxisClassification::Vertical { direction }
+                    | AxisClassification::Horizontal { direction } => {
+                        DirectionResult::Direction(direction)
+                    }
+                    AxisClassification::Ambiguous => DirectionResult::Ambiguous,
                 }
-                AxisClassification::Ambiguous => DirectionResult::Ambiguous,
-            },
+            }
             Some(locked) => match validate_with_lock(
                 locked,
                 candidate.dx,
