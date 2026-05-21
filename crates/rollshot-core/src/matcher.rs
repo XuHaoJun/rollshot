@@ -166,6 +166,138 @@ fn candidate(
     }
 }
 
+fn search_axes(locked_axis: Option<ScrollAxis>) -> &'static [SearchAxis] {
+    match locked_axis {
+        Some(ScrollAxis::Vertical) => &[SearchAxis::Vertical],
+        Some(ScrollAxis::Horizontal) => &[SearchAxis::Horizontal],
+        None => &[SearchAxis::Vertical, SearchAxis::Horizontal],
+    }
+}
+
+fn predicted_offset(axis: SearchAxis, last_motion: (i32, i32)) -> i32 {
+    match axis {
+        SearchAxis::Vertical => last_motion.1,
+        SearchAxis::Horizontal => last_motion.0,
+    }
+}
+
+fn template_candidates(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    locked_axis: Option<ScrollAxis>,
+    last_motion: (i32, i32),
+    config: &StitchConfig,
+) -> Vec<MotionCandidate> {
+    let mut out = Vec::new();
+    let roi = content_roi(width, height);
+    let match_region = match_width_region(roi, config.match_width);
+
+    for axis in search_axes(locked_axis) {
+        if let Some(candidate) = search_template_axis(
+            prev_gray,
+            curr_gray,
+            width,
+            height,
+            *axis,
+            match_region,
+            predicted_offset(*axis, last_motion),
+            config,
+        ) {
+            out.push(candidate);
+        }
+    }
+
+    out
+}
+
+fn search_template_axis(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    axis: SearchAxis,
+    region: Region,
+    last_offset: i32,
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    if width < 50 || height < 50 {
+        return None;
+    }
+
+    let max_offset = match axis {
+        SearchAxis::Vertical => (height as i32 - config.min_overlap as i32).max(0),
+        SearchAxis::Horizontal => (width as i32 - config.min_overlap as i32).max(0),
+    };
+    let max_offset = max_offset.min(match axis {
+        SearchAxis::Vertical => (height as f32 * config.max_search_ratio) as i32,
+        SearchAxis::Horizontal => (width as f32 * config.max_search_ratio) as i32,
+    });
+    if max_offset <= 0 {
+        return None;
+    }
+
+    let mut best_offset = 0i32;
+    let mut best_score = f32::MIN;
+    let mut second_score = f32::MIN;
+
+    for offset in signed_predict_iter(max_offset, last_offset) {
+        let score = match axis {
+            SearchAxis::Vertical => ncc_score_shifted(
+                prev_gray,
+                curr_gray,
+                width,
+                height,
+                region,
+                0,
+                offset,
+            ),
+            SearchAxis::Horizontal => ncc_score_shifted(
+                prev_gray,
+                curr_gray,
+                width,
+                height,
+                region,
+                offset,
+                0,
+            ),
+        };
+
+        if score > best_score {
+            second_score = best_score;
+            best_score = score;
+            best_offset = offset;
+        } else if score > second_score {
+            second_score = score;
+        }
+    }
+
+    if !best_score.is_finite() || best_score <= 0.0 {
+        return None;
+    }
+
+    let confidence = 1.0 - best_score.clamp(0.0, 1.0);
+    let second_confidence = if second_score.is_finite() {
+        Some(1.0 - second_score.clamp(0.0, 1.0))
+    } else {
+        None
+    };
+
+    let (dx, dy) = match axis {
+        SearchAxis::Vertical => (0, best_offset),
+        SearchAxis::Horizontal => (best_offset, 0),
+    };
+
+    Some(candidate(
+        dx,
+        dy,
+        MatchMethod::Template,
+        confidence,
+        second_confidence,
+    ))
+}
+
 fn content_roi(width: u32, height: u32) -> Region {
     let side = ((width as f32 * SIDE_IGNORE_RATIO) as u32).max(MIN_IGNORE_PX);
     let top = ((height as f32 * TOP_IGNORE_RATIO) as u32).max(MIN_IGNORE_PX);
@@ -193,46 +325,56 @@ fn to_grayscale(img: &RgbaImage) -> Vec<f32> {
         .collect()
 }
 
-fn predict_iter(max: i32, predict: i32) -> Vec<i32> {
-    let p = predict.clamp(0, max);
-    let mut out = Vec::with_capacity((max as usize).saturating_mul(2) + 1);
+fn signed_predict_iter(max_abs: i32, predict: i32) -> Vec<i32> {
+    let p = predict.clamp(-max_abs, max_abs);
+    let mut out = Vec::with_capacity((max_abs as usize).saturating_mul(2) + 1);
     out.push(p);
-    for delta in 1..=max {
-        if p + delta <= max {
+    for delta in 1..=max_abs {
+        if p + delta <= max_abs {
             out.push(p + delta);
         }
-        if p - delta >= 0 {
+        if p - delta >= -max_abs {
             out.push(p - delta);
         }
     }
     out
 }
 
-fn ncc_score_region(
+fn ncc_score_shifted(
     prev_gray: &[f32],
     curr_gray: &[f32],
     width: u32,
-    prev_region: Region,
-    curr_region: Region,
+    height: u32,
+    region: Region,
+    dx: i32,
+    dy: i32,
 ) -> f32 {
-    if prev_region.w == 0 || prev_region.h == 0 || width == 0 {
+    let overlap = match compute_overlap(width, height, width, height, dx, dy) {
+        Some(overlap) => overlap,
+        None => return f32::MIN,
+    };
+    let x0 = region.x.max(overlap.prev_x);
+    let y0 = region.y.max(overlap.prev_y);
+    let x1 = (region.x + region.w).min(overlap.prev_x + overlap.width);
+    let y1 = (region.y + region.h).min(overlap.prev_y + overlap.height);
+    if x1 <= x0 || y1 <= y0 {
         return f32::MIN;
     }
 
     let mut prev_sum = 0.0f32;
     let mut curr_sum = 0.0f32;
     let mut count = 0usize;
-
-    for row in 0..prev_region.h {
-        let prev_base = ((prev_region.y + row) * width + prev_region.x) as usize;
-        let curr_base = ((curr_region.y + row) * width + curr_region.x) as usize;
-        for col in 0..prev_region.w as usize {
-            prev_sum += prev_gray[prev_base + col];
-            curr_sum += curr_gray[curr_base + col];
+    for prev_y in y0..y1 {
+        for prev_x in x0..x1 {
+            let curr_x = (prev_x as i32 - dx) as u32;
+            let curr_y = (prev_y as i32 - dy) as u32;
+            let prev_idx = (prev_y * width + prev_x) as usize;
+            let curr_idx = (curr_y * width + curr_x) as usize;
+            prev_sum += prev_gray[prev_idx];
+            curr_sum += curr_gray[curr_idx];
             count += 1;
         }
     }
-
     if count == 0 {
         return f32::MIN;
     }
@@ -242,13 +384,14 @@ fn ncc_score_region(
     let mut num = 0.0f32;
     let mut prev_var = 0.0f32;
     let mut curr_var = 0.0f32;
-
-    for row in 0..prev_region.h {
-        let prev_base = ((prev_region.y + row) * width + prev_region.x) as usize;
-        let curr_base = ((curr_region.y + row) * width + curr_region.x) as usize;
-        for col in 0..prev_region.w as usize {
-            let p = prev_gray[prev_base + col] - prev_mean;
-            let c = curr_gray[curr_base + col] - curr_mean;
+    for prev_y in y0..y1 {
+        for prev_x in x0..x1 {
+            let curr_x = (prev_x as i32 - dx) as u32;
+            let curr_y = (prev_y as i32 - dy) as u32;
+            let prev_idx = (prev_y * width + prev_x) as usize;
+            let curr_idx = (curr_y * width + curr_x) as usize;
+            let p = prev_gray[prev_idx] - prev_mean;
+            let c = curr_gray[curr_idx] - curr_mean;
             num += p * c;
             prev_var += p * p;
             curr_var += c * c;
@@ -258,41 +401,7 @@ fn ncc_score_region(
     if prev_var <= 1.0 || curr_var <= 1.0 {
         return f32::MIN;
     }
-
     num / (prev_var.sqrt() * curr_var.sqrt())
-}
-
-fn overlap_mean_abs_diff(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    region: Region,
-    offset: u32,
-) -> f32 {
-    if region.w == 0 || region.h == 0 {
-        return f32::INFINITY;
-    }
-
-    let sample_h = region.h.min(160);
-    let prev_start_y = offset + region.h.saturating_sub(sample_h);
-    let curr_start_y = region.h.saturating_sub(sample_h);
-
-    let mut sum = 0.0f32;
-    let mut count = 0usize;
-    for row in 0..sample_h {
-        let prev_base = ((prev_start_y + row) * width + region.x) as usize;
-        let curr_base = ((curr_start_y + row) * width + region.x) as usize;
-        for col in 0..region.w as usize {
-            sum += (prev_gray[prev_base + col] - curr_gray[curr_base + col]).abs();
-            count += 1;
-        }
-    }
-
-    if count == 0 {
-        return f32::INFINITY;
-    }
-
-    sum / (count as f32 * 255.0)
 }
 
 #[cfg(test)]
