@@ -234,6 +234,8 @@ Once the axis is locked:
 - Horizontal mode accepts `Right` and `Left` only.
 - Cross-axis movement must stay within `max_cross_axis_px`.
 - A reliable different-axis estimate returns `AxisChanged`.
+  The matcher must still probe enough opposite-axis candidates while locked to
+  distinguish an actual axis change from a weak `NoMatch`.
 
 `LinearScroll` never switches into Mosaic2D behavior.
 
@@ -321,16 +323,18 @@ best final confidence.
 The existing vertical template matcher should be evolved rather than replaced
 all at once.
 
-`CoarseDownscaled2DMatcher` searches a downscaled version of both frames to
-produce rough `(dx, dy)` candidates. It uses `max_search_ratio` to avoid full
-frame exhaustive search.
+`CoarseDownscaled2DMatcher` searches an averaged downscaled version of both
+frames to produce rough `(dx, dy)` candidates. It uses `max_search_ratio` to
+bound the search window and must not run a full-resolution exhaustive search
+for every offset.
 
 `AxisAwareTemplateMatcher` refines candidates along the relevant axis:
 
 - Unknown axis: evaluate plausible vertical and horizontal candidates.
-- Locked vertical axis: search primarily `dy`, with small cross-axis tolerance.
-- Locked horizontal axis: search primarily `dx`, with small cross-axis
-  tolerance.
+- Locked vertical axis: prefer vertical motion, but still probe horizontal
+  candidates strongly enough to report `AxisChanged` when verified.
+- Locked horizontal axis: prefer horizontal motion, but still probe vertical
+  candidates strongly enough to report `AxisChanged` when verified.
 
 Sticky headers, scrollbars, and portal crop borders should be handled first
 through ROI exclusion. Semantic masks are out of scope for v0.2.
