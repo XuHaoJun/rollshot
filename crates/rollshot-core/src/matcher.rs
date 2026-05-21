@@ -1,13 +1,12 @@
 use image::{Rgba, RgbaImage};
 
-use crate::types::{OffsetEstimate, StitchConfig};
+use crate::types::{MatchMethod, MotionCandidate, StitchConfig};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
 const SIDE_IGNORE_RATIO: f32 = 0.04;
 const MIN_IGNORE_PX: u32 = 24;
 const TEMPLATE_MIN_HEIGHT: u32 = 48;
-const SECOND_BEST_MIN_MARGIN: f32 = 0.015;
 const VERIFY_MAX_NORMALIZED_DIFF: f32 = 18.0 / 255.0;
 
 #[derive(Clone, Copy)]
@@ -18,25 +17,29 @@ struct Region {
     h: u32,
 }
 
-/// Estimates the vertical offset that takes `prev` onto `curr`.
+/// Internal vertical-template result.
 ///
-/// Confidence follows the rollshot convention: lower is better, and an
-/// estimate is acceptable when `confidence <= StitchConfig::accept_diff`.
-///
-/// Returns an estimate with `confidence = f32::INFINITY` when the frames
-/// are too small to match, the content ROI is empty, the best score is
-/// indistinguishable from the second-best, or the verification step
-/// reports too much pixel disagreement.
-pub fn estimate_offset(
+/// `confidence` follows the rollshot v0.1 convention: lower is better, and a
+/// caller-facing accept threshold of `StitchConfig::accept_confidence` decides
+/// whether the candidate is usable. `f32::INFINITY` means the inputs were not
+/// usable at all (dimension mismatch, ROI empty, second-best margin too tight,
+/// verification disagreement).
+struct VerticalTemplateEstimate {
+    dy: i32,
+    confidence: f32,
+    second_best_score: Option<f32>,
+}
+
+fn estimate_vertical_template(
     prev: &RgbaImage,
     curr: &RgbaImage,
     last_offset: i32,
     config: &StitchConfig,
-) -> OffsetEstimate {
-    let no_match = OffsetEstimate {
+) -> VerticalTemplateEstimate {
+    let no_match = VerticalTemplateEstimate {
         dy: 0,
         confidence: f32::INFINITY,
-        method: config.algorithm,
+        second_best_score: None,
     };
 
     if prev.dimensions() != curr.dimensions() {
@@ -101,7 +104,7 @@ pub fn estimate_offset(
         return no_match;
     }
 
-    if second_score.is_finite() && best_score - second_score < SECOND_BEST_MIN_MARGIN {
+    if second_score.is_finite() && best_score - second_score < config.second_best_margin {
         return no_match;
     }
 
@@ -124,11 +127,43 @@ pub fn estimate_offset(
     }
 
     let confidence = (1.0 - best_score.clamp(0.0, 1.0)) + verify * 0.5;
-    OffsetEstimate {
+    VerticalTemplateEstimate {
         dy: best_offset,
         confidence,
-        method: config.algorithm,
+        second_best_score: if second_score.is_finite() {
+            Some(second_score)
+        } else {
+            None
+        },
     }
+}
+
+/// Public v0.2 entrypoint. Produces a single vertical `MotionCandidate` from
+/// the template matcher. Plan 2 evolves this into a multi-candidate hybrid
+/// generator; Plan 1 ships only the vertical template path.
+///
+/// Returns `None` when the template path could not produce a usable estimate
+/// at all. Callers downstream still run the candidate through the pixel
+/// overlap verifier.
+pub fn estimate_motion(
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    last_offset: i32,
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    let raw = estimate_vertical_template(prev, curr, last_offset, config);
+    if !raw.confidence.is_finite() {
+        return None;
+    }
+    Some(MotionCandidate {
+        dx: 0,
+        dy: raw.dy,
+        method: MatchMethod::Template,
+        score: raw.confidence,
+        second_best_score: raw.second_best_score,
+        inliers: None,
+        raw_matches: None,
+    })
 }
 
 fn content_roi(width: u32, height: u32) -> Region {
@@ -262,8 +297,8 @@ fn overlap_mean_abs_diff(
 
 #[cfg(test)]
 mod tests {
-    use super::{content_roi, estimate_offset};
-    use crate::types::{MatchAlgorithm, StitchConfig};
+    use super::{content_roi, estimate_motion};
+    use crate::types::{MatchMethod, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -298,7 +333,6 @@ mod tests {
     #[test]
     fn content_roi_skips_borders() {
         let roi = content_roi(320, 320);
-
         assert!(roi.x >= 24);
         assert!(roi.y >= 24);
         assert!(roi.w < 320);
@@ -306,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn estimate_offset_respects_min_overlap() {
+    fn estimate_motion_respects_min_overlap() {
         let canvas = make_textured_canvas(320, 800);
         let prev = crop(&canvas, 0, 320);
         let curr = crop(&canvas, 120, 320);
@@ -314,59 +348,41 @@ mod tests {
             min_overlap: 280,
             ..StitchConfig::default()
         };
-
-        let estimate = estimate_offset(&prev, &curr, 0, &config);
-
+        let candidate = estimate_motion(&prev, &curr, 0, &config).expect("template candidate");
         assert!(
-            estimate.dy <= 40,
-            "dy = {} exceeds configured max offset",
-            estimate.dy
+            candidate.dy <= 40,
+            "dy = {} exceeds bounded search",
+            candidate.dy
         );
     }
 
     #[test]
-    fn estimate_offset_finds_known_scroll() {
+    fn estimate_motion_finds_known_scroll() {
         let canvas = make_textured_canvas(160, 600);
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
-
-        let estimate = estimate_offset(&prev, &curr, 0, &StitchConfig::default());
-
-        assert_eq!(estimate.method, MatchAlgorithm::Template);
+        let candidate =
+            estimate_motion(&prev, &curr, 0, &StitchConfig::default()).expect("template candidate");
+        assert_eq!(candidate.method, MatchMethod::Template);
+        assert_eq!(candidate.dx, 0);
         assert!(
-            (estimate.dy - 40).abs() <= 2,
+            (candidate.dy - 40).abs() <= 2,
             "dy = {} (expected ~40)",
-            estimate.dy
-        );
-        assert!(
-            estimate.confidence < StitchConfig::default().accept_diff,
-            "confidence = {} (expected < {})",
-            estimate.confidence,
-            StitchConfig::default().accept_diff
+            candidate.dy
         );
     }
 
     #[test]
-    fn estimate_offset_rejects_unrelated_frames() {
+    fn estimate_motion_returns_none_for_unrelated_frames() {
         let prev = make_textured_canvas(160, 160);
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
-
-        let estimate = estimate_offset(&prev, &curr, 0, &StitchConfig::default());
-
-        assert!(
-            estimate.confidence > StitchConfig::default().accept_diff,
-            "confidence = {} (expected > accept_diff)",
-            estimate.confidence
-        );
+        assert!(estimate_motion(&prev, &curr, 0, &StitchConfig::default()).is_none());
     }
 
     #[test]
-    fn estimate_offset_rejects_dimension_mismatch() {
+    fn estimate_motion_returns_none_for_dimension_mismatch() {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
-
-        let estimate = estimate_offset(&prev, &curr, 0, &StitchConfig::default());
-
-        assert!(!estimate.confidence.is_finite());
+        assert!(estimate_motion(&prev, &curr, 0, &StitchConfig::default()).is_none());
     }
 }

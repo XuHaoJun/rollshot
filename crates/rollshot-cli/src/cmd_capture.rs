@@ -84,7 +84,8 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                     StitchOutcome::Appended { .. } => appended += 1,
                     StitchOutcome::Duplicate => duplicates += 1,
                     StitchOutcome::NoMatch { .. } => no_match += 1,
-                    StitchOutcome::NoProgress => no_progress += 1,
+                    StitchOutcome::NoProgress { .. } => no_progress += 1,
+                    StitchOutcome::AxisChanged { .. } => no_match += 1,
                 }
                 if captured >= args.max_frames {
                     break;

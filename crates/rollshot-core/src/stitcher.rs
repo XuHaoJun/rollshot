@@ -1,16 +1,23 @@
 use image::RgbaImage;
 
+use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
+use crate::canvas::{CanvasAppendError, LinearCanvas};
 use crate::duplicate;
-use crate::image_ext::append_below;
-use crate::matcher::estimate_offset;
-use crate::types::{StitchConfig, StitchOutcome, StitchStats};
+use crate::matcher::estimate_motion;
+use crate::overlap::compute_overlap;
+use crate::types::{
+    AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, ScrollAxis, StitchConfig,
+    StitchOutcome, StitchStats,
+};
+use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 pub struct Stitcher {
     config: StitchConfig,
-    full_image: Option<RgbaImage>,
+    canvas: Option<LinearCanvas>,
     last_good_frame: Option<RgbaImage>,
     last_good_signature: Option<Vec<u8>>,
     last_offset: i32,
+    locked_axis: Option<ScrollAxis>,
     stats: StitchStats,
 }
 
@@ -18,16 +25,17 @@ impl Stitcher {
     pub fn new(config: StitchConfig) -> Self {
         Self {
             config,
-            full_image: None,
+            canvas: None,
             last_good_frame: None,
             last_good_signature: None,
             last_offset: 0,
+            locked_axis: None,
             stats: StitchStats::default(),
         }
     }
 
     pub fn push_frame(&mut self, frame: RgbaImage) -> StitchOutcome {
-        if self.full_image.is_none() {
+        if self.canvas.is_none() {
             return self.accept_first_frame(frame);
         }
 
@@ -38,7 +46,8 @@ impl Stitcher {
 
         if anchor.dimensions() != frame.dimensions() {
             return StitchOutcome::NoMatch {
-                confidence: f32::INFINITY,
+                reason: NoMatchReason::DimensionMismatch,
+                best_estimate: None,
             };
         }
 
@@ -49,40 +58,184 @@ impl Stitcher {
             }
         }
 
-        let estimate = estimate_offset(anchor, &frame, self.last_offset, &self.config);
-        if estimate.confidence > self.config.accept_diff {
+        let candidate = match estimate_motion(anchor, &frame, self.last_offset, &self.config) {
+            Some(c) => c,
+            None => {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::LowConfidence,
+                    best_estimate: None,
+                };
+            }
+        };
+
+        if candidate.score > self.config.accept_confidence {
             return StitchOutcome::NoMatch {
-                confidence: estimate.confidence,
+                reason: NoMatchReason::LowConfidence,
+                best_estimate: build_estimate(
+                    anchor,
+                    &frame,
+                    &candidate,
+                    self.config.axis_ratio_threshold,
+                ),
             };
         }
 
-        let dy = estimate.dy.max(0) as u32;
-        if dy < self.config.min_append {
-            return StitchOutcome::NoProgress;
+        let direction = match self.classify_direction(&candidate) {
+            DirectionResult::Direction(dir) => dir,
+            DirectionResult::Ambiguous => {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::AmbiguousAxis,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+            DirectionResult::CrossAxisTooLarge => {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::CrossAxisTooLarge,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+            DirectionResult::AxisChanged { new_axis, locked } => {
+                let estimate =
+                    build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
+                        .expect("axis-change estimate must compute overlap");
+                return StitchOutcome::AxisChanged {
+                    previous_axis: locked,
+                    new_axis,
+                    estimate,
+                };
+            }
+        };
+
+        let slice_px = match direction {
+            AppendDirection::Bottom | AppendDirection::Top => candidate.dy.unsigned_abs(),
+            AppendDirection::Right | AppendDirection::Left => candidate.dx.unsigned_abs(),
+        };
+        if slice_px < self.config.min_append {
+            return StitchOutcome::NoProgress {
+                estimate: build_estimate(
+                    anchor,
+                    &frame,
+                    &candidate,
+                    self.config.axis_ratio_threshold,
+                ),
+            };
         }
 
-        let combined = append_below(
-            self.full_image
-                .as_ref()
-                .expect("full image present after first frame"),
-            &frame,
-            dy,
-        );
-        let total_height = combined.height();
+        let verifier = PixelOverlapVerifier::new(&self.config.verifier, self.config.min_overlap);
+        let (overlap_region, _verifier_score) = match verifier.verify(anchor, &frame, &candidate) {
+            VerifierOutcome::Pass { overlap, score } => (overlap, score),
+            VerifierOutcome::InsufficientOverlap => {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::InsufficientOverlap,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+            VerifierOutcome::OverlapDisagreement { .. } => {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::OverlapVerificationFailed,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+        };
 
-        self.full_image = Some(combined);
-        self.last_good_frame = Some(frame);
+        let canvas = self
+            .canvas
+            .as_mut()
+            .expect("canvas present after first frame");
+        let added = match canvas.append(direction, &frame, slice_px) {
+            Ok(n) => n,
+            Err(CanvasAppendError::AxisMismatch { locked, attempted }) => {
+                let estimate = MotionEstimate {
+                    dx: candidate.dx,
+                    dy: candidate.dy,
+                    axis: attempted,
+                    direction,
+                    confidence: candidate.score,
+                    method: candidate.method,
+                    overlap: overlap_region,
+                    inliers: candidate.inliers,
+                    raw_matches: candidate.raw_matches,
+                };
+                return StitchOutcome::AxisChanged {
+                    previous_axis: locked,
+                    new_axis: attempted,
+                    estimate,
+                };
+            }
+            Err(CanvasAppendError::DimensionMismatch { .. }) => {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::DimensionMismatch,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+            Err(CanvasAppendError::EmptyAppend) => {
+                return StitchOutcome::NoProgress {
+                    estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+        };
+
+        self.locked_axis = Some(direction.axis());
+        self.last_offset = candidate.dy;
+
+        let estimate = MotionEstimate {
+            dx: candidate.dx,
+            dy: candidate.dy,
+            axis: direction.axis(),
+            direction,
+            confidence: candidate.score,
+            method: candidate.method,
+            overlap: overlap_region,
+            inliers: candidate.inliers,
+            raw_matches: candidate.raw_matches,
+        };
+
         self.last_good_signature = Some(signature);
-        self.last_offset = estimate.dy;
+        self.last_good_frame = Some(frame);
         self.stats.frame_count += 1;
-        self.stats.total_height = total_height;
-        self.stats.last_append = dy;
+        self.stats.total_height = canvas.height();
+        self.stats.total_width = canvas.width();
+        self.stats.last_append = added;
 
-        StitchOutcome::Appended { added: dy }
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        }
     }
 
     pub fn full_image(&self) -> Option<&RgbaImage> {
-        self.full_image.as_ref()
+        self.canvas.as_ref().map(LinearCanvas::image)
     }
 
     pub fn stats(&self) -> StitchStats {
@@ -91,14 +244,90 @@ impl Stitcher {
 
     fn accept_first_frame(&mut self, frame: RgbaImage) -> StitchOutcome {
         let height = frame.height();
+        let width = frame.width();
         self.stats = StitchStats {
             frame_count: 1,
             total_height: height,
+            total_width: width,
             last_append: height,
         };
         self.last_good_signature = Some(duplicate::signature(&frame));
         self.last_good_frame = Some(frame.clone());
-        self.full_image = Some(frame);
+        self.canvas = Some(LinearCanvas::new(frame));
         StitchOutcome::FirstFrame
     }
+
+    fn classify_direction(&self, candidate: &MotionCandidate) -> DirectionResult {
+        match self.locked_axis {
+            None => {
+                match classify_axis(candidate.dx, candidate.dy, self.config.axis_ratio_threshold) {
+                    AxisClassification::Vertical { direction }
+                    | AxisClassification::Horizontal { direction } => {
+                        DirectionResult::Direction(direction)
+                    }
+                    AxisClassification::Ambiguous => DirectionResult::Ambiguous,
+                }
+            }
+            Some(locked) => match validate_with_lock(
+                locked,
+                candidate.dx,
+                candidate.dy,
+                self.config.max_cross_axis_px,
+            ) {
+                AxisValidation::OnAxis { direction } => DirectionResult::Direction(direction),
+                AxisValidation::CrossAxisTooLarge => DirectionResult::CrossAxisTooLarge,
+                AxisValidation::AxisChanged { new_axis } => {
+                    DirectionResult::AxisChanged { new_axis, locked }
+                }
+            },
+        }
+    }
+}
+
+enum DirectionResult {
+    Direction(AppendDirection),
+    Ambiguous,
+    CrossAxisTooLarge,
+    AxisChanged {
+        new_axis: ScrollAxis,
+        locked: ScrollAxis,
+    },
+}
+
+fn build_estimate(
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    candidate: &MotionCandidate,
+    axis_ratio_threshold: f32,
+) -> Option<MotionEstimate> {
+    let overlap = compute_overlap(
+        prev.width(),
+        prev.height(),
+        curr.width(),
+        curr.height(),
+        candidate.dx,
+        candidate.dy,
+    )?;
+    let direction = match classify_axis(candidate.dx, candidate.dy, axis_ratio_threshold) {
+        AxisClassification::Vertical { direction }
+        | AxisClassification::Horizontal { direction } => direction,
+        AxisClassification::Ambiguous => {
+            if candidate.dy >= 0 {
+                AppendDirection::Bottom
+            } else {
+                AppendDirection::Top
+            }
+        }
+    };
+    Some(MotionEstimate {
+        dx: candidate.dx,
+        dy: candidate.dy,
+        axis: direction.axis(),
+        direction,
+        confidence: candidate.score,
+        method: candidate.method,
+        overlap,
+        inliers: candidate.inliers,
+        raw_matches: candidate.raw_matches,
+    })
 }

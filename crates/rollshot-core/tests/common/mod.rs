@@ -71,3 +71,39 @@ pub fn paint_sticky_header(frame: &mut RgbaImage, header_h: u32) {
         }
     }
 }
+
+/// Builds a wide deterministic canvas suitable for horizontal scroll fixtures.
+/// The texture differs from `make_scroll_canvas` so column shifts produce
+/// distinct grayscale patterns.
+pub fn make_wide_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([240, 240, 240, 255]));
+
+    for x in (0..width).step_by(36) {
+        let accent = ((x / 3) % 180) as u8;
+        for y in 24..height.saturating_sub(24) {
+            let stripe = if (x / 7 + y / 11) % 2 == 0 { 220 } else { 180 };
+            img.put_pixel(x, y, Rgba([stripe, accent, 80, 255]));
+            if x + 1 < width {
+                img.put_pixel(x + 1, y, Rgba([30, 30, 30, 255]));
+            }
+        }
+    }
+
+    for row in [42u32, 96, 154, 211, 268] {
+        if row >= height {
+            continue;
+        }
+        for x in 20..width.saturating_sub(20) {
+            if (x / 13) % 3 != 0 {
+                img.put_pixel(x, row, Rgba([20, 20, 20, 255]));
+            }
+        }
+    }
+
+    img
+}
+
+/// Crops a horizontal viewport-sized frame from the canvas.
+pub fn crop_frame_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
+    imageops::crop_imm(canvas, x, y, w, h).to_image()
+}
