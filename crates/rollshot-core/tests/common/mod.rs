@@ -107,3 +107,21 @@ pub fn make_wide_canvas(width: u32, height: u32) -> RgbaImage {
 pub fn crop_frame_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
     imageops::crop_imm(canvas, x, y, w, h).to_image()
 }
+
+/// Builds deliberately ambiguous repeated rows. Multiple offsets look equally
+/// plausible, so Plan 2 should reject them without AKAZE.
+pub fn make_repeated_rows(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([250, 250, 250, 255]));
+    for y in 0..height {
+        let band = (y / 16) % 2;
+        let color = if band == 0 {
+            Rgba([40, 40, 40, 255])
+        } else {
+            Rgba([210, 210, 210, 255])
+        };
+        for x in 0..width {
+            img.put_pixel(x, y, color);
+        }
+    }
+    img
+}

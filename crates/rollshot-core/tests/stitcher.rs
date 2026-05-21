@@ -1,6 +1,9 @@
 mod common;
 
-use common::{crop_frame, make_scroll_canvas, paint_sticky_header};
+use common::{
+    crop_frame, crop_frame_xy, make_repeated_rows, make_scroll_canvas, make_wide_canvas,
+    paint_sticky_header,
+};
 use image::{Rgba, RgbaImage};
 use rollshot_core::{
     AppendDirection, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
@@ -193,4 +196,145 @@ fn sticky_header_frames_still_append_expected_amount() {
         }
         other => panic!("expected Appended with sticky header, got {other:?}"),
     }
+}
+
+#[test]
+fn vertical_up_scroll_prepends_top() {
+    let canvas = make_scroll_canvas(320, 1400);
+    let first = crop_frame(&canvas, 800, 320);
+    let scrolled = crop_frame(&canvas, 720, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Top);
+            assert_eq!(estimate.axis, ScrollAxis::Vertical);
+            assert!(estimate.dy < 0, "dy = {}", estimate.dy);
+            assert!((76..=84).contains(&added), "added = {added}");
+        }
+        other => panic!("expected top append, got {other:?}"),
+    }
+
+    assert_eq!(stitcher.stats().total_width, 320);
+    assert!(stitcher.stats().total_height > 320);
+}
+
+#[test]
+fn horizontal_right_scroll_appends_right() {
+    let canvas = make_wide_canvas(1400, 320);
+    let first = crop_frame_xy(&canvas, 0, 0, 320, 320);
+    let scrolled = crop_frame_xy(&canvas, 80, 0, 320, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Right);
+            assert_eq!(estimate.axis, ScrollAxis::Horizontal);
+            assert!(estimate.dx > 0, "dx = {}", estimate.dx);
+            assert!((76..=84).contains(&added), "added = {added}");
+        }
+        other => panic!("expected right append, got {other:?}"),
+    }
+
+    assert!(stitcher.stats().total_width > 320);
+    assert_eq!(stitcher.stats().total_height, 320);
+}
+
+#[test]
+fn horizontal_left_scroll_prepends_left() {
+    let canvas = make_wide_canvas(1400, 320);
+    let first = crop_frame_xy(&canvas, 800, 0, 320, 320);
+    let scrolled = crop_frame_xy(&canvas, 720, 0, 320, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Left);
+            assert_eq!(estimate.axis, ScrollAxis::Horizontal);
+            assert!(estimate.dx < 0, "dx = {}", estimate.dx);
+            assert!((76..=84).contains(&added), "added = {added}");
+        }
+        other => panic!("expected left append, got {other:?}"),
+    }
+
+    assert!(stitcher.stats().total_width > 320);
+    assert_eq!(stitcher.stats().total_height, 320);
+}
+
+#[test]
+fn horizontal_after_vertical_lock_is_rejected_as_axis_change() {
+    let vertical = make_scroll_canvas(320, 1200);
+    let first = crop_frame(&vertical, 0, 320);
+    let down = crop_frame(&vertical, 80, 320);
+    let horizontal = make_wide_canvas(1400, 320);
+    let right = crop_frame_xy(&horizontal, 160, 0, 320, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+    assert!(matches!(
+        stitcher.push_frame(down),
+        StitchOutcome::Appended {
+            direction: AppendDirection::Bottom,
+            ..
+        }
+    ));
+
+    match stitcher.push_frame(right) {
+        StitchOutcome::NoMatch {
+            reason: NoMatchReason::LowConfidence | NoMatchReason::CrossAxisTooLarge,
+            ..
+        }
+        | StitchOutcome::AxisChanged {
+            previous_axis: ScrollAxis::Vertical,
+            new_axis: ScrollAxis::Horizontal,
+            ..
+        } => {}
+        other => panic!("expected horizontal frame rejected after vertical lock, got {other:?}"),
+    }
+
+    assert_eq!(stitcher.stats().frame_count, 2);
+}
+
+#[test]
+fn repeated_rows_do_not_append_without_clear_match() {
+    let canvas = make_repeated_rows(320, 1000);
+    let first = crop_frame(&canvas, 0, 320);
+    let repeated = crop_frame(&canvas, 32, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(repeated) {
+        StitchOutcome::Duplicate => {}
+        StitchOutcome::NoMatch { reason, .. } => {
+            assert!(matches!(
+                reason,
+                NoMatchReason::LowConfidence
+                    | NoMatchReason::AmbiguousAxis
+                    | NoMatchReason::OverlapVerificationFailed
+            ));
+        }
+        other => panic!("expected repeated rows to be rejected, got {other:?}"),
+    }
+
+    assert_eq!(stitcher.stats().frame_count, 1);
+    assert_eq!(stitcher.stats().total_height, 320);
 }
