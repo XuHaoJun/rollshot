@@ -1,3 +1,4 @@
+mod akaze_matcher;
 mod axis;
 mod canvas;
 mod duplicate;
@@ -10,6 +11,7 @@ mod verifier;
 pub use canvas::{CanvasAppendError, LinearCanvas};
 pub use stitcher::Stitcher;
 pub use types::{
-    AppendDirection, MatchMethod, MatchStrategy, MotionCandidate, MotionEstimate, NoMatchReason,
-    OverlapRegion, ScrollAxis, StitchConfig, StitchOutcome, StitchStats, VerifierConfig,
+    AkazeConfig, AppendDirection, MatchMethod, MatchStrategy, MotionCandidate, MotionEstimate,
+    NoMatchReason, OverlapRegion, ScrollAxis, StitchConfig, StitchOutcome, StitchStats,
+    VerifierConfig,
 };
