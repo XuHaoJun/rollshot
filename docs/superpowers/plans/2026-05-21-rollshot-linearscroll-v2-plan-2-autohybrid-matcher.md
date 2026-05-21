@@ -6,6 +6,29 @@
 
 **Architecture:** Keep all Plan 2 matcher work inside `rollshot-core` and avoid new dependencies. `matcher.rs` becomes a small internal pipeline: generate coarse 2D, axis-aware template, and edge-projection candidates; verify candidates with `PixelOverlapVerifier`; rank the verified candidates by normalized confidence and second-best margin; return one `MotionCandidate` to `Stitcher`. `Stitcher` passes the locked axis and last accepted motion into the matcher, then keeps using Plan 1 axis validation, verifier, and `LinearCanvas` append behavior.
 
+```text
+estimate_motion(prev, curr, locked_axis, last_motion, config)
+   |
+   |-- prev_gray, curr_gray = to_grayscale(prev/curr)   // computed ONCE
+   |
+   |    parallel fan-out (not a fallback chain):
+   |-- coarse_candidates(prev_gray, curr_gray, ...)     // best (dx, dy) on stepped grid
+   |-- template_candidates(prev_gray, curr_gray, ...)   // axis-aware NCC search
+   |-- edge_projection_candidates(prev_gray, curr_gray, ...) // 1-D MAD on edges
+   |
+   v
+rank_verified_candidates(prev, curr, candidates, ...)
+   |
+   |-- filter: accept_confidence, second_best_margin, axis lock
+   |-- verify: PixelOverlapVerifier per surviving candidate
+   |-- combine score + verifier MAD
+   |
+   v
+Option<MotionCandidate> -> Stitcher
+```
+
+Design note: the v0.2 spec lists Coarse / Template / Edge / AKAZE as a numbered pipeline, but explicitly allows the matcher to "contain multiple internal candidate generators". Plan 2 picks parallel fan-out because all three non-AKAZE generators are cheap relative to the verifier and the ranker needs cross-method scoring anyway. AKAZE in Plan 3 will keep its "only run on weak top-candidate" budget by feeding the same ranker.
+
 **Tech Stack:** Rust 2021, `image` 0.25 (`RgbaImage`), existing `rollshot-core` modules (`axis`, `overlap`, `verifier`, `canvas`), deterministic synthetic tests. No AKAZE dependency and no new CLI flags in this plan.
 
 ---
@@ -13,9 +36,10 @@
 ## Assumptions
 
 - Plan 1 has landed: `MotionCandidate`, `MotionEstimate`, `ScrollAxis`, `AppendDirection`, `MatchMethod`, `LinearCanvas`, `compute_overlap`, and `PixelOverlapVerifier` already exist.
-- `MotionCandidate.score` is treated as normalized confidence where lower is better. Plan 2 makes every candidate generator follow that convention.
-- `MotionCandidate.second_best_score` is also normalized lower-is-better confidence. The second-best margin check is `second_best_score - score >= config.second_best_margin`.
-- AKAZE, golden fixtures, debug match reports, and CI feature work stay in Plan 3.
+- `MotionCandidate.score` is treated as normalized confidence where lower is better, in roughly `[0.0, 1.0]`. Plan 2 makes every candidate generator follow that convention (Template uses `1.0 - NCC.clamp(0, 1)`; Coarse and Edge use normalized MAD).
+- `MotionCandidate.second_best_score` is also normalized lower-is-better confidence. The second-best margin check is `second_best_score - score >= config.second_best_margin` (i.e. the runner-up must be measurably *worse*, meaning higher score).
+- `match_width` (and its derived ROI) was sized for vertical scroll. Plan 2 reuses it unchanged for horizontal search; the synthetic fixtures have `match_width >= roi.w` so the ROI collapses to "full content rectangle" and the asymmetry is inert. TODO (future tuning, not in this plan): introduce an axis-aware band ROI for horizontal scroll on wide content.
+- AKAZE, golden fixtures, debug match reports, and CI feature work stay in Plan 3. That includes targeted fixtures where the Coarse and Edge candidate paths *win* over Template; in Plan 2 they are tested as fallbacks-of-last-resort that produce verified candidates, but Template is expected to win on the synthetic textures used here.
 
 ## File Structure
 
@@ -210,7 +234,7 @@ Run:
 rtk cargo test -p rollshot-core matcher:: -- --nocapture
 ```
 
-Expected: compile fails because `estimate_motion` still takes `(prev, curr, last_offset, config)` and does not accept `(locked_axis, last_motion)`, or the new tests fail because horizontal/top/left matching is not implemented.
+Expected: tests do not pass yet. Initially the compile fails because `estimate_motion` still takes `(prev, curr, last_offset, config)` instead of `(prev, curr, locked_axis, last_motion, config)`. After Task 2 updates the signature, the new directional / locked-axis / repeated-grid tests should still fail because the multi-generator pipeline (template, coarse, edge) is not implemented yet. Either failure mode is acceptable here — the gate is "these tests are red".
 
 - [ ] **Step 5: Commit the failing tests**
 
@@ -286,20 +310,46 @@ pub fn estimate_motion(
         return None;
     }
 
+    // Grayscale is the only buffer every generator needs. Compute it once and
+    // thread `&[f32]` through the pipeline so we don't allocate `2 * 4 * W * H`
+    // bytes three times per frame.
+    let width = prev.width();
+    let height = prev.height();
+    let prev_gray = to_grayscale(prev);
+    let curr_gray = to_grayscale(curr);
+
     let mut candidates = Vec::new();
-    candidates.extend(coarse_candidates(prev, curr, locked_axis, config));
+    candidates.extend(coarse_candidates(
+        &prev_gray,
+        &curr_gray,
+        width,
+        height,
+        locked_axis,
+        config,
+    ));
     candidates.extend(template_candidates(
-        prev,
-        curr,
+        &prev_gray,
+        &curr_gray,
+        width,
+        height,
         locked_axis,
         last_motion,
         config,
     ));
-    candidates.extend(edge_projection_candidates(prev, curr, locked_axis, config));
+    candidates.extend(edge_projection_candidates(
+        &prev_gray,
+        &curr_gray,
+        width,
+        height,
+        locked_axis,
+        config,
+    ));
 
     rank_verified_candidates(prev, curr, locked_axis, candidates, config)
 }
 ```
+
+Note: only `rank_verified_candidates` keeps the `&RgbaImage` references, because it hands the original frames to `PixelOverlapVerifier` (which samples RGBA pixels through `image::RgbaImage::get_pixel` for the full-res band).
 
 - [ ] **Step 4: Add axis and second-best filtering helpers**
 
@@ -445,20 +495,24 @@ Add:
 
 ```rust
 fn template_candidates(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
     let mut out = Vec::new();
-    let roi = content_roi(prev.width(), prev.height());
+    let roi = content_roi(width, height);
     let match_region = match_width_region(roi, config.match_width);
 
     for axis in search_axes(locked_axis) {
         if let Some(candidate) = search_template_axis(
-            prev,
-            curr,
+            prev_gray,
+            curr_gray,
+            width,
+            height,
             *axis,
             match_region,
             predicted_offset(*axis, last_motion),
@@ -478,26 +532,26 @@ Add:
 
 ```rust
 fn search_template_axis(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
     axis: SearchAxis,
     region: Region,
     last_offset: i32,
     config: &StitchConfig,
 ) -> Option<MotionCandidate> {
-    if prev.width() < 50 || prev.height() < 50 {
+    if width < 50 || height < 50 {
         return None;
     }
 
-    let prev_gray = to_grayscale(prev);
-    let curr_gray = to_grayscale(curr);
     let max_offset = match axis {
-        SearchAxis::Vertical => (prev.height() as i32 - config.min_overlap as i32).max(0),
-        SearchAxis::Horizontal => (prev.width() as i32 - config.min_overlap as i32).max(0),
+        SearchAxis::Vertical => (height as i32 - config.min_overlap as i32).max(0),
+        SearchAxis::Horizontal => (width as i32 - config.min_overlap as i32).max(0),
     };
     let max_offset = max_offset.min(match axis {
-        SearchAxis::Vertical => (prev.height() as f32 * config.max_search_ratio) as i32,
-        SearchAxis::Horizontal => (prev.width() as f32 * config.max_search_ratio) as i32,
+        SearchAxis::Vertical => (height as f32 * config.max_search_ratio) as i32,
+        SearchAxis::Horizontal => (width as f32 * config.max_search_ratio) as i32,
     });
     if max_offset <= 0 {
         return None;
@@ -510,19 +564,19 @@ fn search_template_axis(
     for offset in signed_predict_iter(max_offset, last_offset) {
         let score = match axis {
             SearchAxis::Vertical => ncc_score_shifted(
-                &prev_gray,
-                &curr_gray,
-                prev.width(),
-                prev.height(),
+                prev_gray,
+                curr_gray,
+                width,
+                height,
                 region,
                 0,
                 offset,
             ),
             SearchAxis::Horizontal => ncc_score_shifted(
-                &prev_gray,
-                &curr_gray,
-                prev.width(),
-                prev.height(),
+                prev_gray,
+                curr_gray,
+                width,
+                height,
                 region,
                 offset,
                 0,
@@ -681,19 +735,21 @@ git commit -m "feat(core): add axis-aware template matching"
 
 - [ ] **Step 1: Add coarse 2D candidate generation**
 
+Performance note: with `max_search_ratio = 0.75` and an unlocked axis (only happens on frame 2), the dense `(dx, dy)` grid contains up to `(121 * 121)` candidates for a 320-square frame. `coarse_mad` itself steps with `COARSE_DOWNSAMPLE_STEP`, so each candidate samples ~`(overlap_w / 4) * (overlap_h / 4)` cells. Total work is bounded at ~50M ops on frame 2 (one-shot) and ~5M ops on subsequent frames (axis locked → `dx` constrained to `±max_cross_axis_px`). Acceptable for Plan 2. If profiling later shows this is the matcher's hot spot, the follow-up is to build a true ¼-resolution image once and exhaustively search there (Plan 3 or later, not in scope here).
+
 Add:
 
 ```rust
 fn coarse_candidates(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
-    let prev_gray = to_grayscale(prev);
-    let curr_gray = to_grayscale(curr);
-    let max_dx = (prev.width() as f32 * config.max_search_ratio) as i32;
-    let max_dy = (prev.height() as f32 * config.max_search_ratio) as i32;
+    let max_dx = (width as f32 * config.max_search_ratio) as i32;
+    let max_dy = (height as f32 * config.max_search_ratio) as i32;
     let step = COARSE_DOWNSAMPLE_STEP as i32;
     let mut scored = Vec::new();
 
@@ -715,10 +771,10 @@ fn coarse_candidates(
                 continue;
             }
             let diff = coarse_mad(
-                &prev_gray,
-                &curr_gray,
-                prev.width(),
-                prev.height(),
+                prev_gray,
+                curr_gray,
+                width,
+                height,
                 dx,
                 dy,
                 COARSE_DOWNSAMPLE_STEP,
@@ -730,20 +786,24 @@ fn coarse_candidates(
     }
 
     scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let ranked = scored;
-    ranked
-        .iter()
-        .take(4)
-        .enumerate()
-        .map(|(idx, (score, dx, dy))| {
-            let second = if idx == 0 {
-                ranked.get(1).map(|(score, _, _)| *score)
-            } else {
-                ranked.first().map(|(score, _, _)| *score)
-            };
-            candidate(*dx, *dy, MatchMethod::Coarse, *score, second)
-        })
-        .collect()
+
+    // Only emit the top-1 coarse candidate. Earlier drafts emitted the top-4,
+    // but `passes_second_best_margin` would always reject candidates 2..4
+    // (their `second_best_score = scored[0].0` is *lower* than their own
+    // score, so the margin check is always negative). Emitting them was dead
+    // code that wasted verifier cycles.
+    let (best_score, best_dx, best_dy) = match scored.first() {
+        Some(t) => *t,
+        None => return Vec::new(),
+    };
+    let second = scored.get(1).map(|(score, _, _)| *score);
+    vec![candidate(
+        best_dx,
+        best_dy,
+        MatchMethod::Coarse,
+        best_score,
+        second,
+    )]
 }
 
 fn coarse_mad(
@@ -787,21 +847,21 @@ Add:
 
 ```rust
 fn edge_projection_candidates(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
-    let prev_gray = to_grayscale(prev);
-    let curr_gray = to_grayscale(curr);
     let mut out = Vec::new();
 
     for axis in search_axes(locked_axis) {
         if let Some(candidate) = edge_projection_axis(
-            &prev_gray,
-            &curr_gray,
-            prev.width(),
-            prev.height(),
+            prev_gray,
+            curr_gray,
+            width,
+            height,
             *axis,
             config,
         ) {
