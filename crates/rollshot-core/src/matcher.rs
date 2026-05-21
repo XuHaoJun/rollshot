@@ -1,6 +1,6 @@
 use image::{Rgba, RgbaImage};
 
-use crate::types::{MatchMethod, MotionCandidate, MotionEstimate, StitchConfig};
+use crate::types::{MatchMethod, MotionCandidate, StitchConfig};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
@@ -164,36 +164,6 @@ pub fn estimate_motion(
         inliers: None,
         raw_matches: None,
     })
-}
-
-/// Compatibility shim kept until Task 7 refactors `Stitcher` onto
-/// `estimate_motion`. Delegates to `estimate_vertical_template` and wraps the
-/// result in a `MotionEstimate`.
-pub fn estimate_offset(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
-    last_offset: i32,
-    config: &StitchConfig,
-) -> MotionEstimate {
-    let raw = estimate_vertical_template(prev, curr, last_offset, config);
-    MotionEstimate {
-        dx: 0,
-        dy: raw.dy,
-        axis: crate::types::ScrollAxis::Vertical,
-        direction: crate::types::AppendDirection::Bottom,
-        confidence: raw.confidence,
-        method: MatchMethod::Template,
-        overlap: crate::types::OverlapRegion {
-            prev_x: 0,
-            prev_y: 0,
-            curr_x: 0,
-            curr_y: 0,
-            width: 0,
-            height: 0,
-        },
-        inliers: None,
-        raw_matches: None,
-    }
 }
 
 fn content_roi(width: u32, height: u32) -> Region {
