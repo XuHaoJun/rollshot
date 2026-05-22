@@ -1,9 +1,15 @@
+---
+title: Capture pipeline appears hung on macOS — stitcher perf regression
+status: open
+date: 2026-05-22
+severity: high
+reporter: noah
+tags: [capture, stitcher, macos, perf]
+---
+
 # Capture pipeline appears hung on macOS — stitcher perf regression
 
-Status: open
-Severity: high (blocks the macOS happy path of `rollshot capture`)
-Reporter: noah
-Date: 2026-05-22
+> Blocks the macOS happy path of `rollshot capture`.
 
 ## TL;DR
 
