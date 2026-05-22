@@ -2,9 +2,9 @@ mod common;
 
 use common::{
     crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas, paint_decorative_bottom_border,
-    paint_sidebar_icon_at, paint_sticky_footer, paint_sticky_header, paint_sticky_sidebar, Side,
+    paint_sidebar_icon_at, paint_sticky_footer, paint_sticky_header, paint_sticky_horizontal_band,
 };
-use image::Rgba;
+use image::{Rgba, RgbaImage};
 use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
 
 #[test]
@@ -589,6 +589,105 @@ fn bottom_anchored_sidebar_icon_only_at_canvas_bottom() {
             assert!(
                 stitched.get_pixel(cx, cy) != &icon_color,
                 "icon leaked to ({cx}, {cy}) — bottom-anchored should only appear at canvas bottom",
+            );
+        }
+    }
+}
+
+fn drive_horizontal_right(
+    canvas: &RgbaImage,
+    frame_w: u32,
+    step: u32,
+    mut paint: impl FnMut(&mut RgbaImage),
+) -> RgbaImage {
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    let mut x = 0;
+    while x + frame_w <= canvas.width() {
+        let mut f = crop_frame_xy(canvas, x, 0, frame_w, canvas.height());
+        paint(&mut f);
+        stitcher.push_frame(f);
+        x += step;
+    }
+    stitcher
+        .full_image()
+        .expect("stitched output exists")
+        .clone()
+}
+
+#[test]
+fn horizontal_scroll_with_sticky_top_band() {
+    let source = make_wide_canvas(1400, 320);
+    let frame_w = 320u32;
+    let step = 70u32;
+
+    let stitched = drive_horizontal_right(&source, frame_w, step, |f| {
+        paint_sticky_horizontal_band(f, 10, 0);
+    });
+
+    for x in 0..stitched.width() {
+        let p = *stitched.get_pixel(x, 0);
+        assert!(
+            (p[0] == 90 || p[0] == 130) && p[0] == p[1] && p[1] == p[2],
+            "top band missing at ({x}, 0): {p:?}",
+        );
+    }
+}
+
+#[test]
+fn horizontal_scroll_with_sticky_bottom_band() {
+    let source = make_wide_canvas(1400, 320);
+    let frame_w = 320u32;
+    let step = 70u32;
+
+    let stitched = drive_horizontal_right(&source, frame_w, step, |f| {
+        paint_sticky_horizontal_band(f, 0, 8);
+    });
+
+    let h = stitched.height();
+    for x in 0..stitched.width() {
+        let p = *stitched.get_pixel(x, h - 1);
+        assert!(
+            (p[0] == 95 || p[0] == 135) && p[0] == p[1] && p[1] == p[2],
+            "bottom band missing at ({x}, h-1): {p:?}",
+        );
+    }
+}
+
+#[test]
+fn motion_larger_than_half_frame_falls_back_to_v0_2_behavior() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_w = 320u32;
+    let frame_h = 320u32;
+    let step = 200u32;
+
+    let first = crop_frame_xy(&source, 0, 0, frame_w, frame_h);
+    let mut canvas = LinearCanvas::new(first);
+    let mut expected_h = frame_h;
+
+    let mut y = step;
+    while y + frame_h <= source.height() && expected_h < 1000 {
+        let f = crop_frame_xy(&source, 0, y, frame_w, frame_h);
+        let added = canvas
+            .append(AppendDirection::Bottom, &f, step)
+            .expect("append");
+        assert_eq!(added, step);
+        expected_h += step;
+        y += step;
+    }
+
+    assert!(
+        expected_h > frame_h,
+        "need at least one large-motion append; got expected_h = {expected_h}",
+    );
+
+    let stitched = canvas.image();
+    assert_eq!(stitched.height(), expected_h);
+    for cy in 0..stitched.height() {
+        for cx in 0..stitched.width() {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                source.get_pixel(cx, cy),
+                "large-motion fallback byte-equivalence mismatch at ({cx}, {cy})",
             );
         }
     }
