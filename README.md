@@ -44,8 +44,33 @@ cargo run -p rollshot-cli -- probe
 cargo run -p rollshot-cli -- stitch-folder tests/fixtures
 ```
 
+`rollshot capture` prints per-frame progress to stderr by default:
+`frame N/MAX: OUTCOME elapsed=SECONDS`. The final capture summary and output
+path remain on stdout. Pass `--quiet` to suppress progress output when stderr
+must stay empty for scripts.
+
 `stitch-folder` is intentionally a bootstrap smoke command until the stitching
 core phase adds image fixtures and golden output tests.
+
+## Matcher Performance Checks
+
+The ordinary test suite includes a structural matcher budget test for a
+retina-sized synthetic frame pair. It checks searched offsets and
+full-resolution NCC work instead of wall-clock time, so it is stable across
+developer machines and GitHub-hosted runners.
+
+For a release-mode wall-clock smoke check, run:
+
+```bash
+cargo test --release -p rollshot-core large_retina_pair_perf_smoke -- --ignored --nocapture
+```
+
+To enforce the current hosted-runner threshold locally or in the manual
+`Matcher Perf Smoke` GitHub workflow, set:
+
+```bash
+rtk env ROLLSHOT_PERF_STRICT=1 cargo test --release -p rollshot-core large_retina_pair_perf_smoke -- --ignored --nocapture
+```
 
 ## GitHub Actions
 
@@ -59,6 +84,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --features akaze
 ```
+
+`.github/workflows/matcher-perf.yml` is manual-only and runs the release-mode
+large-frame matcher smoke on `ubuntu-24.04`. It complements the deterministic
+structural budget test in the normal suite.
 
 Hosted PR CI does not run real desktop capture. KDE Wayland capture needs a real
 interactive desktop session, xdg-desktop-portal-kde, PipeWire, and user

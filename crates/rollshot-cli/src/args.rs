@@ -59,6 +59,10 @@ pub struct CaptureArgs {
     /// Include the cursor in captured frames.
     #[arg(long, default_value_t = false)]
     pub show_cursor: bool,
+
+    /// Suppress per-frame capture progress on stderr.
+    #[arg(long, default_value_t = false)]
+    pub quiet: bool,
 }
 
 #[derive(Debug, clap::Args)]

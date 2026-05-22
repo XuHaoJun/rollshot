@@ -1,4 +1,5 @@
 use image::{Rgba, RgbaImage};
+use rayon::prelude::*;
 
 use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
@@ -11,6 +12,7 @@ const BOTTOM_IGNORE_RATIO: f32 = 0.08;
 const SIDE_IGNORE_RATIO: f32 = 0.04;
 const MIN_IGNORE_PX: u32 = 24;
 const COARSE_DOWNSAMPLE_STEP: u32 = 4;
+const COARSE_AXIS_STRIDE: i32 = 8;
 const EDGE_PROJECTION_STEP: u32 = 2;
 
 #[derive(Clone, Copy)]
@@ -42,6 +44,86 @@ pub(crate) enum MotionSearchOutcome {
     },
 }
 
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SearchBudget {
+    coarse_score_calls: u64,
+    full_res_ncc_calls: u64,
+    full_res_ncc_pixel_visits: u64,
+    verifier_calls: u64,
+}
+
+#[cfg(test)]
+static ACTIVE_SEARCH_BUDGET: std::sync::Mutex<Option<SearchBudget>> = std::sync::Mutex::new(None);
+
+// Serializes every `estimate_motion` invocation in test builds so that
+// concurrent unit tests cannot contaminate `ACTIVE_SEARCH_BUDGET`. Without
+// this, `cargo test`'s multi-threaded runner can interleave
+// `estimate_motion` calls from other tests with the budget test's call,
+// causing their `ncc_score_shifted` increments to leak into the budget
+// counters and push the structural budget assertions over threshold
+// (seen on the macOS GitHub-hosted runner).
+#[cfg(test)]
+static ESTIMATE_MOTION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static IN_BUDGET_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn estimate_motion_with_budget(
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    locked_axis: Option<ScrollAxis>,
+    last_motion: (i32, i32),
+    config: &StitchConfig,
+    budget: &mut SearchBudget,
+) -> MotionSearchOutcome {
+    // Hold the serialization lock for the entire scope (set Some → run →
+    // take None) so no concurrent test can slip in NCC calls between
+    // `estimate_motion` returning and the budget being taken.
+    let _serialize = ESTIMATE_MOTION_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    IN_BUDGET_SCOPE.with(|c| c.set(true));
+    let _restore = InBudgetScopeGuard;
+    {
+        let mut active = ACTIVE_SEARCH_BUDGET
+            .lock()
+            .expect("search budget mutex poisoned");
+        assert!(active.is_none(), "nested search budgets are not supported");
+        *active = Some(SearchBudget::default());
+    }
+    let result = estimate_motion(prev, curr, locked_axis, last_motion, config);
+    *budget = ACTIVE_SEARCH_BUDGET
+        .lock()
+        .expect("search budget mutex poisoned")
+        .take()
+        .unwrap_or_default();
+    result
+}
+
+#[cfg(test)]
+struct InBudgetScopeGuard;
+
+#[cfg(test)]
+impl Drop for InBudgetScopeGuard {
+    fn drop(&mut self) {
+        IN_BUDGET_SCOPE.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+fn with_active_search_budget(f: impl FnOnce(&mut SearchBudget)) {
+    let mut active = ACTIVE_SEARCH_BUDGET
+        .lock()
+        .expect("search budget mutex poisoned");
+    if let Some(budget) = active.as_mut() {
+        f(budget);
+    }
+}
+
 pub(crate) fn estimate_motion(
     prev: &RgbaImage,
     curr: &RgbaImage,
@@ -49,6 +131,24 @@ pub(crate) fn estimate_motion(
     last_motion: (i32, i32),
     config: &StitchConfig,
 ) -> MotionSearchOutcome {
+    // In test builds, serialize every call to `estimate_motion` against
+    // other test threads' `estimate_motion` calls. The budget test relies
+    // on having `ACTIVE_SEARCH_BUDGET` to itself; without this, other
+    // tests' `ncc_score_shifted` increments would leak into the budget
+    // counters and exceed the structural thresholds. The budget test
+    // re-enters this function while already holding the serialize lock,
+    // so it skips re-acquisition (std `Mutex` is not reentrant).
+    #[cfg(test)]
+    let _serialize = if IN_BUDGET_SCOPE.with(|c| c.get()) {
+        None
+    } else {
+        Some(
+            ESTIMATE_MOTION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        )
+    };
+
     if prev.dimensions() != curr.dimensions() {
         return MotionSearchOutcome::NoMatch {
             reason: NoMatchReason::DimensionMismatch,
@@ -62,14 +162,8 @@ pub(crate) fn estimate_motion(
     let curr_gray = to_grayscale(curr);
 
     let mut candidates = Vec::new();
-    candidates.extend(coarse_candidates(
-        &prev_gray,
-        &curr_gray,
-        width,
-        height,
-        locked_axis,
-        config,
-    ));
+    let coarse = coarse_candidates(&prev_gray, &curr_gray, width, height, locked_axis, config);
+    candidates.extend(coarse.iter().copied());
     candidates.extend(template_candidates(
         &prev_gray,
         &curr_gray,
@@ -77,6 +171,7 @@ pub(crate) fn estimate_motion(
         height,
         locked_axis,
         last_motion,
+        &coarse,
         config,
     ));
     candidates.extend(edge_projection_candidates(
@@ -138,6 +233,9 @@ fn rank_verified_candidates(
         if !candidate_matches_axis(candidate.dx, candidate.dy, locked_axis, config) {
             continue;
         }
+
+        #[cfg(test)]
+        with_active_search_budget(|budget| budget.verifier_calls += 1);
 
         let verifier_score = match verifier.verify(prev, curr, &candidate) {
             VerifierOutcome::Pass { score, .. } => score,
@@ -228,6 +326,35 @@ fn predicted_offset(axis: SearchAxis, last_motion: (i32, i32)) -> i32 {
     }
 }
 
+fn template_refine_radius() -> i32 {
+    COARSE_DOWNSAMPLE_STEP as i32 * COARSE_AXIS_STRIDE * 2 + 16
+}
+
+// On steady scroll the previous-frame motion is the most accurate seed — it
+// gives full-res refinement precision regardless of per-frame texture
+// quality, which matters for low-feature content (see the
+// `low_feature_text` golden fixture). Coarse is only used when there is no
+// velocity history to lean on (first frame, cross-axis probe). The coarse
+// candidate is always also added to the candidate pool, so if a sudden
+// scroll-speed change puts the true offset outside `template_refine_radius`
+// of `predicted`, the 32-px-quantized coarse candidate is still available
+// for the verifier to accept or reject.
+fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCandidate]) -> i32 {
+    let predicted = predicted_offset(axis, last_motion);
+    if predicted != 0 {
+        return predicted;
+    }
+    coarse
+        .iter()
+        .find_map(|candidate| match axis {
+            SearchAxis::Vertical if candidate.dx == 0 => Some(candidate.dy),
+            SearchAxis::Horizontal if candidate.dy == 0 => Some(candidate.dx),
+            _ => None,
+        })
+        .unwrap_or(predicted)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn template_candidates(
     prev_gray: &[f32],
     curr_gray: &[f32],
@@ -235,6 +362,7 @@ fn template_candidates(
     height: u32,
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
+    coarse: &[MotionCandidate],
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
     let mut out = Vec::new();
@@ -242,6 +370,7 @@ fn template_candidates(
     let match_region = match_width_region(roi, config.match_width);
 
     for axis in search_axes(locked_axis) {
+        let seed = template_seed(*axis, last_motion, coarse);
         if let Some(candidate) = search_template_axis(
             prev_gray,
             curr_gray,
@@ -249,7 +378,7 @@ fn template_candidates(
             height,
             *axis,
             match_region,
-            predicted_offset(*axis, last_motion),
+            seed,
             config,
         ) {
             out.push(candidate);
@@ -286,28 +415,27 @@ fn search_template_axis(
         return None;
     }
 
-    let mut best_offset = 0i32;
-    let mut best_score = f32::MIN;
-    let mut second_score = f32::MIN;
+    let offsets = refinement_offsets(last_offset, max_offset, template_refine_radius());
+    let scored: Vec<_> = offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let score = match axis {
+                SearchAxis::Vertical => {
+                    ncc_score_shifted(prev_gray, curr_gray, width, height, region, 0, offset)
+                }
+                SearchAxis::Horizontal => {
+                    ncc_score_shifted(prev_gray, curr_gray, width, height, region, offset, 0)
+                }
+            };
+            score.is_finite().then_some((score, offset))
+        })
+        .collect();
 
-    for offset in signed_predict_iter(max_offset, last_offset) {
-        let score = match axis {
-            SearchAxis::Vertical => {
-                ncc_score_shifted(prev_gray, curr_gray, width, height, region, 0, offset)
-            }
-            SearchAxis::Horizontal => {
-                ncc_score_shifted(prev_gray, curr_gray, width, height, region, offset, 0)
-            }
-        };
+    let mut scored: Vec<(f32, i32)> = scored.into_iter().collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
 
-        if score > best_score {
-            second_score = best_score;
-            best_score = score;
-            best_offset = offset;
-        } else if score > second_score {
-            second_score = score;
-        }
-    }
+    let (best_score, best_offset) = scored.first().copied()?;
+    let second_score = scored.get(1).map(|(score, _)| *score).unwrap_or(f32::MIN);
 
     if !best_score.is_finite() || best_score <= 0.0 {
         return None;
@@ -369,58 +497,74 @@ fn coarse_candidates(
     let curr_samples = coarse_samples(curr_gray, width, height, COARSE_DOWNSAMPLE_STEP);
     let max_dx = ((width as f32 * config.max_search_ratio) as i32 / step).max(0);
     let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
-    let mut scored = Vec::new();
 
-    let dx_values: Vec<i32> = if locked_axis == Some(ScrollAxis::Vertical) {
-        vec![0]
-    } else {
-        (-max_dx..=max_dx).collect()
-    };
-    let dy_values: Vec<i32> = if locked_axis == Some(ScrollAxis::Horizontal) {
-        vec![0]
-    } else {
-        (-max_dy..=max_dy).collect()
-    };
-
-    for sample_dy in dy_values {
-        for sample_dx in dx_values.iter().copied() {
-            let dx = sample_dx * step;
-            let dy = sample_dy * step;
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            if !candidate_matches_axis(dx, dy, locked_axis, config) {
-                continue;
-            }
-            let diff = coarse_mad(
-                &prev_samples,
-                &curr_samples,
-                sample_w,
-                sample_h,
-                sample_dx,
-                sample_dy,
-                1,
-            );
-            if diff.is_finite() {
-                scored.push((diff, dx, dy));
-            }
+    let mut out = Vec::new();
+    for axis in search_axes(locked_axis) {
+        let max_offset = match axis {
+            SearchAxis::Vertical => max_dy,
+            SearchAxis::Horizontal => max_dx,
+        };
+        if let Some(candidate) = coarse_axis_candidate(
+            &prev_samples,
+            &curr_samples,
+            sample_w,
+            sample_h,
+            *axis,
+            max_offset,
+        ) {
+            out.push(candidate);
         }
     }
 
-    scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out.into_iter()
+        .map(|mut candidate| {
+            candidate.dx *= step;
+            candidate.dy *= step;
+            candidate
+        })
+        .filter(|candidate| candidate_matches_axis(candidate.dx, candidate.dy, locked_axis, config))
+        .collect()
+}
 
-    let (best_score, best_dx, best_dy) = match scored.first() {
-        Some(t) => *t,
-        None => return Vec::new(),
-    };
+fn coarse_axis_candidate(
+    prev_samples: &[f32],
+    curr_samples: &[f32],
+    sample_w: u32,
+    sample_h: u32,
+    axis: SearchAxis,
+    max_offset: i32,
+) -> Option<MotionCandidate> {
+    let min_dim = sample_w.min(sample_h) as i32;
+    let stride = if min_dim < 60 { 2 } else { COARSE_AXIS_STRIDE };
+    let offsets: Vec<i32> = coarse_axis_offsets(max_offset, 0, stride)
+        .into_iter()
+        .filter(|offset| *offset != 0)
+        .collect();
+    #[cfg(test)]
+    with_active_search_budget(|budget| budget.coarse_score_calls += offsets.len() as u64);
+
+    let mut scored: Vec<_> = offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            let diff = coarse_mad(prev_samples, curr_samples, sample_w, sample_h, dx, dy, 1);
+            diff.is_finite().then_some((diff, dx, dy))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let (best_score, best_dx, best_dy) = *scored.first()?;
     let second = scored.get(1).map(|(score, _, _)| *score);
-    vec![candidate(
+    Some(candidate(
         best_dx,
         best_dy,
         MatchMethod::Coarse,
         best_score,
         second,
-    )]
+    ))
 }
 
 fn coarse_sample_dimensions(width: u32, height: u32, step: u32) -> (u32, u32) {
@@ -610,6 +754,52 @@ fn to_grayscale(img: &RgbaImage) -> Vec<f32> {
         .collect()
 }
 
+fn coarse_axis_offsets(max_abs: i32, predict: i32, step: i32) -> Vec<i32> {
+    let max_abs = max_abs.max(0);
+    let step = step.max(1);
+    let predict = predict.clamp(-max_abs, max_abs);
+    let mut out = Vec::new();
+    out.push(predict);
+
+    let mut delta = step;
+    while delta <= max_abs {
+        if predict + delta <= max_abs {
+            out.push(predict + delta);
+        }
+        if predict - delta >= -max_abs {
+            out.push(predict - delta);
+        }
+        delta += step;
+    }
+
+    if !out.contains(&max_abs) {
+        out.push(max_abs);
+    }
+    if max_abs != 0 && !out.contains(&-max_abs) {
+        out.push(-max_abs);
+    }
+
+    out
+}
+
+fn refinement_offsets(seed: i32, max_abs: i32, radius: i32) -> Vec<i32> {
+    let seed = seed.clamp(-max_abs, max_abs);
+    let radius = radius.max(0);
+    let start = (seed - radius).max(-max_abs);
+    let end = (seed + radius).min(max_abs);
+    let mut out = Vec::with_capacity((end - start + 1).max(0) as usize);
+    out.push(seed);
+    for delta in 1..=radius {
+        if seed + delta <= end {
+            out.push(seed + delta);
+        }
+        if seed - delta >= start {
+            out.push(seed - delta);
+        }
+    }
+    out
+}
+
 fn signed_predict_iter(max_abs: i32, predict: i32) -> Vec<i32> {
     let p = predict.clamp(-max_abs, max_abs);
     let mut out = Vec::with_capacity((max_abs as usize).saturating_mul(2) + 1);
@@ -645,6 +835,12 @@ fn ncc_score_shifted(
     if x1 <= x0 || y1 <= y0 {
         return f32::MIN;
     }
+
+    #[cfg(test)]
+    with_active_search_budget(|budget| {
+        budget.full_res_ncc_calls += 1;
+        budget.full_res_ncc_pixel_visits += u64::from(x1 - x0) * u64::from(y1 - y0) * 2;
+    });
 
     let mut prev_sum = 0.0f32;
     let mut curr_sum = 0.0f32;
@@ -692,8 +888,9 @@ fn ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{
-        coarse_sample_dimensions, content_roi, estimate_motion, MotionSearchOutcome,
-        COARSE_DOWNSAMPLE_STEP,
+        coarse_axis_offsets, coarse_sample_dimensions, content_roi, estimate_motion,
+        estimate_motion_with_budget, refinement_offsets, template_refine_radius,
+        MotionSearchOutcome, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
     };
     #[cfg(feature = "akaze")]
     use crate::types::AkazeConfig;
@@ -769,6 +966,37 @@ mod tests {
 
     fn crop_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
         imageops::crop_imm(canvas, x, y, w, h).to_image()
+    }
+
+    // Like `make_textured_canvas` but mixes in an aperiodic per-pixel hash so
+    // wider search ranges (retina-scale perf smoke) cannot lock onto a
+    // periodic alias instead of the true motion.
+    fn make_aperiodic_canvas(width: u32, height: u32) -> RgbaImage {
+        let mut img = make_textured_canvas(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                // Splitmix-style hash on (x, y) so each pixel gets a unique,
+                // non-periodic perturbation that the matcher can lock onto.
+                let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                h ^= h >> 30;
+                h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 27;
+                let noise = (h as u8) & 0x3F;
+                let p = img.get_pixel(x, y);
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        p[0].saturating_add(noise),
+                        p[1].saturating_sub(noise),
+                        p[2].wrapping_add(noise),
+                        255,
+                    ]),
+                );
+            }
+        }
+        img
     }
 
     fn unwrap_candidate(outcome: MotionSearchOutcome) -> MotionCandidate {
@@ -1005,6 +1233,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn coarse_axis_offsets_are_bounded_for_large_frames() {
+        let offsets = coarse_axis_offsets(2205, 0, 32);
+        assert_eq!(offsets.first().copied(), Some(0));
+        assert!(offsets.contains(&2205));
+        assert!(offsets.contains(&-2205));
+        assert!(
+            offsets.len() <= 141,
+            "offset count should stay bounded, got {}",
+            offsets.len()
+        );
+    }
+
     #[cfg(feature = "akaze")]
     #[test]
     fn akaze_fallback_recovers_repeated_grid_with_sparse_features() {
@@ -1041,6 +1282,66 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn large_pair_stays_within_structural_search_budget() {
+        let canvas = make_textured_canvas(1470, 900);
+        let prev = crop(&canvas, 0, 660);
+        let curr = crop(&canvas, 110, 660);
+        let config = StitchConfig::default();
+
+        let mut budget = SearchBudget::default();
+        let candidate = unwrap_candidate(estimate_motion_with_budget(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut budget,
+        ));
+
+        assert_eq!(candidate.dx, 0);
+        assert!(
+            (candidate.dy - 110).abs() <= 3,
+            "dy = {} (expected ~110)",
+            candidate.dy
+        );
+        assert!(
+            budget.coarse_score_calls <= 4096,
+            "coarse_score_calls = {}",
+            budget.coarse_score_calls
+        );
+        assert!(
+            budget.full_res_ncc_calls <= 768,
+            "full_res_ncc_calls = {}",
+            budget.full_res_ncc_calls
+        );
+        assert!(
+            budget.full_res_ncc_pixel_visits <= 200_000_000,
+            "full_res_ncc_pixel_visits = {}",
+            budget.full_res_ncc_pixel_visits
+        );
+    }
+
+    #[test]
+    fn refinement_offsets_stay_near_seed() {
+        let radius = template_refine_radius();
+        assert!(
+            radius >= COARSE_DOWNSAMPLE_STEP as i32 * COARSE_AXIS_STRIDE,
+            "radius = {radius}"
+        );
+
+        let offsets = refinement_offsets(220, 990, radius);
+        assert_eq!(offsets.first().copied(), Some(220));
+        assert!(offsets.contains(&(220 - radius)));
+        assert!(offsets.contains(&(220 + radius)));
+        assert!(!offsets.contains(&0));
+        assert!(
+            offsets.len() <= (radius * 2 + 1) as usize,
+            "len = {}",
+            offsets.len()
+        );
+    }
+
     #[cfg(feature = "akaze")]
     #[test]
     fn akaze_candidate_rejected_by_verifier_preserves_best_estimate() {
@@ -1065,5 +1366,56 @@ mod tests {
         };
         assert_eq!(best.method, MatchMethod::Akaze);
         assert!((best.dy - 72).abs() <= 8, "best dy = {}", best.dy);
+    }
+
+    #[test]
+    #[ignore = "release-mode perf smoke; run manually with --ignored --nocapture"]
+    fn large_retina_pair_perf_smoke() {
+        // Uses an aperiodic canvas so the retina-scale search range cannot
+        // lock onto a periodic alias of the true motion.
+        let canvas = make_aperiodic_canvas(2940, 1800);
+        let prev = crop(&canvas, 0, 1320);
+        let curr = crop(&canvas, 220, 1320);
+        let config = StitchConfig::default();
+
+        let started = std::time::Instant::now();
+        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &config);
+        let elapsed = started.elapsed();
+        let candidate = unwrap_candidate(outcome);
+
+        let mut budget = SearchBudget::default();
+        let budget_candidate = unwrap_candidate(estimate_motion_with_budget(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut budget,
+        ));
+
+        println!(
+            "large_retina_pair_perf_smoke: elapsed={:.3}s parallelism={} candidate={:?} budget_candidate={:?} budget={:?}",
+            elapsed.as_secs_f64(),
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            candidate,
+            budget_candidate,
+            budget
+        );
+
+        assert_eq!(candidate.dx, 0);
+        assert!(
+            (candidate.dy - 220).abs() <= 3,
+            "dy = {} (expected ~220)",
+            candidate.dy
+        );
+        assert_eq!(budget_candidate.dx, candidate.dx);
+        assert_eq!(budget_candidate.dy, candidate.dy);
+
+        if std::env::var_os("ROLLSHOT_PERF_STRICT").is_some() {
+            assert!(
+                elapsed.as_secs_f64() < 1.0,
+                "release perf smoke exceeded 1.0s: elapsed={elapsed:?}, budget={budget:?}"
+            );
+        }
     }
 }

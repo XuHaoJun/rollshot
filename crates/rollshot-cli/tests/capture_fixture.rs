@@ -234,3 +234,78 @@ fn rollshot_capture_rejects_portal_region_for_fixture_backend() {
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
+
+#[test]
+fn rollshot_capture_prints_default_progress_to_stderr() {
+    let tempdir = temp_dir("progress-stderr");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--max-frames", "2"])
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(stdout.contains("captured 2 frames"), "stdout = {stdout}");
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
+    assert!(
+        stderr.contains("frame 1/2: stitching..."),
+        "stderr = {stderr}"
+    );
+    assert!(stderr.contains("FirstFrame"), "stderr = {stderr}");
+    assert!(
+        stderr.contains("frame 2/2: stitching..."),
+        "stderr = {stderr}"
+    );
+    assert!(stderr.contains("elapsed="), "stderr = {stderr}");
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn rollshot_capture_quiet_suppresses_progress_stderr() {
+    let tempdir = temp_dir("progress-quiet");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--max-frames", "2"])
+        .arg("--quiet")
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
+    assert_eq!(stderr, "");
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}

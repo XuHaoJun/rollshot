@@ -1,0 +1,20 @@
+name: Matcher Perf Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  matcher-perf:
+    name: Matcher release perf smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run strict release perf smoke
+        env:
+          ROLLSHOT_PERF_STRICT: "1"
+        run: cargo test --release -p rollshot-core large_retina_pair_perf_smoke -- --ignored --nocapture
