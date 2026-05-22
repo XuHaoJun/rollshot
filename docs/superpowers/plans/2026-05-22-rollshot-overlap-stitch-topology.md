@@ -329,9 +329,59 @@ The two failing tests document the v0.3 behavior we are about to implement.
 ### Task 2.2: `append_bottom` — implementation
 
 **Files:**
-- Modify: `crates/rollshot-core/src/canvas.rs` (the `fn append_bottom` body)
+- Modify: `crates/rollshot-core/src/canvas.rs` (module doc comment + the `fn append_bottom` body)
 
-- [ ] **Step 1: Replace `append_bottom` with the overlap-and-overwrite version**
+- [ ] **Step 1: Update the module-level doc comment with the overlap geometry**
+
+Open `crates/rollshot-core/src/canvas.rs` and replace the existing module-level
+doc comment at the top of the file:
+
+```rust
+//! Single-axis stitched canvas that can grow in four directions.
+```
+
+with this expanded version documenting the v0.3 overlap topology in-place
+(future maintainers reading `append_bottom` see the geometry without chasing
+the spec):
+
+```rust
+//! Single-axis stitched canvas that can grow in four directions.
+//!
+//! # v0.3 overlap-and-overwrite topology
+//!
+//! Each new slice widens to `max(H/2, slice_px)` and pastes back into the
+//! existing canvas by `overlap_size = max(0, H/2 - slice_px)` pixels, so the
+//! new slice's overlap portion overwrites the previous slice's trailing
+//! portion. Only the most recently appended slice's trailing pixels survive
+//! in the canvas — naturally hiding sticky horizontal bands and 1 px
+//! decorative borders without explicit detection.
+//!
+//! For `slice_px >= H/2`, `overlap_size` collapses to 0 and the helper
+//! degenerates to v0.2's minimal-slice append.
+//!
+//! `append_bottom` geometry (vertical scroll-down; other directions
+//! symmetric):
+//!
+//! ```text
+//!   frame (H tall):           canvas grows downward:
+//!   ┌───────────┐ row 0       canvas[0 .. paste_y)         preserved
+//!   │  unused   │             canvas[paste_y .. canvas_h)  overlap, overwritten
+//!   │  upper    │             canvas[canvas_h .. canvas_h + slice_px)  new
+//!   │  portion  │
+//!   ├───────────┤ row H - total_slice            paste_y = canvas_h - overlap_size
+//!   │  overlap  │\
+//!   │  portion  │ \--- overwrites canvas tail
+//!   ├───────────┤ row H - slice_px
+//!   │  new      │
+//!   │  content  │ ---- appended at canvas tail
+//!   └───────────┘ row H - 1
+//! ```
+//!
+//! Full derivation and edge cases:
+//! `docs/superpowers/specs/2026-05-22-rollshot-overlap-stitch-topology-design.md`.
+```
+
+- [ ] **Step 2: Replace `append_bottom` with the overlap-and-overwrite version**
 
 Open `crates/rollshot-core/src/canvas.rs`. Find the existing `fn append_bottom`
 (it should look approximately like this v0.2 version):
@@ -381,7 +431,7 @@ Replace it with:
     }
 ```
 
-- [ ] **Step 2: Run the Task 2.1 tests, expect PASS**
+- [ ] **Step 3: Run the Task 2.1 tests, expect PASS**
 
 Run: `rtk cargo test -p rollshot-core --lib canvas::tests::append_bottom_pastes_at_canvas_height_minus_overlap`
 Expected: **PASS**.
@@ -395,7 +445,7 @@ Expected: **PASS**.
 Run: `rtk cargo test -p rollshot-core --lib canvas::tests::append_bottom_net_growth_equals_slice_px`
 Expected: **PASS**.
 
-- [ ] **Step 3: Run all canvas tests, ensure no regressions**
+- [ ] **Step 4: Run all canvas tests, ensure no regressions**
 
 Run: `rtk cargo test -p rollshot-core --lib canvas::tests`
 Expected: all canvas inline unit tests pass.
@@ -403,7 +453,7 @@ Expected: all canvas inline unit tests pass.
 Run: `rtk cargo test -p rollshot-core --test canvas`
 Expected: all integration tests in `tests/canvas.rs` pass.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 Run:
 ```bash
@@ -986,21 +1036,24 @@ Create `crates/rollshot-core/tests/overlap_topology.rs`:
 ```rust
 mod common;
 
-use common::{crop_frame, crop_frame_xy, make_scroll_canvas};
+use common::{crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas};
 use image::RgbaImage;
 use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, Stitcher};
 
+// ---- Byte-equivalence regression gates ------------------------------------
+//
+// For pure-scroll fixtures, v0.3 overlap-and-overwrite is algebraically
+// equivalent to v0.2 minimal-slice append: every pixel that v0.3 overwrites
+// in the overlap region was the SAME source-canvas pixel that v0.2 already
+// placed there. We bypass the motion estimator and drive LinearCanvas
+// directly with exact slice_px values, so the test purely validates the
+// overlap topology algorithm — estimator drift is a separate concern.
+//
+// Each direction (Bottom, Top, Right, Left) has its own gate; a bug in any
+// one helper's paste position or slice origin should fail its dedicated test.
+
 #[test]
-fn pure_scroll_byte_identical_to_v0_2_minimal_slice() {
-    // For pure-scroll fixtures, v0.3 overlap-and-overwrite is algebraically
-    // equivalent to v0.2 minimal-slice append: every pixel that v0.3
-    // overwrites in the overlap region was the SAME source-canvas pixel that
-    // v0.2 already placed there.
-    //
-    // We bypass the motion estimator and drive LinearCanvas directly with
-    // exact slice_px values. This way the test purely validates the overlap
-    // topology algorithm — estimator drift is a separate concern tested
-    // elsewhere.
+fn pure_scroll_down_byte_identical_to_v0_2() {
     let source = make_scroll_canvas(320, 1400);
     let frame_w = 320u32;
     let frame_h = 320u32;
@@ -1028,18 +1081,146 @@ fn pure_scroll_byte_identical_to_v0_2_minimal_slice() {
             assert_eq!(
                 stitched.get_pixel(cx, cy),
                 source.get_pixel(cx, cy),
-                "pixel mismatch at ({cx}, {cy})",
+                "scroll-down pixel mismatch at ({cx}, {cy})",
+            );
+        }
+    }
+}
+
+#[test]
+fn pure_scroll_up_byte_identical_to_v0_2() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_w = 320u32;
+    let frame_h = 320u32;
+    let step = 70u32;
+    let initial_y_start = 700u32;
+
+    let first = crop_frame_xy(&source, 0, initial_y_start, frame_w, frame_h);
+    let mut canvas = LinearCanvas::new(first);
+    let mut top_y = initial_y_start;
+
+    let mut prepended = 0u32;
+    while top_y >= step && prepended < 700 {
+        top_y -= step;
+        let f = crop_frame_xy(&source, 0, top_y, frame_w, frame_h);
+        let added = canvas
+            .append(AppendDirection::Top, &f, step)
+            .expect("prepend");
+        assert_eq!(added, step);
+        prepended += step;
+    }
+
+    let stitched = canvas.image();
+    let bottom_y = initial_y_start + frame_h;
+    let expected_h = bottom_y - top_y;
+    assert_eq!(stitched.height(), expected_h);
+
+    // stitched[(cx, cy)] should equal source[(cx, top_y + cy)].
+    for cy in 0..stitched.height() {
+        for cx in 0..stitched.width() {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                source.get_pixel(cx, top_y + cy),
+                "scroll-up pixel mismatch at canvas ({cx}, {cy}) -> source ({cx}, {})",
+                top_y + cy,
+            );
+        }
+    }
+}
+
+#[test]
+fn pure_scroll_right_byte_identical_to_v0_2() {
+    let source = make_wide_canvas(1400, 320);
+    let frame_w = 320u32;
+    let frame_h = 320u32;
+    let step = 70u32;
+
+    let first = crop_frame_xy(&source, 0, 0, frame_w, frame_h);
+    let mut canvas = LinearCanvas::new(first);
+    let mut expected_w = frame_w;
+
+    let mut x = step;
+    while x + frame_w <= source.width() && expected_w < 700 {
+        let f = crop_frame_xy(&source, x, 0, frame_w, frame_h);
+        let added = canvas
+            .append(AppendDirection::Right, &f, step)
+            .expect("append");
+        assert_eq!(added, step);
+        expected_w += step;
+        x += step;
+    }
+
+    let stitched = canvas.image();
+    assert_eq!(stitched.width(), expected_w);
+    for cy in 0..stitched.height() {
+        for cx in 0..stitched.width() {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                source.get_pixel(cx, cy),
+                "scroll-right pixel mismatch at ({cx}, {cy})",
+            );
+        }
+    }
+}
+
+#[test]
+fn pure_scroll_left_byte_identical_to_v0_2() {
+    let source = make_wide_canvas(1400, 320);
+    let frame_w = 320u32;
+    let frame_h = 320u32;
+    let step = 70u32;
+    let initial_x_start = 700u32;
+
+    let first = crop_frame_xy(&source, initial_x_start, 0, frame_w, frame_h);
+    let mut canvas = LinearCanvas::new(first);
+    let mut left_x = initial_x_start;
+
+    let mut prepended = 0u32;
+    while left_x >= step && prepended < 700 {
+        left_x -= step;
+        let f = crop_frame_xy(&source, left_x, 0, frame_w, frame_h);
+        let added = canvas
+            .append(AppendDirection::Left, &f, step)
+            .expect("prepend");
+        assert_eq!(added, step);
+        prepended += step;
+    }
+
+    let stitched = canvas.image();
+    let right_x = initial_x_start + frame_w;
+    let expected_w = right_x - left_x;
+    assert_eq!(stitched.width(), expected_w);
+
+    for cy in 0..stitched.height() {
+        for cx in 0..stitched.width() {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                source.get_pixel(left_x + cx, cy),
+                "scroll-left pixel mismatch at canvas ({cx}, {cy}) -> source ({}, {cy})",
+                left_x + cx,
             );
         }
     }
 }
 ```
 
-- [ ] **Step 3: Run the new test, expect PASS**
+- [ ] **Step 3: Run the new tests, expect PASS**
 
-Run: `rtk cargo test -p rollshot-core --test overlap_topology pure_scroll_byte_identical_to_v0_2_minimal_slice`
-Expected: **PASS**. If this fails, the overlap math in Phase 2 has a bug;
-investigate before continuing.
+Run: `rtk cargo test -p rollshot-core --test overlap_topology pure_scroll_down_byte_identical_to_v0_2`
+Expected: **PASS**.
+
+Run: `rtk cargo test -p rollshot-core --test overlap_topology pure_scroll_up_byte_identical_to_v0_2`
+Expected: **PASS**.
+
+Run: `rtk cargo test -p rollshot-core --test overlap_topology pure_scroll_right_byte_identical_to_v0_2`
+Expected: **PASS**.
+
+Run: `rtk cargo test -p rollshot-core --test overlap_topology pure_scroll_left_byte_identical_to_v0_2`
+Expected: **PASS**.
+
+If any fail, the overlap math in the corresponding Phase 2 slice helper
+has a bug; the failing test name tells you which helper to inspect.
+Investigate before continuing.
 
 - [ ] **Step 4: Commit**
 
@@ -1047,11 +1228,14 @@ Run:
 ```bash
 rtk git add crates/rollshot-core/tests/common/mod.rs crates/rollshot-core/tests/overlap_topology.rs
 rtk git commit -m "$(cat <<'EOF'
-test(core): pure-scroll v0.2 equivalence regression gate
+test(core): pure-scroll v0.2 equivalence regression gates (4 directions)
 
 Re-add sticky paint helpers (lost in the revert) and create the
-overlap_topology integration test file with the byte-identical-
-to-v0.2 regression gate as the first test.
+overlap_topology integration test file with byte-identical-to-v0.2
+regression gates for all four directions: scroll-down, scroll-up,
+scroll-right, scroll-left. Each test drives LinearCanvas directly
+(bypassing the motion estimator) so it purely validates the overlap
+topology algorithm.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1742,7 +1926,9 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 Append:
 
 ```rust
-use common::{crop_frame_xy, make_wide_canvas, paint_sticky_horizontal_band};
+// crop_frame_xy and make_wide_canvas are already imported at the top of
+// the file by Task 3.1. Only paint_sticky_horizontal_band is new here.
+use common::paint_sticky_horizontal_band;
 
 fn drive_horizontal_right(
     canvas: &RgbaImage,
@@ -1811,42 +1997,48 @@ fn horizontal_scroll_with_sticky_bottom_band() {
 fn motion_larger_than_half_frame_falls_back_to_v0_2_behavior() {
     // When slice_px >= frame_h / 2 the overlap formula yields overlap_size = 0
     // and slice helper behavior is byte-identical to v0.2 minimal-slice
-    // append. We can't compare against a v0.2 config switch (it no longer
-    // exists), so we assert the canvas-grows-by-`added`-per-append invariant
-    // — this holds in BOTH the overlap and the no-overlap regimes and is
-    // therefore a regression gate for the fallback path specifically because
-    // the test uses step > frame_h/2.
+    // append. Drive LinearCanvas directly with step > H/2 and compare against
+    // the source canvas — same pattern as `pure_scroll_down_byte_identical_to_v0_2`
+    // but with a step that exercises the no-overlap fallback branch
+    // specifically. A bug in the `slice_px >= H/2` code path would corrupt
+    // pixel content even though the canvas-grows-by-slice_px invariant
+    // still holds, so we check actual content here.
     let source = make_scroll_canvas(320, 1400);
+    let frame_w = 320u32;
     let frame_h = 320u32;
-    let step = 200u32; // > frame_h / 2
+    let step = 200u32; // > frame_h / 2 = 160
 
-    let mut stitcher = Stitcher::new(StitchConfig::default());
-    let mut y = 0;
-    let mut last_h: Option<u32> = None;
-    let mut append_count = 0u32;
-    while y + frame_h <= source.height() {
-        let f = crop_frame(&source, y, frame_h);
-        let outcome = stitcher.push_frame(f);
-        let current_h = stitcher.full_image().unwrap().height();
-        match outcome {
-            StitchOutcome::FirstFrame => {
-                last_h = Some(current_h);
-            }
-            StitchOutcome::Appended { added, .. } => {
-                let prev = last_h.expect("first frame must precede appends");
-                assert_eq!(
-                    current_h - prev,
-                    added,
-                    "canvas must grow by exactly `added` per append",
-                );
-                last_h = Some(current_h);
-                append_count += 1;
-            }
-            _ => {}
-        }
+    let first = crop_frame_xy(&source, 0, 0, frame_w, frame_h);
+    let mut canvas = LinearCanvas::new(first);
+    let mut expected_h = frame_h;
+
+    let mut y = step;
+    while y + frame_h <= source.height() && expected_h < 1000 {
+        let f = crop_frame_xy(&source, 0, y, frame_w, frame_h);
+        let added = canvas
+            .append(AppendDirection::Bottom, &f, step)
+            .expect("append");
+        assert_eq!(added, step);
+        expected_h += step;
         y += step;
     }
-    assert!(append_count >= 2, "need >=2 appends; got {append_count}");
+
+    assert!(
+        expected_h > frame_h,
+        "need at least one large-motion append; got expected_h = {expected_h}",
+    );
+
+    let stitched = canvas.image();
+    assert_eq!(stitched.height(), expected_h);
+    for cy in 0..stitched.height() {
+        for cx in 0..stitched.width() {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                source.get_pixel(cx, cy),
+                "large-motion fallback byte-equivalence mismatch at ({cx}, {cy})",
+            );
+        }
+    }
 }
 ```
 
@@ -1864,7 +2056,7 @@ Expected: **PASS**.
 - [ ] **Step 3: Run the entire overlap_topology test file once**
 
 Run: `rtk cargo test -p rollshot-core --test overlap_topology`
-Expected: all 11 tests pass.
+Expected: all 16 tests pass (4 byte-equivalence + 12 sticky/edge-case).
 
 - [ ] **Step 4: Commit**
 
