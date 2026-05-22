@@ -162,12 +162,31 @@ impl LinearCanvas {
     }
 
     fn prepend_top(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.height());
-        let slice = frame.view(0, 0, frame.width(), slice_px).to_image();
-        let mut combined = RgbaImage::new(self.image.width(), self.image.height() + slice_px);
+        let frame_h = frame.height();
+        let slice_px = slice_px.min(frame_h);
+
+        let overlap_size = (frame_h / 2).saturating_sub(slice_px);
+        let total_slice = (slice_px + overlap_size).min(frame_h);
+
+        let slice = frame
+            .view(0, 0, frame.width(), total_slice)
+            .to_image();
+
+        let new_height = self.image.height() + slice_px;
+
+        let mut combined = RgbaImage::new(self.image.width(), new_height);
         combined.copy_from(&slice, 0, 0).expect("copy slice");
+        let kept_old = self
+            .image
+            .view(
+                0,
+                overlap_size,
+                self.image.width(),
+                self.image.height() - overlap_size,
+            )
+            .to_image();
         combined
-            .copy_from(&self.image, 0, slice_px)
+            .copy_from(&kept_old, 0, total_slice)
             .expect("copy base");
         self.image = combined;
         slice_px
@@ -404,5 +423,59 @@ mod tests {
             .unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.height(), h0 + 2, "canvas must grow by exactly slice_px");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 overlap-and-overwrite tests: prepend_top
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn prepend_top_drops_overlap_rows_of_existing_canvas() {
+        // H=8, slice_px=2 → overlap = 4-2 = 2, total_slice = 4.
+        // Slice = frame rows [0..4). Combined y=0..3 = slice. Combined y=4..9
+        // = old canvas rows [2..8). Old canvas rows 0..1 are dropped.
+        let base = solid(4, 8, [10, 10, 10, 255]);
+        let frame = solid(4, 8, [0, 200, 0, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let added = canvas
+            .append(AppendDirection::Top, &frame, 2)
+            .unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(canvas.height(), 10);
+        // y=0..3 is now frame 2's top (green 0/200/0).
+        assert_eq!(canvas.image().get_pixel(0, 0), &Rgba([0, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(0, 3), &Rgba([0, 200, 0, 255]));
+        // y=4..9 is what remains of frame 1.
+        assert_eq!(canvas.image().get_pixel(0, 4), &Rgba([10, 10, 10, 255]));
+        assert_eq!(canvas.image().get_pixel(0, 9), &Rgba([10, 10, 10, 255]));
+    }
+
+    #[test]
+    fn prepend_top_large_motion_uses_zero_overlap() {
+        // H=4, slice_px=3 → overlap = 0, total_slice = 3. Behaves like v0.2.
+        let base = solid(4, 4, [10, 10, 10, 255]);
+        let frame = solid(4, 4, [0, 200, 0, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let added = canvas
+            .append(AppendDirection::Top, &frame, 3)
+            .unwrap();
+        assert_eq!(added, 3);
+        assert_eq!(canvas.height(), 7);
+        assert_eq!(canvas.image().get_pixel(0, 0), &Rgba([0, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(0, 2), &Rgba([0, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(0, 3), &Rgba([10, 10, 10, 255]));
+    }
+
+    #[test]
+    fn prepend_top_net_growth_equals_slice_px() {
+        let base = solid(4, 8, [10, 10, 10, 255]);
+        let frame = solid(4, 8, [0, 200, 0, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let h0 = canvas.height();
+        let added = canvas
+            .append(AppendDirection::Top, &frame, 2)
+            .unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(canvas.height(), h0 + 2);
     }
 }
