@@ -1089,6 +1089,33 @@ fn scan_clamps_extent_above_max_band_ratio() {
     // top extent would be 10 unclamped -> exceeds 0.3 * 10 = 3 -> zeroed (Step 5 of algorithm).
     assert_eq!(e.top, 0, "extent above max_band_ratio must be zeroed, got {}", e.top);
 }
+
+#[test]
+fn scan_treats_nan_motion_as_static_only_when_static_score_is_very_low() {
+    // Edge rows where motion alignment falls off the frame (NaN motion).
+    // First 3 rows have static ≈ 0 (well below threshold/4) -> accepted as static.
+    let row_static = vec![0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+    let row_motion = vec![f32::NAN, f32::NAN, f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let col_static = vec![0.5; 8];
+    let col_motion = vec![0.0; 8];
+    let cfg = StaticRegionConfig::default();
+    let e = scan_edges(&row_static, &row_motion, &col_static, &col_motion, &cfg);
+    assert_eq!(e.top, 3, "NaN motion + very low static should classify as static");
+}
+
+#[test]
+fn scan_rejects_nan_motion_when_static_score_not_negligible() {
+    // Default threshold = 4/255 ≈ 0.01568; threshold/4 ≈ 0.00392.
+    // Static = 0.01 is below the main threshold but above threshold/4,
+    // so NaN motion rows should NOT be classified as static.
+    let row_static = vec![0.01, 0.01, 0.01, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+    let row_motion = vec![f32::NAN, f32::NAN, f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let col_static = vec![0.5; 8];
+    let col_motion = vec![0.0; 8];
+    let cfg = StaticRegionConfig::default();
+    let e = scan_edges(&row_static, &row_motion, &col_static, &col_motion, &cfg);
+    assert_eq!(e.top, 0, "NaN motion + moderate static should NOT count as static");
+}
 ```
 
 - [ ] **Step 2: Run the new tests and confirm they fail**
@@ -1113,8 +1140,20 @@ fn is_static_line(static_score: f32, motion_score: f32, cfg: &StaticRegionConfig
     if !static_score.is_finite() { return false; }
     if static_score >= cfg.static_mad_threshold { return false; }
     if !motion_score.is_finite() {
-        // No motion-aligned comparison available; conservatively treat as static
-        // ONLY if the static score is essentially zero.
+        // Edge row / column: the motion-aligned comparison fell off the frame
+        // (shifted (x + dx, y + dy) coordinate is out of bounds for every x or y
+        // we tried). We only have row_static / col_static evidence.
+        //
+        // To detect sticky footer / sticky right-sidebar (which sit exactly on
+        // the appended-edge of each slice and therefore have no in-bounds
+        // motion alignment), we must accept some rows / cols here. To avoid
+        // false-positives on benign uniform-color scrollable content (e.g. a
+        // paragraph break or all-white area), require static_score well below
+        // threshold — concretely threshold / 4. This is the minimum guard that
+        // lets edge-anchored sticky bands be detected. Unit tests
+        // `scan_treats_nan_motion_as_static_only_when_static_score_is_very_low`
+        // and `scan_rejects_nan_motion_when_static_score_not_negligible` pin
+        // both sides of this rule.
         return static_score < cfg.static_mad_threshold / 4.0;
     }
     (motion_score - static_score) > cfg.motion_margin
@@ -1254,6 +1293,13 @@ Add to `static_region.rs`:
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Edge { Top, Bottom, Left, Right }
 
+/// Sorted-vector median, picking the upper of the two middles when len is even.
+/// Shared between this task's edge sampling and Task 9's per-band aggregation.
+pub(super) fn median_u8(mut v: Vec<u8>) -> u8 {
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
 pub(super) fn sample_band_bg_color(img: &RgbaImage, edge: Edge, thickness: u32) -> Option<[u8; 4]> {
     if thickness == 0 { return None; }
     let w = img.width();
@@ -1275,12 +1321,8 @@ pub(super) fn sample_band_bg_color(img: &RgbaImage, edge: Edge, thickness: u32) 
             rs.push(r); gs.push(g); bs.push(b); as_.push(a);
         }
     }
-    fn median(mut v: Vec<u8>) -> u8 {
-        v.sort_unstable();
-        v[v.len() / 2]
-    }
     if rs.is_empty() { return None; }
-    Some([median(rs), median(gs), median(bs), median(as_)])
+    Some([median_u8(rs), median_u8(gs), median_u8(bs), median_u8(as_)])
 }
 ```
 
@@ -1515,8 +1557,7 @@ impl StaticRegionDetector {
             rs.push(b.color[0]); gs.push(b.color[1]);
             bs.push(b.color[2]); as_.push(b.color[3]);
         }
-        fn median(mut v: Vec<u8>) -> u8 { v.sort_unstable(); v[v.len() / 2] }
-        let color = [median(rs), median(gs), median(bs), median(as_)];
+        let color = [median_u8(rs), median_u8(gs), median_u8(bs), median_u8(as_)];
         Some(StickyBand { thickness: median_thickness, bg_color: color })
     }
 }
