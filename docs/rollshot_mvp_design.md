@@ -171,6 +171,82 @@ v0.2 是本文件的主要範圍。
 
 ---
 
+### 3.2.1 v0.2.1：Static region mask（patch）
+
+v0.2 完成後，matcher 端透過 content ROI 已不再被 sticky / fixed UI 帶跑，但 `LinearCanvas::append_*` 仍把整條 slice 貼進 canvas，造成 sticky header / footer / 左右 sidebar 在長圖上重複出現（icon、分隔線、漸層、footer 等）。
+
+v0.2.1 是針對這個視覺問題的 patch，只動 stitcher / canvas，不更動 matcher / verifier / capture / CLI。
+
+詳細 spec 見 `docs/superpowers/specs/2026-05-22-rollshot-static-region-mask-design.md`，以下只列重點。
+
+目標：
+
+```text
+1. 自動偵測 frame 邊緣的 static region：top / bottom / left / right 各一段
+2. 在 LinearCanvas::append_* 套用 mask
+3. 對 masked 區段填採樣得到的背景色
+4. 第一張 frame 原貌保留（sticky UI 在 canvas 頂端可見一次）
+5. 不破壞 v0.2 既有 fixture，並補上 sticky_sidebar / sticky_footer fixture
+6. 預設 enabled=true，可透過 config 關閉退回 v0.2 行為
+```
+
+演算法（簡述）：
+
+```text
+給定一對成功 match 的 (prev, curr) 與 motion (dx, dy)：
+
+1. 對 row 與 col 各算兩種差異（mean absolute difference, normalized）：
+     diff_static : 不位移直接比 prev(x, y)        vs curr(x, y)
+     diff_motion : 依 motion 對齊比 prev(x+dx, y+dy) vs curr(x, y)
+
+2. 若 diff_static < static_mad_threshold
+    ∧ diff_motion - diff_static > motion_margin
+   → 該 row/col 屬於 static line。
+
+3. 從 frame 四個邊緣往內掃，遇到第一個 non-static line 即停，
+   產出 (top, bottom, left, right) 四段 extent。
+   只接受 contiguous-from-edge，內部孤立的 static line 不算。
+
+4. extent > max_band_ratio * (W or H) 視為 noise，該邊 extent 歸 0。
+
+5. 對每段 sticky band 採樣內側 thin strip，取 channel-wise median 當 bg_color。
+
+6. 累積 min_observations 次（預設 3）後，
+   各邊 extent 與 bg_color 各取 median 鎖定，
+   之後 observe 直接 ignore。
+
+7. canvas.append_* 接受 Option<&StaticMask>，在 frame 局部座標
+   碰到 mask 命中的 pixel 改填對應 bg_color。
+   corner 衝突時 top/bottom 優先於 left/right。
+```
+
+完成標準：
+
+```text
+[ ] static_region module 落地、有單元測試
+[ ] LinearCanvas::append 接受 Option<&StaticMask>，舊測試傳 None 行為不變
+[ ] StaticRegionConfig 加進 StitchConfig，預設 enabled=true
+[ ] sticky_sidebar / sticky_footer fixture：縫合長圖該段不再重複
+[ ] sticky_header fixture：motion 估算與 v0.2 一致，且輸出 header 不重複
+[ ] horizontal scroll + sticky band fixture 通過
+[ ] first frame 保留 sticky pixels 原貌
+[ ] no_sticky baseline fixture 輸出與 v0.2 byte-identical
+[ ] detector_disabled_via_config 行為與 v0.2 一致
+```
+
+非 v0.2.1 範圍：
+
+```text
+- 半透明 / blur sticky element（先當不透明處理）
+- 自身會動的 sticky 元素（loading spinner / video）
+- 中間懸浮 banner / chat widget（非 edge-anchored）
+- carry-over 真實 sticky pixels（取代填色） → v0.2.2 候選
+- semantic mask（OCR / DOM / a11y tree） → v0.5+
+- 把 sticky 區段裁掉而非填色（output 縮小） → 未來決策
+```
+
+---
+
 ### 3.3 v0.3：Capture UX / interactive session
 
 v0.3 處理「使用者怎麼開始、調整、停止」。
@@ -993,7 +1069,7 @@ scrollbar
 portal crop 邊界
 ```
 
-v0.2 先以 ROI 排除為主，不急著做 semantic mask。
+v0.2 先以 ROI 排除為主。v0.2.1 在 canvas append 端加上 static region mask（見 3.2.1），處理 sticky header / footer / sidebar 在輸出長圖上的視覺重複。其餘動態區域（cursor / loading spinner / video / animation）仍延後處理；semantic mask 留到 v0.5+。
 
 ---
 
@@ -1310,7 +1386,7 @@ target/test-artifacts/
 | AKAZE 太慢 | 只作 fallback；限制 max_features；只在低信心時執行。 |
 | AKAZE 對文字頁不穩 | 不把 AKAZE 放第一順位；template / edge 先跑。 |
 | 重複 row / grid 誤判 | second-best margin、AKAZE fallback、overlap verifier。 |
-| sticky header 干擾 | content ROI 排除 top/bottom/side；未來 mask。 |
+| sticky header / sidebar 干擾 | matcher：content ROI 排除 top/bottom/side；canvas append：v0.2.1 static region mask（見 3.2.1）。 |
 | 使用者期待 2D stitching | 明確區分 LinearScroll 與 Mosaic2D；v0.5+ 再做。 |
 | 使用者不想輸入 max frames / fps | v0.3 做 interactive stop UX。 |
 | OpenCV ORB 依賴痛苦 | 不納入；AKAZE + rollshot-specific motion voting。 |
