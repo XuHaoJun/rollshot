@@ -44,6 +44,11 @@ cargo run -p rollshot-cli -- probe
 cargo run -p rollshot-cli -- stitch-folder tests/fixtures
 ```
 
+`rollshot capture` prints per-frame progress to stderr by default:
+`frame N/MAX: OUTCOME elapsed=SECONDS`. The final capture summary and output
+path remain on stdout. Pass `--quiet` to suppress progress output when stderr
+must stay empty for scripts.
+
 `stitch-folder` is intentionally a bootstrap smoke command until the stitching
 core phase adds image fixtures and golden output tests.
 

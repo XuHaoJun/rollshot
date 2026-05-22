@@ -33,6 +33,7 @@
 //! ```
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use image::ImageFormat;
 use rollshot_capture::{
@@ -79,13 +80,22 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                     write_dump_frame(dir, captured, &frame.image)?;
                 }
                 captured += 1;
-                match stitcher.push_frame(frame.image) {
+                if !args.quiet {
+                    log_capture_start(captured, args.max_frames);
+                }
+                let stitch_started = Instant::now();
+                let outcome = stitcher.push_frame(frame.image);
+                let stitch_elapsed = stitch_started.elapsed();
+                match &outcome {
                     StitchOutcome::FirstFrame => {}
                     StitchOutcome::Appended { .. } => appended += 1,
                     StitchOutcome::Duplicate => duplicates += 1,
                     StitchOutcome::NoMatch { .. } => no_match += 1,
                     StitchOutcome::NoProgress { .. } => no_progress += 1,
                     StitchOutcome::AxisChanged { .. } => no_match += 1,
+                }
+                if !args.quiet {
+                    log_capture_progress(captured, args.max_frames, &outcome, stitch_elapsed);
                 }
                 if captured >= args.max_frames {
                     break;
@@ -137,6 +147,31 @@ fn write_dump_frame(dir: &Path, index: u32, image: &image::RgbaImage) -> Result<
         .save_with_format(&path, ImageFormat::Png)
         .map_err(|err| CliError::new(format!("failed to save {}: {err}", path.display()), 1))?;
     Ok(())
+}
+
+fn log_capture_start(index: u32, max_frames: u32) {
+    eprintln!("frame {index}/{max_frames}: stitching...");
+}
+
+fn log_capture_progress(index: u32, max_frames: u32, outcome: &StitchOutcome, elapsed: Duration) {
+    eprintln!(
+        "frame {}/{}: {} elapsed={:.3}s",
+        index,
+        max_frames,
+        outcome_label(outcome),
+        elapsed.as_secs_f64()
+    );
+}
+
+fn outcome_label(outcome: &StitchOutcome) -> &'static str {
+    match outcome {
+        StitchOutcome::FirstFrame => "FirstFrame",
+        StitchOutcome::Appended { .. } => "Appended",
+        StitchOutcome::Duplicate => "Duplicate",
+        StitchOutcome::NoMatch { .. } => "NoMatch",
+        StitchOutcome::NoProgress { .. } => "NoProgress",
+        StitchOutcome::AxisChanged { .. } => "AxisChanged",
+    }
 }
 
 fn parse_region(flag: &str, kind: BackendKind) -> Result<RegionMode, CliError> {
