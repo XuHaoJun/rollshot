@@ -193,14 +193,22 @@ impl LinearCanvas {
     }
 
     fn append_right(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.width());
-        let overlap = frame.width() - slice_px;
-        let slice = frame.view(overlap, 0, slice_px, frame.height()).to_image();
-        let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
+        let frame_w = frame.width();
+        let slice_px = slice_px.min(frame_w);
+
+        let overlap_size = (frame_w / 2).saturating_sub(slice_px);
+        let total_slice = (slice_px + overlap_size).min(frame_w);
+
+        let slice = frame
+            .view(frame_w - total_slice, 0, total_slice, frame.height())
+            .to_image();
+
+        let new_width = self.image.width() + slice_px;
+        let paste_x = self.image.width() - overlap_size;
+
+        let mut combined = RgbaImage::new(new_width, self.image.height());
         combined.copy_from(&self.image, 0, 0).expect("copy base");
-        combined
-            .copy_from(&slice, self.image.width(), 0)
-            .expect("copy slice");
+        combined.copy_from(&slice, paste_x, 0).expect("copy slice");
         self.image = combined;
         slice_px
     }
@@ -477,5 +485,55 @@ mod tests {
             .unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.height(), h0 + 2);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 overlap-and-overwrite tests: append_right
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn append_right_pastes_at_canvas_width_minus_overlap() {
+        // W=8, slice_px=2 → overlap = 4-2 = 2, total_slice = 4.
+        // Slice = frame cols [4..8). Paste at canvas x = 8 - 2 = 6.
+        let base = solid(8, 4, [10, 10, 10, 255]);
+        let frame = solid(8, 4, [0, 0, 200, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let added = canvas
+            .append(AppendDirection::Right, &frame, 2)
+            .unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(canvas.width(), 10);
+        // x=0..5 stays frame 1.
+        assert_eq!(canvas.image().get_pixel(5, 0), &Rgba([10, 10, 10, 255]));
+        // x=6..9 is now frame 2's slice (blue).
+        assert_eq!(canvas.image().get_pixel(6, 0), &Rgba([0, 0, 200, 255]));
+        assert_eq!(canvas.image().get_pixel(9, 0), &Rgba([0, 0, 200, 255]));
+    }
+
+    #[test]
+    fn append_right_large_motion_uses_zero_overlap() {
+        let base = solid(4, 4, [10, 10, 10, 255]);
+        let frame = solid(4, 4, [0, 0, 200, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let added = canvas
+            .append(AppendDirection::Right, &frame, 3)
+            .unwrap();
+        assert_eq!(added, 3);
+        assert_eq!(canvas.width(), 7);
+        assert_eq!(canvas.image().get_pixel(3, 0), &Rgba([10, 10, 10, 255]));
+        assert_eq!(canvas.image().get_pixel(4, 0), &Rgba([0, 0, 200, 255]));
+    }
+
+    #[test]
+    fn append_right_net_growth_equals_slice_px() {
+        let base = solid(8, 4, [10, 10, 10, 255]);
+        let frame = solid(8, 4, [0, 0, 200, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let w0 = canvas.width();
+        let added = canvas
+            .append(AppendDirection::Right, &frame, 2)
+            .unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(canvas.width(), w0 + 2);
     }
 }
