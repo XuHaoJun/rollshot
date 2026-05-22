@@ -38,6 +38,10 @@ fn golden_fixtures_match_expected_outputs() {
         run_fixture(family, StitchConfig::default());
     }
 
+    // These fixtures use small synthetic frames where a single scroll step is
+    // a large fraction of frame height/width, so the production default of
+    // max_search_ratio = 0.4 is too tight for them. Real-screen captures
+    // (e.g. 1320 px tall, scrolling 200-400 px/frame) stay well inside 0.4.
     let mut large_search_cfg = StitchConfig::default();
     large_search_cfg.max_search_ratio = 0.75;
     for family in [

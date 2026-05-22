@@ -286,10 +286,19 @@ fn predicted_offset(axis: SearchAxis, last_motion: (i32, i32)) -> i32 {
     }
 }
 
-fn template_refine_radius(_config: &StitchConfig) -> i32 {
+fn template_refine_radius() -> i32 {
     COARSE_DOWNSAMPLE_STEP as i32 * COARSE_AXIS_STRIDE * 2 + 16
 }
 
+// On steady scroll the previous-frame motion is the most accurate seed — it
+// gives full-res refinement precision regardless of per-frame texture
+// quality, which matters for low-feature content (see the
+// `low_feature_text` golden fixture). Coarse is only used when there is no
+// velocity history to lean on (first frame, cross-axis probe). The coarse
+// candidate is always also added to the candidate pool, so if a sudden
+// scroll-speed change puts the true offset outside `template_refine_radius`
+// of `predicted`, the 32-px-quantized coarse candidate is still available
+// for the verifier to accept or reject.
 fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCandidate]) -> i32 {
     let predicted = predicted_offset(axis, last_motion);
     if predicted != 0 {
@@ -366,7 +375,7 @@ fn search_template_axis(
         return None;
     }
 
-    let offsets = refinement_offsets(last_offset, max_offset, template_refine_radius(config));
+    let offsets = refinement_offsets(last_offset, max_offset, template_refine_radius());
     let scored: Vec<_> = offsets
         .into_par_iter()
         .filter_map(|offset| {
@@ -462,7 +471,6 @@ fn coarse_candidates(
             sample_h,
             *axis,
             max_offset,
-            0,
         ) {
             out.push(candidate);
         }
@@ -485,11 +493,10 @@ fn coarse_axis_candidate(
     sample_h: u32,
     axis: SearchAxis,
     max_offset: i32,
-    predicted: i32,
 ) -> Option<MotionCandidate> {
     let min_dim = sample_w.min(sample_h) as i32;
     let stride = if min_dim < 60 { 2 } else { COARSE_AXIS_STRIDE };
-    let offsets: Vec<i32> = coarse_axis_offsets(max_offset, predicted, stride)
+    let offsets: Vec<i32> = coarse_axis_offsets(max_offset, 0, stride)
         .into_iter()
         .filter(|offset| *offset != 0)
         .collect();
@@ -921,6 +928,37 @@ mod tests {
         imageops::crop_imm(canvas, x, y, w, h).to_image()
     }
 
+    // Like `make_textured_canvas` but mixes in an aperiodic per-pixel hash so
+    // wider search ranges (retina-scale perf smoke) cannot lock onto a
+    // periodic alias instead of the true motion.
+    fn make_aperiodic_canvas(width: u32, height: u32) -> RgbaImage {
+        let mut img = make_textured_canvas(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                // Splitmix-style hash on (x, y) so each pixel gets a unique,
+                // non-periodic perturbation that the matcher can lock onto.
+                let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                h ^= h >> 30;
+                h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 27;
+                let noise = (h as u8) & 0x3F;
+                let p = img.get_pixel(x, y);
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        p[0].saturating_add(noise),
+                        p[1].saturating_sub(noise),
+                        p[2].wrapping_add(noise),
+                        255,
+                    ]),
+                );
+            }
+        }
+        img
+    }
+
     fn unwrap_candidate(outcome: MotionSearchOutcome) -> MotionCandidate {
         match outcome {
             MotionSearchOutcome::Candidate(candidate) => candidate,
@@ -1246,7 +1284,7 @@ mod tests {
 
     #[test]
     fn refinement_offsets_stay_near_seed() {
-        let radius = template_refine_radius(&StitchConfig::default());
+        let radius = template_refine_radius();
         assert!(
             radius >= COARSE_DOWNSAMPLE_STEP as i32 * COARSE_AXIS_STRIDE,
             "radius = {radius}"
@@ -1293,7 +1331,9 @@ mod tests {
     #[test]
     #[ignore = "release-mode perf smoke; run manually with --ignored --nocapture"]
     fn large_retina_pair_perf_smoke() {
-        let canvas = make_textured_canvas(2940, 1800);
+        // Uses an aperiodic canvas so the retina-scale search range cannot
+        // lock onto a periodic alias of the true motion.
+        let canvas = make_aperiodic_canvas(2940, 1800);
         let prev = crop(&canvas, 0, 1320);
         let curr = crop(&canvas, 220, 1320);
         let config = StitchConfig::default();
@@ -1322,9 +1362,11 @@ mod tests {
             budget
         );
 
+        assert_eq!(candidate.dx, 0);
         assert!(
-            candidate.dy != 0,
-            "matcher should find some vertical motion, got dy=0"
+            (candidate.dy - 220).abs() <= 3,
+            "dy = {} (expected ~220)",
+            candidate.dy
         );
         assert_eq!(budget_candidate.dx, candidate.dx);
         assert_eq!(budget_candidate.dy, candidate.dy);
