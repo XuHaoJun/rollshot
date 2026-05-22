@@ -56,6 +56,21 @@ struct SearchBudget {
 #[cfg(test)]
 static ACTIVE_SEARCH_BUDGET: std::sync::Mutex<Option<SearchBudget>> = std::sync::Mutex::new(None);
 
+// Serializes every `estimate_motion` invocation in test builds so that
+// concurrent unit tests cannot contaminate `ACTIVE_SEARCH_BUDGET`. Without
+// this, `cargo test`'s multi-threaded runner can interleave
+// `estimate_motion` calls from other tests with the budget test's call,
+// causing their `ncc_score_shifted` increments to leak into the budget
+// counters and push the structural budget assertions over threshold
+// (seen on the macOS GitHub-hosted runner).
+#[cfg(test)]
+static ESTIMATE_MOTION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static IN_BUDGET_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(test)]
 fn estimate_motion_with_budget(
     prev: &RgbaImage,
@@ -65,14 +80,14 @@ fn estimate_motion_with_budget(
     config: &StitchConfig,
     budget: &mut SearchBudget,
 ) -> MotionSearchOutcome {
-    let result =
-        with_search_budget(|| estimate_motion(prev, curr, locked_axis, last_motion, config));
-    *budget = take_search_budget();
-    result
-}
-
-#[cfg(test)]
-fn with_search_budget<R>(f: impl FnOnce() -> R) -> R {
+    // Hold the serialization lock for the entire scope (set Some → run →
+    // take None) so no concurrent test can slip in NCC calls between
+    // `estimate_motion` returning and the budget being taken.
+    let _serialize = ESTIMATE_MOTION_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    IN_BUDGET_SCOPE.with(|c| c.set(true));
+    let _restore = InBudgetScopeGuard;
     {
         let mut active = ACTIVE_SEARCH_BUDGET
             .lock()
@@ -80,16 +95,23 @@ fn with_search_budget<R>(f: impl FnOnce() -> R) -> R {
         assert!(active.is_none(), "nested search budgets are not supported");
         *active = Some(SearchBudget::default());
     }
-    f()
-}
-
-#[cfg(test)]
-fn take_search_budget() -> SearchBudget {
-    ACTIVE_SEARCH_BUDGET
+    let result = estimate_motion(prev, curr, locked_axis, last_motion, config);
+    *budget = ACTIVE_SEARCH_BUDGET
         .lock()
         .expect("search budget mutex poisoned")
         .take()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    result
+}
+
+#[cfg(test)]
+struct InBudgetScopeGuard;
+
+#[cfg(test)]
+impl Drop for InBudgetScopeGuard {
+    fn drop(&mut self) {
+        IN_BUDGET_SCOPE.with(|c| c.set(false));
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +131,24 @@ pub(crate) fn estimate_motion(
     last_motion: (i32, i32),
     config: &StitchConfig,
 ) -> MotionSearchOutcome {
+    // In test builds, serialize every call to `estimate_motion` against
+    // other test threads' `estimate_motion` calls. The budget test relies
+    // on having `ACTIVE_SEARCH_BUDGET` to itself; without this, other
+    // tests' `ncc_score_shifted` increments would leak into the budget
+    // counters and exceed the structural thresholds. The budget test
+    // re-enters this function while already holding the serialize lock,
+    // so it skips re-acquisition (std `Mutex` is not reentrant).
+    #[cfg(test)]
+    let _serialize = if IN_BUDGET_SCOPE.with(|c| c.get()) {
+        None
+    } else {
+        Some(
+            ESTIMATE_MOTION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        )
+    };
+
     if prev.dimensions() != curr.dimensions() {
         return MotionSearchOutcome::NoMatch {
             reason: NoMatchReason::DimensionMismatch,
