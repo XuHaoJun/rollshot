@@ -341,6 +341,119 @@ fn decorative_1px_bottom_border_only_at_canvas_bottom() {
 }
 
 #[test]
+fn sticky_header_after_scroll_up_appears_only_once() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let mut config = StitchConfig::default();
+    config.verifier.downsample_max_mad = 40.0 / 255.0;
+    config.verifier.full_res_max_mad = 30.0 / 255.0;
+    let mut stitcher = Stitcher::new(config);
+
+    let mut y = source.height() - frame_h;
+    let mut appended = 0u32;
+    loop {
+        let mut f = crop_frame(&source, y, frame_h);
+        paint_sticky_header(&mut f, 12);
+        match stitcher.push_frame(f) {
+            StitchOutcome::FirstFrame => {}
+            StitchOutcome::Appended { .. } => appended += 1,
+            _ => {}
+        }
+        if y < step {
+            break;
+        }
+        y -= step;
+    }
+    assert!(appended >= 3, "need >=3 prepends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+
+    let header_red = Rgba([200, 60, 60, 255]);
+    let header_dark_blue = Rgba([30, 30, 90, 255]);
+    let mut saw_header = false;
+    for x in 0..stitched.width() {
+        let p = *stitched.get_pixel(x, 0);
+        if p == header_red || p == header_dark_blue {
+            saw_header = true;
+            break;
+        }
+    }
+    assert!(saw_header, "header must appear at canvas top after scroll-up");
+
+    let probe_start = step;
+    for y in probe_start..stitched.height() {
+        let mut saw = false;
+        for x in 0..stitched.width() {
+            let p = *stitched.get_pixel(x, y);
+            if p == header_red || p == header_dark_blue {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            !saw,
+            "header leaked to canvas y={y} after scroll-up prepend",
+        );
+    }
+}
+
+#[test]
+fn bidirectional_scroll_down_then_up_canvas_consistent() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut anchor = 500u32;
+    let mut appended_total = 0u32;
+
+    let mut f = crop_frame(&source, anchor, frame_h);
+    paint_sticky_footer(&mut f, 8);
+    stitcher.push_frame(f);
+
+    for _ in 0..3 {
+        anchor += step;
+        let mut f = crop_frame(&source, anchor, frame_h);
+        paint_sticky_footer(&mut f, 8);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended_total += 1;
+        }
+    }
+
+    let mut up_anchor = 500u32;
+    for _ in 0..3 {
+        if up_anchor < step {
+            break;
+        }
+        up_anchor -= step;
+        let mut f = crop_frame(&source, up_anchor, frame_h);
+        paint_sticky_footer(&mut f, 8);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended_total += 1;
+        }
+    }
+
+    assert!(
+        appended_total >= 4,
+        "need >=4 appends across both directions; got {appended_total}",
+    );
+
+    let stitched = stitcher.full_image().expect("stitched");
+    assert!(
+        stitched.height() > frame_h,
+        "canvas height should exceed single frame_h after bidirectional scroll",
+    );
+
+    let h = stitched.height();
+    let bottom = *stitched.get_pixel(stitched.width() / 2, h - 1);
+    assert!(
+        bottom[0] == 110 || bottom[0] == 150,
+        "canvas bottom should still be a footer color after bidirectional scroll; got {bottom:?}",
+    );
+}
+
+#[test]
 fn solid_sidebar_renders_as_continuous_column() {
     let source = make_scroll_canvas(320, 1400);
     let frame_h = 320u32;
