@@ -5,11 +5,11 @@ use crate::canvas::{CanvasAppendError, LinearCanvas};
 use crate::duplicate;
 use crate::matcher::{estimate_motion, MotionSearchOutcome};
 use crate::overlap::compute_overlap;
+use crate::static_region::StaticRegionDetector;
 use crate::types::{
     AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, ScrollAxis, StitchConfig,
     StitchOutcome, StitchStats,
 };
-use crate::static_region::StaticRegionDetector;
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 pub struct Stitcher {
@@ -175,7 +175,8 @@ impl Stitcher {
         };
 
         if self.config.static_region.enabled {
-            self.static_detector.observe(anchor, &frame, candidate.dx, candidate.dy);
+            self.static_detector
+                .observe(anchor, &frame, candidate.dx, candidate.dy);
         }
         let mask = if self.config.static_region.enabled {
             self.static_detector.mask()
