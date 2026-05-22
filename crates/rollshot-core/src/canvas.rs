@@ -168,9 +168,7 @@ impl LinearCanvas {
         let overlap_size = (frame_h / 2).saturating_sub(slice_px);
         let total_slice = (slice_px + overlap_size).min(frame_h);
 
-        let slice = frame
-            .view(0, 0, frame.width(), total_slice)
-            .to_image();
+        let slice = frame.view(0, 0, frame.width(), total_slice).to_image();
 
         let new_height = self.image.height() + slice_px;
 
@@ -214,12 +212,29 @@ impl LinearCanvas {
     }
 
     fn prepend_left(&mut self, frame: &RgbaImage, slice_px: u32) -> u32 {
-        let slice_px = slice_px.min(frame.width());
-        let slice = frame.view(0, 0, slice_px, frame.height()).to_image();
-        let mut combined = RgbaImage::new(self.image.width() + slice_px, self.image.height());
+        let frame_w = frame.width();
+        let slice_px = slice_px.min(frame_w);
+
+        let overlap_size = (frame_w / 2).saturating_sub(slice_px);
+        let total_slice = (slice_px + overlap_size).min(frame_w);
+
+        let slice = frame.view(0, 0, total_slice, frame.height()).to_image();
+
+        let new_width = self.image.width() + slice_px;
+
+        let mut combined = RgbaImage::new(new_width, self.image.height());
         combined.copy_from(&slice, 0, 0).expect("copy slice");
+        let kept_old = self
+            .image
+            .view(
+                overlap_size,
+                0,
+                self.image.width() - overlap_size,
+                self.image.height(),
+            )
+            .to_image();
         combined
-            .copy_from(&self.image, slice_px, 0)
+            .copy_from(&kept_old, total_slice, 0)
             .expect("copy base");
         self.image = combined;
         slice_px
@@ -369,9 +384,7 @@ mod tests {
         let base = solid(4, 8, [10, 10, 10, 255]);
         let frame = solid(4, 8, [200, 0, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Bottom, &frame, 2)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Bottom, &frame, 2).unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.height(), 10);
         // y=0..5 stays frame 1 (gray 10/10/10).
@@ -388,9 +401,7 @@ mod tests {
         let base = solid(4, 4, [10, 10, 10, 255]);
         let frame = solid(4, 4, [200, 0, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Bottom, &frame, 3)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Bottom, &frame, 3).unwrap();
         assert_eq!(added, 3);
         assert_eq!(canvas.height(), 7);
         // y=0..3 stays frame 1.
@@ -408,9 +419,7 @@ mod tests {
         let base = solid(2, 10, [10, 10, 10, 255]);
         let frame = solid(2, 10, [200, 0, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Bottom, &frame, 1)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Bottom, &frame, 1).unwrap();
         assert_eq!(added, 1);
         assert_eq!(canvas.height(), 11);
         // y=0..5 stays frame 1.
@@ -426,11 +435,13 @@ mod tests {
         let frame = solid(4, 8, [200, 0, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
         let h0 = canvas.height();
-        let added = canvas
-            .append(AppendDirection::Bottom, &frame, 2)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Bottom, &frame, 2).unwrap();
         assert_eq!(added, 2);
-        assert_eq!(canvas.height(), h0 + 2, "canvas must grow by exactly slice_px");
+        assert_eq!(
+            canvas.height(),
+            h0 + 2,
+            "canvas must grow by exactly slice_px"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -445,9 +456,7 @@ mod tests {
         let base = solid(4, 8, [10, 10, 10, 255]);
         let frame = solid(4, 8, [0, 200, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Top, &frame, 2)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Top, &frame, 2).unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.height(), 10);
         // y=0..3 is now frame 2's top (green 0/200/0).
@@ -464,9 +473,7 @@ mod tests {
         let base = solid(4, 4, [10, 10, 10, 255]);
         let frame = solid(4, 4, [0, 200, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Top, &frame, 3)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Top, &frame, 3).unwrap();
         assert_eq!(added, 3);
         assert_eq!(canvas.height(), 7);
         assert_eq!(canvas.image().get_pixel(0, 0), &Rgba([0, 200, 0, 255]));
@@ -480,9 +487,7 @@ mod tests {
         let frame = solid(4, 8, [0, 200, 0, 255]);
         let mut canvas = LinearCanvas::new(base);
         let h0 = canvas.height();
-        let added = canvas
-            .append(AppendDirection::Top, &frame, 2)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Top, &frame, 2).unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.height(), h0 + 2);
     }
@@ -498,9 +503,7 @@ mod tests {
         let base = solid(8, 4, [10, 10, 10, 255]);
         let frame = solid(8, 4, [0, 0, 200, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Right, &frame, 2)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Right, &frame, 2).unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.width(), 10);
         // x=0..5 stays frame 1.
@@ -515,9 +518,7 @@ mod tests {
         let base = solid(4, 4, [10, 10, 10, 255]);
         let frame = solid(4, 4, [0, 0, 200, 255]);
         let mut canvas = LinearCanvas::new(base);
-        let added = canvas
-            .append(AppendDirection::Right, &frame, 3)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Right, &frame, 3).unwrap();
         assert_eq!(added, 3);
         assert_eq!(canvas.width(), 7);
         assert_eq!(canvas.image().get_pixel(3, 0), &Rgba([10, 10, 10, 255]));
@@ -530,9 +531,52 @@ mod tests {
         let frame = solid(8, 4, [0, 0, 200, 255]);
         let mut canvas = LinearCanvas::new(base);
         let w0 = canvas.width();
-        let added = canvas
-            .append(AppendDirection::Right, &frame, 2)
-            .unwrap();
+        let added = canvas.append(AppendDirection::Right, &frame, 2).unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(canvas.width(), w0 + 2);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 overlap-and-overwrite tests: prepend_left
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn prepend_left_drops_overlap_cols_of_existing_canvas() {
+        // W=8, slice_px=2 → overlap = 2, total_slice = 4.
+        // Slice = frame cols [0..4). Combined x=0..3 = slice (yellow).
+        // Combined x=4..9 = old canvas cols [2..8).
+        let base = solid(8, 4, [10, 10, 10, 255]);
+        let frame = solid(8, 4, [200, 200, 0, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let added = canvas.append(AppendDirection::Left, &frame, 2).unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(canvas.width(), 10);
+        assert_eq!(canvas.image().get_pixel(0, 0), &Rgba([200, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(3, 0), &Rgba([200, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(4, 0), &Rgba([10, 10, 10, 255]));
+        assert_eq!(canvas.image().get_pixel(9, 0), &Rgba([10, 10, 10, 255]));
+    }
+
+    #[test]
+    fn prepend_left_large_motion_uses_zero_overlap() {
+        let base = solid(4, 4, [10, 10, 10, 255]);
+        let frame = solid(4, 4, [200, 200, 0, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let added = canvas.append(AppendDirection::Left, &frame, 3).unwrap();
+        assert_eq!(added, 3);
+        assert_eq!(canvas.width(), 7);
+        assert_eq!(canvas.image().get_pixel(0, 0), &Rgba([200, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(2, 0), &Rgba([200, 200, 0, 255]));
+        assert_eq!(canvas.image().get_pixel(3, 0), &Rgba([10, 10, 10, 255]));
+    }
+
+    #[test]
+    fn prepend_left_net_growth_equals_slice_px() {
+        let base = solid(8, 4, [10, 10, 10, 255]);
+        let frame = solid(8, 4, [200, 200, 0, 255]);
+        let mut canvas = LinearCanvas::new(base);
+        let w0 = canvas.width();
+        let added = canvas.append(AppendDirection::Left, &frame, 2).unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.width(), w0 + 2);
     }
