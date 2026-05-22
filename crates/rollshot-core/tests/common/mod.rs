@@ -51,7 +51,88 @@ pub fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
     img
 }
 
-/// Crops a viewport-sized frame from the canvas.
+#[derive(Debug, Clone, Copy)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+pub fn paint_sticky_sidebar(frame: &mut image::RgbaImage, side: Side, width: u32) {
+    let h = frame.height();
+    let w = frame.width();
+    let x_start = match side {
+        Side::Left => 0,
+        Side::Right => w.saturating_sub(width),
+    };
+    for y in 0..h {
+        for x in x_start..(x_start + width).min(w) {
+            let v = if (y / 7) % 2 == 0 { 100 } else { 140 };
+            frame.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+    }
+}
+
+pub fn paint_sticky_footer(frame: &mut image::RgbaImage, height: u32) {
+    let h = frame.height();
+    let w = frame.width();
+    let y_start = h.saturating_sub(height);
+    for y in y_start..h {
+        for x in 0..w {
+            let v = if (x / 9) % 2 == 0 { 110 } else { 150 };
+            frame.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+    }
+}
+
+pub fn paint_decorative_bottom_border(frame: &mut image::RgbaImage, color: image::Rgba<u8>) {
+    let h = frame.height();
+    if h == 0 {
+        return;
+    }
+    let w = frame.width();
+    for x in 0..w {
+        frame.put_pixel(x, h - 1, color);
+    }
+}
+
+pub fn paint_sticky_horizontal_band(frame: &mut image::RgbaImage, top_h: u32, bottom_h: u32) {
+    let h = frame.height();
+    let w = frame.width();
+    for y in 0..top_h.min(h) {
+        for x in 0..w {
+            let v = if (x / 5) % 2 == 0 { 90 } else { 130 };
+            frame.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+    }
+    let bottom_start = h.saturating_sub(bottom_h);
+    for y in bottom_start..h {
+        for x in 0..w {
+            let v = if (x / 5) % 2 == 0 { 95 } else { 135 };
+            frame.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+    }
+}
+
+pub fn paint_sidebar_icon_at(
+    frame: &mut image::RgbaImage,
+    sidebar_width: u32,
+    icon_y: u32,
+    icon_h: u32,
+    color: image::Rgba<u8>,
+) {
+    let h = frame.height();
+    let w = frame.width();
+    let y0 = icon_y.min(h);
+    let y1 = (icon_y + icon_h).min(h);
+    let x1 = sidebar_width.min(w);
+    for y in y0..y1 {
+        for x in 0..x1 {
+            frame.put_pixel(x, y, color);
+        }
+    }
+}
+
+/// Crops a viewport-sized frame from the canvas (vertically).
 pub fn crop_frame(canvas: &RgbaImage, y: u32, height: u32) -> RgbaImage {
     imageops::crop_imm(canvas, 0, y, canvas.width(), height).to_image()
 }
