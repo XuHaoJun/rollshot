@@ -125,3 +125,30 @@ pub fn make_repeated_rows(width: u32, height: u32) -> RgbaImage {
     }
     img
 }
+
+/// Builds mostly repeated content with sparse unique corners. Template and edge
+/// projections see many plausible offsets, while AKAZE can vote on the sparse
+/// corners.
+pub fn make_akaze_fallback_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = make_repeated_rows(width, height);
+
+    for i in 0..80u32 {
+        let x = 20 + ((i * 43) % width.saturating_sub(40).max(1));
+        let y = 20 + ((i * 61) % height.saturating_sub(40).max(1));
+        let color = Rgba([
+            (20 + (i * 19) % 180) as u8,
+            (30 + (i * 23) % 160) as u8,
+            (40 + (i * 29) % 150) as u8,
+            255,
+        ]);
+        for yy in y..(y + 9).min(height) {
+            for xx in x..(x + 9).min(width) {
+                if xx == x || yy == y || xx + 1 == x + 9 || yy + 1 == y + 9 || xx == x + yy - y {
+                    img.put_pixel(xx, yy, color);
+                }
+            }
+        }
+    }
+
+    img
+}

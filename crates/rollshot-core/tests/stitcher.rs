@@ -1,10 +1,14 @@
 mod common;
 
+#[cfg(feature = "akaze")]
+use common::make_akaze_fallback_canvas;
 use common::{
     crop_frame, crop_frame_xy, make_repeated_rows, make_scroll_canvas, make_wide_canvas,
     paint_sticky_header,
 };
 use image::{Rgba, RgbaImage};
+#[cfg(feature = "akaze")]
+use rollshot_core::{AkazeConfig, MatchMethod};
 use rollshot_core::{
     AppendDirection, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
     VerifierConfig,
@@ -111,10 +115,9 @@ fn small_scroll_below_min_append_reports_no_progress() {
     let first = crop_frame(&canvas, 0, 320);
     let nudged = crop_frame(&canvas, 16, 320);
 
-    let mut stitcher = Stitcher::new(StitchConfig {
-        min_append: 64,
-        ..StitchConfig::default()
-    });
+    let mut config = StitchConfig::default();
+    config.min_append = 64;
+    let mut stitcher = Stitcher::new(config);
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
     match stitcher.push_frame(nudged) {
         StitchOutcome::NoProgress { estimate } => {
@@ -140,7 +143,11 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
 
     match stitcher.push_frame(bad) {
         StitchOutcome::NoMatch { reason, .. } => {
-            assert_eq!(reason, NoMatchReason::LowConfidence);
+            assert!(
+                reason == NoMatchReason::LowConfidence
+                    || reason == NoMatchReason::AkazeDisabled
+                    || reason == NoMatchReason::NotEnoughFeatures
+            );
         }
         other => panic!("expected NoMatch on white frame, got {other:?}"),
     }
@@ -176,13 +183,12 @@ fn sticky_header_frames_still_append_expected_amount() {
     // verifier thresholds reject. Use a slightly more lenient verifier so the
     // test proves sticky headers don't dominate *motion estimation* rather than
     // testing verifier strictness.
-    let config = StitchConfig {
-        verifier: VerifierConfig {
-            downsample_max_mad: 40.0 / 255.0,
-            full_res_max_mad: 30.0 / 255.0,
-            ..VerifierConfig::default()
-        },
-        ..StitchConfig::default()
+    let mut config = StitchConfig::default();
+    {
+        let mut v = VerifierConfig::default();
+        v.downsample_max_mad = 40.0 / 255.0;
+        v.full_res_max_mad = 30.0 / 255.0;
+        config.verifier = v;
     };
     let mut stitcher = Stitcher::new(config);
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
@@ -332,4 +338,41 @@ fn repeated_rows_do_not_append_without_clear_match() {
 
     assert_eq!(stitcher.stats().frame_count, 1);
     assert_eq!(stitcher.stats().total_height, 320);
+}
+
+#[cfg(feature = "akaze")]
+#[test]
+fn akaze_fallback_appends_when_template_is_ambiguous() {
+    let canvas = make_akaze_fallback_canvas(320, 900);
+    let first = crop_frame(&canvas, 0, 320);
+    let scrolled = crop_frame(&canvas, 88, 320);
+
+    let mut config = StitchConfig::default();
+    config.second_best_margin = 0.25;
+    {
+        let mut a = AkazeConfig::default();
+        a.enabled = true;
+        a.detector_threshold = 0.0005;
+        a.min_raw_matches = 8;
+        a.min_inliers = 6;
+        a.min_inlier_ratio = 0.25;
+        config.akaze = a;
+    }
+    let mut stitcher = Stitcher::new(config);
+
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert_eq!(estimate.method, MatchMethod::Akaze);
+            assert!((84..=92).contains(&added), "added = {added}");
+            assert!(estimate.inliers.unwrap_or(0) >= 6);
+            assert!(estimate.raw_matches.unwrap_or(0) >= 8);
+        }
+        other => panic!("expected AKAZE append, got {other:?}"),
+    }
 }

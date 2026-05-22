@@ -76,4 +76,16 @@ pub struct StitchFolderArgs {
     /// Output PNG path.
     #[arg(long, short)]
     pub output: PathBuf,
+
+    /// Write a JSON report with one match outcome per input frame.
+    #[arg(long)]
+    pub debug_match_report: Option<PathBuf>,
+
+    /// Write overlap and diff images for frames with estimates.
+    #[arg(long)]
+    pub dump_overlap_debug: Option<PathBuf>,
+
+    /// Diagnostic switch that forces AutoHybrid to skip AKAZE fallback.
+    #[arg(long, default_value_t = false)]
+    pub disable_akaze: bool,
 }

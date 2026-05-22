@@ -97,6 +97,8 @@ pub enum NoMatchReason {
     NotEnoughFeatures,
     MotionTooSmall,
     DimensionMismatch,
+    AkazeDisabled,
+    AkazeLowInliers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,6 +133,7 @@ pub struct StitchStats {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct VerifierConfig {
     /// Maximum mean absolute difference of the downsampled overlap, normalized to [0, 1].
     pub downsample_max_mad: f32,
@@ -154,6 +157,31 @@ impl Default for VerifierConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct AkazeConfig {
+    pub enabled: bool,
+    pub max_features: usize,
+    pub detector_threshold: f64,
+    pub min_raw_matches: usize,
+    pub min_inliers: usize,
+    pub min_inlier_ratio: f32,
+}
+
+impl Default for AkazeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: cfg!(feature = "akaze"),
+            max_features: 1200,
+            detector_threshold: 0.001,
+            min_raw_matches: 24,
+            min_inliers: 16,
+            min_inlier_ratio: 0.35,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StitchConfig {
     pub strategy: MatchStrategy,
     pub min_overlap: u32,
@@ -165,6 +193,7 @@ pub struct StitchConfig {
     pub second_best_margin: f32,
     pub max_search_ratio: f32,
     pub match_width: u32,
+    pub akaze: AkazeConfig,
     pub verifier: VerifierConfig,
 }
 
@@ -181,6 +210,7 @@ impl Default for StitchConfig {
             second_best_margin: 0.001,
             max_search_ratio: 0.75,
             match_width: 512,
+            akaze: AkazeConfig::default(),
             verifier: VerifierConfig::default(),
         }
     }
@@ -254,5 +284,22 @@ mod tests {
         assert_ne!(appended, StitchOutcome::FirstFrame);
         assert_ne!(no_match, no_progress);
         assert_ne!(no_match, StitchOutcome::Duplicate);
+    }
+
+    #[test]
+    fn akaze_defaults_follow_compile_feature() {
+        let cfg = StitchConfig::default();
+
+        #[cfg(feature = "akaze")]
+        assert!(cfg.akaze.enabled);
+
+        #[cfg(not(feature = "akaze"))]
+        assert!(!cfg.akaze.enabled);
+
+        assert_eq!(cfg.akaze.max_features, 1200);
+        assert_eq!(cfg.akaze.detector_threshold, 0.001);
+        assert_eq!(cfg.akaze.min_raw_matches, 24);
+        assert_eq!(cfg.akaze.min_inliers, 16);
+        assert_eq!(cfg.akaze.min_inlier_ratio, 0.35);
     }
 }

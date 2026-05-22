@@ -8,6 +8,17 @@ rust-version.workspace = true
 
 [dependencies]
 image = { workspace = true }
+akaze = { workspace = true, optional = true }
+bitarray = { workspace = true, optional = true }
+space = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+akaze = ["dep:akaze", "dep:bitarray", "dep:space"]
 
 [lints]
 workspace = true

@@ -34,7 +34,7 @@ Then run:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --features akaze
 ```
 
 Useful smoke commands:
@@ -57,7 +57,7 @@ It runs:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --features akaze
 ```
 
 Hosted PR CI does not run real desktop capture. KDE Wayland capture needs a real
@@ -72,6 +72,7 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo fmt --all -- --check` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace` passes.
+- [ ] `cargo test --workspace --features akaze` passes.
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
 - [ ] `cargo run -p rollshot-cli -- stitch-folder tests/fixtures` exits successfully with bootstrap status text.
 

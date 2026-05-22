@@ -38,6 +38,9 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Test AKAZE feature
+        run: cargo test --workspace --features akaze
+
       - name: Check macOS ScreenCaptureKit feature
         if: runner.os == 'macOS'
         run: |

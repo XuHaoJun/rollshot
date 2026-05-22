@@ -3,7 +3,7 @@ use image::RgbaImage;
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::canvas::{CanvasAppendError, LinearCanvas};
 use crate::duplicate;
-use crate::matcher::estimate_motion;
+use crate::matcher::{estimate_motion, MotionSearchOutcome};
 use crate::overlap::compute_overlap;
 use crate::types::{
     AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, ScrollAxis, StitchConfig,
@@ -65,11 +65,17 @@ impl Stitcher {
             self.last_motion,
             &self.config,
         ) {
-            Some(c) => c,
-            None => {
+            MotionSearchOutcome::Candidate(c) => c,
+            MotionSearchOutcome::NoMatch {
+                reason,
+                best_candidate,
+            } => {
+                let best_estimate = best_candidate.and_then(|candidate| {
+                    build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
+                });
                 return StitchOutcome::NoMatch {
-                    reason: NoMatchReason::LowConfidence,
-                    best_estimate: None,
+                    reason,
+                    best_estimate,
                 };
             }
         };
