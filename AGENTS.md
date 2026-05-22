@@ -59,6 +59,17 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - New branches: use `git checkout -b <name>` in place.
 - Never set up git worktrees unless explicitly asked.
 
+## 6. Shell Commands
+
+- Always prefix shell commands with `rtk`, unless invoking MCP tools or another non-shell tool.
+
+## 7. Verification
+
+For Rust changes, prefer:
+- `rtk cargo test`
+- `rtk cargo fmt --check`
+- `rtk cargo clippy --workspace --all-targets -- -D warnings` when risk justifies it
+
 @RTK.md
 
 <!-- code-review-graph MCP tools -->
