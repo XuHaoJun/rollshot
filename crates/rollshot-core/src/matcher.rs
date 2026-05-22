@@ -1232,7 +1232,7 @@ mod tests {
             budget.coarse_score_calls
         );
         assert!(
-            budget.full_res_ncc_calls <= 256,
+            budget.full_res_ncc_calls <= 192,
             "full_res_ncc_calls = {}",
             budget.full_res_ncc_calls
         );
