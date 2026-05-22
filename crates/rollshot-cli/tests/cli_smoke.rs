@@ -159,7 +159,10 @@ fn rollshot_stitch_folder_writes_debug_report() {
         "expected at least one overlap_prev PNG in {}, found {:?}",
         debug_dir.display(),
         std::fs::read_dir(&debug_dir)
-            .map(|it| it.filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>())
+            .map(|it| it
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>())
             .unwrap_or_default(),
     );
 
@@ -182,7 +185,9 @@ fn rollshot_stitch_folder_disable_akaze_skips_akaze() {
         y.hash(&mut hasher);
         let seed = hasher.finish();
         for (i, px) in frame.pixels_mut().enumerate() {
-            let h = seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64);
+            let h = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(i as u64);
             let n0 = (h as i32 % 61) - 30;
             let n1 = ((h >> 16) as i32 % 61) - 30;
             let n2 = ((h >> 32) as i32 % 61) - 30;

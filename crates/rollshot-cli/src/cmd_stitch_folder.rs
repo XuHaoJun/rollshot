@@ -3,9 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
-use rollshot_core::{
-    MotionEstimate, OverlapRegion, StitchConfig, StitchOutcome, Stitcher,
-};
+use rollshot_core::{MotionEstimate, OverlapRegion, StitchConfig, StitchOutcome, Stitcher};
 use serde::Serialize;
 
 use crate::args::StitchFolderArgs;
@@ -92,12 +90,30 @@ fn write_overlap_artifacts(
         )
     })?;
     let prefix = format!("frame_{frame_index:03}");
-    crop_overlap(prev, estimate.overlap.prev_x, estimate.overlap.prev_y, estimate.overlap.width, estimate.overlap.height)
-        .save_with_format(dir.join(format!("{prefix}_overlap_prev.png")), ImageFormat::Png)
-        .map_err(|err| CliError::new(format!("failed to save overlap prev: {err}"), 1))?;
-    crop_overlap(curr, estimate.overlap.curr_x, estimate.overlap.curr_y, estimate.overlap.width, estimate.overlap.height)
-        .save_with_format(dir.join(format!("{prefix}_overlap_curr.png")), ImageFormat::Png)
-        .map_err(|err| CliError::new(format!("failed to save overlap curr: {err}"), 1))?;
+    crop_overlap(
+        prev,
+        estimate.overlap.prev_x,
+        estimate.overlap.prev_y,
+        estimate.overlap.width,
+        estimate.overlap.height,
+    )
+    .save_with_format(
+        dir.join(format!("{prefix}_overlap_prev.png")),
+        ImageFormat::Png,
+    )
+    .map_err(|err| CliError::new(format!("failed to save overlap prev: {err}"), 1))?;
+    crop_overlap(
+        curr,
+        estimate.overlap.curr_x,
+        estimate.overlap.curr_y,
+        estimate.overlap.width,
+        estimate.overlap.height,
+    )
+    .save_with_format(
+        dir.join(format!("{prefix}_overlap_curr.png")),
+        ImageFormat::Png,
+    )
+    .map_err(|err| CliError::new(format!("failed to save overlap curr: {err}"), 1))?;
     diff_overlap(prev, curr, estimate.overlap)
         .save_with_format(dir.join(format!("{prefix}_diff.png")), ImageFormat::Png)
         .map_err(|err| CliError::new(format!("failed to save overlap diff: {err}"), 1))?;
@@ -117,7 +133,12 @@ fn diff_overlap(prev: &RgbaImage, curr: &RgbaImage, overlap: OverlapRegion) -> R
             out.put_pixel(
                 x,
                 y,
-                Rgba([p[0].abs_diff(c[0]), p[1].abs_diff(c[1]), p[2].abs_diff(c[2]), 255]),
+                Rgba([
+                    p[0].abs_diff(c[0]),
+                    p[1].abs_diff(c[1]),
+                    p[2].abs_diff(c[2]),
+                    255,
+                ]),
             );
         }
     }
@@ -182,7 +203,9 @@ pub fn run(args: &StitchFolderArgs) -> Result<String, CliError> {
                 appended += 1;
                 frame_report.outcome = "Appended".to_string();
                 frame_report.estimate = Some(estimate_report(estimate));
-                if let (Some(dir), Some(prev)) = (args.dump_overlap_debug.as_ref(), last_accepted.as_ref()) {
+                if let (Some(dir), Some(prev)) =
+                    (args.dump_overlap_debug.as_ref(), last_accepted.as_ref())
+                {
                     write_overlap_artifacts(dir, report.frames.len(), prev, &frame, estimate)?;
                 }
                 last_accepted = Some(frame);

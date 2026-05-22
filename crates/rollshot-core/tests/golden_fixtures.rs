@@ -2,9 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use image::{imageops, Rgba, RgbaImage};
-use rollshot_core::{
-    AppendDirection, MatchMethod, StitchConfig, StitchOutcome, Stitcher,
-};
+use rollshot_core::{AppendDirection, MatchMethod, StitchConfig, StitchOutcome, Stitcher};
 use serde::Deserialize;
 
 const FIXTURE_ROOT: &str = "tests/fixtures/linearscroll_v2";
@@ -109,13 +107,16 @@ fn run_fixture(family: &str, config: StitchConfig) -> Vec<ObservedMotion> {
     let image_ok = images_within_tolerance(actual, &expected_output);
     let motions_ok = motions_match(&observed, &expected_motions);
     if !image_ok || !motions_ok {
-        write_failure_artifacts(family, actual, &expected_output, &observed, &expected_motions);
+        write_failure_artifacts(
+            family,
+            actual,
+            &expected_output,
+            &observed,
+            &expected_motions,
+        );
     }
 
-    assert!(
-        image_ok,
-        "{family} output mismatch beyond tolerance"
-    );
+    assert!(image_ok, "{family} output mismatch beyond tolerance");
     assert!(
         motions_ok,
         "{family} motions mismatch: observed={observed:?}, expected={expected_motions:?}"
@@ -167,15 +168,12 @@ fn load_expected_motions(path: &Path) -> Vec<ExpectedMotion> {
 
 fn motions_match(observed: &[ObservedMotion], expected: &[ExpectedMotion]) -> bool {
     observed.len() == expected.len()
-        && observed
-            .iter()
-            .zip(expected)
-            .all(|(observed, expected)| {
-                observed.frame == expected.frame
-                    && observed.dx == expected.dx
-                    && observed.dy == expected.dy
-                    && format!("{:?}", observed.direction) == expected.direction
-            })
+        && observed.iter().zip(expected).all(|(observed, expected)| {
+            observed.frame == expected.frame
+                && observed.dx == expected.dx
+                && observed.dy == expected.dy
+                && format!("{:?}", observed.direction) == expected.direction
+        })
 }
 
 fn write_failure_artifacts(
@@ -190,9 +188,7 @@ fn write_failure_artifacts(
         .join(family);
     fs::create_dir_all(&out).expect("create artifact dir");
 
-    actual
-        .save(out.join("actual.png"))
-        .expect("save actual");
+    actual.save(out.join("actual.png")).expect("save actual");
     expected
         .save(out.join("expected.png"))
         .expect("save expected");
@@ -386,8 +382,7 @@ fn write_vertical_fixture(
 
     let min_y = *offsets.iter().min().expect("min y");
     let max_y = offsets.iter().max().expect("max y") + viewport;
-    let mut expected =
-        imageops::crop_imm(&canvas, x, min_y, viewport, max_y - min_y).to_image();
+    let mut expected = imageops::crop_imm(&canvas, x, min_y, viewport, max_y - min_y).to_image();
     if sticky {
         paint_fixture_header(&mut expected, 42);
     }
@@ -437,12 +432,7 @@ fn write_horizontal_fixture(root: &Path, name: &str, offsets: [u32; 3], y: u32, 
             .enumerate()
             .map(|(idx, pair)| {
                 let dx = pair[1] as i32 - pair[0] as i32;
-                (
-                    idx + 1,
-                    dx,
-                    0,
-                    if dx >= 0 { "Right" } else { "Left" },
-                )
+                (idx + 1, dx, 0, if dx >= 0 { "Right" } else { "Left" })
             })
             .collect::<Vec<_>>(),
     );
@@ -517,10 +507,7 @@ fn write_bad_frame_fixture(root: &Path) {
         .to_image()
         .save(expected_dir.join("output.png"))
         .expect("save expected");
-    write_motions(
-        &expected_dir.join("motions.json"),
-        &[(2, 0, 120, "Bottom")],
-    );
+    write_motions(&expected_dir.join("motions.json"), &[(2, 0, 120, "Bottom")]);
 }
 
 fn write_duplicate_fixture(root: &Path) {
@@ -546,10 +533,7 @@ fn write_duplicate_fixture(root: &Path) {
         .to_image()
         .save(expected_dir.join("output.png"))
         .expect("save expected");
-    write_motions(
-        &expected_dir.join("motions.json"),
-        &[(2, 0, 100, "Bottom")],
-    );
+    write_motions(&expected_dir.join("motions.json"), &[(2, 0, 100, "Bottom")]);
 }
 
 fn recreate_dir(path: &Path) {
