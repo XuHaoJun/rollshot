@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: 'Manually triggered code reviewer invoked via "/code-review". Reviews code changes and provides actionable feedback focused on bugs, structure, performance, and behavior changes. Accepts no arguments (uncommitted changes), a commit hash, a branch name, or a PR URL/number. Do NOT auto-invoke; only run when the user explicitly types /code-review.'
+description: 'Manually triggered code reviewer invoked via "/code-review". Reviews code changes and provides actionable feedback focused on bugs, structure, performance, and behavior changes. Accepts no arguments, a commit hash, a branch name, a PR URL/number, or docs/superpowers spec/plan files as review context. Do NOT auto-invoke; only run when the user explicitly types /code-review.'
 ---
 
 You are a code reviewer. Your job is to review code changes and provide actionable feedback.
@@ -14,6 +14,11 @@ Input: $ARGUMENTS
 ## Determining What to Review
 
 Based on the input provided, determine which type of review to perform:
+
+0. **Spec/plan context arguments**:
+   - If arguments include files under `docs/superpowers/*` that look like a spec or plan, treat those files as review context for the current non-main branch by default.
+   - Do NOT review the spec/plan files themselves unless the user explicitly asks to review the spec/plan.
+   - Read the spec/plan to understand intended behavior, then review the current branch's code changes compared to `main`/`master`.
 
 1. **No arguments (default)**: 
    - First, check current branch: `git branch --show-current`
