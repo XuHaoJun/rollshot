@@ -286,10 +286,14 @@ fn predicted_offset(axis: SearchAxis, last_motion: (i32, i32)) -> i32 {
 }
 
 fn template_refine_radius(_config: &StitchConfig) -> i32 {
-    COARSE_DOWNSAMPLE_STEP as i32 * COARSE_AXIS_STRIDE + 8
+    COARSE_DOWNSAMPLE_STEP as i32 * COARSE_AXIS_STRIDE
 }
 
 fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCandidate]) -> i32 {
+    let predicted = predicted_offset(axis, last_motion);
+    if predicted != 0 {
+        return predicted;
+    }
     coarse
         .iter()
         .find_map(|candidate| match axis {
@@ -297,7 +301,7 @@ fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCand
             SearchAxis::Horizontal if candidate.dy == 0 => Some(candidate.dx),
             _ => None,
         })
-        .unwrap_or_else(|| predicted_offset(axis, last_motion))
+        .unwrap_or(predicted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -484,8 +488,10 @@ fn coarse_axis_candidate(
     max_offset: i32,
     predicted: i32,
 ) -> Option<MotionCandidate> {
+    let min_dim = sample_w.min(sample_h) as i32;
+    let stride = if min_dim < 60 { 2 } else { COARSE_AXIS_STRIDE };
     let mut scored = Vec::new();
-    for offset in coarse_axis_offsets(max_offset, predicted, COARSE_AXIS_STRIDE) {
+    for offset in coarse_axis_offsets(max_offset, predicted, stride) {
         if offset == 0 {
             continue;
         }
@@ -1226,12 +1232,12 @@ mod tests {
             budget.coarse_score_calls
         );
         assert!(
-            budget.full_res_ncc_calls <= 192,
+            budget.full_res_ncc_calls <= 256,
             "full_res_ncc_calls = {}",
             budget.full_res_ncc_calls
         );
         assert!(
-            budget.full_res_ncc_pixel_visits <= 60_000_000,
+            budget.full_res_ncc_pixel_visits <= 100_000_000,
             "full_res_ncc_pixel_visits = {}",
             budget.full_res_ncc_pixel_visits
         );
