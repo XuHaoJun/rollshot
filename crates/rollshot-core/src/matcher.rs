@@ -1,4 +1,5 @@
 use image::{Rgba, RgbaImage};
+use rayon::prelude::*;
 
 use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
@@ -365,29 +366,39 @@ fn search_template_axis(
         return None;
     }
 
-    let mut best_offset = 0i32;
-    let mut best_score = f32::MIN;
-    let mut second_score = f32::MIN;
+    let offsets = refinement_offsets(last_offset, max_offset, template_refine_radius(config));
+    let scored: Vec<_> = offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let score = match axis {
+                SearchAxis::Vertical => ncc_score_shifted(
+                    prev_gray,
+                    curr_gray,
+                    width,
+                    height,
+                    region,
+                    0,
+                    offset,
+                ),
+                SearchAxis::Horizontal => ncc_score_shifted(
+                    prev_gray,
+                    curr_gray,
+                    width,
+                    height,
+                    region,
+                    offset,
+                    0,
+                ),
+            };
+            score.is_finite().then_some((score, offset))
+        })
+        .collect();
 
-    let radius = template_refine_radius(config);
-    for offset in refinement_offsets(last_offset, max_offset, radius) {
-        let score = match axis {
-            SearchAxis::Vertical => {
-                ncc_score_shifted(prev_gray, curr_gray, width, height, region, 0, offset)
-            }
-            SearchAxis::Horizontal => {
-                ncc_score_shifted(prev_gray, curr_gray, width, height, region, offset, 0)
-            }
-        };
+    let mut scored: Vec<(f32, i32)> = scored.into_iter().collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
 
-        if score > best_score {
-            second_score = best_score;
-            best_score = score;
-            best_offset = offset;
-        } else if score > second_score {
-            second_score = score;
-        }
-    }
+    let (best_score, best_offset) = scored.first().copied()?;
+    let second_score = scored.get(1).map(|(score, _)| *score).unwrap_or(f32::MIN);
 
     if !best_score.is_finite() || best_score <= 0.0 {
         return None;
@@ -490,22 +501,24 @@ fn coarse_axis_candidate(
 ) -> Option<MotionCandidate> {
     let min_dim = sample_w.min(sample_h) as i32;
     let stride = if min_dim < 60 { 2 } else { COARSE_AXIS_STRIDE };
-    let mut scored = Vec::new();
-    for offset in coarse_axis_offsets(max_offset, predicted, stride) {
-        if offset == 0 {
-            continue;
-        }
-        let (dx, dy) = match axis {
-            SearchAxis::Vertical => (0, offset),
-            SearchAxis::Horizontal => (offset, 0),
-        };
-        #[cfg(test)]
-        with_active_search_budget(|budget| budget.coarse_score_calls += 1);
-        let diff = coarse_mad(prev_samples, curr_samples, sample_w, sample_h, dx, dy, 1);
-        if diff.is_finite() {
-            scored.push((diff, dx, dy));
-        }
-    }
+    let offsets: Vec<i32> = coarse_axis_offsets(max_offset, predicted, stride)
+        .into_iter()
+        .filter(|offset| *offset != 0)
+        .collect();
+    #[cfg(test)]
+    with_active_search_budget(|budget| budget.coarse_score_calls += offsets.len() as u64);
+
+    let mut scored: Vec<_> = offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            let diff = coarse_mad(prev_samples, curr_samples, sample_w, sample_h, dx, dy, 1);
+            diff.is_finite().then_some((diff, dx, dy))
+        })
+        .collect();
 
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
     let (best_score, best_dx, best_dy) = *scored.first()?;
