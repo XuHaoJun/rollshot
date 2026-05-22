@@ -1,8 +1,9 @@
 mod common;
 
 use common::{
-    crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas, paint_decorative_bottom_border,
-    paint_sidebar_icon_at, paint_sticky_footer, paint_sticky_header, paint_sticky_horizontal_band,
+    crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas,
+    paint_decorative_bottom_border, paint_sidebar_icon_at, paint_sticky_footer,
+    paint_sticky_header, paint_sticky_horizontal_band,
 };
 use image::{Rgba, RgbaImage};
 use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
@@ -235,7 +236,10 @@ fn sticky_header_appears_only_at_canvas_top() {
             break;
         }
     }
-    assert!(saw_header_at_top, "frame 1's header must remain at canvas top");
+    assert!(
+        saw_header_at_top,
+        "frame 1's header must remain at canvas top"
+    );
 
     let probe_y = frame_h + step + 1;
     if probe_y < stitched.height() {
@@ -379,7 +383,10 @@ fn sticky_header_after_scroll_up_appears_only_once() {
             break;
         }
     }
-    assert!(saw_header, "header must appear at canvas top after scroll-up");
+    assert!(
+        saw_header,
+        "header must appear at canvas top after scroll-up"
+    );
 
     let probe_start = step;
     for y in probe_start..stitched.height() {
