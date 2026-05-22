@@ -174,7 +174,7 @@ impl Stitcher {
             .canvas
             .as_mut()
             .expect("canvas present after first frame");
-        let added = match canvas.append(direction, &frame, slice_px) {
+        let added = match canvas.append(direction, &frame, slice_px, None) {
             Ok(n) => n,
             Err(CanvasAppendError::AxisMismatch { locked, attempted }) => {
                 let estimate = MotionEstimate {
