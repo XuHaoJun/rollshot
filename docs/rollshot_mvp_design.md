@@ -1061,7 +1061,7 @@ scrollbar
 portal crop 邊界
 ```
 
-v0.2 先以 ROI 排除為主。v0.2.1 在 canvas append 端加上 static region mask（見 3.2.1），處理 sticky header / footer / sidebar 在輸出長圖上的視覺重複。其餘動態區域（cursor / loading spinner / video / animation）仍延後處理；semantic mask 留到 v0.6+。
+v0.2 先以 ROI 排除為主。v0.3 在 canvas append 端改用 overlap-and-overwrite topology（見 3.2.1），處理 sticky header / footer / 純色 sidebar / 裝飾邊框在輸出長圖上的視覺重複。其餘動態區域（cursor / loading spinner / video / animation）仍延後處理；semantic mask 留到 v0.6+。
 
 ---
 
