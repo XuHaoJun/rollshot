@@ -174,11 +174,9 @@ impl Stitcher {
             }
         };
 
-        if self.config.static_region.enabled {
+        let mask = if self.config.static_region.enabled {
             self.static_detector
                 .observe(anchor, &frame, candidate.dx, candidate.dy);
-        }
-        let mask = if self.config.static_region.enabled {
             self.static_detector.mask()
         } else {
             None

@@ -98,41 +98,74 @@ fn sticky_footer_does_not_duplicate_in_output() {
 }
 
 #[test]
-fn sticky_header_output_is_clean_after_first_frame() {
-    // Use the rich common canvas at 320px width so NCC template matching
-    // reliably finds dy≈80. The simple 120px canvas struggles with the
-    // bright full-width sticky header confusing the matcher.
+fn sticky_header_masked_in_vertical_up_scroll_appends() {
+    // Vertical-UP scroll: each new frame sees content higher on the page than
+    // the previous, so the stitcher uses Top append (prepend). The sticky
+    // header at frame y=[0, 12) therefore lands INSIDE each prepended slice
+    // (top slice_px rows of the new frame). Without v0.2.1's static mask the
+    // header would repeat every slice_px rows down the top of the stitched
+    // canvas.
+    //
+    // We push enough frames (≥4 successful appends) so the detector locks
+    // (default min_observations = 3 — locked after the 3rd observe call, the
+    // 4th and later pushes append with the locked mask). We use the rich 320px
+    // common canvas so NCC template matching reliably finds the motion, and
+    // we loosen the verifier MAD thresholds because the painted header pattern
+    // (red / dark-blue contrast) inflates overlap MAD even though the matcher's
+    // content_roi already excludes the header band.
     let canvas = common::make_scroll_canvas(320, 1400);
     let mut config = StitchConfig::default();
     config.verifier.downsample_max_mad = 40.0 / 255.0;
     config.verifier.full_res_max_mad = 30.0 / 255.0;
     let mut stitcher = Stitcher::new(config);
 
-    let mut first = common::crop_frame(&canvas, 0, 320);
-    paint_sticky_header(&mut first, 12);
-    assert!(matches!(
-        stitcher.push_frame(first),
-        StitchOutcome::FirstFrame
-    ));
-
-    let mut scrolled = common::crop_frame(&canvas, 70, 320);
-    paint_sticky_header(&mut scrolled, 12);
-    let outcome = stitcher.push_frame(scrolled);
+    let frame_h: u32 = 320;
+    let step: u32 = 70;
+    let mut y = canvas.height() - frame_h;
+    let mut appended = 0u32;
+    loop {
+        let mut f = common::crop_frame(&canvas, y, frame_h);
+        paint_sticky_header(&mut f, 12);
+        match stitcher.push_frame(f) {
+            StitchOutcome::FirstFrame => {}
+            StitchOutcome::Appended { .. } => appended += 1,
+            other => panic!("unexpected outcome at y={y}: {other:?}"),
+        }
+        if y < step {
+            break;
+        }
+        y -= step;
+    }
     assert!(
-        matches!(outcome, StitchOutcome::Appended { .. }),
-        "expected Appended, got {outcome:?}"
+        appended >= 4,
+        "need ≥4 Top appends so detector locks before the last push; got {appended}"
     );
 
     let stitched = stitcher.full_image().expect("stitched output exists");
-    let h = stitched.height();
+
+    // The most recently prepended slice sits at canvas y=0..slice_px. With
+    // detector locked and top.thickness == 12, canvas y=0..12 must be the
+    // sampled bg color, uniformly across every x. paint_sticky_header alternates
+    // between (200, 60, 60) and (30, 30, 90); a successful mask replaces them
+    // with one flat color.
+    let row1: Vec<_> = (0..stitched.width())
+        .map(|x| *stitched.get_pixel(x, 1))
+        .collect();
+    let first = row1[0];
     assert!(
-        h > 200,
-        "stitched image should be taller than 200px, got {h}"
+        row1.iter().all(|p| p == &first),
+        "row 1 inside the masked header zone should be one flat bg color across x; \
+         first variant {first:?} vs others"
     );
-    let mid_pixel = stitched.get_pixel(50, 216);
-    assert!(
-        mid_pixel[0] != mid_pixel[1] || mid_pixel[1] != mid_pixel[2],
-        "row 216 should be scrollable content, got {mid_pixel:?}"
+    let header_red = Rgba([200, 60, 60, 255]);
+    let header_dark_blue = Rgba([30, 30, 90, 255]);
+    assert_ne!(
+        first, header_red,
+        "masked pixel should not be raw paint_sticky_header red"
+    );
+    assert_ne!(
+        first, header_dark_blue,
+        "masked pixel should not be raw paint_sticky_header dark-blue"
     );
 }
 

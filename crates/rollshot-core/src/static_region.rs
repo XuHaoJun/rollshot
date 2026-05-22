@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use image::{Rgba, RgbaImage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,6 +657,27 @@ mod detector_tests {
         assert_eq!(
             e.top, 0,
             "NaN motion + moderate static should NOT count as static"
+        );
+    }
+
+    #[test]
+    fn scan_treats_both_scores_below_quarter_threshold_as_static() {
+        // Case (c): uniform-color sticky element. Both static and motion-aligned
+        // MAD collapse to ~0 because the line's pixels are constant, so
+        // (motion - static) cannot exceed motion_margin. The dedicated
+        // `motion_score < threshold/4` branch must accept these as static —
+        // without it, flat sidebars / footers go undetected.
+        let row_static = vec![0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+        // Default threshold = 4/255 ≈ 0.01568; threshold/4 ≈ 0.00392.
+        // motion_score 0.002 sits below threshold/4 for the first 3 rows.
+        let row_motion = vec![0.002, 0.002, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let col_static = vec![0.5; 8];
+        let col_motion = vec![0.0; 8];
+        let cfg = StaticRegionConfig::default();
+        let e = scan_edges(&row_static, &row_motion, &col_static, &col_motion, &cfg);
+        assert_eq!(
+            e.top, 3,
+            "uniform-color sticky: both scores below threshold/4 should classify as static"
         );
     }
 
