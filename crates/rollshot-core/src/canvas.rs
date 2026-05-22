@@ -106,6 +106,14 @@ impl LinearCanvas {
             }
         }
 
+        // The perpendicular dimension must match exactly. The parallel
+        // dimension must not exceed the canvas's current parallel dimension,
+        // because `overlap_size = frame_parallel/2 - slice_px` is subtracted
+        // from `canvas.parallel` to compute the paste position; a frame taller
+        // (or wider) than the canvas could otherwise underflow that subtraction.
+        // For the normal stitcher flow, every frame's parallel dim equals the
+        // first frame's parallel dim, and the canvas only grows, so this
+        // condition is naturally satisfied.
         match target_axis {
             ScrollAxis::Vertical => {
                 if frame.width() != self.image.width() {
@@ -114,12 +122,24 @@ impl LinearCanvas {
                         frame: frame.width(),
                     });
                 }
+                if frame.height() > self.image.height() {
+                    return Err(CanvasAppendError::DimensionMismatch {
+                        canvas: self.image.height(),
+                        frame: frame.height(),
+                    });
+                }
             }
             ScrollAxis::Horizontal => {
                 if frame.height() != self.image.height() {
                     return Err(CanvasAppendError::DimensionMismatch {
                         canvas: self.image.height(),
                         frame: frame.height(),
+                    });
+                }
+                if frame.width() > self.image.width() {
+                    return Err(CanvasAppendError::DimensionMismatch {
+                        canvas: self.image.width(),
+                        frame: frame.width(),
                     });
                 }
             }
@@ -147,16 +167,14 @@ impl LinearCanvas {
         let overlap_size = (frame_h / 2).saturating_sub(slice_px);
         let total_slice = (slice_px + overlap_size).min(frame_h);
 
-        let slice = frame
-            .view(0, frame_h - total_slice, frame.width(), total_slice)
-            .to_image();
+        let slice = frame.view(0, frame_h - total_slice, frame.width(), total_slice);
 
         let new_height = self.image.height() + slice_px;
         let paste_y = self.image.height() - overlap_size;
 
         let mut combined = RgbaImage::new(self.image.width(), new_height);
         combined.copy_from(&self.image, 0, 0).expect("copy base");
-        combined.copy_from(&slice, 0, paste_y).expect("copy slice");
+        combined.copy_from(&*slice, 0, paste_y).expect("copy slice");
         self.image = combined;
         slice_px
     }
@@ -168,23 +186,20 @@ impl LinearCanvas {
         let overlap_size = (frame_h / 2).saturating_sub(slice_px);
         let total_slice = (slice_px + overlap_size).min(frame_h);
 
-        let slice = frame.view(0, 0, frame.width(), total_slice).to_image();
+        let slice = frame.view(0, 0, frame.width(), total_slice);
 
         let new_height = self.image.height() + slice_px;
 
         let mut combined = RgbaImage::new(self.image.width(), new_height);
-        combined.copy_from(&slice, 0, 0).expect("copy slice");
-        let kept_old = self
-            .image
-            .view(
-                0,
-                overlap_size,
-                self.image.width(),
-                self.image.height() - overlap_size,
-            )
-            .to_image();
+        combined.copy_from(&*slice, 0, 0).expect("copy slice");
+        let kept_old = self.image.view(
+            0,
+            overlap_size,
+            self.image.width(),
+            self.image.height() - overlap_size,
+        );
         combined
-            .copy_from(&kept_old, 0, total_slice)
+            .copy_from(&*kept_old, 0, total_slice)
             .expect("copy base");
         self.image = combined;
         slice_px
@@ -197,16 +212,14 @@ impl LinearCanvas {
         let overlap_size = (frame_w / 2).saturating_sub(slice_px);
         let total_slice = (slice_px + overlap_size).min(frame_w);
 
-        let slice = frame
-            .view(frame_w - total_slice, 0, total_slice, frame.height())
-            .to_image();
+        let slice = frame.view(frame_w - total_slice, 0, total_slice, frame.height());
 
         let new_width = self.image.width() + slice_px;
         let paste_x = self.image.width() - overlap_size;
 
         let mut combined = RgbaImage::new(new_width, self.image.height());
         combined.copy_from(&self.image, 0, 0).expect("copy base");
-        combined.copy_from(&slice, paste_x, 0).expect("copy slice");
+        combined.copy_from(&*slice, paste_x, 0).expect("copy slice");
         self.image = combined;
         slice_px
     }
@@ -218,23 +231,20 @@ impl LinearCanvas {
         let overlap_size = (frame_w / 2).saturating_sub(slice_px);
         let total_slice = (slice_px + overlap_size).min(frame_w);
 
-        let slice = frame.view(0, 0, total_slice, frame.height()).to_image();
+        let slice = frame.view(0, 0, total_slice, frame.height());
 
         let new_width = self.image.width() + slice_px;
 
         let mut combined = RgbaImage::new(new_width, self.image.height());
-        combined.copy_from(&slice, 0, 0).expect("copy slice");
-        let kept_old = self
-            .image
-            .view(
-                overlap_size,
-                0,
-                self.image.width() - overlap_size,
-                self.image.height(),
-            )
-            .to_image();
+        combined.copy_from(&*slice, 0, 0).expect("copy slice");
+        let kept_old = self.image.view(
+            overlap_size,
+            0,
+            self.image.width() - overlap_size,
+            self.image.height(),
+        );
         combined
-            .copy_from(&kept_old, total_slice, 0)
+            .copy_from(&*kept_old, total_slice, 0)
             .expect("copy base");
         self.image = combined;
         slice_px
@@ -347,6 +357,38 @@ mod tests {
             CanvasAppendError::DimensionMismatch {
                 canvas: 4,
                 frame: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_dim_larger_than_canvas_is_rejected_vertical() {
+        let mut canvas = LinearCanvas::new(solid(4, 4, [0, 0, 0, 255]));
+        let frame = solid(4, 8, [1, 1, 1, 255]);
+        let err = canvas
+            .append(AppendDirection::Bottom, &frame, 1)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CanvasAppendError::DimensionMismatch {
+                canvas: 4,
+                frame: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_dim_larger_than_canvas_is_rejected_horizontal() {
+        let mut canvas = LinearCanvas::new(solid(4, 4, [0, 0, 0, 255]));
+        let frame = solid(8, 4, [1, 1, 1, 255]);
+        let err = canvas
+            .append(AppendDirection::Right, &frame, 1)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CanvasAppendError::DimensionMismatch {
+                canvas: 4,
+                frame: 8,
             }
         );
     }

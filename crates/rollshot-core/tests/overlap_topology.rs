@@ -1,3 +1,12 @@
+//! v0.3 overlap-and-overwrite topology integration tests.
+//!
+//! The four `pure_scroll_*_byte_identical_to_v0_2` tests assert that the
+//! stitched canvas equals the original source verbatim. For pure-scroll
+//! fixtures (no per-frame variation, no sticky UI), this is algebraically
+//! equivalent to byte-identity with v0.2's stitched output, since v0.2's
+//! minimal-slice append over a pure scroll also reconstructs the source.
+//! Any drift indicates a bug in the new overlap-and-overwrite slice math.
+
 mod common;
 
 use common::{
