@@ -208,7 +208,7 @@ impl Default for StitchConfig {
             axis_ratio_threshold: 1.5,
             max_cross_axis_px: 6,
             second_best_margin: 0.001,
-            max_search_ratio: 0.75,
+            max_search_ratio: 0.4,
             match_width: 512,
             akaze: AkazeConfig::default(),
             verifier: VerifierConfig::default(),
@@ -228,6 +228,7 @@ mod tests {
         assert_eq!(cfg.axis_ratio_threshold, 1.5);
         assert_eq!(cfg.max_cross_axis_px, 6);
         assert_eq!(cfg.verifier.downsample_step, 4);
+        assert_eq!(cfg.max_search_ratio, 0.4);
     }
 
     #[test]

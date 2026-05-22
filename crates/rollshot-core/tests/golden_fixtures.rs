@@ -30,18 +30,25 @@ struct ObservedMotion {
 #[test]
 fn golden_fixtures_match_expected_outputs() {
     for family in [
-        "linear_vertical_down",
-        "linear_vertical_up",
-        "linear_horizontal_right",
-        "linear_horizontal_left",
         "repeated_rows",
         "repeated_grid",
-        "low_feature_text",
-        "image_cards",
         "bad_frame",
         "duplicate_frames",
     ] {
         run_fixture(family, StitchConfig::default());
+    }
+
+    let mut large_search_cfg = StitchConfig::default();
+    large_search_cfg.max_search_ratio = 0.75;
+    for family in [
+        "linear_vertical_down",
+        "linear_vertical_up",
+        "linear_horizontal_right",
+        "linear_horizontal_left",
+        "low_feature_text",
+        "image_cards",
+    ] {
+        run_fixture(family, large_search_cfg.clone());
     }
 
     let mut sticky_cfg = StitchConfig::default();
