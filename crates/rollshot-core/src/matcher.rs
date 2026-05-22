@@ -371,24 +371,12 @@ fn search_template_axis(
         .into_par_iter()
         .filter_map(|offset| {
             let score = match axis {
-                SearchAxis::Vertical => ncc_score_shifted(
-                    prev_gray,
-                    curr_gray,
-                    width,
-                    height,
-                    region,
-                    0,
-                    offset,
-                ),
-                SearchAxis::Horizontal => ncc_score_shifted(
-                    prev_gray,
-                    curr_gray,
-                    width,
-                    height,
-                    region,
-                    offset,
-                    0,
-                ),
+                SearchAxis::Vertical => {
+                    ncc_score_shifted(prev_gray, curr_gray, width, height, region, 0, offset)
+                }
+                SearchAxis::Horizontal => {
+                    ncc_score_shifted(prev_gray, curr_gray, width, height, region, offset, 0)
+                }
             };
             score.is_finite().then_some((score, offset))
         })
@@ -1300,5 +1288,54 @@ mod tests {
         };
         assert_eq!(best.method, MatchMethod::Akaze);
         assert!((best.dy - 72).abs() <= 8, "best dy = {}", best.dy);
+    }
+
+    #[test]
+    #[ignore = "release-mode perf smoke; run manually with --ignored --nocapture"]
+    fn large_retina_pair_perf_smoke() {
+        let canvas = make_textured_canvas(2940, 1800);
+        let prev = crop(&canvas, 0, 1320);
+        let curr = crop(&canvas, 220, 1320);
+        let config = StitchConfig::default();
+
+        let started = std::time::Instant::now();
+        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &config);
+        let elapsed = started.elapsed();
+        let candidate = unwrap_candidate(outcome);
+
+        let mut budget = SearchBudget::default();
+        let budget_candidate = unwrap_candidate(estimate_motion_with_budget(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut budget,
+        ));
+
+        println!(
+            "large_retina_pair_perf_smoke: elapsed={:.3}s parallelism={} candidate={:?} budget_candidate={:?} budget={:?}",
+            elapsed.as_secs_f64(),
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            candidate,
+            budget_candidate,
+            budget
+        );
+
+        assert_eq!(candidate.dx, 0);
+        assert_eq!(budget_candidate.dx, candidate.dx);
+        assert_eq!(budget_candidate.dy, candidate.dy);
+        assert!(
+            (candidate.dy - 220).abs() <= 3,
+            "dy = {} (expected ~220)",
+            candidate.dy
+        );
+
+        if std::env::var_os("ROLLSHOT_PERF_STRICT").is_some() {
+            assert!(
+                elapsed.as_secs_f64() < 1.0,
+                "release perf smoke exceeded 1.0s: elapsed={elapsed:?}, budget={budget:?}"
+            );
+        }
     }
 }
