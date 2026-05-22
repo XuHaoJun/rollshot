@@ -102,6 +102,19 @@ fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
     img
 }
 
+fn make_axis_debug_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([245, 245, 245, 255]));
+    for y in 0..height {
+        for x in 0..width {
+            let r = ((x * 17 + y * 31 + (x / 13) * 19) % 255) as u8;
+            let g = ((x * 43 + y * 11 + (y / 17) * 23) % 255) as u8;
+            let b = ((x * 7 + y * 53 + (x / 29 + y / 31) * 41) % 255) as u8;
+            img.put_pixel(x, y, Rgba([r, g, b, 255]));
+        }
+    }
+    img
+}
+
 #[test]
 fn rollshot_stitch_folder_writes_debug_report() {
     let tempdir = tempdir_for_test("rollshot-stitch-folder-debug");
@@ -164,6 +177,56 @@ fn rollshot_stitch_folder_writes_debug_report() {
                 .map(|e| e.file_name())
                 .collect::<Vec<_>>())
             .unwrap_or_default(),
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
+    let tempdir = tempdir_for_test("rollshot-stitch-folder-axis-debug");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+
+    let canvas = make_axis_debug_canvas(900, 600);
+    for (idx, (x, y)) in [(200u32, 0u32), (200, 80), (280, 80)].iter().enumerate() {
+        let frame = imageops::crop_imm(&canvas, *x, *y, 320, 320).to_image();
+        frame
+            .save(frames_dir.join(format!("frame_{idx:03}.png")))
+            .expect("save frame");
+    }
+
+    let output_png = tempdir.join("stitched.png");
+    let report_json = tempdir.join("report.json");
+    let debug_dir = tempdir.join("debug");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("stitch-folder")
+        .arg(&frames_dir)
+        .arg("--output")
+        .arg(&output_png)
+        .arg("--debug-match-report")
+        .arg(&report_json)
+        .arg("--dump-overlap-debug")
+        .arg(&debug_dir)
+        .arg("--disable-akaze")
+        .output()
+        .expect("run rollshot stitch-folder");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = std::fs::read_to_string(&report_json).expect("read report");
+    assert!(
+        report.contains("\"outcome\": \"AxisChanged\""),
+        "report = {report}"
+    );
+    assert!(
+        debug_dir.join("frame_002_overlap_prev.png").exists(),
+        "expected axis-changed overlap debug for frame 002 in {}",
+        debug_dir.display()
     );
 
     let _ = std::fs::remove_dir_all(&tempdir);

@@ -206,7 +206,7 @@ mod tests {
             let r = (40 + (i * 17) % 180) as u8;
             let g = (70 + (i * 29) % 170) as u8;
             let b = (90 + (i * 31) % 150) as u8;
-            let size: u32 = 12 + (i % 8) as u32;
+            let size: u32 = 12 + (i % 8);
             for yy in 0..size {
                 for xx in 0..size {
                     let cx = size as i32 / 2;

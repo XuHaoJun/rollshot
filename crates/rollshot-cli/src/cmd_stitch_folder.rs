@@ -234,11 +234,23 @@ pub fn run(args: &StitchFolderArgs) -> Result<String, CliError> {
                 no_progress += 1;
                 frame_report.outcome = "NoProgress".to_string();
                 frame_report.estimate = estimate.as_ref().map(estimate_report);
+                if let (Some(dir), Some(prev), Some(estimate)) = (
+                    args.dump_overlap_debug.as_ref(),
+                    last_accepted.as_ref(),
+                    estimate.as_ref(),
+                ) {
+                    write_overlap_artifacts(dir, report.frames.len(), prev, &frame, estimate)?;
+                }
             }
             StitchOutcome::AxisChanged { estimate, .. } => {
                 no_match += 1;
                 frame_report.outcome = "AxisChanged".to_string();
                 frame_report.estimate = Some(estimate_report(estimate));
+                if let (Some(dir), Some(prev)) =
+                    (args.dump_overlap_debug.as_ref(), last_accepted.as_ref())
+                {
+                    write_overlap_artifacts(dir, report.frames.len(), prev, &frame, estimate)?;
+                }
             }
         }
 
