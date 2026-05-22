@@ -2,7 +2,7 @@ mod common;
 
 use common::{
     crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas, paint_decorative_bottom_border,
-    paint_sticky_footer, paint_sticky_header,
+    paint_sidebar_icon_at, paint_sticky_footer, paint_sticky_header, paint_sticky_sidebar, Side,
 };
 use image::Rgba;
 use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
@@ -338,4 +338,145 @@ fn decorative_1px_bottom_border_only_at_canvas_bottom() {
         border_seen_at_y.is_empty(),
         "decorative border found at unexpected canvas rows: {border_seen_at_y:?}",
     );
+}
+
+#[test]
+fn solid_sidebar_renders_as_continuous_column() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let sidebar_color = Rgba([50, 60, 70, 255]);
+    let sidebar_w = 12u32;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut y = 0;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() {
+        let mut f = crop_frame(&source, y, frame_h);
+        for fy in 0..f.height() {
+            for fx in 0..sidebar_w.min(f.width()) {
+                f.put_pixel(fx, fy, sidebar_color);
+            }
+        }
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 3, "need >=3 appends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+    for cy in 0..stitched.height() {
+        for cx in 0..sidebar_w {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                &sidebar_color,
+                "solid sidebar should be continuous at ({cx}, {cy})",
+            );
+        }
+    }
+}
+
+#[test]
+fn top_anchored_sidebar_icon_preserved_from_first_frame() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let sidebar_w = 12u32;
+    let icon_color = Rgba([255, 128, 0, 255]);
+    let icon_y = 20u32;
+    let icon_h = 20u32;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut y = 0;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() {
+        let mut f = crop_frame(&source, y, frame_h);
+        for fy in 0..f.height() {
+            for fx in 0..sidebar_w.min(f.width()) {
+                f.put_pixel(fx, fy, Rgba([50, 60, 70, 255]));
+            }
+        }
+        paint_sidebar_icon_at(&mut f, sidebar_w, icon_y, icon_h, icon_color);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 3, "need >=3 appends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+
+    for cy in icon_y..icon_y + icon_h {
+        for cx in 0..sidebar_w {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                &icon_color,
+                "icon missing at ({cx}, {cy})",
+            );
+        }
+    }
+
+    for cy in 0..stitched.height() {
+        if cy >= icon_y && cy < icon_y + icon_h {
+            continue;
+        }
+        for cx in 0..sidebar_w {
+            assert!(
+                stitched.get_pixel(cx, cy) != &icon_color,
+                "icon leaked to ({cx}, {cy}) — top-anchored icon should appear only at frame 1's position",
+            );
+        }
+    }
+}
+
+#[test]
+fn bottom_anchored_sidebar_icon_only_at_canvas_bottom() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let sidebar_w = 12u32;
+    let icon_color = Rgba([0, 200, 200, 255]);
+    let icon_h = 20u32;
+    let icon_y = frame_h - icon_h;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut y = 0;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() {
+        let mut f = crop_frame(&source, y, frame_h);
+        for fy in 0..f.height() {
+            for fx in 0..sidebar_w.min(f.width()) {
+                f.put_pixel(fx, fy, Rgba([50, 60, 70, 255]));
+            }
+        }
+        paint_sidebar_icon_at(&mut f, sidebar_w, icon_y, icon_h, icon_color);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 3, "need >=3 appends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+    let h = stitched.height();
+
+    for cy in h - icon_h..h {
+        for cx in 0..sidebar_w {
+            assert_eq!(
+                stitched.get_pixel(cx, cy),
+                &icon_color,
+                "icon missing at ({cx}, {cy}) at canvas bottom",
+            );
+        }
+    }
+
+    for cy in 0..h - icon_h {
+        for cx in 0..sidebar_w {
+            assert!(
+                stitched.get_pixel(cx, cy) != &icon_color,
+                "icon leaked to ({cx}, {cy}) — bottom-anchored should only appear at canvas bottom",
+            );
+        }
+    }
 }
