@@ -1,6 +1,9 @@
 mod common;
 
-use common::{crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas, paint_sticky_header};
+use common::{
+    crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas, paint_decorative_bottom_border,
+    paint_sticky_footer, paint_sticky_header,
+};
 use image::Rgba;
 use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
 
@@ -244,4 +247,95 @@ fn sticky_header_appears_only_at_canvas_top() {
             );
         }
     }
+}
+
+#[test]
+fn sticky_footer_only_at_canvas_bottom() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut y = 0;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() {
+        let mut f = crop_frame(&source, y, frame_h);
+        paint_sticky_footer(&mut f, 12);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 3, "need >=3 appends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+    let h = stitched.height();
+
+    let bottom = *stitched.get_pixel(stitched.width() / 2, h - 1);
+    assert!(
+        bottom[0] == 110 || bottom[0] == 150,
+        "bottom row should be a footer color; got {bottom:?}",
+    );
+    assert_eq!(bottom[0], bottom[1]);
+    assert_eq!(bottom[1], bottom[2]);
+
+    let probe_y = frame_h;
+    if probe_y < h {
+        let mut saw_footer = false;
+        for x in 0..stitched.width() {
+            let p = *stitched.get_pixel(x, probe_y);
+            if p[0] == p[1] && p[1] == p[2] && (p[0] == 110 || p[0] == 150) {
+                saw_footer = true;
+                break;
+            }
+        }
+        assert!(
+            !saw_footer,
+            "footer leaked to canvas y={probe_y} in the middle of the canvas",
+        );
+    }
+}
+
+#[test]
+fn decorative_1px_bottom_border_only_at_canvas_bottom() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let border_color = Rgba([160, 160, 160, 255]);
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut y = 0;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() {
+        let mut f = crop_frame(&source, y, frame_h);
+        paint_decorative_bottom_border(&mut f, border_color);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 4, "need >=4 appends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+    let h = stitched.height();
+    let w = stitched.width();
+
+    for x in 0..w {
+        let p = *stitched.get_pixel(x, h - 1);
+        assert_eq!(p, border_color, "bottom row must be border at x={x}");
+    }
+
+    let mut border_seen_at_y: Vec<u32> = Vec::new();
+    for y in 0..h - 1 {
+        for x in 0..w {
+            if *stitched.get_pixel(x, y) == border_color {
+                border_seen_at_y.push(y);
+                break;
+            }
+        }
+    }
+    assert!(
+        border_seen_at_y.is_empty(),
+        "decorative border found at unexpected canvas rows: {border_seen_at_y:?}",
+    );
 }
