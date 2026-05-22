@@ -239,9 +239,9 @@ canvas.image = combined
 
 ---
 
-### 3.3 v0.3：Capture UX / interactive session
+### 3.3 v0.4：Capture UX / interactive session
 
-v0.3 處理「使用者怎麼開始、調整、停止」。
+v0.4 處理「使用者怎麼開始、調整、停止」。
 
 目標：
 
@@ -255,7 +255,7 @@ clipboard output
 preview / minimal UI
 ```
 
-v0.3 的 UX 方向：
+v0.4 的 UX 方向：
 
 ```text
 rollshot capture
@@ -276,7 +276,7 @@ fps / max frames 可保留為 debug / expert options，但不應是主流程。
 
 ---
 
-### 3.4 v0.4：Platform polish / packaging
+### 3.4 v0.5：Platform polish / packaging
 
 目標：
 
@@ -290,7 +290,7 @@ self-hosted smoke tests
 
 ---
 
-### 3.5 v0.5+：Mosaic2D / Map mode
+### 3.5 v0.6+：Mosaic2D / Map mode
 
 Mosaic2D 是目前已知最後階段，不放入 v0.2。
 
@@ -386,7 +386,7 @@ rollshot/
         command_dump_frames.rs
         logging.rs
 
-    rollshot-app/          # v0.3+，可先保留或延後建立
+    rollshot-app/          # v0.4+，可先保留或延後建立
       src/
         main.rs
         selector.rs
@@ -524,7 +524,7 @@ overlap verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StitchMode {
     LinearScroll,
-    // v0.5+
+    // v0.6+
     Mosaic2D,
 }
 ```
@@ -1061,7 +1061,7 @@ scrollbar
 portal crop 邊界
 ```
 
-v0.2 先以 ROI 排除為主。v0.2.1 在 canvas append 端加上 static region mask（見 3.2.1），處理 sticky header / footer / sidebar 在輸出長圖上的視覺重複。其餘動態區域（cursor / loading spinner / video / animation）仍延後處理；semantic mask 留到 v0.5+。
+v0.2 先以 ROI 排除為主。v0.2.1 在 canvas append 端加上 static region mask（見 3.2.1），處理 sticky header / footer / sidebar 在輸出長圖上的視覺重複。其餘動態區域（cursor / loading spinner / video / animation）仍延後處理；semantic mask 留到 v0.6+。
 
 ---
 
@@ -1233,9 +1233,9 @@ rollshot stitch-folder ./frames --disable-akaze
 rollshot stitch-folder ./frames --dump-overlap-debug ./debug
 ```
 
-### 17.3 v0.3 interactive capture
+### 17.3 v0.4 interactive capture
 
-v0.3 才處理：
+v0.4 才處理：
 
 ```bash
 rollshot capture
@@ -1379,8 +1379,8 @@ target/test-artifacts/
 | AKAZE 對文字頁不穩 | 不把 AKAZE 放第一順位；template / edge 先跑。 |
 | 重複 row / grid 誤判 | second-best margin、AKAZE fallback、overlap verifier。 |
 | sticky header / sidebar 干擾 | matcher：content ROI 排除 top/bottom/side；canvas append：v0.3 overlap-and-overwrite topology（見 3.2.1）對 sticky header / footer / 純色 sidebar / 裝飾邊框天生 cover。 |
-| 使用者期待 2D stitching | 明確區分 LinearScroll 與 Mosaic2D；v0.5+ 再做。 |
-| 使用者不想輸入 max frames / fps | v0.3 做 interactive stop UX。 |
+| 使用者期待 2D stitching | 明確區分 LinearScroll 與 Mosaic2D；v0.6+ 再做。 |
+| 使用者不想輸入 max frames / fps | v0.4 做 interactive stop UX。 |
 | OpenCV ORB 依賴痛苦 | 不納入；AKAZE + rollshot-specific motion voting。 |
 
 ---
@@ -1460,9 +1460,9 @@ bad frame
 
 ---
 
-## 22. v0.3 規劃：interactive capture
+## 22. v0.4 規劃：interactive capture
 
-v0.3 重點：
+v0.4 重點：
 
 ```text
 選區 UX
@@ -1498,7 +1498,7 @@ algorithm
 
 ---
 
-## 23. v0.5+ 規劃：Mosaic2D
+## 23. v0.6+ 規劃：Mosaic2D
 
 Mosaic2D 是獨立模式。
 
