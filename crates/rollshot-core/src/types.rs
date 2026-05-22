@@ -7,8 +7,6 @@
 //! - `dx > 0` means current frame sees rightward content -> append `Right`.
 //! - `dx < 0` means current frame sees leftward content -> append `Left`.
 
-use crate::static_region::StaticRegionConfig;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollAxis {
     Vertical,
@@ -197,7 +195,6 @@ pub struct StitchConfig {
     pub match_width: u32,
     pub akaze: AkazeConfig,
     pub verifier: VerifierConfig,
-    pub static_region: StaticRegionConfig,
 }
 
 impl Default for StitchConfig {
@@ -215,7 +212,6 @@ impl Default for StitchConfig {
             match_width: 512,
             akaze: AkazeConfig::default(),
             verifier: VerifierConfig::default(),
-            static_region: StaticRegionConfig::default(),
         }
     }
 }
@@ -306,12 +302,5 @@ mod tests {
         assert_eq!(cfg.akaze.min_raw_matches, 24);
         assert_eq!(cfg.akaze.min_inliers, 16);
         assert_eq!(cfg.akaze.min_inlier_ratio, 0.35);
-    }
-
-    #[test]
-    fn default_stitch_config_enables_static_region() {
-        let cfg = StitchConfig::default();
-        assert!(cfg.static_region.enabled);
-        assert_eq!(cfg.static_region.min_observations, 3);
     }
 }

@@ -5,7 +5,6 @@ use crate::canvas::{CanvasAppendError, LinearCanvas};
 use crate::duplicate;
 use crate::matcher::{estimate_motion, MotionSearchOutcome};
 use crate::overlap::compute_overlap;
-use crate::static_region::StaticRegionDetector;
 use crate::types::{
     AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, ScrollAxis, StitchConfig,
     StitchOutcome, StitchStats,
@@ -20,12 +19,10 @@ pub struct Stitcher {
     last_motion: (i32, i32),
     locked_axis: Option<ScrollAxis>,
     stats: StitchStats,
-    static_detector: StaticRegionDetector,
 }
 
 impl Stitcher {
     pub fn new(config: StitchConfig) -> Self {
-        let static_detector = StaticRegionDetector::new(config.static_region.clone());
         Self {
             config,
             canvas: None,
@@ -34,7 +31,6 @@ impl Stitcher {
             last_motion: (0, 0),
             locked_axis: None,
             stats: StitchStats::default(),
-            static_detector,
         }
     }
 
@@ -174,19 +170,11 @@ impl Stitcher {
             }
         };
 
-        let mask = if self.config.static_region.enabled {
-            self.static_detector
-                .observe(anchor, &frame, candidate.dx, candidate.dy);
-            self.static_detector.mask()
-        } else {
-            None
-        };
-
         let canvas = self
             .canvas
             .as_mut()
             .expect("canvas present after first frame");
-        let added = match canvas.append(direction, &frame, slice_px, mask) {
+        let added = match canvas.append(direction, &frame, slice_px) {
             Ok(n) => n,
             Err(CanvasAppendError::AxisMismatch { locked, attempted }) => {
                 let estimate = MotionEstimate {

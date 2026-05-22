@@ -1116,28 +1116,6 @@ fn scan_rejects_nan_motion_when_static_score_not_negligible() {
     let e = scan_edges(&row_static, &row_motion, &col_static, &col_motion, &cfg);
     assert_eq!(e.top, 0, "NaN motion + moderate static should NOT count as static");
 }
-
-#[test]
-fn scan_treats_both_scores_below_quarter_threshold_as_static() {
-    // Case (c): uniform-color sticky element. Both prev[x,y] == curr[x,y]
-    // AND prev[x+dx, y+dy] == curr[x,y] (constant pixels along the line),
-    // so static_score AND motion_score both collapse to ~0. The
-    // (motion - static) margin check fails, but the dedicated
-    // motion < threshold/4 branch must accept these as static.
-    //
-    // Without this branch, flat-color sidebars / footers go undetected.
-    let row_static = vec![0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
-    // motion_score 0.002 sits below threshold/4 (~0.0039) for the first 3 rows.
-    let row_motion = vec![0.002, 0.002, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    let col_static = vec![0.5; 8];
-    let col_motion = vec![0.0; 8];
-    let cfg = StaticRegionConfig::default();
-    let e = scan_edges(&row_static, &row_motion, &col_static, &col_motion, &cfg);
-    assert_eq!(
-        e.top, 3,
-        "uniform-color sticky: both scores below threshold/4 should classify as static"
-    );
-}
 ```
 
 - [ ] **Step 2: Run the new tests and confirm they fail**
@@ -1162,10 +1140,9 @@ fn is_static_line(static_score: f32, motion_score: f32, cfg: &StaticRegionConfig
     if !static_score.is_finite() { return false; }
     if static_score >= cfg.static_mad_threshold { return false; }
     if !motion_score.is_finite() {
-        // Case (b) — edge row / column: the motion-aligned comparison fell off
-        // the frame (shifted (x + dx, y + dy) coordinate is out of bounds for
-        // every x or y we tried). We only have row_static / col_static
-        // evidence.
+        // Edge row / column: the motion-aligned comparison fell off the frame
+        // (shifted (x + dx, y + dy) coordinate is out of bounds for every x or y
+        // we tried). We only have row_static / col_static evidence.
         //
         // To detect sticky footer / sticky right-sidebar (which sit exactly on
         // the appended-edge of each slice and therefore have no in-bounds
@@ -1178,23 +1155,6 @@ fn is_static_line(static_score: f32, motion_score: f32, cfg: &StaticRegionConfig
         // and `scan_rejects_nan_motion_when_static_score_not_negligible` pin
         // both sides of this rule.
         return static_score < cfg.static_mad_threshold / 4.0;
-    }
-    if motion_score < cfg.static_mad_threshold / 4.0 {
-        // Case (c) — uniform-color sticky element. When pixels along the line
-        // are constant (e.g. a flat sidebar background, a solid footer), both
-        // prev[x, y] == curr[x, y] AND prev[x + dx, y + dy] == curr[x, y],
-        // so static_score AND motion_score both collapse to ~0. The
-        // (motion - static) margin check then fails and the band is missed
-        // entirely. Accept here when motion_score is also far below threshold.
-        //
-        // The false-positive risk (uniform-color *scrollable* content sitting
-        // at an edge during one frame) is bounded by three downstream guards:
-        // contiguous-from-edge scan (step 4 below) rejects mid-frame matches,
-        // max_band_ratio caps the band at 30% of the dimension, and the lock
-        // uses the median across min_observations frames so a single frame's
-        // edge coincidence cannot capture the lock. Pinned by the unit test
-        // `scan_treats_both_scores_below_quarter_threshold_as_static`.
-        return true;
     }
     (motion_score - static_score) > cfg.motion_margin
 }

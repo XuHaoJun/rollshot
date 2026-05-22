@@ -180,29 +180,9 @@ step 2  per-col aggregates (symmetric):
           col_motion[x]  = mean over y of |prev(x + dx, y + dy)
                                           - curr(x, y)| / 255
 
-step 3  line is "static candidate" iff one of the following holds:
-
-        (a) (general case) static_score is finite,
-            static_score < static_mad_threshold,
-            motion_score is finite,
-            AND (motion_score - static_score) > motion_margin
-        (b) (edge of frame, motion alignment fell off bounds)
-            static_score is finite,
-            static_score < static_mad_threshold / 4
-            AND motion_score is NaN
-        (c) (uniform-color sticky element — both scores collapse to ~0)
-            static_score < static_mad_threshold
-            AND motion_score < static_mad_threshold / 4
-
-        Case (c) catches sticky elements whose pixels are constant across
-        the line (e.g. a flat sidebar background). Without it, both
-        static_score and motion_score sit near zero, the (motion - static)
-        margin check fails, and the band is missed entirely. The
-        contiguous-from-edge requirement (step 4), the max_band_ratio cap
-        (step 5), and the median across min_observations (lock step)
-        together keep case (c) from false-positiving on uniform-color
-        scrollable content that happens to sit at the edge during a single
-        frame.
+step 3  line is "static candidate" iff
+          static_score < static_mad_threshold
+          AND (motion_score - static_score) > motion_margin
 
 step 4  contiguous-from-edge scan:
           top_this    = scan rows 0, 1, 2, ... until first non-static row
@@ -487,7 +467,6 @@ unaffected because the matcher path is unchanged.
 | Risk | Mitigation |
 | --- | --- |
 | Detector false-positives on pure-scroll fixtures | `motion_margin` guard, contiguous-from-edge requirement, `max_band_ratio` cap, byte-identical regression test. |
-| Uniform-color sticky element (flat sidebar / footer with no internal variation) goes undetected because `(motion_score - static_score)` collapses to ~0 | Detection step 3 case (c): accept when `static_score < threshold` AND `motion_score < threshold / 4`. Safeguards against false-positive on uniform scrollable content: contiguous-from-edge + `max_band_ratio` cap + median across `min_observations`. |
 | Detector locks early on a transient overlay | Median over `min_observations` frames damps single outliers; users can lower `enabled` flag for diagnosis. |
 | Sticky region has gradient / shadow / divider line | v0.2.1 accepts the visible seam. Carry-over from first frame is deferred to v0.2.2. |
 | Self-animating sticky elements (spinner, video) | `motion_margin` test will reject them; `max_band_ratio` is the backstop. |
