@@ -1,7 +1,8 @@
 mod common;
 
-use common::{crop_frame_xy, make_scroll_canvas, make_wide_canvas};
-use rollshot_core::{AppendDirection, LinearCanvas};
+use common::{crop_frame, crop_frame_xy, make_scroll_canvas, make_wide_canvas, paint_sticky_header};
+use image::Rgba;
+use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
 
 #[test]
 fn pure_scroll_down_byte_identical_to_v0_2() {
@@ -148,6 +149,98 @@ fn pure_scroll_left_byte_identical_to_v0_2() {
                 source.get_pixel(left_x + cx, cy),
                 "scroll-left pixel mismatch at canvas ({cx}, {cy}) -> source ({}, {cy})",
                 left_x + cx,
+            );
+        }
+    }
+}
+
+#[test]
+fn first_frame_preserved_verbatim() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+
+    let mut first = crop_frame(&source, 0, frame_h);
+    paint_sticky_header(&mut first, 12);
+    let expected_first = first.clone();
+
+    let outcome = stitcher.push_frame(first);
+    assert!(matches!(outcome, StitchOutcome::FirstFrame));
+
+    let mut y = step;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() && appended < 3 {
+        let mut f = crop_frame(&source, y, frame_h);
+        paint_sticky_header(&mut f, 12);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 2, "need >=2 appends; got {appended}");
+
+    let stitched = stitcher
+        .full_image()
+        .expect("stitched output exists")
+        .clone();
+
+    let preserved_until = frame_h / 2;
+    for y in 0..preserved_until {
+        for x in 0..stitched.width() {
+            assert_eq!(
+                stitched.get_pixel(x, y),
+                expected_first.get_pixel(x, y),
+                "first-frame pixel changed at ({x}, {y}); should be preserved before y={preserved_until}",
+            );
+        }
+    }
+}
+
+#[test]
+fn sticky_header_appears_only_at_canvas_top() {
+    let source = make_scroll_canvas(320, 1400);
+    let frame_h = 320u32;
+    let step = 70u32;
+
+    let mut config = StitchConfig::default();
+    config.verifier.downsample_max_mad = 40.0 / 255.0;
+    config.verifier.full_res_max_mad = 30.0 / 255.0;
+    let mut stitcher = Stitcher::new(config);
+
+    let mut y = 0;
+    let mut appended = 0u32;
+    while y + frame_h <= source.height() {
+        let mut f = crop_frame(&source, y, frame_h);
+        paint_sticky_header(&mut f, 12);
+        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
+            appended += 1;
+        }
+        y += step;
+    }
+    assert!(appended >= 3, "need >=3 appends; got {appended}");
+
+    let stitched = stitcher.full_image().expect("stitched");
+
+    let header_red = Rgba([200, 60, 60, 255]);
+    let header_dark_blue = Rgba([30, 30, 90, 255]);
+    let mut saw_header_at_top = false;
+    for x in 0..stitched.width() {
+        let p = *stitched.get_pixel(x, 0);
+        if p == header_red || p == header_dark_blue {
+            saw_header_at_top = true;
+            break;
+        }
+    }
+    assert!(saw_header_at_top, "frame 1's header must remain at canvas top");
+
+    let probe_y = frame_h + step + 1;
+    if probe_y < stitched.height() {
+        for x in 0..stitched.width() {
+            let p = *stitched.get_pixel(x, probe_y);
+            assert!(
+                p != header_red && p != header_dark_blue,
+                "header color leaked to canvas y={probe_y} at x={x}: {p:?}",
             );
         }
     }
