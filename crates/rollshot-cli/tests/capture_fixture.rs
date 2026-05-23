@@ -98,10 +98,7 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
         .map(|e| e.path())
         .collect();
     dumped.sort();
-    assert!(
-        !dumped.is_empty(),
-        "at least one frame should be dumped"
-    );
+    assert!(!dumped.is_empty(), "at least one frame should be dumped");
     for path in &dumped {
         let bytes = std::fs::read(path).expect("read dumped frame");
         assert!(
