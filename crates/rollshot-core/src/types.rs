@@ -31,6 +31,7 @@ impl AppendDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MatchMethod {
     Template,
     Coarse,
@@ -89,6 +90,7 @@ pub struct MotionEstimate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NoMatchReason {
     LowConfidence,
     AmbiguousAxis,
