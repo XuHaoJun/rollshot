@@ -142,7 +142,6 @@ fn rollshot_stitch_folder_writes_debug_report() {
         .arg(&report_json)
         .arg("--dump-overlap-debug")
         .arg(&debug_dir)
-        .arg("--disable-akaze")
         .output()
         .expect("run rollshot stitch-folder");
 
@@ -209,7 +208,6 @@ fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
         .arg(&report_json)
         .arg("--dump-overlap-debug")
         .arg(&debug_dir)
-        .arg("--disable-akaze")
         .output()
         .expect("run rollshot stitch-folder");
 
@@ -234,8 +232,8 @@ fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
 
 #[cfg(feature = "akaze")]
 #[test]
-fn rollshot_stitch_folder_disable_akaze_skips_akaze() {
-    let tempdir = tempdir_for_test("rollshot-stitch-folder-disable-akaze");
+fn rollshot_stitch_folder_enable_akaze_toggle() {
+    let tempdir = tempdir_for_test("rollshot-stitch-folder-enable-akaze");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
 
@@ -285,16 +283,16 @@ fn rollshot_stitch_folder_disable_akaze_skips_akaze() {
         std::fs::read_to_string(&report_json).expect("read report")
     };
 
-    let with_akaze = run("with", &[]);
-    let without_akaze = run("without", &["--disable-akaze"]);
+    let without_akaze = run("without", &[]);
+    let with_akaze = run("with", &["--enable-akaze"]);
 
     assert!(
-        with_akaze.contains("\"method\": \"Akaze\""),
-        "expected AKAZE to fire in baseline run, report = {with_akaze}"
+        !without_akaze.contains("\"method\": \"Akaze\""),
+        "baseline (no --enable-akaze) should not invoke AKAZE, report = {without_akaze}"
     );
     assert!(
-        !without_akaze.contains("\"method\": \"Akaze\""),
-        "--disable-akaze should suppress AKAZE entirely, report = {without_akaze}"
+        with_akaze.contains("\"method\": \"Akaze\""),
+        "expected AKAZE to fire with --enable-akaze, report = {with_akaze}"
     );
 
     let _ = std::fs::remove_dir_all(&tempdir);

@@ -170,7 +170,10 @@ pub struct AkazeConfig {
 impl Default for AkazeConfig {
     fn default() -> Self {
         Self {
-            enabled: cfg!(feature = "akaze"),
+            // AKAZE is an expensive opt-in fallback (full-image multi-scale
+            // feature extraction on every miss costs ~2s on a 2560-wide
+            // frame). Callers must explicitly enable it.
+            enabled: false,
             max_features: 1200,
             detector_threshold: 0.001,
             min_raw_matches: 24,
@@ -288,15 +291,9 @@ mod tests {
     }
 
     #[test]
-    fn akaze_defaults_follow_compile_feature() {
+    fn akaze_is_disabled_by_default() {
         let cfg = StitchConfig::default();
-
-        #[cfg(feature = "akaze")]
-        assert!(cfg.akaze.enabled);
-
-        #[cfg(not(feature = "akaze"))]
         assert!(!cfg.akaze.enabled);
-
         assert_eq!(cfg.akaze.max_features, 1200);
         assert_eq!(cfg.akaze.detector_threshold, 0.001);
         assert_eq!(cfg.akaze.min_raw_matches, 24);

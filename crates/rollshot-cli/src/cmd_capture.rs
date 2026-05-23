@@ -66,7 +66,11 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
         })?;
     }
 
-    let mut stitcher = Stitcher::new(StitchConfig::default());
+    let mut config = StitchConfig::default();
+    if args.enable_akaze {
+        config.akaze.enabled = true;
+    }
+    let mut stitcher = Stitcher::new(config);
     let mut captured: u32 = 0;
     let mut appended: u32 = 0;
     let mut duplicates: u32 = 0;

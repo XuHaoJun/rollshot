@@ -63,6 +63,12 @@ pub struct CaptureArgs {
     /// Suppress per-frame capture progress on stderr.
     #[arg(long, default_value_t = false)]
     pub quiet: bool,
+
+    /// Enable the AKAZE feature-based fallback when regular matchers miss.
+    /// Off by default because it can stall the loop for ~2s per call on
+    /// high-resolution frames.
+    #[arg(long, default_value_t = false)]
+    pub enable_akaze: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -89,7 +95,8 @@ pub struct StitchFolderArgs {
     #[arg(long)]
     pub dump_overlap_debug: Option<PathBuf>,
 
-    /// Diagnostic switch that forces AutoHybrid to skip AKAZE fallback.
+    /// Enable the AKAZE feature-based fallback. Disabled by default — see
+    /// the same flag on `capture` for the rationale.
     #[arg(long, default_value_t = false)]
-    pub disable_akaze: bool,
+    pub enable_akaze: bool,
 }

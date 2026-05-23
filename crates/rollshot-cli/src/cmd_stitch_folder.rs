@@ -168,8 +168,8 @@ pub fn run(args: &StitchFolderArgs) -> Result<String, CliError> {
     }
 
     let mut config = StitchConfig::default();
-    if args.disable_akaze {
-        config.akaze.enabled = false;
+    if args.enable_akaze {
+        config.akaze.enabled = true;
     }
     let mut stitcher = Stitcher::new(config);
     let mut report = MatchReport { frames: Vec::new() };
