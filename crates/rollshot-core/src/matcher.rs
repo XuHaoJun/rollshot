@@ -802,7 +802,11 @@ fn edge_projection(gray: &[f32], width: u32, height: u32, axis: SearchAxis) -> V
         SearchAxis::Horizontal => {
             let mut cols = vec![0.0; width as usize];
             let y_start = if height >= 1024 { roi.y } else { 0 };
-            let y_end = if height >= 1024 { roi.y + roi.h } else { height };
+            let y_end = if height >= 1024 {
+                roi.y + roi.h
+            } else {
+                height
+            };
             let roi_h = y_end - y_start;
             for x in 1..width {
                 let mut sum = 0.0;
