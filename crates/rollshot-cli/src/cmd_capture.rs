@@ -33,7 +33,7 @@
 //! ```
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use image::ImageFormat;
 use rollshot_capture::{
@@ -48,6 +48,24 @@ use crate::cli_error::CliError;
 #[derive(Debug, Serialize)]
 struct CaptureMatchReport {
     frames: Vec<CaptureFrameReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<CaptureSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptureSummary {
+    capture_interval_p50_ms: f64,
+    capture_interval_p90_ms: f64,
+    capture_interval_max_ms: f64,
+    max_accepted_dy: u32,
+    longest_no_match_run: u32,
+    frames_under_20ms: usize,
+    total_frames: usize,
+    appended: u32,
+    duplicates: u32,
+    no_match: u32,
+    no_progress: u32,
+    pacing_skipped: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,8 +139,14 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     let mut duplicates: u32 = 0;
     let mut no_match: u32 = 0;
     let mut no_progress: u32 = 0;
-    let mut report = CaptureMatchReport { frames: Vec::new() };
+    let mut pacing_skipped: u32 = 0;
+    let mut report = CaptureMatchReport {
+        frames: Vec::new(),
+        summary: None,
+    };
     let mut previous_capture_timestamp = None;
+    let min_interval = Duration::from_millis(args.min_interval_ms);
+    let mut last_processed_timestamp: Option<SystemTime> = None;
 
     loop {
         match stream.next_frame() {
@@ -135,6 +159,35 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                         .map(duration_ms)
                 });
                 previous_capture_timestamp = Some(frame.timestamp);
+
+                if args.min_interval_ms > 0 {
+                    if let Some(last_ts) = last_processed_timestamp {
+                        if let Ok(elapsed) = frame.timestamp.duration_since(last_ts) {
+                            if elapsed < min_interval {
+                                pacing_skipped += 1;
+                                captured += 1;
+                                report.frames.push(CaptureFrameReport {
+                                    frame_index: report.frames.len(),
+                                    outcome: "PacingSkipped".to_string(),
+                                    reason: None,
+                                    estimate: None,
+                                    capture_interval_ms,
+                                    stitch_elapsed_ms: 0.0,
+                                });
+                                if !args.quiet {
+                                    eprintln!(
+                                        "frame {}/{}: PacingSkipped",
+                                        captured, args.max_frames
+                                    );
+                                }
+                                if captured >= args.max_frames {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
 
                 if let Some(dir) = args.dump_frames.as_ref() {
                     write_dump_frame(dir, captured, &frame.image)?;
@@ -191,6 +244,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                 if !args.quiet {
                     log_capture_progress(captured, args.max_frames, &outcome, stitch_elapsed);
                 }
+                last_processed_timestamp = Some(frame.timestamp);
                 if captured >= args.max_frames {
                     break;
                 }
@@ -199,6 +253,17 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
             Err(err) => return Err(CliError::from_capture(err)),
         }
     }
+
+    let summary = compute_summary(
+        &report,
+        appended,
+        duplicates,
+        no_match,
+        no_progress,
+        pacing_skipped,
+    );
+    print_diagnostics_summary(&summary, args.quiet);
+    report.summary = Some(summary);
 
     let stitched = stitcher
         .full_image()
@@ -210,7 +275,10 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     }
 
     Ok(format!(
-        "captured {captured} frames, appended {appended} (duplicates {duplicates}, no-progress {no_progress}, no-match {no_match})\noutput: {out} ({w}x{h})\n",
+        "captured {captured} frames, appended {appended} \
+         (duplicates {duplicates}, no-progress {no_progress}, \
+         no-match {no_match}, pacing-skipped {pacing_skipped})\n\
+         output: {out} ({w}x{h})\n",
         out = args.output.display(),
         w = stitched.width(),
         h = stitched.height(),
@@ -304,6 +372,94 @@ fn outcome_label(outcome: &StitchOutcome) -> &'static str {
         StitchOutcome::NoMatch { .. } => "NoMatch",
         StitchOutcome::NoProgress { .. } => "NoProgress",
         StitchOutcome::AxisChanged { .. } => "AxisChanged",
+    }
+}
+
+fn compute_summary(
+    report: &CaptureMatchReport,
+    appended: u32,
+    duplicates: u32,
+    no_match: u32,
+    no_progress: u32,
+    pacing_skipped: u32,
+) -> CaptureSummary {
+    let mut intervals: Vec<f64> = report
+        .frames
+        .iter()
+        .filter_map(|f| f.capture_interval_ms)
+        .collect();
+    intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let percentile = |sorted: &[f64], p: f64| -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let idx = (p / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
+
+    let max_accepted_dy = report
+        .frames
+        .iter()
+        .filter(|f| f.outcome == "Appended")
+        .filter_map(|f| f.estimate.as_ref())
+        .map(|e| e.dy.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+
+    let mut longest_no_match_run: u32 = 0;
+    let mut current_run: u32 = 0;
+    for f in &report.frames {
+        if f.outcome == "NoMatch" {
+            current_run += 1;
+            longest_no_match_run = longest_no_match_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+
+    let frames_under_20ms = intervals.iter().filter(|&&v| v < 20.0).count();
+
+    CaptureSummary {
+        capture_interval_p50_ms: percentile(&intervals, 50.0),
+        capture_interval_p90_ms: percentile(&intervals, 90.0),
+        capture_interval_max_ms: intervals.last().copied().unwrap_or(0.0),
+        max_accepted_dy,
+        longest_no_match_run,
+        frames_under_20ms,
+        total_frames: report.frames.len(),
+        appended,
+        duplicates,
+        no_match,
+        no_progress,
+        pacing_skipped,
+    }
+}
+
+fn print_diagnostics_summary(summary: &CaptureSummary, quiet: bool) {
+    if quiet {
+        return;
+    }
+    eprintln!(
+        "--- capture diagnostics ---\n\
+         capture_interval_ms: p50={:.1} p90={:.1} max={:.1}\n\
+         max_accepted_dy: {}\n\
+         longest_no_match_run: {}",
+        summary.capture_interval_p50_ms,
+        summary.capture_interval_p90_ms,
+        summary.capture_interval_max_ms,
+        summary.max_accepted_dy,
+        summary.longest_no_match_run,
+    );
+    if summary.pacing_skipped > 0 {
+        eprintln!("pacing_skipped: {}", summary.pacing_skipped);
+    }
+    if summary.longest_no_match_run >= 5 {
+        eprintln!(
+            "warning: {} consecutive NoMatch frames — \
+             scroll may be too fast for the capture cadence",
+            summary.longest_no_match_run
+        );
     }
 }
 

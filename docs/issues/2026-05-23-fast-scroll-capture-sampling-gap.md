@@ -1,6 +1,6 @@
 ---
 title: Fast manual scrolling can outpace capture sampling and break stitching
-status: open
+status: in-progress
 date: 2026-05-23
 severity: high
 reporter: noah
@@ -143,6 +143,20 @@ Prefer fixing the sampling/scroll-control problem before tuning the matcher.
    - Larger motion recovery or better feature fallback can help marginal
      cases, but it cannot reliably reconstruct content when adjacent sampled
      frames do not overlap enough.
+
+## Progress
+
+- **Item 1 (diagnostics):** Done. Post-capture summary prints
+  `capture_interval_ms` p50/p90/max, `max_accepted_dy`,
+  `longest_no_match_run`, and a warning when consecutive NoMatch >= 5.
+  Same stats included in `--debug-match-report` JSON via `CaptureSummary`.
+- **Item 1.5 (consumer-side frame pacing):** Done. `--min-interval-ms`
+  flag skips frames arriving sooner than the threshold after the last
+  processed frame. Default 0 (disabled). Reported as `PacingSkipped`
+  in per-frame progress and diagnostics summary.
+- **Item 2 (auto-scroll):** Not started.
+- **Item 3 (capture buffering):** Not started.
+- **Item 4 (matcher improvements):** Not started.
 
 ## Open Questions
 
