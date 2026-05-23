@@ -18,6 +18,7 @@ pub struct Stitcher {
     last_good_signature: Option<Vec<u8>>,
     last_motion: (i32, i32),
     locked_axis: Option<ScrollAxis>,
+    locked_direction: Option<AppendDirection>,
     stats: StitchStats,
 }
 
@@ -30,6 +31,7 @@ impl Stitcher {
             last_good_signature: None,
             last_motion: (0, 0),
             locked_axis: None,
+            locked_direction: None,
             stats: StitchStats::default(),
         }
     }
@@ -128,6 +130,20 @@ impl Stitcher {
             }
         };
 
+        if let Some(locked_dir) = self.locked_direction {
+            if direction != locked_dir {
+                return StitchOutcome::NoMatch {
+                    reason: NoMatchReason::ReverseDirection,
+                    best_estimate: build_estimate(
+                        anchor,
+                        &frame,
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                };
+            }
+        }
+
         let slice_px = match direction {
             AppendDirection::Bottom | AppendDirection::Top => candidate.dy.unsigned_abs(),
             AppendDirection::Right | AppendDirection::Left => candidate.dx.unsigned_abs(),
@@ -218,6 +234,7 @@ impl Stitcher {
         };
 
         self.locked_axis = Some(direction.axis());
+        self.locked_direction = Some(direction);
         self.last_motion = (candidate.dx, candidate.dy);
 
         let estimate = MotionEstimate {

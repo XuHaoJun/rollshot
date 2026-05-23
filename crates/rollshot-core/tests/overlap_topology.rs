@@ -15,7 +15,9 @@ use common::{
     paint_sticky_header, paint_sticky_horizontal_band,
 };
 use image::{Rgba, RgbaImage};
-use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
+use rollshot_core::{
+    AppendDirection, LinearCanvas, NoMatchReason, StitchConfig, StitchOutcome, Stitcher,
+};
 
 #[test]
 fn pure_scroll_down_byte_identical_to_v0_2() {
@@ -415,14 +417,14 @@ fn sticky_header_after_scroll_up_appears_only_once() {
 }
 
 #[test]
-fn bidirectional_scroll_down_then_up_canvas_consistent() {
+fn bidirectional_scroll_down_then_up_rejects_reverse() {
     let source = make_scroll_canvas(320, 1400);
     let frame_h = 320u32;
     let step = 70u32;
     let mut stitcher = Stitcher::new(StitchConfig::default());
 
     let mut anchor = 500u32;
-    let mut appended_total = 0u32;
+    let mut appended_down = 0u32;
 
     let mut f = crop_frame(&source, anchor, frame_h);
     paint_sticky_footer(&mut f, 8);
@@ -433,11 +435,14 @@ fn bidirectional_scroll_down_then_up_canvas_consistent() {
         let mut f = crop_frame(&source, anchor, frame_h);
         paint_sticky_footer(&mut f, 8);
         if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
-            appended_total += 1;
+            appended_down += 1;
         }
     }
 
+    assert_eq!(appended_down, 3, "all downward frames should append");
+
     let mut up_anchor = 500u32;
+    let mut rejected_up = 0u32;
     for _ in 0..3 {
         if up_anchor < step {
             break;
@@ -445,28 +450,16 @@ fn bidirectional_scroll_down_then_up_canvas_consistent() {
         up_anchor -= step;
         let mut f = crop_frame(&source, up_anchor, frame_h);
         paint_sticky_footer(&mut f, 8);
-        if let StitchOutcome::Appended { .. } = stitcher.push_frame(f) {
-            appended_total += 1;
+        match stitcher.push_frame(f) {
+            StitchOutcome::NoMatch { reason, .. } => {
+                assert_eq!(reason, NoMatchReason::ReverseDirection);
+                rejected_up += 1;
+            }
+            other => panic!("expected ReverseDirection NoMatch for upward frame; got {other:?}"),
         }
     }
 
-    assert!(
-        appended_total >= 4,
-        "need >=4 appends across both directions; got {appended_total}",
-    );
-
-    let stitched = stitcher.full_image().expect("stitched");
-    assert!(
-        stitched.height() > frame_h,
-        "canvas height should exceed single frame_h after bidirectional scroll",
-    );
-
-    let h = stitched.height();
-    let bottom = *stitched.get_pixel(stitched.width() / 2, h - 1);
-    assert!(
-        bottom[0] == 110 || bottom[0] == 150,
-        "canvas bottom should still be a footer color after bidirectional scroll; got {bottom:?}",
-    );
+    assert_eq!(rejected_up, 3, "all upward frames should be rejected");
 }
 
 #[test]

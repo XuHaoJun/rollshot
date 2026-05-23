@@ -112,6 +112,7 @@ pub enum NoMatchReason {
     /// The FAST+KNN path produced no candidate that passed
     /// rank_verified_candidates (or did not meet min_inliers).
     FeatureLowInliers,
+    ReverseDirection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
