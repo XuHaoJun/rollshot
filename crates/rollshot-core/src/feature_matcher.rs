@@ -5,14 +5,12 @@
 //! docs/superpowers/specs/2026-05-23-rollshot-fast-hnsw-fallback-design.md
 //! Approach A. Current matching is exact linear scan.
 
-use image::RgbaImage;
 use image::GrayImage;
+use image::RgbaImage;
 use imageproc::corners;
 
 use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
-use crate::types::{
-    FastHnswConfig, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig,
-};
+use crate::types::{FastHnswConfig, MotionCandidate, ScrollAxis, StitchConfig};
 
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -59,7 +57,10 @@ pub(crate) enum FastHnswCandidateOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FeatureFallbackOutcome {
     Disabled,
-    NotEnoughFeatures { prev: usize, curr: usize },
+    NotEnoughFeatures {
+        prev: usize,
+        curr: usize,
+    },
     NotEnoughMatches {
         raw_matches: usize,
         source: FeatureSource,
@@ -110,12 +111,10 @@ impl FeatureFallbackOutcome {
                     source: FeatureSource::Akaze,
                 }
             }
-            AkazeCandidateOutcome::Candidates(candidates) => {
-                FeatureFallbackOutcome::Candidates {
-                    candidates,
-                    source: FeatureSource::Akaze,
-                }
-            }
+            AkazeCandidateOutcome::Candidates(candidates) => FeatureFallbackOutcome::Candidates {
+                candidates,
+                source: FeatureSource::Akaze,
+            },
         }
     }
 }
@@ -139,7 +138,7 @@ fn compute_descriptor(gray: &GrayImage, x: u32, y: u32, patch: usize) -> Option<
     }
     let bins = patch / 2;
     let mut desc = [0.0f32; 8];
-    for i in 0..bins {
+    for (i, d) in desc.iter_mut().enumerate().take(bins) {
         let row_y = cy + (-half + (i as i32) * 2);
         let mut sum = 0.0f32;
         let mut count = 0u32;
@@ -148,10 +147,11 @@ fn compute_descriptor(gray: &GrayImage, x: u32, y: u32, patch: usize) -> Option<
             sum += gray.get_pixel(col_x as u32, row_y as u32)[0] as f32 / 255.0;
             count += 1;
         }
-        desc[i] = if count > 0 { sum / count as f32 } else { 0.0 };
+        *d = if count > 0 { sum / count as f32 } else { 0.0 };
     }
-    for j in 0..bins {
-        let col_x = cx + (-half + (j as i32) * 2);
+    for (k, d) in desc.iter_mut().enumerate().skip(bins).take(bins) {
+        let col_bin = k - bins;
+        let col_x = cx + (-half + (col_bin as i32) * 2);
         let mut sum = 0.0f32;
         let mut count = 0u32;
         for i in 0..bins {
@@ -159,7 +159,7 @@ fn compute_descriptor(gray: &GrayImage, x: u32, y: u32, patch: usize) -> Option<
             sum += gray.get_pixel(col_x as u32, row_y as u32)[0] as f32 / 255.0;
             count += 1;
         }
-        desc[bins + j] = if count > 0 { sum / count as f32 } else { 0.0 };
+        *d = if count > 0 { sum / count as f32 } else { 0.0 };
     }
     Some(desc)
 }
@@ -371,7 +371,12 @@ pub(crate) fn fast_hnsw_candidates(
     }
 
     let lowe_ratio = 1.4;
-    let matches = linear_knn_match(&prev_desc, &curr_desc, config.distance_threshold, lowe_ratio);
+    let matches = linear_knn_match(
+        &prev_desc,
+        &curr_desc,
+        config.distance_threshold,
+        lowe_ratio,
+    );
     if matches.len() < config.min_raw_matches {
         return FastHnswCandidateOutcome::NotEnoughMatches {
             raw_matches: matches.len(),
@@ -399,7 +404,7 @@ pub(crate) fn fast_hnsw_candidates(
 
 /// Pick-one dispatch:
 ///   - `config.akaze.enabled = true`  → run AKAZE (FastHnsw is skipped
-///                                       even if also enabled)
+///     even if also enabled)
 ///   - else `config.fast_hnsw.enabled = true` → run FAST+KNN
 ///   - else → Disabled
 pub(crate) fn feature_fallback_candidates(
@@ -434,8 +439,10 @@ mod tests {
 
     #[test]
     fn fast_hnsw_returns_disabled_when_config_disabled() {
-        let mut config = FastHnswConfig::default();
-        config.enabled = false;
+        let config = FastHnswConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let outcome = fast_hnsw_candidates(&solid_frame(), &solid_frame(), None, &config);
         assert_eq!(outcome, FastHnswCandidateOutcome::Disabled);
     }
@@ -465,8 +472,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                FeatureFallbackOutcome::Disabled
-                    | FeatureFallbackOutcome::NotEnoughFeatures { .. }
+                FeatureFallbackOutcome::Disabled | FeatureFallbackOutcome::NotEnoughFeatures { .. }
             ),
             "unexpected outcome: {outcome:?}"
         );
@@ -490,11 +496,12 @@ mod tests {
                     let dist2 = dx * dx + dy * dy;
                     let radius2 = (size as i32 / 2).pow(2);
                     if dist2 <= radius2 {
-                        let intensity = if (xx / 3 + yy / 3) % 2 == 0 || dx.abs() < 2 || dy.abs() < 2 {
-                            60i32
-                        } else {
-                            -30i32
-                        };
+                        let intensity =
+                            if (xx / 3 + yy / 3) % 2 == 0 || dx.abs() < 2 || dy.abs() < 2 {
+                                60i32
+                            } else {
+                                -30i32
+                            };
                         img.put_pixel(
                             x + xx,
                             y + yy,
@@ -517,7 +524,11 @@ mod tests {
         let img = solid_frame();
         let gray = rgba_to_gray(&img);
         let corners = extract_corners(&gray, 64, 1200);
-        assert!(corners.is_empty(), "solid image returned {} corners", corners.len());
+        assert!(
+            corners.is_empty(),
+            "solid image returned {} corners",
+            corners.len()
+        );
     }
 
     #[test]
@@ -638,27 +649,19 @@ mod tests {
     #[test]
     fn vote_dominant_translation_picks_majority_bucket() {
         let prev = vec![(0u32, 0u32); 6];
-        let curr = vec![
-            (0u32, 40u32),
-            (0, 41),
-            (0, 39),
-            (0, 40),
-            (0, 42),
-            (0, 100),
-        ];
+        let curr = vec![(0u32, 40u32), (0, 41), (0, 39), (0, 40), (0, 42), (0, 100)];
         let matches: Vec<[usize; 2]> = (0..6).map(|i| [i, i]).collect();
-        let mut cfg = FastHnswConfig::default();
-        cfg.min_inliers = 4;
+        let cfg = FastHnswConfig {
+            min_inliers: 4,
+            ..Default::default()
+        };
         let result = vote_dominant_translation(&prev, &curr, &matches, None, &cfg);
         let (dx, dy, inliers, raw, residual_px) = result.expect("dominant translation");
         assert_eq!(dx, 0);
-        assert!(dy >= -42 && dy <= -39, "dy = {dy}");
+        assert!((-42..=-39).contains(&dy), "dy = {dy}");
         assert!(inliers >= 4, "inliers = {inliers}");
         assert_eq!(raw, 6);
-        assert!(
-            residual_px <= 2.0,
-            "residual_px = {residual_px}"
-        );
+        assert!(residual_px <= 2.0, "residual_px = {residual_px}");
     }
 
     #[test]
@@ -667,9 +670,7 @@ mod tests {
         let curr = vec![(10u32, 20u32), (30, 40), (50, 60)];
         let matches = vec![[0, 0], [1, 1], [2, 2]];
         let cfg = FastHnswConfig::default();
-        assert!(
-            vote_dominant_translation(&prev, &curr, &matches, None, &cfg).is_none()
-        );
+        assert!(vote_dominant_translation(&prev, &curr, &matches, None, &cfg).is_none());
     }
 
     #[test]
@@ -757,8 +758,7 @@ mod tests {
         let prev = crop_xy(&canvas, 20, 100, 220, 220);
         let curr = crop_xy(&canvas, 58, 100, 220, 220);
         let config = FastHnswConfig::default();
-        let outcome =
-            fast_hnsw_candidates(&prev, &curr, Some(ScrollAxis::Vertical), &config);
+        let outcome = fast_hnsw_candidates(&prev, &curr, Some(ScrollAxis::Vertical), &config);
         assert!(
             matches!(
                 outcome,
@@ -775,8 +775,7 @@ mod tests {
         let prev = crop_xy(&canvas, 100, 20, 220, 220);
         let curr = crop_xy(&canvas, 100, 58, 220, 220);
         let config = FastHnswConfig::default();
-        let outcome =
-            fast_hnsw_candidates(&prev, &curr, Some(ScrollAxis::Horizontal), &config);
+        let outcome = fast_hnsw_candidates(&prev, &curr, Some(ScrollAxis::Horizontal), &config);
         assert!(
             matches!(
                 outcome,
