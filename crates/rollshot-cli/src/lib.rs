@@ -3,6 +3,7 @@ pub mod cli_error;
 pub mod cmd_capture;
 pub mod cmd_probe;
 pub mod cmd_stitch_folder;
+mod frame_slot;
 
 use clap::Parser;
 
