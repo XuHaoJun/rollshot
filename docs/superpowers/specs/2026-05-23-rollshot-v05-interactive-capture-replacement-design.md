@@ -327,24 +327,70 @@ For frontend changes, use the package manager selected by the app scaffold and p
 
 ---
 
-## 10. Milestones
+## 10. Implementation Plan Strategy
 
-### Milestone 1: Launcher and Tauri scaffold
+Implementation must be split into three separate plan documents. Do not collapse this spec into one large implementation plan.
+
+Each plan must produce working, testable software on its own, and the next plan should be written only after the previous plan is implemented and verified. This matters because the GUI/portal/HiDPI behavior in Plan 2 can change the exact session-state details needed by Plan 3.
+
+### Plan 1: CLI Launcher and Headless Split
+
+Scope:
+
+- change `rollshot capture` into the interactive entrypoint
+- add `rollshot capture --headless`
+- make `--output` required only for headless mode
+- add GUI launcher discovery/spawn behavior
+- preserve existing headless capture behavior and tests
+
+Do not build the Tauri UI in this plan.
+
+### Plan 2: Tauri App Scaffold, Live Preview, and Region Selection
+
+Scope:
+
+- convert `rollshot-app` from placeholder to Tauri v2 app
+- wire React frontend scaffold
+- call capture backend from Tauri commands
+- display bounded-cadence live preview
+- implement source-pixel region selection and HiDPI tests
+
+Do not implement full stitching lifecycle in this plan.
+
+### Plan 3: Interactive Stitch, Stop, Save, and Minimal Polish
+
+Scope:
+
+- crop selected region
+- run stitch loop under GUI session state
+- stop on user action
+- keep final image in backend state
+- save PNG
+- add only the minimal polish needed to complete and verify the workflow
+
+Plan 3 may include the conservative full-screen Linux fallback if Plan 2 proves it is needed.
+
+---
+
+## 11. Milestones
+
+### Milestone 1: Launcher and headless split
 
 Goal: `rollshot capture` launches `rollshot-app`; `--headless` still runs current CLI flow.
 
 Verification:
 
 - CLI tests cover `--output` and `--headless` behavior.
-- `rollshot-app` builds as a Tauri app.
 - launcher failures are clear.
+- existing headless capture tests still pass.
 
-### Milestone 2: Live preview and region selection
+### Milestone 2: Tauri scaffold, live preview, and region selection
 
 Goal: GUI starts capture backend, receives frames, displays preview, and returns a valid source-pixel region.
 
 Verification:
 
+- `rollshot-app` builds as a Tauri app.
 - KDE 6 Wayland manual test sees live frame.
 - HiDPI region conversion is tested.
 - no stitching starts before region confirmation.
@@ -382,7 +428,7 @@ Not included:
 
 ---
 
-## 11. Differences From The Previous Spec
+## 12. Differences From The Previous Spec
 
 This replacement keeps the previous spec's main product direction but changes the design discipline:
 
@@ -392,4 +438,4 @@ This replacement keeps the previous spec's main product direction but changes th
 4. shadcn/Tailwind are scaffold preferences, not architecture constraints.
 5. Frame IPC starts with binary ArrayBuffer and defers SharedBuffer until measured need.
 6. Linux full-screen capture is a risk path with a fallback, not the baseline UX.
-7. Implementation milestones are separated from speculative polish.
+7. Implementation is explicitly split into three plan documents with verification between plans.
