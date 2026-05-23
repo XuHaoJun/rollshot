@@ -15,6 +15,7 @@ use crate::types::{
 };
 
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 fn rgba_to_gray(img: &RgbaImage) -> GrayImage {
     image::imageops::grayscale(img)
@@ -228,6 +229,97 @@ fn euclidean_distance(a: &[f32; 8], b: &[f32; 8]) -> f32 {
         sum += d * d;
     }
     sum.sqrt()
+}
+
+/// Bucket-vote translation summary.
+///
+/// Returns `(dx, dy, inliers, raw_matches, residual_px)` where:
+/// - `(dx, dy)` is the median translation within the winning bucket
+/// - `inliers` is the count of matches in the winning bucket
+/// - `raw_matches` is the total number of input matches (before
+///   cross-axis filtering)
+/// - `residual_px` is the median Euclidean distance of inliers from
+///   the winning (dx, dy) — fed into `feature_score` per the spec
+fn vote_dominant_translation(
+    prev_corners: &[(u32, u32)],
+    curr_corners: &[(u32, u32)],
+    matches: &[[usize; 2]],
+    locked_axis: Option<ScrollAxis>,
+    config: &FastHnswConfig,
+) -> Option<(i32, i32, usize, usize, f32)> {
+    let raw_matches = matches.len();
+    if raw_matches == 0 {
+        return None;
+    }
+    let translations: Vec<(i32, i32)> = matches
+        .iter()
+        .filter_map(|&[curr_idx, prev_idx]| {
+            let (cx, cy) = curr_corners.get(curr_idx)?;
+            let (px, py) = prev_corners.get(prev_idx)?;
+            let dx = *px as i32 - *cx as i32;
+            let dy = *py as i32 - *cy as i32;
+            match locked_axis {
+                Some(ScrollAxis::Vertical) if dx.abs() > config.cross_axis_tolerance => None,
+                Some(ScrollAxis::Horizontal) if dy.abs() > config.cross_axis_tolerance => None,
+                _ => Some((dx, dy)),
+            }
+        })
+        .collect();
+    if translations.is_empty() {
+        return None;
+    }
+    let mut buckets: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
+    for &(dx, dy) in &translations {
+        let key = (dx / 4, dy / 4);
+        if key == (0, 0) {
+            continue;
+        }
+        buckets.entry(key).or_default().push((dx, dy));
+    }
+    let mut best: Option<(usize, Vec<(i32, i32)>)> = None;
+    for (_, bucket) in buckets {
+        let len = bucket.len();
+        if best.as_ref().map(|(n, _)| len > *n).unwrap_or(true) {
+            best = Some((len, bucket));
+        }
+    }
+    let (_, bucket) = best?;
+    let inliers = bucket.len();
+    if inliers < config.min_inliers {
+        return None;
+    }
+    let mut dxs: Vec<i32> = bucket.iter().map(|(dx, _)| *dx).collect();
+    let mut dys: Vec<i32> = bucket.iter().map(|(_, dy)| *dy).collect();
+    dxs.sort_unstable();
+    dys.sort_unstable();
+    let dx_median = dxs[dxs.len() / 2];
+    let dy_median = dys[dys.len() / 2];
+    let residual_px = compute_median_residual(&bucket, dx_median, dy_median);
+    Some((dx_median, dy_median, inliers, raw_matches, residual_px))
+}
+
+/// Median Euclidean distance between each `(tx, ty)` translation and
+/// the winning `(dx, dy)`. Drives the `residual_term` of
+/// `feature_score`.
+fn compute_median_residual(translations: &[(i32, i32)], dx: i32, dy: i32) -> f32 {
+    if translations.is_empty() {
+        return 0.0;
+    }
+    let mut residuals: Vec<f32> = translations
+        .iter()
+        .map(|&(tx, ty)| {
+            let ex = (tx - dx) as f32;
+            let ey = (ty - dy) as f32;
+            (ex * ex + ey * ey).sqrt()
+        })
+        .collect();
+    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = residuals.len() / 2;
+    if residuals.len() % 2 == 0 {
+        (residuals[mid - 1] + residuals[mid]) * 0.5
+    } else {
+        residuals[mid]
+    }
 }
 
 /// FAST corners + linear KNN matching. The "Hnsw" in the name is
@@ -483,5 +575,55 @@ mod tests {
         let curr = [[0.0; 8]];
         let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
         assert_eq!(pairs, vec![[0usize, 0usize]]);
+    }
+
+    #[test]
+    fn vote_dominant_translation_picks_majority_bucket() {
+        let prev = vec![(0u32, 0u32); 6];
+        let curr = vec![
+            (0u32, 40u32),
+            (0, 41),
+            (0, 39),
+            (0, 40),
+            (0, 42),
+            (0, 100),
+        ];
+        let matches: Vec<[usize; 2]> = (0..6).map(|i| [i, i]).collect();
+        let mut cfg = FastHnswConfig::default();
+        cfg.min_inliers = 4;
+        let result = vote_dominant_translation(&prev, &curr, &matches, None, &cfg);
+        let (dx, dy, inliers, raw, residual_px) = result.expect("dominant translation");
+        assert_eq!(dx, 0);
+        assert!(dy >= -42 && dy <= -39, "dy = {dy}");
+        assert!(inliers >= 4, "inliers = {inliers}");
+        assert_eq!(raw, 6);
+        assert!(
+            residual_px <= 2.0,
+            "residual_px = {residual_px}"
+        );
+    }
+
+    #[test]
+    fn vote_dominant_translation_rejects_zero_zero_bucket() {
+        let prev = vec![(10u32, 20u32), (30, 40), (50, 60)];
+        let curr = vec![(10u32, 20u32), (30, 40), (50, 60)];
+        let matches = vec![[0, 0], [1, 1], [2, 2]];
+        let cfg = FastHnswConfig::default();
+        assert!(
+            vote_dominant_translation(&prev, &curr, &matches, None, &cfg).is_none()
+        );
+    }
+
+    #[test]
+    fn vote_dominant_translation_respects_locked_vertical_axis() {
+        let prev = vec![(0u32, 0u32), (0, 10), (0, 20)];
+        let curr = vec![(50u32, 0u32), (50, 10), (50, 20)];
+        let matches = vec![[0, 0], [1, 1], [2, 2]];
+        let cfg = FastHnswConfig::default();
+        assert!(
+            vote_dominant_translation(&prev, &curr, &matches, Some(ScrollAxis::Vertical), &cfg)
+                .is_none(),
+            "vertical lock must reject cross-axis-only matches"
+        );
     }
 }
