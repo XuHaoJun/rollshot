@@ -1,7 +1,9 @@
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 
-use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
+use crate::feature_matcher::{
+    feature_fallback_candidates, FeatureFallbackOutcome, FeatureSource,
+};
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::overlap::compute_overlap;
 use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
@@ -207,25 +209,38 @@ pub(crate) fn estimate_motion(
         return MotionSearchOutcome::Candidate(candidate);
     }
 
-    match akaze_candidates(prev, curr, &config.akaze) {
-        AkazeCandidateOutcome::Disabled => MotionSearchOutcome::NoMatch {
-            reason: NoMatchReason::AkazeDisabled,
+    match feature_fallback_candidates(prev, curr, locked_axis, config) {
+        FeatureFallbackOutcome::Disabled => MotionSearchOutcome::NoMatch {
+            reason: NoMatchReason::FeatureFallbackDisabled,
             best_candidate: None,
         },
-        AkazeCandidateOutcome::NotEnoughFeatures { .. } => MotionSearchOutcome::NoMatch {
+        FeatureFallbackOutcome::NotEnoughFeatures { .. } => MotionSearchOutcome::NoMatch {
             reason: NoMatchReason::NotEnoughFeatures,
             best_candidate: None,
         },
-        AkazeCandidateOutcome::NotEnoughMatches { .. } => MotionSearchOutcome::NoMatch {
-            reason: NoMatchReason::AkazeLowInliers,
-            best_candidate: None,
-        },
-        AkazeCandidateOutcome::Candidates(akaze_candidates) => {
-            let best = akaze_candidates.first().copied();
-            match rank_verified_candidates(prev, curr, locked_axis, akaze_candidates, config) {
+        FeatureFallbackOutcome::NotEnoughMatches { raw_matches: _, source } => {
+            let reason = match source {
+                FeatureSource::FastHnsw => NoMatchReason::FeatureLowInliers,
+                FeatureSource::Akaze => NoMatchReason::AkazeLowInliers,
+            };
+            MotionSearchOutcome::NoMatch {
+                reason,
+                best_candidate: None,
+            }
+        }
+        FeatureFallbackOutcome::Candidates {
+            candidates,
+            source,
+        } => {
+            let best = candidates.first().copied();
+            let reason = match source {
+                FeatureSource::FastHnsw => NoMatchReason::FeatureLowInliers,
+                FeatureSource::Akaze => NoMatchReason::AkazeLowInliers,
+            };
+            match rank_verified_candidates(prev, curr, locked_axis, candidates, config) {
                 Some(candidate) => MotionSearchOutcome::Candidate(candidate),
                 None => MotionSearchOutcome::NoMatch {
-                    reason: NoMatchReason::AkazeLowInliers,
+                    reason,
                     best_candidate: best,
                 },
             }
