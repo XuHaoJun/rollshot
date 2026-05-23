@@ -254,7 +254,14 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
         }
     }
 
-    let summary = compute_summary(&report, appended, duplicates, no_match, no_progress, pacing_skipped);
+    let summary = compute_summary(
+        &report,
+        appended,
+        duplicates,
+        no_match,
+        no_progress,
+        pacing_skipped,
+    );
     print_diagnostics_summary(&summary, args.quiet);
     report.summary = Some(summary);
 
