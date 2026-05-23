@@ -79,6 +79,12 @@ pub struct CaptureArgs {
     /// miss; disabling is for benchmarking / debugging the matcher path.
     #[arg(long, default_value_t = false)]
     pub disable_feature_fallback: bool,
+
+    /// Minimum milliseconds between processed frames. Frames arriving
+    /// sooner are skipped. Helps maintain stitchable overlap during fast
+    /// scrolling. 0 disables pacing (default).
+    #[arg(long, default_value_t = 0)]
+    pub min_interval_ms: u64,
 }
 
 #[derive(Debug, clap::Args)]

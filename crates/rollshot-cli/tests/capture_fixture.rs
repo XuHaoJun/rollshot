@@ -309,3 +309,158 @@ fn rollshot_capture_quiet_suppresses_progress_stderr() {
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
+
+#[test]
+fn rollshot_capture_fixture_prints_diagnostics_summary() {
+    let tempdir = temp_dir("diagnostics-summary");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
+    assert!(
+        stderr.contains("capture_interval_ms"),
+        "stderr should contain capture_interval_ms: {stderr}"
+    );
+    assert!(
+        stderr.contains("max_accepted_dy"),
+        "stderr should contain max_accepted_dy: {stderr}"
+    );
+    assert!(
+        stderr.contains("longest_no_match_run"),
+        "stderr should contain longest_no_match_run: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn rollshot_capture_quiet_suppresses_diagnostics() {
+    let tempdir = temp_dir("diagnostics-quiet");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .arg("--quiet")
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
+    assert!(
+        !stderr.contains("capture_interval_ms"),
+        "stderr should NOT contain diagnostics when --quiet: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn rollshot_capture_pacing_skips_fast_frames() {
+    let tempdir = temp_dir("pacing-skip");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--min-interval-ms", "1000"])
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(
+        stdout.contains("captured 4 frames"),
+        "all frames should be captured from stream; stdout = {stdout}"
+    );
+    assert!(
+        stdout.contains("pacing-skipped"),
+        "should report pacing skips; stdout = {stdout}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
+    assert!(
+        stderr.contains("pacing_skipped"),
+        "diagnostics should report pacing skips; stderr = {stderr}"
+    );
+    assert!(
+        stderr.contains("PacingSkipped"),
+        "per-frame progress should show PacingSkipped; stderr = {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn rollshot_capture_pacing_zero_means_no_skip() {
+    let tempdir = temp_dir("pacing-zero");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+    write_scroll_fixture(&frames_dir);
+
+    let output_png = tempdir.join("stitched.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("capture")
+        .args(["--backend", "fixture"])
+        .args(["--fixture"])
+        .arg(&frames_dir)
+        .args(["--output"])
+        .arg(&output_png)
+        .args(["--min-interval-ms", "0"])
+        .output()
+        .expect("run rollshot capture");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(
+        stdout.contains("appended 3"),
+        "all scrollable frames should stitch normally; stdout = {stdout}"
+    );
+}
