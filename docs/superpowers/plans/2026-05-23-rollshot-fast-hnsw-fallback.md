@@ -66,6 +66,7 @@ In the `MatchMethod` enum:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MatchMethod {
     Template,
     Coarse,
@@ -79,10 +80,12 @@ pub enum MatchMethod {
 }
 ```
 
-In the `NoMatchReason` enum, add two variants (preserve `#[non_exhaustive]`):
+In the `NoMatchReason` enum, add `#[non_exhaustive]` if needed and add
+two variants:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NoMatchReason {
     // ... existing variants unchanged ...
     AkazeDisabled,
@@ -569,6 +572,14 @@ Append to the `#[cfg(test)] mod tests` block in `feature_matcher.rs`:
         let corners = extract_corners(&gray, 16, 50); // low threshold = many corners
         assert!(corners.len() <= 50, "got {}", corners.len());
     }
+
+    #[test]
+    fn extract_corners_returns_empty_when_max_features_is_zero() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        let corners = extract_corners(&gray, 64, 0);
+        assert!(corners.is_empty(), "got {}", corners.len());
+    }
 ```
 
 - [ ] **Step 2: Run, expect compile failure**
@@ -590,7 +601,7 @@ fn extract_corners(gray: &GrayImage, threshold: u8, max_features: usize) -> Vec<
     // FAST needs at least a 16-pixel ring around each candidate. Guard
     // against pathological inputs so imageproc never sees < 16 px
     // dimensions.
-    if gray.width() < 16 || gray.height() < 16 {
+    if max_features == 0 || gray.width() < 16 || gray.height() < 16 {
         return Vec::new();
     }
     let fast12 = corners::corners_fast12(gray, threshold);
@@ -977,6 +988,31 @@ EOF
     }
 
     #[test]
+    fn vote_dominant_translation_rejects_ambiguous_runner_up_bucket() {
+        let prev = vec![(0u32, 0u32); 7];
+        let curr = vec![
+            (0u32, 40u32),
+            (0, 40),
+            (0, 40),
+            (0, 40),
+            (0, 80),
+            (0, 80),
+            (0, 80),
+        ];
+        let matches: Vec<[usize; 2]> = (0..7).map(|i| [i, i]).collect();
+        let cfg = FastHnswConfig {
+            min_inliers: 3,
+            second_best_ratio: 2.0,
+            ..Default::default()
+        };
+
+        assert!(
+            vote_dominant_translation(&prev, &curr, &matches, None, &cfg).is_none(),
+            "4 votes vs 3 votes must fail the 2.0 second-best ratio"
+        );
+    }
+
+    #[test]
     fn vote_dominant_translation_respects_locked_vertical_axis() {
         // All matches drift horizontally (dx > tolerance, dy = 0).
         let prev = vec![(0u32, 0u32), (0, 10), (0, 20)];
@@ -1054,14 +1090,19 @@ fn vote_dominant_translation(
         }
         buckets.entry(key).or_default().push((dx, dy));
     }
-    let mut best: Option<(usize, Vec<(i32, i32)>)> = None;
-    for (_, bucket) in buckets {
-        let len = bucket.len();
-        if best.as_ref().map(|(n, _)| len > *n).unwrap_or(true) {
-            best = Some((len, bucket));
-        }
+    type TranslationBucket = ((i32, i32), Vec<(i32, i32)>);
+    let mut buckets: Vec<TranslationBucket> = buckets.into_iter().collect();
+    buckets.sort_by(|(a_key, a_bucket), (b_key, b_bucket)| {
+        b_bucket
+            .len()
+            .cmp(&a_bucket.len())
+            .then_with(|| a_key.cmp(b_key))
+    });
+    let (_, bucket) = buckets.first()?;
+    let second_best = buckets.get(1).map(|(_, bucket)| bucket.len()).unwrap_or(0);
+    if second_best > 0 && (bucket.len() as f32) < (second_best as f32 * config.second_best_ratio) {
+        return None;
     }
-    let (_, bucket) = best?;
     let inliers = bucket.len();
     if inliers < config.min_inliers {
         return None;
@@ -1072,7 +1113,7 @@ fn vote_dominant_translation(
     dys.sort_unstable();
     let dx_median = dxs[dxs.len() / 2];
     let dy_median = dys[dys.len() / 2];
-    let residual_px = compute_median_residual(&bucket, dx_median, dy_median);
+    let residual_px = compute_median_residual(bucket, dx_median, dy_median);
     Some((dx_median, dy_median, inliers, raw_matches, residual_px))
 }
 

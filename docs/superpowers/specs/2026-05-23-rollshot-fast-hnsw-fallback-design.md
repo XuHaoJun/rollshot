@@ -28,8 +28,9 @@ capture backends, canvas topology, and Stitcher state are untouched.
 - Keep AKAZE compiled and runtime-switchable via `--enable-akaze` for
   parity validation and rollback. Emit a deprecation warning when used.
 - Keep the public `Stitcher` API and `StitchOutcome` variants identical;
-  add new `NoMatchReason` and `MatchMethod` variants only (the enums are
-  already `#[non_exhaustive]`, so this does not break callers).
+  mark `NoMatchReason` and `MatchMethod` `#[non_exhaustive]` and add the
+  new variants only, so downstream exhaustive matches get the normal
+  non-exhaustive guardrail instead of a silent future break.
 - Mirror the existing `AkazeConfig` + `AkazeCandidateOutcome` shape so
   the AKAZE removal in a future release is a delete-only change.
 - Land with unit, integration, and CLI smoke tests at parity with the
@@ -222,6 +223,7 @@ Approaches Considered).
 ### Updates to existing types (`types.rs`)
 
 ```rust
+#[non_exhaustive]
 pub enum MatchMethod {
     Template,
     Coarse,
@@ -293,12 +295,17 @@ Key invariants:
 - Descriptor computation skips corners whose patch reaches outside the
   image; no clamping, no panics. This is checked in
   `fast_hnsw_candidates_skips_edge_corners` (see Tests).
+- `extract_corners` returns empty when `max_features == 0`; public config
+  values must not be able to trigger divide-by-zero panics.
 - `linear_knn_match` returns empty (not `None`) when either side is
   empty after corner extraction.
 - `vote_dominant_translation` rejects the `(0, 0)` bucket so trivial
   no-motion cases cannot vote themselves into the winning bucket. (A
   zero-motion frame is filtered earlier by `Stitcher::is_duplicate`,
   but the matcher must still be defensive.)
+- `vote_dominant_translation` rejects ambiguous winners unless the
+  winning bucket has at least `second_best_ratio` times the runner-up
+  bucket's votes.
 
 ## Error Handling and Outcome Mapping
 
@@ -347,6 +354,8 @@ Mirrors `akaze_matcher::tests`.
 | `fast_hnsw_candidates_respects_locked_vertical_axis` | `locked_axis = Some(Vertical)`, only-horizontal-offset input → `NotEnoughMatches`. |
 | `fast_hnsw_candidates_respects_locked_horizontal_axis` | Symmetric to above. |
 | `fast_hnsw_candidates_skips_edge_corners` | Corner adjacent to the image boundary does not panic; descriptor either omits or zeros it (test asserts a value, the spec accepts either as long as no panic). |
+| `extract_corners_returns_empty_when_max_features_is_zero` | Public `FastHnswConfig { max_features: 0, .. }` cannot trigger a divide-by-zero panic. |
+| `vote_dominant_translation_rejects_ambiguous_runner_up_bucket` | A near-tied runner-up bucket fails `second_best_ratio` instead of accepting an arbitrary `HashMap` winner. |
 | `fast_hnsw_score_matches_akaze_default_accept_confidence` | Healthy inlier ratio → score below `StitchConfig::default().accept_confidence`. |
 
 ### Layer 2 — `crates/rollshot-core/tests/stitcher.rs`
