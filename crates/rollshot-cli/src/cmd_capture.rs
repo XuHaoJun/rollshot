@@ -284,11 +284,15 @@ fn stitch_loop(
                         frame_report.estimate = Some(estimate_report(estimate));
                     }
                 }
+                let contributes = matches!(
+                    outcome,
+                    StitchOutcome::FirstFrame | StitchOutcome::Appended { .. }
+                );
                 report.frames.push(frame_report);
                 if !quiet {
                     log_capture_progress(captured, max_frames, &outcome, stitch_elapsed);
                 }
-                if captured >= max_frames {
+                if contributes && captured >= max_frames {
                     break;
                 }
             }
