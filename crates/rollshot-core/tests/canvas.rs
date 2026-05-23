@@ -13,17 +13,13 @@ fn vertical_down_pipeline_grows_canvas_downward() {
     let mut canvas = LinearCanvas::new(f0);
     assert_eq!(canvas.height(), 320);
 
-    let added1 = canvas
-        .append(AppendDirection::Bottom, &f1, 80, None)
-        .unwrap();
+    let added1 = canvas.append(AppendDirection::Bottom, &f1, 80).unwrap();
     assert_eq!(added1, 80);
     assert_eq!(canvas.axis(), Some(ScrollAxis::Vertical));
     assert_eq!(canvas.height(), 400);
     assert_eq!(canvas.width(), 320);
 
-    let added2 = canvas
-        .append(AppendDirection::Bottom, &f2, 80, None)
-        .unwrap();
+    let added2 = canvas.append(AppendDirection::Bottom, &f2, 80).unwrap();
     assert_eq!(added2, 80);
     assert_eq!(canvas.height(), 480);
 }
@@ -36,11 +32,11 @@ fn vertical_up_pipeline_grows_canvas_upward() {
     let f2 = crop_frame_xy(&canvas_src, 0, 640, 320, 320);
 
     let mut canvas = LinearCanvas::new(f0);
-    let added1 = canvas.append(AppendDirection::Top, &f1, 80, None).unwrap();
+    let added1 = canvas.append(AppendDirection::Top, &f1, 80).unwrap();
     assert_eq!(added1, 80);
     assert_eq!(canvas.axis(), Some(ScrollAxis::Vertical));
 
-    let added2 = canvas.append(AppendDirection::Top, &f2, 80, None).unwrap();
+    let added2 = canvas.append(AppendDirection::Top, &f2, 80).unwrap();
     assert_eq!(added2, 80);
     assert_eq!(canvas.height(), 480);
     assert_eq!(canvas.width(), 320);
@@ -54,15 +50,11 @@ fn horizontal_right_pipeline_grows_canvas_rightward() {
     let f2 = crop_frame_xy(&canvas_src, 160, 0, 320, 320);
 
     let mut canvas = LinearCanvas::new(f0);
-    let added1 = canvas
-        .append(AppendDirection::Right, &f1, 80, None)
-        .unwrap();
+    let added1 = canvas.append(AppendDirection::Right, &f1, 80).unwrap();
     assert_eq!(added1, 80);
     assert_eq!(canvas.axis(), Some(ScrollAxis::Horizontal));
 
-    let added2 = canvas
-        .append(AppendDirection::Right, &f2, 80, None)
-        .unwrap();
+    let added2 = canvas.append(AppendDirection::Right, &f2, 80).unwrap();
     assert_eq!(added2, 80);
     assert_eq!(canvas.width(), 480);
     assert_eq!(canvas.height(), 320);
@@ -76,11 +68,11 @@ fn horizontal_left_pipeline_grows_canvas_leftward() {
     let f2 = crop_frame_xy(&canvas_src, 640, 0, 320, 320);
 
     let mut canvas = LinearCanvas::new(f0);
-    let added1 = canvas.append(AppendDirection::Left, &f1, 80, None).unwrap();
+    let added1 = canvas.append(AppendDirection::Left, &f1, 80).unwrap();
     assert_eq!(added1, 80);
     assert_eq!(canvas.axis(), Some(ScrollAxis::Horizontal));
 
-    let added2 = canvas.append(AppendDirection::Left, &f2, 80, None).unwrap();
+    let added2 = canvas.append(AppendDirection::Left, &f2, 80).unwrap();
     assert_eq!(added2, 80);
     assert_eq!(canvas.width(), 480);
     assert_eq!(canvas.height(), 320);
@@ -93,14 +85,12 @@ fn switching_axis_mid_stitch_is_rejected() {
     let f1 = crop_frame_xy(&canvas_src, 0, 80, 320, 320);
 
     let mut canvas = LinearCanvas::new(f0);
-    canvas
-        .append(AppendDirection::Bottom, &f1, 80, None)
-        .unwrap();
+    canvas.append(AppendDirection::Bottom, &f1, 80).unwrap();
 
     let wide = make_wide_canvas(1200, 320);
     let frame_right = crop_frame_xy(&wide, 80, 0, 320, 320);
     let err = canvas
-        .append(AppendDirection::Right, &frame_right, 80, None)
+        .append(AppendDirection::Right, &frame_right, 80)
         .unwrap_err();
     use rollshot_core::CanvasAppendError;
     assert_eq!(
