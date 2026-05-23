@@ -99,10 +99,7 @@ fn capture_interactive_forwards_app_failure() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("exited with status"),
-        "stderr = {stderr}"
-    );
+    assert!(stderr.contains("exited with status"), "stderr = {stderr}");
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }

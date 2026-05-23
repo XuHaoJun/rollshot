@@ -2030,6 +2030,8 @@ dependencies = [
  "image",
  "nix",
  "pipewire",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "zed-scap",
