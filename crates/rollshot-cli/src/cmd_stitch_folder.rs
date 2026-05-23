@@ -168,7 +168,14 @@ pub fn run(args: &StitchFolderArgs) -> Result<String, CliError> {
     }
 
     let mut config = StitchConfig::default();
+    if args.disable_feature_fallback {
+        config.fast_hnsw.enabled = false;
+    }
     if args.enable_akaze {
+        eprintln!(
+            "warning: --enable-akaze is deprecated and will be removed in \
+             a future release; FAST+KNN is the default feature fallback"
+        );
         config.akaze.enabled = true;
     }
     let mut stitcher = Stitcher::new(config);
