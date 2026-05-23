@@ -187,6 +187,26 @@ pub(crate) fn estimate_motion(
         return MotionSearchOutcome::Candidate(candidate);
     }
 
+    // Relaxed coarse pass: standard coarse search is bounded by
+    // `max_search_ratio` (≈0.4 of the frame); a single fast scroll can jump
+    // farther than that and miss every regular matcher. Before falling back
+    // to AKAZE (~2s on a 2560-wide frame), retry coarse with the ratio
+    // pushed near the geometric ceiling so we can recover the candidate
+    // through the same downsampled MAD path used in steady-state.
+    if let Some(candidate) = relaxed_coarse_candidate(
+        prev,
+        curr,
+        &prev_gray,
+        &curr_gray,
+        width,
+        height,
+        locked_axis,
+        last_motion,
+        config,
+    ) {
+        return MotionSearchOutcome::Candidate(candidate);
+    }
+
     match akaze_candidates(prev, curr, &config.akaze) {
         AkazeCandidateOutcome::Disabled => MotionSearchOutcome::NoMatch {
             reason: NoMatchReason::AkazeDisabled,
@@ -211,6 +231,60 @@ pub(crate) fn estimate_motion(
             }
         }
     }
+}
+
+const RELAXED_SEARCH_RATIO: f32 = 0.85;
+
+#[allow(clippy::too_many_arguments)]
+fn relaxed_coarse_candidate(
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    locked_axis: Option<ScrollAxis>,
+    last_motion: (i32, i32),
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    // No point retrying if the standard pass already searches near the
+    // geometric ceiling.
+    if config.max_search_ratio >= RELAXED_SEARCH_RATIO - 0.05 {
+        return None;
+    }
+
+    let mut relaxed_cfg = config.clone();
+    relaxed_cfg.max_search_ratio = RELAXED_SEARCH_RATIO;
+
+    let coarse = coarse_candidates(
+        prev_gray,
+        curr_gray,
+        width,
+        height,
+        locked_axis,
+        &relaxed_cfg,
+    );
+    if coarse.is_empty() {
+        return None;
+    }
+
+    // Coarse is stride-8 in sample space (32 px in pixel space) — too coarse
+    // to pass the verifier on its own. Use it to seed a relaxed template
+    // refinement, which lands on a single-pixel offset that the verifier can
+    // accept on the same min_overlap budget.
+    let mut candidates = coarse.clone();
+    candidates.extend(template_candidates(
+        prev_gray,
+        curr_gray,
+        width,
+        height,
+        locked_axis,
+        last_motion,
+        &coarse,
+        &relaxed_cfg,
+    ));
+
+    rank_verified_candidates(prev, curr, locked_axis, candidates, config)
 }
 
 fn rank_verified_candidates(

@@ -79,6 +79,40 @@ fn duplicate_frame_returns_duplicate_without_growing() {
 }
 
 #[test]
+fn fast_scroll_beyond_default_search_ratio_recovers_via_relaxed_pass() {
+    // The default `max_search_ratio` (0.4) only reaches ~128 px on a
+    // 320-tall frame. A 200 px scroll lands outside that envelope, so
+    // every regular matcher misses. The relaxed coarse pass widens the
+    // ratio to ~0.85 (≈272 px), which must recover the offset without
+    // AKAZE — the latter is disabled by default after Phase 1 of the
+    // overlap-stitch performance work.
+    let canvas = make_scroll_canvas(320, 1200);
+    let first = crop_frame(&canvas, 0, 320);
+    let scrolled = crop_frame(&canvas, 200, 320);
+
+    let config = StitchConfig::default();
+    assert!(!config.akaze.enabled, "AKAZE must stay off for this test");
+    let mut stitcher = Stitcher::new(config);
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert_eq!(estimate.axis, ScrollAxis::Vertical);
+            assert!(
+                (192..=208).contains(&added),
+                "added = {added} (expected ~200 via relaxed coarse)"
+            );
+        }
+        other => panic!("expected Appended via relaxed coarse, got {other:?}"),
+    }
+}
+
+#[test]
 fn normal_scroll_appends_bottom_and_locks_vertical_axis() {
     let canvas = make_scroll_canvas(320, 1200);
     let first = crop_frame(&canvas, 0, 320);
