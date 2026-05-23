@@ -1,0 +1,242 @@
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
+
+use rollshot_capture::InteractiveLaunchOptions;
+
+use crate::args::CaptureArgs;
+use crate::cli_error::CliError;
+
+const APP_ENV: &str = "ROLLSHOT_APP";
+
+pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
+    reject_headless_only_flags(args)?;
+
+    let options = launch_options(args);
+    let app_path = resolve_app_binary()?;
+    let mut command = Command::new(&app_path);
+    command.args(app_args(&options)?);
+
+    let status = command.status().map_err(|err| {
+        CliError::new(format!("failed to launch {}: {err}", app_path.display()), 1)
+    })?;
+
+    if status.success() {
+        Ok(String::new())
+    } else {
+        Err(CliError::new(
+            format!(
+                "{} exited with status {}",
+                app_path.display(),
+                status_label(status)
+            ),
+            status
+                .code()
+                .and_then(|code| u8::try_from(code).ok())
+                .unwrap_or(1),
+        ))
+    }
+}
+
+fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
+    InteractiveLaunchOptions {
+        backend: args.backend.clone(),
+        fps: args.fps,
+        show_cursor: args.show_cursor,
+    }
+}
+
+fn app_args(options: &InteractiveLaunchOptions) -> Result<Vec<OsString>, CliError> {
+    let payload = serde_json::to_string(options)
+        .map_err(|err| CliError::new(format!("failed to encode GUI launch options: {err}"), 1))?;
+    Ok(vec![OsString::from("--capture"), OsString::from(payload)])
+}
+
+fn reject_headless_only_flags(args: &CaptureArgs) -> Result<(), CliError> {
+    let mut rejected = Vec::new();
+
+    if args.output.is_some() {
+        rejected.push("--output");
+    }
+    if args.region != "auto" {
+        rejected.push("--region");
+    }
+    if args.fixture.is_some() {
+        rejected.push("--fixture");
+    }
+    if args.dump_frames.is_some() {
+        rejected.push("--dump-frames");
+    }
+    if args.debug_match_report.is_some() {
+        rejected.push("--debug-match-report");
+    }
+    if args.max_frames != 200 {
+        rejected.push("--max-frames");
+    }
+    if args.quiet {
+        rejected.push("--quiet");
+    }
+    if args.enable_akaze {
+        rejected.push("--enable-akaze");
+    }
+    if args.disable_feature_fallback {
+        rejected.push("--disable-feature-fallback");
+    }
+
+    if rejected.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            format!(
+                "the following flags are only supported with --headless: {}",
+                rejected.join(", ")
+            ),
+            1,
+        ))
+    }
+}
+
+fn resolve_app_binary() -> Result<PathBuf, CliError> {
+    let current_exe = std::env::current_exe()
+        .map_err(|err| CliError::new(format!("failed to locate rollshot binary: {err}"), 1))?;
+    resolve_app_binary_from_env_and_exe(std::env::var_os(APP_ENV), &current_exe)
+}
+
+fn resolve_app_binary_from_env_and_exe(
+    env_path: Option<OsString>,
+    current_exe: &Path,
+) -> Result<PathBuf, CliError> {
+    if let Some(path) = env_path {
+        if path.is_empty() {
+            return Err(CliError::new(
+                format!("{APP_ENV} is set but empty; expected path to rollshot-app"),
+                1,
+            ));
+        }
+        return Ok(PathBuf::from(path));
+    }
+
+    let bin_dir = current_exe.parent().ok_or_else(|| {
+        CliError::new(
+            format!(
+                "failed to locate {} next to rollshot",
+                default_app_binary_name()
+            ),
+            1,
+        )
+    })?;
+    Ok(bin_dir.join(default_app_binary_name()))
+}
+
+#[cfg(windows)]
+fn default_app_binary_name() -> &'static str {
+    "rollshot-app.exe"
+}
+
+#[cfg(not(windows))]
+fn default_app_binary_name() -> &'static str {
+    "rollshot-app"
+}
+
+fn status_label(status: ExitStatus) -> String {
+    status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        app_args, launch_options, reject_headless_only_flags, resolve_app_binary_from_env_and_exe,
+    };
+    use crate::args::CaptureArgs;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    fn base_args() -> CaptureArgs {
+        CaptureArgs {
+            headless: false,
+            backend: "linux-portal".to_string(),
+            region: "auto".to_string(),
+            output: None,
+            fixture: None,
+            dump_frames: None,
+            debug_match_report: None,
+            max_frames: 200,
+            fps: 7,
+            show_cursor: true,
+            quiet: false,
+            enable_akaze: false,
+            disable_feature_fallback: false,
+        }
+    }
+
+    #[test]
+    fn launch_options_keep_only_interactive_fields() {
+        let args = base_args();
+        let options = launch_options(&args);
+
+        assert_eq!(options.backend, "linux-portal");
+        assert_eq!(options.fps, 7);
+        assert!(options.show_cursor);
+    }
+
+    #[test]
+    fn app_args_include_capture_flag_and_json_payload() {
+        let args = base_args();
+        let options = launch_options(&args);
+
+        let app_args = app_args(&options).expect("build app args");
+        assert_eq!(app_args[0], OsString::from("--capture"));
+
+        let payload = app_args[1].to_string_lossy();
+        assert!(payload.contains("\"backend\":\"linux-portal\""));
+        assert!(payload.contains("\"fps\":7"));
+        assert!(payload.contains("\"show_cursor\":true"));
+    }
+
+    #[test]
+    fn reject_headless_only_flags_lists_all_rejected_flags() {
+        let mut args = base_args();
+        args.output = Some(PathBuf::from("out.png"));
+        args.region = "10,20 100x200".to_string();
+        args.fixture = Some(PathBuf::from("frames"));
+        args.dump_frames = Some(PathBuf::from("dump"));
+        args.debug_match_report = Some(PathBuf::from("report.json"));
+        args.max_frames = 10;
+        args.quiet = true;
+        args.enable_akaze = true;
+        args.disable_feature_fallback = true;
+
+        let err = reject_headless_only_flags(&args).expect_err("flags rejected");
+        assert!(err.message.contains("--headless"), "{}", err.message);
+        for flag in [
+            "--output",
+            "--region",
+            "--fixture",
+            "--dump-frames",
+            "--debug-match-report",
+            "--max-frames",
+            "--quiet",
+            "--enable-akaze",
+            "--disable-feature-fallback",
+        ] {
+            assert!(err.message.contains(flag), "{} missing {flag}", err.message);
+        }
+    }
+
+    #[test]
+    fn resolve_app_binary_prefers_env_override() {
+        let env_path = PathBuf::from("custom-rollshot-app");
+        let current_exe = Path::new("target/debug/rollshot");
+
+        let resolved = resolve_app_binary_from_env_and_exe(
+            Some(OsString::from(env_path.as_os_str())),
+            current_exe,
+        )
+        .expect("env override resolves");
+
+        assert_eq!(resolved, env_path);
+    }
+}
