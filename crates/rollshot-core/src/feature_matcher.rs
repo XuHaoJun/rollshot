@@ -322,21 +322,79 @@ fn compute_median_residual(translations: &[(i32, i32)], dx: i32, dy: i32) -> f32
     }
 }
 
-/// FAST corners + linear KNN matching. The "Hnsw" in the name is
-/// reserved for a future ANN upgrade — see
-/// docs/superpowers/specs/2026-05-23-rollshot-fast-hnsw-fallback-design.md
-/// Approach A. Current matching is exact linear scan.
+// Keep in sync with akaze_matcher::akaze_score (intentionally private
+// there). Same coefficients, same residual normalization, so AKAZE
+// and FAST+KNN scores are directly comparable against
+// `accept_confidence` and against each other. When AKAZE is removed,
+// fold this into a single shared helper.
+fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
+    let ratio_term = 1.0 - inlier_ratio.clamp(0.0, 1.0);
+    let residual_term = (residual_px / 4.0).clamp(0.0, 1.0);
+    (ratio_term * 0.08 + residual_term * 0.04).clamp(0.0, 1.0)
+}
+
 pub(crate) fn fast_hnsw_candidates(
-    _prev: &RgbaImage,
-    _curr: &RgbaImage,
-    _locked_axis: Option<ScrollAxis>,
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    locked_axis: Option<ScrollAxis>,
     config: &FastHnswConfig,
 ) -> FastHnswCandidateOutcome {
     if !config.enabled {
         return FastHnswCandidateOutcome::Disabled;
     }
-    // Real implementation lands in subsequent tasks.
-    FastHnswCandidateOutcome::Disabled
+    if prev.dimensions() != curr.dimensions() {
+        return FastHnswCandidateOutcome::NotEnoughFeatures { prev: 0, curr: 0 };
+    }
+
+    let prev_gray = rgba_to_gray(prev);
+    let curr_gray = rgba_to_gray(curr);
+    let prev_corners = extract_corners(&prev_gray, config.corner_threshold, config.max_features);
+    let curr_corners = extract_corners(&curr_gray, config.corner_threshold, config.max_features);
+
+    if prev_corners.len() < config.min_keypoints || curr_corners.len() < config.min_keypoints {
+        return FastHnswCandidateOutcome::NotEnoughFeatures {
+            prev: prev_corners.len(),
+            curr: curr_corners.len(),
+        };
+    }
+
+    let (prev_desc, prev_kept) =
+        compute_descriptors(&prev_gray, &prev_corners, config.descriptor_patch_size);
+    let (curr_desc, curr_kept) =
+        compute_descriptors(&curr_gray, &curr_corners, config.descriptor_patch_size);
+
+    if prev_desc.len() < config.min_keypoints || curr_desc.len() < config.min_keypoints {
+        return FastHnswCandidateOutcome::NotEnoughFeatures {
+            prev: prev_desc.len(),
+            curr: curr_desc.len(),
+        };
+    }
+
+    let lowe_ratio = 1.4;
+    let matches = linear_knn_match(&prev_desc, &curr_desc, config.distance_threshold, lowe_ratio);
+    if matches.len() < config.min_raw_matches {
+        return FastHnswCandidateOutcome::NotEnoughMatches {
+            raw_matches: matches.len(),
+        };
+    }
+
+    let Some((dx, dy, inliers, raw, residual_px)) =
+        vote_dominant_translation(&prev_kept, &curr_kept, &matches, locked_axis, config)
+    else {
+        return FastHnswCandidateOutcome::NotEnoughMatches {
+            raw_matches: matches.len(),
+        };
+    };
+    let inlier_ratio = inliers as f32 / raw.max(1) as f32;
+    FastHnswCandidateOutcome::Candidates(vec![MotionCandidate {
+        dx,
+        dy,
+        method: crate::types::MatchMethod::FastHnsw,
+        score: feature_score(inlier_ratio, residual_px),
+        second_best_score: None,
+        inliers: Some(inliers),
+        raw_matches: Some(raw),
+    }])
 }
 
 /// Pick-one dispatch:
@@ -624,6 +682,134 @@ mod tests {
             vote_dominant_translation(&prev, &curr, &matches, Some(ScrollAxis::Vertical), &cfg)
                 .is_none(),
             "vertical lock must reject cross-axis-only matches"
+        );
+    }
+
+    fn crop_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
+        use image::imageops;
+        imageops::crop_imm(canvas, x, y, w, h).to_image()
+    }
+
+    #[test]
+    fn fast_hnsw_candidates_estimate_translation() {
+        let canvas = feature_canvas(420, 420);
+        let prev = crop_xy(&canvas, 20, 30, 220, 220);
+        let curr = crop_xy(&canvas, 58, 92, 220, 220);
+        let config = FastHnswConfig::default();
+        let outcome = fast_hnsw_candidates(&prev, &curr, None, &config);
+        let candidates = match outcome {
+            FastHnswCandidateOutcome::Candidates(c) => c,
+            other => panic!("expected Candidates, got {other:?}"),
+        };
+        let candidate = candidates.first().expect("one candidate");
+        assert_eq!(candidate.method, crate::types::MatchMethod::FastHnsw);
+        assert!(
+            (candidate.dx - 38).abs() <= 3,
+            "dx = {} (expected ~38)",
+            candidate.dx
+        );
+        assert!(
+            (candidate.dy - 62).abs() <= 3,
+            "dy = {} (expected ~62)",
+            candidate.dy
+        );
+        assert!(candidate.raw_matches.unwrap_or(0) >= 24);
+        assert!(candidate.inliers.unwrap_or(0) >= 16);
+    }
+
+    #[test]
+    fn fast_hnsw_candidates_returns_not_enough_features_on_solid_frames() {
+        let prev = solid_frame();
+        let curr = solid_frame();
+        let config = FastHnswConfig::default();
+        let outcome = fast_hnsw_candidates(&prev, &curr, None, &config);
+        assert!(
+            matches!(outcome, FastHnswCandidateOutcome::NotEnoughFeatures { .. }),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn fast_hnsw_candidates_returns_not_enough_matches_on_unrelated_frames() {
+        let prev = feature_canvas(220, 220);
+        let mut curr = feature_canvas(220, 220);
+        for (i, px) in curr.pixels_mut().enumerate() {
+            let n = ((i as u64).wrapping_mul(6364136223846793005) >> 32) as u8;
+            px[0] = n;
+            px[1] = n.wrapping_add(83);
+            px[2] = n.wrapping_add(149);
+        }
+        let config = FastHnswConfig::default();
+        let outcome = fast_hnsw_candidates(&prev, &curr, None, &config);
+        assert!(
+            matches!(
+                outcome,
+                FastHnswCandidateOutcome::NotEnoughMatches { .. }
+                    | FastHnswCandidateOutcome::NotEnoughFeatures { .. }
+            ),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn fast_hnsw_candidates_respects_locked_vertical_axis() {
+        let canvas = feature_canvas(420, 420);
+        let prev = crop_xy(&canvas, 20, 100, 220, 220);
+        let curr = crop_xy(&canvas, 58, 100, 220, 220);
+        let config = FastHnswConfig::default();
+        let outcome =
+            fast_hnsw_candidates(&prev, &curr, Some(ScrollAxis::Vertical), &config);
+        assert!(
+            matches!(
+                outcome,
+                FastHnswCandidateOutcome::NotEnoughMatches { .. }
+                    | FastHnswCandidateOutcome::NotEnoughFeatures { .. }
+            ),
+            "vertical lock should reject pure horizontal motion, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn fast_hnsw_candidates_respects_locked_horizontal_axis() {
+        let canvas = feature_canvas(420, 420);
+        let prev = crop_xy(&canvas, 100, 20, 220, 220);
+        let curr = crop_xy(&canvas, 100, 58, 220, 220);
+        let config = FastHnswConfig::default();
+        let outcome =
+            fast_hnsw_candidates(&prev, &curr, Some(ScrollAxis::Horizontal), &config);
+        assert!(
+            matches!(
+                outcome,
+                FastHnswCandidateOutcome::NotEnoughMatches { .. }
+                    | FastHnswCandidateOutcome::NotEnoughFeatures { .. }
+            ),
+            "horizontal lock should reject pure vertical motion, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn fast_hnsw_score_below_default_accept_confidence() {
+        let accept = StitchConfig::default().accept_confidence;
+        let score = feature_score(0.6, 1.0);
+        assert!(
+            score < accept,
+            "healthy match scored {score} >= accept_confidence {accept}"
+        );
+    }
+
+    #[test]
+    fn fast_hnsw_score_top_quality_near_zero() {
+        let score = feature_score(0.9, 0.0);
+        assert!(score <= 0.01, "top-quality score = {score} should be ~0");
+    }
+
+    #[test]
+    fn fast_hnsw_score_floor_at_minimum_acceptable_quality() {
+        let accept = StitchConfig::default().accept_confidence;
+        let floor = feature_score(0.35, 4.0);
+        assert!(
+            floor <= accept,
+            "floor {floor} exceeds accept_confidence {accept}"
         );
     }
 }
