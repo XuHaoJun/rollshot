@@ -540,6 +540,17 @@ Append to the `#[cfg(test)] mod tests` block in `feature_matcher.rs`:
     }
 
     #[test]
+    fn extract_corners_short_circuits_on_tiny_image() {
+        // Anything below the FAST detector's working dimension must
+        // return early instead of asking imageproc to operate on a
+        // pathologically small buffer.
+        let tiny = image::GrayImage::from_pixel(8, 8, image::Luma([128]));
+        assert!(extract_corners(&tiny, 64, 1200).is_empty());
+        let narrow = image::GrayImage::from_pixel(8, 240, image::Luma([128]));
+        assert!(extract_corners(&narrow, 64, 1200).is_empty());
+    }
+
+    #[test]
     fn extract_corners_finds_features_on_feature_canvas() {
         let img = feature_canvas(220, 220);
         let gray = rgba_to_gray(&img);
@@ -576,6 +587,12 @@ fn rgba_to_gray(img: &RgbaImage) -> GrayImage {
 }
 
 fn extract_corners(gray: &GrayImage, threshold: u8, max_features: usize) -> Vec<(u32, u32)> {
+    // FAST needs at least a 16-pixel ring around each candidate. Guard
+    // against pathological inputs so imageproc never sees < 16 px
+    // dimensions.
+    if gray.width() < 16 || gray.height() < 16 {
+        return Vec::new();
+    }
     let fast12 = corners::corners_fast12(gray, threshold);
     let raw: Vec<(u32, u32)> = if fast12.len() > 200 {
         fast12.into_iter().map(|c| (c.x, c.y)).collect()
@@ -644,6 +661,24 @@ Append to the test module:
         assert!(compute_descriptor(&gray, 1, 1, 9).is_none());
         // Same for the far edges.
         assert!(compute_descriptor(&gray, 218, 218, 9).is_none());
+    }
+
+    #[test]
+    fn compute_descriptor_rejects_even_or_tiny_patch() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        assert!(
+            compute_descriptor(&gray, 110, 110, 8).is_none(),
+            "even patch must be rejected"
+        );
+        assert!(
+            compute_descriptor(&gray, 110, 110, 1).is_none(),
+            "patch<3 must be rejected"
+        );
+        assert!(
+            compute_descriptor(&gray, 110, 110, 9).is_some(),
+            "valid 9x9 patch on interior corner must succeed"
+        );
     }
 
     #[test]
@@ -914,13 +949,19 @@ EOF
             (0, 100),
         ];
         let matches: Vec<[usize; 2]> = (0..6).map(|i| [i, i]).collect();
-        let cfg = FastHnswConfig::default();
+        let mut cfg = FastHnswConfig::default();
+        cfg.min_inliers = 4; // fixture has fewer inliers than the production default
         let result = vote_dominant_translation(&prev, &curr, &matches, None, &cfg);
-        let (dx, dy, inliers, raw) = result.expect("dominant translation");
+        let (dx, dy, inliers, raw, residual_px) = result.expect("dominant translation");
         assert_eq!(dx, 0);
-        assert!(dy >= 39 && dy <= 42, "dy = {dy}");
+        // Translation = prev - curr = 0 - 40 = -40.
+        assert!(dy >= -42 && dy <= -39, "dy = {dy}");
         assert!(inliers >= 4, "inliers = {inliers}");
         assert_eq!(raw, 6);
+        assert!(
+            residual_px <= 2.0,
+            "residual_px = {residual_px} (tightly clustered bucket should be sub-pixel)"
+        );
     }
 
     #[test]
@@ -960,13 +1001,22 @@ Expected: FAIL.
 ```rust
 use std::collections::HashMap;
 
+/// Bucket-vote translation summary.
+///
+/// Returns `(dx, dy, inliers, raw_matches, residual_px)` where:
+/// - `(dx, dy)` is the median translation within the winning bucket
+/// - `inliers` is the count of matches in the winning bucket
+/// - `raw_matches` is the total number of input matches (before
+///   cross-axis filtering)
+/// - `residual_px` is the median Euclidean distance of inliers from
+///   the winning (dx, dy) — fed into `feature_score` per the spec
 fn vote_dominant_translation(
     prev_corners: &[(u32, u32)],
     curr_corners: &[(u32, u32)],
     matches: &[[usize; 2]],
     locked_axis: Option<ScrollAxis>,
     config: &FastHnswConfig,
-) -> Option<(i32, i32, usize, usize)> {
+) -> Option<(i32, i32, usize, usize, f32)> {
     let raw_matches = matches.len();
     if raw_matches == 0 {
         return None;
@@ -991,7 +1041,11 @@ fn vote_dominant_translation(
     if translations.is_empty() {
         return None;
     }
-    // Bucket by (dx/4, dy/4). Reject the (0, 0) bucket entirely.
+    // Bucket by (dx/4, dy/4). Reject the (0, 0) bucket entirely so the
+    // duplicate-frame case (all dx/dy in [-3, 3]) cannot vote itself
+    // into the winning slot. The duplicate detector upstream catches
+    // perfect duplicates; anything large enough to matter for stitching
+    // (>= min_append = 8 px) lands outside the (0, 0) bucket.
     let mut buckets: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
     for &(dx, dy) in &translations {
         let key = (dx / 4, dy / 4);
@@ -1018,7 +1072,32 @@ fn vote_dominant_translation(
     dys.sort_unstable();
     let dx_median = dxs[dxs.len() / 2];
     let dy_median = dys[dys.len() / 2];
-    Some((dx_median, dy_median, inliers, raw_matches))
+    let residual_px = compute_median_residual(&bucket, dx_median, dy_median);
+    Some((dx_median, dy_median, inliers, raw_matches, residual_px))
+}
+
+/// Median Euclidean distance between each `(tx, ty)` translation and
+/// the winning `(dx, dy)`. Drives the `residual_term` of
+/// `feature_score`.
+fn compute_median_residual(translations: &[(i32, i32)], dx: i32, dy: i32) -> f32 {
+    if translations.is_empty() {
+        return 0.0;
+    }
+    let mut residuals: Vec<f32> = translations
+        .iter()
+        .map(|&(tx, ty)| {
+            let ex = (tx - dx) as f32;
+            let ey = (ty - dy) as f32;
+            (ex * ex + ey * ey).sqrt()
+        })
+        .collect();
+    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = residuals.len() / 2;
+    if residuals.len() % 2 == 0 {
+        (residuals[mid - 1] + residuals[mid]) * 0.5
+    } else {
+        residuals[mid]
+    }
 }
 ```
 
@@ -1163,11 +1242,29 @@ Append to the test module:
     #[test]
     fn fast_hnsw_score_below_default_accept_confidence() {
         let accept = StitchConfig::default().accept_confidence;
-        // Healthy: 0.6 inlier ratio, ~24 raw matches.
-        let score = feature_score(0.6, 24);
+        // Healthy: 0.6 inlier ratio, 1 px median residual.
+        let score = feature_score(0.6, 1.0);
         assert!(
             score < accept,
             "healthy match scored {score} >= accept_confidence {accept}"
+        );
+    }
+
+    #[test]
+    fn fast_hnsw_score_top_quality_near_zero() {
+        // Near-perfect match: 0.9 inlier ratio, 0 px residual.
+        let score = feature_score(0.9, 0.0);
+        assert!(score <= 0.01, "top-quality score = {score} should be ~0");
+    }
+
+    #[test]
+    fn fast_hnsw_score_floor_at_minimum_acceptable_quality() {
+        // Floor: 0.35 inlier ratio, 4 px residual (= worst-case bucket).
+        let accept = StitchConfig::default().accept_confidence;
+        let floor = feature_score(0.35, 4.0);
+        assert!(
+            floor <= accept,
+            "floor {floor} exceeds accept_confidence {accept}"
         );
     }
 ```
@@ -1183,10 +1280,13 @@ Add `feature_score` next to the other helpers. The numeric formula is duplicated
 
 ```rust
 // Keep in sync with akaze_matcher::akaze_score (intentionally private
-// there). When AKAZE is removed, fold this into a single shared helper.
-fn feature_score(inlier_ratio: f32, raw_matches: usize) -> f32 {
+// there). Same coefficients, same residual normalization, so AKAZE
+// and FAST+KNN scores are directly comparable against
+// `accept_confidence` and against each other. When AKAZE is removed,
+// fold this into a single shared helper.
+fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
     let ratio_term = 1.0 - inlier_ratio.clamp(0.0, 1.0);
-    let residual_term = if raw_matches >= 16 { 0.0 } else { 1.0 };
+    let residual_term = (residual_px / 4.0).clamp(0.0, 1.0);
     (ratio_term * 0.08 + residual_term * 0.04).clamp(0.0, 1.0)
 }
 ```
@@ -1241,7 +1341,7 @@ pub(crate) fn fast_hnsw_candidates(
         };
     }
 
-    let Some((dx, dy, inliers, raw)) =
+    let Some((dx, dy, inliers, raw, residual_px)) =
         vote_dominant_translation(&prev_kept, &curr_kept, &matches, locked_axis, config)
     else {
         return FastHnswCandidateOutcome::NotEnoughMatches {
@@ -1253,7 +1353,7 @@ pub(crate) fn fast_hnsw_candidates(
         dx,
         dy,
         method: crate::types::MatchMethod::FastHnsw,
-        score: feature_score(inlier_ratio, raw),
+        score: feature_score(inlier_ratio, residual_px),
         second_best_score: None,
         inliers: Some(inliers),
         raw_matches: Some(raw),
@@ -1474,60 +1574,39 @@ fn fast_hnsw_attempt_with_blank_frames_reports_not_enough_features() {
 
 #[test]
 fn fast_hnsw_candidate_rejected_by_verifier_preserves_best_estimate() {
-    // Construct frames that produce a FAST+KNN candidate the verifier
-    // cannot pass: identical sparse features arranged so the
-    // descriptor matches but the surrounding mean-abs-diff exceeds
-    // verifier thresholds.
-    let prev = common::make_akaze_fallback_canvas(320, 400);
-    let mut curr = common::make_akaze_fallback_canvas(320, 400);
-    // Smash the background of curr to break verifier MAD but keep the
-    // sparse feature blobs intact.
-    for (i, px) in curr.pixels_mut().enumerate() {
-        if px[0] > 220 {
-            // Only stomp the light grid pixels — corners (darker) are kept.
-            let n = ((i as u64).wrapping_mul(6364136223846793005) >> 40) as u8;
-            px[0] = n;
-            px[1] = n;
-            px[2] = n;
+    // Recipe mirrored from akaze_candidate_rejected_by_verifier_preserves_best_estimate
+    // in matcher.rs: keep the top half intact so feature matching can
+    // vote a candidate, stomp the bottom half so the overlap verifier
+    // rejects it. The two halves' MAD must exceed the verifier's
+    // full_res_max_mad threshold (≈18/255 = 0.07).
+    let canvas = common::make_akaze_fallback_canvas(360, 760);
+    let first = image::imageops::crop_imm(&canvas, 0, 0, 240, 240).to_image();
+    let mut second = image::imageops::crop_imm(&canvas, 0, 72, 240, 240).to_image();
+    for y in 120..240 {
+        for x in 0..240 {
+            let v = ((x * 41 + y * 67) % 255) as u8;
+            second.put_pixel(x, y, Rgba([v, 255 - v, v / 2, 255]));
         }
     }
-    let first = image::imageops::crop_imm(&prev, 0, 0, 320, 320).to_image();
-    let second = image::imageops::crop_imm(&curr, 0, 32, 320, 320).to_image();
 
     let mut stitcher = Stitcher::new(StitchConfig::default());
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
-    match stitcher.push_frame(second) {
+    let best = match stitcher.push_frame(second) {
         StitchOutcome::NoMatch {
-            reason,
-            best_estimate,
-        } => {
-            // Allowed reasons depend on how the candidate failed:
-            //   - rank_verified_candidates rejected → FeatureLowInliers
-            //   - vote failed inliers threshold      → FeatureLowInliers
-            //   - feature scan never produced enough → NotEnoughFeatures/Matches
-            assert!(
-                matches!(
-                    reason,
-                    NoMatchReason::FeatureLowInliers
-                        | NoMatchReason::OverlapVerificationFailed
-                        | NoMatchReason::InsufficientOverlap
-                        | NoMatchReason::NotEnoughFeatures
-                ),
-                "unexpected reason {reason:?}"
-            );
-            // If a candidate was produced and only verifier rejected it,
-            // best_estimate must surface so the report can be informative.
-            // (Not asserted as Some — the test tolerates either branch.)
-            let _ = best_estimate;
-        }
-        StitchOutcome::Appended { .. } => {
-            // Acceptable if the stomp didn't break verifier; the test's
-            // primary contract is "no panic and the reason is in the
-            // allowed set." Move on.
-        }
-        other => panic!("expected NoMatch or Appended, got {other:?}"),
-    }
+            reason: NoMatchReason::FeatureLowInliers,
+            best_estimate: Some(candidate),
+        } => candidate,
+        other => panic!(
+            "expected NoMatch::FeatureLowInliers with best_estimate, got {other:?}"
+        ),
+    };
+    assert_eq!(best.method, MatchMethod::FastHnsw);
+    assert!(
+        (best.dy - 72).abs() <= 8,
+        "best.dy = {} (expected ~72)",
+        best.dy
+    );
 }
 
 #[cfg(feature = "akaze")]
