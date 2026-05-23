@@ -14,6 +14,7 @@ fn rollshot_capture_fixture_writes_png() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -50,6 +51,7 @@ fn rollshot_capture_fixture_requires_fixture_path() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--output"])
         .arg(&output_png)
@@ -76,6 +78,7 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -124,6 +127,7 @@ fn rollshot_capture_respects_max_frames() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -160,6 +164,7 @@ fn rollshot_capture_accepts_manual_region_string() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -188,6 +193,7 @@ fn rollshot_capture_rejects_garbage_region() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -214,6 +220,7 @@ fn rollshot_capture_rejects_portal_region_for_fixture_backend() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -241,6 +248,7 @@ fn rollshot_capture_prints_default_progress_to_stderr() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -284,6 +292,7 @@ fn rollshot_capture_quiet_suppresses_progress_stderr() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -316,6 +325,7 @@ fn rollshot_capture_fixture_prints_diagnostics_summary() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)
@@ -357,6 +367,7 @@ fn rollshot_capture_quiet_suppresses_diagnostics() {
     let output_png = tempdir.join("stitched.png");
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--fixture"])
         .arg(&frames_dir)

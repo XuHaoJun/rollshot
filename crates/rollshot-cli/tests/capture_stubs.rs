@@ -12,6 +12,7 @@ fn linux_portal_backend_exits_with_unsupported_code() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
     command
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "linux-portal"])
         .args(["--output"])
         .arg(&out);
@@ -38,6 +39,7 @@ fn macos_sck_backend_on_linux_exits_with_unsupported_code() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
     command
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "macos-sck"])
         .args(["--output"])
         .arg(&out);
@@ -63,6 +65,7 @@ fn macos_sck_backend_rejects_portal_region_without_starting_capture() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
     command
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "macos-sck"])
         .args(["--region", "portal"])
         .args(["--output"])
@@ -92,6 +95,7 @@ fn backend_auto_exits_with_host_appropriate_code() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
     command
         .arg("capture")
+        .arg("--headless")
         .args(["--backend", "auto"])
         .args(["--output"])
         .arg(&out);
