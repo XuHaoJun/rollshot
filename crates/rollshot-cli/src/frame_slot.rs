@@ -65,7 +65,9 @@ impl FrameSlot {
             })
             .unwrap_or_else(PoisonError::into_inner);
 
-        if let Some(frame) = state.frames.pop_front() {
+        if !state.frames.is_empty() {
+            let frame = state.frames.pop_back().unwrap();
+            state.frames.clear();
             return Ok(frame);
         }
         if let Some(msg) = state.error.take() {
