@@ -1,39 +1,28 @@
 //! `rollshot capture` — drives a CaptureBackend, stitches its frames, writes a
 //! PNG.
 //!
-//! Pipeline:
+//! Pipeline (async stitch):
 //!
 //! ```text
 //!   args (clap)
 //!     │
 //!     ▼
-//!   BackendKind::from_cli_flag ─► BackendKind
-//!     │                              │
-//!     │                              ├── Fixture  → FixtureBackend::new(--fixture)
-//!     │                              └── other    → BackendKind::create()
-//!     ▼
-//!   CaptureOptions { region, fps, show_cursor }
-//!     │
-//!     ▼
 //!   backend.start(options) ──► Box<dyn FrameStream>
 //!     │
-//!     ▼ loop until EndOfStream / --max-frames
-//!     ┌──────────────────────────────────────────┐
-//!     │  stream.next_frame()                     │
-//!     │     │                                    │
-//!     │     ▼                                    │
-//!     │  [optional] write_dump_frame(idx, image) │
-//!     │     │                                    │
-//!     │     ▼                                    │
-//!     │  stitcher.push_frame(image)              │
-//!     └──────────────────────────────────────────┘
+//!     ├── reader thread: stream.next_frame() → FrameSlot (latest-wins)
+//!     │
+//!     └── main thread (stitch loop):
+//!           slot.take_blocking() → dump → stitcher.push_frame()
+//!           repeat until EndOfStream / --max-frames
 //!     │
 //!     ▼
 //!   stitcher.full_image() → save PNG → summary
 //! ```
 
-use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use image::ImageFormat;
 use rollshot_capture::{
@@ -65,7 +54,7 @@ struct CaptureSummary {
     duplicates: u32,
     no_match: u32,
     no_progress: u32,
-    pacing_skipped: u32,
+    frames_read: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,23 +122,106 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
         );
         config.akaze.enabled = true;
     }
+
+    let slot = Arc::new(crate::frame_slot::FrameSlot::new());
+    let slot_stitch = Arc::clone(&slot);
+    let stitch_done = Arc::new(AtomicBool::new(false));
+    let stitch_done_reader = Arc::clone(&stitch_done);
+
+    let max_frames = args.max_frames;
+    let quiet = args.quiet;
+    let dump_frames: Option<PathBuf> = args.dump_frames.clone();
+
+    let stitch_done_flag = Arc::clone(&stitch_done);
+    let stitch_handle = std::thread::spawn(move || {
+        let result = stitch_loop(slot_stitch, config, max_frames, quiet, dump_frames.as_deref());
+        stitch_done_flag.store(true, Ordering::Relaxed);
+        result
+    });
+
+    loop {
+        if stitch_done_reader.load(Ordering::Relaxed) {
+            break;
+        }
+        match stream.next_frame() {
+            Ok(frame) => slot.store(frame),
+            Err(CaptureError::EndOfStream) => {
+                slot.signal_end();
+                break;
+            }
+            Err(err) => {
+                slot.signal_error(format!("{err}"));
+                break;
+            }
+        }
+    }
+
+    let stitch_result = stitch_handle
+        .join()
+        .map_err(|_| CliError::new("stitch thread panicked", 1))?;
+    let (stitcher, mut report, captured, appended, duplicates, no_match, no_progress) =
+        stitch_result?;
+    let frames_read = slot.total_produced();
+
+    let summary =
+        compute_summary(&report, appended, duplicates, no_match, no_progress, frames_read);
+    print_diagnostics_summary(&summary, args.quiet);
+    report.summary = Some(summary);
+
+    let stitched = stitcher
+        .full_image()
+        .ok_or_else(|| CliError::new("no frames produced an output image", 1))?;
+    save_png(stitched, &args.output)?;
+
+    if let Some(path) = args.debug_match_report.as_ref() {
+        write_report(path, &report)?;
+    }
+
+    Ok(format!(
+        "captured {captured} frames, appended {appended} \
+         (duplicates {duplicates}, no-progress {no_progress}, \
+         no-match {no_match}, frames-read {frames_read})\n\
+         output: {out} ({w}x{h})\n",
+        out = args.output.display(),
+        w = stitched.width(),
+        h = stitched.height(),
+    ))
+}
+
+type StitchLoopResult = Result<
+    (
+        Stitcher,
+        CaptureMatchReport,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+    ),
+    CliError,
+>;
+
+fn stitch_loop(
+    slot: Arc<crate::frame_slot::FrameSlot>,
+    config: StitchConfig,
+    max_frames: u32,
+    quiet: bool,
+    dump_frames: Option<&Path>,
+) -> StitchLoopResult {
     let mut stitcher = Stitcher::new(config);
     let mut captured: u32 = 0;
     let mut appended: u32 = 0;
     let mut duplicates: u32 = 0;
     let mut no_match: u32 = 0;
     let mut no_progress: u32 = 0;
-    let mut pacing_skipped: u32 = 0;
     let mut report = CaptureMatchReport {
         frames: Vec::new(),
         summary: None,
     };
     let mut previous_capture_timestamp = None;
-    let min_interval = Duration::from_millis(args.min_interval_ms);
-    let mut last_processed_timestamp: Option<SystemTime> = None;
 
     loop {
-        match stream.next_frame() {
+        match slot.take_blocking(Duration::from_secs(5)) {
             Ok(frame) => {
                 let capture_interval_ms = previous_capture_timestamp.and_then(|previous| {
                     frame
@@ -160,41 +232,12 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                 });
                 previous_capture_timestamp = Some(frame.timestamp);
 
-                if args.min_interval_ms > 0 {
-                    if let Some(last_ts) = last_processed_timestamp {
-                        if let Ok(elapsed) = frame.timestamp.duration_since(last_ts) {
-                            if elapsed < min_interval {
-                                pacing_skipped += 1;
-                                captured += 1;
-                                report.frames.push(CaptureFrameReport {
-                                    frame_index: report.frames.len(),
-                                    outcome: "PacingSkipped".to_string(),
-                                    reason: None,
-                                    estimate: None,
-                                    capture_interval_ms,
-                                    stitch_elapsed_ms: 0.0,
-                                });
-                                if !args.quiet {
-                                    eprintln!(
-                                        "frame {}/{}: PacingSkipped",
-                                        captured, args.max_frames
-                                    );
-                                }
-                                if captured >= args.max_frames {
-                                    break;
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                if let Some(dir) = args.dump_frames.as_ref() {
+                if let Some(dir) = dump_frames {
                     write_dump_frame(dir, captured, &frame.image)?;
                 }
                 captured += 1;
-                if !args.quiet {
-                    log_capture_start(captured, args.max_frames);
+                if !quiet {
+                    log_capture_start(captured, max_frames);
                 }
                 let stitch_started = Instant::now();
                 let outcome = stitcher.push_frame(frame.image);
@@ -241,11 +284,10 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
                     }
                 }
                 report.frames.push(frame_report);
-                if !args.quiet {
-                    log_capture_progress(captured, args.max_frames, &outcome, stitch_elapsed);
+                if !quiet {
+                    log_capture_progress(captured, max_frames, &outcome, stitch_elapsed);
                 }
-                last_processed_timestamp = Some(frame.timestamp);
-                if captured >= args.max_frames {
+                if captured >= max_frames {
                     break;
                 }
             }
@@ -254,35 +296,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
         }
     }
 
-    let summary = compute_summary(
-        &report,
-        appended,
-        duplicates,
-        no_match,
-        no_progress,
-        pacing_skipped,
-    );
-    print_diagnostics_summary(&summary, args.quiet);
-    report.summary = Some(summary);
-
-    let stitched = stitcher
-        .full_image()
-        .ok_or_else(|| CliError::new("no frames produced an output image", 1))?;
-    save_png(stitched, &args.output)?;
-
-    if let Some(path) = args.debug_match_report.as_ref() {
-        write_report(path, &report)?;
-    }
-
-    Ok(format!(
-        "captured {captured} frames, appended {appended} \
-         (duplicates {duplicates}, no-progress {no_progress}, \
-         no-match {no_match}, pacing-skipped {pacing_skipped})\n\
-         output: {out} ({w}x{h})\n",
-        out = args.output.display(),
-        w = stitched.width(),
-        h = stitched.height(),
-    ))
+    Ok((stitcher, report, captured, appended, duplicates, no_match, no_progress))
 }
 
 fn duration_ms(duration: Duration) -> f64 {
@@ -381,7 +395,7 @@ fn compute_summary(
     duplicates: u32,
     no_match: u32,
     no_progress: u32,
-    pacing_skipped: u32,
+    frames_read: u32,
 ) -> CaptureSummary {
     let mut intervals: Vec<f64> = report
         .frames
@@ -432,7 +446,7 @@ fn compute_summary(
         duplicates,
         no_match,
         no_progress,
-        pacing_skipped,
+        frames_read,
     }
 }
 
@@ -451,8 +465,11 @@ fn print_diagnostics_summary(summary: &CaptureSummary, quiet: bool) {
         summary.max_accepted_dy,
         summary.longest_no_match_run,
     );
-    if summary.pacing_skipped > 0 {
-        eprintln!("pacing_skipped: {}", summary.pacing_skipped);
+    if summary.frames_read > summary.total_frames as u32 {
+        eprintln!(
+            "frames_read: {} (stitched {})",
+            summary.frames_read, summary.total_frames
+        );
     }
     if summary.longest_no_match_run >= 5 {
         eprintln!(

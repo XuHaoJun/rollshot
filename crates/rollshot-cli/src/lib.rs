@@ -1,6 +1,7 @@
 pub mod args;
 pub mod cli_error;
 pub mod cmd_capture;
+mod frame_slot;
 pub mod cmd_probe;
 pub mod cmd_stitch_folder;
 
