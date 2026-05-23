@@ -1,10 +1,8 @@
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 
-use crate::feature_matcher::{
-    feature_fallback_candidates, FeatureFallbackOutcome, FeatureSource,
-};
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
+use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome, FeatureSource};
 use crate::overlap::compute_overlap;
 use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
@@ -218,7 +216,10 @@ pub(crate) fn estimate_motion(
             reason: NoMatchReason::NotEnoughFeatures,
             best_candidate: None,
         },
-        FeatureFallbackOutcome::NotEnoughMatches { raw_matches: _, source } => {
+        FeatureFallbackOutcome::NotEnoughMatches {
+            raw_matches: _,
+            source,
+        } => {
             let reason = match source {
                 FeatureSource::FastHnsw => NoMatchReason::FeatureLowInliers,
                 FeatureSource::Akaze => NoMatchReason::AkazeLowInliers,
@@ -228,10 +229,7 @@ pub(crate) fn estimate_motion(
                 best_candidate: None,
             }
         }
-        FeatureFallbackOutcome::Candidates {
-            candidates,
-            source,
-        } => {
+        FeatureFallbackOutcome::Candidates { candidates, source } => {
             let best = candidates.first().copied();
             let reason = match source {
                 FeatureSource::FastHnsw => NoMatchReason::FeatureLowInliers,
