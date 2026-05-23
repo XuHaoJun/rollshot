@@ -9,7 +9,7 @@ use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 const TOP_IGNORE_RATIO: f32 = 0.12;
 const BOTTOM_IGNORE_RATIO: f32 = 0.08;
-const SIDE_IGNORE_RATIO: f32 = 0.04;
+const SIDE_IGNORE_RATIO: f32 = 0.15;
 const MIN_IGNORE_PX: u32 = 24;
 const COARSE_DOWNSAMPLE_STEP: u32 = 4;
 const COARSE_AXIS_STRIDE: i32 = 8;
