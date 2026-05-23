@@ -6,11 +6,37 @@
 //! Approach A. Current matching is exact linear scan.
 
 use image::RgbaImage;
+use image::GrayImage;
+use imageproc::corners;
 
 use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::types::{
     FastHnswConfig, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig,
 };
+
+fn rgba_to_gray(img: &RgbaImage) -> GrayImage {
+    image::imageops::grayscale(img)
+}
+
+fn extract_corners(gray: &GrayImage, threshold: u8, max_features: usize) -> Vec<(u32, u32)> {
+    if gray.width() < 16 || gray.height() < 16 {
+        return Vec::new();
+    }
+    let fast12 = corners::corners_fast12(gray, threshold);
+    let raw: Vec<(u32, u32)> = if fast12.len() > 200 {
+        fast12.into_iter().map(|c| (c.x, c.y)).collect()
+    } else {
+        corners::corners_fast9(gray, threshold)
+            .into_iter()
+            .map(|c| (c.x, c.y))
+            .collect()
+    };
+    if raw.len() <= max_features {
+        return raw;
+    }
+    let step = raw.len() / max_features + 1;
+    raw.into_iter().step_by(step).collect()
+}
 
 /// Outcome of running `fast_hnsw_candidates`.
 ///
@@ -181,5 +207,81 @@ mod tests {
             ),
             "unexpected outcome: {outcome:?}"
         );
+    }
+
+    fn feature_canvas(width: u32, height: u32) -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(width, height, Rgba([238, 238, 238, 255]));
+        for i in 0..80u32 {
+            let x = 20 + ((i * 37 + i * i) % width.saturating_sub(40).max(1));
+            let y = 20 + ((i * 53 + i * i * 3) % height.saturating_sub(40).max(1));
+            let r = (40 + (i * 17) % 180) as u8;
+            let g = (70 + (i * 29) % 170) as u8;
+            let b = (90 + (i * 31) % 150) as u8;
+            let size: u32 = 12 + (i % 8);
+            for yy in 0..size {
+                for xx in 0..size {
+                    let cx = size as i32 / 2;
+                    let cy = size as i32 / 2;
+                    let dx = xx as i32 - cx;
+                    let dy = yy as i32 - cy;
+                    let dist2 = dx * dx + dy * dy;
+                    let radius2 = (size as i32 / 2).pow(2);
+                    if dist2 <= radius2 {
+                        let intensity = if (xx / 3 + yy / 3) % 2 == 0 || dx.abs() < 2 || dy.abs() < 2 {
+                            60i32
+                        } else {
+                            -30i32
+                        };
+                        img.put_pixel(
+                            x + xx,
+                            y + yy,
+                            Rgba([
+                                (r as i32 + intensity).clamp(0, 255) as u8,
+                                (g as i32 + intensity + (i * 13 % 40) as i32).clamp(0, 255) as u8,
+                                (b as i32 + intensity).clamp(0, 255) as u8,
+                                255,
+                            ]),
+                        );
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn extract_corners_returns_empty_on_solid_image() {
+        let img = solid_frame();
+        let gray = rgba_to_gray(&img);
+        let corners = extract_corners(&gray, 64, 1200);
+        assert!(corners.is_empty(), "solid image returned {} corners", corners.len());
+    }
+
+    #[test]
+    fn extract_corners_short_circuits_on_tiny_image() {
+        let tiny = image::GrayImage::from_pixel(8, 8, image::Luma([128]));
+        assert!(extract_corners(&tiny, 64, 1200).is_empty());
+        let narrow = image::GrayImage::from_pixel(8, 240, image::Luma([128]));
+        assert!(extract_corners(&narrow, 64, 1200).is_empty());
+    }
+
+    #[test]
+    fn extract_corners_finds_features_on_feature_canvas() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        let corners = extract_corners(&gray, 64, 1200);
+        assert!(
+            corners.len() > 30,
+            "expected >30 corners on feature canvas, got {}",
+            corners.len()
+        );
+    }
+
+    #[test]
+    fn extract_corners_caps_at_max_features() {
+        let img = feature_canvas(420, 420);
+        let gray = rgba_to_gray(&img);
+        let corners = extract_corners(&gray, 16, 50);
+        assert!(corners.len() <= 50, "got {}", corners.len());
     }
 }
