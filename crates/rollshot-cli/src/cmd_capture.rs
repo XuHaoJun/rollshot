@@ -292,7 +292,7 @@ fn stitch_loop(
                 if !quiet {
                     log_capture_progress(captured, max_frames, &outcome, stitch_elapsed);
                 }
-                if contributes && captured >= max_frames {
+                if contributes && (appended + 1) >= max_frames {
                     break;
                 }
             }
