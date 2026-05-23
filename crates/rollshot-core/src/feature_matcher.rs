@@ -180,12 +180,12 @@ fn compute_descriptors(
     (descs, kept)
 }
 
-/// Linear KNN with Lowe ratio test. For each `curr` descriptor, find
-/// the best and second-best `prev` matches by Euclidean distance.
-/// Accept if `best.dist < distance_threshold` and `best.dist * ratio <
-/// second.dist`. When there is only one `prev` candidate, the ratio
-/// test cannot fire — accept the best if it clears the distance
-/// threshold.
+/// Symmetric linear KNN with Lowe ratio test. Match `curr -> prev` and
+/// `prev -> curr`, then keep only mutual best pairs. Each directional
+/// pass accepts if `best.dist < distance_threshold` and `best.dist *
+/// ratio < second.dist`. When there is only one candidate on that
+/// directional pass, the ratio test cannot fire — accept the best if it
+/// clears the distance threshold.
 ///
 /// Returns pairs as `[curr_idx, prev_idx]`. Parallel via rayon.
 fn linear_knn_match(
@@ -197,13 +197,33 @@ fn linear_knn_match(
     if prev.is_empty() || curr.is_empty() {
         return Vec::new();
     }
-    curr.par_iter()
+    let forward = knn_best_indices(curr, prev, distance_threshold, lowe_ratio);
+    let reverse = knn_best_indices(prev, curr, distance_threshold, lowe_ratio);
+
+    forward
+        .into_iter()
         .enumerate()
-        .filter_map(|(curr_idx, c)| {
+        .filter_map(|(curr_idx, prev_idx)| {
+            let prev_idx = prev_idx?;
+            (reverse.get(prev_idx).copied().flatten() == Some(curr_idx))
+                .then_some([curr_idx, prev_idx])
+        })
+        .collect()
+}
+
+fn knn_best_indices(
+    queries: &[[f32; 8]],
+    candidates: &[[f32; 8]],
+    distance_threshold: f32,
+    lowe_ratio: f32,
+) -> Vec<Option<usize>> {
+    queries
+        .par_iter()
+        .map(|q| {
             let mut best = (f32::INFINITY, usize::MAX);
             let mut second = f32::INFINITY;
-            for (i, p) in prev.iter().enumerate() {
-                let dist = euclidean_distance(p, c);
+            for (i, candidate) in candidates.iter().enumerate() {
+                let dist = euclidean_distance(candidate, q);
                 if dist < best.0 {
                     second = best.0;
                     best = (dist, i);
@@ -217,7 +237,7 @@ fn linear_knn_match(
             if second.is_finite() && best.0 * lowe_ratio >= second {
                 return None;
             }
-            Some([curr_idx, best.1])
+            Some(best.1)
         })
         .collect()
 }
@@ -647,6 +667,19 @@ mod tests {
         let curr = vec![d(0.90)];
         let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
         assert!(pairs.is_empty(), "expected distant pair rejected");
+    }
+
+    #[test]
+    fn linear_knn_match_keeps_only_mutual_best_pairs() {
+        let d = |v: f32| [v; 8];
+        let prev = vec![d(0.10)];
+        let curr = vec![d(0.10), d(0.11), d(0.12)];
+        let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
+        assert_eq!(
+            pairs,
+            vec![[0usize, 0usize]],
+            "multiple current descriptors must not vote for one previous descriptor"
+        );
     }
 
     #[test]
