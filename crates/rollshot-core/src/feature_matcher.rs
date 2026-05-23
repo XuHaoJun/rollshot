@@ -179,6 +179,57 @@ fn compute_descriptors(
     (descs, kept)
 }
 
+/// Linear KNN with Lowe ratio test. For each `curr` descriptor, find
+/// the best and second-best `prev` matches by Euclidean distance.
+/// Accept if `best.dist < distance_threshold` and `best.dist * ratio <
+/// second.dist`. When there is only one `prev` candidate, the ratio
+/// test cannot fire — accept the best if it clears the distance
+/// threshold.
+///
+/// Returns pairs as `[curr_idx, prev_idx]`. Parallel via rayon.
+fn linear_knn_match(
+    prev: &[[f32; 8]],
+    curr: &[[f32; 8]],
+    distance_threshold: f32,
+    lowe_ratio: f32,
+) -> Vec<[usize; 2]> {
+    if prev.is_empty() || curr.is_empty() {
+        return Vec::new();
+    }
+    curr.par_iter()
+        .enumerate()
+        .filter_map(|(curr_idx, c)| {
+            let mut best = (f32::INFINITY, usize::MAX);
+            let mut second = f32::INFINITY;
+            for (i, p) in prev.iter().enumerate() {
+                let dist = euclidean_distance(p, c);
+                if dist < best.0 {
+                    second = best.0;
+                    best = (dist, i);
+                } else if dist < second {
+                    second = dist;
+                }
+            }
+            if best.0 >= distance_threshold {
+                return None;
+            }
+            if second.is_finite() && best.0 * lowe_ratio >= second {
+                return None;
+            }
+            Some([curr_idx, best.1])
+        })
+        .collect()
+}
+
+fn euclidean_distance(a: &[f32; 8], b: &[f32; 8]) -> f32 {
+    let mut sum = 0.0f32;
+    for i in 0..8 {
+        let d = a[i] - b[i];
+        sum += d * d;
+    }
+    sum.sqrt()
+}
+
 /// FAST corners + linear KNN matching. The "Hnsw" in the name is
 /// reserved for a future ANN upgrade — see
 /// docs/superpowers/specs/2026-05-23-rollshot-fast-hnsw-fallback-design.md
@@ -392,5 +443,45 @@ mod tests {
         let (descs, kept) = compute_descriptors(&gray, &corners, 9);
         assert_eq!(descs.len(), 1, "only the interior corner survives");
         assert_eq!(kept, vec![(110, 110)]);
+    }
+
+    #[test]
+    fn linear_knn_match_pairs_identical_descriptors() {
+        let d = |v: f32| [v; 8];
+        let prev = vec![d(0.10), d(0.30), d(0.70)];
+        let curr = vec![d(0.30), d(0.10), d(0.70)];
+        let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
+        assert!(pairs.contains(&[0, 1]));
+        assert!(pairs.contains(&[1, 0]));
+        assert!(pairs.contains(&[2, 2]));
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn linear_knn_match_rejects_ambiguous_pairs() {
+        let d = |v: f32| [v; 8];
+        let prev = vec![d(0.48), d(0.52)];
+        let curr = vec![d(0.50)];
+        let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
+        assert!(pairs.is_empty(), "expected ambiguous pair rejected");
+    }
+
+    #[test]
+    fn linear_knn_match_rejects_distant_pairs() {
+        let d = |v: f32| [v; 8];
+        let prev = vec![d(0.10)];
+        let curr = vec![d(0.90)];
+        let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
+        assert!(pairs.is_empty(), "expected distant pair rejected");
+    }
+
+    #[test]
+    fn linear_knn_match_returns_empty_on_empty_input() {
+        assert!(linear_knn_match(&[], &[[0.0; 8]], 0.20, 1.4).is_empty());
+        assert!(linear_knn_match(&[[0.0; 8]], &[], 0.20, 1.4).is_empty());
+        let prev = [[0.0; 8]];
+        let curr = [[0.0; 8]];
+        let pairs = linear_knn_match(&prev, &curr, 0.20, 1.4);
+        assert_eq!(pairs, vec![[0usize, 0usize]]);
     }
 }
