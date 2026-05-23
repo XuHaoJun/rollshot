@@ -14,6 +14,8 @@ use crate::types::{
     FastHnswConfig, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig,
 };
 
+use rayon::prelude::*;
+
 fn rgba_to_gray(img: &RgbaImage) -> GrayImage {
     image::imageops::grayscale(img)
 }
@@ -115,6 +117,66 @@ impl FeatureFallbackOutcome {
             }
         }
     }
+}
+
+/// 9x9 patch → `[f32; 8]` row/col-mean descriptor.
+///
+/// Returns `None` when the patch reaches outside the image (no
+/// clamping — corners too close to an edge are dropped at the call
+/// site).
+fn compute_descriptor(gray: &GrayImage, x: u32, y: u32, patch: usize) -> Option<[f32; 8]> {
+    if patch % 2 == 0 || patch < 3 {
+        return None;
+    }
+    let half = (patch / 2) as i32;
+    let w = gray.width() as i32;
+    let h = gray.height() as i32;
+    let cx = x as i32;
+    let cy = y as i32;
+    if cx - half < 0 || cy - half < 0 || cx + half >= w || cy + half >= h {
+        return None;
+    }
+    let bins = patch / 2;
+    let mut desc = [0.0f32; 8];
+    for i in 0..bins {
+        let row_y = cy + (-half + (i as i32) * 2);
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for j in 0..bins {
+            let col_x = cx + (-half + (j as i32) * 2);
+            sum += gray.get_pixel(col_x as u32, row_y as u32)[0] as f32 / 255.0;
+            count += 1;
+        }
+        desc[i] = if count > 0 { sum / count as f32 } else { 0.0 };
+    }
+    for j in 0..bins {
+        let col_x = cx + (-half + (j as i32) * 2);
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for i in 0..bins {
+            let row_y = cy + (-half + (i as i32) * 2);
+            sum += gray.get_pixel(col_x as u32, row_y as u32)[0] as f32 / 255.0;
+            count += 1;
+        }
+        desc[bins + j] = if count > 0 { sum / count as f32 } else { 0.0 };
+    }
+    Some(desc)
+}
+
+/// Batch descriptor computation. Returns `(descriptors, surviving_corners)`
+/// in lockstep — corners that fail the edge check are dropped from
+/// both. Parallel via rayon.
+fn compute_descriptors(
+    gray: &GrayImage,
+    corners: &[(u32, u32)],
+    patch: usize,
+) -> (Vec<[f32; 8]>, Vec<(u32, u32)>) {
+    let paired: Vec<((u32, u32), [f32; 8])> = corners
+        .par_iter()
+        .filter_map(|&(x, y)| compute_descriptor(gray, x, y, patch).map(|d| ((x, y), d)))
+        .collect();
+    let (kept, descs): (Vec<(u32, u32)>, Vec<[f32; 8]>) = paired.into_iter().unzip();
+    (descs, kept)
 }
 
 /// FAST corners + linear KNN matching. The "Hnsw" in the name is
@@ -283,5 +345,52 @@ mod tests {
         let gray = rgba_to_gray(&img);
         let corners = extract_corners(&gray, 16, 50);
         assert!(corners.len() <= 50, "got {}", corners.len());
+    }
+
+    #[test]
+    fn compute_descriptor_returns_eight_dim_for_interior_corner() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        let desc = compute_descriptor(&gray, 110, 110, 9);
+        let desc = desc.expect("interior corner descriptor");
+        for v in &desc {
+            assert!(*v >= 0.0 && *v <= 1.0, "descriptor entry out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn compute_descriptor_skips_edge_corner_without_panic() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        assert!(compute_descriptor(&gray, 1, 1, 9).is_none());
+        assert!(compute_descriptor(&gray, 218, 218, 9).is_none());
+    }
+
+    #[test]
+    fn compute_descriptor_rejects_even_or_tiny_patch() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        assert!(
+            compute_descriptor(&gray, 110, 110, 8).is_none(),
+            "even patch must be rejected"
+        );
+        assert!(
+            compute_descriptor(&gray, 110, 110, 1).is_none(),
+            "patch<3 must be rejected"
+        );
+        assert!(
+            compute_descriptor(&gray, 110, 110, 9).is_some(),
+            "valid 9x9 patch on interior corner must succeed"
+        );
+    }
+
+    #[test]
+    fn compute_descriptors_skips_edge_corners_and_keeps_interior() {
+        let img = feature_canvas(220, 220);
+        let gray = rgba_to_gray(&img);
+        let corners = vec![(1u32, 1u32), (110, 110), (218, 218)];
+        let (descs, kept) = compute_descriptors(&gray, &corners, 9);
+        assert_eq!(descs.len(), 1, "only the interior corner survives");
+        assert_eq!(kept, vec![(110, 110)]);
     }
 }
