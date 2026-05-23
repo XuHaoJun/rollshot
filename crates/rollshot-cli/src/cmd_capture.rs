@@ -134,7 +134,13 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
 
     let stitch_done_flag = Arc::clone(&stitch_done);
     let stitch_handle = std::thread::spawn(move || {
-        let result = stitch_loop(slot_stitch, config, max_frames, quiet, dump_frames.as_deref());
+        let result = stitch_loop(
+            slot_stitch,
+            config,
+            max_frames,
+            quiet,
+            dump_frames.as_deref(),
+        );
         stitch_done_flag.store(true, Ordering::Relaxed);
         result
     });
@@ -163,8 +169,14 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
         stitch_result?;
     let frames_read = slot.total_produced();
 
-    let summary =
-        compute_summary(&report, appended, duplicates, no_match, no_progress, frames_read);
+    let summary = compute_summary(
+        &report,
+        appended,
+        duplicates,
+        no_match,
+        no_progress,
+        frames_read,
+    );
     print_diagnostics_summary(&summary, args.quiet);
     report.summary = Some(summary);
 
@@ -188,18 +200,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     ))
 }
 
-type StitchLoopResult = Result<
-    (
-        Stitcher,
-        CaptureMatchReport,
-        u32,
-        u32,
-        u32,
-        u32,
-        u32,
-    ),
-    CliError,
->;
+type StitchLoopResult = Result<(Stitcher, CaptureMatchReport, u32, u32, u32, u32, u32), CliError>;
 
 fn stitch_loop(
     slot: Arc<crate::frame_slot::FrameSlot>,
@@ -296,7 +297,15 @@ fn stitch_loop(
         }
     }
 
-    Ok((stitcher, report, captured, appended, duplicates, no_match, no_progress))
+    Ok((
+        stitcher,
+        report,
+        captured,
+        appended,
+        duplicates,
+        no_match,
+        no_progress,
+    ))
 }
 
 fn duration_ms(duration: Duration) -> f64 {

@@ -384,4 +384,3 @@ fn rollshot_capture_quiet_suppresses_diagnostics() {
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
-
