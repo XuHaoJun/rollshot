@@ -24,6 +24,10 @@ pub enum Command {
 
 #[derive(Debug, clap::Args)]
 pub struct CaptureArgs {
+    /// Run capture/stitch without the GUI.
+    #[arg(long, default_value_t = false)]
+    pub headless: bool,
+
     /// Which capture backend to use.
     #[arg(
         long,
@@ -36,9 +40,9 @@ pub struct CaptureArgs {
     #[arg(long, default_value = "auto")]
     pub region: String,
 
-    /// Output PNG path.
+    /// Output PNG path. Required with --headless.
     #[arg(long)]
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
 
     /// Directory of pre-recorded frames; required with --backend fixture.
     #[arg(long)]
