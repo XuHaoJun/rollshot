@@ -48,6 +48,10 @@ pub struct CaptureArgs {
     #[arg(long)]
     pub dump_frames: Option<PathBuf>,
 
+    /// Write a JSON report with one match outcome per captured frame.
+    #[arg(long)]
+    pub debug_match_report: Option<PathBuf>,
+
     /// Maximum number of frames to read before stopping.
     #[arg(long, default_value_t = 200)]
     pub max_frames: u32,

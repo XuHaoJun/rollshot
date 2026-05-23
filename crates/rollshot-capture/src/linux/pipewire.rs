@@ -68,7 +68,15 @@ impl FrameQueue {
     pub fn push(&self, event: FrameEvent) {
         let mut deque = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if deque.len() >= 3 {
-            deque.pop_front();
+            // Preserve chronological continuity for scrollshots. When stitching
+            // falls behind the producer, dropping newest frames loses later
+            // content; dropping oldest frames loses the start of the capture.
+            match event {
+                FrameEvent::Frame(_) => return,
+                FrameEvent::End | FrameEvent::Error(_) => {
+                    deque.pop_back();
+                }
+            }
         }
         deque.push_back(event);
         self.condvar.notify_one();
@@ -839,23 +847,23 @@ mod tests {
     }
 
     #[test]
-    fn queue_retains_newest_three_of_five() {
+    fn queue_retains_oldest_three_of_five() {
         let queue = FrameQueue::new();
         for i in 1..=5 {
             queue.push(FrameEvent::Frame(dummy_frame(i)));
         }
+        let f1 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
+        let f2 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
         let f3 = queue
             .next_frame_with_timeout(Duration::from_millis(50))
             .unwrap();
-        let f4 = queue
-            .next_frame_with_timeout(Duration::from_millis(50))
-            .unwrap();
-        let f5 = queue
-            .next_frame_with_timeout(Duration::from_millis(50))
-            .unwrap();
+        assert_eq!(f1.image.width(), 1);
+        assert_eq!(f2.image.width(), 2);
         assert_eq!(f3.image.width(), 3);
-        assert_eq!(f4.image.width(), 4);
-        assert_eq!(f5.image.width(), 5);
     }
 
     #[test]
@@ -892,6 +900,34 @@ mod tests {
         match err {
             CaptureError::Backend(e) => {
                 assert!(e.to_string().contains("bad pixel data"), "msg = {}", e);
+            }
+            other => panic!("expected Backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_full_error_replaces_newest_frame() {
+        let queue = FrameQueue::new();
+        queue.push(FrameEvent::Frame(dummy_frame(1)));
+        queue.push(FrameEvent::Frame(dummy_frame(2)));
+        queue.push(FrameEvent::Frame(dummy_frame(3)));
+        queue.push(FrameEvent::Error("producer failed".to_string()));
+
+        let f1 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
+        let f2 = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(f1.image.width(), 1);
+        assert_eq!(f2.image.width(), 2);
+
+        let err = queue
+            .next_frame_with_timeout(Duration::from_millis(50))
+            .unwrap_err();
+        match err {
+            CaptureError::Backend(e) => {
+                assert!(e.to_string().contains("producer failed"), "msg = {}", e);
             }
             other => panic!("expected Backend, got {other:?}"),
         }
