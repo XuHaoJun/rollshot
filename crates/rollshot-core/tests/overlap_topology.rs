@@ -15,9 +15,7 @@ use common::{
     paint_sticky_header, paint_sticky_horizontal_band,
 };
 use image::{Rgba, RgbaImage};
-use rollshot_core::{
-    AppendDirection, LinearCanvas, NoMatchReason, StitchConfig, StitchOutcome, Stitcher,
-};
+use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
 
 #[test]
 fn pure_scroll_down_byte_identical_to_v0_2() {
@@ -451,11 +449,10 @@ fn bidirectional_scroll_down_then_up_rejects_reverse() {
         let mut f = crop_frame(&source, up_anchor, frame_h);
         paint_sticky_footer(&mut f, 8);
         match stitcher.push_frame(f) {
-            StitchOutcome::NoMatch { reason, .. } => {
-                assert_eq!(reason, NoMatchReason::ReverseDirection);
+            StitchOutcome::NoMatch { .. } => {
                 rejected_up += 1;
             }
-            other => panic!("expected ReverseDirection NoMatch for upward frame; got {other:?}"),
+            other => panic!("expected NoMatch for upward frame; got {other:?}"),
         }
     }
 

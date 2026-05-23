@@ -781,30 +781,37 @@ fn edge_projection_axis(
 }
 
 fn edge_projection(gray: &[f32], width: u32, height: u32, axis: SearchAxis) -> Vec<f32> {
+    let roi = content_roi(width, height);
     match axis {
         SearchAxis::Vertical => {
             let mut rows = vec![0.0; height as usize];
+            let x_start = if width >= 1024 { roi.x } else { 0 };
+            let x_end = if width >= 1024 { roi.x + roi.w } else { width };
+            let roi_w = x_end - x_start;
             for y in 1..height {
                 let mut sum = 0.0;
-                for x in 0..width {
+                for x in x_start..x_end {
                     let idx = (y * width + x) as usize;
                     let prev = ((y - 1) * width + x) as usize;
                     sum += (gray[idx] - gray[prev]).abs();
                 }
-                rows[y as usize] = sum / width.max(1) as f32 / 255.0;
+                rows[y as usize] = sum / roi_w.max(1) as f32 / 255.0;
             }
             rows
         }
         SearchAxis::Horizontal => {
             let mut cols = vec![0.0; width as usize];
+            let y_start = if height >= 1024 { roi.y } else { 0 };
+            let y_end = if height >= 1024 { roi.y + roi.h } else { height };
+            let roi_h = y_end - y_start;
             for x in 1..width {
                 let mut sum = 0.0;
-                for y in 0..height {
+                for y in y_start..y_end {
                     let idx = (y * width + x) as usize;
                     let prev = (y * width + x - 1) as usize;
                     sum += (gray[idx] - gray[prev]).abs();
                 }
-                cols[x as usize] = sum / height.max(1) as f32 / 255.0;
+                cols[x as usize] = sum / roi_h.max(1) as f32 / 255.0;
             }
             cols
         }
