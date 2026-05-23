@@ -49,6 +49,8 @@ fn verifier_rejects_when_pixels_disagree() {
                         | NoMatchReason::LowConfidence
                         | NoMatchReason::AkazeDisabled
                         | NoMatchReason::AkazeLowInliers
+                        | NoMatchReason::FeatureFallbackDisabled
+                        | NoMatchReason::FeatureLowInliers
                 ),
                 "unexpected reason: {reason:?}"
             );
@@ -76,6 +78,8 @@ fn verifier_rejects_when_overlap_is_too_small() {
                         | NoMatchReason::LowConfidence
                         | NoMatchReason::AkazeDisabled
                         | NoMatchReason::AkazeLowInliers
+                        | NoMatchReason::FeatureFallbackDisabled
+                        | NoMatchReason::FeatureLowInliers
                 ),
                 "unexpected reason: {reason:?}"
             );

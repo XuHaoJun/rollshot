@@ -31,11 +31,17 @@ impl AppendDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MatchMethod {
     Template,
     Coarse,
     Edge,
     Akaze,
+    /// FAST corners + linear KNN matching. The "Hnsw" in the name is
+    /// reserved for a future ANN upgrade — see
+    /// docs/superpowers/specs/2026-05-23-rollshot-fast-hnsw-fallback-design.md
+    /// Approach A. Current matching is exact linear scan.
+    FastHnsw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +90,7 @@ pub struct MotionEstimate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NoMatchReason {
     LowConfidence,
     AmbiguousAxis,
@@ -99,6 +106,12 @@ pub enum NoMatchReason {
     DimensionMismatch,
     AkazeDisabled,
     AkazeLowInliers,
+    /// Both fast_hnsw and akaze are disabled, so estimate_motion has no
+    /// feature-based fallback to fall through to.
+    FeatureFallbackDisabled,
+    /// The FAST+KNN path produced no candidate that passed
+    /// rank_verified_candidates (or did not meet min_inliers).
+    FeatureLowInliers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -183,6 +196,43 @@ impl Default for AkazeConfig {
     }
 }
 
+/// Configuration for the FAST corners + linear KNN feature fallback.
+///
+/// The "Hnsw" in the name is reserved for a future ANN upgrade — see
+/// docs/superpowers/specs/2026-05-23-rollshot-fast-hnsw-fallback-design.md
+/// Approach A. Current matching is exact linear scan.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct FastHnswConfig {
+    pub enabled: bool,
+    pub corner_threshold: u8,
+    pub descriptor_patch_size: usize,
+    pub max_features: usize,
+    pub min_keypoints: usize,
+    pub min_raw_matches: usize,
+    pub min_inliers: usize,
+    pub distance_threshold: f32,
+    pub cross_axis_tolerance: i32,
+    pub second_best_ratio: f32,
+}
+
+impl Default for FastHnswConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            corner_threshold: 64,
+            descriptor_patch_size: 9,
+            max_features: 1200,
+            min_keypoints: 80,
+            min_raw_matches: 24,
+            min_inliers: 16,
+            distance_threshold: 0.10,
+            cross_axis_tolerance: 2,
+            second_best_ratio: 2.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct StitchConfig {
@@ -197,6 +247,7 @@ pub struct StitchConfig {
     pub max_search_ratio: f32,
     pub match_width: u32,
     pub akaze: AkazeConfig,
+    pub fast_hnsw: FastHnswConfig,
     pub verifier: VerifierConfig,
 }
 
@@ -214,6 +265,7 @@ impl Default for StitchConfig {
             max_search_ratio: 0.4,
             match_width: 512,
             akaze: AkazeConfig::default(),
+            fast_hnsw: FastHnswConfig::default(),
             verifier: VerifierConfig::default(),
         }
     }
@@ -299,5 +351,20 @@ mod tests {
         assert_eq!(cfg.akaze.min_raw_matches, 24);
         assert_eq!(cfg.akaze.min_inliers, 16);
         assert_eq!(cfg.akaze.min_inlier_ratio, 0.35);
+    }
+
+    #[test]
+    fn fast_hnsw_is_enabled_by_default() {
+        let cfg = StitchConfig::default();
+        assert!(cfg.fast_hnsw.enabled);
+        assert_eq!(cfg.fast_hnsw.corner_threshold, 64);
+        assert_eq!(cfg.fast_hnsw.descriptor_patch_size, 9);
+        assert_eq!(cfg.fast_hnsw.max_features, 1200);
+        assert_eq!(cfg.fast_hnsw.min_keypoints, 80);
+        assert_eq!(cfg.fast_hnsw.min_raw_matches, 24);
+        assert_eq!(cfg.fast_hnsw.min_inliers, 16);
+        assert!((cfg.fast_hnsw.distance_threshold - 0.10).abs() < 1e-6);
+        assert_eq!(cfg.fast_hnsw.cross_axis_tolerance, 2);
+        assert!((cfg.fast_hnsw.second_best_ratio - 2.0).abs() < 1e-6);
     }
 }

@@ -8,9 +8,9 @@ use common::{
 };
 use image::{Rgba, RgbaImage};
 #[cfg(feature = "akaze")]
-use rollshot_core::{AkazeConfig, MatchMethod};
+use rollshot_core::AkazeConfig;
 use rollshot_core::{
-    AppendDirection, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
+    AppendDirection, MatchMethod, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
     VerifierConfig,
 };
 
@@ -179,7 +179,7 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
         StitchOutcome::NoMatch { reason, .. } => {
             assert!(
                 reason == NoMatchReason::LowConfidence
-                    || reason == NoMatchReason::AkazeDisabled
+                    || reason == NoMatchReason::FeatureFallbackDisabled
                     || reason == NoMatchReason::NotEnoughFeatures
             );
         }
@@ -372,6 +372,113 @@ fn repeated_rows_do_not_append_without_clear_match() {
 
     assert_eq!(stitcher.stats().frame_count, 1);
     assert_eq!(stitcher.stats().total_height, 320);
+}
+
+#[test]
+fn fast_hnsw_fallback_recovers_repeated_grid_with_sparse_features() {
+    let canvas = common::make_akaze_fallback_canvas(320, 900);
+    let first = crop_frame(&canvas, 0, 320);
+    let scrolled = crop_frame(&canvas, 88, 320);
+
+    let mut config = StitchConfig::default();
+    config.second_best_margin = 0.25;
+    let mut stitcher = Stitcher::new(config);
+
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert_eq!(estimate.method, MatchMethod::FastHnsw);
+            assert!((84..=92).contains(&added), "added = {added}");
+            assert!(estimate.inliers.unwrap_or(0) >= 16);
+            assert!(estimate.raw_matches.unwrap_or(0) >= 24);
+        }
+        other => panic!("expected FAST+KNN append, got {other:?}"),
+    }
+}
+
+#[test]
+fn fast_hnsw_attempt_with_blank_frames_reports_not_enough_features() {
+    let prev = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
+    let curr = RgbaImage::from_pixel(220, 220, Rgba([220, 180, 240, 255]));
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(prev), StitchOutcome::FirstFrame);
+    match stitcher.push_frame(curr) {
+        StitchOutcome::NoMatch {
+            reason: NoMatchReason::NotEnoughFeatures,
+            best_estimate: None,
+        } => {}
+        other => panic!("expected NotEnoughFeatures, got {other:?}"),
+    }
+}
+
+#[test]
+fn fast_hnsw_candidate_rejected_by_verifier_preserves_best_estimate() {
+    let canvas = common::make_akaze_fallback_canvas(360, 760);
+    let prev = crop_frame(&canvas, 0, 240);
+    let mut curr = crop_frame(&canvas, 72, 240);
+    // Corrupt most of the frame except a thin top strip so verifier rejects.
+    for y in 40..240 {
+        for x in 0..240 {
+            let v = ((x * 41 + y * 67) % 255) as u8;
+            curr.put_pixel(x, y, Rgba([v, 255 - v, v / 2, 255]));
+        }
+    }
+
+    let mut config = StitchConfig::default();
+    config.second_best_margin = 0.25;
+    let mut stitcher = Stitcher::new(config);
+    assert_eq!(stitcher.push_frame(prev), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(curr) {
+        StitchOutcome::NoMatch {
+            reason: NoMatchReason::FeatureLowInliers,
+            best_estimate: Some(estimate),
+        } => {
+            assert_eq!(estimate.method, MatchMethod::FastHnsw);
+            assert!((estimate.dy - 72).abs() <= 8, "dy = {}", estimate.dy);
+        }
+        other => panic!("expected FeatureLowInliers with best_estimate, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "akaze")]
+#[test]
+fn enable_akaze_overrides_fast_hnsw() {
+    let canvas = common::make_akaze_fallback_canvas(320, 900);
+    let first = crop_frame(&canvas, 0, 320);
+    let scrolled = crop_frame(&canvas, 88, 320);
+
+    let mut config = StitchConfig::default();
+    config.second_best_margin = 0.25;
+    config.fast_hnsw.enabled = true;
+    {
+        let mut a = AkazeConfig::default();
+        a.enabled = true;
+        a.detector_threshold = 0.0005;
+        a.min_raw_matches = 8;
+        a.min_inliers = 6;
+        a.min_inlier_ratio = 0.25;
+        config.akaze = a;
+    }
+    let mut stitcher = Stitcher::new(config);
+
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended { estimate, .. } => {
+            assert_eq!(
+                estimate.method,
+                MatchMethod::Akaze,
+                "AKAZE must win pick-one dispatch even with FastHnsw enabled"
+            );
+        }
+        other => panic!("expected AKAZE append, got {other:?}"),
+    }
 }
 
 #[cfg(feature = "akaze")]

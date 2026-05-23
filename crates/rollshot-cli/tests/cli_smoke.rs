@@ -115,6 +115,44 @@ fn make_axis_debug_canvas(width: u32, height: u32) -> RgbaImage {
     img
 }
 
+fn make_akaze_fallback_smoke_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([246, 246, 246, 255]));
+    for y in 0..height {
+        let band = (y / 10) % 2;
+        let v = if band == 0 { 60 } else { 220 };
+        for x in 0..width {
+            img.put_pixel(x, y, Rgba([v, v, v, 255]));
+        }
+    }
+    // Small cross-shaped features create strong FAST corners but barely
+    // affect template NCC on periodic bands.
+    for i in 0..80u32 {
+        let cx = 24 + ((i * 59) % width.saturating_sub(48).max(1));
+        let cy = 24 + ((i * 89) % height.saturating_sub(48).max(1));
+        let color = Rgba([
+            (50 + (i * 17) % 150) as u8,
+            (60 + (i * 23) % 140) as u8,
+            (70 + (i * 29) % 130) as u8,
+            255,
+        ]);
+        // 3x3 cross
+        img.put_pixel(cx, cy, color);
+        if cx > 0 {
+            img.put_pixel(cx - 1, cy, color);
+        }
+        if cx + 1 < width {
+            img.put_pixel(cx + 1, cy, color);
+        }
+        if cy > 0 {
+            img.put_pixel(cx, cy - 1, color);
+        }
+        if cy + 1 < height {
+            img.put_pixel(cx, cy + 1, color);
+        }
+    }
+    img
+}
+
 #[test]
 fn rollshot_stitch_folder_writes_debug_report() {
     let tempdir = tempdir_for_test("rollshot-stitch-folder-debug");
@@ -230,77 +268,95 @@ fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
     let _ = std::fs::remove_dir_all(&tempdir);
 }
 
-#[cfg(feature = "akaze")]
 #[test]
-fn rollshot_stitch_folder_enable_akaze_toggle() {
-    let tempdir = tempdir_for_test("rollshot-stitch-folder-enable-akaze");
+fn rollshot_stitch_folder_default_uses_fast_hnsw() {
+    let tempdir = tempdir_for_test("rollshot-stitch-fast-hnsw");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
 
     let canvas = make_akaze_fallback_smoke_canvas(320, 820);
-    use std::hash::{Hash, Hasher};
-    for (idx, y) in [0u32, 96, 192].iter().enumerate() {
-        let mut frame = imageops::crop_imm(&canvas, 0, *y, 320, 320).to_image();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        idx.hash(&mut hasher);
-        y.hash(&mut hasher);
-        let seed = hasher.finish();
-        for (i, px) in frame.pixels_mut().enumerate() {
-            let h = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(i as u64);
-            let n0 = (h as i32 % 61) - 30;
-            let n1 = ((h >> 16) as i32 % 61) - 30;
-            let n2 = ((h >> 32) as i32 % 61) - 30;
-            px[0] = (px[0] as i32 + n0).clamp(0, 255) as u8;
-            px[1] = (px[1] as i32 + n1).clamp(0, 255) as u8;
-            px[2] = (px[2] as i32 + n2).clamp(0, 255) as u8;
-        }
+    for (idx, y) in [0u32, 86].iter().enumerate() {
+        let frame = imageops::crop_imm(&canvas, 0, *y, 320, 320).to_image();
         frame
             .save(frames_dir.join(format!("frame_{idx:03}.png")))
             .expect("save frame");
     }
 
-    let run = |label: &str, extra_args: &[&str]| -> String {
-        let output_png = tempdir.join(format!("stitched_{label}.png"));
-        let report_json = tempdir.join(format!("report_{label}.json"));
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rollshot"));
-        cmd.arg("stitch-folder")
-            .arg(&frames_dir)
-            .arg("--output")
-            .arg(&output_png)
-            .arg("--debug-match-report")
-            .arg(&report_json);
-        for a in extra_args {
-            cmd.arg(a);
-        }
-        let output = cmd.output().expect("run rollshot stitch-folder");
-        assert!(
-            output.status.success(),
-            "{label} stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        std::fs::read_to_string(&report_json).expect("read report")
-    };
+    let output_png = tempdir.join("stitched.png");
+    let report_json = tempdir.join("report.json");
 
-    let without_akaze = run("without", &[]);
-    let with_akaze = run("with", &["--enable-akaze"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("stitch-folder")
+        .arg(&frames_dir)
+        .arg("--output")
+        .arg(&output_png)
+        .arg("--debug-match-report")
+        .arg(&report_json)
+        .output()
+        .expect("run rollshot stitch-folder");
 
     assert!(
-        !without_akaze.contains("\"method\": \"Akaze\""),
-        "baseline (no --enable-akaze) should not invoke AKAZE, report = {without_akaze}"
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = std::fs::read_to_string(&report_json).expect("read report");
+    assert!(
+        report.contains("\"method\": \"FastHnsw\""),
+        "expected FastHnsw in report, got {report}"
     );
     assert!(
-        with_akaze.contains("\"method\": \"Akaze\""),
-        "expected AKAZE to fire with --enable-akaze, report = {with_akaze}"
+        !report.contains("\"method\": \"Akaze\""),
+        "expected no Akaze in report, got {report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn rollshot_stitch_folder_disable_feature_fallback_makes_no_match() {
+    let tempdir = tempdir_for_test("rollshot-stitch-disable-fallback");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+
+    let canvas = make_akaze_fallback_smoke_canvas(320, 820);
+    for (idx, y) in [0u32, 86].iter().enumerate() {
+        let frame = imageops::crop_imm(&canvas, 0, *y, 320, 320).to_image();
+        frame
+            .save(frames_dir.join(format!("frame_{idx:03}.png")))
+            .expect("save frame");
+    }
+
+    let output_png = tempdir.join("stitched.png");
+    let report_json = tempdir.join("report.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("stitch-folder")
+        .arg(&frames_dir)
+        .arg("--output")
+        .arg(&output_png)
+        .arg("--debug-match-report")
+        .arg(&report_json)
+        .arg("--disable-feature-fallback")
+        .output()
+        .expect("run rollshot stitch-folder");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = std::fs::read_to_string(&report_json).expect("read report");
+    assert!(
+        report.contains("FeatureFallbackDisabled"),
+        "expected FeatureFallbackDisabled in report, got {report}"
     );
 
     let _ = std::fs::remove_dir_all(&tempdir);
 }
 
 #[cfg(feature = "akaze")]
-fn make_akaze_fallback_smoke_canvas(width: u32, height: u32) -> RgbaImage {
-    use image::{Rgba, RgbaImage};
+fn make_akaze_test_canvas(width: u32, height: u32) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([246, 246, 246, 255]));
     for y in 0..height {
         for x in 0..width {
@@ -326,4 +382,84 @@ fn make_akaze_fallback_smoke_canvas(width: u32, height: u32) -> RgbaImage {
         }
     }
     img
+}
+
+#[cfg(feature = "akaze")]
+#[test]
+fn rollshot_stitch_folder_enable_akaze_overrides_fast_hnsw() {
+    let tempdir = tempdir_for_test("rollshot-stitch-folder-enable-akaze");
+    let frames_dir = tempdir.join("frames");
+    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+
+    let canvas = make_akaze_test_canvas(320, 820);
+    use std::hash::{Hash, Hasher};
+    for (idx, y) in [0u32, 96, 192].iter().enumerate() {
+        let mut frame = imageops::crop_imm(&canvas, 0, *y, 320, 320).to_image();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        idx.hash(&mut hasher);
+        y.hash(&mut hasher);
+        let seed = hasher.finish();
+        for (i, px) in frame.pixels_mut().enumerate() {
+            let h = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(i as u64);
+            let n0 = (h as i32 % 71) - 35;
+            let n1 = ((h >> 16) as i32 % 71) - 35;
+            let n2 = ((h >> 32) as i32 % 71) - 35;
+            px[0] = (px[0] as i32 + n0).clamp(0, 255) as u8;
+            px[1] = (px[1] as i32 + n1).clamp(0, 255) as u8;
+            px[2] = (px[2] as i32 + n2).clamp(0, 255) as u8;
+        }
+        frame
+            .save(frames_dir.join(format!("frame_{idx:03}.png")))
+            .expect("save frame");
+    }
+
+    let run = |label: &str, extra_args: &[&str]| -> (String, String) {
+        let output_png = tempdir.join(format!("stitched_{label}.png"));
+        let report_json = tempdir.join(format!("report_{label}.json"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+        cmd.arg("stitch-folder")
+            .arg(&frames_dir)
+            .arg("--output")
+            .arg(&output_png)
+            .arg("--debug-match-report")
+            .arg(&report_json);
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        let output = cmd.output().expect("run rollshot stitch-folder");
+        assert!(
+            output.status.success(),
+            "{label} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            std::fs::read_to_string(&report_json).expect("read report"),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    };
+
+    let (without_akaze, _) = run("without", &[]);
+    let (with_akaze, with_stderr) = run("with", &["--enable-akaze"]);
+
+    assert!(
+        !without_akaze.contains("\"method\": \"Akaze\""),
+        "baseline (no --enable-akaze) should not invoke AKAZE, report = {without_akaze}"
+    );
+    assert!(
+        with_akaze.contains("\"method\": \"Akaze\""),
+        "expected AKAZE to fire with --enable-akaze, report = {with_akaze}"
+    );
+    assert!(
+        !with_akaze.contains("\"method\": \"FastHnsw\""),
+        "expected no FastHnsw when AKAZE enabled, report = {with_akaze}"
+    );
+    // Check deprecation warning on stderr
+    assert!(
+        with_stderr.to_lowercase().contains("deprecated"),
+        "expected deprecation warning on stderr for --enable-akaze, stderr = {with_stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tempdir);
 }
