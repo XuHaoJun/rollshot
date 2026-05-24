@@ -70,6 +70,16 @@ For Rust changes, prefer:
 - `rtk cargo fmt --check`
 - `rtk cargo clippy --workspace --all-targets -- -D warnings` when risk justifies it
 
+For frontend changes under `crates/rollshot-app`, prefer:
+- `rtk pnpm --dir crates/rollshot-app run typecheck`
+- `rtk pnpm --dir crates/rollshot-app test`
+- `rtk pnpm --dir crates/rollshot-app run build`
+
+When already in `crates/rollshot-app/` (check with `pwd`):
+- `rtk pnpm run typecheck`
+- `rtk pnpm test`
+- `rtk pnpm run build`
+
 @RTK.md
 
 <!-- code-review-graph MCP tools -->
