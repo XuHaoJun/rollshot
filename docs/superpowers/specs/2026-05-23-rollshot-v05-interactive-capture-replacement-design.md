@@ -198,6 +198,12 @@ frontend invoke<ArrayBuffer>() → Blob URL → <img> or canvas
 
 This is supported by the snow-shot pattern for screenshot and scroll screenshot commands. SharedBuffer / zero-copy transfer is explicitly out of v0.5 unless preview IPC becomes the measured bottleneck.
 
+For coordinate handling, v0.5 follows the same principle as snow-shot and OBS, but not their full capture architectures:
+
+- snow-shot converts monitor/logical rectangles into physical pixel rectangles before platform crop, then clips global crop regions into monitor-local crop regions.
+- OBS treats crop values as source-local pixels after applying item/canvas scale, and rescales crop values only when the source dimensions change.
+- Rollshot interactive capture should use the same invariant: UI/logical coordinates are temporary; persisted crop state is always source-frame pixels.
+
 ### 5.4 Region selection
 
 The first version uses a Tauri transparent overlay window and a Canvas2D selection layer:
@@ -208,7 +214,28 @@ The first version uses a Tauri transparent overlay window and a Canvas2D selecti
 - show region dimensions
 - confirm or cancel
 
-The selected region is in source-frame pixel coordinates. HiDPI conversion must be tested explicitly because browser CSS pixels, Tauri window coordinates, and captured frame pixels can differ.
+The selected region is in source-frame pixel coordinates. Browser CSS pixels, Tauri window coordinates, monitor logical points, and captured frame pixels must not be mixed in backend state.
+
+Interactive conversion contract:
+
+```text
+frontend pointer events
+  → CSS rectangle relative to the rendered preview image
+  → source-frame pixel rectangle using rendered preview size and captured frame size
+  → Rust confirm_region validates against latest CapturedFrame.image dimensions
+  → Rust crop_frame crops CapturedFrame.image pixels before stitching
+```
+
+The frontend conversion should preserve selected bounds:
+
+- compute source `left` / `top` with floor
+- compute source `right` / `bottom` with ceil
+- derive width / height from those edges
+- clamp the final region to the captured frame dimensions
+
+This avoids independently rounding origin and size, which can shrink or drift fractional HiDPI selections.
+
+In v0.5, GUI-selected interactive regions are not sent back into platform capture APIs as Linux portal regions or macOS `scap` crop areas. The backend captures the selected source/window, then Rollshot applies the GUI region as a post-capture source-frame pixel crop. This keeps Linux and macOS interactive behavior consistent even though their platform capture APIs use different coordinate spaces.
 
 ---
 
@@ -219,6 +246,8 @@ The selected region is in source-frame pixel coordinates. HiDPI conversion must 
 Linux Wayland is the primary validation target.
 
 Portal source selection remains in `rollshot-capture`. The GUI should prefer source/window selection through portal and do its own region selection after frames arrive. This avoids relying on KDE's portal region picker for precise crop and avoids the tooltip-first-frame issue by delaying stitch start until after GUI region confirmation.
+
+For interactive GUI crop, Linux uses the same source-frame pixel contract as other platforms: capture a full selected source/window, receive `CapturedFrame.image`, then apply the GUI-selected region as a post-capture crop. Existing headless/manual Linux crop semantics remain separate: `RegionMode::Manual` is interpreted relative to the post-VideoCrop frame.
 
 PipeWire has no general window-exclusion mechanism. Therefore:
 
@@ -233,6 +262,8 @@ The old spec's blanket "hide overlay for Linux full-screen" is too broad for the
 macOS remains supported through the existing ScreenCaptureKit/scap backend when built with the macOS feature. The app can later use exclusion mechanisms for app windows, but v0.5 should not depend on macOS-only exclusion to make the core flow work.
 
 The primary macOS requirement is that the GUI architecture does not block using SCK in `rollshot-app`.
+
+For interactive GUI crop, macOS must also use the post-capture source-frame pixel contract. Existing `scap` manual crop may still involve logical-vs-physical coordinate ambiguity in headless/manual paths; v0.5 interactive crop must avoid depending on that ambiguity by cropping `CapturedFrame.image` in Rollshot-owned Rust state.
 
 ### 6.3 Windows
 
@@ -293,12 +324,15 @@ Add focused tests for:
 - launcher option serialization
 - `crop_frame` bounds and metadata updates
 - session state transitions that do not require a real portal
+- interactive session stores and crops source-frame pixel regions, not CSS/logical coordinates
 
 ### 9.2 Frontend tests
 
 Add lightweight tests only where they catch real risk:
 
 - region coordinate conversion
+- fractional HiDPI conversion that floors near edges and ceils far edges
+- full-rendered-preview conversion maps exactly to full source-frame bounds
 - selection drag/resize math
 - command wrapper result handling
 
@@ -356,6 +390,7 @@ Scope:
 - call capture backend from Tauri commands
 - display bounded-cadence live preview
 - implement source-pixel region selection and HiDPI tests
+- establish the interactive coordinate-space contract from preview CSS rectangle to source-frame pixel rectangle
 
 Do not implement full stitching lifecycle in this plan.
 
@@ -363,6 +398,7 @@ Do not implement full stitching lifecycle in this plan.
 
 Scope:
 
+- tighten coordinate conversion if Plan 2's manual verification finds preview/image-box drift
 - crop selected region
 - run stitch loop under GUI session state
 - stop on user action
