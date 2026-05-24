@@ -5,3 +5,6 @@
 .vscode/
 # Added by code-review-graph
 .code-review-graph/
+crates/rollshot-app/node_modules/
+crates/rollshot-app/dist/
+crates/rollshot-app/src-tauri/target/
