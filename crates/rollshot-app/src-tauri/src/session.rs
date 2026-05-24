@@ -281,7 +281,9 @@ fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
 fn format_stitch_outcome(outcome: &StitchOutcome) -> String {
     match outcome {
         StitchOutcome::FirstFrame => "first frame".to_string(),
-        StitchOutcome::Appended { direction, added, .. } => {
+        StitchOutcome::Appended {
+            direction, added, ..
+        } => {
             format!("appended {added}px {direction:?}")
         }
         StitchOutcome::NoProgress { .. } => "no progress".to_string(),
@@ -703,11 +705,16 @@ mod tests {
     fn scrolling_frame(y_offset: u8) -> CapturedFrame {
         let canvas_height: u32 = 200;
         let canvas_width: u32 = 80;
-        let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([245, 245, 245, 255]));
+        let mut canvas =
+            RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([245, 245, 245, 255]));
         for y in (0u32..canvas_height).step_by(11) {
             let accent = ((y / 3) % 180) as u8;
             for x in 8..canvas_width.saturating_sub(8) {
-                let stripe = if (x / 5 + y / 7) % 2 == 0 { 220u8 } else { 180u8 };
+                let stripe = if (x / 5 + y / 7) % 2 == 0 {
+                    220u8
+                } else {
+                    180u8
+                };
                 canvas.put_pixel(x, y, Rgba([accent, stripe, 80, 255]));
                 if y + 1 < canvas_height {
                     canvas.put_pixel(x, y + 1, Rgba([30, 30, 30, 255]));
@@ -738,7 +745,9 @@ mod tests {
         let mut session = AppSession::new();
         session.store_frame_for_test(make_test_frame(320, 200));
 
-        let err = session.start_stitching_for_test().expect_err("missing region rejected");
+        let err = session
+            .start_stitching_for_test()
+            .expect_err("missing region rejected");
 
         assert!(err.contains("confirm a region"), "err = {err}");
     }
@@ -801,10 +810,8 @@ mod tests {
 
     #[test]
     fn save_image_writes_final_png() {
-        let tempdir = std::env::temp_dir().join(format!(
-            "rollshot-app-save-image-{}",
-            std::process::id()
-        ));
+        let tempdir =
+            std::env::temp_dir().join(format!("rollshot-app-save-image-{}", std::process::id()));
         std::fs::create_dir_all(&tempdir).expect("create tempdir");
         let output = tempdir.join("stitched.png");
 

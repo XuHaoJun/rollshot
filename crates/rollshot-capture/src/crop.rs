@@ -1,6 +1,6 @@
 use image::RgbaImage;
 
-use crate::{CapturedFrame, CaptureError, FrameMetadata, Region};
+use crate::{CaptureError, CapturedFrame, FrameMetadata, Region};
 
 pub fn crop_frame(frame: &CapturedFrame, region: Region) -> Result<CapturedFrame, CaptureError> {
     if region.x < 0 || region.y < 0 || region.width == 0 || region.height == 0 {
@@ -67,7 +67,10 @@ mod tests {
             image,
             timestamp: SystemTime::UNIX_EPOCH,
             metadata: FrameMetadata {
-                source_size: Some(Size { width: 4, height: 3 }),
+                source_size: Some(Size {
+                    width: 4,
+                    height: 3,
+                }),
                 effective_region: None,
                 pixel_format: Some(PixelFormat::Rgba),
                 stride: Some(16),
@@ -133,6 +136,9 @@ mod tests {
         )
         .expect_err("outside region rejected");
 
-        assert!(err.to_string().contains("outside frame bounds"), "err = {err}");
+        assert!(
+            err.to_string().contains("outside frame bounds"),
+            "err = {err}"
+        );
     }
 }
