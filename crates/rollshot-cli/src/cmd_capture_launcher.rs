@@ -133,7 +133,17 @@ fn resolve_app_binary_from_env_and_exe(
                 1,
             ));
         }
-        return Ok(PathBuf::from(path));
+        let resolved = PathBuf::from(path);
+        if !resolved.exists() {
+            return Err(CliError::new(
+                format!(
+                    "{APP_ENV} points to {} but the file does not exist",
+                    resolved.display()
+                ),
+                1,
+            ));
+        }
+        return Ok(resolved);
     }
 
     let bin_dir = current_exe.parent().ok_or_else(|| {
@@ -145,7 +155,30 @@ fn resolve_app_binary_from_env_and_exe(
             1,
         )
     })?;
-    Ok(bin_dir.join(default_app_binary_name()))
+    let app_path = bin_dir.join(default_app_binary_name());
+    if !app_path.exists() {
+        let hint = if is_cargo_target_dir(bin_dir) {
+            "hint: the GUI app must be built separately with the Tauri toolchain:\n  \
+             pnpm --dir crates/rollshot-app install\n  \
+             pnpm --dir crates/rollshot-app run tauri build --debug\n\
+             or use --headless to skip the GUI"
+        } else {
+            "hint: reinstall rollshot or set ROLLSHOT_APP to the GUI binary path"
+        };
+        return Err(CliError::new(
+            format!(
+                "{} not found next to rollshot (looked in {})\n{hint}",
+                default_app_binary_name(),
+                bin_dir.display(),
+            ),
+            1,
+        ));
+    }
+    Ok(app_path)
+}
+
+fn is_cargo_target_dir(dir: &Path) -> bool {
+    dir.components().any(|c| c.as_os_str() == "target")
 }
 
 #[cfg(windows)]
@@ -248,15 +281,54 @@ mod tests {
 
     #[test]
     fn resolve_app_binary_prefers_env_override() {
-        let env_path = PathBuf::from("custom-rollshot-app");
-        let current_exe = Path::new("target/debug/rollshot");
+        let current_exe_path = std::env::current_exe().expect("current exe");
+        let env_path = current_exe_path.clone();
 
         let resolved = resolve_app_binary_from_env_and_exe(
             Some(OsString::from(env_path.as_os_str())),
-            current_exe,
+            Path::new("target/debug/rollshot"),
         )
         .expect("env override resolves");
 
         assert_eq!(resolved, env_path);
+    }
+
+    #[test]
+    fn resolve_app_binary_env_missing_file() {
+        let env_path = PathBuf::from("/no/such/rollshot-app");
+        let err = resolve_app_binary_from_env_and_exe(
+            Some(OsString::from(env_path.as_os_str())),
+            Path::new("target/debug/rollshot"),
+        )
+        .expect_err("missing env path");
+
+        assert!(err.message.contains("ROLLSHOT_APP"), "{}", err.message);
+        assert!(err.message.contains("does not exist"), "{}", err.message);
+    }
+
+    #[test]
+    fn resolve_app_binary_sibling_missing_dev() {
+        let err = resolve_app_binary_from_env_and_exe(
+            None,
+            Path::new("/project/target/debug/rollshot"),
+        )
+        .expect_err("sibling missing in dev");
+
+        assert!(err.message.contains("not found"), "{}", err.message);
+        assert!(err.message.contains("tauri"), "{}", err.message);
+        assert!(err.message.contains("--headless"), "{}", err.message);
+    }
+
+    #[test]
+    fn resolve_app_binary_sibling_missing_prod() {
+        let err = resolve_app_binary_from_env_and_exe(
+            None,
+            Path::new("/usr/bin/rollshot"),
+        )
+        .expect_err("sibling missing in prod");
+
+        assert!(err.message.contains("not found"), "{}", err.message);
+        assert!(err.message.contains("ROLLSHOT_APP"), "{}", err.message);
+        assert!(!err.message.contains("tauri"), "{}", err.message);
     }
 }
