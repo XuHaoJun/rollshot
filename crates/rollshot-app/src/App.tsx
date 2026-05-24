@@ -21,6 +21,7 @@ export default function App() {
   const [pendingRegion, setPendingRegion] = useState<SourceRegion | null>(null)
   const [message, setMessage] = useState('Ready to start capture')
   const previewUrlRef = useRef<string | null>(null)
+  const previewPollInFlightRef = useRef(false)
 
   useEffect(() => {
     previewUrlRef.current = previewUrl
@@ -42,6 +43,11 @@ export default function App() {
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
+      if (previewPollInFlightRef.current) {
+        return
+      }
+
+      previewPollInFlightRef.current = true
       try {
         const nextStatus = await sessionStatus()
         setStatus(nextStatus)
@@ -60,6 +66,8 @@ export default function App() {
         }
       } catch (error) {
         setMessage(String(error))
+      } finally {
+        previewPollInFlightRef.current = false
       }
     }, 160)
 

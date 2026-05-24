@@ -85,9 +85,9 @@ impl AppSession {
             return Err("region must have non-negative origin and non-zero size".to_string());
         }
 
-        let right = region.x as u32 + region.width;
-        let bottom = region.y as u32 + region.height;
-        if right > frame.image.width() || bottom > frame.image.height() {
+        let right = (region.x as u64) + (region.width as u64);
+        let bottom = (region.y as u64) + (region.height as u64);
+        if right > frame.image.width() as u64 || bottom > frame.image.height() as u64 {
             return Err(format!(
                 "region x={},y={},w={},h={} is outside frame bounds {}x{}",
                 region.x,
@@ -102,38 +102,34 @@ impl AppSession {
         self.selected_region = Some(region.into());
         Ok(region)
     }
+}
 
-    pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
-        let Some(frame) = &self.latest_frame else {
-            return Ok(None);
-        };
+fn encode_preview_png(frame: &CapturedFrame, max_edge: u32) -> Result<Vec<u8>, String> {
+    let max_edge = max_edge.max(1);
+    let width = frame.image.width();
+    let height = frame.image.height();
+    let largest = width.max(height).max(1);
+    let scale = (max_edge as f32 / largest as f32).min(1.0);
+    let preview_width = ((width as f32 * scale).round() as u32).max(1);
+    let preview_height = ((height as f32 * scale).round() as u32).max(1);
 
-        let max_edge = max_edge.max(1);
-        let width = frame.image.width();
-        let height = frame.image.height();
-        let largest = width.max(height).max(1);
-        let scale = (max_edge as f32 / largest as f32).min(1.0);
-        let preview_width = ((width as f32 * scale).round() as u32).max(1);
-        let preview_height = ((height as f32 * scale).round() as u32).max(1);
-
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        if preview_width == width && preview_height == height {
-            frame
-                .image
-                .write_to(&mut cursor, image::ImageFormat::Png)
-                .map_err(|err| format!("failed to encode preview png: {err}"))?;
-        } else {
-            image::imageops::resize(
-                &frame.image,
-                preview_width,
-                preview_height,
-                image::imageops::FilterType::Nearest,
-            )
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    if preview_width == width && preview_height == height {
+        frame
+            .image
             .write_to(&mut cursor, image::ImageFormat::Png)
             .map_err(|err| format!("failed to encode preview png: {err}"))?;
-        }
-        Ok(Some(cursor.into_inner()))
+    } else {
+        image::imageops::resize(
+            &frame.image,
+            preview_width,
+            preview_height,
+            image::imageops::FilterType::Nearest,
+        )
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|err| format!("failed to encode preview png: {err}"))?;
     }
+    Ok(cursor.into_inner())
 }
 
 pub struct SharedSession {
@@ -265,11 +261,18 @@ impl SharedSession {
     }
 
     pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| "session lock poisoned".to_string())?;
-        inner.latest_preview_png(max_edge)
+        let frame = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            inner.latest_frame.clone()
+        };
+
+        frame
+            .as_ref()
+            .map(|frame| encode_preview_png(frame, max_edge))
+            .transpose()
     }
 }
 
@@ -288,7 +291,7 @@ impl AppSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSession, RegionDto, SessionStatus};
+    use super::{encode_preview_png, AppSession, RegionDto, SessionStatus};
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
     use std::time::SystemTime;
@@ -334,6 +337,26 @@ mod tests {
     }
 
     #[test]
+    fn confirm_region_rejects_overflowing_bounds_without_panic() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(make_test_frame(320, 200));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.confirm_region(RegionDto {
+                x: i32::MAX,
+                y: 10,
+                width: u32::MAX,
+                height: 40,
+            })
+        }));
+
+        let err = result
+            .expect("region validation should not panic")
+            .expect_err("overflowing region should be rejected");
+        assert!(err.contains("outside frame bounds"), "err = {err}");
+    }
+
+    #[test]
     fn confirm_region_stores_source_pixel_region() {
         let mut session = AppSession::new();
         session.store_frame_for_test(make_test_frame(320, 200));
@@ -358,10 +381,8 @@ mod tests {
         let mut session = AppSession::new();
         session.store_frame_for_test(make_test_frame(800, 400));
 
-        let bytes = session
-            .latest_preview_png(200)
-            .expect("encode preview")
-            .expect("preview exists");
+        let bytes = encode_preview_png(session.latest_frame.as_ref().expect("preview exists"), 200)
+            .expect("encode preview");
         let image = image::load_from_memory(&bytes).expect("decode png");
 
         assert_eq!(image.width(), 200);
