@@ -121,3 +121,36 @@ button:not(:disabled),
     border-top: 1px solid #c7d0dc;
   }
 }
+
+.preview-wrap {
+  position: relative;
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  line-height: 0;
+  user-select: none;
+  touch-action: none;
+}
+
+.preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  object-fit: contain;
+  border: 1px solid #8b95a5;
+  background: #ffffff;
+}
+
+.selection-dim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(17, 24, 39, 0.08);
+}
+
+.selection-box {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid #00a884;
+  background: rgba(0, 168, 132, 0.12);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+}
