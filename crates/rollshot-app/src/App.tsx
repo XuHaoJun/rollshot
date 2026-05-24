@@ -213,7 +213,7 @@ export default function App() {
         <p className="status-text">
           {status.state === 'failed' ? status.message : message}
         </p>
-        <Button type="button" onClick={onStart} disabled={status.state !== 'idle'}>
+        <Button type="button" onClick={onStart} disabled={status.state === 'stitching'}>
           <Play className="size-4" aria-hidden="true" />
           Start
         </Button>

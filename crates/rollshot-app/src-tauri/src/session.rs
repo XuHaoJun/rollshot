@@ -236,6 +236,18 @@ impl AppSession {
             output_path: self.output_path.clone(),
         })
     }
+
+    fn reset_capture_state(&mut self) {
+        self.latest_frame = None;
+        self.latest_frame_seq = 0;
+        self.selected_region = None;
+        self.stitcher = None;
+        self.stitch_stats = StitchStatsDto::from(StitchStats::default());
+        self.last_stitch_outcome = None;
+        self.final_image = None;
+        self.output_path = None;
+        self.error = None;
+    }
 }
 
 fn encode_preview_png(frame: &CapturedFrame, max_edge: u32) -> Result<Vec<u8>, String> {
@@ -425,6 +437,10 @@ impl SharedSession {
                 let _ = handle.join();
             }
         }
+
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.reset_capture_state();
+        }
     }
 
     pub fn status(&self) -> Result<SessionStatus, String> {
@@ -522,6 +538,13 @@ impl SharedSession {
             }
         }
 
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut reader) = self.reader.lock() {
+            if let Some(handle) = reader.take() {
+                let _ = handle.join();
+            }
+        }
+
         let mut inner = self
             .inner
             .lock()
@@ -590,9 +613,10 @@ impl AppSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_preview_png, AppSession, RegionDto, SessionStatus};
+    use super::{encode_preview_png, AppSession, RegionDto, SessionStatus, SharedSession};
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
+    use std::sync::atomic::Ordering;
     use std::time::SystemTime;
 
     fn make_test_frame(width: u32, height: u32) -> CapturedFrame {
@@ -837,5 +861,61 @@ mod tests {
         let decoded = image::open(&output).expect("decode saved png");
         assert_eq!(decoded.width(), 80);
         let _ = std::fs::remove_dir_all(&tempdir);
+    }
+
+    #[test]
+    fn stop_capture_resets_preview_state_for_restart() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(make_test_frame(320, 200));
+            inner
+                .confirm_region(RegionDto {
+                    x: 10,
+                    y: 10,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+        }
+
+        session.stop_capture();
+
+        assert_eq!(session.status().expect("status"), SessionStatus::Idle);
+    }
+
+    #[test]
+    fn stop_stitching_stops_capture_reader_and_keeps_final_image() {
+        let session = SharedSession::new();
+        session.stop.store(false, Ordering::Relaxed);
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(scrolling_frame(0));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner
+                .push_stitch_frame(scrolling_frame(0))
+                .expect("first frame");
+        }
+
+        let done = session.stop_stitching().expect("stop stitching");
+
+        assert!(session.stop.load(Ordering::Relaxed));
+        assert_eq!(done.image_width, 80);
+        assert_eq!(
+            session.status().expect("status"),
+            SessionStatus::Done {
+                image_width: 80,
+                image_height: 80,
+                output_path: None,
+            }
+        );
     }
 }
