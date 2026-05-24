@@ -406,6 +406,7 @@ impl SharedSession {
                         }
                     }
                     Err(rollshot_capture::CaptureError::EndOfStream) => break,
+                    Err(rollshot_capture::CaptureError::Timeout { .. }) => continue,
                     Err(err) => {
                         if let Ok(mut inner) = session.inner.lock() {
                             inner.error = Some(err.to_string());
@@ -457,6 +458,20 @@ impl SharedSession {
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
         inner.confirm_region(region)
+    }
+
+    pub fn stitch_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
+        let image = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            inner.stitcher.as_ref().and_then(|s| s.full_image()).cloned()
+        };
+        image
+            .as_ref()
+            .map(|image| encode_preview_image_png(image, max_edge))
+            .transpose()
     }
 
     pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
