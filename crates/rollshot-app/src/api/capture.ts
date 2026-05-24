@@ -1,0 +1,60 @@
+import { invoke } from '@tauri-apps/api/core'
+import type { SourceRegion } from '../region/geometry'
+
+export type InteractiveLaunchOptions = {
+  backend: string
+  fps: number
+  show_cursor: boolean
+}
+
+export type RegionDto = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type SessionStatus =
+  | { state: 'idle' }
+  | {
+      state: 'previewing'
+      frame_width: number
+      frame_height: number
+      region: RegionDto | null
+    }
+  | { state: 'failed'; message: string }
+
+export async function launchOptions(): Promise<InteractiveLaunchOptions> {
+  return await invoke<InteractiveLaunchOptions>('launch_options')
+}
+
+export async function startCapture(options: InteractiveLaunchOptions): Promise<void> {
+  await invoke('start_capture', { options })
+}
+
+export async function stopCapture(): Promise<void> {
+  await invoke('stop_capture')
+}
+
+export async function sessionStatus(): Promise<SessionStatus> {
+  return await invoke<SessionStatus>('session_status')
+}
+
+export async function getLatestPreview(maxEdge: number): Promise<Blob | null> {
+  const bytes = await invoke<ArrayBuffer>('get_latest_preview', { maxEdge })
+  if (bytes.byteLength === 0) {
+    return null
+  }
+  return new Blob([bytes], { type: 'image/png' })
+}
+
+export async function confirmRegion(region: SourceRegion): Promise<RegionDto> {
+  return await invoke<RegionDto>('confirm_region', {
+    region: {
+      x: region.x,
+      y: region.y,
+      width: region.width,
+      height: region.height,
+    },
+  })
+}
