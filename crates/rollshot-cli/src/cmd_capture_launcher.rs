@@ -4,7 +4,7 @@ use std::process::{Command, ExitStatus};
 
 use rollshot_capture::InteractiveLaunchOptions;
 
-use crate::args::CaptureArgs;
+use crate::args::{CaptureArgs, MAX_FRAMES_DEFAULT};
 use crate::cli_error::CliError;
 
 const APP_ENV: &str = "ROLLSHOT_APP";
@@ -14,8 +14,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
 
     let options = launch_options(args);
     let app_path = resolve_app_binary()?;
-    let mut command = Command::new(&app_path);
-    command.args(app_args(&options)?);
+    let mut command = build_app_command(&app_path, &options)?;
 
     let status = command.status().map_err(|err| {
         CliError::new(format!("failed to launch {}: {err}", app_path.display()), 1)
@@ -46,6 +45,27 @@ fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
     }
 }
 
+fn build_app_command(
+    app_path: &Path,
+    options: &InteractiveLaunchOptions,
+) -> Result<Command, CliError> {
+    #[cfg(windows)]
+    {
+        if app_path
+            .extension()
+            .map_or(false, |ext| ext == "cmd" || ext == "bat")
+        {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.arg("/c").arg(app_path);
+            cmd.args(app_args(options)?);
+            return Ok(cmd);
+        }
+    }
+    let mut cmd = Command::new(app_path);
+    cmd.args(app_args(options)?);
+    Ok(cmd)
+}
+
 fn app_args(options: &InteractiveLaunchOptions) -> Result<Vec<OsString>, CliError> {
     let payload = serde_json::to_string(options)
         .map_err(|err| CliError::new(format!("failed to encode GUI launch options: {err}"), 1))?;
@@ -70,7 +90,7 @@ fn reject_headless_only_flags(args: &CaptureArgs) -> Result<(), CliError> {
     if args.debug_match_report.is_some() {
         rejected.push("--debug-match-report");
     }
-    if args.max_frames != 200 {
+    if args.max_frames != MAX_FRAMES_DEFAULT {
         rejected.push("--max-frames");
     }
     if args.quiet {

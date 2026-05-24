@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub const MAX_FRAMES_DEFAULT: u32 = 200;
+
 #[derive(Debug, Parser)]
 #[command(name = "rollshot", version, about = "rollshot: scrollshot stitcher")]
 pub struct Cli {
@@ -57,7 +59,7 @@ pub struct CaptureArgs {
     pub debug_match_report: Option<PathBuf>,
 
     /// Maximum number of frames to read before stopping.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = MAX_FRAMES_DEFAULT)]
     pub max_frames: u32,
 
     /// Capture frame rate (used by real backends; ignored by fixture).
