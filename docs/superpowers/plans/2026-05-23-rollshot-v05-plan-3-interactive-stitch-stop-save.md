@@ -629,7 +629,7 @@ pub enum SessionStatus {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct StitchStatsDto {
     pub frame_count: u32,
     pub total_width: u32,
@@ -699,13 +699,9 @@ inner.error = None;
 
 - [ ] **Step 5: Implement pure session stitching methods**
 
-Add these methods to `impl AppSession`:
+Add these private methods to `impl AppSession`:
 
 ```rust
-    pub fn start_stitching_for_test(&mut self) -> Result<(), String> {
-        self.start_stitching()
-    }
-
     fn start_stitching(&mut self) -> Result<(), String> {
         if self.selected_region.is_none() {
             return Err("confirm a region before starting stitching".to_string());
@@ -717,10 +713,6 @@ Add these methods to `impl AppSession`:
         self.output_path = None;
         self.error = None;
         Ok(())
-    }
-
-    pub fn push_stitch_frame_for_test(&mut self, frame: CapturedFrame) -> Result<(), String> {
-        self.push_stitch_frame(frame)
     }
 
     fn push_stitch_frame(&mut self, frame: CapturedFrame) -> Result<(), String> {
@@ -736,10 +728,6 @@ Add these methods to `impl AppSession`:
         self.last_stitch_outcome = Some(format_stitch_outcome(&outcome));
         self.stitch_stats = stitcher.stats().into();
         Ok(())
-    }
-
-    pub fn finish_stitching_for_test(&mut self) -> Result<DoneImageDto, String> {
-        self.finish_stitching()
     }
 
     fn finish_stitching(&mut self) -> Result<DoneImageDto, String> {
@@ -761,6 +749,23 @@ Add these methods to `impl AppSession`:
         Ok(done)
     }
 
+```
+
+Append these test-only proxies to the existing `#[cfg(test)] impl AppSession` block:
+
+```rust
+    pub fn start_stitching_for_test(&mut self) -> Result<(), String> {
+        self.start_stitching()
+    }
+
+    pub fn push_stitch_frame_for_test(&mut self, frame: CapturedFrame) -> Result<(), String> {
+        self.push_stitch_frame(frame)
+    }
+
+    pub fn finish_stitching_for_test(&mut self) -> Result<DoneImageDto, String> {
+        self.finish_stitching()
+    }
+
     pub fn final_image_png_for_test(&self) -> Option<Vec<u8>> {
         self.final_image
             .as_ref()
@@ -771,6 +776,7 @@ Add these methods to `impl AppSession`:
 Add these helper functions below `encode_preview_png`:
 
 ```rust
+#[cfg(test)]
 fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     image
@@ -1076,13 +1082,9 @@ impl Drop for SharedSession {
 
 - [ ] **Step 4: Add save and final-preview helpers**
 
-Add this method to `impl AppSession`:
+Add this private method to `impl AppSession`:
 
 ```rust
-    pub fn save_image_for_test(&mut self, path: &Path) -> Result<DoneImageDto, String> {
-        self.save_image(path)
-    }
-
     fn save_image(&mut self, path: &Path) -> Result<DoneImageDto, String> {
         let image = self
             .final_image
@@ -1133,6 +1135,14 @@ fn encode_preview_image_png(image: &RgbaImage, max_edge: u32) -> Result<Vec<u8>,
     }
     Ok(cursor.into_inner())
 }
+```
+
+Append this test-only proxy to the existing `#[cfg(test)] impl AppSession` block:
+
+```rust
+    pub fn save_image_for_test(&mut self, path: &Path) -> Result<DoneImageDto, String> {
+        self.save_image(path)
+    }
 ```
 
 - [ ] **Step 5: Add Tauri commands**
@@ -1273,6 +1283,22 @@ describe('capture api wrappers', () => {
       output_path: '/tmp/out.png',
     })
     expect(invokeMock).toHaveBeenCalledWith('save_image', { path: '/tmp/out.png' })
+  })
+
+  it('sends stop_stitching and returns done image dto', async () => {
+    const { stopStitching } = await import('./capture')
+    invokeMock.mockResolvedValueOnce({
+      image_width: 200,
+      image_height: 600,
+      output_path: null,
+    })
+
+    await expect(stopStitching()).resolves.toEqual({
+      image_width: 200,
+      image_height: 600,
+      output_path: null,
+    })
+    expect(invokeMock).toHaveBeenCalledWith('stop_stitching')
   })
 
   it('returns null when final preview is not available yet', async () => {
@@ -1470,6 +1496,12 @@ Extend the unmount cleanup:
       if (finalPreviewUrlRef.current) {
         URL.revokeObjectURL(finalPreviewUrlRef.current)
       }
+```
+
+Update the preview poll effect so it also fetches live frames during stitching (otherwise the preview freezes and the user has no visual feedback that frames are being captured). Change the condition in the polling timer:
+
+```ts
+        if (nextStatus.state === 'previewing' || nextStatus.state === 'stitching') {
 ```
 
 - [ ] **Step 2: Add stitch, stop, and save handlers**
@@ -1786,3 +1818,99 @@ If every command and manual check passes, no commit is needed for Task 7. If a v
   - Rust status fields use snake_case through serde and match TypeScript names: `frame_width`, `image_width`, `output_path`, `last_outcome`.
   - Command names match frontend wrappers: `start_stitching`, `stop_stitching`, `save_image`, `get_final_preview`.
   - The final image stays in Rust as `AppSession::final_image`; the frontend receives only a resized PNG preview and save status.
+
+---
+
+## Engineering Review Notes
+
+Applied during eng review on 2026-05-24. Changes marked with D1-D4.
+
+### D1: Preview freezes during stitching (Architecture)
+
+The poll timer only fetched preview during `previewing` state. Once stitching started, the user saw a frozen image with no visual feedback that frames were being captured. Fixed by extending the poll guard in Task 6 Step 1 to also match `stitching`.
+
+### D2: Test-only methods leaked into release binary (Code Quality)
+
+`start_stitching_for_test`, `push_stitch_frame_for_test`, `finish_stitching_for_test`, `final_image_png_for_test`, `save_image_for_test`, and `encode_rgba_png` were placed in the regular `impl AppSession` block. Fixed by moving them to `#[cfg(test)] impl AppSession` blocks in Task 3 Step 5 and Task 4 Step 4.
+
+### D3: Missing `Default` derive on `StitchStatsDto` (Code Quality — compile error)
+
+`AppSession` derives `Default`, which requires all fields to implement `Default`. `StitchStatsDto` was missing it. Fixed by adding `Default` to its derive list in Task 3 Step 3.
+
+### D4: Missing `stopStitching` frontend API test (Tests)
+
+The test file covered `startStitching`, `saveImage`, and `getFinalPreview` but not `stopStitching`. Added a test in Task 5 Step 1 for completeness.
+
+### NOT in scope
+
+- Clipboard support (copy stitched image to clipboard) — deferred per spec, save-to-file only for v0.5.
+- Full-screen Linux fallback / keyboard-only controls — Plan 2 did not prove it was needed.
+- `Arc<CapturedFrame>` zero-copy frame sharing between reader and stitch threads — current `clone()` is bounded by capture FPS (~5fps, ~70MB/s temporary allocations on 2560x1440). Acceptable for v0.5; optimize if profiling shows pressure.
+- Memory ceiling / paging for the stitched canvas — `LinearCanvas` grows unboundedly during long scrolls. Pre-existing in `rollshot-core`, not introduced by this plan.
+- macOS interactive testing — plan covers Linux KDE 6 Wayland only; macOS path is structurally identical (same Rust crop/stitch/save) but untested manually.
+
+### What already exists
+
+| Sub-problem | Existing code | Reused? |
+|---|---|---|
+| Frame capture + reader thread | `SharedSession::start_reader` | Yes — extended with seq counter |
+| Region selection UI | `RegionOverlay.tsx` + `geometry.ts` | Yes — conversion fix only |
+| Stitcher engine | `rollshot_core::Stitcher` | Yes — used directly |
+| Preview encoding | `encode_preview_png` in `session.rs` | Yes — refactored to `encode_preview_image_png` |
+| Region validation | `AppSession::confirm_region` | Yes — reused as-is |
+
+No unnecessary rebuilds detected.
+
+### Failure modes
+
+| Codepath | Failure mode | Test? | Error handling? | User visibility |
+|---|---|---|---|---|
+| `crop_frame` | Region outside frame bounds | Task 2 `crop_frame_rejects_out_of_bounds_region` | `Err(CaptureError::InvalidConfig)` | Error propagates to status |
+| `crop_frame` | Negative origin | Task 2 `crop_frame_rejects_negative_origin` | `Err(CaptureError::InvalidConfig)` | Error propagates to status |
+| `start_stitching` | No confirmed region | Task 3 `start_stitching_requires_confirmed_region` | `Err("confirm a region...")` | Error shown in message |
+| `push_stitch_frame` | Crop error (frame size changed mid-session) | No dedicated test | `inner.error = Some(err)` via stitch_loop | Status becomes `Failed` |
+| `finish_stitching` | Stitcher produced no output (0 frames pushed) | No dedicated test | `Err("stitcher produced no output")` | Error shown in message |
+| `save_image` | Permission denied / invalid path | No dedicated test | `Err("failed to save ...")` via `image::save_with_format` | Error shown in message |
+| `final_preview_png` | Cloning very large final image | No test | OOM possible for extremely long scrolls | Process crash (pre-existing `LinearCanvas` concern) |
+| Stitch loop | Mutex poisoned (panic in another thread) | No test | `stitch_loop` returns silently; `inner.lock()` returns `Err` | Stitching stops silently |
+| Dialog cancelled | User clicks Cancel in save dialog | N/A (frontend logic) | `if (!selected) return` | No action, no error |
+
+No critical gaps — all failure modes either have tests, explicit error handling, or are pre-existing concerns in `rollshot-core` outside this plan's scope.
+
+### Parallelization strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| Task 1 | `crates/rollshot-app/src/` (frontend) | — |
+| Task 2 | `crates/rollshot-capture/` | — |
+| Task 3 | `crates/rollshot-app/src-tauri/` | Task 2 (uses `crop_frame`) |
+| Task 4 | `crates/rollshot-app/src-tauri/` | Task 3 |
+| Task 5 | `crates/rollshot-app/` (both frontend + Cargo.toml) | Task 4 |
+| Task 6 | `crates/rollshot-app/src/` (frontend) | Task 5 |
+| Task 7 | None (verification) | Task 6 |
+
+**Lane A:** Task 1 (frontend geometry fix) — independent, frontend-only
+**Lane B:** Task 2 → Task 3 → Task 4 → Task 5 → Task 6 (sequential, shared `src-tauri/` state)
+
+Launch A + B in parallel. Task 1 and Task 2 can run concurrently. Tasks 3-6 are sequential. Task 7 waits for all.
+
+### Completion summary
+
+```
+Plan reviewed:           docs/superpowers/plans/2026-05-23-rollshot-v05-plan-3-interactive-stitch-stop-save.md
+Tasks in plan:           7
+Files Create/Modify:     2 create / 11 modify
+
+- Step 0: Scope Challenge   — accepted as-is (no complexity smell)
+- Architecture Review:        1 issue (D1: frozen preview during stitching)
+- Plan Structure + Code Q:    2 issues (D2: test methods in release binary, D3: missing Default derive)
+- Test Review:                table produced, 1 gap (D4: missing stopStitching test)
+- Performance Review:         0 issues (frame clone is bounded by capture FPS, acceptable for v0.5)
+- NOT in scope:               written
+- What already exists:        written
+- Failure modes:              0 critical gaps
+- Parallelization:            2 lanes, 1 parallel / 1 sequential
+- Unresolved decisions:       0
+```
+
+Plan is locked in — run `superpowers:subagent-driven-development` with Lane A (Task 1) and Lane B (Tasks 2-6) in parallel, then Task 7 after both merge.
