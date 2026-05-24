@@ -1,12 +1,17 @@
-use rollshot_capture::{CapturedFrame, Region};
-
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use rollshot_capture::{BackendKind, CaptureOptions, InteractiveLaunchOptions, RegionMode};
+use image::RgbaImage;
+use rollshot_capture::{
+    crop_frame, BackendKind, CaptureOptions, CapturedFrame, InteractiveLaunchOptions, Region,
+    RegionMode,
+};
+use rollshot_core::{StitchConfig, StitchOutcome, StitchStats, Stitcher};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -17,9 +22,47 @@ pub enum SessionStatus {
         frame_height: u32,
         region: Option<RegionDto>,
     },
+    Stitching {
+        frame_width: u32,
+        frame_height: u32,
+        region: RegionDto,
+        stats: StitchStatsDto,
+        last_outcome: Option<String>,
+    },
+    Done {
+        image_width: u32,
+        image_height: u32,
+        output_path: Option<String>,
+    },
     Failed {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StitchStatsDto {
+    pub frame_count: u32,
+    pub total_width: u32,
+    pub total_height: u32,
+    pub last_append: u32,
+}
+
+impl From<StitchStats> for StitchStatsDto {
+    fn from(value: StitchStats) -> Self {
+        Self {
+            frame_count: value.frame_count,
+            total_width: value.total_width,
+            total_height: value.total_height,
+            last_append: value.last_append,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DoneImageDto {
+    pub image_width: u32,
+    pub image_height: u32,
+    pub output_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,7 +87,13 @@ impl From<RegionDto> for Region {
 #[derive(Default)]
 pub struct AppSession {
     latest_frame: Option<CapturedFrame>,
+    latest_frame_seq: u64,
     selected_region: Option<Region>,
+    stitcher: Option<Stitcher>,
+    stitch_stats: StitchStatsDto,
+    last_stitch_outcome: Option<String>,
+    final_image: Option<RgbaImage>,
+    output_path: Option<String>,
     error: Option<String>,
 }
 
@@ -60,18 +109,38 @@ impl AppSession {
             };
         }
 
-        match &self.latest_frame {
-            Some(frame) => SessionStatus::Previewing {
+        if let Some(image) = &self.final_image {
+            return SessionStatus::Done {
+                image_width: image.width(),
+                image_height: image.height(),
+                output_path: self.output_path.clone(),
+            };
+        }
+
+        match (&self.latest_frame, self.selected_region) {
+            (Some(frame), Some(region)) if self.stitcher.is_some() => SessionStatus::Stitching {
                 frame_width: frame.image.width(),
                 frame_height: frame.image.height(),
-                region: self.selected_region.map(|region| RegionDto {
+                region: RegionDto {
+                    x: region.x,
+                    y: region.y,
+                    width: region.width,
+                    height: region.height,
+                },
+                stats: self.stitch_stats,
+                last_outcome: self.last_stitch_outcome.clone(),
+            },
+            (Some(frame), region) => SessionStatus::Previewing {
+                frame_width: frame.image.width(),
+                frame_height: frame.image.height(),
+                region: region.map(|region| RegionDto {
                     x: region.x,
                     y: region.y,
                     width: region.width,
                     height: region.height,
                 }),
             },
-            None => SessionStatus::Idle,
+            (None, _) => SessionStatus::Idle,
         }
     }
 
@@ -102,6 +171,55 @@ impl AppSession {
         self.selected_region = Some(region.into());
         Ok(region)
     }
+
+    fn start_stitching(&mut self) -> Result<(), String> {
+        if self.selected_region.is_none() {
+            return Err("confirm a region before starting stitching".to_string());
+        }
+        let mut config = StitchConfig::default();
+        config.min_overlap = 32;
+        self.stitcher = Some(Stitcher::new(config));
+        self.stitch_stats = StitchStatsDto::from(StitchStats::default());
+        self.last_stitch_outcome = None;
+        self.final_image = None;
+        self.output_path = None;
+        self.error = None;
+        Ok(())
+    }
+
+    fn push_stitch_frame(&mut self, frame: CapturedFrame) -> Result<(), String> {
+        let region = self
+            .selected_region
+            .ok_or_else(|| "confirm a region before stitching frames".to_string())?;
+        let stitcher = self
+            .stitcher
+            .as_mut()
+            .ok_or_else(|| "stitching has not started".to_string())?;
+        let cropped = crop_frame(&frame, region).map_err(|err| err.to_string())?;
+        let outcome = stitcher.push_frame(cropped.image);
+        self.last_stitch_outcome = Some(format_stitch_outcome(&outcome));
+        self.stitch_stats = stitcher.stats().into();
+        Ok(())
+    }
+
+    fn finish_stitching(&mut self) -> Result<DoneImageDto, String> {
+        let stitcher = self
+            .stitcher
+            .take()
+            .ok_or_else(|| "stitching has not started".to_string())?;
+        let image = stitcher
+            .full_image()
+            .ok_or_else(|| "stitcher produced no output".to_string())?
+            .clone();
+        let done = DoneImageDto {
+            image_width: image.width(),
+            image_height: image.height(),
+            output_path: self.output_path.clone(),
+        };
+        self.final_image = Some(image);
+        self.stitch_stats = stitcher.stats().into();
+        Ok(done)
+    }
 }
 
 fn encode_preview_png(frame: &CapturedFrame, max_edge: u32) -> Result<Vec<u8>, String> {
@@ -130,6 +248,32 @@ fn encode_preview_png(frame: &CapturedFrame, max_edge: u32) -> Result<Vec<u8>, S
         .map_err(|err| format!("failed to encode preview png: {err}"))?;
     }
     Ok(cursor.into_inner())
+}
+
+#[cfg(test)]
+fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|err| format!("failed to encode png: {err}"))?;
+    Ok(cursor.into_inner())
+}
+
+fn format_stitch_outcome(outcome: &StitchOutcome) -> String {
+    match outcome {
+        StitchOutcome::FirstFrame => "first frame".to_string(),
+        StitchOutcome::Appended { direction, added, .. } => {
+            format!("appended {added}px {direction:?}")
+        }
+        StitchOutcome::NoProgress { .. } => "no progress".to_string(),
+        StitchOutcome::Duplicate => "duplicate frame".to_string(),
+        StitchOutcome::NoMatch { reason, .. } => format!("no match: {reason:?}"),
+        StitchOutcome::AxisChanged {
+            previous_axis,
+            new_axis,
+            ..
+        } => format!("axis changed from {previous_axis:?} to {new_axis:?}"),
+    }
 }
 
 pub struct SharedSession {
@@ -165,7 +309,13 @@ impl SharedSession {
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
             inner.latest_frame = None;
+            inner.latest_frame_seq = 0;
             inner.selected_region = None;
+            inner.stitcher = None;
+            inner.stitch_stats = StitchStatsDto::from(StitchStats::default());
+            inner.last_stitch_outcome = None;
+            inner.final_image = None;
+            inner.output_path = None;
             inner.error = None;
         }
 
@@ -214,6 +364,7 @@ impl SharedSession {
                     Ok(frame) => {
                         if let Ok(mut inner) = session.inner.lock() {
                             inner.latest_frame = Some(frame);
+                            inner.latest_frame_seq = inner.latest_frame_seq.wrapping_add(1);
                             inner.error = None;
                         }
                     }
@@ -286,6 +437,24 @@ impl Drop for SharedSession {
 impl AppSession {
     pub fn store_frame_for_test(&mut self, frame: CapturedFrame) {
         self.latest_frame = Some(frame);
+    }
+
+    pub fn start_stitching_for_test(&mut self) -> Result<(), String> {
+        self.start_stitching()
+    }
+
+    pub fn push_stitch_frame_for_test(&mut self, frame: CapturedFrame) -> Result<(), String> {
+        self.push_stitch_frame(frame)
+    }
+
+    pub fn finish_stitching_for_test(&mut self) -> Result<DoneImageDto, String> {
+        self.finish_stitching()
+    }
+
+    pub fn final_image_png_for_test(&self) -> Option<Vec<u8>> {
+        self.final_image
+            .as_ref()
+            .and_then(|image| encode_rgba_png(image).ok())
     }
 }
 
@@ -401,5 +570,104 @@ mod tests {
                 message: "capture backend crashed".to_string()
             }
         );
+    }
+
+    fn scrolling_frame(y_offset: u8) -> CapturedFrame {
+        let canvas_height: u32 = 200;
+        let canvas_width: u32 = 80;
+        let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([245, 245, 245, 255]));
+        for y in (0u32..canvas_height).step_by(11) {
+            let accent = ((y / 3) % 180) as u8;
+            for x in 8..canvas_width.saturating_sub(8) {
+                let stripe = if (x / 5 + y / 7) % 2 == 0 { 220u8 } else { 180u8 };
+                canvas.put_pixel(x, y, Rgba([accent, stripe, 80, 255]));
+                if y + 1 < canvas_height {
+                    canvas.put_pixel(x, y + 1, Rgba([30, 30, 30, 255]));
+                }
+            }
+        }
+        for col in [21u32, 47, 73] {
+            if col >= canvas_width {
+                continue;
+            }
+            for y in 12..canvas_height.saturating_sub(12) {
+                if (y / 13) % 3 != 0 {
+                    canvas.put_pixel(col, y, Rgba([20, 20, 20, 255]));
+                }
+            }
+        }
+        let offset_y = y_offset as u32;
+        let image = image::imageops::crop_imm(&canvas, 0, offset_y, 80, 80).to_image();
+        CapturedFrame {
+            image,
+            timestamp: SystemTime::UNIX_EPOCH,
+            metadata: FrameMetadata::fake(),
+        }
+    }
+
+    #[test]
+    fn start_stitching_requires_confirmed_region() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(make_test_frame(320, 200));
+
+        let err = session.start_stitching_for_test().expect_err("missing region rejected");
+
+        assert!(err.contains("confirm a region"), "err = {err}");
+    }
+
+    #[test]
+    fn push_stitch_frame_crops_to_selected_region_and_updates_stats() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 10,
+                y: 10,
+                width: 60,
+                height: 60,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+        session
+            .push_stitch_frame_for_test(scrolling_frame(8))
+            .expect("second frame");
+
+        let status = session.status();
+        match status {
+            SessionStatus::Stitching { stats, .. } => {
+                assert_eq!(stats.frame_count, 2);
+                assert_eq!(stats.total_width, 60);
+                assert!(stats.total_height >= 60);
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_stitching_keeps_final_image_in_session() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+
+        let done = session.finish_stitching_for_test().expect("finish");
+
+        assert_eq!(done.image_width, 80);
+        assert_eq!(done.image_height, 80);
+        assert!(session.final_image_png_for_test().is_some());
     }
 }
