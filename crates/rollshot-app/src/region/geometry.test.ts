@@ -28,6 +28,32 @@ describe('region geometry', () => {
     ).toEqual({ x: 100, y: 50, width: 400, height: 200 })
   })
 
+  it('preserves fractional CSS edges by flooring origin and ceiling far edge', () => {
+    const cssRect: CssRect = { left: 10.25, top: 4.5, width: 20.25, height: 10.25 }
+    expect(
+      cssRectToSourceRegion(cssRect, {
+        renderedWidth: 333,
+        renderedHeight: 222,
+        sourceWidth: 1000,
+        sourceHeight: 666,
+      }),
+    ).toEqual({ x: 30, y: 13, width: 62, height: 32 })
+  })
+
+  it('maps a full rendered preview exactly to the full source frame', () => {
+    expect(
+      cssRectToSourceRegion(
+        { left: 0, top: 0, width: 511.5, height: 287.75 },
+        {
+          renderedWidth: 511.5,
+          renderedHeight: 287.75,
+          sourceWidth: 2560,
+          sourceHeight: 1440,
+        },
+      ),
+    ).toEqual({ x: 0, y: 0, width: 2560, height: 1440 })
+  })
+
   it('clamps source region to frame bounds', () => {
     expect(
       clampSourceRegion(

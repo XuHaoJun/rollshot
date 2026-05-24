@@ -46,12 +46,17 @@ export function cssRectToSourceRegion(
 ): SourceRegion {
   const xScale = scale.sourceWidth / scale.renderedWidth
   const yScale = scale.sourceHeight / scale.renderedHeight
+  const left = Math.floor(rect.left * xScale)
+  const top = Math.floor(rect.top * yScale)
+  const right = Math.ceil((rect.left + rect.width) * xScale)
+  const bottom = Math.ceil((rect.top + rect.height) * yScale)
+
   return clampSourceRegion(
     {
-      x: Math.round(rect.left * xScale),
-      y: Math.round(rect.top * yScale),
-      width: Math.round(rect.width * xScale),
-      height: Math.round(rect.height * yScale),
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top,
     },
     { width: scale.sourceWidth, height: scale.sourceHeight },
   )

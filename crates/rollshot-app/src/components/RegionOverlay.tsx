@@ -37,10 +37,15 @@ export function RegionOverlay({
   }, [rect])
 
   function localPoint(event: PointerEvent<HTMLDivElement>): Point {
-    const bounds = event.currentTarget.getBoundingClientRect()
+    const image = imageRef.current
+    if (!image) {
+      return { x: 0, y: 0 }
+    }
+
+    const bounds = image.getBoundingClientRect()
     return {
-      x: event.clientX - bounds.left,
-      y: event.clientY - bounds.top,
+      x: Math.max(0, Math.min(event.clientX - bounds.left, bounds.width)),
+      y: Math.max(0, Math.min(event.clientY - bounds.top, bounds.height)),
     }
   }
 
@@ -51,10 +56,11 @@ export function RegionOverlay({
       return
     }
 
+    const bounds = image.getBoundingClientRect()
     onRegionChange(
       cssRectToSourceRegion(nextRect, {
-        renderedWidth: image.clientWidth,
-        renderedHeight: image.clientHeight,
+        renderedWidth: bounds.width,
+        renderedHeight: bounds.height,
         sourceWidth,
         sourceHeight,
       }),
