@@ -193,6 +193,7 @@ Create `crates/rollshot-app/package.json`:
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "^26.0.0",
     "typescript": "^5.0.0",
     "vite": "^7.0.0",
     "vitest": "^3.0.0"
@@ -733,10 +734,7 @@ rtk git commit -m "feat(app): parse capture launch options"
 Create `crates/rollshot-app/src-tauri/src/session.rs`:
 
 ```rust
-use std::time::SystemTime;
-
-use image::{Rgba, RgbaImage};
-use rollshot_capture::{CapturedFrame, FrameMetadata, Region};
+use rollshot_capture::{CapturedFrame, Region};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -783,10 +781,6 @@ impl AppSession {
         Self::default()
     }
 
-    pub fn store_frame_for_test(&mut self, frame: CapturedFrame) {
-        self.latest_frame = Some(frame);
-    }
-
     pub fn status(&self) -> SessionStatus {
         SessionStatus::Idle
     }
@@ -800,17 +794,27 @@ impl AppSession {
     }
 }
 
-pub fn make_test_frame(width: u32, height: u32) -> CapturedFrame {
-    CapturedFrame {
-        image: RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255])),
-        timestamp: SystemTime::UNIX_EPOCH,
-        metadata: FrameMetadata::fake(),
+#[cfg(test)]
+impl AppSession {
+    pub fn store_frame_for_test(&mut self, frame: CapturedFrame) {
+        self.latest_frame = Some(frame);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{make_test_frame, AppSession, RegionDto, SessionStatus};
+    use super::{AppSession, RegionDto, SessionStatus};
+    use image::{Rgba, RgbaImage};
+    use rollshot_capture::{CapturedFrame, FrameMetadata};
+    use std::time::SystemTime;
+
+    fn make_test_frame(width: u32, height: u32) -> CapturedFrame {
+        CapturedFrame {
+            image: RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255])),
+            timestamp: SystemTime::UNIX_EPOCH,
+            metadata: FrameMetadata::fake(),
+        }
+    }
 
     #[test]
     fn status_reports_latest_frame_size() {
@@ -878,6 +882,20 @@ mod tests {
         assert_eq!(image.width(), 200);
         assert_eq!(image.height(), 100);
     }
+
+    #[test]
+    fn status_reports_error_when_set() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(make_test_frame(320, 200));
+        session.error = Some("capture backend crashed".to_string());
+
+        assert_eq!(
+            session.status(),
+            SessionStatus::Failed {
+                message: "capture backend crashed".to_string()
+            }
+        );
+    }
 }
 ```
 
@@ -893,16 +911,12 @@ Expected: FAIL because `status`, `confirm_region`, and `latest_preview_png` are 
 
 - [ ] **Step 3: Implement session status, region validation, and preview encoding**
 
-Replace the `impl AppSession` block in `crates/rollshot-app/src-tauri/src/session.rs` with:
+Replace the two `impl AppSession` blocks (the main one and the `#[cfg(test)]` one) in `crates/rollshot-app/src-tauri/src/session.rs` with:
 
 ```rust
 impl AppSession {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn store_frame_for_test(&mut self, frame: CapturedFrame) {
-        self.latest_frame = Some(frame);
     }
 
     pub fn status(&self) -> SessionStatus {
@@ -968,22 +982,29 @@ impl AppSession {
         let preview_width = ((width as f32 * scale).round() as u32).max(1);
         let preview_height = ((height as f32 * scale).round() as u32).max(1);
 
-        let preview = if preview_width == width && preview_height == height {
-            frame.image.clone()
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        if preview_width == width && preview_height == height {
+            frame.image
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .map_err(|err| format!("failed to encode preview png: {err}"))?;
         } else {
             image::imageops::resize(
                 &frame.image,
                 preview_width,
                 preview_height,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Nearest,
             )
-        };
-
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        preview
             .write_to(&mut cursor, image::ImageFormat::Png)
             .map_err(|err| format!("failed to encode preview png: {err}"))?;
+        }
         Ok(Some(cursor.into_inner()))
+    }
+}
+
+#[cfg(test)]
+impl AppSession {
+    pub fn store_frame_for_test(&mut self, frame: CapturedFrame) {
+        self.latest_frame = Some(frame);
     }
 }
 ```
@@ -1690,9 +1711,13 @@ export default function App() {
       setMessage('Launch options are not loaded yet')
       return
     }
-    setMessage('Starting capture')
-    await startCapture(options)
-    setMessage('Select a region in the preview')
+    try {
+      setMessage('Starting capture')
+      await startCapture(options)
+      setMessage('Select a region in the preview')
+    } catch (error) {
+      setMessage(String(error))
+    }
   }
 
   async function onConfirmRegion() {
@@ -1700,16 +1725,23 @@ export default function App() {
       setMessage('Select a region first')
       return
     }
-
-    const confirmed = await confirmRegion(pendingRegion)
-    setMessage(
-      `Region ${confirmed.width}x${confirmed.height} at ${confirmed.x},${confirmed.y}`,
-    )
+    try {
+      const confirmed = await confirmRegion(pendingRegion)
+      setMessage(
+        `Region ${confirmed.width}x${confirmed.height} at ${confirmed.x},${confirmed.y}`,
+      )
+    } catch (error) {
+      setMessage(String(error))
+    }
   }
 
   async function onStop() {
-    await stopCapture()
-    setMessage('Capture stopped')
+    try {
+      await stopCapture()
+      setMessage('Capture stopped')
+    } catch (error) {
+      setMessage(String(error))
+    }
   }
 
   const canConfirm =
