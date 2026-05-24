@@ -1,6 +1,11 @@
+mod commands;
 mod launch;
+mod session;
+
+use std::sync::Arc;
 
 use launch::LaunchMode;
+use session::SharedSession;
 
 pub fn run() {
     let launch_mode = match launch::parse_launch_args(std::env::args()) {
@@ -11,12 +16,22 @@ pub fn run() {
         }
     };
 
-    let _launch_options = match launch_mode {
+    let launch_options = match launch_mode {
         LaunchMode::Capture(options) => options,
     };
+    let shared_session = Arc::new(SharedSession::new());
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![])
+        .manage(launch_options)
+        .manage(Arc::clone(&shared_session))
+        .invoke_handler(tauri::generate_handler![
+            commands::launch_options,
+            commands::start_capture,
+            commands::stop_capture,
+            commands::session_status,
+            commands::confirm_region,
+            commands::get_latest_preview
+        ])
         .run(tauri::generate_context!())
         .expect("error while running rollshot app");
 }
