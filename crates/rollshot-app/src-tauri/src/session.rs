@@ -220,12 +220,32 @@ impl AppSession {
         self.stitch_stats = stitcher.stats().into();
         Ok(done)
     }
+
+    fn save_image(&mut self, path: &Path) -> Result<DoneImageDto, String> {
+        let image = self
+            .final_image
+            .as_ref()
+            .ok_or_else(|| "no final image is available to save".to_string())?;
+        image
+            .save_with_format(path, image::ImageFormat::Png)
+            .map_err(|err| format!("failed to save {}: {err}", path.display()))?;
+        self.output_path = Some(path.to_string_lossy().to_string());
+        Ok(DoneImageDto {
+            image_width: image.width(),
+            image_height: image.height(),
+            output_path: self.output_path.clone(),
+        })
+    }
 }
 
 fn encode_preview_png(frame: &CapturedFrame, max_edge: u32) -> Result<Vec<u8>, String> {
+    encode_preview_image_png(&frame.image, max_edge)
+}
+
+fn encode_preview_image_png(image: &RgbaImage, max_edge: u32) -> Result<Vec<u8>, String> {
     let max_edge = max_edge.max(1);
-    let width = frame.image.width();
-    let height = frame.image.height();
+    let width = image.width();
+    let height = image.height();
     let largest = width.max(height).max(1);
     let scale = (max_edge as f32 / largest as f32).min(1.0);
     let preview_width = ((width as f32 * scale).round() as u32).max(1);
@@ -233,13 +253,12 @@ fn encode_preview_png(frame: &CapturedFrame, max_edge: u32) -> Result<Vec<u8>, S
 
     let mut cursor = std::io::Cursor::new(Vec::new());
     if preview_width == width && preview_height == height {
-        frame
-            .image
+        image
             .write_to(&mut cursor, image::ImageFormat::Png)
             .map_err(|err| format!("failed to encode preview png: {err}"))?;
     } else {
         image::imageops::resize(
-            &frame.image,
+            image,
             preview_width,
             preview_height,
             image::imageops::FilterType::Nearest,
@@ -280,6 +299,8 @@ pub struct SharedSession {
     inner: Mutex<AppSession>,
     stop: AtomicBool,
     reader: Mutex<Option<JoinHandle<()>>>,
+    stitch_stop: AtomicBool,
+    stitcher: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl SharedSession {
@@ -288,6 +309,8 @@ impl SharedSession {
             inner: Mutex::new(AppSession::new()),
             stop: AtomicBool::new(false),
             reader: Mutex::new(None),
+            stitch_stop: AtomicBool::new(false),
+            stitcher: Mutex::new(None),
         }
     }
 
@@ -387,6 +410,13 @@ impl SharedSession {
     }
 
     pub fn stop_capture(&self) {
+        self.stitch_stop.store(true, Ordering::Relaxed);
+        if let Ok(mut stitcher) = self.stitcher.lock() {
+            if let Some(handle) = stitcher.take() {
+                let _ = handle.join();
+            }
+        }
+
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(mut reader) = self.reader.lock() {
             if let Some(handle) = reader.take() {
@@ -425,10 +455,104 @@ impl SharedSession {
             .map(|frame| encode_preview_png(frame, max_edge))
             .transpose()
     }
+
+    pub fn start_stitching(self: &Arc<Self>) -> Result<(), String> {
+        {
+            let mut stitcher = self
+                .stitcher
+                .lock()
+                .map_err(|_| "stitcher lock poisoned".to_string())?;
+            if stitcher.is_some() {
+                return Err("stitching is already running".to_string());
+            }
+
+            {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| "session lock poisoned".to_string())?;
+                inner.start_stitching()?;
+            }
+
+            self.stitch_stop.store(false, Ordering::Relaxed);
+            let session = Arc::clone(self);
+            *stitcher = Some(std::thread::spawn(move || {
+                session.stitch_loop();
+            }));
+        }
+        Ok(())
+    }
+
+    fn stitch_loop(&self) {
+        let mut last_seen_seq = 0_u64;
+        while !self.stitch_stop.load(Ordering::Relaxed) {
+            let next_frame = {
+                let inner = match self.inner.lock() {
+                    Ok(inner) => inner,
+                    Err(_) => return,
+                };
+                if inner.latest_frame_seq == last_seen_seq {
+                    None
+                } else {
+                    last_seen_seq = inner.latest_frame_seq;
+                    inner.latest_frame.clone()
+                }
+            };
+
+            if let Some(frame) = next_frame {
+                if let Ok(mut inner) = self.inner.lock() {
+                    if let Err(err) = inner.push_stitch_frame(frame) {
+                        inner.error = Some(err);
+                        break;
+                    }
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    pub fn stop_stitching(&self) -> Result<DoneImageDto, String> {
+        self.stitch_stop.store(true, Ordering::Relaxed);
+        if let Ok(mut stitcher) = self.stitcher.lock() {
+            if let Some(handle) = stitcher.take() {
+                let _ = handle.join();
+            }
+        }
+
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        inner.finish_stitching()
+    }
+
+    pub fn save_image(&self, path: &Path) -> Result<DoneImageDto, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        inner.save_image(path)
+    }
+
+    pub fn final_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
+        let image = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            inner.final_image.clone()
+        };
+        image
+            .as_ref()
+            .map(|image| encode_preview_image_png(image, max_edge))
+            .transpose()
+    }
 }
 
 impl Drop for SharedSession {
     fn drop(&mut self) {
+        self.stitch_stop.store(true, Ordering::Relaxed);
         self.stop.store(true, Ordering::Relaxed);
     }
 }
@@ -449,6 +573,10 @@ impl AppSession {
 
     pub fn finish_stitching_for_test(&mut self) -> Result<DoneImageDto, String> {
         self.finish_stitching()
+    }
+
+    pub fn save_image_for_test(&mut self, path: &Path) -> Result<DoneImageDto, String> {
+        self.save_image(path)
     }
 
     pub fn final_image_png_for_test(&self) -> Option<Vec<u8>> {
@@ -669,5 +797,38 @@ mod tests {
         assert_eq!(done.image_width, 80);
         assert_eq!(done.image_height, 80);
         assert!(session.final_image_png_for_test().is_some());
+    }
+
+    #[test]
+    fn save_image_writes_final_png() {
+        let tempdir = std::env::temp_dir().join(format!(
+            "rollshot-app-save-image-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tempdir).expect("create tempdir");
+        let output = tempdir.join("stitched.png");
+
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+        session.finish_stitching_for_test().expect("finish");
+
+        let done = session.save_image_for_test(&output).expect("save png");
+
+        assert_eq!(done.output_path, Some(output.to_string_lossy().to_string()));
+        let decoded = image::open(&output).expect("decode saved png");
+        assert_eq!(decoded.width(), 80);
+        let _ = std::fs::remove_dir_all(&tempdir);
     }
 }

@@ -28,7 +28,11 @@ pub fn run() {
             commands::stop_capture,
             commands::session_status,
             commands::confirm_region,
-            commands::get_latest_preview
+            commands::get_latest_preview,
+            commands::start_stitching,
+            commands::stop_stitching,
+            commands::save_image,
+            commands::get_final_preview
         ])
         .run(tauri::generate_context!())
         .expect("error while running rollshot app");
