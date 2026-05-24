@@ -72,6 +72,15 @@ pub fn save_image(
 }
 
 #[tauri::command]
+pub fn get_stitch_preview(
+    session: tauri::State<'_, Arc<SharedSession>>,
+    max_edge: u32,
+) -> Result<Response, String> {
+    let bytes = session.stitch_preview_png(max_edge)?.unwrap_or_default();
+    Ok(Response::new(bytes))
+}
+
+#[tauri::command]
 pub fn get_final_preview(
     session: tauri::State<'_, Arc<SharedSession>>,
     max_edge: u32,

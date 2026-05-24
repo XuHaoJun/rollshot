@@ -33,6 +33,7 @@ pub fn run() {
             commands::start_stitching,
             commands::stop_stitching,
             commands::save_image,
+            commands::get_stitch_preview,
             commands::get_final_preview
         ])
         .run(tauri::generate_context!())

@@ -98,6 +98,14 @@ export async function saveImage(path: string): Promise<DoneImageDto> {
   return await invoke<DoneImageDto>('save_image', { path })
 }
 
+export async function getStitchPreview(maxEdge: number): Promise<Blob | null> {
+  const bytes = await invoke<ArrayBuffer>('get_stitch_preview', { maxEdge })
+  if (bytes.byteLength === 0) {
+    return null
+  }
+  return new Blob([bytes], { type: 'image/png' })
+}
+
 export async function getFinalPreview(maxEdge: number): Promise<Blob | null> {
   const bytes = await invoke<ArrayBuffer>('get_final_preview', { maxEdge })
   if (bytes.byteLength === 0) {
