@@ -253,6 +253,8 @@ Use shadcn/Tailwind as scaffold defaults, not as product requirements. The inter
 - Save
 - Cancel
 
+Use Node.js 24 through an app-local mise config and use pnpm for frontend package management, matching snow-shot's package-manager choice. Use Vite for the v0.5 app scaffold rather than snow-shot's Rsbuild/TanStack Router stack; the v0.5 UI is a small single-screen capture flow, and shadcn/Tailwind's Vite path is the lower-risk default.
+
 Avoid building a general settings shell, tray app, updater, command palette, global preferences, or i18n in v0.5.
 
 ---
