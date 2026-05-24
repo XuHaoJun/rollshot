@@ -118,7 +118,8 @@ impl AppSession {
 
         let mut cursor = std::io::Cursor::new(Vec::new());
         if preview_width == width && preview_height == height {
-            frame.image
+            frame
+                .image
                 .write_to(&mut cursor, image::ImageFormat::Png)
                 .map_err(|err| format!("failed to encode preview png: {err}"))?;
         } else {
@@ -132,6 +133,149 @@ impl AppSession {
             .map_err(|err| format!("failed to encode preview png: {err}"))?;
         }
         Ok(Some(cursor.into_inner()))
+    }
+}
+
+pub struct SharedSession {
+    inner: Mutex<AppSession>,
+    stop: AtomicBool,
+    reader: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl SharedSession {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(AppSession::new()),
+            stop: AtomicBool::new(false),
+            reader: Mutex::new(None),
+        }
+    }
+
+    pub fn start_capture(
+        self: &Arc<Self>,
+        options: InteractiveLaunchOptions,
+    ) -> Result<(), String> {
+        let mut reader = self
+            .reader
+            .lock()
+            .map_err(|_| "reader lock poisoned".to_string())?;
+        if reader.is_some() {
+            return Err("capture is already running".to_string());
+        }
+
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            inner.latest_frame = None;
+            inner.selected_region = None;
+            inner.error = None;
+        }
+
+        self.start_reader(options, &mut reader);
+        Ok(())
+    }
+
+    fn start_reader(
+        self: &Arc<Self>,
+        options: InteractiveLaunchOptions,
+        reader_slot: &mut Option<JoinHandle<()>>,
+    ) {
+        self.stop.store(false, Ordering::Relaxed);
+        let session = Arc::clone(self);
+        *reader_slot = Some(std::thread::spawn(move || {
+            let kind = match BackendKind::from_cli_flag(&options.backend) {
+                Ok(kind) => kind,
+                Err(err) => {
+                    session.store_error(err.to_string());
+                    return;
+                }
+            };
+            let mut backend = match kind.create() {
+                Ok(backend) => backend,
+                Err(err) => {
+                    session.store_error(err.to_string());
+                    return;
+                }
+            };
+            let capture_options = CaptureOptions {
+                region: RegionMode::FullSource,
+                fps: options.fps,
+                show_cursor: options.show_cursor,
+                prefer_portal_region: false,
+            };
+            let mut stream = match backend.start(capture_options) {
+                Ok(stream) => stream,
+                Err(err) => {
+                    session.store_error(err.to_string());
+                    return;
+                }
+            };
+
+            while !session.stop.load(Ordering::Relaxed) {
+                match stream.next_frame() {
+                    Ok(frame) => {
+                        if let Ok(mut inner) = session.inner.lock() {
+                            inner.latest_frame = Some(frame);
+                            inner.error = None;
+                        }
+                    }
+                    Err(rollshot_capture::CaptureError::EndOfStream) => break,
+                    Err(err) => {
+                        if let Ok(mut inner) = session.inner.lock() {
+                            inner.error = Some(err.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
+    fn store_error(&self, message: String) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.error = Some(message);
+        }
+    }
+
+    pub fn stop_capture(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut reader) = self.reader.lock() {
+            if let Some(handle) = reader.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    pub fn status(&self) -> Result<SessionStatus, String> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        Ok(inner.status())
+    }
+
+    pub fn confirm_region(&self, region: RegionDto) -> Result<RegionDto, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        inner.confirm_region(region)
+    }
+
+    pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        inner.latest_preview_png(max_edge)
+    }
+}
+
+impl Drop for SharedSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -236,130 +380,5 @@ mod tests {
                 message: "capture backend crashed".to_string()
             }
         );
-    }
-}
-
-pub struct SharedSession {
-    inner: Mutex<AppSession>,
-    stop: AtomicBool,
-    reader: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl SharedSession {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(AppSession::new()),
-            stop: AtomicBool::new(false),
-            reader: Mutex::new(None),
-        }
-    }
-
-    pub fn start_capture(self: &Arc<Self>, options: InteractiveLaunchOptions) -> Result<(), String> {
-        let mut reader = self.reader.lock().map_err(|_| "reader lock poisoned".to_string())?;
-        if reader.is_some() {
-            return Err("capture is already running".to_string());
-        }
-
-        {
-            let mut inner = self.inner.lock().map_err(|_| "session lock poisoned".to_string())?;
-            inner.latest_frame = None;
-            inner.selected_region = None;
-            inner.error = None;
-        }
-
-        self.start_reader(options, &mut reader);
-        Ok(())
-    }
-
-    fn start_reader(
-        self: &Arc<Self>,
-        options: InteractiveLaunchOptions,
-        reader_slot: &mut Option<JoinHandle<()>>,
-    ) {
-        self.stop.store(false, Ordering::Relaxed);
-        let session = Arc::clone(self);
-        *reader_slot = Some(std::thread::spawn(move || {
-            let kind = match BackendKind::from_cli_flag(&options.backend) {
-                Ok(kind) => kind,
-                Err(err) => {
-                    session.store_error(err.to_string());
-                    return;
-                }
-            };
-            let mut backend = match kind.create() {
-                Ok(backend) => backend,
-                Err(err) => {
-                    session.store_error(err.to_string());
-                    return;
-                }
-            };
-            let capture_options = CaptureOptions {
-                region: RegionMode::FullSource,
-                fps: options.fps,
-                show_cursor: options.show_cursor,
-                prefer_portal_region: false,
-            };
-            let mut stream = match backend.start(capture_options) {
-                Ok(stream) => stream,
-                Err(err) => {
-                    session.store_error(err.to_string());
-                    return;
-                }
-            };
-
-            while !session.stop.load(Ordering::Relaxed) {
-                match stream.next_frame() {
-                    Ok(frame) => {
-                        if let Ok(mut inner) = session.inner.lock() {
-                            inner.latest_frame = Some(frame);
-                            inner.error = None;
-                        }
-                    }
-                    Err(rollshot_capture::CaptureError::EndOfStream) => break,
-                    Err(err) => {
-                        if let Ok(mut inner) = session.inner.lock() {
-                            inner.error = Some(err.to_string());
-                        }
-                        break;
-                    }
-                }
-            }
-        }));
-    }
-
-    fn store_error(&self, message: String) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.error = Some(message);
-        }
-    }
-
-    pub fn stop_capture(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut reader) = self.reader.lock() {
-            if let Some(handle) = reader.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-
-    pub fn status(&self) -> Result<SessionStatus, String> {
-        let inner = self.inner.lock().map_err(|_| "session lock poisoned".to_string())?;
-        Ok(inner.status())
-    }
-
-    pub fn confirm_region(&self, region: RegionDto) -> Result<RegionDto, String> {
-        let mut inner = self.inner.lock().map_err(|_| "session lock poisoned".to_string())?;
-        inner.confirm_region(region)
-    }
-
-    pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
-        let inner = self.inner.lock().map_err(|_| "session lock poisoned".to_string())?;
-        inner.latest_preview_png(max_edge)
-    }
-}
-
-impl Drop for SharedSession {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
     }
 }

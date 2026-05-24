@@ -16,9 +16,7 @@ pub fn run() {
         }
     };
 
-    let launch_options = match launch_mode {
-        LaunchMode::Capture(options) => options,
-    };
+    let LaunchMode::Capture(launch_options) = launch_mode;
     let shared_session = Arc::new(SharedSession::new());
 
     tauri::Builder::default()

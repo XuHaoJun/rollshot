@@ -13,7 +13,9 @@ where
     let mut args = args.into_iter().map(Into::into);
     let _program = args.next();
     let Some(flag) = args.next() else {
-        return Err("rollshot-app must be launched by `rollshot capture` with --capture".to_string());
+        return Err(
+            "rollshot-app must be launched by `rollshot capture` with --capture".to_string(),
+        );
     };
 
     if flag != "--capture" {
@@ -25,7 +27,9 @@ where
     };
 
     if let Some(extra) = args.next() {
-        return Err(format!("unexpected argument after capture payload: '{extra}'"));
+        return Err(format!(
+            "unexpected argument after capture payload: '{extra}'"
+        ));
     }
 
     let options: InteractiveLaunchOptions = serde_json::from_str(&payload)
@@ -58,7 +62,10 @@ mod tests {
     #[test]
     fn rejects_missing_capture_payload() {
         let err = parse_launch_args(["rollshot-app", "--capture"]).expect_err("missing payload");
-        assert!(err.contains("--capture requires a JSON payload"), "err = {err}");
+        assert!(
+            err.contains("--capture requires a JSON payload"),
+            "err = {err}"
+        );
     }
 
     #[test]
