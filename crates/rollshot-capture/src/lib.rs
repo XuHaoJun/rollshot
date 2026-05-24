@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod crop;
 pub mod error;
 pub mod fake;
 pub mod fixture;
@@ -10,6 +11,7 @@ pub mod linux;
 pub mod macos;
 
 pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
+pub use crop::crop_frame;
 pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
