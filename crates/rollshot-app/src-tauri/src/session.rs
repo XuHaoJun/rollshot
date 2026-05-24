@@ -466,7 +466,11 @@ impl SharedSession {
                 .inner
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
-            inner.stitcher.as_ref().and_then(|s| s.full_image()).cloned()
+            inner
+                .stitcher
+                .as_ref()
+                .and_then(|s| s.full_image())
+                .cloned()
         };
         image
             .as_ref()

@@ -308,11 +308,9 @@ mod tests {
 
     #[test]
     fn resolve_app_binary_sibling_missing_dev() {
-        let err = resolve_app_binary_from_env_and_exe(
-            None,
-            Path::new("/project/target/debug/rollshot"),
-        )
-        .expect_err("sibling missing in dev");
+        let err =
+            resolve_app_binary_from_env_and_exe(None, Path::new("/project/target/debug/rollshot"))
+                .expect_err("sibling missing in dev");
 
         assert!(err.message.contains("not found"), "{}", err.message);
         assert!(err.message.contains("tauri"), "{}", err.message);
@@ -321,11 +319,8 @@ mod tests {
 
     #[test]
     fn resolve_app_binary_sibling_missing_prod() {
-        let err = resolve_app_binary_from_env_and_exe(
-            None,
-            Path::new("/usr/bin/rollshot"),
-        )
-        .expect_err("sibling missing in prod");
+        let err = resolve_app_binary_from_env_and_exe(None, Path::new("/usr/bin/rollshot"))
+            .expect_err("sibling missing in prod");
 
         assert!(err.message.contains("not found"), "{}", err.message);
         assert!(err.message.contains("ROLLSHOT_APP"), "{}", err.message);
