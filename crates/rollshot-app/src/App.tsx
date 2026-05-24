@@ -145,7 +145,11 @@ export default function App() {
       if (status.state === 'stitching') {
         const done = await stopStitching()
         setMessage(`Stitched ${done.image_width}x${done.image_height}`)
-        await refreshFinalPreview()
+        try {
+          await refreshFinalPreview()
+        } catch {
+          // refresh failure is non-fatal; keep the success message
+        }
         return
       }
 
@@ -209,7 +213,7 @@ export default function App() {
         <p className="status-text">
           {status.state === 'failed' ? status.message : message}
         </p>
-        <Button type="button" onClick={onStart} disabled={status.state === 'stitching'}>
+        <Button type="button" onClick={onStart} disabled={status.state !== 'idle'}>
           <Play className="size-4" aria-hidden="true" />
           Start
         </Button>
