@@ -14,6 +14,19 @@ export type RegionDto = {
   height: number
 }
 
+export type StitchStatsDto = {
+  frame_count: number
+  total_width: number
+  total_height: number
+  last_append: number
+}
+
+export type DoneImageDto = {
+  image_width: number
+  image_height: number
+  output_path: string | null
+}
+
 export type SessionStatus =
   | { state: 'idle' }
   | {
@@ -21,6 +34,20 @@ export type SessionStatus =
       frame_width: number
       frame_height: number
       region: RegionDto | null
+    }
+  | {
+      state: 'stitching'
+      frame_width: number
+      frame_height: number
+      region: RegionDto
+      stats: StitchStatsDto
+      last_outcome: string | null
+    }
+  | {
+      state: 'done'
+      image_width: number
+      image_height: number
+      output_path: string | null
     }
   | { state: 'failed'; message: string }
 
@@ -57,4 +84,24 @@ export async function confirmRegion(region: SourceRegion): Promise<RegionDto> {
       height: region.height,
     },
   })
+}
+
+export async function startStitching(): Promise<void> {
+  await invoke('start_stitching')
+}
+
+export async function stopStitching(): Promise<DoneImageDto> {
+  return await invoke<DoneImageDto>('stop_stitching')
+}
+
+export async function saveImage(path: string): Promise<DoneImageDto> {
+  return await invoke<DoneImageDto>('save_image', { path })
+}
+
+export async function getFinalPreview(maxEdge: number): Promise<Blob | null> {
+  const bytes = await invoke<ArrayBuffer>('get_final_preview', { maxEdge })
+  if (bytes.byteLength === 0) {
+    return null
+  }
+  return new Blob([bytes], { type: 'image/png' })
 }

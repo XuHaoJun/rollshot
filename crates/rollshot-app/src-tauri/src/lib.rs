@@ -20,6 +20,7 @@ pub fn run() {
     let shared_session = Arc::new(SharedSession::new());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(launch_options)
         .manage(Arc::clone(&shared_session))
         .invoke_handler(tauri::generate_handler![
