@@ -3803,6 +3803,7 @@ name = "rollshot-app"
 version = "0.1.0"
 dependencies = [
  "image",
+ "raw-window-handle",
  "rollshot-capture",
  "rollshot-core",
  "serde",
@@ -3811,6 +3812,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "thiserror 1.0.69",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
