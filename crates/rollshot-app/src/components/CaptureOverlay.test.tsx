@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   launchOptions: vi.fn(),
   overlayExclusion: vi.fn(),
   saveImage: vi.fn(),
+  scrollThrough: vi.fn(),
   sessionStatus: vi.fn(),
   startCapture: vi.fn(),
   startStitching: vi.fn(),
@@ -20,6 +21,12 @@ const api = vi.hoisted(() => ({
 
 vi.mock('../api/capture', () => api)
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    outerPosition: () => Promise.resolve({ x: 0, y: 0 }),
+    scaleFactor: () => Promise.resolve(2),
+  }),
+}))
 
 const reactActGlobal = globalThis as typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT: boolean

@@ -2,6 +2,7 @@ import { type PointerEvent, useCallback, useEffect, useMemo, useRef, useState } 
 import {
   cssRectToSourceRegion,
   dragToCssRect,
+  previewScaleFromRendered,
   type CssRect,
   type Point,
   type SourceRegion,
@@ -68,12 +69,15 @@ export function RegionOverlay({
     if (!selectedRegion || !renderedSize) {
       return undefined
     }
-    const rect = sourceRegionToCssRect(selectedRegion, {
-      renderedWidth: renderedSize.width,
-      renderedHeight: renderedSize.height,
-      sourceWidth,
-      sourceHeight,
-    })
+    const rect = sourceRegionToCssRect(
+      selectedRegion,
+      previewScaleFromRendered({
+        renderedWidth: renderedSize.width,
+        renderedHeight: renderedSize.height,
+        sourceWidth,
+        sourceHeight,
+      }),
+    )
     return {
       left: `${rect.left}px`,
       top: `${rect.top}px`,
@@ -105,12 +109,15 @@ export function RegionOverlay({
 
     const bounds = image.getBoundingClientRect()
     setRenderedSize({ width: bounds.width, height: bounds.height })
-    const nextRegion = cssRectToSourceRegion(nextRect, {
-      renderedWidth: bounds.width,
-      renderedHeight: bounds.height,
-      sourceWidth,
-      sourceHeight,
-    })
+    const nextRegion = cssRectToSourceRegion(
+      nextRect,
+      previewScaleFromRendered({
+        renderedWidth: bounds.width,
+        renderedHeight: bounds.height,
+        sourceWidth,
+        sourceHeight,
+      }),
+    )
     setSelectedRegion(nextRegion)
     onRegionChange(nextRegion)
   }

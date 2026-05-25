@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   confirmRegion,
   getFinalPreview,
@@ -7,6 +8,7 @@ import {
   launchOptions,
   overlayExclusion,
   saveImage,
+  scrollThrough,
   sessionStatus,
   startCapture,
   startStitching,
@@ -15,7 +17,7 @@ import {
   type OverlayExclusion,
   type SessionStatus,
 } from '../api/capture'
-import type { SourceRegion } from '../region/geometry'
+import type { PreviewScale, SourceRegion } from '../region/geometry'
 import { sourceRegionToCssRect } from '../region/geometry'
 import { choosePreviewPlacement } from '../overlay/placement'
 import { AdaptiveStitchPreview } from './AdaptiveStitchPreview'
@@ -30,6 +32,10 @@ export function CaptureOverlay() {
   const [selectedRegion, setSelectedRegion] = useState<SourceRegion | null>(null)
   const [stitchPreviewUrl, setStitchPreviewUrl] = useState<string | null>(null)
   const [finalPreviewUrl, setFinalPreviewUrl] = useState<string | null>(null)
+  const [windowOrigin, setWindowOrigin] = useState<{ x: number; y: number } | null>(null)
+  const [devicePixelRatio, setDevicePixelRatio] = useState<number>(() =>
+    typeof window === 'undefined' ? 1 : window.devicePixelRatio,
+  )
   const [message, setMessage] = useState('Starting capture')
   const [startupFailed, setStartupFailed] = useState(false)
   const pollInFlightRef = useRef(false)
@@ -52,9 +58,17 @@ export function CaptureOverlay() {
   }, [])
 
   useEffect(() => {
-    Promise.all([launchOptions(), overlayExclusion()])
-      .then(([loadedOptions, loadedExclusion]) => {
+    const tauriWindow = getCurrentWindow()
+    Promise.all([
+      launchOptions(),
+      overlayExclusion(),
+      tauriWindow.outerPosition(),
+      tauriWindow.scaleFactor(),
+    ])
+      .then(([loadedOptions, loadedExclusion, outerPosition, scaleFactor]) => {
         setOverlayMode(loadedExclusion)
+        setWindowOrigin({ x: outerPosition.x, y: outerPosition.y })
+        setDevicePixelRatio(scaleFactor)
         return startCapture(loadedOptions)
       })
       .then(() => setMessage('Select a region'))
@@ -123,6 +137,34 @@ export function CaptureOverlay() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onCancel])
 
+  const scrollPendingRef = useRef(false)
+  const accumulatedDeltaRef = useRef(0)
+  const flushScroll = useCallback(() => {
+    if (scrollPendingRef.current) return
+    const delta = accumulatedDeltaRef.current
+    if (Math.abs(delta) < 4) return
+    accumulatedDeltaRef.current = 0
+    scrollPendingRef.current = true
+    const sign = delta > 0 ? 1 : -1
+    const lines = Math.min(8, Math.max(1, Math.round(Math.abs(delta) / 40)))
+    scrollThrough(sign * lines)
+      .catch((error) => setMessage(String(error)))
+      .finally(() => {
+        scrollPendingRef.current = false
+        if (Math.abs(accumulatedDeltaRef.current) >= 4) flushScroll()
+      })
+  }, [])
+
+  const onWheel = useCallback(
+    (event: WheelEvent<HTMLElement>) => {
+      if (status.state !== 'stitching') return
+      if (event.deltaY === 0) return
+      accumulatedDeltaRef.current += event.deltaY
+      flushScroll()
+    },
+    [status.state, flushScroll],
+  )
+
   const onStop = useCallback(async () => {
     try {
       const done = await stopStitching()
@@ -161,24 +203,31 @@ export function CaptureOverlay() {
   const showSelection = status.state === 'previewing' || status.state === 'stitching'
   const canEditSelection = status.state === 'previewing'
 
+  const scale = useMemo<PreviewScale | null>(() => {
+    if (!showSelection || !windowOrigin) return null
+    return {
+      scaleX: devicePixelRatio,
+      scaleY: devicePixelRatio,
+      sourceOriginX: windowOrigin.x,
+      sourceOriginY: windowOrigin.y,
+      sourceWidth,
+      sourceHeight,
+    }
+  }, [devicePixelRatio, showSelection, sourceHeight, sourceWidth, windowOrigin])
+
   const placement = useMemo(() => {
-    if (!activeRegion) {
+    if (!activeRegion || !scale) {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-    const regionRect = sourceRegionToCssRect(activeRegion, {
-      renderedWidth: bounds.width,
-      renderedHeight: bounds.height,
-      sourceWidth,
-      sourceHeight,
-    })
+    const regionRect = sourceRegionToCssRect(activeRegion, scale)
     return choosePreviewPlacement({
       bounds,
       region: regionRect,
       preview: PREVIEW_SIZE,
       overlayExclusion: overlayMode,
     })
-  }, [activeRegion, overlayMode, sourceHeight, sourceWidth])
+  }, [activeRegion, overlayMode, scale])
 
   const toolbarMode = status.state === 'done' ? 'done' : status.state === 'failed' ? 'failed' : 'stitching'
   const stats =
@@ -187,14 +236,13 @@ export function CaptureOverlay() {
       : message
 
   return (
-    <main className="capture-overlay">
+    <main className="capture-overlay" onWheel={onWheel}>
       {status.state === 'done' && finalPreviewUrl ? (
         <img className="final-overlay-preview" src={finalPreviewUrl} alt="Stitched result" draggable={false} />
       ) : null}
-      {showSelection ? (
+      {showSelection && scale ? (
         <SelectionLayer
-          sourceWidth={sourceWidth}
-          sourceHeight={sourceHeight}
+          scale={scale}
           selectedRegion={activeRegion}
           disabled={!canEditSelection}
           onSelect={onSelect}

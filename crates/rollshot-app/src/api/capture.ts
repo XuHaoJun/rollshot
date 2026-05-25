@@ -119,3 +119,7 @@ export type OverlayExclusion = 'verified' | 'unsupported' | 'unknown'
 export async function overlayExclusion(): Promise<OverlayExclusion> {
   return await invoke<OverlayExclusion>('overlay_exclusion')
 }
+
+export async function scrollThrough(length: number): Promise<void> {
+  await invoke('scroll_through', { length })
+}

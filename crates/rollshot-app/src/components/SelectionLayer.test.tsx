@@ -1,7 +1,17 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { PreviewScale } from '../region/geometry'
 import { SelectionLayer } from './SelectionLayer'
+
+const testScale: PreviewScale = {
+  scaleX: 2,
+  scaleY: 2,
+  sourceOriginX: 0,
+  sourceOriginY: 0,
+  sourceWidth: 1000,
+  sourceHeight: 500,
+}
 
 const reactActGlobal = globalThis as typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT: boolean
@@ -64,8 +74,7 @@ describe('SelectionLayer', () => {
     act(() => {
       root.render(
         <SelectionLayer
-          sourceWidth={1000}
-          sourceHeight={500}
+          scale={testScale}
           selectedRegion={null}
           onSelect={onSelect}
           onCancel={vi.fn()}
@@ -97,8 +106,7 @@ describe('SelectionLayer', () => {
     act(() => {
       root.render(
         <SelectionLayer
-          sourceWidth={1000}
-          sourceHeight={500}
+          scale={testScale}
           selectedRegion={null}
           onSelect={onSelect}
           onCancel={vi.fn()}
@@ -121,8 +129,7 @@ describe('SelectionLayer', () => {
     act(() => {
       root.render(
         <SelectionLayer
-          sourceWidth={1000}
-          sourceHeight={500}
+          scale={testScale}
           selectedRegion={{ x: 100, y: 50, width: 400, height: 200 }}
           disabled
           onSelect={onSelect}
@@ -148,8 +155,7 @@ describe('SelectionLayer', () => {
     act(() => {
       root.render(
         <SelectionLayer
-          sourceWidth={1000}
-          sourceHeight={500}
+          scale={testScale}
           selectedRegion={null}
           onSelect={vi.fn()}
           onCancel={onCancel}

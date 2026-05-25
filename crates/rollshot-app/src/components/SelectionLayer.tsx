@@ -5,12 +5,12 @@ import {
   sourceRegionToCssRect,
   type CssRect,
   type Point,
+  type PreviewScale,
   type SourceRegion,
 } from '../region/geometry'
 
 type SelectionLayerProps = {
-  sourceWidth: number
-  sourceHeight: number
+  scale: PreviewScale
   selectedRegion: SourceRegion | null
   disabled?: boolean
   onSelect: (region: SourceRegion) => void
@@ -18,8 +18,7 @@ type SelectionLayerProps = {
 }
 
 export function SelectionLayer({
-  sourceWidth,
-  sourceHeight,
+  scale,
   selectedRegion,
   disabled = false,
   onSelect,
@@ -44,14 +43,8 @@ export function SelectionLayer({
     if (!selectedRegion) {
       return null
     }
-    const bounds = layerRef.current?.getBoundingClientRect()
-    return sourceRegionToCssRect(selectedRegion, {
-      renderedWidth: bounds?.width ?? window.innerWidth,
-      renderedHeight: bounds?.height ?? window.innerHeight,
-      sourceWidth,
-      sourceHeight,
-    })
-  }, [selectedRegion, sourceHeight, sourceWidth])
+    return sourceRegionToCssRect(selectedRegion, scale)
+  }, [scale, selectedRegion])
 
   const visibleRect = draftRect ?? selectedRect
 
@@ -114,15 +107,7 @@ export function SelectionLayer({
           setDraftRect(null)
           return
         }
-        const bounds = event.currentTarget.getBoundingClientRect()
-        onSelect(
-          cssRectToSourceRegion(nextRect, {
-            renderedWidth: bounds.width,
-            renderedHeight: bounds.height,
-            sourceWidth,
-            sourceHeight,
-          }),
-        )
+        onSelect(cssRectToSourceRegion(nextRect, scale))
       }}
     >
       <div className="selection-dim" />

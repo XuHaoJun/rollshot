@@ -14,6 +14,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+enigo = "0.6.1"
 image = { workspace = true }
 rollshot-capture = { path = "../../rollshot-capture" }
 rollshot-core = { path = "../../rollshot-core" }
@@ -23,6 +24,7 @@ raw-window-handle = "0.6"
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [features]
 default = []

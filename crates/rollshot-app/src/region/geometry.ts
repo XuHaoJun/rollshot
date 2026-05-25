@@ -18,8 +18,10 @@ export type SourceRegion = {
 }
 
 export type PreviewScale = {
-  renderedWidth: number
-  renderedHeight: number
+  scaleX: number
+  scaleY: number
+  sourceOriginX: number
+  sourceOriginY: number
   sourceWidth: number
   sourceHeight: number
 }
@@ -40,16 +42,30 @@ export function dragToCssRect(start: Point, current: Point): CssRect {
   }
 }
 
+export function previewScaleFromRendered(input: {
+  renderedWidth: number
+  renderedHeight: number
+  sourceWidth: number
+  sourceHeight: number
+}): PreviewScale {
+  return {
+    scaleX: input.sourceWidth / input.renderedWidth,
+    scaleY: input.sourceHeight / input.renderedHeight,
+    sourceOriginX: 0,
+    sourceOriginY: 0,
+    sourceWidth: input.sourceWidth,
+    sourceHeight: input.sourceHeight,
+  }
+}
+
 export function cssRectToSourceRegion(
   rect: CssRect,
   scale: PreviewScale,
 ): SourceRegion {
-  const xScale = scale.sourceWidth / scale.renderedWidth
-  const yScale = scale.sourceHeight / scale.renderedHeight
-  const left = Math.floor(rect.left * xScale)
-  const top = Math.floor(rect.top * yScale)
-  const right = Math.ceil((rect.left + rect.width) * xScale)
-  const bottom = Math.ceil((rect.top + rect.height) * yScale)
+  const left = Math.floor(scale.sourceOriginX + rect.left * scale.scaleX)
+  const top = Math.floor(scale.sourceOriginY + rect.top * scale.scaleY)
+  const right = Math.ceil(scale.sourceOriginX + (rect.left + rect.width) * scale.scaleX)
+  const bottom = Math.ceil(scale.sourceOriginY + (rect.top + rect.height) * scale.scaleY)
 
   return clampSourceRegion(
     {
@@ -66,13 +82,11 @@ export function sourceRegionToCssRect(
   region: SourceRegion,
   scale: PreviewScale,
 ): CssRect {
-  const xScale = scale.renderedWidth / scale.sourceWidth
-  const yScale = scale.renderedHeight / scale.sourceHeight
   return {
-    left: region.x * xScale,
-    top: region.y * yScale,
-    width: region.width * xScale,
-    height: region.height * yScale,
+    left: (region.x - scale.sourceOriginX) / scale.scaleX,
+    top: (region.y - scale.sourceOriginY) / scale.scaleY,
+    width: region.width / scale.scaleX,
+    height: region.height / scale.scaleY,
   }
 }
 
