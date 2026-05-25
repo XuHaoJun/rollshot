@@ -4,10 +4,24 @@ pub fn configure_overlay_window(window: &tauri::WebviewWindow) -> OverlayExclusi
     let _ = window.set_decorations(false);
     let _ = window.set_always_on_top(true);
     let _ = window.set_skip_taskbar(true);
-    let _ = window.set_fullscreen(true);
+    cover_primary_monitor(window);
+    let _ = window.show();
     let _ = window.set_focus();
 
     platform_overlay_exclusion(window)
+}
+
+fn cover_primary_monitor(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.primary_monitor() else {
+        return;
+    };
+    let position = *monitor.position();
+    let size = *monitor.size();
+
+    // macOS scale factor 會讓位置在第一次 set 後跑掉，set 兩次比較穩
+    let _ = window.set_position(tauri::PhysicalPosition::new(position.x, position.y));
+    let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height));
+    let _ = window.set_position(tauri::PhysicalPosition::new(position.x, position.y));
 }
 
 #[cfg(target_os = "windows")]
