@@ -104,11 +104,11 @@ export function SelectionLayer({
         if (disabled) {
           return
         }
-        if (!start) {
+        if (!startRef.current) {
           return
         }
-        const nextRect = dragToCssRect(start, localPoint(event))
-        setStart(null)
+        const nextRect = dragToCssRect(startRef.current, localPoint(event))
+        startRef.current = null
         setDraftRect(nextRect)
         if (nextRect.width < 4 || nextRect.height < 4) {
           setDraftRect(null)
