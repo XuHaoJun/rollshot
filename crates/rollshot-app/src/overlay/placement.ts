@@ -1,4 +1,6 @@
-export type OverlayExclusion = 'verified' | 'unsupported' | 'unknown'
+import type { OverlayExclusion } from '../api/capture'
+
+export type { OverlayExclusion }
 
 export type OverlayRect = {
   left: number

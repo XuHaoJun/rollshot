@@ -31,6 +31,7 @@ export function CaptureOverlay() {
   const [stitchPreviewUrl, setStitchPreviewUrl] = useState<string | null>(null)
   const [finalPreviewUrl, setFinalPreviewUrl] = useState<string | null>(null)
   const [message, setMessage] = useState('Starting capture')
+  const [startupFailed, setStartupFailed] = useState(false)
   const pollInFlightRef = useRef(false)
   const stitchPreviewUrlRef = useRef<string | null>(null)
   const finalPreviewUrlRef = useRef<string | null>(null)
@@ -58,12 +59,14 @@ export function CaptureOverlay() {
       })
       .then(() => setMessage('Select a region'))
       .catch((error) => {
+        setStartupFailed(true)
         setStatus({ state: 'failed', message: String(error) })
         setMessage(String(error))
       })
   }, [])
 
   useEffect(() => {
+    if (startupFailed) return
     const timer = window.setInterval(async () => {
       if (pollInFlightRef.current) return
       pollInFlightRef.current = true
@@ -88,7 +91,7 @@ export function CaptureOverlay() {
     }, 160)
 
     return () => window.clearInterval(timer)
-  }, [])
+  }, [startupFailed])
 
   const onSelect = useCallback(async (region: SourceRegion) => {
     try {
@@ -109,6 +112,16 @@ export function CaptureOverlay() {
       window.close()
     }
   }, [])
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onCancel()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onCancel])
 
   const onStop = useCallback(async () => {
     try {
