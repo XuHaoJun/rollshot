@@ -58,4 +58,12 @@ describe('capture api wrappers', () => {
 
     await expect(getFinalPreview(1200)).resolves.toBeNull()
   })
+
+  it('reads overlay exclusion capability', async () => {
+    const { overlayExclusion } = await import('./capture')
+    invokeMock.mockResolvedValueOnce('unsupported')
+
+    await expect(overlayExclusion()).resolves.toBe('unsupported')
+    expect(invokeMock).toHaveBeenCalledWith('overlay_exclusion')
+  })
 })

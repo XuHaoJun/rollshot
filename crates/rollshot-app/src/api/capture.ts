@@ -113,3 +113,9 @@ export async function getFinalPreview(maxEdge: number): Promise<Blob | null> {
   }
   return new Blob([bytes], { type: 'image/png' })
 }
+
+export type OverlayExclusion = 'verified' | 'unsupported' | 'unknown'
+
+export async function overlayExclusion(): Promise<OverlayExclusion> {
+  return await invoke<OverlayExclusion>('overlay_exclusion')
+}

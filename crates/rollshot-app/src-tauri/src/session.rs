@@ -73,6 +73,14 @@ pub struct RegionDto {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayExclusion {
+    Verified,
+    Unsupported,
+    Unknown,
+}
+
 impl From<RegionDto> for Region {
     fn from(value: RegionDto) -> Self {
         Self {
@@ -315,6 +323,7 @@ pub struct SharedSession {
     reader: Mutex<Option<JoinHandle<()>>>,
     stitch_stop: AtomicBool,
     stitcher: Mutex<Option<JoinHandle<()>>>,
+    overlay_exclusion: Mutex<OverlayExclusion>,
 }
 
 impl SharedSession {
@@ -325,6 +334,7 @@ impl SharedSession {
             reader: Mutex::new(None),
             stitch_stop: AtomicBool::new(false),
             stitcher: Mutex::new(None),
+            overlay_exclusion: Mutex::new(OverlayExclusion::Unknown),
         }
     }
 
@@ -592,6 +602,19 @@ impl SharedSession {
             .map(|image| encode_preview_image_png(image, max_edge))
             .transpose()
     }
+
+    pub fn overlay_exclusion(&self) -> Result<OverlayExclusion, String> {
+        self.overlay_exclusion
+            .lock()
+            .map(|state| *state)
+            .map_err(|_| "overlay exclusion lock poisoned".to_string())
+    }
+
+    pub fn set_overlay_exclusion(&self, state: OverlayExclusion) {
+        if let Ok(mut current) = self.overlay_exclusion.lock() {
+            *current = state;
+        }
+    }
 }
 
 impl Drop for SharedSession {
@@ -632,7 +655,9 @@ impl AppSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_preview_png, AppSession, RegionDto, SessionStatus, SharedSession};
+    use super::{
+        encode_preview_png, AppSession, OverlayExclusion, RegionDto, SessionStatus, SharedSession,
+    };
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
     use std::sync::atomic::Ordering;
@@ -935,6 +960,28 @@ mod tests {
                 image_height: 80,
                 output_path: None,
             }
+        );
+    }
+
+    #[test]
+    fn shared_session_defaults_overlay_exclusion_to_unknown() {
+        let session = SharedSession::new();
+
+        assert_eq!(
+            session.overlay_exclusion().expect("overlay exclusion"),
+            OverlayExclusion::Unknown
+        );
+    }
+
+    #[test]
+    fn shared_session_can_store_overlay_exclusion_state() {
+        let session = SharedSession::new();
+
+        session.set_overlay_exclusion(OverlayExclusion::Unsupported);
+
+        assert_eq!(
+            session.overlay_exclusion().expect("overlay exclusion"),
+            OverlayExclusion::Unsupported
         );
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rollshot_capture::InteractiveLaunchOptions;
 use tauri::ipc::Response;
 
-use crate::session::{DoneImageDto, RegionDto, SessionStatus, SharedSession};
+use crate::session::{DoneImageDto, OverlayExclusion, RegionDto, SessionStatus, SharedSession};
 
 #[tauri::command]
 pub fn launch_options(
@@ -87,4 +87,11 @@ pub fn get_final_preview(
 ) -> Result<Response, String> {
     let bytes = session.final_preview_png(max_edge)?.unwrap_or_default();
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn overlay_exclusion(
+    session: tauri::State<'_, Arc<SharedSession>>,
+) -> Result<OverlayExclusion, String> {
+    session.overlay_exclusion()
 }
