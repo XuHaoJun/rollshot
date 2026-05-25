@@ -62,6 +62,20 @@ export function cssRectToSourceRegion(
   )
 }
 
+export function sourceRegionToCssRect(
+  region: SourceRegion,
+  scale: PreviewScale,
+): CssRect {
+  const xScale = scale.renderedWidth / scale.sourceWidth
+  const yScale = scale.renderedHeight / scale.sourceHeight
+  return {
+    left: region.x * xScale,
+    top: region.y * yScale,
+    width: region.width * xScale,
+    height: region.height * yScale,
+  }
+}
+
 export function clampSourceRegion(
   region: SourceRegion,
   source: SourceSize,

@@ -1,10 +1,11 @@
-import { type PointerEvent, useMemo, useRef, useState } from 'react'
+import { type PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cssRectToSourceRegion,
   dragToCssRect,
   type CssRect,
   type Point,
   type SourceRegion,
+  sourceRegionToCssRect,
 } from '../region/geometry'
 
 type RegionOverlayProps = {
@@ -22,19 +23,64 @@ export function RegionOverlay({
 }: RegionOverlayProps) {
   const imageRef = useRef<HTMLImageElement | null>(null)
   const [start, setStart] = useState<Point | null>(null)
-  const [rect, setRect] = useState<CssRect | null>(null)
+  const [selectedRegion, setSelectedRegion] = useState<SourceRegion | null>(null)
+  const [renderedSize, setRenderedSize] = useState<{ width: number; height: number } | null>(null)
+
+  const updateRenderedSize = useCallback(() => {
+    const image = imageRef.current
+    if (!image) {
+      return
+    }
+
+    const bounds = image.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) {
+      return
+    }
+
+    setRenderedSize((current) => {
+      if (current?.width === bounds.width && current.height === bounds.height) {
+        return current
+      }
+      return { width: bounds.width, height: bounds.height }
+    })
+  }, [])
+
+  useEffect(() => {
+    updateRenderedSize()
+    const image = imageRef.current
+    const observer =
+      image && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(updateRenderedSize)
+        : null
+
+    if (image && observer) {
+      observer.observe(image)
+    }
+    window.addEventListener('resize', updateRenderedSize)
+
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateRenderedSize)
+    }
+  }, [imageUrl, updateRenderedSize])
 
   const overlayStyle = useMemo(() => {
-    if (!rect) {
+    if (!selectedRegion || !renderedSize) {
       return undefined
     }
+    const rect = sourceRegionToCssRect(selectedRegion, {
+      renderedWidth: renderedSize.width,
+      renderedHeight: renderedSize.height,
+      sourceWidth,
+      sourceHeight,
+    })
     return {
       left: `${rect.left}px`,
       top: `${rect.top}px`,
       width: `${rect.width}px`,
       height: `${rect.height}px`,
     }
-  }, [rect])
+  }, [renderedSize, selectedRegion, sourceHeight, sourceWidth])
 
   function localPoint(event: PointerEvent<HTMLDivElement>): Point {
     const image = imageRef.current
@@ -52,19 +98,21 @@ export function RegionOverlay({
   function publishRegion(nextRect: CssRect | null) {
     const image = imageRef.current
     if (!image || !nextRect || nextRect.width < 4 || nextRect.height < 4) {
+      setSelectedRegion(null)
       onRegionChange(null)
       return
     }
 
     const bounds = image.getBoundingClientRect()
-    onRegionChange(
-      cssRectToSourceRegion(nextRect, {
-        renderedWidth: bounds.width,
-        renderedHeight: bounds.height,
-        sourceWidth,
-        sourceHeight,
-      }),
-    )
+    setRenderedSize({ width: bounds.width, height: bounds.height })
+    const nextRegion = cssRectToSourceRegion(nextRect, {
+      renderedWidth: bounds.width,
+      renderedHeight: bounds.height,
+      sourceWidth,
+      sourceHeight,
+    })
+    setSelectedRegion(nextRegion)
+    onRegionChange(nextRegion)
   }
 
   return (
@@ -75,7 +123,6 @@ export function RegionOverlay({
         const point = localPoint(event)
         setStart(point)
         const nextRect = dragToCssRect(point, point)
-        setRect(nextRect)
         publishRegion(nextRect)
       }}
       onPointerMove={(event) => {
@@ -83,7 +130,6 @@ export function RegionOverlay({
           return
         }
         const nextRect = dragToCssRect(start, localPoint(event))
-        setRect(nextRect)
         publishRegion(nextRect)
       }}
       onPointerUp={(event) => {
@@ -92,7 +138,6 @@ export function RegionOverlay({
         }
         const nextRect = dragToCssRect(start, localPoint(event))
         setStart(null)
-        setRect(nextRect)
         publishRegion(nextRect)
       }}
     >
@@ -102,6 +147,7 @@ export function RegionOverlay({
         src={imageUrl}
         alt="Live capture preview"
         draggable={false}
+        onLoad={updateRenderedSize}
       />
       <div className="selection-dim" />
       {overlayStyle ? <div className="selection-box" style={overlayStyle} /> : null}

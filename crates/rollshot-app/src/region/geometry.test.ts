@@ -3,6 +3,7 @@ import {
   clampSourceRegion,
   dragToCssRect,
   cssRectToSourceRegion,
+  sourceRegionToCssRect,
   type CssRect,
 } from './geometry'
 
@@ -52,6 +53,20 @@ describe('region geometry', () => {
         },
       ),
     ).toEqual({ x: 0, y: 0, width: 2560, height: 1440 })
+  })
+
+  it('projects source pixels back into the current rendered preview size', () => {
+    expect(
+      sourceRegionToCssRect(
+        { x: 100, y: 50, width: 400, height: 200 },
+        {
+          renderedWidth: 250,
+          renderedHeight: 125,
+          sourceWidth: 1000,
+          sourceHeight: 500,
+        },
+      ),
+    ).toEqual({ left: 25, top: 12.5, width: 100, height: 50 })
   })
 
   it('clamps source region to frame bounds', () => {
