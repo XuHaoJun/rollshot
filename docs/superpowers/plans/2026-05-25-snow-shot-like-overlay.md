@@ -20,14 +20,11 @@ Create:
 - `crates/rollshot-app/src/overlay/placement.test.ts`  
   Unit tests for placement choices and safe fallback behavior.
 
-- `crates/rollshot-app/src/overlay/selection.ts`  
-  Pure overlay-coordinate to source-coordinate conversion helper.
-
-- `crates/rollshot-app/src/overlay/selection.test.ts`  
-  Unit tests for HiDPI and overlay coordinate conversion.
-
 - `crates/rollshot-app/src/components/CaptureOverlay.tsx`  
   Top-level overlay state renderer and polling owner.
+
+- `crates/rollshot-app/src/components/CaptureOverlay.test.tsx`  
+  Flow tests for direct launch, auto-start stitching after selection, and stopping into final preview.
 
 - `crates/rollshot-app/src/components/SelectionLayer.tsx`  
   Fullscreen Snow-Shot-like selection layer: dim mask, crosshair cursor, auxiliary lines, drag-to-select.
@@ -61,6 +58,9 @@ Modify:
 - `crates/rollshot-app/src/api/capture.test.ts`  
   Test the new API wrapper.
 
+- `crates/rollshot-app/src/region/geometry.test.ts`  
+  Add fullscreen-overlay coordinate coverage to the existing geometry helper tests.
+
 - `crates/rollshot-app/src-tauri/src/commands.rs`  
   Add `overlay_exclusion` command.
 
@@ -76,6 +76,111 @@ Modify:
 Keep:
 
 - `crates/rollshot-app/src/components/RegionOverlay.tsx` and its test can remain temporarily unused until a cleanup task removes them. Do not delete them in the first pass unless the replacement is fully verified.
+
+---
+
+## Plan Review Addendum
+
+This section captures the plan-eng-review recommendations already applied to the task plan.
+
+### Step 0 Scope Challenge
+
+Goal alignment: every task contributes to replacing the current workbench capture UI with a Snow-Shot-like overlay. Task 8 is intentionally scoped as best-effort native exclusion; the core Linux-safe UX must work even if Task 8 is deferred.
+
+Existing code to reuse:
+
+- `crates/rollshot-app/src/region/geometry.ts` already has `dragToCssRect`, `cssRectToSourceRegion`, `sourceRegionToCssRect`, and `clampSourceRegion`; do not create a second overlay-coordinate conversion helper.
+- `crates/rollshot-app/src/api/capture.ts` already wraps capture/stitch IPC calls.
+- `crates/rollshot-app/src-tauri/src/session.rs` already owns capture state, stitching state, preview encoding, and stop/final-image behavior.
+- `crates/rollshot-app/src/components/RegionOverlay.tsx` is a reference for existing drag selection behavior, but remains unused after the overlay replacement.
+
+Minimum viable plan:
+
+- Required for the UX goal: Tasks 1, 2, 3, 4, 5, 6, 7, and 9.
+- Deferrable without breaking Linux-safe behavior: Task 8. If deferred, inside-crop image preview should remain disabled unless `overlay_exclusion` returns `verified`.
+
+NOT in scope:
+
+- wlr-layer-shell or platform-specific layer-shell windows.
+- Annotation, OCR, color picker, or editor-style screenshot tools.
+- Window auto-detection or automatic scroll driving.
+- Rendering the live stitch preview inside the crop when exclusion is `unknown` or `unsupported`.
+- Removing old `RegionOverlay` code in this first implementation pass.
+- Shipping/package changes; this plan changes the existing Tauri app artifact, not a new artifact.
+
+### Data Flow
+
+```text
+rollshot capture
+      |
+      v
+Tauri overlay window starts
+      |
+      +--> launchOptions() + overlayExclusion()
+      |
+      +--> startCapture(options)
+      |
+      v
+previewing frame dimensions
+      |
+      v
+SelectionLayer drag
+      |
+      v
+cssRectToSourceRegion()
+      |
+      v
+confirmRegion(region) -> startStitching()
+      |
+      v
+poll sessionStatus() + getStitchPreview()
+      |
+      v
+AdaptiveStitchPreview placement decision
+      |
+      v
+stopStitching() -> getFinalPreview() -> saveImage()
+```
+
+### Failure Modes
+
+| Failure mode | Expected behavior in plan |
+| --- | --- |
+| Capture permission denied or portal cancelled | `startCapture` failure moves overlay to failed/status UI; user can close. |
+| Overlay window fails to cover the selected screen | Setup requests fullscreen and focus; manual smoke must verify the dim layer covers the whole captured source. |
+| Overlay exclusion unsupported/unknown | Preview only appears outside crop; fullscreen crop falls back to status-only. |
+| User crops the full screen | `choosePreviewPlacement` returns inside image preview only for `verified`, otherwise status-only. |
+| Stitch preview is temporarily unavailable | `AdaptiveStitchPreview` shows status instead of broken image. |
+| User cancels with Escape | `stopCapture()` is called, then the overlay closes. |
+| Save dialog cancelled | No error message; overlay remains in done state. |
+| Windows exclusion API unavailable/fails | Capability remains `unknown`; frontend keeps conservative preview behavior. |
+
+### Test Coverage
+
+| Task / behavior | Unit | Integration | E2E / smoke | Manual only |
+| --- | --- | --- | --- | --- |
+| Task 1 / preview side placement and fullscreen fallback | yes | no | no | no |
+| Task 2 / fullscreen overlay coordinate conversion reusing geometry helper | yes | no | no | no |
+| Task 3 / overlay exclusion state and IPC wrapper | yes | yes | no | no |
+| Task 4 / drag-to-select and Escape cancel | yes | no | no | no |
+| Task 5 / image preview vs status-only rendering | yes | no | no | no |
+| Task 6 / direct launch, region confirm, start stitching, stop/final preview | yes | yes | no | no |
+| Task 7 / overlay CSS and Tauri config | no | build/typecheck | no | visual smoke |
+| Task 8 / native exclusion compile path | no | current-target cargo test | optional Windows target check | Windows capture exclusion |
+| Task 9 / full app behavior | no | yes | no | overlay smoke |
+
+### Parallelization Strategy
+
+```text
+Lane A: Task 1 -> Task 5
+Lane B: Task 2 -> Task 4
+Lane C: Task 3 -> Task 8
+
+Merge point: Task 6 depends on Tasks 3, 4, and 5.
+Final path: Task 6 -> Task 7 -> Task 9.
+```
+
+Keep these lanes on separate commits if implemented by parallel agents. Do not edit `App.tsx` before Task 6, because that is the merge point where the independently tested components become the active UI.
 
 ---
 
@@ -334,130 +439,63 @@ rtk git commit -m "feat(app): add overlay preview placement helper"
 
 ---
 
-### Task 2: Add Overlay Selection Coordinate Helper
+### Task 2: Extend Existing Region Geometry Coverage for Overlay Selection
 
 **Files:**
 
-- Create: `crates/rollshot-app/src/overlay/selection.ts`
-- Create: `crates/rollshot-app/src/overlay/selection.test.ts`
+- Modify: `crates/rollshot-app/src/region/geometry.test.ts`
 
-- [ ] **Step 1: Write failing selection tests**
+- [ ] **Step 1: Add overlay-specific geometry tests**
 
-Create `crates/rollshot-app/src/overlay/selection.test.ts`:
+In `crates/rollshot-app/src/region/geometry.test.ts`, add these tests inside `describe('region geometry', ...)`:
 
 ```ts
-import { describe, expect, it } from 'vitest'
-import { overlayRectToSourceRegion } from './selection'
+it('maps a fullscreen overlay drag to source pixels', () => {
+  expect(
+    cssRectToSourceRegion(
+      { left: 50, top: 20, width: 200, height: 100 },
+      {
+        renderedWidth: 500,
+        renderedHeight: 250,
+        sourceWidth: 1000,
+        sourceHeight: 500,
+      },
+    ),
+  ).toEqual({ x: 100, y: 40, width: 400, height: 200 })
+})
 
-describe('overlayRectToSourceRegion', () => {
-  it('maps overlay CSS pixels to source pixels', () => {
-    expect(
-      overlayRectToSourceRegion(
-        { left: 50, top: 20, width: 200, height: 100 },
-        {
-          overlayWidth: 500,
-          overlayHeight: 250,
-          sourceWidth: 1000,
-          sourceHeight: 500,
-        },
-      ),
-    ).toEqual({ x: 100, y: 40, width: 400, height: 200 })
-  })
-
-  it('floors origin and ceilings far edge for fractional HiDPI coordinates', () => {
-    expect(
-      overlayRectToSourceRegion(
-        { left: 10.25, top: 4.5, width: 20.25, height: 10.25 },
-        {
-          overlayWidth: 333,
-          overlayHeight: 222,
-          sourceWidth: 1000,
-          sourceHeight: 666,
-        },
-      ),
-    ).toEqual({ x: 30, y: 13, width: 62, height: 32 })
-  })
-
-  it('clamps to source bounds', () => {
-    expect(
-      overlayRectToSourceRegion(
-        { left: -20, top: 240, width: 120, height: 80 },
-        {
-          overlayWidth: 500,
-          overlayHeight: 250,
-          sourceWidth: 1000,
-          sourceHeight: 500,
-        },
-      ),
-    ).toEqual({ x: 0, y: 480, width: 200, height: 20 })
-  })
+it('clamps fullscreen overlay drags to source bounds', () => {
+  expect(
+    cssRectToSourceRegion(
+      { left: -20, top: 240, width: 120, height: 80 },
+      {
+        renderedWidth: 500,
+        renderedHeight: 250,
+        sourceWidth: 1000,
+        sourceHeight: 500,
+      },
+    ),
+  ).toEqual({ x: 0, y: 480, width: 200, height: 20 })
 })
 ```
 
-- [ ] **Step 2: Run the failing selection tests**
+- [ ] **Step 2: Run the geometry tests**
 
 Run:
 
 ```bash
-rtk pnpm --dir crates/rollshot-app test -- overlay/selection.test.ts
-```
-
-Expected: FAIL because `src/overlay/selection.ts` does not exist.
-
-- [ ] **Step 3: Implement the selection helper**
-
-Create `crates/rollshot-app/src/overlay/selection.ts`:
-
-```ts
-import { clampSourceRegion, type CssRect, type SourceRegion } from '../region/geometry'
-
-export type OverlaySourceScale = {
-  overlayWidth: number
-  overlayHeight: number
-  sourceWidth: number
-  sourceHeight: number
-}
-
-export function overlayRectToSourceRegion(
-  rect: CssRect,
-  scale: OverlaySourceScale,
-): SourceRegion {
-  const xScale = scale.sourceWidth / scale.overlayWidth
-  const yScale = scale.sourceHeight / scale.overlayHeight
-  const left = Math.floor(rect.left * xScale)
-  const top = Math.floor(rect.top * yScale)
-  const right = Math.ceil((rect.left + rect.width) * xScale)
-  const bottom = Math.ceil((rect.top + rect.height) * yScale)
-
-  return clampSourceRegion(
-    {
-      x: left,
-      y: top,
-      width: right - left,
-      height: bottom - top,
-    },
-    { width: scale.sourceWidth, height: scale.sourceHeight },
-  )
-}
-```
-
-- [ ] **Step 4: Run the selection tests**
-
-Run:
-
-```bash
-rtk pnpm --dir crates/rollshot-app test -- overlay/selection.test.ts
+rtk pnpm --dir crates/rollshot-app test -- region/geometry.test.ts
 ```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit selection helper**
+- [ ] **Step 3: Commit geometry coverage**
 
 Run:
 
 ```bash
-rtk git add crates/rollshot-app/src/overlay/selection.ts crates/rollshot-app/src/overlay/selection.test.ts
-rtk git commit -m "feat(app): add overlay selection coordinate helper"
+rtk git add crates/rollshot-app/src/region/geometry.test.ts
+rtk git commit -m "test(app): cover overlay geometry conversion"
 ```
 
 ---
@@ -583,6 +621,8 @@ pub fn configure_overlay_window(window: &tauri::WebviewWindow) -> OverlayExclusi
     let _ = window.set_decorations(false);
     let _ = window.set_always_on_top(true);
     let _ = window.set_skip_taskbar(true);
+    let _ = window.set_fullscreen(true);
+    let _ = window.set_focus();
     initial_overlay_exclusion()
 }
 ```
@@ -612,6 +652,12 @@ In `crates/rollshot-app/src-tauri/src/lib.rs`, add the module:
 
 ```rust
 mod overlay;
+```
+
+Add the Manager import needed by `get_webview_window`:
+
+```rust
+use tauri::Manager;
 ```
 
 Add a setup block before `.invoke_handler(...)`:
@@ -811,6 +857,33 @@ describe('SelectionLayer', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
+  it('does not publish selections while disabled', () => {
+    const onSelect = vi.fn()
+
+    act(() => {
+      root.render(
+        <SelectionLayer
+          sourceWidth={1000}
+          sourceHeight={500}
+          selectedRegion={{ x: 100, y: 50, width: 400, height: 200 }}
+          disabled
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+        />,
+      )
+    })
+
+    const layer = container.querySelector('.selection-layer')
+    act(() => {
+      layer?.dispatchEvent(pointerEvent('pointerdown', 10, 10))
+      layer?.dispatchEvent(pointerEvent('pointermove', 200, 100))
+      layer?.dispatchEvent(pointerEvent('pointerup', 200, 100))
+    })
+
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(container.querySelector('.selection-box')).not.toBeNull()
+  })
+
   it('cancels on Escape', () => {
     const onCancel = vi.fn()
 
@@ -851,13 +924,20 @@ Create `crates/rollshot-app/src/components/SelectionLayer.tsx`:
 
 ```tsx
 import { type PointerEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { dragToCssRect, sourceRegionToCssRect, type CssRect, type Point, type SourceRegion } from '../region/geometry'
-import { overlayRectToSourceRegion } from '../overlay/selection'
+import {
+  cssRectToSourceRegion,
+  dragToCssRect,
+  sourceRegionToCssRect,
+  type CssRect,
+  type Point,
+  type SourceRegion,
+} from '../region/geometry'
 
 type SelectionLayerProps = {
   sourceWidth: number
   sourceHeight: number
   selectedRegion: SourceRegion | null
+  disabled?: boolean
   onSelect: (region: SourceRegion) => void
   onCancel: () => void
 }
@@ -866,6 +946,7 @@ export function SelectionLayer({
   sourceWidth,
   sourceHeight,
   selectedRegion,
+  disabled = false,
   onSelect,
   onCancel,
 }: SelectionLayerProps) {
@@ -885,14 +966,13 @@ export function SelectionLayer({
   }, [onCancel])
 
   const selectedRect = useMemo(() => {
-    const layer = layerRef.current
-    if (!selectedRegion || !layer) {
+    if (!selectedRegion) {
       return null
     }
-    const bounds = layer.getBoundingClientRect()
+    const bounds = layerRef.current?.getBoundingClientRect()
     return sourceRegionToCssRect(selectedRegion, {
-      renderedWidth: bounds.width,
-      renderedHeight: bounds.height,
+      renderedWidth: bounds?.width ?? window.innerWidth,
+      renderedHeight: bounds?.height ?? window.innerHeight,
       sourceWidth,
       sourceHeight,
     })
@@ -924,8 +1004,11 @@ export function SelectionLayer({
   return (
     <div
       ref={layerRef}
-      className="selection-layer"
+      className={disabled ? 'selection-layer selection-layer-disabled' : 'selection-layer'}
       onPointerDown={(event) => {
+        if (disabled) {
+          return
+        }
         event.currentTarget.setPointerCapture(event.pointerId)
         const point = localPoint(event)
         setStart(point)
@@ -933,6 +1016,9 @@ export function SelectionLayer({
         setCursorPoint(point)
       }}
       onPointerMove={(event) => {
+        if (disabled) {
+          return
+        }
         const point = localPoint(event)
         setCursorPoint(point)
         if (start) {
@@ -940,6 +1026,9 @@ export function SelectionLayer({
         }
       }}
       onPointerUp={(event) => {
+        if (disabled) {
+          return
+        }
         if (!start) {
           return
         }
@@ -952,9 +1041,9 @@ export function SelectionLayer({
         }
         const bounds = event.currentTarget.getBoundingClientRect()
         onSelect(
-          overlayRectToSourceRegion(nextRect, {
-            overlayWidth: bounds.width,
-            overlayHeight: bounds.height,
+          cssRectToSourceRegion(nextRect, {
+            renderedWidth: bounds.width,
+            renderedHeight: bounds.height,
             sourceWidth,
             sourceHeight,
           }),
@@ -1153,9 +1242,205 @@ rtk git commit -m "feat(app): add adaptive stitch preview components"
 **Files:**
 
 - Create: `crates/rollshot-app/src/components/CaptureOverlay.tsx`
+- Create: `crates/rollshot-app/src/components/CaptureOverlay.test.tsx`
 - Modify: `crates/rollshot-app/src/App.tsx`
 
-- [ ] **Step 1: Implement CaptureOverlay**
+- [ ] **Step 1: Write failing CaptureOverlay flow tests**
+
+Create `crates/rollshot-app/src/components/CaptureOverlay.test.tsx`:
+
+```tsx
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SessionStatus } from '../api/capture'
+import { CaptureOverlay } from './CaptureOverlay'
+
+const api = vi.hoisted(() => ({
+  confirmRegion: vi.fn(),
+  getFinalPreview: vi.fn(),
+  getStitchPreview: vi.fn(),
+  launchOptions: vi.fn(),
+  overlayExclusion: vi.fn(),
+  saveImage: vi.fn(),
+  sessionStatus: vi.fn(),
+  startCapture: vi.fn(),
+  startStitching: vi.fn(),
+  stopCapture: vi.fn(),
+  stopStitching: vi.fn(),
+}))
+
+vi.mock('../api/capture', () => api)
+vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
+
+const reactActGlobal = globalThis as typeof globalThis & {
+  IS_REACT_ACT_ENVIRONMENT: boolean
+}
+reactActGlobal.IS_REACT_ACT_ENVIRONMENT = true
+
+function pointerEvent(type: string, x: number, y: number) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+  })
+  Object.defineProperty(event, 'pointerId', { value: 1 })
+  return event
+}
+
+async function flush() {
+  await act(async () => {
+    await Promise.resolve()
+  })
+}
+
+describe('CaptureOverlay', () => {
+  let container: HTMLDivElement
+  let root: Root
+  let rectSpy: ReturnType<typeof vi.spyOn>
+  let originalSetPointerCapture: typeof HTMLDivElement.prototype.setPointerCapture | undefined
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.clearAllMocks()
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    rectSpy = vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockImplementation(
+      () =>
+        ({
+          x: 0,
+          y: 0,
+          left: 0,
+          top: 0,
+          right: 500,
+          bottom: 250,
+          width: 500,
+          height: 250,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    )
+    originalSetPointerCapture = HTMLDivElement.prototype.setPointerCapture
+    HTMLDivElement.prototype.setPointerCapture = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:preview'),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    })
+    api.launchOptions.mockResolvedValue({
+      backend: 'fixture',
+      fps: 5,
+      show_cursor: false,
+    })
+    api.overlayExclusion.mockResolvedValue('unsupported')
+    api.startCapture.mockResolvedValue(undefined)
+    api.sessionStatus.mockResolvedValue({
+      state: 'previewing',
+      frame_width: 1000,
+      frame_height: 500,
+      region: null,
+    } satisfies SessionStatus)
+    api.confirmRegion.mockResolvedValue({ x: 100, y: 50, width: 400, height: 200 })
+    api.startStitching.mockResolvedValue(undefined)
+    api.getStitchPreview.mockResolvedValue(null)
+    api.stopStitching.mockResolvedValue({ image_width: 1000, image_height: 1600 })
+    api.getFinalPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    container.remove()
+    rectSpy.mockRestore()
+    if (originalSetPointerCapture) {
+      HTMLDivElement.prototype.setPointerCapture = originalSetPointerCapture
+    } else {
+      Reflect.deleteProperty(HTMLDivElement.prototype, 'setPointerCapture')
+    }
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('starts capture from launch options when mounted', async () => {
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+
+    expect(api.launchOptions).toHaveBeenCalledOnce()
+    expect(api.overlayExclusion).toHaveBeenCalledOnce()
+    expect(api.startCapture).toHaveBeenCalledWith({
+      backend: 'fixture',
+      fps: 5,
+      show_cursor: false,
+    })
+  })
+
+  it('confirms the selected region and starts stitching after drag release', async () => {
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    const layer = container.querySelector('.selection-layer')
+    expect(layer).not.toBeNull()
+
+    await act(async () => {
+      layer?.dispatchEvent(pointerEvent('pointerdown', 50, 25))
+      layer?.dispatchEvent(pointerEvent('pointermove', 250, 125))
+      layer?.dispatchEvent(pointerEvent('pointerup', 250, 125))
+      await Promise.resolve()
+    })
+
+    expect(api.confirmRegion).toHaveBeenCalledWith({ x: 100, y: 50, width: 400, height: 200 })
+    expect(api.startStitching).toHaveBeenCalledOnce()
+  })
+
+  it('stops stitching and requests the final preview', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'appended',
+    } satisfies SessionStatus)
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Stop'),
+    )
+    expect(stopButton).not.toBeUndefined()
+
+    await act(async () => {
+      stopButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+
+    expect(api.stopStitching).toHaveBeenCalledOnce()
+    expect(api.getFinalPreview).toHaveBeenCalledWith(1400)
+  })
+})
+```
+
+- [ ] **Step 2: Run the failing CaptureOverlay tests**
+
+Run:
+
+```bash
+rtk pnpm --dir crates/rollshot-app test -- components/CaptureOverlay.test.tsx
+```
+
+Expected: FAIL because `CaptureOverlay.tsx` does not exist.
+
+- [ ] **Step 3: Implement CaptureOverlay**
 
 Create `crates/rollshot-app/src/components/CaptureOverlay.tsx`:
 
@@ -1174,7 +1459,6 @@ import {
   startStitching,
   stopCapture,
   stopStitching,
-  type InteractiveLaunchOptions,
   type OverlayExclusion,
   type SessionStatus,
 } from '../api/capture'
@@ -1189,7 +1473,6 @@ const PREVIEW_SIZE = { width: 180, height: 260 }
 
 export function CaptureOverlay() {
   const [status, setStatus] = useState<SessionStatus>({ state: 'idle' })
-  const [options, setOptions] = useState<InteractiveLaunchOptions | null>(null)
   const [overlayMode, setOverlayMode] = useState<OverlayExclusion>('unknown')
   const [selectedRegion, setSelectedRegion] = useState<SourceRegion | null>(null)
   const [stitchPreviewUrl, setStitchPreviewUrl] = useState<string | null>(null)
@@ -1217,7 +1500,6 @@ export function CaptureOverlay() {
   useEffect(() => {
     Promise.all([launchOptions(), overlayExclusion()])
       .then(([loadedOptions, loadedExclusion]) => {
-        setOptions(loadedOptions)
         setOverlayMode(loadedExclusion)
         return startCapture(loadedOptions)
       })
@@ -1310,7 +1592,8 @@ export function CaptureOverlay() {
   const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
   const sourceWidth = status.state === 'previewing' || status.state === 'stitching' ? status.frame_width : 1
   const sourceHeight = status.state === 'previewing' || status.state === 'stitching' ? status.frame_height : 1
-  const canSelect = status.state === 'previewing' || status.state === 'stitching'
+  const showSelection = status.state === 'previewing' || status.state === 'stitching'
+  const canEditSelection = status.state === 'previewing'
 
   const placement = useMemo(() => {
     if (!activeRegion) {
@@ -1342,11 +1625,12 @@ export function CaptureOverlay() {
       {status.state === 'done' && finalPreviewUrl ? (
         <img className="final-overlay-preview" src={finalPreviewUrl} alt="Stitched result" draggable={false} />
       ) : null}
-      {canSelect ? (
+      {showSelection ? (
         <SelectionLayer
           sourceWidth={sourceWidth}
           sourceHeight={sourceHeight}
           selectedRegion={activeRegion}
+          disabled={!canEditSelection}
           onSelect={onSelect}
           onCancel={onCancel}
         />
@@ -1373,7 +1657,7 @@ export function CaptureOverlay() {
 }
 ```
 
-- [ ] **Step 2: Replace App with CaptureOverlay**
+- [ ] **Step 4: Replace App with CaptureOverlay**
 
 Replace `crates/rollshot-app/src/App.tsx` with:
 
@@ -1385,23 +1669,24 @@ export default function App() {
 }
 ```
 
-- [ ] **Step 3: Run focused frontend checks**
+- [ ] **Step 5: Run focused frontend checks**
 
 Run:
 
 ```bash
+rtk pnpm --dir crates/rollshot-app test -- components/CaptureOverlay.test.tsx
 rtk pnpm --dir crates/rollshot-app run typecheck
 rtk pnpm --dir crates/rollshot-app test
 ```
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit CaptureOverlay flow**
+- [ ] **Step 6: Commit CaptureOverlay flow**
 
 Run:
 
 ```bash
-rtk git add crates/rollshot-app/src/components/CaptureOverlay.tsx crates/rollshot-app/src/App.tsx
+rtk git add crates/rollshot-app/src/components/CaptureOverlay.tsx crates/rollshot-app/src/components/CaptureOverlay.test.tsx crates/rollshot-app/src/App.tsx
 rtk git commit -m "feat(app): switch to capture overlay flow"
 ```
 
@@ -1452,6 +1737,11 @@ button:not(:disabled),
   inset: 0;
   cursor: crosshair;
   touch-action: none;
+}
+
+.selection-layer-disabled {
+  pointer-events: none;
+  cursor: default;
 }
 
 .selection-dim {
@@ -1569,7 +1859,7 @@ In `crates/rollshot-app/src-tauri/tauri.conf.json`, update the `main` window obj
   "minWidth": 320,
   "minHeight": 240,
   "resizable": false,
-  "fullscreen": false,
+  "fullscreen": true,
   "decorations": false,
   "transparent": true,
   "alwaysOnTop": true,
@@ -1606,13 +1896,19 @@ rtk git commit -m "feat(app): style capture window as overlay"
 - Modify: `crates/rollshot-app/src-tauri/Cargo.toml`
 - Modify: `crates/rollshot-app/src-tauri/src/overlay.rs`
 
-- [ ] **Step 1: Add Windows dependency**
+- [ ] **Step 1: Add direct native-handle dependencies**
 
-In `crates/rollshot-app/src-tauri/Cargo.toml`, add:
+In `crates/rollshot-app/src-tauri/Cargo.toml`, add `raw-window-handle` under `[dependencies]` because the overlay helper reads the native window handle directly:
+
+```toml
+raw-window-handle = "0.6"
+```
+
+Then add the Windows-only dependency:
 
 ```toml
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 ```
 
 - [ ] **Step 2: Implement Windows exclusion call**
@@ -1624,6 +1920,8 @@ pub fn configure_overlay_window(window: &tauri::WebviewWindow) -> OverlayExclusi
     let _ = window.set_decorations(false);
     let _ = window.set_always_on_top(true);
     let _ = window.set_skip_taskbar(true);
+    let _ = window.set_fullscreen(true);
+    let _ = window.set_focus();
 
     platform_overlay_exclusion(window)
 }
@@ -1635,8 +1933,10 @@ Add platform helpers:
 #[cfg(target_os = "windows")]
 fn platform_overlay_exclusion(window: &tauri::WebviewWindow) -> OverlayExclusion {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+    };
 
     let Ok(handle) = window.window_handle() else {
         return OverlayExclusion::Unknown;
@@ -1644,8 +1944,8 @@ fn platform_overlay_exclusion(window: &tauri::WebviewWindow) -> OverlayExclusion
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
         return OverlayExclusion::Unknown;
     };
-    let hwnd = HWND(handle.hwnd.get() as isize);
-    let ok = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).as_bool() };
+    let hwnd = handle.hwnd.get() as HWND;
+    let ok = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0 };
     if ok {
         OverlayExclusion::Verified
     } else {
@@ -1669,14 +1969,6 @@ fn platform_overlay_exclusion(_window: &tauri::WebviewWindow) -> OverlayExclusio
 }
 ```
 
-Also add this dependency because the code uses `raw_window_handle` directly:
-
-```toml
-raw-window-handle = "0.6"
-```
-
-under `[dependencies]`.
-
 - [ ] **Step 3: Run Rust checks**
 
 Run:
@@ -1687,6 +1979,14 @@ rtk cargo fmt --check
 ```
 
 Expected: PASS on the current platform. If the current platform is not Windows, this still validates the Linux/macOS compile path for the active target.
+
+If a Windows Rust target is installed locally or in CI, also run:
+
+```bash
+rtk cargo check -p rollshot-app --target x86_64-pc-windows-msvc
+```
+
+Expected: PASS. If the target is not installed, document that Windows exclusion compile coverage was skipped locally and must be covered by CI or a Windows machine before shipping inside-crop preview as `verified`.
 
 - [ ] **Step 4: Commit native exclusion best effort**
 
@@ -1740,19 +2040,23 @@ Expected: PASS. If clippy reports pre-existing unrelated warnings, document the 
 
 - [ ] **Step 4: Manual overlay smoke test**
 
-Run the app through the existing capture launcher command used by this branch. If the launcher command is not known, run:
+Run the app through the existing interactive capture launcher:
 
 ```bash
-rtk cargo run -p rollshot -- capture --help
+rtk cargo run -p rollshot-cli --bin rollshot -- capture --backend auto --fps 5
 ```
 
-Then launch capture with the command shown by help.
+If the real backend is not available on the current machine, first confirm the CLI shape with:
+
+```bash
+rtk cargo run -p rollshot-cli --bin rollshot -- capture --help
+```
 
 Expected manual behavior:
 
 - no app workbench or Start panel appears
 - capture starts directly in overlay mode
-- background is dimmed
+- background is dimmed across the full screen
 - cursor is crosshair over the overlay
 - auxiliary lines follow pointer movement
 - dragging creates a selected crop box
