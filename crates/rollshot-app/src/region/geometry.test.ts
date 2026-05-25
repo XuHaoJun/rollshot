@@ -77,4 +77,32 @@ describe('region geometry', () => {
       ),
     ).toEqual({ x: 0, y: 90, width: 36, height: 10 })
   })
+
+  it('maps a fullscreen overlay drag to source pixels', () => {
+    expect(
+      cssRectToSourceRegion(
+        { left: 50, top: 20, width: 200, height: 100 },
+        {
+          renderedWidth: 500,
+          renderedHeight: 250,
+          sourceWidth: 1000,
+          sourceHeight: 500,
+        },
+      ),
+    ).toEqual({ x: 100, y: 40, width: 400, height: 200 })
+  })
+
+  it('clamps fullscreen overlay drags to source bounds', () => {
+    expect(
+      cssRectToSourceRegion(
+        { left: -20, top: 240, width: 120, height: 80 },
+        {
+          renderedWidth: 500,
+          renderedHeight: 250,
+          sourceWidth: 1000,
+          sourceHeight: 500,
+        },
+      ),
+    ).toEqual({ x: 0, y: 480, width: 200, height: 20 })
+  })
 })
