@@ -30,6 +30,9 @@ export function SelectionLayer({
   const [cursorPoint, setCursorPoint] = useState<Point | null>(null)
 
   useEffect(() => {
+    if (disabled) {
+      return
+    }
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         onCancel()
@@ -37,7 +40,7 @@ export function SelectionLayer({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onCancel])
+  }, [disabled, onCancel])
 
   const selectedRect = useMemo(() => {
     if (!selectedRegion) {

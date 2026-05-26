@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
@@ -8,7 +8,7 @@ import {
   launchOptions,
   overlayExclusion,
   saveImage,
-  scrollThrough,
+  setInputPassthrough,
   sessionStatus,
   startCapture,
   startStitching,
@@ -121,53 +121,17 @@ export function CaptureOverlay() {
 
   const onCancel = useCallback(async () => {
     try {
+      await setInputPassthrough(false)
       await stopCapture()
     } finally {
       window.close()
     }
   }, [])
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        onCancel()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onCancel])
-
-  const scrollPendingRef = useRef(false)
-  const accumulatedDeltaRef = useRef(0)
-  const flushScroll = useCallback(() => {
-    if (scrollPendingRef.current) return
-    const delta = accumulatedDeltaRef.current
-    if (Math.abs(delta) < 4) return
-    accumulatedDeltaRef.current = 0
-    scrollPendingRef.current = true
-    const sign = delta > 0 ? 1 : -1
-    const lines = Math.min(8, Math.max(1, Math.round(Math.abs(delta) / 40)))
-    scrollThrough(sign * lines)
-      .catch((error) => setMessage(String(error)))
-      .finally(() => {
-        scrollPendingRef.current = false
-        if (Math.abs(accumulatedDeltaRef.current) >= 4) flushScroll()
-      })
-  }, [])
-
-  const onWheel = useCallback(
-    (event: WheelEvent<HTMLElement>) => {
-      if (status.state !== 'stitching') return
-      if (event.deltaY === 0) return
-      accumulatedDeltaRef.current += event.deltaY
-      flushScroll()
-    },
-    [status.state, flushScroll],
-  )
-
-  const onStop = useCallback(async () => {
+  const finishStitching = useCallback(async () => {
     try {
       const done = await stopStitching()
+      await setInputPassthrough(false)
       setMessage(`Stitched ${done.image_width}x${done.image_height}`)
       const blob = await getFinalPreview(1400)
       if (blob) {
@@ -177,8 +141,10 @@ export function CaptureOverlay() {
           return nextUrl
         })
       }
+      return true
     } catch (error) {
       setMessage(String(error))
+      return false
     }
   }, [])
 
@@ -196,6 +162,39 @@ export function CaptureOverlay() {
       setMessage(String(error))
     }
   }, [])
+
+  const onStop = useCallback(async () => {
+    await finishStitching()
+  }, [finishStitching])
+
+  const finishAndSave = useCallback(async () => {
+    if (status.state === 'stitching') {
+      const finished = await finishStitching()
+      if (!finished) return
+    }
+    await onSave()
+  }, [finishStitching, onSave, status.state])
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && (status.state === 'stitching' || status.state === 'done')) {
+        event.preventDefault()
+        finishAndSave()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [finishAndSave, status.state])
+
+  useEffect(() => {
+    if (status.state !== 'stitching') {
+      return
+    }
+    setInputPassthrough(true).catch((error) => setMessage(String(error)))
+    return () => {
+      setInputPassthrough(false).catch((error) => setMessage(String(error)))
+    }
+  }, [status.state])
 
   const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
   const sourceWidth = status.state === 'previewing' || status.state === 'stitching' ? status.frame_width : 1
@@ -236,7 +235,7 @@ export function CaptureOverlay() {
       : message
 
   return (
-    <main className="capture-overlay" onWheel={onWheel}>
+    <main className="capture-overlay">
       {status.state === 'done' && finalPreviewUrl ? (
         <img className="final-overlay-preview" src={finalPreviewUrl} alt="Stitched result" draggable={false} />
       ) : null}

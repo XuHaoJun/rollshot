@@ -7,7 +7,6 @@ mod session;
 use std::sync::Arc;
 
 use launch::LaunchMode;
-use scroll::EnigoState;
 use session::SharedSession;
 use tauri::Manager;
 
@@ -27,7 +26,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(launch_options)
         .manage(Arc::clone(&shared_session))
-        .manage(EnigoState::new())
         .setup({
             let shared_session = Arc::clone(&shared_session);
             move |app| {
@@ -51,7 +49,7 @@ pub fn run() {
             commands::get_stitch_preview,
             commands::get_final_preview,
             commands::overlay_exclusion,
-            scroll::scroll_through,
+            scroll::set_input_passthrough,
         ])
         .run(tauri::generate_context!())
         .expect("error while running rollshot app");

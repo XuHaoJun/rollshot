@@ -120,6 +120,6 @@ export async function overlayExclusion(): Promise<OverlayExclusion> {
   return await invoke<OverlayExclusion>('overlay_exclusion')
 }
 
-export async function scrollThrough(length: number): Promise<void> {
-  await invoke('scroll_through', { length })
+export async function setInputPassthrough(enabled: boolean): Promise<void> {
+  await invoke('set_input_passthrough', { enabled })
 }

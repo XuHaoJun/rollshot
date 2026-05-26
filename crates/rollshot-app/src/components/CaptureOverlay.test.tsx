@@ -11,7 +11,7 @@ const api = vi.hoisted(() => ({
   launchOptions: vi.fn(),
   overlayExclusion: vi.fn(),
   saveImage: vi.fn(),
-  scrollThrough: vi.fn(),
+  setInputPassthrough: vi.fn(),
   sessionStatus: vi.fn(),
   startCapture: vi.fn(),
   startStitching: vi.fn(),
@@ -19,8 +19,12 @@ const api = vi.hoisted(() => ({
   stopStitching: vi.fn(),
 }))
 
+const dialog = vi.hoisted(() => ({
+  save: vi.fn(),
+}))
+
 vi.mock('../api/capture', () => api)
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
+vi.mock('@tauri-apps/plugin-dialog', () => dialog)
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     outerPosition: () => Promise.resolve({ x: 0, y: 0 }),
@@ -93,6 +97,7 @@ describe('CaptureOverlay', () => {
     })
     api.overlayExclusion.mockResolvedValue('unsupported')
     api.startCapture.mockResolvedValue(undefined)
+    api.setInputPassthrough.mockResolvedValue(undefined)
     api.sessionStatus.mockResolvedValue({
       state: 'previewing',
       frame_width: 1000,
@@ -104,6 +109,8 @@ describe('CaptureOverlay', () => {
     api.getStitchPreview.mockResolvedValue(null)
     api.stopStitching.mockResolvedValue({ image_width: 1000, image_height: 1600 })
     api.getFinalPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+    api.saveImage.mockResolvedValue({ image_width: 1000, image_height: 1600, output_path: '/tmp/rollshot.png' })
+    dialog.save.mockResolvedValue(null)
   })
 
   afterEach(() => {
@@ -181,5 +188,60 @@ describe('CaptureOverlay', () => {
 
     expect(api.stopStitching).toHaveBeenCalledOnce()
     expect(api.getFinalPreview).toHaveBeenCalledWith(1400)
+  })
+
+  it('enables input passthrough while stitching and disables it on unmount', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'appended',
+    } satisfies SessionStatus)
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(api.setInputPassthrough).toHaveBeenCalledWith(true)
+
+    await act(async () => root.unmount())
+
+    expect(api.setInputPassthrough).toHaveBeenLastCalledWith(false)
+  })
+
+  it('finishes stitching and opens the save dialog on Escape', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'appended',
+    } satisfies SessionStatus)
+    dialog.save.mockResolvedValue('/tmp/rollshot.png')
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await Promise.resolve()
+    })
+
+    expect(api.stopStitching).toHaveBeenCalledOnce()
+    expect(dialog.save).toHaveBeenCalledWith({
+      title: 'Save stitched PNG',
+      defaultPath: 'rollshot.png',
+      filters: [{ name: 'PNG image', extensions: ['png'] }],
+    })
+    expect(api.saveImage).toHaveBeenCalledWith('/tmp/rollshot.png')
+    expect(api.stopCapture).not.toHaveBeenCalled()
   })
 })

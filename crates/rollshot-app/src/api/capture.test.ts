@@ -66,4 +66,13 @@ describe('capture api wrappers', () => {
     await expect(overlayExclusion()).resolves.toBe('unsupported')
     expect(invokeMock).toHaveBeenCalledWith('overlay_exclusion')
   })
+
+  it('sets native input passthrough', async () => {
+    const { setInputPassthrough } = await import('./capture')
+    invokeMock.mockResolvedValueOnce(undefined)
+
+    await setInputPassthrough(true)
+
+    expect(invokeMock).toHaveBeenCalledWith('set_input_passthrough', { enabled: true })
+  })
 })
