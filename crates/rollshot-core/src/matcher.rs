@@ -2,7 +2,7 @@ use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
-use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome, FeatureSource};
+use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome};
 use crate::overlap::compute_overlap;
 use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
@@ -190,9 +190,9 @@ pub(crate) fn estimate_motion(
     // Relaxed coarse pass: standard coarse search is bounded by
     // `max_search_ratio` (≈0.4 of the frame); a single fast scroll can jump
     // farther than that and miss every regular matcher. Before falling back
-    // to AKAZE (~2s on a 2560-wide frame), retry coarse with the ratio
-    // pushed near the geometric ceiling so we can recover the candidate
-    // through the same downsampled MAD path used in steady-state.
+    // to the feature matcher, retry coarse with the ratio pushed near the
+    // geometric ceiling so we can recover the candidate through the same
+    // downsampled MAD path used in steady-state.
     if let Some(candidate) = relaxed_coarse_candidate(
         prev,
         curr,
@@ -216,29 +216,18 @@ pub(crate) fn estimate_motion(
             reason: NoMatchReason::NotEnoughFeatures,
             best_candidate: None,
         },
-        FeatureFallbackOutcome::NotEnoughMatches {
-            raw_matches: _,
-            source,
-        } => {
-            let reason = match source {
-                FeatureSource::FastHnsw => NoMatchReason::FeatureLowInliers,
-                FeatureSource::Akaze => NoMatchReason::AkazeLowInliers,
-            };
+        FeatureFallbackOutcome::NotEnoughMatches { raw_matches: _ } => {
             MotionSearchOutcome::NoMatch {
-                reason,
+                reason: NoMatchReason::FeatureLowInliers,
                 best_candidate: None,
             }
         }
-        FeatureFallbackOutcome::Candidates { candidates, source } => {
+        FeatureFallbackOutcome::Candidates { candidates } => {
             let best = candidates.first().copied();
-            let reason = match source {
-                FeatureSource::FastHnsw => NoMatchReason::FeatureLowInliers,
-                FeatureSource::Akaze => NoMatchReason::AkazeLowInliers,
-            };
             match rank_verified_candidates(prev, curr, locked_axis, candidates, config) {
                 Some(candidate) => MotionSearchOutcome::Candidate(candidate),
                 None => MotionSearchOutcome::NoMatch {
-                    reason,
+                    reason: NoMatchReason::FeatureLowInliers,
                     best_candidate: best,
                 },
             }
@@ -990,10 +979,6 @@ mod tests {
         estimate_motion_with_budget, refinement_offsets, template_refine_radius,
         MotionSearchOutcome, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
     };
-    #[cfg(feature = "akaze")]
-    use crate::types::AkazeConfig;
-    #[cfg(feature = "akaze")]
-    use crate::types::{MatchMethod, NoMatchReason};
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
@@ -1101,39 +1086,6 @@ mod tests {
         match outcome {
             MotionSearchOutcome::Candidate(candidate) => candidate,
             other => panic!("expected candidate, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "akaze")]
-    fn make_sparse_feature_canvas(width: u32, height: u32) -> RgbaImage {
-        let mut img = make_repeated_grid(width, height);
-        for i in 0..64u32 {
-            let x = 18 + ((i * 41) % width.saturating_sub(36).max(1));
-            let y = 18 + ((i * 67) % height.saturating_sub(36).max(1));
-            for yy in y..(y + 7).min(height) {
-                for xx in x..(x + 7).min(width) {
-                    if xx == x || yy == y || xx == x + yy - y {
-                        img.put_pixel(xx, yy, Rgba([15, 15, 15, 255]));
-                    }
-                }
-            }
-        }
-        img
-    }
-
-    #[cfg(feature = "akaze")]
-    fn fallback_config() -> StitchConfig {
-        StitchConfig {
-            second_best_margin: 0.25,
-            akaze: AkazeConfig {
-                enabled: true,
-                max_features: 1200,
-                detector_threshold: 0.0005,
-                min_raw_matches: 8,
-                min_inliers: 6,
-                min_inlier_ratio: 0.25,
-            },
-            ..StitchConfig::default()
         }
     }
 
@@ -1344,42 +1296,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "akaze")]
-    #[test]
-    fn akaze_fallback_recovers_repeated_grid_with_sparse_features() {
-        let canvas = make_sparse_feature_canvas(360, 760);
-        let prev = crop_xy(&canvas, 0, 0, 240, 240);
-        let curr = crop_xy(&canvas, 0, 72, 240, 240);
-
-        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
-        let candidate = match outcome {
-            MotionSearchOutcome::Candidate(candidate) => candidate,
-            other => panic!("expected AKAZE candidate, got {other:?}"),
-        };
-
-        assert_eq!(candidate.method, MatchMethod::Akaze);
-        assert_eq!(candidate.dx, 0);
-        assert!((candidate.dy - 72).abs() <= 3, "dy = {}", candidate.dy);
-        assert!(candidate.inliers.unwrap_or(0) >= 6);
-    }
-
-    #[cfg(feature = "akaze")]
-    #[test]
-    fn akaze_attempt_with_blank_frames_reports_not_enough_features() {
-        let prev = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
-        let curr = RgbaImage::from_pixel(220, 220, Rgba([250, 250, 250, 255]));
-
-        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
-
-        assert!(matches!(
-            outcome,
-            MotionSearchOutcome::NoMatch {
-                reason: NoMatchReason::NotEnoughFeatures,
-                best_candidate: None,
-            }
-        ));
-    }
-
     #[test]
     fn large_pair_stays_within_structural_search_budget() {
         let canvas = make_textured_canvas(1470, 900);
@@ -1438,32 +1354,6 @@ mod tests {
             "len = {}",
             offsets.len()
         );
-    }
-
-    #[cfg(feature = "akaze")]
-    #[test]
-    fn akaze_candidate_rejected_by_verifier_preserves_best_estimate() {
-        let canvas = make_sparse_feature_canvas(360, 760);
-        let prev = crop_xy(&canvas, 0, 0, 240, 240);
-        let mut curr = crop_xy(&canvas, 0, 72, 240, 240);
-        for y in 120..240 {
-            for x in 0..240 {
-                let v = ((x * 41 + y * 67) % 255) as u8;
-                curr.put_pixel(x, y, Rgba([v, 255 - v, v / 2, 255]));
-            }
-        }
-
-        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &fallback_config());
-
-        let best = match outcome {
-            MotionSearchOutcome::NoMatch {
-                reason: NoMatchReason::AkazeLowInliers,
-                best_candidate: Some(candidate),
-            } => candidate,
-            other => panic!("expected AkazeLowInliers with best_candidate, got {other:?}"),
-        };
-        assert_eq!(best.method, MatchMethod::Akaze);
-        assert!((best.dy - 72).abs() <= 8, "best dy = {}", best.dy);
     }
 
     #[test]

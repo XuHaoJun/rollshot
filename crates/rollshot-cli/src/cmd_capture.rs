@@ -127,13 +127,6 @@ fn run_headless(args: &CaptureArgs) -> Result<String, CliError> {
     if args.disable_feature_fallback {
         config.fast_hnsw.enabled = false;
     }
-    if args.enable_akaze {
-        eprintln!(
-            "warning: --enable-akaze is deprecated and will be removed in \
-             a future release; FAST+KNN is the default feature fallback"
-        );
-        config.akaze.enabled = true;
-    }
 
     let slot = Arc::new(crate::frame_slot::FrameSlot::new());
     let slot_stitch = Arc::clone(&slot);

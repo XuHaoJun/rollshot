@@ -96,9 +96,6 @@ fn reject_headless_only_flags(args: &CaptureArgs) -> Result<(), CliError> {
     if args.quiet {
         rejected.push("--quiet");
     }
-    if args.enable_akaze {
-        rejected.push("--enable-akaze");
-    }
     if args.disable_feature_fallback {
         rejected.push("--disable-feature-fallback");
     }
@@ -220,7 +217,6 @@ mod tests {
             fps: 7,
             show_cursor: true,
             quiet: false,
-            enable_akaze: false,
             disable_feature_fallback: false,
         }
     }
@@ -259,7 +255,6 @@ mod tests {
         args.debug_match_report = Some(PathBuf::from("report.json"));
         args.max_frames = 10;
         args.quiet = true;
-        args.enable_akaze = true;
         args.disable_feature_fallback = true;
 
         let err = reject_headless_only_flags(&args).expect_err("flags rejected");
@@ -272,7 +267,6 @@ mod tests {
             "--debug-match-report",
             "--max-frames",
             "--quiet",
-            "--enable-akaze",
             "--disable-feature-fallback",
         ] {
             assert!(err.message.contains(flag), "{} missing {flag}", err.message);

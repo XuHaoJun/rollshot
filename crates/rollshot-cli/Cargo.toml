@@ -21,7 +21,6 @@ serde_json = { workspace = true }
 
 [features]
 default = []
-akaze = ["rollshot-core/akaze"]
 macos-sck = ["rollshot-capture/macos-sck"]
 
 [dev-dependencies]

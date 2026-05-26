@@ -50,7 +50,7 @@ These packages are not needed for the CLI (`rollshot-cli`) or capture library
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --features akaze
+cargo test --workspace
 ```
 
 Useful smoke commands:
@@ -99,7 +99,7 @@ dependencies on the Ubuntu runner, then runs:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --features akaze
+cargo test --workspace
 ```
 
 `.github/workflows/matcher-perf.yml` is manual-only and runs the release-mode
@@ -118,7 +118,6 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo fmt --all -- --check` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace` passes.
-- [ ] `cargo test --workspace --features akaze` passes.
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
 - [ ] `cargo run -p rollshot-cli -- stitch-folder tests/fixtures` exits successfully with bootstrap status text.
 - [ ] `cargo check -p rollshot-app` passes (requires Tauri Linux deps on Linux, Xcode on macOS).

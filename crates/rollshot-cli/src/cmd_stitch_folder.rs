@@ -171,13 +171,6 @@ pub fn run(args: &StitchFolderArgs) -> Result<String, CliError> {
     if args.disable_feature_fallback {
         config.fast_hnsw.enabled = false;
     }
-    if args.enable_akaze {
-        eprintln!(
-            "warning: --enable-akaze is deprecated and will be removed in \
-             a future release; FAST+KNN is the default feature fallback"
-        );
-        config.akaze.enabled = true;
-    }
     let mut stitcher = Stitcher::new(config);
     let mut report = MatchReport { frames: Vec::new() };
     let mut last_accepted: Option<RgbaImage> = None;

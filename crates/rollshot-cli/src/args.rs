@@ -74,12 +74,6 @@ pub struct CaptureArgs {
     #[arg(long, default_value_t = false)]
     pub quiet: bool,
 
-    /// Enable the AKAZE feature-based fallback instead of FAST+KNN.
-    /// DEPRECATED — AKAZE will be removed in the next minor release.
-    /// Kept for parity testing during the FAST migration.
-    #[arg(long, default_value_t = false)]
-    pub enable_akaze: bool,
-
     /// Disable the FAST + linear-KNN feature fallback. The fallback only
     /// runs after the regular matchers and the relaxed coarse pass both
     /// miss; disabling is for benchmarking / debugging the matcher path.
@@ -110,12 +104,6 @@ pub struct StitchFolderArgs {
     /// Write overlap and diff images for frames with estimates.
     #[arg(long)]
     pub dump_overlap_debug: Option<PathBuf>,
-
-    /// Enable the AKAZE feature-based fallback. DEPRECATED — AKAZE will
-    /// be removed in the next minor release. Kept for parity testing
-    /// during the FAST migration.
-    #[arg(long, default_value_t = false)]
-    pub enable_akaze: bool,
 
     /// Disable the FAST + linear-KNN feature fallback. The fallback only
     /// runs after the regular matchers and the relaxed coarse pass both

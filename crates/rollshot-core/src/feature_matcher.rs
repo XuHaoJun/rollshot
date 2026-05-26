@@ -9,7 +9,6 @@ use image::GrayImage;
 use image::RgbaImage;
 use imageproc::corners;
 
-use crate::akaze_matcher::{akaze_candidates, AkazeCandidateOutcome};
 use crate::types::{FastHnswConfig, MotionCandidate, ScrollAxis, StitchConfig};
 
 use rayon::prelude::*;
@@ -40,10 +39,6 @@ fn extract_corners(gray: &GrayImage, threshold: u8, max_features: usize) -> Vec<
 }
 
 /// Outcome of running `fast_hnsw_candidates`.
-///
-/// Shape mirrors `AkazeCandidateOutcome` deliberately so the dispatcher
-/// can collapse both into `FeatureFallbackOutcome` without bespoke
-/// arms per branch.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FastHnswCandidateOutcome {
     Disabled,
@@ -52,29 +47,12 @@ pub(crate) enum FastHnswCandidateOutcome {
     Candidates(Vec<MotionCandidate>),
 }
 
-/// Tagged outcome from the dispatcher so the matcher can map it back
-/// onto the correct `NoMatchReason` variant.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FeatureFallbackOutcome {
     Disabled,
-    NotEnoughFeatures {
-        prev: usize,
-        curr: usize,
-    },
-    NotEnoughMatches {
-        raw_matches: usize,
-        source: FeatureSource,
-    },
-    Candidates {
-        candidates: Vec<MotionCandidate>,
-        source: FeatureSource,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FeatureSource {
-    FastHnsw,
-    Akaze,
+    NotEnoughFeatures { prev: usize, curr: usize },
+    NotEnoughMatches { raw_matches: usize },
+    Candidates { candidates: Vec<MotionCandidate> },
 }
 
 impl FeatureFallbackOutcome {
@@ -85,36 +63,11 @@ impl FeatureFallbackOutcome {
                 FeatureFallbackOutcome::NotEnoughFeatures { prev, curr }
             }
             FastHnswCandidateOutcome::NotEnoughMatches { raw_matches } => {
-                FeatureFallbackOutcome::NotEnoughMatches {
-                    raw_matches,
-                    source: FeatureSource::FastHnsw,
-                }
+                FeatureFallbackOutcome::NotEnoughMatches { raw_matches }
             }
             FastHnswCandidateOutcome::Candidates(candidates) => {
-                FeatureFallbackOutcome::Candidates {
-                    candidates,
-                    source: FeatureSource::FastHnsw,
-                }
+                FeatureFallbackOutcome::Candidates { candidates }
             }
-        }
-    }
-
-    fn from_akaze(outcome: AkazeCandidateOutcome) -> Self {
-        match outcome {
-            AkazeCandidateOutcome::Disabled => FeatureFallbackOutcome::Disabled,
-            AkazeCandidateOutcome::NotEnoughFeatures { prev, curr } => {
-                FeatureFallbackOutcome::NotEnoughFeatures { prev, curr }
-            }
-            AkazeCandidateOutcome::NotEnoughMatches { raw_matches } => {
-                FeatureFallbackOutcome::NotEnoughMatches {
-                    raw_matches,
-                    source: FeatureSource::Akaze,
-                }
-            }
-            AkazeCandidateOutcome::Candidates(candidates) => FeatureFallbackOutcome::Candidates {
-                candidates,
-                source: FeatureSource::Akaze,
-            },
         }
     }
 }
@@ -347,11 +300,6 @@ fn compute_median_residual(translations: &[(i32, i32)], dx: i32, dy: i32) -> f32
     }
 }
 
-// Keep in sync with akaze_matcher::akaze_score (intentionally private
-// there). Same coefficients, same residual normalization, so AKAZE
-// and FAST+KNN scores are directly comparable against
-// `accept_confidence` and against each other. When AKAZE is removed,
-// fold this into a single shared helper.
 fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
     let ratio_term = 1.0 - inlier_ratio.clamp(0.0, 1.0);
     let residual_term = (residual_px / 4.0).clamp(0.0, 1.0);
@@ -427,20 +375,12 @@ pub(crate) fn fast_hnsw_candidates(
     }])
 }
 
-/// Pick-one dispatch:
-///   - `config.akaze.enabled = true`  → run AKAZE (FastHnsw is skipped
-///     even if also enabled)
-///   - else `config.fast_hnsw.enabled = true` → run FAST+KNN
-///   - else → Disabled
 pub(crate) fn feature_fallback_candidates(
     prev: &RgbaImage,
     curr: &RgbaImage,
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> FeatureFallbackOutcome {
-    if config.akaze.enabled {
-        return FeatureFallbackOutcome::from_akaze(akaze_candidates(prev, curr, &config.akaze));
-    }
     if config.fast_hnsw.enabled {
         return FeatureFallbackOutcome::from_fast_hnsw(fast_hnsw_candidates(
             prev,
@@ -473,34 +413,11 @@ mod tests {
     }
 
     #[test]
-    fn feature_fallback_disabled_when_both_off() {
+    fn feature_fallback_disabled_when_fast_hnsw_off() {
         let mut config = StitchConfig::default();
         config.fast_hnsw.enabled = false;
-        config.akaze.enabled = false;
         let outcome = feature_fallback_candidates(&solid_frame(), &solid_frame(), None, &config);
         assert_eq!(outcome, FeatureFallbackOutcome::Disabled);
-    }
-
-    #[test]
-    fn feature_fallback_akaze_wins_pick_one() {
-        let mut config = StitchConfig::default();
-        config.fast_hnsw.enabled = true;
-        config.akaze.enabled = true;
-        let outcome = feature_fallback_candidates(&solid_frame(), &solid_frame(), None, &config);
-        // Both akaze and fast_hnsw are enabled → akaze wins per pick-one
-        // dispatch. With the akaze feature flag compiled in, a solid
-        // frame triggers NotEnoughFeatures from the real AKAZE code.
-        // Without the feature flag, akaze_candidates returns Disabled.
-        // Either way we just verify the dispatcher didn't panic and
-        // didn't route through FastHnsw (which would produce Disabled
-        // with the FastHnsw source tag, observable after real impl).
-        assert!(
-            matches!(
-                outcome,
-                FeatureFallbackOutcome::Disabled | FeatureFallbackOutcome::NotEnoughFeatures { .. }
-            ),
-            "unexpected outcome: {outcome:?}"
-        );
     }
 
     fn feature_canvas(width: u32, height: u32) -> RgbaImage {

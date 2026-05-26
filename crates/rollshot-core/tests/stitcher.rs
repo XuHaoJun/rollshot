@@ -1,14 +1,10 @@
 mod common;
 
-#[cfg(feature = "akaze")]
-use common::make_akaze_fallback_canvas;
 use common::{
     crop_frame, crop_frame_xy, make_repeated_rows, make_scroll_canvas, make_wide_canvas,
     paint_sticky_header,
 };
 use image::{Rgba, RgbaImage};
-#[cfg(feature = "akaze")]
-use rollshot_core::AkazeConfig;
 use rollshot_core::{
     AppendDirection, MatchMethod, NoMatchReason, ScrollAxis, StitchConfig, StitchOutcome, Stitcher,
     VerifierConfig,
@@ -83,15 +79,12 @@ fn fast_scroll_beyond_default_search_ratio_recovers_via_relaxed_pass() {
     // The default `max_search_ratio` (0.4) only reaches ~128 px on a
     // 320-tall frame. A 200 px scroll lands outside that envelope, so
     // every regular matcher misses. The relaxed coarse pass widens the
-    // ratio to ~0.85 (≈272 px), which must recover the offset without
-    // AKAZE — the latter is disabled by default after Phase 1 of the
-    // overlap-stitch performance work.
+    // ratio to ~0.85 (≈272 px), which must recover the offset.
     let canvas = make_scroll_canvas(320, 1200);
     let first = crop_frame(&canvas, 0, 320);
     let scrolled = crop_frame(&canvas, 200, 320);
 
     let config = StitchConfig::default();
-    assert!(!config.akaze.enabled, "AKAZE must stay off for this test");
     let mut stitcher = Stitcher::new(config);
     assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
 
@@ -376,7 +369,7 @@ fn repeated_rows_do_not_append_without_clear_match() {
 
 #[test]
 fn fast_hnsw_fallback_recovers_repeated_grid_with_sparse_features() {
-    let canvas = common::make_akaze_fallback_canvas(320, 900);
+    let canvas = common::make_feature_fallback_canvas(320, 900);
     let first = crop_frame(&canvas, 0, 320);
     let scrolled = crop_frame(&canvas, 88, 320);
 
@@ -419,7 +412,7 @@ fn fast_hnsw_attempt_with_blank_frames_reports_not_enough_features() {
 
 #[test]
 fn fast_hnsw_candidate_rejected_by_verifier_preserves_best_estimate() {
-    let canvas = common::make_akaze_fallback_canvas(360, 760);
+    let canvas = common::make_feature_fallback_canvas(360, 760);
     let prev = crop_frame(&canvas, 0, 240);
     let mut curr = crop_frame(&canvas, 72, 240);
     // Corrupt most of the frame except a thin top strip so verifier rejects.
@@ -444,76 +437,5 @@ fn fast_hnsw_candidate_rejected_by_verifier_preserves_best_estimate() {
             assert!((estimate.dy - 72).abs() <= 8, "dy = {}", estimate.dy);
         }
         other => panic!("expected FeatureLowInliers with best_estimate, got {other:?}"),
-    }
-}
-
-#[cfg(feature = "akaze")]
-#[test]
-fn enable_akaze_overrides_fast_hnsw() {
-    let canvas = common::make_akaze_fallback_canvas(320, 900);
-    let first = crop_frame(&canvas, 0, 320);
-    let scrolled = crop_frame(&canvas, 88, 320);
-
-    let mut config = StitchConfig::default();
-    config.second_best_margin = 0.25;
-    config.fast_hnsw.enabled = true;
-    {
-        let mut a = AkazeConfig::default();
-        a.enabled = true;
-        a.detector_threshold = 0.0005;
-        a.min_raw_matches = 8;
-        a.min_inliers = 6;
-        a.min_inlier_ratio = 0.25;
-        config.akaze = a;
-    }
-    let mut stitcher = Stitcher::new(config);
-
-    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
-    match stitcher.push_frame(scrolled) {
-        StitchOutcome::Appended { estimate, .. } => {
-            assert_eq!(
-                estimate.method,
-                MatchMethod::Akaze,
-                "AKAZE must win pick-one dispatch even with FastHnsw enabled"
-            );
-        }
-        other => panic!("expected AKAZE append, got {other:?}"),
-    }
-}
-
-#[cfg(feature = "akaze")]
-#[test]
-fn akaze_fallback_appends_when_template_is_ambiguous() {
-    let canvas = make_akaze_fallback_canvas(320, 900);
-    let first = crop_frame(&canvas, 0, 320);
-    let scrolled = crop_frame(&canvas, 88, 320);
-
-    let mut config = StitchConfig::default();
-    config.second_best_margin = 0.25;
-    {
-        let mut a = AkazeConfig::default();
-        a.enabled = true;
-        a.detector_threshold = 0.0005;
-        a.min_raw_matches = 8;
-        a.min_inliers = 6;
-        a.min_inlier_ratio = 0.25;
-        config.akaze = a;
-    }
-    let mut stitcher = Stitcher::new(config);
-
-    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
-    match stitcher.push_frame(scrolled) {
-        StitchOutcome::Appended {
-            direction,
-            added,
-            estimate,
-        } => {
-            assert_eq!(direction, AppendDirection::Bottom);
-            assert_eq!(estimate.method, MatchMethod::Akaze);
-            assert!((84..=92).contains(&added), "added = {added}");
-            assert!(estimate.inliers.unwrap_or(0) >= 6);
-            assert!(estimate.raw_matches.unwrap_or(0) >= 8);
-        }
-        other => panic!("expected AKAZE append, got {other:?}"),
     }
 }

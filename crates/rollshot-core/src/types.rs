@@ -36,7 +36,6 @@ pub enum MatchMethod {
     Template,
     Coarse,
     Edge,
-    Akaze,
     /// FAST corners + linear KNN matching. The "Hnsw" in the name is
     /// reserved for a future ANN upgrade — see
     /// docs/superpowers/specs/2026-05-23-rollshot-fast-hnsw-fallback-design.md
@@ -104,10 +103,8 @@ pub enum NoMatchReason {
     NotEnoughFeatures,
     MotionTooSmall,
     DimensionMismatch,
-    AkazeDisabled,
-    AkazeLowInliers,
-    /// Both fast_hnsw and akaze are disabled, so estimate_motion has no
-    /// feature-based fallback to fall through to.
+    /// fast_hnsw is disabled, so estimate_motion has no feature-based
+    /// fallback to fall through to.
     FeatureFallbackDisabled,
     /// The FAST+KNN path produced no candidate that passed
     /// rank_verified_candidates (or did not meet min_inliers).
@@ -170,33 +167,6 @@ impl Default for VerifierConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct AkazeConfig {
-    pub enabled: bool,
-    pub max_features: usize,
-    pub detector_threshold: f64,
-    pub min_raw_matches: usize,
-    pub min_inliers: usize,
-    pub min_inlier_ratio: f32,
-}
-
-impl Default for AkazeConfig {
-    fn default() -> Self {
-        Self {
-            // AKAZE is an expensive opt-in fallback (full-image multi-scale
-            // feature extraction on every miss costs ~2s on a 2560-wide
-            // frame). Callers must explicitly enable it.
-            enabled: false,
-            max_features: 1200,
-            detector_threshold: 0.001,
-            min_raw_matches: 24,
-            min_inliers: 16,
-            min_inlier_ratio: 0.35,
-        }
-    }
-}
-
 /// Configuration for the FAST corners + linear KNN feature fallback.
 ///
 /// The "Hnsw" in the name is reserved for a future ANN upgrade — see
@@ -247,7 +217,6 @@ pub struct StitchConfig {
     pub second_best_margin: f32,
     pub max_search_ratio: f32,
     pub match_width: u32,
-    pub akaze: AkazeConfig,
     pub fast_hnsw: FastHnswConfig,
     pub verifier: VerifierConfig,
 }
@@ -265,7 +234,6 @@ impl Default for StitchConfig {
             second_best_margin: 0.001,
             max_search_ratio: 0.4,
             match_width: 512,
-            akaze: AkazeConfig::default(),
             fast_hnsw: FastHnswConfig::default(),
             verifier: VerifierConfig::default(),
         }
@@ -341,17 +309,6 @@ mod tests {
         assert_ne!(appended, StitchOutcome::FirstFrame);
         assert_ne!(no_match, no_progress);
         assert_ne!(no_match, StitchOutcome::Duplicate);
-    }
-
-    #[test]
-    fn akaze_is_disabled_by_default() {
-        let cfg = StitchConfig::default();
-        assert!(!cfg.akaze.enabled);
-        assert_eq!(cfg.akaze.max_features, 1200);
-        assert_eq!(cfg.akaze.detector_threshold, 0.001);
-        assert_eq!(cfg.akaze.min_raw_matches, 24);
-        assert_eq!(cfg.akaze.min_inliers, 16);
-        assert_eq!(cfg.akaze.min_inlier_ratio, 0.35);
     }
 
     #[test]

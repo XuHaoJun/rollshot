@@ -190,7 +190,7 @@ pub fn crop_frame_xy(canvas: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> Rgba
 }
 
 /// Builds deliberately ambiguous repeated rows. Multiple offsets look equally
-/// plausible, so Plan 2 should reject them without AKAZE.
+/// plausible, so Plan 2 should reject them without the feature fallback.
 pub fn make_repeated_rows(width: u32, height: u32) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([250, 250, 250, 255]));
     for y in 0..height {
@@ -208,9 +208,9 @@ pub fn make_repeated_rows(width: u32, height: u32) -> RgbaImage {
 }
 
 /// Builds mostly repeated content with sparse unique corners. Template and edge
-/// projections see many plausible offsets, while AKAZE can vote on the sparse
-/// corners.
-pub fn make_akaze_fallback_canvas(width: u32, height: u32) -> RgbaImage {
+/// projections see many plausible offsets, while the feature fallback can vote
+/// on the sparse corners.
+pub fn make_feature_fallback_canvas(width: u32, height: u32) -> RgbaImage {
     let mut img = make_repeated_rows(width, height);
 
     for i in 0..80u32 {
