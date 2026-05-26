@@ -28,6 +28,13 @@ impl Default for CaptureOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InteractiveLaunchOptions {
+    pub backend: String,
+    pub fps: u32,
+    pub show_cursor: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureProbe {
     pub backend: &'static str,
@@ -95,4 +102,28 @@ pub enum PixelFormat {
     Bgrx,
     Rgbx,
     Rgb,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InteractiveLaunchOptions;
+
+    #[test]
+    fn interactive_launch_options_round_trip_json() {
+        let options = InteractiveLaunchOptions {
+            backend: "linux-portal".to_string(),
+            fps: 7,
+            show_cursor: true,
+        };
+
+        let json = serde_json::to_string(&options).expect("serialize launch options");
+        assert!(
+            json.contains("\"backend\":\"linux-portal\""),
+            "json = {json}"
+        );
+
+        let decoded: InteractiveLaunchOptions =
+            serde_json::from_str(&json).expect("deserialize launch options");
+        assert_eq!(decoded, options);
+    }
 }

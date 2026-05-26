@@ -90,6 +90,18 @@ struct OverlapReport {
 }
 
 pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
+    if args.headless {
+        run_headless(args)
+    } else {
+        crate::cmd_capture_launcher::run(args)
+    }
+}
+
+fn run_headless(args: &CaptureArgs) -> Result<String, CliError> {
+    let output = args
+        .output
+        .as_ref()
+        .ok_or_else(|| CliError::new("--output is required with --headless", 1))?;
     let kind = BackendKind::from_cli_flag(&args.backend).map_err(CliError::from_capture)?;
     let mut backend = build_backend(kind, args)?;
     let region = parse_region(&args.region, kind)?;
@@ -183,7 +195,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
     let stitched = stitcher
         .full_image()
         .ok_or_else(|| CliError::new("no frames produced an output image", 1))?;
-    save_png(stitched, &args.output)?;
+    save_png(stitched, output)?;
 
     if let Some(path) = args.debug_match_report.as_ref() {
         write_report(path, &report)?;
@@ -194,7 +206,7 @@ pub fn run(args: &CaptureArgs) -> Result<String, CliError> {
          (duplicates {duplicates}, no-progress {no_progress}, \
          no-match {no_match}, frames-read {frames_read})\n\
          output: {out} ({w}x{h})\n",
-        out = args.output.display(),
+        out = output.display(),
         w = stitched.width(),
         h = stitched.height(),
     ))

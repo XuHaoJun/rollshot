@@ -1,9 +1,6 @@
 [submodule "learn-projects/obs-studio"]
 	path = learn-projects/obs-studio
 	url = https://github.com/obsproject/obs-studio.git
-[submodule "learn-projects/scap"]
-	path = learn-projects/scap
-	url = https://github.com/CapSoftware/scap.git
 [submodule "learn-projects/wayscrollshot"]
 	path = learn-projects/wayscrollshot
 	url = https://github.com/jswysnemc/wayscrollshot.git
@@ -13,3 +10,9 @@
 [submodule "learn-projects/snow-shot"]
 	path = learn-projects/snow-shot
 	url = https://github.com/mg-chao/snow-shot.git
+[submodule "learn-projects/tauri-template"]
+	path = learn-projects/tauri-template
+	url = https://github.com/dannysmith/tauri-template.git
+[submodule "learn-projects/scap"]
+	path = learn-projects/scap
+	url = https://github.com/zed-industries/scap.git

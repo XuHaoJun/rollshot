@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub const MAX_FRAMES_DEFAULT: u32 = 200;
+
 #[derive(Debug, Parser)]
 #[command(name = "rollshot", version, about = "rollshot: scrollshot stitcher")]
 pub struct Cli {
@@ -24,6 +26,10 @@ pub enum Command {
 
 #[derive(Debug, clap::Args)]
 pub struct CaptureArgs {
+    /// Run capture/stitch without the GUI.
+    #[arg(long, default_value_t = false)]
+    pub headless: bool,
+
     /// Which capture backend to use.
     #[arg(
         long,
@@ -36,9 +42,9 @@ pub struct CaptureArgs {
     #[arg(long, default_value = "auto")]
     pub region: String,
 
-    /// Output PNG path.
+    /// Output PNG path. Required with --headless.
     #[arg(long)]
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
 
     /// Directory of pre-recorded frames; required with --backend fixture.
     #[arg(long)]
@@ -53,7 +59,7 @@ pub struct CaptureArgs {
     pub debug_match_report: Option<PathBuf>,
 
     /// Maximum number of frames to read before stopping.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = MAX_FRAMES_DEFAULT)]
     pub max_frames: u32,
 
     /// Capture frame rate (used by real backends; ignored by fixture).

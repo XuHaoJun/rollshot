@@ -60,6 +60,9 @@ impl CliError {
             CaptureError::InvalidConfig { message } => {
                 CliError::new(format!("invalid configuration: {message}"), 1)
             }
+            CaptureError::Timeout { message } => {
+                CliError::new(format!("frame timeout: {message}"), 1)
+            }
             CaptureError::Backend(err) => CliError::new(format!("{err:#}"), 1),
         }
     }

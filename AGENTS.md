@@ -70,7 +70,35 @@ For Rust changes, prefer:
 - `rtk cargo fmt --check`
 - `rtk cargo clippy --workspace --all-targets -- -D warnings` when risk justifies it
 
+For frontend changes under `crates/rollshot-app`, prefer:
+- `rtk pnpm --dir crates/rollshot-app run typecheck`
+- `rtk pnpm --dir crates/rollshot-app test`
+- `rtk pnpm --dir crates/rollshot-app run build`
+
+When already in `crates/rollshot-app/` (check with `pwd`):
+- `rtk pnpm run typecheck`
+- `rtk pnpm test`
+- `rtk pnpm run build`
+
 @RTK.md
+
+## 8. learn-projects
+
+The `learn-projects/` directory contains cloned reference repositories for
+learning and cross-referencing. They are **not** part of rollshot's build
+and are excluded from search tools by `.ignore` and `.rgignore`.
+
+**Searching**: use `--no-ignore` (ripgrep) or similar flags to include
+learn-projects results when needed.
+
+| Project | Remote | Relationship to rollshot |
+|---------|--------|--------------------------|
+| `obs-studio` | obsproject/obs-studio | Reference for streaming and capture layer (OBS capture architecture, PipeWire, ScreenCaptureKit patterns). Directly relevant to `rollshot-capture`. |
+| `rust-cv` | rust-cv/cv | Computer Vision library in Rust. Reference for image stitching, feature detection, and geometric transforms used in `rollshot-core`. |
+| `scap` | zed-industries/scap | Screen capture library by Zed Industries. `rollshot-capture` is built as a scap-compatible crate; the macOS backend uses scap. Directly relevant to `rollshot-capture`. |
+| `snow-shot` | mg-chao/snow-shot | Same category: screenshot/long-screenshot software. Reference for screenshot workflows, UI patterns. |
+| `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-app`. |
+| `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph

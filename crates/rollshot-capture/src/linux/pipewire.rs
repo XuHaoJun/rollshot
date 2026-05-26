@@ -107,9 +107,9 @@ impl FrameQueue {
         };
 
         if wait_result.timed_out() && deque.is_empty() {
-            return Err(CaptureError::Backend(anyhow::anyhow!(
-                "PipeWire stream produced no frames within {timeout:?}"
-            )));
+            return Err(CaptureError::Timeout {
+                message: format!("PipeWire stream produced no frames within {timeout:?}"),
+            });
         }
 
         match deque.pop_front() {
@@ -867,16 +867,16 @@ mod tests {
     }
 
     #[test]
-    fn queue_timeout_returns_backend_error() {
+    fn queue_timeout_returns_timeout_error() {
         let queue = FrameQueue::new();
         let err = queue
             .next_frame_with_timeout(Duration::from_millis(100))
             .unwrap_err();
         match err {
-            CaptureError::Backend(e) => {
-                assert!(e.to_string().contains("no frames within"), "msg = {}", e);
+            CaptureError::Timeout { message } => {
+                assert!(message.contains("no frames within"), "msg = {message}");
             }
-            other => panic!("expected Backend, got {other:?}"),
+            other => panic!("expected Timeout, got {other:?}"),
         }
     }
 

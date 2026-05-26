@@ -238,6 +238,7 @@ fn rollshot_capture_fixture_writes_debug_report() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
         .arg("capture")
+        .arg("--headless")
         .arg("--backend")
         .arg("fixture")
         .arg("--fixture")

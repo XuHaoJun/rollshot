@@ -12,7 +12,7 @@ PipeWire support.
 - `crates/rollshot-core`: platform-independent stitching concepts
 - `crates/rollshot-capture`: capture traits and frame metadata
 - `crates/rollshot-cli`: command-line interface
-- `crates/rollshot-app`: future app entry point
+- `crates/rollshot-app`: Tauri v2 interactive capture app with live preview
 
 ## Local Development
 
@@ -29,7 +29,23 @@ sudo apt-get install -y pkg-config libpipewire-0.3-dev libspa-0.2-dev libclang-1
 the `pipewire` crate) needs. Without it, set `LIBCLANG_PATH=/usr/lib/llvm-18/lib`
 before building.
 
-Then run:
+### Tauri App
+
+The `rollshot-app` crate is a Tauri v2 app that needs WebKit, GTK, and X11
+development headers on Linux. On macOS it needs Xcode (or Xcode Command Line
+Tools) but no extra packages.
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev \
+  libayatana-appindicator3-dev librsvg2-dev
+```
+
+These packages are not needed for the CLI (`rollshot-cli`) or capture library
+(`rollshot-capture`). They are only required when building `rollshot-app`.
+
+### Build & Test
 
 ```bash
 cargo fmt --all -- --check
@@ -77,7 +93,8 @@ rtk env ROLLSHOT_PERF_STRICT=1 cargo test --release -p rollshot-core large_retin
 `.github/workflows/ci.yml` runs on `ubuntu-24.04` and `macos-14` for pushes to
 `main` and pull requests.
 
-It runs:
+It installs PipeWire/D-Bus development packages and Tauri Linux system
+dependencies on the Ubuntu runner, then runs:
 
 ```bash
 cargo fmt --all -- --check
@@ -104,6 +121,7 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo test --workspace --features akaze` passes.
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
 - [ ] `cargo run -p rollshot-cli -- stitch-folder tests/fixtures` exits successfully with bootstrap status text.
+- [ ] `cargo check -p rollshot-app` passes (requires Tauri Linux deps on Linux, Xcode on macOS).
 
 ## Manual Testing: Linux Wayland Portal Capture
 

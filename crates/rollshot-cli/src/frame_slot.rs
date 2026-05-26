@@ -67,7 +67,6 @@ impl FrameSlot {
 
         if !state.frames.is_empty() {
             let frame = state.frames.pop_back().unwrap();
-            state.frames.clear();
             return Ok(frame);
         }
         if let Some(msg) = state.error.take() {

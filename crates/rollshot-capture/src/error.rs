@@ -15,6 +15,9 @@ pub enum CaptureError {
     #[error("end of frame stream")]
     EndOfStream,
 
+    #[error("frame timeout: {message}")]
+    Timeout { message: String },
+
     #[error("invalid configuration: {message}")]
     InvalidConfig { message: String },
 
