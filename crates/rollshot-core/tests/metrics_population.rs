@@ -45,9 +45,16 @@ fn make_rich_texture_frame(width: u32, height: u32, offset_x: i32, offset_y: i32
         let px = ((x as i32 + offset_x).rem_euclid(width as i32)) as u32;
         let py = ((y as i32 + offset_y).rem_euclid(height as i32)) as u32;
         // Hash-like deterministic value for texture variety (LCG-style mix).
-        let v = (px.wrapping_mul(1664525).wrapping_add(py.wrapping_mul(1013904223)) & 0xFF) as u8;
+        let v = (px
+            .wrapping_mul(1664525)
+            .wrapping_add(py.wrapping_mul(1013904223))
+            & 0xFF) as u8;
         // Add fine-grained stripe structure so edge detectors fire.
-        let stripe = if (px / 4 + py / 4) % 2 == 0 { v } else { 255 - v };
+        let stripe = if (px / 4 + py / 4) % 2 == 0 {
+            v
+        } else {
+            255 - v
+        };
         image::Rgba([stripe, stripe, stripe, 255])
     })
 }
@@ -92,8 +99,15 @@ fn appended_outcome_populates_all_stages() {
     assert_eq!(m.outcome, StitchOutcomeKind::Appended);
     assert_eq!(m.frame_index, 1);
     assert!(m.no_match_reason.is_none());
-    assert!(m.prepare_frame_us > 0, "prepare_frame_us={}", m.prepare_frame_us);
-    assert!(m.coarse_us > 0 || m.template_ncc_us > 0, "matcher stages should record some time");
+    assert!(
+        m.prepare_frame_us > 0,
+        "prepare_frame_us={}",
+        m.prepare_frame_us
+    );
+    assert!(
+        m.coarse_us > 0 || m.template_ncc_us > 0,
+        "matcher stages should record some time"
+    );
     assert!(m.verifier_us > 0, "verifier_us={}", m.verifier_us);
     assert!(m.append_us > 0, "append_us={}", m.append_us);
     assert!(m.coarse_candidates > 0 || m.ncc_offsets_scored > 0);
@@ -108,7 +122,10 @@ fn appended_outcome_populates_all_stages() {
 fn duplicate_outcome_populates_only_duplicate_stage() {
     let mut stitcher = Stitcher::new(StitchConfig::default());
     let frames = load_frames("duplicate_frames");
-    assert!(frames.len() >= 2, "duplicate_frames fixture must have >=2 frames");
+    assert!(
+        frames.len() >= 2,
+        "duplicate_frames fixture must have >=2 frames"
+    );
 
     stitcher.push_frame(frames[0].clone());
 
@@ -136,7 +153,10 @@ fn duplicate_outcome_populates_only_duplicate_stage() {
             break;
         }
     }
-    assert!(found_duplicate, "duplicate_frames fixture should produce a Duplicate outcome");
+    assert!(
+        found_duplicate,
+        "duplicate_frames fixture should produce a Duplicate outcome"
+    );
 }
 
 #[test]
@@ -191,7 +211,13 @@ fn no_match_outcome_records_dimension_mismatch() {
     stitcher.push_frame(frame1);
     let outcome = stitcher.push_frame(frame2);
     assert!(
-        matches!(outcome, StitchOutcome::NoMatch { reason: NoMatchReason::DimensionMismatch, .. }),
+        matches!(
+            outcome,
+            StitchOutcome::NoMatch {
+                reason: NoMatchReason::DimensionMismatch,
+                ..
+            }
+        ),
         "expected NoMatch{{DimensionMismatch}}, got {outcome:?}"
     );
     let m = stitcher.last_metrics();
@@ -234,7 +260,10 @@ fn no_progress_outcome_recorded_for_low_motion_fixture() {
     // fallback across up to 10 frames.
     let mut stitcher2 = Stitcher::new(StitchConfig::default());
     let frames = load_frames("repeated_rows");
-    assert!(frames.len() >= 2, "repeated_rows fixture must have >=2 frames");
+    assert!(
+        frames.len() >= 2,
+        "repeated_rows fixture must have >=2 frames"
+    );
     stitcher2.push_frame(frames[0].clone());
     for frame in frames.iter().skip(1).take(10) {
         let o = stitcher2.push_frame(frame.clone());

@@ -97,7 +97,14 @@ fn estimate_motion_with_budget(
         *active = Some(SearchBudget::default());
     }
     let mut throwaway_metrics = StitchMetrics::default();
-    let result = estimate_motion(prev, curr, locked_axis, last_motion, config, &mut throwaway_metrics);
+    let result = estimate_motion(
+        prev,
+        curr,
+        locked_axis,
+        last_motion,
+        config,
+        &mut throwaway_metrics,
+    );
     *budget = ACTIVE_SEARCH_BUDGET
         .lock()
         .expect("search budget mutex poisoned")
@@ -533,7 +540,9 @@ fn search_template_axis(
 
     let offsets = refinement_offsets(last_offset, max_offset, template_refine_radius());
     metrics.ncc_offsets_scored += offsets.len();
-    metrics.ncc_pixel_visits += offsets.len().saturating_mul(region.w as usize * region.h as usize);
+    metrics.ncc_pixel_visits += offsets
+        .len()
+        .saturating_mul(region.w as usize * region.h as usize);
     let scored: Vec<_> = offsets
         .into_par_iter()
         .filter_map(|offset| {
@@ -1152,7 +1161,14 @@ mod tests {
             min_overlap: 280,
             ..StitchConfig::default()
         };
-        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &config, &mut StitchMetrics::default()));
+        let candidate = unwrap_candidate(estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut StitchMetrics::default(),
+        ));
         assert!(
             candidate.dy <= 40,
             "dy = {} exceeds bounded search",
@@ -1186,7 +1202,14 @@ mod tests {
         let prev = make_textured_canvas(160, 160);
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
         assert!(matches!(
-            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default(), &mut StitchMetrics::default()),
+            estimate_motion(
+                &prev,
+                &curr,
+                None,
+                (0, 0),
+                &StitchConfig::default(),
+                &mut StitchMetrics::default()
+            ),
             MotionSearchOutcome::NoMatch { .. }
         ));
     }
@@ -1196,7 +1219,14 @@ mod tests {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
         assert!(matches!(
-            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default(), &mut StitchMetrics::default()),
+            estimate_motion(
+                &prev,
+                &curr,
+                None,
+                (0, 0),
+                &StitchConfig::default(),
+                &mut StitchMetrics::default()
+            ),
             MotionSearchOutcome::NoMatch { .. }
         ));
     }
@@ -1294,7 +1324,14 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 0, 32, 160, 160);
 
-        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default(), &mut StitchMetrics::default());
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+            &mut StitchMetrics::default(),
+        );
 
         assert!(matches!(candidate, MotionSearchOutcome::NoMatch { .. }));
     }
@@ -1418,7 +1455,14 @@ mod tests {
         let config = StitchConfig::default();
 
         let started = std::time::Instant::now();
-        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &config, &mut StitchMetrics::default());
+        let outcome = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut StitchMetrics::default(),
+        );
         let elapsed = started.elapsed();
         let candidate = unwrap_candidate(outcome);
 
