@@ -12,10 +12,13 @@ where
 {
     let mut args = args.into_iter().map(Into::into);
     let _program = args.next();
+
     let Some(flag) = args.next() else {
-        return Err(
-            "rollshot-app must be launched by `rollshot capture` with --capture".to_string(),
-        );
+        return Ok(LaunchMode::Capture(InteractiveLaunchOptions {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+        }));
     };
 
     if flag != "--capture" {
@@ -55,6 +58,18 @@ mod tests {
                 assert_eq!(options.backend, "linux-portal");
                 assert_eq!(options.fps, 7);
                 assert!(options.show_cursor);
+            }
+        }
+    }
+
+    #[test]
+    fn no_args_uses_defaults() {
+        let mode = parse_launch_args(["rollshot-app"]).expect("no args should succeed");
+        match mode {
+            LaunchMode::Capture(options) => {
+                assert_eq!(options.backend, "auto");
+                assert_eq!(options.fps, 5);
+                assert!(!options.show_cursor);
             }
         }
     }
