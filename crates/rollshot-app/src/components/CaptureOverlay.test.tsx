@@ -213,6 +213,26 @@ describe('CaptureOverlay', () => {
     expect(api.setInputPassthrough).toHaveBeenLastCalledWith(false)
   })
 
+  it('does not render selection dimming while stitching', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'appended',
+    } satisfies SessionStatus)
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(container.querySelector('.selection-dim')).toBeNull()
+    expect(container.querySelector('.selection-box')).toBeNull()
+  })
+
   it('finishes stitching and opens the save dialog on Escape', async () => {
     api.sessionStatus.mockResolvedValue({
       state: 'stitching',

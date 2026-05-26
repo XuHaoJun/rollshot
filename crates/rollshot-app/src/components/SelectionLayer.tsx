@@ -50,6 +50,13 @@ export function SelectionLayer({
   }, [scale, selectedRegion])
 
   const visibleRect = draftRect ?? selectedRect
+  const className = [
+    'selection-layer',
+    disabled ? 'selection-layer-disabled' : '',
+    visibleRect ? 'selection-layer-has-rect' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   function localPoint(event: PointerEvent<HTMLDivElement>): Point {
     const layer = layerRef.current
@@ -75,7 +82,7 @@ export function SelectionLayer({
   return (
     <div
       ref={layerRef}
-      className={disabled ? 'selection-layer selection-layer-disabled' : 'selection-layer'}
+      className={className}
       onPointerDown={(event) => {
         if (disabled) {
           return

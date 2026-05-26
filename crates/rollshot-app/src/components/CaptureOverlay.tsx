@@ -197,13 +197,13 @@ export function CaptureOverlay() {
   }, [status.state])
 
   const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
-  const sourceWidth = status.state === 'previewing' || status.state === 'stitching' ? status.frame_width : 1
-  const sourceHeight = status.state === 'previewing' || status.state === 'stitching' ? status.frame_height : 1
-  const showSelection = status.state === 'previewing' || status.state === 'stitching'
-  const canEditSelection = status.state === 'previewing'
+  const hasCaptureFrame = status.state === 'previewing' || status.state === 'stitching'
+  const sourceWidth = hasCaptureFrame ? status.frame_width : 1
+  const sourceHeight = hasCaptureFrame ? status.frame_height : 1
+  const showSelection = status.state === 'previewing'
 
   const scale = useMemo<PreviewScale | null>(() => {
-    if (!showSelection || !windowOrigin) return null
+    if (!hasCaptureFrame || !windowOrigin) return null
     return {
       scaleX: devicePixelRatio,
       scaleY: devicePixelRatio,
@@ -212,7 +212,7 @@ export function CaptureOverlay() {
       sourceWidth,
       sourceHeight,
     }
-  }, [devicePixelRatio, showSelection, sourceHeight, sourceWidth, windowOrigin])
+  }, [devicePixelRatio, hasCaptureFrame, sourceHeight, sourceWidth, windowOrigin])
 
   const placement = useMemo(() => {
     if (!activeRegion || !scale) {
@@ -243,11 +243,10 @@ export function CaptureOverlay() {
         <SelectionLayer
           scale={scale}
           selectedRegion={activeRegion}
-          disabled={!canEditSelection}
           onSelect={onSelect}
           onCancel={onCancel}
         />
-      ) : status.state !== 'done' ? (
+      ) : status.state !== 'done' && status.state !== 'stitching' ? (
         <div className="selection-layer">
           <div className="selection-dim" />
           <div className="capture-status">{message}</div>

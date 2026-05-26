@@ -98,6 +98,7 @@ describe('SelectionLayer', () => {
       height: 200,
     })
     expect(container.querySelector('.selection-box')).not.toBeNull()
+    expect(layer?.classList.contains('selection-layer-has-rect')).toBe(true)
   })
 
   it('ignores tiny selections', () => {

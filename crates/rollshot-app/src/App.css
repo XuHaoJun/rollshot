@@ -103,7 +103,11 @@ button:not(:disabled),
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: rgba(0, 0, 0, 0.34);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.selection-layer-has-rect .selection-dim {
+  background: transparent;
 }
 
 .selection-guide {
@@ -127,11 +131,11 @@ button:not(:disabled),
 .selection-box {
   position: absolute;
   pointer-events: none;
-  border: 2px solid #22c55e;
-  background: rgba(34, 197, 94, 0.08);
+  border: 2px solid #38bdf8;
+  background: transparent;
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.72),
-    0 0 0 9999px rgba(0, 0, 0, 0.28);
+    0 0 0 9999px rgba(0, 0, 0, 0.24);
 }
 
 .adaptive-stitch-preview {
