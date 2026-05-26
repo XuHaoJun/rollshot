@@ -4,6 +4,7 @@ use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisVal
 use crate::canvas::{CanvasAppendError, LinearCanvas};
 use crate::duplicate;
 use crate::matcher::{estimate_motion, MotionSearchOutcome};
+use crate::metrics::{StitchMetrics, StitchOutcomeKind};
 use crate::overlap::compute_overlap;
 use crate::types::{
     AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, ScrollAxis, StitchConfig,
@@ -20,6 +21,8 @@ pub struct Stitcher {
     locked_axis: Option<ScrollAxis>,
     locked_direction: Option<AppendDirection>,
     stats: StitchStats,
+    last_metrics: StitchMetrics,
+    frame_counter: usize,
 }
 
 impl Stitcher {
@@ -33,6 +36,8 @@ impl Stitcher {
             locked_axis: None,
             locked_direction: None,
             stats: StitchStats::default(),
+            last_metrics: StitchMetrics::default(),
+            frame_counter: 0,
         }
     }
 
@@ -269,6 +274,12 @@ impl Stitcher {
 
     pub fn stats(&self) -> StitchStats {
         self.stats
+    }
+
+    /// Per-frame instrumentation snapshot from the most recent push_frame call.
+    /// Reset to defaults at the start of each push_frame; populated as stages run.
+    pub fn last_metrics(&self) -> &StitchMetrics {
+        &self.last_metrics
     }
 
     fn accept_first_frame(&mut self, frame: RgbaImage) -> StitchOutcome {
