@@ -90,6 +90,7 @@ impl Stitcher {
             self.locked_axis,
             self.last_motion,
             &self.config,
+            &mut self.last_metrics,
         ) {
             MotionSearchOutcome::Candidate(c) => c,
             MotionSearchOutcome::NoMatch {
