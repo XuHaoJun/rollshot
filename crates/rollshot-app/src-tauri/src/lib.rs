@@ -3,6 +3,8 @@ mod launch;
 mod overlay;
 mod scroll;
 mod session;
+#[cfg(target_os = "linux")]
+mod webkit_workaround;
 
 use std::sync::Arc;
 
@@ -21,6 +23,9 @@ pub fn run() {
 
     let LaunchMode::Capture(launch_options) = launch_mode;
     let shared_session = Arc::new(SharedSession::new());
+
+    #[cfg(target_os = "linux")]
+    webkit_workaround::apply();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
