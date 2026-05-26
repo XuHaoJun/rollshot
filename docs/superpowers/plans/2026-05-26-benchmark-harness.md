@@ -414,6 +414,8 @@ git commit -m "feat(core): add canvas accessors (allocated_bytes, logical_pixels
 
 Add the metrics field, accessor, and frame counter — but do not wire any `ScopedTimer`s yet. This is purely additive scaffolding so production behavior is unchanged.
 
+> **TDD note:** Tasks 3, 4, and 5 are pure additive instrumentation with no behavior change. They have no failing-test-first step because the default field values are already `0` (so a "field exists and is 0" test would pass before any wiring). Verification is consolidated in Task 6 (`metrics_population.rs`), which exercises the populated metrics end-to-end. If a regression in Task 4 or 5 is suspected before Task 6 runs, the `cargo build -p rollshot-core` + existing test suite (`cargo test -p rollshot-core`) is the early signal.
+
 - [ ] **Step 1: Add the import and fields**
 
 In `crates/rollshot-core/src/stitcher.rs`, modify the imports block (lines 1-12) to include the metrics types:
@@ -523,16 +525,22 @@ In `crates/rollshot-core/src/stitcher.rs`, just below the `impl Stitcher` block 
 
 - [ ] **Step 2: Rewrite `push_frame` with `ScopedTimer`s and outcome recording**
 
-Replace the entire `push_frame` method (lines 39-264) in `crates/rollshot-core/src/stitcher.rs` with this version. The diff is large because every `return` path now records the outcome kind first.
+Replace the entire `push_frame` method (lines 39-264) in `crates/rollshot-core/src/stitcher.rs` with the inner-method version below.
+
+Why the wrapper: a `ScopedTimer` over `total_us` would hold `&mut self.last_metrics.total_us` for the whole function, which the borrow checker rejects when subsequent stages reborrow `&mut self.last_metrics` (matcher call) or `&mut self` (helper methods like `record_no_match` / `snapshot_canvas_state`). Wrapping with a manual `Instant` records total wall time on every return path without keeping a sub-borrow live.
 
 ```rust
     pub fn push_frame(&mut self, frame: RgbaImage) -> StitchOutcome {
+        let total_start = std::time::Instant::now();
         self.last_metrics = StitchMetrics::default();
         self.last_metrics.frame_index = self.frame_counter;
         self.frame_counter += 1;
+        let outcome = self.push_frame_inner(frame);
+        self.last_metrics.total_us = total_start.elapsed().as_micros() as u64;
+        outcome
+    }
 
-        let _total = crate::metrics::ScopedTimer::new(&mut self.last_metrics.total_us);
-
+    fn push_frame_inner(&mut self, frame: RgbaImage) -> StitchOutcome {
         if self.canvas.is_none() {
             let outcome = self.accept_first_frame(frame);
             self.last_metrics.outcome = StitchOutcomeKind::FirstFrame;
@@ -564,13 +572,19 @@ Replace the entire `push_frame` method (lines 39-264) in `crates/rollshot-core/s
             }
         }
 
+        // NOTE: Task 4 still calls `estimate_motion` with the original 5-arg
+        // signature so this commit compiles cleanly. Task 5 changes both the
+        // matcher signature and this call site to pass `&mut self.last_metrics`,
+        // which is what populates `prepare_frame_us`, `coarse_us`,
+        // `template_ncc_us`, `edge_projection_us`, and `fallback_us`. Until
+        // Task 5 lands, those fields remain `0`; `duplicate_us`, `verifier_us`,
+        // `append_us`, and the outcome/motion fields are populated here.
         let candidate = match estimate_motion(
             anchor,
             &frame,
             self.locked_axis,
             self.last_motion,
             &self.config,
-            &mut self.last_metrics,
         ) {
             MotionSearchOutcome::Candidate(c) => c,
             MotionSearchOutcome::NoMatch {
@@ -816,11 +830,17 @@ In `crates/rollshot-core/src/stitcher.rs`, add this method to the `impl Stitcher
     }
 ```
 
-Note: the `push_frame` body above calls `estimate_motion` with a sixth argument (`&mut self.last_metrics`). This won't compile yet — Task 5 changes the matcher signature to accept it.
+Note: Task 4 deliberately calls `estimate_motion` with the existing 5-arg signature so this commit compiles and `cargo test -p rollshot-core` still passes. Task 5 changes both the matcher signature and this call site at once, which keeps every commit on the branch bisect-safe.
 
-- [ ] **Step 4: Skip compile here — Task 5 unblocks it**
+- [ ] **Step 4: Verify the crate still builds and existing tests pass**
 
-The crate will not compile after Task 4 alone, because `estimate_motion` doesn't yet accept the metrics argument. Do not run `cargo build` between Task 4 and Task 5; commit Task 4 as a logical unit (stitcher-level wiring) and proceed directly to Task 5 (matcher-level wiring) to unblock the build.
+Run: `rtk cargo build -p rollshot-core`
+
+Expected: clean build.
+
+Run: `rtk cargo test -p rollshot-core`
+
+Expected: all existing tests still pass — Task 4 introduces no behavior change beyond populating `duplicate_us`, `verifier_us`, `append_us`, the outcome kind, the motion-outcome fields, and the canvas state snapshot. Matcher-internal stage timings (`prepare_frame_us`, `coarse_us`, `template_ncc_us`, `edge_projection_us`, `fallback_us`) remain at 0 until Task 5 wires them in.
 
 - [ ] **Step 5: Commit**
 
@@ -1127,9 +1147,7 @@ fn search_template_axis(
 
 - [ ] **Step 5: Add `metrics` parameter to `edge_projection_candidates`**
 
-Find `fn edge_projection_candidates` (around line 709). Add `metrics: &mut StitchMetrics` as the last parameter. If the function's inner code path also issues NCC-equivalent passes, count offsets there too — otherwise leave the body as-is. Use `rtk grep` to confirm the function body doesn't already do NCC scoring; if it produces candidates by scoring offsets, add the same `metrics.ncc_offsets_scored += ...; metrics.ncc_pixel_visits += ...` line at the boundary where offsets are enumerated.
-
-Minimum change (signature only) if the body doesn't score NCC offsets:
+Find `fn edge_projection_candidates` (around line 709). `edge_projection_axis` (its inner helper) scores offsets via `projection_mad` on derivative projections — **not** via `ncc_score_shifted`. So this stage does not contribute to `ncc_offsets_scored` / `ncc_pixel_visits`. Add `metrics: &mut StitchMetrics` as the last parameter and discard it in the body (reserved for a future edge-specific counter):
 
 ```rust
 fn edge_projection_candidates(
@@ -1141,14 +1159,12 @@ fn edge_projection_candidates(
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
-    // existing body — the _metrics argument is reserved for counter wiring
-    // once edge-projection's internal NCC offsets are exposed.
-    let _ = metrics;  // suppress unused-variable warning during initial wire-up
+    let _ = metrics; // reserved for edge-stage counters; timing is captured by the outer ScopedTimer.
     // ... existing function body unchanged ...
 }
 ```
 
-If you find that `edge_projection_candidates` calls `ncc_score_shifted` directly or iterates offset arrays, count them the same way as Step 4 (replace `let _ = metrics;` with the increment lines).
+The outer `ScopedTimer` in `estimate_motion` already records `edge_projection_us`, so timing coverage is complete; only the counter wiring is deferred.
 
 - [ ] **Step 6: Add `metrics` parameter to `relaxed_coarse_candidate`**
 
@@ -1422,13 +1438,92 @@ fn outcome_kind_advances_frame_index() {
     stitcher.push_frame(frames[0].clone()); // duplicate
     assert_eq!(stitcher.last_metrics().frame_index, 1);
 }
+
+#[test]
+fn no_match_outcome_records_dimension_mismatch() {
+    use rollshot_core::NoMatchReason;
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    let frame1 = RgbaImage::from_pixel(200, 200, image::Rgba([200, 200, 200, 255]));
+    let frame2 = RgbaImage::from_pixel(220, 200, image::Rgba([200, 200, 200, 255]));
+    stitcher.push_frame(frame1);
+    let outcome = stitcher.push_frame(frame2);
+    assert!(
+        matches!(outcome, StitchOutcome::NoMatch { reason: NoMatchReason::DimensionMismatch, .. }),
+        "expected NoMatch{{DimensionMismatch}}, got {outcome:?}"
+    );
+    let m = stitcher.last_metrics();
+    assert_eq!(m.outcome, StitchOutcomeKind::NoMatch);
+    assert_eq!(m.no_match_reason, Some(NoMatchReason::DimensionMismatch));
+    // Dimension mismatch returns before duplicate detection, so duplicate_us
+    // stays zero.
+    assert_eq!(m.duplicate_us, 0);
+}
+
+#[test]
+fn no_progress_outcome_recorded_for_low_motion_fixture() {
+    // Scan through the `repeated_rows` fixture (designed to trigger
+    // NoProgress / matching failures); assert metrics if the outcome appears
+    // within the first few frames.
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    let frames = load_frames("repeated_rows");
+    assert!(frames.len() >= 2, "repeated_rows fixture must have >=2 frames");
+    stitcher.push_frame(frames[0].clone());
+    for frame in frames.iter().skip(1).take(5) {
+        let outcome = stitcher.push_frame(frame.clone());
+        if matches!(outcome, StitchOutcome::NoProgress { .. }) {
+            let m = stitcher.last_metrics();
+            assert_eq!(m.outcome, StitchOutcomeKind::NoProgress);
+            assert!(
+                m.no_match_reason.is_none(),
+                "NoProgress should not set no_match_reason, got {:?}",
+                m.no_match_reason
+            );
+            return;
+        }
+    }
+    panic!(
+        "repeated_rows did not produce a NoProgress outcome within 5 frames; \
+         choose a different fixture if this test becomes unreliable"
+    );
+}
+
+#[test]
+fn axis_changed_outcome_recorded_when_axis_lock_breaks() {
+    // Establish a vertical axis lock with two vertical-scroll frames, then
+    // push a horizontal-scroll frame to trip AxisChanged.
+    let mut large_search_cfg = StitchConfig::default();
+    large_search_cfg.max_search_ratio = 0.75;
+    let mut stitcher = Stitcher::new(large_search_cfg);
+    let vertical_frames = load_frames("linear_vertical_down");
+    let horizontal_frames = load_frames("linear_horizontal_right");
+    assert!(vertical_frames.len() >= 2);
+    assert!(!horizontal_frames.is_empty());
+
+    stitcher.push_frame(vertical_frames[0].clone());
+    stitcher.push_frame(vertical_frames[1].clone());
+    let outcome = stitcher.push_frame(horizontal_frames[0].clone());
+    assert!(
+        matches!(outcome, StitchOutcome::AxisChanged { .. }),
+        "expected AxisChanged after locking vertical and pushing horizontal frame, got {outcome:?}"
+    );
+    let m = stitcher.last_metrics();
+    assert_eq!(m.outcome, StitchOutcomeKind::AxisChanged);
+}
 ```
+
+> If `no_progress_outcome_recorded_for_low_motion_fixture` or
+> `axis_changed_outcome_recorded_when_axis_lock_breaks` proves unreliable on a
+> given machine (fixture content sensitivity), swap the fixture or relax the
+> assertion to an iteration-and-find-first pattern like
+> `duplicate_outcome_populates_only_duplicate_stage`. The shape of the test
+> (outcome populates `metrics.outcome` correctly) is the invariant; the trigger
+> is implementation detail.
 
 - [ ] **Step 2: Run the new tests**
 
 Run: `rtk cargo test -p rollshot-core --test metrics_population`
 
-Expected: 5 passing tests (`first_frame_outcome_populates_minimal_fields`, `appended_outcome_populates_all_stages`, `duplicate_outcome_populates_only_duplicate_stage`, `stage_sum_covers_at_least_80_percent_of_total`, `outcome_kind_advances_frame_index`).
+Expected: 8 passing tests (`first_frame_outcome_populates_minimal_fields`, `appended_outcome_populates_all_stages`, `duplicate_outcome_populates_only_duplicate_stage`, `stage_sum_covers_at_least_80_percent_of_total`, `outcome_kind_advances_frame_index`, `no_match_outcome_records_dimension_mismatch`, `no_progress_outcome_recorded_for_low_motion_fixture`, `axis_changed_outcome_recorded_when_axis_lock_breaks`).
 
 If `stage_sum_covers_at_least_80_percent_of_total` fails because the actual accounted ratio is below 80%, lower the threshold to 70% — the goal is to catch egregious instrumentation drift, not to demand a tight bound. Document the actual observed ratio in a comment in the test.
 
@@ -1782,6 +1877,49 @@ pub fn default_specs() -> Vec<SyntheticSpec> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_jitter_is_reproducible() {
+        let a: Vec<_> = (0..50).map(|i| deterministic_jitter(0xC0FFEE, i, 2)).collect();
+        let b: Vec<_> = (0..50).map(|i| deterministic_jitter(0xC0FFEE, i, 2)).collect();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn deterministic_jitter_respects_max_abs() {
+        for i in 0..200 {
+            let j = deterministic_jitter(0xC0FFEE, i, 3);
+            assert!(j.abs() <= 3, "jitter {j} out of bounds at idx {i}");
+        }
+    }
+
+    #[test]
+    fn synthetic_spec_validate_accepts_well_formed_spec() {
+        for spec in default_specs() {
+            spec.validate();
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "canvas_height")]
+    fn synthetic_spec_validate_rejects_oversized_traversal() {
+        let mut bad = default_specs()[0].clone();
+        bad.canvas_height = 100; // far too small for 200 frames × 40 px step
+        bad.validate();
+    }
+
+    #[test]
+    fn synthetic_spec_frames_yields_expected_count() {
+        let spec = &default_specs()[0];
+        let base = make_scroll_canvas(spec.canvas_width, spec.canvas_height);
+        let count = spec.frames(&base).count();
+        assert_eq!(count, spec.frame_count);
+    }
+}
 ```
 
 - [ ] **Step 2: Confirm the synthetic module compiles by tying it into the bench binary in Task 10**
@@ -1814,6 +1952,23 @@ This task wires up the bench binary scaffolding: argument parsing, scenario enum
 //!   scenario (Task 12), merge their JSONL stdout into the output file.
 //! - `--run-single-scenario <name>` (worker, Task 11): run one scenario and
 //!   emit JSONL records to stdout. Used by the orchestrator.
+//!
+//! Process topology:
+//!
+//! ```text
+//!  orchestrator (this binary, no flags)
+//!  ├── registered_scenarios()    -> 11 fixtures + 3 synthetic
+//!  ├── for (scenario, run_idx)
+//!  │      spawn worker subprocess: --run-single-scenario <name> --worker-run <i>
+//!  │       │
+//!  │       ▼ stdout (JSONL: frame records + final summary)
+//!  │      append to target/bench/stitch_sequences-<sha>-<ts>.jsonl
+//!  └── flush + summary line on stderr
+//! ```
+//!
+//! Why subprocess-per-scenario: each worker gets a clean RSS baseline. An
+//! in-process loop would carry allocator high-water marks across scenarios
+//! and contaminate `peak_rss_kb_delta`.
 
 mod rss;
 mod synthetic;
@@ -2199,6 +2354,52 @@ fn run_worker(name: &str, run: usize) {
     let _ = out.flush();
 }
 
+#[derive(Default)]
+struct OutcomeCounts {
+    total: usize,
+    appended: usize,
+    duplicate: usize,
+    no_match: usize,
+    no_progress: usize,
+    axis_changed: usize,
+}
+
+impl OutcomeCounts {
+    fn record(&mut self, outcome: &StitchOutcome) {
+        self.total += 1;
+        match outcome {
+            StitchOutcome::FirstFrame => {}
+            StitchOutcome::Appended { .. } => self.appended += 1,
+            StitchOutcome::Duplicate => self.duplicate += 1,
+            StitchOutcome::NoMatch { .. } => self.no_match += 1,
+            StitchOutcome::NoProgress { .. } => self.no_progress += 1,
+            StitchOutcome::AxisChanged { .. } => self.axis_changed += 1,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_and_emit(
+    stitcher: &mut Stitcher,
+    scenario_name: &str,
+    run: usize,
+    idx: usize,
+    frame: RgbaImage,
+    counts: &mut OutcomeCounts,
+    rss_peak: &mut u64,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let outcome = stitcher.push_frame(frame);
+    counts.record(&outcome);
+    let metrics = stitcher.last_metrics();
+    let rec = BenchRecord::Frame(make_frame_record(scenario_name, run, metrics));
+    writeln!(out, "{}", serde_json::to_string(&rec).unwrap())?;
+    if idx % 10 == 0 {
+        *rss_peak = (*rss_peak).max(rss::read_rss_kb());
+    }
+    Ok(())
+}
+
 fn run_scenario_worker(
     scenario: &Scenario,
     run: usize,
@@ -2206,42 +2407,30 @@ fn run_scenario_worker(
 ) -> io::Result<()> {
     let rss_baseline = rss::read_rss_kb();
     let mut rss_peak = rss_baseline;
-
     let mut stitcher = Stitcher::new(scenario.config.clone());
-    let mut total_frames = 0usize;
-    let mut appended = 0usize;
-    let mut duplicate = 0usize;
-    let mut no_match = 0usize;
-    let mut no_progress = 0usize;
-    let mut axis_changed = 0usize;
+    let mut counts = OutcomeCounts::default();
 
-    let frames: Box<dyn Iterator<Item = RgbaImage>> = match &scenario.source {
-        ScenarioSource::Fixture { family } => Box::new(load_fixture_frames(family).into_iter()),
+    // Inline-iterate per source so synthetic frames stay lazy. Each frame is
+    // ~2.5 MB; pre-materializing 200 of them would buffer ~500 MB and bury
+    // the stitcher's own `peak_rss_kb_delta` signal — the whole point of
+    // forking a worker per scenario is to get a clean RSS baseline.
+    match &scenario.source {
+        ScenarioSource::Fixture { family } => {
+            for (idx, frame) in load_fixture_frames(family).into_iter().enumerate() {
+                process_and_emit(
+                    &mut stitcher, &scenario.name, run, idx, frame,
+                    &mut counts, &mut rss_peak, out,
+                )?;
+            }
+        }
         ScenarioSource::Synthetic(spec) => {
             let base = make_scroll_canvas(spec.canvas_width, spec.canvas_height);
-            let spec = spec.clone();
-            Box::new(materialize_synthetic_frames(spec, base).into_iter())
-        }
-    };
-
-    for (idx, frame) in frames.enumerate() {
-        let outcome = stitcher.push_frame(frame);
-        match outcome {
-            StitchOutcome::FirstFrame => {}
-            StitchOutcome::Appended { .. } => appended += 1,
-            StitchOutcome::Duplicate => duplicate += 1,
-            StitchOutcome::NoMatch { .. } => no_match += 1,
-            StitchOutcome::NoProgress { .. } => no_progress += 1,
-            StitchOutcome::AxisChanged { .. } => axis_changed += 1,
-        }
-        total_frames += 1;
-
-        let metrics = stitcher.last_metrics();
-        let rec = BenchRecord::Frame(make_frame_record(&scenario.name, run, metrics));
-        writeln!(out, "{}", serde_json::to_string(&rec).unwrap())?;
-
-        if idx % 10 == 0 {
-            rss_peak = rss_peak.max(rss::read_rss_kb());
+            for (idx, frame) in spec.frames(&base).enumerate() {
+                process_and_emit(
+                    &mut stitcher, &scenario.name, run, idx, frame,
+                    &mut counts, &mut rss_peak, out,
+                )?;
+            }
         }
     }
     rss_peak = rss_peak.max(rss::read_rss_kb());
@@ -2276,12 +2465,12 @@ fn run_scenario_worker(
         git_sha: GIT_SHA,
         peak_rss_kb_delta: rss_peak.saturating_sub(rss_baseline),
         peak_rss_kb_absolute: rss_peak,
-        total_frames,
-        appended,
-        duplicate,
-        no_match,
-        no_progress,
-        axis_changed,
+        total_frames: counts.total,
+        appended: counts.appended,
+        duplicate: counts.duplicate,
+        no_match: counts.no_match,
+        no_progress: counts.no_progress,
+        axis_changed: counts.axis_changed,
         final_canvas_logical_pixels: final_w * final_h,
         final_canvas_allocated_bytes: stitched
             .as_ref()
@@ -2293,10 +2482,6 @@ fn run_scenario_worker(
     });
     writeln!(out, "{}", serde_json::to_string(&summary).unwrap())?;
     Ok(())
-}
-
-fn materialize_synthetic_frames(spec: SyntheticSpec, base: RgbaImage) -> Vec<RgbaImage> {
-    spec.frames(&base).collect()
 }
 
 fn pixel_hash(img: &RgbaImage) -> String {
@@ -2484,7 +2669,67 @@ Expected: ~1–2 minutes wall-clock. Output JSONL contains 14 summary records (1
 
 Inspect the output with: `rtk wc -l target/bench/stitch_sequences-*.jsonl`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add inline unit tests for `select_scenarios` and `pixel_hash`**
+
+Append the following `#[cfg(test)] mod tests` block to the end of `crates/rollshot-core/benches/stitch_sequences.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with_filter(filter: Option<&str>) -> Args {
+        Args {
+            fixtures: filter.map(|s| s.to_string()),
+            out: None,
+            repeats: 1,
+            no_jsonl: false,
+            run_single_scenario: None,
+            worker_run: 0,
+        }
+    }
+
+    #[test]
+    fn select_scenarios_no_filter_returns_all_registered() {
+        let selected = select_scenarios(&args_with_filter(None));
+        assert_eq!(selected.len(), registered_scenarios().len());
+    }
+
+    #[test]
+    fn select_scenarios_filter_returns_matching_subset() {
+        let selected = select_scenarios(&args_with_filter(Some("duplicate_frames,long_vertical_text")));
+        let names: Vec<_> = selected.iter().map(|s| s.name.clone()).collect();
+        // Order follows registered_scenarios() (fixtures first, then synthetic).
+        assert_eq!(names, vec!["duplicate_frames".to_string(), "long_vertical_text".to_string()]);
+    }
+
+    #[test]
+    fn select_scenarios_filter_unknown_name_returns_empty() {
+        let selected = select_scenarios(&args_with_filter(Some("does_not_exist")));
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn pixel_hash_is_deterministic() {
+        let img = synthetic::make_scroll_canvas(64, 64);
+        assert_eq!(pixel_hash(&img), pixel_hash(&img));
+    }
+
+    #[test]
+    fn pixel_hash_differs_for_different_inputs() {
+        let img1 = synthetic::make_scroll_canvas(64, 64);
+        let mut img2 = img1.clone();
+        img2.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        assert_ne!(pixel_hash(&img1), pixel_hash(&img2));
+    }
+}
+```
+
+Run: `rtk cargo test -p rollshot-core --benches`
+
+Expected: 10 tests pass — 5 from `synthetic::tests` (Task 9) and 5 from `stitch_sequences::tests` (this step).
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/rollshot-core/benches/stitch_sequences.rs
@@ -3040,6 +3285,29 @@ checks as JSONL — designed to be diffed before/after an optimization PR.
 See the design spec at
 `docs/superpowers/specs/2026-05-26-benchmark-harness-design.md` for the full
 rationale.
+
+## How it runs
+
+```text
+ cargo bench -p rollshot-core --bench stitch_sequences
+        │
+        ▼
+ orchestrator (this binary)
+ ├── enumerate scenarios (11 golden fixtures + 3 synthetic stress)
+ ├── for each (scenario, run_index in 0..repeats):
+ │       fork: stitch_sequences --run-single-scenario <name> --worker-run <i>
+ │              │
+ │              ▼ stdout (JSONL)
+ │       append to target/bench/stitch_sequences-<sha>-<ts>.jsonl
+ │
+ ▼
+ python3 scripts/bench/summarize.py  (per-scenario report)
+ python3 scripts/bench/compare.py    (delta vs baseline)
+```
+
+Subprocess-per-scenario is intentional: each worker process starts with a
+fresh allocator state so `peak_rss_kb_delta` measures **this scenario's**
+memory pressure rather than the high-water mark of all prior scenarios.
 
 ## What it measures
 
