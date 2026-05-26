@@ -25,11 +25,19 @@ import { OverlayToolbar } from './OverlayToolbar'
 import { SelectionLayer } from './SelectionLayer'
 
 const PREVIEW_SIZE = { width: 180, height: 260 }
+const OVERLAY_CLEAR_DELAY_MS = 17
+
+function waitForOverlayClear() {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, OVERLAY_CLEAR_DELAY_MS)
+  })
+}
 
 export function CaptureOverlay() {
   const [status, setStatus] = useState<SessionStatus>({ state: 'idle' })
   const [overlayMode, setOverlayMode] = useState<OverlayExclusion>('unknown')
   const [selectedRegion, setSelectedRegion] = useState<SourceRegion | null>(null)
+  const [isStartingStitching, setIsStartingStitching] = useState(false)
   const [stitchPreviewUrl, setStitchPreviewUrl] = useState<string | null>(null)
   const [finalPreviewUrl, setFinalPreviewUrl] = useState<string | null>(null)
   const [windowOrigin, setWindowOrigin] = useState<{ x: number; y: number } | null>(null)
@@ -110,16 +118,19 @@ export function CaptureOverlay() {
   const onSelect = useCallback(async (region: SourceRegion) => {
     try {
       setSelectedRegion(region)
+      setIsStartingStitching(true)
       const confirmed = await confirmRegion(region)
       setMessage(`${confirmed.width}x${confirmed.height} selected`)
+      await waitForOverlayClear()
       await startStitching()
       setMessage('Scroll now')
     } catch (error) {
+      setIsStartingStitching(false)
       setMessage(String(error))
     }
   }, [])
 
-  const onCancel = useCallback(async () => {
+  const closeOverlay = useCallback(async () => {
     try {
       await setInputPassthrough(false)
       await stopCapture()
@@ -127,6 +138,10 @@ export function CaptureOverlay() {
       window.close()
     }
   }, [])
+
+  const onCancel = useCallback(async () => {
+    await closeOverlay()
+  }, [closeOverlay])
 
   const finishStitching = useCallback(async () => {
     try {
@@ -148,20 +163,28 @@ export function CaptureOverlay() {
     }
   }, [])
 
-  const onSave = useCallback(async () => {
+  const saveCurrentImage = useCallback(async (closeAfter: boolean) => {
     try {
       const selected = await save({
         title: 'Save stitched PNG',
         defaultPath: 'rollshot.png',
         filters: [{ name: 'PNG image', extensions: ['png'] }],
       })
-      if (!selected) return
-      const done = await saveImage(selected)
-      setMessage(done.output_path ? `Saved ${done.output_path}` : 'Saved image')
+      if (selected) {
+        const done = await saveImage(selected)
+        setMessage(done.output_path ? `Saved ${done.output_path}` : 'Saved image')
+      }
+      if (closeAfter) {
+        await closeOverlay()
+      }
     } catch (error) {
       setMessage(String(error))
     }
-  }, [])
+  }, [closeOverlay])
+
+  const onSave = useCallback(async () => {
+    await saveCurrentImage(false)
+  }, [saveCurrentImage])
 
   const onStop = useCallback(async () => {
     await finishStitching()
@@ -172,8 +195,8 @@ export function CaptureOverlay() {
       const finished = await finishStitching()
       if (!finished) return
     }
-    await onSave()
-  }, [finishStitching, onSave, status.state])
+    await saveCurrentImage(true)
+  }, [finishStitching, saveCurrentImage, status.state])
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -190,6 +213,7 @@ export function CaptureOverlay() {
     if (status.state !== 'stitching') {
       return
     }
+    setIsStartingStitching(false)
     setInputPassthrough(true).catch((error) => setMessage(String(error)))
     return () => {
       setInputPassthrough(false).catch((error) => setMessage(String(error)))
@@ -200,7 +224,7 @@ export function CaptureOverlay() {
   const hasCaptureFrame = status.state === 'previewing' || status.state === 'stitching'
   const sourceWidth = hasCaptureFrame ? status.frame_width : 1
   const sourceHeight = hasCaptureFrame ? status.frame_height : 1
-  const showSelection = status.state === 'previewing'
+  const showSelection = status.state === 'previewing' && !isStartingStitching
 
   const scale = useMemo<PreviewScale | null>(() => {
     if (!hasCaptureFrame || !windowOrigin) return null
@@ -214,19 +238,23 @@ export function CaptureOverlay() {
     }
   }, [devicePixelRatio, hasCaptureFrame, sourceHeight, sourceWidth, windowOrigin])
 
+  const activeRegionRect = useMemo(() => {
+    if (!activeRegion || !scale) return null
+    return sourceRegionToCssRect(activeRegion, scale)
+  }, [activeRegion, scale])
+
   const placement = useMemo(() => {
-    if (!activeRegion || !scale) {
+    if (!activeRegionRect) {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-    const regionRect = sourceRegionToCssRect(activeRegion, scale)
     return choosePreviewPlacement({
       bounds,
-      region: regionRect,
+      region: activeRegionRect,
       preview: PREVIEW_SIZE,
       overlayExclusion: overlayMode,
     })
-  }, [activeRegion, overlayMode, scale])
+  }, [activeRegionRect, overlayMode])
 
   const toolbarMode = status.state === 'done' ? 'done' : status.state === 'failed' ? 'failed' : 'stitching'
   const stats =
@@ -236,6 +264,17 @@ export function CaptureOverlay() {
 
   return (
     <main className="capture-overlay">
+      {(status.state === 'stitching' || isStartingStitching) && activeRegionRect ? (
+        <div
+          className="capture-mask"
+          style={{
+            left: `${activeRegionRect.left}px`,
+            top: `${activeRegionRect.top}px`,
+            width: `${activeRegionRect.width}px`,
+            height: `${activeRegionRect.height}px`,
+          }}
+        />
+      ) : null}
       {status.state === 'done' && finalPreviewUrl ? (
         <img className="final-overlay-preview" src={finalPreviewUrl} alt="Stitched result" draggable={false} />
       ) : null}

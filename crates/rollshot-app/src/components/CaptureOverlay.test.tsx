@@ -58,6 +58,7 @@ describe('CaptureOverlay', () => {
   let container: HTMLDivElement
   let root: Root
   let rectSpy: ReturnType<typeof vi.spyOn>
+  let closeSpy: ReturnType<typeof vi.spyOn>
   let originalSetPointerCapture: typeof HTMLDivElement.prototype.setPointerCapture | undefined
 
   beforeEach(() => {
@@ -66,6 +67,7 @@ describe('CaptureOverlay', () => {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
+    closeSpy = vi.spyOn(window, 'close').mockImplementation(() => undefined)
     rectSpy = vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockImplementation(
       () =>
         ({
@@ -116,6 +118,7 @@ describe('CaptureOverlay', () => {
   afterEach(() => {
     act(() => root.unmount())
     container.remove()
+    closeSpy.mockRestore()
     rectSpy.mockRestore()
     if (originalSetPointerCapture) {
       HTMLDivElement.prototype.setPointerCapture = originalSetPointerCapture
@@ -139,7 +142,7 @@ describe('CaptureOverlay', () => {
     })
   })
 
-  it('confirms the selected region and starts stitching after drag release', async () => {
+  it('hides the picker and waits one frame before starting stitching', async () => {
     act(() => root.render(<CaptureOverlay />))
     await flush()
     await act(async () => {
@@ -157,6 +160,14 @@ describe('CaptureOverlay', () => {
     })
 
     expect(api.confirmRegion).toHaveBeenCalledWith({ x: 100, y: 50, width: 400, height: 200 })
+    expect(container.querySelector('.selection-box')).toBeNull()
+    expect(container.querySelector('.capture-mask')).not.toBeNull()
+    expect(api.startStitching).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(17)
+    })
+
     expect(api.startStitching).toHaveBeenCalledOnce()
   })
 
@@ -213,7 +224,7 @@ describe('CaptureOverlay', () => {
     expect(api.setInputPassthrough).toHaveBeenLastCalledWith(false)
   })
 
-  it('does not render selection dimming while stitching', async () => {
+  it('renders a transparent crop mask without picker chrome while stitching', async () => {
     api.sessionStatus.mockResolvedValue({
       state: 'stitching',
       frame_width: 1000,
@@ -229,8 +240,8 @@ describe('CaptureOverlay', () => {
       await vi.advanceTimersByTimeAsync(160)
     })
 
-    expect(container.querySelector('.selection-dim')).toBeNull()
     expect(container.querySelector('.selection-box')).toBeNull()
+    expect(container.querySelector('.capture-mask')).not.toBeNull()
   })
 
   it('finishes stitching and opens the save dialog on Escape', async () => {
@@ -262,6 +273,35 @@ describe('CaptureOverlay', () => {
       filters: [{ name: 'PNG image', extensions: ['png'] }],
     })
     expect(api.saveImage).toHaveBeenCalledWith('/tmp/rollshot.png')
-    expect(api.stopCapture).not.toHaveBeenCalled()
+    expect(api.stopCapture).toHaveBeenCalledOnce()
+    expect(closeSpy).toHaveBeenCalledOnce()
+  })
+
+  it('closes after Escape when the save dialog is cancelled', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'appended',
+    } satisfies SessionStatus)
+    dialog.save.mockResolvedValue(null)
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await Promise.resolve()
+    })
+
+    expect(api.stopStitching).toHaveBeenCalledOnce()
+    expect(api.saveImage).not.toHaveBeenCalled()
+    expect(api.stopCapture).toHaveBeenCalledOnce()
+    expect(closeSpy).toHaveBeenCalledOnce()
   })
 })

@@ -138,6 +138,13 @@ button:not(:disabled),
     0 0 0 9999px rgba(0, 0, 0, 0.24);
 }
 
+.capture-mask {
+  position: fixed;
+  pointer-events: none;
+  background: transparent;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.24);
+}
+
 .adaptive-stitch-preview {
   position: fixed;
   overflow: hidden;

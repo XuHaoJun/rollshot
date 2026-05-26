@@ -514,25 +514,25 @@ impl SharedSession {
                 return Err("stitching is already running".to_string());
             }
 
-            {
+            let start_seq = {
                 let mut inner = self
                     .inner
                     .lock()
                     .map_err(|_| "session lock poisoned".to_string())?;
                 inner.start_stitching()?;
-            }
+                inner.latest_frame_seq
+            };
 
             self.stitch_stop.store(false, Ordering::Relaxed);
             let session = Arc::clone(self);
             *stitcher = Some(std::thread::spawn(move || {
-                session.stitch_loop();
+                session.stitch_loop(start_seq);
             }));
         }
         Ok(())
     }
 
-    fn stitch_loop(&self) {
-        let mut last_seen_seq = 0_u64;
+    fn stitch_loop(&self, mut last_seen_seq: u64) {
         while !self.stitch_stop.load(Ordering::Relaxed) {
             let next_frame = {
                 let inner = match self.inner.lock() {
@@ -662,6 +662,7 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     fn make_test_frame(width: u32, height: u32) -> CapturedFrame {
@@ -962,6 +963,50 @@ mod tests {
                 output_path: None,
             }
         );
+    }
+
+    #[test]
+    fn shared_start_stitching_skips_stale_latest_frame() {
+        let session = Arc::new(SharedSession::new());
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(scrolling_frame(0));
+            inner.latest_frame_seq = 1;
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+        }
+
+        session.start_stitching().expect("start stitching");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        match session.status().expect("status") {
+            SessionStatus::Stitching { stats, .. } => {
+                assert_eq!(stats.frame_count, 0, "stale latest frame must be skipped");
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
+
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.latest_frame = Some(scrolling_frame(8));
+            inner.latest_frame_seq = 2;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        match session.status().expect("status") {
+            SessionStatus::Stitching { stats, .. } => {
+                assert_eq!(stats.frame_count, 1, "first post-start frame is stitched");
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
+
+        session.stop_capture();
     }
 
     #[test]
