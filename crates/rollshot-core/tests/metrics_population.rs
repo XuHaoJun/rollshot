@@ -128,6 +128,10 @@ fn duplicate_outcome_populates_only_duplicate_stage() {
     );
 
     stitcher.push_frame(frames[0].clone());
+    let snapshot_before = {
+        let m = stitcher.last_metrics();
+        (m.canvas_logical_pixels, m.canvas_allocated_bytes)
+    };
 
     // Find a frame that triggers Duplicate.
     let mut found_duplicate = false;
@@ -143,11 +147,12 @@ fn duplicate_outcome_populates_only_duplicate_stage() {
             assert_eq!(m.verifier_us, 0);
             assert_eq!(m.append_us, 0);
             assert_eq!(m.append_copied_bytes, 0);
-            // The Duplicate path exits before snapshotting canvas state, so
-            // canvas fields stay zero in the per-frame metrics record.
+            // The Duplicate path appends nothing, so canvas state is snapshot
+            // unchanged from the first frame.
             assert_eq!(
-                m.canvas_logical_pixels, 0,
-                "Duplicate path does not snapshot canvas (frame {i})"
+                (m.canvas_logical_pixels, m.canvas_allocated_bytes),
+                snapshot_before,
+                "canvas state should not change for Duplicate (frame {i})"
             );
             found_duplicate = true;
             break;

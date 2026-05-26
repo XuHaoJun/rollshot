@@ -26,14 +26,14 @@ pub struct SyntheticSpec {
     pub step_px: u32,
     /// Absolute jitter range. 0 = no jitter; 2 = each frame's offset varies by
     /// up to ±2 px from `idx * step_px`.
-    pub step_jitter_px: i32,
+    pub step_jitter_px: u32,
     pub frame_count: usize,
     pub sticky_top_band_height: Option<u32>,
 }
 
 impl SyntheticSpec {
     pub fn validate(&self) {
-        let jitter_abs = self.step_jitter_px.unsigned_abs();
+        let jitter_abs = self.step_jitter_px;
         let last_offset = (self.frame_count as u32).saturating_sub(1) * self.step_px + jitter_abs;
         let required_canvas_height = self.frame_height + last_offset;
         assert!(
@@ -85,12 +85,12 @@ impl SyntheticSpec {
     }
 }
 
-fn deterministic_jitter(seed: u64, idx: usize, max_abs: i32) -> i32 {
+fn deterministic_jitter(seed: u64, idx: usize, max_abs: u32) -> i32 {
     let mut h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     h = h.wrapping_add(idx as u64);
     h ^= h >> 32;
-    let span = (2 * max_abs + 1) as i64;
-    (h as i64).rem_euclid(span) as i32 - max_abs
+    let span = 2 * max_abs as u64 + 1;
+    (h % span) as i32 - max_abs as i32
 }
 
 fn paint_sticky_band(frame: &mut RgbaImage, band_h: u32) {

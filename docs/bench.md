@@ -50,7 +50,7 @@ memory pressure rather than the high-water mark of all prior scenarios.
 ## Running locally
 
 ```bash
-# Run all 14 scenarios (11 golden fixtures + 3 synthetic stress), 5 repeats each.
+# Run all 14 scenarios (11 golden fixtures + 3 synthetic stress), 3 repeats each.
 rtk cargo bench -p rollshot-core --bench stitch_sequences
 
 # Subset.
@@ -120,8 +120,9 @@ Two kinds of scenarios exist:
   worker subprocess to get a clean RSS baseline. The orchestrator pays
   ~10 ms × N_scenarios × N_repeats spawn overhead, but workload time
   dominates for any non-trivial scenario.
-- **5 repeats is the default tradeoff.** Enough for stable p50/p95 without
-  making local runs painful (~1–2 minutes total wall time). Override with
-  `--repeats 10` for noisier scenarios.
+- **3 repeats is the default tradeoff.** Enough for a usable p50/p95 without
+  making local runs painful (the synthetic 200-frame scenarios dominate wall
+  time). Override with `--repeats 10` for noisier scenarios, or `--repeats 1`
+  for a quick smoke run.
 - **No CI gate yet.** The bench is local-developer + PR-description-driven.
   If CI gating becomes necessary, it'd build on the same JSONL output.

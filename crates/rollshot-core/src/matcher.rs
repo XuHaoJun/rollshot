@@ -207,7 +207,7 @@ pub(crate) fn estimate_motion(
     metrics.edge_projection_us = edge_start.elapsed().as_micros() as u64;
     candidates.extend(edge_result);
 
-    metrics.verifier_candidates = candidates.len();
+    metrics.verifier_candidates += candidates.len();
     if let Some(candidate) = {
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
         rank_verified_candidates(prev, curr, locked_axis, candidates, config)
@@ -260,6 +260,7 @@ pub(crate) fn estimate_motion(
         }
         FeatureFallbackOutcome::Candidates { candidates } => {
             metrics.fallback_features_extracted = candidates.len();
+            metrics.verifier_candidates += candidates.len();
             let best = candidates.first().copied();
             let result = {
                 let _t = ScopedTimer::new(&mut metrics.verifier_us);
@@ -330,6 +331,8 @@ fn relaxed_coarse_candidate(
         metrics,
     ));
 
+    metrics.verifier_candidates += candidates.len();
+    let _t = ScopedTimer::new(&mut metrics.verifier_us);
     rank_verified_candidates(prev, curr, locked_axis, candidates, config)
 }
 

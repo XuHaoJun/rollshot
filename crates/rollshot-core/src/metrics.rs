@@ -1,9 +1,11 @@
 //! Per-frame instrumentation for the stitching pipeline.
 //!
 //! `StitchMetrics` is populated by `Stitcher::push_frame` and exposed via
-//! `Stitcher::last_metrics()`. Stage timings use `ScopedTimer`, which records
+//! `Stitcher::last_metrics()`. Stage timings use `ScopedTimer`, which adds
 //! elapsed microseconds into a `&mut u64` on drop — so early returns and `?`
-//! propagation still record the time spent in that stage.
+//! propagation still record the time spent in that stage, and a stage that
+//! runs more than once per frame (e.g. the verifier across the primary,
+//! relaxed, and fallback passes) accumulates rather than overwrites.
 //!
 //! Instrumentation is always on (no feature flag). Cost per `push_frame` is on
 //! the order of ten `Instant::now()` calls (~100 ns total), well under 1% of
@@ -63,6 +65,14 @@ pub enum StitchOutcomeKind {
     AxisChanged,
 }
 
+impl StitchMetrics {
+    /// Marks this frame as a `NoMatch` outcome with the given reason.
+    pub(crate) fn set_no_match(&mut self, reason: NoMatchReason) {
+        self.outcome = StitchOutcomeKind::NoMatch;
+        self.no_match_reason = Some(reason);
+    }
+}
+
 impl From<&StitchOutcome> for StitchOutcomeKind {
     fn from(outcome: &StitchOutcome) -> Self {
         match outcome {
@@ -76,11 +86,12 @@ impl From<&StitchOutcome> for StitchOutcomeKind {
     }
 }
 
-/// Records elapsed microseconds into a target field on drop.
+/// Adds elapsed microseconds to a target field on drop.
 ///
 /// Use one per stage inside `push_frame` / `estimate_motion`. The drop-based
 /// design means `?` propagation and early returns still record the time spent
-/// in the stage.
+/// in the stage. Because it accumulates (`+=`) rather than overwrites, a stage
+/// timed more than once in a single frame sums correctly.
 pub(crate) struct ScopedTimer<'a> {
     start: Instant,
     target: &'a mut u64,
@@ -97,7 +108,9 @@ impl<'a> ScopedTimer<'a> {
 
 impl Drop for ScopedTimer<'_> {
     fn drop(&mut self) {
-        *self.target = self.start.elapsed().as_micros() as u64;
+        *self.target = self
+            .target
+            .saturating_add(self.start.elapsed().as_micros() as u64);
     }
 }
 
@@ -115,6 +128,21 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         assert!(target >= 1_000, "expected >=1000 µs, got {target}");
+    }
+
+    #[test]
+    fn scoped_timer_accumulates_across_drops() {
+        let mut target = 0u64;
+        for _ in 0..3 {
+            let _t = ScopedTimer::new(&mut target);
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Three ~1ms stints add up rather than overwriting; the last drop
+        // alone would be ~1000 µs, so anything well above that proves the +=.
+        assert!(
+            target >= 1_500,
+            "expected accumulated total >= 1500 µs across 3 timers, got {target}"
+        );
     }
 
     #[test]

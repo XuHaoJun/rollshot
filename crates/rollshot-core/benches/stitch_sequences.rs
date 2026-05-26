@@ -39,7 +39,7 @@ struct Args {
     out: Option<PathBuf>,
 
     /// Number of repetitions per scenario.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 3)]
     repeats: usize,
 
     /// Skip writing JSONL, only print summary to stdout.
