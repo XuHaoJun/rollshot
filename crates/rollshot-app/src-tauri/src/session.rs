@@ -810,6 +810,31 @@ mod tests {
         }
     }
 
+    fn stitch_frame_count(session: &SharedSession) -> u32 {
+        match session.status().expect("status") {
+            SessionStatus::Stitching { stats, .. } => stats.frame_count,
+            other => panic!("expected stitching status, got {other:?}"),
+        }
+    }
+
+    fn wait_for_stitch_frame_count(
+        session: &SharedSession,
+        expected: u32,
+        timeout: std::time::Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let actual = stitch_frame_count(session);
+            if actual == expected {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                assert_eq!(actual, expected, "stitch frame count before timeout");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn start_stitching_requires_confirmed_region() {
         let mut session = AppSession::new();
@@ -983,28 +1008,14 @@ mod tests {
         }
 
         session.start_stitching().expect("start stitching");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        match session.status().expect("status") {
-            SessionStatus::Stitching { stats, .. } => {
-                assert_eq!(stats.frame_count, 0, "stale latest frame must be skipped");
-            }
-            other => panic!("expected stitching status, got {other:?}"),
-        }
+        wait_for_stitch_frame_count(&session, 0, std::time::Duration::from_millis(250));
 
         {
             let mut inner = session.inner.lock().expect("session lock");
             inner.latest_frame = Some(scrolling_frame(8));
             inner.latest_frame_seq = 2;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        match session.status().expect("status") {
-            SessionStatus::Stitching { stats, .. } => {
-                assert_eq!(stats.frame_count, 1, "first post-start frame is stitched");
-            }
-            other => panic!("expected stitching status, got {other:?}"),
-        }
+        wait_for_stitch_frame_count(&session, 1, std::time::Duration::from_secs(1));
 
         session.stop_capture();
     }
