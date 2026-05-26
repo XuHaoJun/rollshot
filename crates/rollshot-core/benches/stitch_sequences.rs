@@ -229,6 +229,20 @@ fn registered_scenarios() -> Vec<Scenario> {
     out
 }
 
+fn select_scenarios(args: &Args) -> Vec<Scenario> {
+    let all = registered_scenarios();
+    match &args.fixtures {
+        Some(filter) => {
+            let allowed: std::collections::HashSet<&str> =
+                filter.split(',').map(str::trim).collect();
+            all.into_iter()
+                .filter(|s| allowed.contains(s.name.as_str()))
+                .collect()
+        }
+        None => all,
+    }
+}
+
 fn existing_fixture_scenarios() -> Vec<Scenario> {
     let mut large_search_cfg = StitchConfig::default();
     large_search_cfg.max_search_ratio = 0.75;
@@ -311,12 +325,81 @@ fn main() {
         return;
     }
 
-    // Orchestrator mode (Task 12 implements spawn-and-merge).
-    eprintln!("(orchestrator not yet implemented — see Tasks 11–12)");
-    let _ = (args, now);
-    eprintln!("Registered scenarios:");
-    for s in registered_scenarios() {
-        eprintln!("  - {} (has_golden={})", s.name, s.has_golden);
+    // Orchestrator mode.
+    let selected = select_scenarios(&args);
+    if selected.is_empty() {
+        eprintln!("no scenarios matched the --fixtures filter");
+        std::process::exit(2);
+    }
+
+    let out_path = args.out.unwrap_or_else(|| default_out_path(now));
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).expect("create bench output dir");
+    }
+
+    let mut out_file: Option<BufWriter<fs::File>> = if args.no_jsonl {
+        None
+    } else {
+        Some(BufWriter::new(
+            fs::File::create(&out_path).expect("open output JSONL"),
+        ))
+    };
+
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut total_workers = 0usize;
+    let mut failed_workers = 0usize;
+
+    for scenario in &selected {
+        for run in 0..args.repeats {
+            total_workers += 1;
+            eprintln!(
+                "[orchestrator] scenario={} run={}/{}",
+                scenario.name,
+                run + 1,
+                args.repeats
+            );
+            let output = std::process::Command::new(&exe)
+                .arg("--run-single-scenario")
+                .arg(&scenario.name)
+                .arg("--worker-run")
+                .arg(run.to_string())
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    if let Some(file) = out_file.as_mut() {
+                        file.write_all(&o.stdout).expect("write worker stdout");
+                    } else {
+                        io::stdout().write_all(&o.stdout).ok();
+                    }
+                }
+                Ok(o) => {
+                    failed_workers += 1;
+                    eprintln!(
+                        "[orchestrator] worker failed: {}\nstderr: {}",
+                        scenario.name,
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                    if let Some(file) = out_file.as_mut() {
+                        file.write_all(&o.stdout).ok();
+                    }
+                }
+                Err(e) => {
+                    failed_workers += 1;
+                    eprintln!("[orchestrator] failed to spawn worker: {e}");
+                }
+            }
+        }
+    }
+
+    if let Some(mut file) = out_file {
+        file.flush().expect("flush output JSONL");
+    }
+
+    eprintln!(
+        "[orchestrator] done: {total_workers} worker run(s), {failed_workers} failed"
+    );
+    if !args.no_jsonl {
+        eprintln!("[orchestrator] JSONL written to {}", out_path.display());
     }
 }
 
@@ -506,4 +589,53 @@ fn compare_against_golden(actual: &RgbaImage, expected: &RgbaImage) -> (Option<u
     }
     let ratio = mismatched as f32 / total.max(1) as f32;
     (Some(max_chan), Some(ratio))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with_filter(filter: Option<&str>) -> Args {
+        Args {
+            fixtures: filter.map(|s| s.to_string()),
+            out: None,
+            repeats: 1,
+            no_jsonl: false,
+            run_single_scenario: None,
+            worker_run: 0,
+        }
+    }
+
+    #[test]
+    fn select_scenarios_no_filter_returns_all_registered() {
+        let selected = select_scenarios(&args_with_filter(None));
+        assert_eq!(selected.len(), registered_scenarios().len());
+    }
+
+    #[test]
+    fn select_scenarios_filter_returns_matching_subset() {
+        let selected = select_scenarios(&args_with_filter(Some("duplicate_frames,long_vertical_text")));
+        let names: Vec<_> = selected.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["duplicate_frames".to_string(), "long_vertical_text".to_string()]);
+    }
+
+    #[test]
+    fn select_scenarios_filter_unknown_name_returns_empty() {
+        let selected = select_scenarios(&args_with_filter(Some("does_not_exist")));
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn pixel_hash_is_deterministic() {
+        let img = synthetic::make_scroll_canvas(64, 64);
+        assert_eq!(pixel_hash(&img), pixel_hash(&img));
+    }
+
+    #[test]
+    fn pixel_hash_differs_for_different_inputs() {
+        let img1 = synthetic::make_scroll_canvas(64, 64);
+        let mut img2 = img1.clone();
+        img2.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        assert_ne!(pixel_hash(&img1), pixel_hash(&img2));
+    }
 }
