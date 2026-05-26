@@ -395,9 +395,7 @@ fn main() {
         file.flush().expect("flush output JSONL");
     }
 
-    eprintln!(
-        "[orchestrator] done: {total_workers} worker run(s), {failed_workers} failed"
-    );
+    eprintln!("[orchestrator] done: {total_workers} worker run(s), {failed_workers} failed");
     if !args.no_jsonl {
         eprintln!("[orchestrator] JSONL written to {}", out_path.display());
     }
@@ -476,11 +474,7 @@ fn process_and_emit(
     Ok(())
 }
 
-fn run_scenario_worker(
-    scenario: &Scenario,
-    run: usize,
-    out: &mut impl Write,
-) -> io::Result<()> {
+fn run_scenario_worker(scenario: &Scenario, run: usize, out: &mut impl Write) -> io::Result<()> {
     let rss_baseline = rss::read_rss_kb();
     let mut rss_peak = rss_baseline;
     let mut stitcher = Stitcher::new(scenario.config.clone());
@@ -490,8 +484,14 @@ fn run_scenario_worker(
         ScenarioSource::Fixture { family } => {
             for (idx, frame) in load_fixture_frames(family).into_iter().enumerate() {
                 process_and_emit(
-                    &mut stitcher, &scenario.name, run, idx, frame,
-                    &mut counts, &mut rss_peak, out,
+                    &mut stitcher,
+                    &scenario.name,
+                    run,
+                    idx,
+                    frame,
+                    &mut counts,
+                    &mut rss_peak,
+                    out,
                 )?;
             }
         }
@@ -499,8 +499,14 @@ fn run_scenario_worker(
             let base = make_scroll_canvas(spec.canvas_width, spec.canvas_height);
             for (idx, frame) in spec.frames(&base).enumerate() {
                 process_and_emit(
-                    &mut stitcher, &scenario.name, run, idx, frame,
-                    &mut counts, &mut rss_peak, out,
+                    &mut stitcher,
+                    &scenario.name,
+                    run,
+                    idx,
+                    frame,
+                    &mut counts,
+                    &mut rss_peak,
+                    out,
                 )?;
             }
         }
@@ -511,15 +517,17 @@ fn run_scenario_worker(
 
     let (final_logical_pixels, final_allocated_bytes) = stitched
         .as_ref()
-        .map(|img| (
-            img.width() as u64 * img.height() as u64,
-            img.as_raw().len() as u64,
-        ))
+        .map(|img| {
+            (
+                img.width() as u64 * img.height() as u64,
+                img.as_raw().len() as u64,
+            )
+        })
         .unwrap_or((0, 0));
 
     let output_pixel_hash = stitched
         .as_ref()
-        .map(|img| pixel_hash(img))
+        .map(pixel_hash)
         .unwrap_or_else(|| "none".to_string());
 
     let (output_max_channel_diff, output_mismatch_ratio) = if scenario.has_golden {
@@ -595,6 +603,7 @@ fn compare_against_golden(actual: &RgbaImage, expected: &RgbaImage) -> (Option<u
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     fn args_with_filter(filter: Option<&str>) -> Args {
         Args {
             fixtures: filter.map(|s| s.to_string()),
@@ -614,9 +623,17 @@ mod tests {
 
     #[test]
     fn select_scenarios_filter_returns_matching_subset() {
-        let selected = select_scenarios(&args_with_filter(Some("duplicate_frames,long_vertical_text")));
+        let selected = select_scenarios(&args_with_filter(Some(
+            "duplicate_frames,long_vertical_text",
+        )));
         let names: Vec<_> = selected.iter().map(|s| s.name.clone()).collect();
-        assert_eq!(names, vec!["duplicate_frames".to_string(), "long_vertical_text".to_string()]);
+        assert_eq!(
+            names,
+            vec![
+                "duplicate_frames".to_string(),
+                "long_vertical_text".to_string()
+            ]
+        );
     }
 
     #[test]

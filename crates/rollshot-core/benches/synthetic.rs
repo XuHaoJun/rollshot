@@ -65,7 +65,8 @@ impl SyntheticSpec {
             };
             let target_y = (idx as i64 * spec.step_px as i64 + jitter as i64)
                 .max(0)
-                .min((base_canvas.height() - spec.frame_height) as i64) as u32;
+                .min((base_canvas.height() - spec.frame_height) as i64)
+                as u32;
 
             let mut frame = imageops::crop_imm(
                 base_canvas,
@@ -137,7 +138,9 @@ pub fn make_scroll_canvas(width: u32, height: u32) -> RgbaImage {
         }
     }
 
-    for col in [42u32, 96, 154, 211, 268, 340, 410, 480, 540, 620, 690, 760, 830] {
+    for col in [
+        42u32, 96, 154, 211, 268, 340, 410, 480, 540, 620, 690, 760, 830,
+    ] {
         if col >= width {
             continue;
         }
@@ -191,12 +194,17 @@ pub fn default_specs() -> Vec<SyntheticSpec> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
     fn deterministic_jitter_is_reproducible() {
-        let a: Vec<_> = (0..50).map(|i| deterministic_jitter(0xC0FFEE, i, 2)).collect();
-        let b: Vec<_> = (0..50).map(|i| deterministic_jitter(0xC0FFEE, i, 2)).collect();
+        let a: Vec<_> = (0..50)
+            .map(|i| deterministic_jitter(0xC0FFEE, i, 2))
+            .collect();
+        let b: Vec<_> = (0..50)
+            .map(|i| deterministic_jitter(0xC0FFEE, i, 2))
+            .collect();
         assert_eq!(a, b);
     }
 

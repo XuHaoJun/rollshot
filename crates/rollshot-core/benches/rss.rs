@@ -12,7 +12,7 @@ pub fn read_rss_kb() -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     s.lines()
         .find_map(|l| l.strip_prefix("VmRSS:"))
-        .and_then(|rest| rest.trim().split_whitespace().next())
+        .and_then(|rest| rest.split_whitespace().next())
         .and_then(|n| n.parse().ok())
         .unwrap_or(0)
 }
