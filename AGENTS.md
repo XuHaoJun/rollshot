@@ -100,6 +100,49 @@ learn-projects results when needed.
 | `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-app`. |
 | `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
+## 9. docs/ — Snapshots, Not Source of Truth
+
+**Code is the source of truth. `docs/` contains snapshots, not current spec.**
+
+Files in `docs/` fall into two categories, both of which can drift from code:
+
+- **Historical (frozen)**: `docs/superpowers/plans/` and `docs/superpowers/specs/`
+  are snapshots produced by the superpowers workflow. They capture design
+  intent at the time of writing and are **not** updated after implementation
+  or subsequent iteration. Treat as archive.
+- **Forward-looking (research)**: other docs (e.g. `docs/stitching-*.md`,
+  `docs/rollshot_mvp_design.md`) may describe analysis or ideas for upcoming
+  work — they reflect intent, not necessarily what's in code today.
+
+Rules:
+
+- When `docs/` conflicts with code, **code wins**. Always.
+- Do not assume any filename, function, module, flag, or behavior named in
+  `docs/` still exists (or exists yet) — verify against code (use
+  code-review-graph MCP tools below) before relying on it.
+- Do not retroactively edit historical plans/specs in `docs/superpowers/` to
+  "fix" drift; that defeats the purpose of a snapshot. New iteration → new
+  plan/spec, or update the code directly.
+- Do not delete or move files in `docs/` unless explicitly asked.
+
+**Exception — active superpowers workflows.** A plan/spec is **live** (not
+historical) while a superpowers skill is actively driving work against it:
+
+- `superpowers:writing-plans` — the plan being authored is live.
+- `superpowers:executing-plans` / `subagent-driven-development` — the plan
+  being executed is the spec; the executor's job is to make code match plan.
+- `superpowers:verification-before-completion` /
+  `finishing-a-development-branch` — the plan defines success criteria.
+- **User explicitly directs work against a specific plan/spec** (e.g.
+  "implement `docs/superpowers/plans/2026-05-23-foo.md`", "verify against
+  `docs/superpowers/specs/bar.md`") — that file is live for the scope of the
+  request, even without a formal skill invocation.
+
+In these contexts the "code wins on conflict" rule above does **not** apply
+to the plan being worked on — that plan is the source of truth for the
+duration of the workflow. The plan becomes a frozen snapshot only after the
+workflow completes and the branch lands.
+
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
