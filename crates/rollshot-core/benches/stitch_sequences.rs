@@ -320,6 +320,190 @@ fn main() {
     }
 }
 
-fn run_worker(_name: &str, _run: usize) {
-    eprintln!("(worker mode not yet implemented — see Task 11)");
+fn run_worker(name: &str, run: usize) {
+    let scenario = registered_scenarios()
+        .into_iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| {
+            eprintln!("unknown scenario: {name}");
+            std::process::exit(2);
+        });
+
+    let stdout = io::stdout().lock();
+    let mut out = BufWriter::new(stdout);
+
+    if let Err(e) = run_scenario_worker(&scenario, run, &mut out) {
+        let rec = BenchRecord::Error(ErrorRecord {
+            scenario: &scenario.name,
+            run,
+            git_sha: GIT_SHA,
+            frame: None,
+            message: format!("{e:?}"),
+        });
+        let _ = writeln!(out, "{}", serde_json::to_string(&rec).unwrap());
+        let _ = out.flush();
+        std::process::exit(1);
+    }
+    let _ = out.flush();
+}
+
+#[derive(Default)]
+struct OutcomeCounts {
+    total: usize,
+    appended: usize,
+    duplicate: usize,
+    no_match: usize,
+    no_progress: usize,
+    axis_changed: usize,
+}
+
+impl OutcomeCounts {
+    fn record(&mut self, outcome: &StitchOutcome) {
+        self.total += 1;
+        match outcome {
+            StitchOutcome::FirstFrame => {}
+            StitchOutcome::Appended { .. } => self.appended += 1,
+            StitchOutcome::Duplicate => self.duplicate += 1,
+            StitchOutcome::NoMatch { .. } => self.no_match += 1,
+            StitchOutcome::NoProgress { .. } => self.no_progress += 1,
+            StitchOutcome::AxisChanged { .. } => self.axis_changed += 1,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_and_emit(
+    stitcher: &mut Stitcher,
+    scenario_name: &str,
+    run: usize,
+    idx: usize,
+    frame: RgbaImage,
+    counts: &mut OutcomeCounts,
+    rss_peak: &mut u64,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let outcome = stitcher.push_frame(frame);
+    counts.record(&outcome);
+    let metrics = stitcher.last_metrics();
+    let rec = BenchRecord::Frame(make_frame_record(scenario_name, run, metrics));
+    writeln!(out, "{}", serde_json::to_string(&rec).unwrap())?;
+    if idx % 10 == 0 {
+        *rss_peak = (*rss_peak).max(rss::read_rss_kb());
+    }
+    Ok(())
+}
+
+fn run_scenario_worker(
+    scenario: &Scenario,
+    run: usize,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let rss_baseline = rss::read_rss_kb();
+    let mut rss_peak = rss_baseline;
+    let mut stitcher = Stitcher::new(scenario.config.clone());
+    let mut counts = OutcomeCounts::default();
+
+    match &scenario.source {
+        ScenarioSource::Fixture { family } => {
+            for (idx, frame) in load_fixture_frames(family).into_iter().enumerate() {
+                process_and_emit(
+                    &mut stitcher, &scenario.name, run, idx, frame,
+                    &mut counts, &mut rss_peak, out,
+                )?;
+            }
+        }
+        ScenarioSource::Synthetic(spec) => {
+            let base = make_scroll_canvas(spec.canvas_width, spec.canvas_height);
+            for (idx, frame) in spec.frames(&base).enumerate() {
+                process_and_emit(
+                    &mut stitcher, &scenario.name, run, idx, frame,
+                    &mut counts, &mut rss_peak, out,
+                )?;
+            }
+        }
+    }
+    rss_peak = rss_peak.max(rss::read_rss_kb());
+
+    let stitched: Option<RgbaImage> = stitcher.full_image().cloned();
+
+    let (final_logical_pixels, final_allocated_bytes) = stitched
+        .as_ref()
+        .map(|img| (
+            img.width() as u64 * img.height() as u64,
+            img.as_raw().len() as u64,
+        ))
+        .unwrap_or((0, 0));
+
+    let output_pixel_hash = stitched
+        .as_ref()
+        .map(|img| pixel_hash(img))
+        .unwrap_or_else(|| "none".to_string());
+
+    let (output_max_channel_diff, output_mismatch_ratio) = if scenario.has_golden {
+        let family = match &scenario.source {
+            ScenarioSource::Fixture { family } => family.clone(),
+            _ => String::new(),
+        };
+        match (load_golden_image(&family), stitched.as_ref()) {
+            (Some(g), Some(s)) => compare_against_golden(s, &g),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    let summary = BenchRecord::Summary(SummaryRecord {
+        scenario: &scenario.name,
+        run,
+        git_sha: GIT_SHA,
+        peak_rss_kb_delta: rss_peak.saturating_sub(rss_baseline),
+        peak_rss_kb_absolute: rss_peak,
+        total_frames: counts.total,
+        appended: counts.appended,
+        duplicate: counts.duplicate,
+        no_match: counts.no_match,
+        no_progress: counts.no_progress,
+        axis_changed: counts.axis_changed,
+        final_canvas_logical_pixels: final_logical_pixels,
+        final_canvas_allocated_bytes: final_allocated_bytes,
+        output_pixel_hash,
+        output_max_channel_diff,
+        output_mismatch_ratio,
+    });
+    writeln!(out, "{}", serde_json::to_string(&summary).unwrap())?;
+    Ok(())
+}
+
+fn pixel_hash(img: &RgbaImage) -> String {
+    // FNV-1a 64-bit over the raw byte buffer.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in img.as_raw() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+fn compare_against_golden(actual: &RgbaImage, expected: &RgbaImage) -> (Option<u8>, Option<f32>) {
+    if actual.dimensions() != expected.dimensions() {
+        return (Some(255), Some(1.0));
+    }
+    let total = (actual.width() as u64) * (actual.height() as u64);
+    let mut mismatched = 0u64;
+    let mut max_chan: u8 = 0;
+    for (a, e) in actual.pixels().zip(expected.pixels()) {
+        let dr = a[0].abs_diff(e[0]);
+        let dg = a[1].abs_diff(e[1]);
+        let db = a[2].abs_diff(e[2]);
+        let da = a[3].abs_diff(e[3]);
+        let local_max = dr.max(dg).max(db).max(da);
+        if local_max > max_chan {
+            max_chan = local_max;
+        }
+        if local_max > 0 {
+            mismatched += 1;
+        }
+    }
+    let ratio = mismatched as f32 / total.max(1) as f32;
+    (Some(max_chan), Some(ratio))
 }
