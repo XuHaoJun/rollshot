@@ -40,9 +40,24 @@ use image::{imageops, RgbaImage};
 use crate::types::{AppendDirection, ScrollAxis};
 
 /// Compact strips into a single base strip once their combined byte size
-/// exceeds this multiple of the logical canvas. `2` bounds resident memory at
-/// roughly the same level as the old eager `LinearCanvas` while preserving the
-/// `O(frame_h)` amortized append cost.
+/// exceeds this multiple of the logical canvas, preserving `O(frame_h)`
+/// amortized append cost.
+///
+/// Peak RSS floors at `(COMPACT_FACTOR + 1) * logical`: at the compaction
+/// instant the old strips (up to `COMPACT_FACTOR x`) coexist with the freshly
+/// composed base (`1x`). `2` keeps the headline append win; lowering it does
+/// not pay off. Measured on the long_vertical_text fixture vs the f404e61
+/// baseline:
+///
+/// | factor | append p95 vs baseline | peak RSS vs baseline |
+/// |-------:|-----------------------:|---------------------:|
+/// |    2.0 |                   -65% |                 +37% |
+/// |    1.5 |                   -41% |                 +24% |
+///
+/// 1.5 sacrifices ~24pp of the append win for only ~13pp less RSS, with
+/// identical total-frame p50 — not worth it. The real RSS driver is the `1x`
+/// compose buffer, not the factor; shrinking it needs incremental compose
+/// (out of P1 scope).
 const COMPACT_FACTOR: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
