@@ -105,6 +105,11 @@ the combined image.
 image dimensions. `full_image()` composes all strips into a cached `RgbaImage`
 with those dimensions. Appending or prepending invalidates the cache.
 
+`strips` are ordered by paste time, not by spatial position. Composition is
+last-write-wins in that order. This matters for top/left prepends: after
+existing strips are shifted, the new top/left crop must still be pasted after
+the older strips so it overwrites the intentional overlap region.
+
 Use `VecDeque` rather than `Vec` because current behavior supports top/left
 prepend as well as bottom/right append. This keeps the implementation honest
 without designing a future bidirectional scrolling mode.
@@ -133,6 +138,8 @@ content down. The strip representation should express the same final positions:
 - Add the incoming top crop at `y = 0`.
 - Shift existing strips down by `slice_px`.
 - Increase `logical_height` by `slice_px`.
+- Store the new crop after existing strips in paste order so the overlap still
+  overwrites old pixels.
 
 For `Right`, mirror `Bottom` horizontally:
 
@@ -145,6 +152,8 @@ For `Left`, mirror `Top` horizontally:
 - Add the incoming left crop at `x = 0`.
 - Shift existing strips right by `slice_px`.
 - Increase `logical_width` by `slice_px`.
+- Store the new crop after existing strips in paste order so the overlap still
+  overwrites old pixels.
 
 This shifting model is acceptable because normal rollshot captures are
 one-directional after axis/direction lock. Top/left prepends remain correct,
