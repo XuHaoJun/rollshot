@@ -173,6 +173,42 @@ Inside `#[cfg(test)] mod tests`, keep the existing tests and add these helpers/t
         // Output must still be correct after compaction.
         assert_eq!(canvas.height(), 32 + 40 * 4);
     }
+
+    #[test]
+    fn strip_canvas_matches_legacy_repeated_top_prepends() {
+        // Multiple prepends: each shifts all prior strips and overwrites the
+        // overlap. Byte-equivalence must hold after every prepend, not just one.
+        let frames = vec![
+            patterned(9, 8, 2),
+            patterned(9, 8, 12),
+            patterned(9, 8, 22),
+            patterned(9, 8, 32),
+            patterned(9, 8, 42),
+        ];
+        assert_strip_matches_legacy(AppendDirection::Top, &frames, &[2, 3, 2, 3]);
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_mixed_directions_and_compaction() {
+        // Slow bottom appends force at least one compaction (triggers at the
+        // 5th append for these sizes), then a top prepend and a final bottom
+        // append exercise direction changes *after* compaction. Output must
+        // stay byte-identical to legacy through compaction and shifting.
+        let base = patterned(8, 32, 9);
+        let mut legacy = LinearCanvas::new(base.clone());
+        let mut strip = StripCanvas::new(base);
+        let mut ops: Vec<(AppendDirection, u8, u32)> =
+            (0..30u8).map(|i| (AppendDirection::Bottom, 40 + i, 4)).collect();
+        ops.push((AppendDirection::Top, 200, 3));
+        ops.push((AppendDirection::Bottom, 210, 5));
+        for (dir, seed, slice) in ops {
+            let f = patterned(8, 32, seed);
+            assert_eq!(legacy.append(dir, &f, slice), strip.append(dir, &f, slice));
+            assert_images_eq(legacy.image(), strip.image());
+            assert_eq!(legacy.width(), strip.width());
+            assert_eq!(legacy.height(), strip.height());
+        }
+    }
 ```
 
 - [ ] **Step 2: Run the focused test to verify RED**
@@ -194,15 +230,16 @@ Expected: FAIL to compile with an error like `use of undeclared type StripCanvas
 - [ ] **Step 1: Replace the production canvas struct**
 
 Before replacing the production type, copy the current `LinearCanvas` struct and
-impl into `#[cfg(test)] mod tests` as `LegacyLinearCanvas`. Then update the
-Task 1 helper to use it:
+impl into `#[cfg(test)] mod tests` as `LegacyLinearCanvas`. Then update **every**
+`LinearCanvas` reference in the Task 1 tests to `LegacyLinearCanvas` — both the
+`assert_strip_matches_legacy` helper and the inline mixed-direction test:
 
 ```rust
 let mut legacy = LegacyLinearCanvas::new(frames[0].clone());
 ```
 
-The helper must keep the old eager append methods exactly so equivalence tests
-compare against the pre-P1 behavior.
+`LegacyLinearCanvas` must keep the old eager append methods exactly so
+equivalence tests compare against the pre-P1 behavior.
 
 In `crates/rollshot-core/src/canvas.rs`, change imports:
 
@@ -229,10 +266,14 @@ struct CanvasStrip {
     image: RgbaImage,
     x: i64,
     y: i64,
-    slice_px: u32,
-    overlap_px: u32,
 }
 ```
+
+`CanvasStrip` carries only what composition reads: the crop and its paste
+position. `slice_px`/`overlap_px` are intentionally **not** stored — nothing
+reads them (compose uses `x`/`y`; metrics use `last_append_copied_bytes`), so
+keeping them would trip `clippy -D warnings` with "field is never read". The
+overlap/slice quantities still exist as locals inside the append methods.
 
 Implement the constructor/accessors:
 
@@ -246,8 +287,6 @@ impl StripCanvas {
             image: first_frame,
             x: 0,
             y: 0,
-            slice_px: logical_height,
-            overlap_px: 0,
         });
         Self {
             axis: None,
@@ -393,8 +432,6 @@ Add the methods with paste-order semantics. New strips always `push_back`; top/l
             image: crop,
             x: 0,
             y: paste_y,
-            slice_px,
-            overlap_px,
         });
         self.logical_height += slice_px;
         slice_px
@@ -414,8 +451,6 @@ Add the methods with paste-order semantics. New strips always `push_back`; top/l
             image: crop,
             x: 0,
             y: 0,
-            slice_px,
-            overlap_px,
         });
         self.logical_height += slice_px;
         slice_px
@@ -434,8 +469,6 @@ Add the methods with paste-order semantics. New strips always `push_back`; top/l
             image: crop,
             x: paste_x,
             y: 0,
-            slice_px,
-            overlap_px,
         });
         self.logical_width += slice_px;
         slice_px
@@ -455,8 +488,6 @@ Add the methods with paste-order semantics. New strips always `push_back`; top/l
             image: crop,
             x: 0,
             y: 0,
-            slice_px,
-            overlap_px,
         });
         self.logical_width += slice_px;
         slice_px
@@ -499,8 +530,6 @@ Add:
             image: base,
             x: 0,
             y: 0,
-            slice_px: 0,
-            overlap_px: 0,
         });
     }
 ```

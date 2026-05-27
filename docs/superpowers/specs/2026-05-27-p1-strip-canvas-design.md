@@ -92,8 +92,6 @@ struct CanvasStrip {
     image: RgbaImage,
     x: i64,
     y: i64,
-    slice_px: u32,
-    overlap_px: u32,
 }
 ```
 
@@ -222,8 +220,6 @@ fn compact_if_needed(&mut self) {
         image: base,
         x: 0,
         y: 0,
-        slice_px: 0,
-        overlap_px: 0,
     });
 }
 ```
@@ -242,8 +238,11 @@ invalidation. Properties:
   grows, so `p95_append_us` still improves; `p99`/`max_append_us` may show
   occasional compaction spikes and should be reported as such.
 
-A composed base strip carries `slice_px = 0` / `overlap_px = 0`; those fields are
-metadata only and are not read during composition.
+`CanvasStrip` stores only `image`/`x`/`y` — the slice/overlap quantities are
+locals inside the append methods, not strip fields, because nothing reads them
+back (composition uses `x`/`y`; per-append copy is tracked by
+`last_append_copied_bytes`). Storing them would trip `clippy -D warnings` with
+"field is never read".
 
 ## Metrics
 
