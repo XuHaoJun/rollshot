@@ -395,7 +395,54 @@ fn overlay_copy(dst: &mut RgbaImage, src: &RgbaImage, x: i64, y: i64) {
 }
 ```
 
-### 3.8 測試
+### 3.8 記憶體陷阱：overlap 冗餘與 compaction
+
+把每次 append 的 slice 當成 immutable strip 保存，會把 overlap 區域冗餘地留下
+來。在 overlap-and-overwrite 下，一個 bottom strip 存
+`total_slice = min(frame_h, slice_px + overlap_px)` 列，但只淨增 `slice_px` 列。
+當 `slice_px < frame_h/2`（慢速捲動）時，每個 strip 存 `frame_h/2` 列卻只淨增
+`slice_px`，於是 strip 總位元組會膨脹到約 `frame_h / (2 * slice_px)` 倍的
+logical canvas。
+
+以 P0 benchmark 場景（`frame_h=700`、`slice_px≈40`）為例，約是最終 canvas 的
+**8 倍**，會讓 peak RSS 比 `LinearCanvas` **更差**數倍，而不是更好。overlap 不能
+丟——覆寫它正是遮蔽 sticky header 的機制（這也是 wayscrollshot 只存淨新列、因此
+沒有 overwrite 語義的原因）。所以冗餘要靠 compaction 回收，而不是省略 overlap。
+
+當 strip 總位元組超過 `COMPACT_FACTOR * logical_bytes`（預設
+`COMPACT_FACTOR = 2`）時，把所有 strips compose 成單一 base strip，清空 deque：
+
+```rust
+const COMPACT_FACTOR: u64 = 2;
+
+fn compact_if_needed(&mut self) {
+    let logical_bytes = self.logical_pixels() * 4;
+    let strip_bytes: u64 = self.strips.iter()
+        .map(|s| s.image.as_raw().len() as u64).sum();
+    if strip_bytes <= logical_bytes.saturating_mul(COMPACT_FACTOR) {
+        return;
+    }
+    self.compose_if_needed();
+    let base = self.composed_cache.take().expect("composed");
+    self.strips.clear();
+    self.strips.push_back(CanvasStrip {
+        image: base, x: 0, y: 0, slice_px: 0, overlap_px: 0,
+    });
+}
+```
+
+`compact_if_needed` 在每次 append 結尾（cache 失效後）執行：
+
+- 常駐 strip 記憶體有界於 `~COMPACT_FACTOR * logical`，約等於 `LinearCanvas` 的
+  暫態峰值。
+- append 仍是 `O(frame_h)` 攤銷：壓平之間 strips 增加
+  `(COMPACT_FACTOR - 1) * logical` 位元組，每次壓平 `O(logical)`，故攤銷後每幀
+  copy 與 canvas 高度無關，保留對 `LinearCanvas` `O(canvas_h)` 的延遲優勢。
+- 壓平那幀本身會 spike 到 `O(logical)` copy 加暫態 `~3 * logical` 配置；隨 canvas
+  變大而越來越罕見，因此 `p95` 仍改善，但 `p99`/`max` 可能出現壓平 spike，應如實
+  報告。
+
+### 3.9 測試
 
 新增：
 
@@ -426,11 +473,15 @@ fn strip_canvas_full_image_is_stable_after_multiple_calls() {}
 3. 每 append 一次比較 `full_image()`。
 4. 允許 0 diff，因為這是純資料結構替換。
 
-### 3.9 驗收條件
+### 3.10 驗收條件
 
 - `full_image()` output 與 legacy byte-identical。
 - append p95 latency 不隨 `canvas_h` 線性上升。
-- 長圖 peak RSS 明顯下降。
+- 透過 compaction，長圖 peak RSS 有界於 `~COMPACT_FACTOR * logical`，與
+  `LinearCanvas` baseline 相當而非數倍；若爆成 baseline 的數倍代表 compaction 沒
+  運作，屬失敗而非可接受的 tradeoff。
+- 有 unit test 證明在慢速捲動（`slice_px < frame_h/2`）序列下 strip+cache 位元組
+  維持有界。
 - 所有 existing tests pass。
 - `StripCanvas` 可先藏在 feature flag：
 
