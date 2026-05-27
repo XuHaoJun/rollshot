@@ -1,4 +1,4 @@
-# P3 — Fast NCC with Integral Stats and `wide` SIMD (Design)
+# P3 — Fast NCC with Fused Single-Pass `wide` SIMD (Design)
 
 > Roadmap source: `docs/stitching-rollshot-optimizations-2.md` §5 (P3). This
 > spec is **live** for the duration of the P3 workflow. It is the source of
@@ -13,10 +13,14 @@ Today `ncc_score_shifted` scans the clipped overlap twice for every refinement
 offset: once to compute means and once to compute covariance/variance. P3
 changes this to fast normalized cross-correlation:
 
-- integral images provide O(1) `sum` and `sum_sq` for each frame window;
-- `wide::f32x8` computes the remaining cross term (`sum_xy`) over contiguous
-  row spans;
+- a single fused `wide::f32x8` pass over the clipped overlap accumulates all
+  five sums at once (`sum_x`, `sum_x2`, `sum_y`, `sum_y2`, `sum_xy`);
 - final NCC is computed from those sums.
+
+No integral image is built: because `sum_xy` must scan every pixel of the rect
+anyway, the four normalization sums are accumulated in that same pass for free.
+This avoids ~168MB of resident f64 tables on a retina pair (prev + curr) plus a
+full-frame build pass, with no per-offset asymptotic loss.
 
 This is a performance change only. Candidate ranking may differ by small
 floating-point tolerance, but verifier-facing outcomes and golden outputs must
@@ -24,15 +28,21 @@ not regress.
 
 ## Decisions
 
-- Raise workspace MSRV from Rust 1.85 to Rust 1.89.
+- Raise the workspace MSRV only if `wide 1.4.0` actually requires it, and then
+  only to the minimum version it needs. Verify with `cargo check` on the current
+  floor (1.85); do not bump to 1.89 speculatively.
 - Add `wide = "1.4.0"` as a normal `rollshot-core` dependency.
-- Do not add a SIMD feature flag. The production path uses `wide` by default.
+- Do not add a SIMD feature flag. The production path uses `wide` by default;
+  `wide` itself falls back to a software implementation where there is no
+  hardware SIMD, so no separate scalar path is maintained.
 - Do not require `RUSTFLAGS="-C target-cpu=native"` or non-baseline target
   features for release builds.
 - Keep the old two-pass NCC implementation only under `#[cfg(test)]` for
   equivalence tests.
-- Store integral images on `PreparedFrame` via lazy cache, not as ad hoc values
-  threaded beside gray buffers.
+- Do not build an integral image. Compute all five NCC sums in one fused `wide`
+  pass over the overlap rect; `PreparedFrame` gains no new field.
+- Reject windows whose variance is `≤ 1.0` (matching legacy `ncc_score_shifted`),
+  not `≤ 1e-9`, so low-texture matcher outcomes are preserved.
 
 ## Current State (Verified Against Code, 2026-05-27)
 
@@ -48,15 +58,15 @@ not regress.
 - `ncc_score_shifted` is the P3 hot function. It computes overlap/region
   clipping, scans for means, then scans again for numerator and variances.
 - `PreparedFrame` currently owns RGBA, duplicate signature, eager `gray`, lazy
-  coarse samples, and lazy edge projections. It does not yet cache integral
-  images.
+  coarse samples, and lazy edge projections. P3 adds no new cached field — the
+  fused NCC pass reads the existing `gray` buffer directly.
 - `rollshot-core` currently depends on `image`, `imageproc`, and `rayon`. It has
   no `[features]` section.
 
 ## Platform and Dependency Notes
 
-`wide` 1.4.0 is acceptable for P3 after raising MSRV to 1.89. Its documented
-platform model is:
+`wide` 1.4.0 is acceptable for P3 (raise MSRV only if it requires it; see
+Decisions). Its documented platform model is:
 
 - explicit SIMD on `x86`, `x86_64`, `wasm32`, and `aarch64 neon`;
 - LLVM/autovec or scalar fallback elsewhere;
@@ -75,59 +85,35 @@ For rollshot this means:
 
 ## Architecture
 
-### `IntegralImage`
+### `NccSums`
 
-Add a matcher-internal summed-area table:
+The fused pass returns a small struct carrying the five sums — no summed-area
+table:
 
 ```rust
-struct IntegralImage {
-    width: usize,
-    height: usize,
-    sum: Vec<f64>,
-    sum_sq: Vec<f64>,
+struct NccSums {
+    n: f64,
+    sum_x: f64,
+    sum_x2: f64,
+    sum_y: f64,
+    sum_y2: f64,
+    sum_xy: f64,
 }
 ```
 
-The buffer shape is `(width + 1) * (height + 1)` so rectangle queries do not
-need edge branches. `sum` and `sum_sq` use `f64` to avoid unnecessary
-accumulation error on larger frames.
-
-APIs:
-
-```rust
-impl IntegralImage {
-    fn from_gray_f32(gray: &[f32], width: usize, height: usize) -> Self;
-    fn rect_sum(&self, x: usize, y: usize, w: usize, h: usize) -> f64;
-    fn rect_sum_sq(&self, x: usize, y: usize, w: usize, h: usize) -> f64;
-}
-```
-
-`IntegralImage` can live in `matcher.rs` for the first P3 patch. If the matcher
-file becomes harder to reason about during implementation, move NCC-specific
-helpers into a private `ncc.rs` module. Do not widen public API solely for this.
+Sums accumulate in `f64` (lane reduction plus the scalar tail) to avoid
+accumulation error on larger frames. The NCC-specific helpers can live in
+`matcher.rs` for the first P3 patch; if the file becomes harder to reason about,
+move them into a private `ncc.rs` module. Do not widen public API solely for
+this.
 
 ### `PreparedFrame`
 
-Extend `PreparedFrame` with a lazy integral cache:
-
-```rust
-integral: OnceLock<IntegralImage>,
-```
-
-Add a private accessor:
-
-```rust
-fn integral(&self) -> &IntegralImage {
-    self.integral.get_or_init(|| {
-        IntegralImage::from_gray_f32(&self.gray, self.width as usize, self.height as usize)
-    })
-}
-```
-
-The integral is lazy so duplicate frames and match paths that never reach
-template refine do not pay for it. The first template refine for a frame builds
-the integral under the existing `template_ncc_us` timing. That attribution is
-acceptable because the cache exists specifically to accelerate NCC.
+`PreparedFrame` is **not** extended. There is no integral cache and no new
+field; the fused pass reads the existing `gray()` buffer for both frames. An
+integral cache was considered and rejected (see Goal): it would add ~168MB
+resident on a retina pair for no per-offset speedup, since `sum_xy` scans the
+rect regardless.
 
 ### Matcher Flow
 
@@ -148,8 +134,7 @@ fn template_candidates(
 
 `search_template_axis` can then access:
 
-- `prev.gray()` and `curr.gray()` for `sum_xy`;
-- `prev.integral()` and `curr.integral()` for `sum`, `sum_sq`;
+- `prev.gray()` and `curr.gray()` for the fused sums pass;
 - dimensions from `PreparedFrame`.
 
 This keeps derived data ownership coherent and avoids threading four related
@@ -165,55 +150,59 @@ buffers through every helper.
 3. Return `f32::MIN` if the clipped rectangle is empty.
 4. Convert the previous-frame rectangle to the matching current-frame
    rectangle by subtracting `(dx, dy)`.
-5. Compute:
-   - `n = rect_w * rect_h`
-   - `sum_prev`, `sum_prev_sq` from `prev.integral()`
-   - `sum_curr`, `sum_curr_sq` from `curr.integral()`
-   - `sum_xy` with the `wide` dot scan
-6. Compute NCC:
+5. Run one fused `wide` pass over the rect, producing `NccSums` with
+   `n = rect_w * rect_h` and `sum_x`, `sum_x2`, `sum_y`, `sum_y2`, `sum_xy`.
+6. Compute NCC from the sums (`ncc_from_sums`):
 
 ```rust
-let numerator = sum_xy - (sum_prev * sum_curr / n);
-let prev_var = sum_prev_sq - (sum_prev * sum_prev / n);
-let curr_var = sum_curr_sq - (sum_curr * sum_curr / n);
+let numerator = sum_xy - (sum_x * sum_y / n);
+let prev_var = sum_x2 - (sum_x * sum_x / n);
+let curr_var = sum_y2 - (sum_y * sum_y / n);
 
-if prev_var <= 1e-9 || curr_var <= 1e-9 {
+// var here is the sum-of-squared-deviations (Σx² − (Σx)²/n) — the same
+// quantity and scale legacy `ncc_score_shifted` thresholds on. Use legacy's
+// ≤ 1.0 floor (NOT 1e-9) so near-flat / low-texture windows that legacy
+// rejected are not silently scored — preserving matcher outcomes.
+if prev_var <= 1.0 || curr_var <= 1.0 {
     return f32::MIN;
 }
 
 (numerator / (prev_var * curr_var).sqrt()) as f32
 ```
 
-Use a small positive variance epsilon for numerical stability. The production
-function should return `f32::MIN` on unusable windows, matching current
-`ncc_score_shifted` behavior for zero/near-zero variance.
+The production function returns `f32::MIN` on unusable windows, matching current
+`ncc_score_shifted` behavior. `ncc_from_sums` is split out from the fused pass so
+the formula and its threshold are unit-testable without building frames.
 
-## `wide` Cross Term
+## Fused `wide` Sums
 
-Implement the cross term as a row-contiguous dot product:
+Implement the five sums as one row-contiguous pass:
 
 ```rust
-fn dot_wide_f32(
+fn fused_sums_wide(
     prev_gray: &[f32],
     curr_gray: &[f32],
     width: usize,
     prev_rect: Region,
     curr_rect: Region,
-) -> f64
+) -> NccSums
 ```
 
-For each row:
+For each row, slice `prev`/`curr` to the rect width and iterate with
+`chunks_exact(8)`:
 
-- process chunks of 8 pixels with `wide::f32x8`;
-- accumulate into one or more `f32x8` lanes;
-- finish the row tail with scalar math;
-- reduce SIMD lanes to `f64` and add the scalar tail as `f64`.
+- per 8-pixel chunk, build two `f32x8` and accumulate `sum_x`, `sum_x2`,
+  `sum_y`, `sum_y2`, `sum_xy` into five `f32x8` lane accumulators;
+- finish the `< 8` `chunks_exact(...).remainder()` tail in scalar `f64`;
+- reduce the SIMD lanes to `f64` and add the scalar tail.
 
-Do not use `unsafe`. `wide::f32x8::from([f32; 8])` is acceptable for the first
-implementation. If benchmark results show load construction overhead is
-material, a follow-up can revisit layout/load strategy.
+Use `chunks_exact(8)` rather than indexed reads: the slice makes the in-bounds
+length provable, so the compiler elides the per-lane bounds checks — important
+because the workspace sets `unsafe_code = "forbid"`, so `get_unchecked` is
+unavailable. Build each vector with
+`wide::f32x8::from(<[f32; 8]>::try_from(chunk).unwrap())`.
 
-The dot helper is intentionally private. P3 does not create a general SIMD
+The helper is intentionally private. P3 does not create a general SIMD
 abstraction layer.
 
 ## Metrics
@@ -229,8 +218,10 @@ represent logical pixels compared, not physical loop visits. It may stay as the
 current structural estimate (`offsets.len() * region_area`) so benchmark
 comparisons remain compatible with earlier P0/P2 reports.
 
-The integral build time is counted in `template_ncc_us` because it is demanded
-by template refine and amortized across offsets for a frame pair.
+There is no integral build to attribute; the fused pass is the only NCC work for
+a frame pair and is already inside `template_ncc_us`. The fused pass visits each
+pixel once (legacy visited twice), so the `#[cfg(test)]` budget counter
+`full_res_ncc_pixel_visits` drops and stays under its existing ceiling.
 
 ## Benchmark Gate
 
@@ -273,24 +264,28 @@ version the raw JSONL.
 The report must specifically address `template_ncc_us` p50, which is the NCC
 field emitted by `scripts/bench/compare.py`. A successful P3 should reduce NCC
 time on NCC-heavy scenarios. If the measured improvement is small, the report
-must explain whether integral construction, rayon overhead, memory bandwidth,
-or scenario mix likely dominated.
+must explain whether rayon overhead, memory bandwidth, SIMD lane utilization, or
+scenario mix likely dominated.
 
 ## Tests
 
 Add focused unit tests near matcher tests:
 
-- `integral_rect_sum_matches_naive_sum`
-- `integral_rect_sum_sq_matches_naive_sum_sq`
-- `fast_ncc_matches_legacy_ncc_for_random_rects`
+- `ncc_from_sums_rejects_low_variance` (the `≤ 1.0` floor, tested directly)
+- `ncc_from_sums_matches_pearson_for_known_vectors`
+- `fast_ncc_matches_legacy_ncc_across_widths_and_axes`
+- `fast_ncc_rejects_low_variance_windows_like_legacy`
 - `fast_ncc_preserves_best_offset_on_synthetic_scroll`
 - `fast_ncc_handles_constant_windows_as_no_score`
-- `repeated_grid_is_still_rejected_by_second_best_margin`
 
-`fast_ncc_matches_legacy_ncc_for_random_rects` should compare scores with a
-tolerance, not exact equality. A starting tolerance of `1e-4` is reasonable
-because legacy NCC accumulates in `f32` while fast NCC uses `f64` for sums and
-may use different SIMD reduction order for `sum_xy`.
+`fast_ncc_matches_legacy_ncc_across_widths_and_axes` must (a) use rect widths
+that are NOT multiples of 8 so the scalar tail is exercised, and (b) cover both
+vertical (`dx=0`) and horizontal (`dy=0`) shifts. Compare with a tolerance, not
+exact equality: a starting `1e-4` is reasonable because legacy NCC accumulates in
+`f32` while fused NCC uses `f64` sums and a different SIMD reduction order for
+`sum_xy`. Repeated-grid ambiguity and full-pipeline outcomes are covered by the
+existing golden-fixture tests, so no new dedicated repeated-grid unit test is
+required.
 
 Existing tests that must keep passing:
 
@@ -315,8 +310,10 @@ rtk python3 scripts/bench/compare.py \
 
 ## Acceptance Criteria
 
-- Workspace MSRV is Rust 1.89 and dependency resolution uses `wide` 1.4.0.
-- Production NCC refine path uses integral stats plus `wide` cross term.
+- Dependency resolution uses `wide` 1.4.0; workspace MSRV is raised only if
+  `wide` requires it, and only to the minimum needed.
+- Production NCC refine path uses a single fused `wide` pass computing all five
+  NCC sums (no integral image), with the `≤ 1.0` variance reject floor.
 - Legacy two-pass NCC is test-only.
 - Golden sequence outputs do not regress.
 - Repeated-grid ambiguity rejection still holds.
@@ -334,7 +331,7 @@ rtk python3 scripts/bench/compare.py \
 | Risk | Mitigation |
 |---|---|
 | Floating-point differences alter candidate ordering | Keep legacy NCC under tests, compare with tolerance, and verify final golden outputs. |
-| Integral cache increases memory | Build lazily; one integral per `PreparedFrame`; measure peak RSS in benchmark report. |
+| Fused pass changes low-variance outcomes vs legacy | Use legacy's `≤ 1.0` reject floor; add a low-variance equivalence test plus golden fixtures. |
 | `wide` speedup is limited by row load overhead or memory bandwidth | Bench first implementation; only optimize load strategy if `template_ncc_us` remains high. |
 | Build accidentally depends on host-only CPU features | Do not require `target-cpu=native`; document that distributed binaries use baseline target features. |
 | Matcher signatures churn too much | Limit signature changes to template refine helpers and keep public crate API unchanged. |
