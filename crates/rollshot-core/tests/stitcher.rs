@@ -439,3 +439,37 @@ fn fast_hnsw_candidate_rejected_by_verifier_preserves_best_estimate() {
         other => panic!("expected FeatureLowInliers with best_estimate, got {other:?}"),
     }
 }
+
+#[test]
+fn appended_advances_anchor_to_latest_frame() {
+    let canvas = make_scroll_canvas(320, 1200);
+    let f0 = crop_frame(&canvas, 0, 320);
+    let f1 = crop_frame(&canvas, 80, 320);
+    let f2 = crop_frame(&canvas, 160, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(f0), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(f1) {
+        StitchOutcome::Appended { added, .. } => {
+            assert!((76..=84).contains(&added), "f0->f1 added={added}");
+        }
+        other => panic!("expected Appended, got {other:?}"),
+    }
+
+    // If the anchor advanced to f1, f1->f2 is a +80 scroll (added ~80). If it
+    // had wrongly stayed at f0, f0->f2 is +160 and `added` would be ~160 (or a
+    // NoMatch) — either way the 76..=84 assert below fails.
+    match stitcher.push_frame(f2) {
+        StitchOutcome::Appended {
+            added, direction, ..
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert!(
+                (76..=84).contains(&added),
+                "f1->f2 added={added} (anchor did not advance to f1)"
+            );
+        }
+        other => panic!("expected Appended, got {other:?}"),
+    }
+}

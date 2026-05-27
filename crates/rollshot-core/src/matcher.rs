@@ -1,5 +1,6 @@
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
+use std::sync::OnceLock;
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome};
@@ -96,10 +97,12 @@ fn estimate_motion_with_budget(
         assert!(active.is_none(), "nested search budgets are not supported");
         *active = Some(SearchBudget::default());
     }
+    let prev_prepared = PreparedFrame::new(prev.clone());
+    let curr_prepared = PreparedFrame::new(curr.clone());
     let mut throwaway_metrics = StitchMetrics::default();
     let result = estimate_motion(
-        prev,
-        curr,
+        &prev_prepared,
+        &curr_prepared,
         locked_axis,
         last_motion,
         config,
@@ -134,8 +137,8 @@ fn with_active_search_budget(f: impl FnOnce(&mut SearchBudget)) {
 }
 
 pub(crate) fn estimate_motion(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     config: &StitchConfig,
@@ -166,24 +169,19 @@ pub(crate) fn estimate_motion(
         };
     }
 
-    let width = prev.width();
-    let height = prev.height();
-    let (prev_gray, curr_gray) = {
-        let _t = ScopedTimer::new(&mut metrics.prepare_frame_us);
-        (to_grayscale(prev), to_grayscale(curr))
-    };
+    let (width, height) = prev.dimensions();
 
     let mut candidates = Vec::new();
     let coarse = {
         let _t = ScopedTimer::new(&mut metrics.coarse_us);
-        coarse_candidates(&prev_gray, &curr_gray, width, height, locked_axis, config)
+        coarse_candidates(prev, curr, locked_axis, config)
     };
     metrics.coarse_candidates = coarse.len();
     candidates.extend(coarse.iter().copied());
     let template_start = std::time::Instant::now();
     let template_result = template_candidates(
-        &prev_gray,
-        &curr_gray,
+        prev.gray(),
+        curr.gray(),
         width,
         height,
         locked_axis,
@@ -195,22 +193,14 @@ pub(crate) fn estimate_motion(
     metrics.template_ncc_us = template_start.elapsed().as_micros() as u64;
     candidates.extend(template_result);
     let edge_start = std::time::Instant::now();
-    let edge_result = edge_projection_candidates(
-        &prev_gray,
-        &curr_gray,
-        width,
-        height,
-        locked_axis,
-        config,
-        metrics,
-    );
+    let edge_result = edge_projection_candidates(prev, curr, locked_axis, config, metrics);
     metrics.edge_projection_us = edge_start.elapsed().as_micros() as u64;
     candidates.extend(edge_result);
 
     metrics.verifier_candidates += candidates.len();
     if let Some(candidate) = {
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
-        rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+        rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
     } {
         return MotionSearchOutcome::Candidate(candidate);
     }
@@ -221,24 +211,15 @@ pub(crate) fn estimate_motion(
     // to the feature matcher, retry coarse with the ratio pushed near the
     // geometric ceiling so we can recover the candidate through the same
     // downsampled MAD path used in steady-state.
-    if let Some(candidate) = relaxed_coarse_candidate(
-        prev,
-        curr,
-        &prev_gray,
-        &curr_gray,
-        width,
-        height,
-        locked_axis,
-        last_motion,
-        config,
-        metrics,
-    ) {
+    if let Some(candidate) =
+        relaxed_coarse_candidate(prev, curr, locked_axis, last_motion, config, metrics)
+    {
         return MotionSearchOutcome::Candidate(candidate);
     }
 
     let fallback_outcome = {
         let _t = ScopedTimer::new(&mut metrics.fallback_us);
-        feature_fallback_candidates(prev, curr, locked_axis, config)
+        feature_fallback_candidates(prev.rgba(), curr.rgba(), locked_axis, config)
     };
     match fallback_outcome {
         FeatureFallbackOutcome::Disabled => MotionSearchOutcome::NoMatch {
@@ -264,7 +245,7 @@ pub(crate) fn estimate_motion(
             let best = candidates.first().copied();
             let result = {
                 let _t = ScopedTimer::new(&mut metrics.verifier_us);
-                rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+                rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
             };
             match result {
                 Some(candidate) => MotionSearchOutcome::Candidate(candidate),
@@ -279,14 +260,9 @@ pub(crate) fn estimate_motion(
 
 const RELAXED_SEARCH_RATIO: f32 = 0.85;
 
-#[allow(clippy::too_many_arguments)]
 fn relaxed_coarse_candidate(
-    prev: &RgbaImage,
-    curr: &RgbaImage,
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    height: u32,
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     config: &StitchConfig,
@@ -297,18 +273,12 @@ fn relaxed_coarse_candidate(
     if config.max_search_ratio >= RELAXED_SEARCH_RATIO - 0.05 {
         return None;
     }
+    let (width, height) = prev.dimensions();
 
     let mut relaxed_cfg = config.clone();
     relaxed_cfg.max_search_ratio = RELAXED_SEARCH_RATIO;
 
-    let coarse = coarse_candidates(
-        prev_gray,
-        curr_gray,
-        width,
-        height,
-        locked_axis,
-        &relaxed_cfg,
-    );
+    let coarse = coarse_candidates(prev, curr, locked_axis, &relaxed_cfg);
     metrics.coarse_candidates = metrics.coarse_candidates.max(coarse.len());
     if coarse.is_empty() {
         return None;
@@ -320,8 +290,8 @@ fn relaxed_coarse_candidate(
     // accept on the same min_overlap budget.
     let mut candidates = coarse.clone();
     candidates.extend(template_candidates(
-        prev_gray,
-        curr_gray,
+        prev.gray(),
+        curr.gray(),
         width,
         height,
         locked_axis,
@@ -333,7 +303,7 @@ fn relaxed_coarse_candidate(
 
     metrics.verifier_candidates += candidates.len();
     let _t = ScopedTimer::new(&mut metrics.verifier_us);
-    rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+    rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
 }
 
 fn rank_verified_candidates(
@@ -614,17 +584,16 @@ fn match_width_region(region: Region, match_width: u32) -> Region {
 }
 
 fn coarse_candidates(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    height: u32,
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
+    let (width, height) = prev.dimensions();
     let step = COARSE_DOWNSAMPLE_STEP as i32;
-    let (sample_w, sample_h) = coarse_sample_dimensions(width, height, COARSE_DOWNSAMPLE_STEP);
-    let prev_samples = coarse_samples(prev_gray, width, height, COARSE_DOWNSAMPLE_STEP);
-    let curr_samples = coarse_samples(curr_gray, width, height, COARSE_DOWNSAMPLE_STEP);
+    let (sample_w, sample_h) = prev.coarse_dims;
+    let prev_samples = prev.coarse();
+    let curr_samples = curr.coarse();
     let max_dx = ((width as f32 * config.max_search_ratio) as i32 / step).max(0);
     let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
 
@@ -635,8 +604,8 @@ fn coarse_candidates(
             SearchAxis::Horizontal => max_dx,
         };
         if let Some(candidate) = coarse_axis_candidate(
-            &prev_samples,
-            &curr_samples,
+            prev_samples,
+            curr_samples,
             sample_w,
             sample_h,
             *axis,
@@ -761,21 +730,25 @@ fn coarse_mad(
 }
 
 fn edge_projection_candidates(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    height: u32,
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
     let _ = metrics; // reserved for edge-stage counters; timing is captured by the outer ScopedTimer.
+    let (width, height) = prev.dimensions();
     let mut out = Vec::new();
 
     for axis in search_axes(locked_axis) {
-        if let Some(candidate) =
-            edge_projection_axis(prev_gray, curr_gray, width, height, *axis, config)
-        {
+        if let Some(candidate) = edge_projection_axis(
+            prev.projection(*axis),
+            curr.projection(*axis),
+            width,
+            height,
+            *axis,
+            config,
+        ) {
             out.push(candidate);
         }
     }
@@ -784,8 +757,8 @@ fn edge_projection_candidates(
 }
 
 fn edge_projection_axis(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
+    prev_proj: &[f32],
+    curr_proj: &[f32],
     width: u32,
     height: u32,
     axis: SearchAxis,
@@ -799,16 +772,9 @@ fn edge_projection_axis(
         return None;
     }
 
-    let prev_proj = edge_projection(prev_gray, width, height, axis);
-    let curr_proj = edge_projection(curr_gray, width, height, axis);
     let mut scored = Vec::new();
     for offset in signed_predict_iter(max_offset, 0) {
-        let score = projection_mad(
-            &prev_proj,
-            &curr_proj,
-            offset,
-            EDGE_PROJECTION_STEP as usize,
-        );
+        let score = projection_mad(prev_proj, curr_proj, offset, EDGE_PROJECTION_STEP as usize);
         if score.is_finite() {
             scored.push((score, offset));
         }
@@ -889,6 +855,84 @@ fn projection_mad(prev: &[f32], curr: &[f32], offset: i32, step: usize) -> f32 {
         return f32::INFINITY;
     }
     sum / count as f32
+}
+
+/// A frame plus its derived matcher inputs. Grayscale is built eagerly; coarse
+/// samples and edge projections are built lazily on first use and cached, so a
+/// frame carried forward as `last_good` does not recompute them next round.
+pub(crate) struct PreparedFrame {
+    rgba: RgbaImage,
+    width: u32,
+    height: u32,
+    #[allow(dead_code)] // used when stitcher adopts PreparedFrame fully (Task 3)
+    signature: Vec<u8>,
+    gray: Vec<f32>,
+    coarse_dims: (u32, u32),
+    coarse: OnceLock<Vec<f32>>,
+    proj_v: OnceLock<Vec<f32>>,
+    proj_h: OnceLock<Vec<f32>>,
+}
+
+impl PreparedFrame {
+    /// Build from an owned frame, computing the duplicate signature internally.
+    pub(crate) fn new(rgba: RgbaImage) -> Self {
+        let signature = crate::duplicate::signature(&rgba);
+        Self::from_parts(rgba, signature)
+    }
+
+    /// Build from an owned frame whose duplicate signature was already computed
+    /// (e.g. by the stitcher's duplicate gate), avoiding a second pass.
+    pub(crate) fn from_parts(rgba: RgbaImage, signature: Vec<u8>) -> Self {
+        let width = rgba.width();
+        let height = rgba.height();
+        let gray = to_grayscale(&rgba);
+        let coarse_dims = coarse_sample_dimensions(width, height, COARSE_DOWNSAMPLE_STEP);
+        Self {
+            rgba,
+            width,
+            height,
+            signature,
+            gray,
+            coarse_dims,
+            coarse: OnceLock::new(),
+            proj_v: OnceLock::new(),
+            proj_h: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn rgba(&self) -> &RgbaImage {
+        &self.rgba
+    }
+
+    #[allow(dead_code)] // used when stitcher adopts PreparedFrame fully (Task 3)
+    pub(crate) fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn gray(&self) -> &[f32] {
+        &self.gray
+    }
+
+    fn coarse(&self) -> &[f32] {
+        self.coarse.get_or_init(|| {
+            coarse_samples(&self.gray, self.width, self.height, COARSE_DOWNSAMPLE_STEP)
+        })
+    }
+
+    fn projection(&self, axis: SearchAxis) -> &[f32] {
+        match axis {
+            SearchAxis::Vertical => self.proj_v.get_or_init(|| {
+                edge_projection(&self.gray, self.width, self.height, SearchAxis::Vertical)
+            }),
+            SearchAxis::Horizontal => self.proj_h.get_or_init(|| {
+                edge_projection(&self.gray, self.width, self.height, SearchAxis::Horizontal)
+            }),
+        }
+    }
 }
 
 fn to_grayscale(img: &RgbaImage) -> Vec<f32> {
@@ -1031,9 +1075,10 @@ fn ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{
-        coarse_axis_offsets, coarse_sample_dimensions, content_roi, estimate_motion,
-        estimate_motion_with_budget, refinement_offsets, template_refine_radius,
-        MotionSearchOutcome, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
+        coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
+        edge_projection, estimate_motion, estimate_motion_with_budget, refinement_offsets,
+        template_refine_radius, to_grayscale, MotionSearchOutcome, PreparedFrame, SearchAxis,
+        SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -1146,6 +1191,10 @@ mod tests {
         }
     }
 
+    fn prep(img: &RgbaImage) -> PreparedFrame {
+        PreparedFrame::new(img.clone())
+    }
+
     #[test]
     fn content_roi_skips_borders() {
         let roi = content_roi(320, 320);
@@ -1153,6 +1202,53 @@ mod tests {
         assert!(roi.y >= 24);
         assert!(roi.w < 320);
         assert!(roi.h < 320);
+    }
+
+    #[test]
+    fn prepared_frame_signature_matches_old_signature() {
+        let img = make_textured_canvas(160, 200);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(
+            prep.signature(),
+            crate::duplicate::signature(&img).as_slice()
+        );
+    }
+
+    #[test]
+    fn prepared_frame_gray_matches_old_to_grayscale() {
+        let img = make_textured_canvas(160, 200);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(prep.gray(), to_grayscale(&img).as_slice());
+    }
+
+    #[test]
+    fn prepared_frame_coarse_matches_old_coarse_samples() {
+        let img = make_textured_canvas(160, 200);
+        let gray = to_grayscale(&img);
+        let expected = coarse_samples(&gray, 160, 200, COARSE_DOWNSAMPLE_STEP);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(prep.coarse(), expected.as_slice());
+        // Lazy OnceLock build is idempotent.
+        assert_eq!(prep.coarse(), expected.as_slice());
+        assert_eq!(
+            prep.coarse_dims,
+            coarse_sample_dimensions(160, 200, COARSE_DOWNSAMPLE_STEP)
+        );
+    }
+
+    #[test]
+    fn prepared_frame_projection_matches_old_edge_projection() {
+        let img = make_textured_canvas(160, 200);
+        let gray = to_grayscale(&img);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(
+            prep.projection(SearchAxis::Vertical),
+            edge_projection(&gray, 160, 200, SearchAxis::Vertical).as_slice()
+        );
+        assert_eq!(
+            prep.projection(SearchAxis::Horizontal),
+            edge_projection(&gray, 160, 200, SearchAxis::Horizontal).as_slice()
+        );
     }
 
     #[test]
@@ -1165,8 +1261,8 @@ mod tests {
             ..StitchConfig::default()
         };
         let candidate = unwrap_candidate(estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             None,
             (0, 0),
             &config,
@@ -1185,8 +1281,8 @@ mod tests {
         let prev = crop(&canvas, 0, 160);
         let curr = crop(&canvas, 40, 160);
         let candidate = unwrap_candidate(estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             None,
             (0, 0),
             &StitchConfig::default(),
@@ -1206,8 +1302,8 @@ mod tests {
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
         assert!(matches!(
             estimate_motion(
-                &prev,
-                &curr,
+                &prep(&prev),
+                &prep(&curr),
                 None,
                 (0, 0),
                 &StitchConfig::default(),
@@ -1223,8 +1319,8 @@ mod tests {
         let curr = make_textured_canvas(160, 200);
         assert!(matches!(
             estimate_motion(
-                &prev,
-                &curr,
+                &prep(&prev),
+                &prep(&curr),
                 None,
                 (0, 0),
                 &StitchConfig::default(),
@@ -1241,8 +1337,8 @@ mod tests {
         let curr = crop(&canvas, 180, 160);
 
         let candidate = unwrap_candidate(estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             None,
             (0, 0),
             &StitchConfig::default(),
@@ -1264,8 +1360,8 @@ mod tests {
         let curr = crop_xy(&canvas, 40, 0, 160, 160);
 
         let candidate = unwrap_candidate(estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             None,
             (0, 0),
             &StitchConfig::default(),
@@ -1287,8 +1383,8 @@ mod tests {
         let curr = crop_xy(&canvas, 180, 0, 160, 160);
 
         let candidate = unwrap_candidate(estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             Some(ScrollAxis::Horizontal),
             (40, 0),
             &StitchConfig::default(),
@@ -1310,8 +1406,8 @@ mod tests {
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
 
         let candidate = estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             Some(ScrollAxis::Vertical),
             (0, 40),
             &StitchConfig::default(),
@@ -1328,8 +1424,8 @@ mod tests {
         let curr = crop_xy(&canvas, 0, 32, 160, 160);
 
         let candidate = estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             None,
             (0, 0),
             &StitchConfig::default(),
@@ -1346,8 +1442,8 @@ mod tests {
         let curr = crop_xy(&canvas, 40, 0, 160, 160);
 
         let candidate = unwrap_candidate(estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             Some(ScrollAxis::Vertical),
             (0, 40),
             &StitchConfig::default(),
@@ -1459,8 +1555,8 @@ mod tests {
 
         let started = std::time::Instant::now();
         let outcome = estimate_motion(
-            &prev,
-            &curr,
+            &prep(&prev),
+            &prep(&curr),
             None,
             (0, 0),
             &config,

@@ -3,7 +3,7 @@ use image::RgbaImage;
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::canvas::{CanvasAppendError, StripCanvas};
 use crate::duplicate;
-use crate::matcher::{estimate_motion, MotionSearchOutcome};
+use crate::matcher::{estimate_motion, MotionSearchOutcome, PreparedFrame};
 use crate::metrics::{StitchMetrics, StitchOutcomeKind};
 use crate::overlap::compute_overlap;
 use crate::types::{
@@ -15,8 +15,7 @@ use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 pub struct Stitcher {
     config: StitchConfig,
     canvas: Option<StripCanvas>,
-    last_good_frame: Option<RgbaImage>,
-    last_good_signature: Option<Vec<u8>>,
+    last_good: Option<PreparedFrame>,
     last_motion: (i32, i32),
     locked_axis: Option<ScrollAxis>,
     locked_direction: Option<AppendDirection>,
@@ -30,8 +29,7 @@ impl Stitcher {
         Self {
             config,
             canvas: None,
-            last_good_frame: None,
-            last_good_signature: None,
+            last_good: None,
             last_motion: (0, 0),
             locked_axis: None,
             locked_direction: None,
@@ -63,7 +61,7 @@ impl Stitcher {
         }
 
         let anchor = self
-            .last_good_frame
+            .last_good
             .as_ref()
             .expect("anchor present after first frame");
 
@@ -80,16 +78,23 @@ impl Stitcher {
             let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.duplicate_us);
             duplicate::signature(&frame)
         };
-        if let Some(prev_sig) = self.last_good_signature.as_ref() {
-            if duplicate::is_duplicate(prev_sig, &signature, self.config.duplicate_threshold) {
-                self.last_metrics.outcome = StitchOutcomeKind::Duplicate;
-                return StitchOutcome::Duplicate;
-            }
+        if duplicate::is_duplicate(
+            anchor.signature(),
+            &signature,
+            self.config.duplicate_threshold,
+        ) {
+            self.last_metrics.outcome = StitchOutcomeKind::Duplicate;
+            return StitchOutcome::Duplicate;
         }
+
+        let curr = {
+            let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.prepare_frame_us);
+            PreparedFrame::from_parts(frame, signature)
+        };
 
         let candidate = match estimate_motion(
             anchor,
-            &frame,
+            &curr,
             self.locked_axis,
             self.last_motion,
             &self.config,
@@ -101,7 +106,12 @@ impl Stitcher {
                 best_candidate,
             } => {
                 let best_estimate = best_candidate.and_then(|candidate| {
-                    build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
+                    build_estimate(
+                        anchor.rgba(),
+                        curr.rgba(),
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    )
                 });
                 self.last_metrics.set_no_match(reason);
                 return StitchOutcome::NoMatch {
@@ -122,8 +132,8 @@ impl Stitcher {
             return StitchOutcome::NoMatch {
                 reason: NoMatchReason::LowConfidence,
                 best_estimate: build_estimate(
-                    anchor,
-                    &frame,
+                    anchor.rgba(),
+                    curr.rgba(),
                     &candidate,
                     self.config.axis_ratio_threshold,
                 ),
@@ -137,8 +147,8 @@ impl Stitcher {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::AmbiguousAxis,
                     best_estimate: build_estimate(
-                        anchor,
-                        &frame,
+                        anchor.rgba(),
+                        curr.rgba(),
                         &candidate,
                         self.config.axis_ratio_threshold,
                     ),
@@ -150,17 +160,21 @@ impl Stitcher {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::CrossAxisTooLarge,
                     best_estimate: build_estimate(
-                        anchor,
-                        &frame,
+                        anchor.rgba(),
+                        curr.rgba(),
                         &candidate,
                         self.config.axis_ratio_threshold,
                     ),
                 };
             }
             DirectionResult::AxisChanged { new_axis, locked } => {
-                let estimate =
-                    build_estimate(anchor, &frame, &candidate, self.config.axis_ratio_threshold)
-                        .expect("axis-change estimate must compute overlap");
+                let estimate = build_estimate(
+                    anchor.rgba(),
+                    curr.rgba(),
+                    &candidate,
+                    self.config.axis_ratio_threshold,
+                )
+                .expect("axis-change estimate must compute overlap");
                 self.last_metrics.outcome = StitchOutcomeKind::AxisChanged;
                 return StitchOutcome::AxisChanged {
                     previous_axis: locked,
@@ -177,8 +191,8 @@ impl Stitcher {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::ReverseDirection,
                     best_estimate: build_estimate(
-                        anchor,
-                        &frame,
+                        anchor.rgba(),
+                        curr.rgba(),
                         &candidate,
                         self.config.axis_ratio_threshold,
                     ),
@@ -194,8 +208,8 @@ impl Stitcher {
             self.last_metrics.outcome = StitchOutcomeKind::NoProgress;
             return StitchOutcome::NoProgress {
                 estimate: build_estimate(
-                    anchor,
-                    &frame,
+                    anchor.rgba(),
+                    curr.rgba(),
                     &candidate,
                     self.config.axis_ratio_threshold,
                 ),
@@ -205,7 +219,7 @@ impl Stitcher {
         let verifier = PixelOverlapVerifier::new(&self.config.verifier, self.config.min_overlap);
         let (overlap_region, _verifier_score) = {
             let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.verifier_us);
-            match verifier.verify(anchor, &frame, &candidate) {
+            match verifier.verify(anchor.rgba(), curr.rgba(), &candidate) {
                 VerifierOutcome::Pass { overlap, score } => (overlap, score),
                 VerifierOutcome::InsufficientOverlap => {
                     drop(_t);
@@ -214,8 +228,8 @@ impl Stitcher {
                     return StitchOutcome::NoMatch {
                         reason: NoMatchReason::InsufficientOverlap,
                         best_estimate: build_estimate(
-                            anchor,
-                            &frame,
+                            anchor.rgba(),
+                            curr.rgba(),
                             &candidate,
                             self.config.axis_ratio_threshold,
                         ),
@@ -228,8 +242,8 @@ impl Stitcher {
                     return StitchOutcome::NoMatch {
                         reason: NoMatchReason::OverlapVerificationFailed,
                         best_estimate: build_estimate(
-                            anchor,
-                            &frame,
+                            anchor.rgba(),
+                            curr.rgba(),
                             &candidate,
                             self.config.axis_ratio_threshold,
                         ),
@@ -248,7 +262,7 @@ impl Stitcher {
                 .canvas
                 .as_mut()
                 .expect("canvas present after first frame");
-            canvas.append(direction, &frame, slice_px)
+            canvas.append(direction, curr.rgba(), slice_px)
         };
         let added = match append_result {
             Ok(n) => n,
@@ -277,8 +291,8 @@ impl Stitcher {
                 return StitchOutcome::NoMatch {
                     reason: NoMatchReason::DimensionMismatch,
                     best_estimate: build_estimate(
-                        anchor,
-                        &frame,
+                        anchor.rgba(),
+                        curr.rgba(),
                         &candidate,
                         self.config.axis_ratio_threshold,
                     ),
@@ -288,8 +302,8 @@ impl Stitcher {
                 self.last_metrics.outcome = StitchOutcomeKind::NoProgress;
                 return StitchOutcome::NoProgress {
                     estimate: build_estimate(
-                        anchor,
-                        &frame,
+                        anchor.rgba(),
+                        curr.rgba(),
                         &candidate,
                         self.config.axis_ratio_threshold,
                     ),
@@ -325,8 +339,7 @@ impl Stitcher {
             raw_matches: candidate.raw_matches,
         };
 
-        self.last_good_signature = Some(signature);
-        self.last_good_frame = Some(frame);
+        self.last_good = Some(curr);
         self.stats.frame_count += 1;
         self.stats.total_height = canvas_height;
         self.stats.total_width = canvas_width;
@@ -364,8 +377,7 @@ impl Stitcher {
             total_width: width,
             last_append: height,
         };
-        self.last_good_signature = Some(duplicate::signature(&frame));
-        self.last_good_frame = Some(frame.clone());
+        self.last_good = Some(PreparedFrame::new(frame.clone()));
         self.canvas = Some(StripCanvas::new(frame));
         StitchOutcome::FirstFrame
     }
