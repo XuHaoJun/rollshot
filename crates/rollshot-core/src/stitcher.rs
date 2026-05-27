@@ -1,7 +1,7 @@
 use image::RgbaImage;
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
-use crate::canvas::{CanvasAppendError, LinearCanvas};
+use crate::canvas::{CanvasAppendError, StripCanvas};
 use crate::duplicate;
 use crate::matcher::{estimate_motion, MotionSearchOutcome};
 use crate::metrics::{StitchMetrics, StitchOutcomeKind};
@@ -14,7 +14,7 @@ use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
 pub struct Stitcher {
     config: StitchConfig,
-    canvas: Option<LinearCanvas>,
+    canvas: Option<StripCanvas>,
     last_good_frame: Option<RgbaImage>,
     last_good_signature: Option<Vec<u8>>,
     last_motion: (i32, i32),
@@ -341,8 +341,8 @@ impl Stitcher {
         }
     }
 
-    pub fn full_image(&self) -> Option<&RgbaImage> {
-        self.canvas.as_ref().map(LinearCanvas::image)
+    pub fn full_image(&mut self) -> Option<&RgbaImage> {
+        self.canvas.as_mut().map(|c| c.image())
     }
 
     pub fn stats(&self) -> StitchStats {
@@ -366,7 +366,7 @@ impl Stitcher {
         };
         self.last_good_signature = Some(duplicate::signature(&frame));
         self.last_good_frame = Some(frame.clone());
-        self.canvas = Some(LinearCanvas::new(frame));
+        self.canvas = Some(StripCanvas::new(frame));
         StitchOutcome::FirstFrame
     }
 

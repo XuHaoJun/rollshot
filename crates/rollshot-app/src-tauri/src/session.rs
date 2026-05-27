@@ -212,7 +212,7 @@ impl AppSession {
     }
 
     fn finish_stitching(&mut self) -> Result<DoneImageDto, String> {
-        let stitcher = self
+        let mut stitcher = self
             .stitcher
             .take()
             .ok_or_else(|| "stitching has not started".to_string())?;
@@ -473,13 +473,13 @@ impl SharedSession {
 
     pub fn stitch_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
         let image = {
-            let inner = self
+            let mut inner = self
                 .inner
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
             inner
                 .stitcher
-                .as_ref()
+                .as_mut()
                 .and_then(|s| s.full_image())
                 .cloned()
         };
