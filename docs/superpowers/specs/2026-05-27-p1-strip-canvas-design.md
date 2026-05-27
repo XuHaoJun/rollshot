@@ -243,8 +243,22 @@ Tests that call `Stitcher::full_image()` must make the stitcher binding mutable.
 ## Benchmark Verification
 
 Before implementing P1, keep the existing baseline files backed up outside
-`target/`. After implementation, run the same scenario set with the fixed
-one-command harness:
+`target/`.
+
+When verifying P1 after implementation, first look for the baseline JSONL under
+repo-root `bench-results/`:
+
+```text
+bench-results/2026-05-27-p1-strip-canvas-before-f404e61.jsonl
+```
+
+If that file is missing, do not silently skip the benchmark comparison. Stop and
+ask the user whether they have a backup copy of the baseline. If they do, have
+them restore it into `bench-results/` and run the comparison. Only skip the
+before/after comparison if the user explicitly says the backup is lost.
+
+After implementation, run the same scenario set with the fixed one-command
+harness:
 
 ```bash
 rtk cargo bench -p rollshot-core --bench stitch_sequences -- \
@@ -270,6 +284,10 @@ The PR should report:
 - `total_us`
 - output hash and golden diff fields
 
+If the baseline is explicitly unavailable, still run the after benchmark and
+record that the run has no before/after comparison because the baseline backup
+was lost.
+
 Expected P1 outcome:
 
 - `append_copied_bytes` no longer scales with final canvas size.
@@ -290,6 +308,9 @@ Expected P1 outcome:
 - New legacy-vs-strip tests prove byte-identical append topology before the
   legacy implementation is removed or hidden from production use.
 - Benchmark after-run is captured and compared against the saved P1 baseline.
+  If `bench-results/` does not contain the baseline, the implementer asks for a
+  backup before proceeding; comparison is skipped only when the user explicitly
+  confirms the backup is lost.
 - No P2/P3 matcher preparation or NCC changes are included in the same commit
   series.
 
