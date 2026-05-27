@@ -61,40 +61,53 @@ as `last_good` (the first frame's signature/gray/coarse are computed once here).
 ### 2. `PreparedFrame` shape and build cost
 
 ```rust
-pub struct PreparedFrame {
+pub(crate) struct PreparedFrame {
     rgba: RgbaImage,
     width: u32,
     height: u32,
-    signature: Vec<u8>,          // duplicate::signature
+    signature: Vec<u8>,          // duplicate::signature (eager, reused from dup gate)
     gray: Vec<f32>,              // eager
-    coarse: Vec<f32>,            // eager (always used by coarse_candidates)
-    coarse_dims: (u32, u32),     // (sample_w, sample_h) for COARSE_DOWNSAMPLE_STEP
-    proj_v: OnceCell<Vec<f32>>,  // lazy, per searched axis
-    proj_h: OnceCell<Vec<f32>>,
+    coarse_dims: (u32, u32),     // (sample_w, sample_h) for COARSE_DOWNSAMPLE_STEP (cheap arithmetic, eager)
+    coarse: OnceLock<Vec<f32>>,  // lazy
+    proj_v: OnceLock<Vec<f32>>,  // lazy, per searched axis
+    proj_h: OnceLock<Vec<f32>>,
 }
 ```
 
-- **Eager**: `gray` + `coarse` — used on essentially every non-duplicate frame.
-- **Lazy** (`std::cell::OnceCell`): edge projections, built per-axis on first use
-  and cached. Avoids building the unused axis (e.g. when axis-locked) and avoids
-  the `&PreparedFrame` vs `&mut` borrow conflict roadmap §4.4 flagged.
-- `OnceCell<Vec<f32>>` keeps `PreparedFrame: Send` (sufficient for the Tauri
-  `Mutex<Stitcher>` state). Parallel (`rayon`) regions continue to receive
-  `&[f32]` slices, never the `PreparedFrame` itself, so its `!Sync` does not
-  matter.
+- **Eager**: `gray` (+ `signature` reused from the dup gate, + `coarse_dims`
+  which is pure arithmetic). `gray` is used on every non-duplicate frame.
+- **Lazy** (`std::sync::OnceLock`): coarse samples and edge projections, built on
+  first use and cached. Coarse is lazy (not eager) so its build time stays under
+  the `coarse_us` timer rather than leaking into `prepare_frame_us` (see §5);
+  projections are lazy so the unused axis is skipped when axis-locked. Laziness
+  also sidesteps the `&PreparedFrame` vs `&mut` borrow conflict roadmap §4.4
+  flagged.
+- `OnceLock<Vec<f32>>` is `Send + Sync`, so `PreparedFrame` and `Stitcher` stay
+  `Send + Sync` — no risk to the Tauri `Arc<Mutex<Stitcher>>` state. Parallel
+  (`rayon`) regions continue to receive `&[f32]` slices, never the
+  `PreparedFrame` itself.
 
-Accessors:
+Accessors (private to the matcher module; `rgba`/`signature`/`dimensions`/
+constructors are `pub(crate)` for the stitcher):
 
 ```rust
 impl PreparedFrame {
+    fn coarse(&self) -> &[f32] {
+        self.coarse.get_or_init(|| coarse_samples(&self.gray, self.width, self.height, COARSE_DOWNSAMPLE_STEP))
+    }
     fn projection(&self, axis: SearchAxis) -> &[f32] {
         match axis {
-            SearchAxis::Vertical   => self.proj_v.get_or_init(|| edge_projection(&self.gray, self.width, self.height, axis)),
-            SearchAxis::Horizontal => self.proj_h.get_or_init(|| edge_projection(&self.gray, self.width, self.height, axis)),
+            SearchAxis::Vertical   => self.proj_v.get_or_init(|| edge_projection(&self.gray, self.width, self.height, SearchAxis::Vertical)),
+            SearchAxis::Horizontal => self.proj_h.get_or_init(|| edge_projection(&self.gray, self.width, self.height, SearchAxis::Horizontal)),
         }
     }
 }
 ```
+
+`PreparedFrame` lives in `matcher.rs` (it depends on the matcher-private
+`SearchAxis` and the builder fns `to_grayscale` / `coarse_samples` /
+`coarse_sample_dimensions` / `edge_projection`); co-locating avoids widening the
+visibility of those five items. The stitcher imports it via `pub(crate)`.
 
 ### 3. Matcher API
 
@@ -139,9 +152,13 @@ remain as the builders used when constructing a `PreparedFrame`.
 
 ### 5. Metrics
 
-- `prepare_frame_us` now times only curr's build (one grayscale, not two).
-  Prev's build is amortized to ~0.
-- `coarse_us` drops (only curr samples computed in `coarse_candidates`).
+- `prepare_frame_us` (timed in the stitcher around `PreparedFrame` construction)
+  now times only curr's grayscale, not prev's + curr's two grayscales. Prev's
+  build is amortized to ~0. Coarse build is lazy and stays under `coarse_us`, so
+  it does not leak into prepare timing.
+- `coarse_us` drops: prev's coarse samples are cached, so `coarse_candidates`
+  only builds curr's samples (once, via the lazy `coarse()` accessor) plus the
+  MAD scoring it always did.
 - These are attribution changes only; outputs are unchanged.
 
 ### 6. No feature flag
