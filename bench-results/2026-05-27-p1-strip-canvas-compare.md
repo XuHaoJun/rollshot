@@ -1,7 +1,9 @@
 ---
 kind: stitch_sequences_benchmark_compare
+schema_version: 1
 benchmark_id: 2026-05-27-p1-strip-canvas
 benchmark_scope: p1-strip-canvas
+roadmap_item: P1
 status: user_accepted
 before:
   short_commit: f404e61
