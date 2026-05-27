@@ -57,7 +57,10 @@ Useful smoke commands:
 
 ```bash
 cargo run -p rollshot-cli -- probe
-cargo run -p rollshot-cli -- stitch-folder tests/fixtures
+mkdir -p target/test-artifacts
+cargo run -p rollshot-cli -- stitch-folder \
+  crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames \
+  --output target/test-artifacts/stitch-folder.png
 ```
 
 `rollshot capture` prints per-frame progress to stderr by default:
@@ -65,8 +68,9 @@ cargo run -p rollshot-cli -- stitch-folder tests/fixtures
 path remain on stdout. Pass `--quiet` to suppress progress output when stderr
 must stay empty for scripts.
 
-`stitch-folder` is intentionally a bootstrap smoke command until the stitching
-core phase adds image fixtures and golden output tests.
+`stitch-folder` stitches pre-recorded frames without using a capture backend,
+which makes it useful for matcher and stitching iteration. Core golden fixtures
+live under `crates/rollshot-core/tests/fixtures/linearscroll_v2`.
 
 ## Matcher Performance Checks
 
@@ -119,7 +123,8 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace` passes.
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
-- [ ] `cargo run -p rollshot-cli -- stitch-folder tests/fixtures` exits successfully with bootstrap status text.
+- [ ] `mkdir -p target/test-artifacts`.
+- [ ] `cargo run -p rollshot-cli -- stitch-folder crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames --output target/test-artifacts/stitch-folder.png` writes a PNG.
 - [ ] `cargo check -p rollshot-app` passes (requires Tauri Linux deps on Linux, Xcode on macOS).
 
 ## Manual Testing: Linux Wayland Portal Capture

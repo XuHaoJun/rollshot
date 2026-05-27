@@ -92,7 +92,29 @@ See `docs/bench.md` for the full workflow and metric reference.
 
 @RTK.md
 
-## 8. learn-projects
+## 8. Project Map
+
+Use this as orientation only; verify current symbols, command flags, and
+behavior against code before relying on them.
+
+- `crates/rollshot-core`: platform-independent stitching. Matcher, canvas,
+  overlap, verifier, metrics, and `Stitcher` live here. Changes on matcher,
+  canvas, verifier, or stitcher paths usually need core tests and the benchmark
+  checks listed above.
+- `crates/rollshot-capture`: capture traits, frame metadata, fixture capture,
+  Linux portal/PipeWire capture, and feature-gated macOS ScreenCaptureKit via
+  `scap`.
+- `crates/rollshot-cli`: command-line entry points. `src/args.rs` is the source
+  of truth for subcommands and flags; `cmd_*` modules hold behavior.
+- `crates/rollshot-app`: Tauri v2 interactive capture app. Frontend code lives
+  under `crates/rollshot-app/src`; Rust/Tauri commands live under
+  `crates/rollshot-app/src-tauri/src`.
+- `scripts/bench`: benchmark JSONL summarization and before/after comparison.
+- `README.md`: user-facing setup and manual testing notes. Treat command
+  examples as documentation to verify against code, not as implementation
+  source of truth.
+
+## 9. learn-projects
 
 The `learn-projects/` directory contains cloned reference repositories for
 learning and cross-referencing. They are **not** part of rollshot's build
@@ -110,7 +132,7 @@ learn-projects results when needed.
 | `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-app`. |
 | `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
-## 9. docs/ — Snapshots, Not Source of Truth
+## 10. docs/ — Snapshots, Not Source of Truth
 
 **Code is the source of truth. `docs/` contains snapshots, not current spec.**
 
