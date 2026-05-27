@@ -1,6 +1,7 @@
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 use std::sync::OnceLock;
+use wide::f32x8;
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome};
@@ -1072,13 +1073,218 @@ fn ncc_score_shifted(
     num / (prev_var.sqrt() * curr_var.sqrt())
 }
 
+#[allow(dead_code)]
+fn clipped_ncc_rects(
+    width: u32,
+    height: u32,
+    region: Region,
+    dx: i32,
+    dy: i32,
+) -> Option<(Region, Region)> {
+    let overlap = compute_overlap(width, height, width, height, dx, dy)?;
+    let x0 = region.x.max(overlap.prev_x);
+    let y0 = region.y.max(overlap.prev_y);
+    let x1 = (region.x + region.w).min(overlap.prev_x + overlap.width);
+    let y1 = (region.y + region.h).min(overlap.prev_y + overlap.height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    let prev_rect = Region {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    };
+    let curr_rect = Region {
+        x: (x0 as i32 - dx) as u32,
+        y: (y0 as i32 - dy) as u32,
+        w: prev_rect.w,
+        h: prev_rect.h,
+    };
+    Some((prev_rect, curr_rect))
+}
+
+#[allow(dead_code)]
+struct NccSums {
+    n: f64,
+    sum_x: f64,
+    sum_x2: f64,
+    sum_y: f64,
+    sum_y2: f64,
+    sum_xy: f64,
+}
+
+#[allow(dead_code)]
+fn fused_sums_wide(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: usize,
+    prev_rect: Region,
+    curr_rect: Region,
+) -> NccSums {
+    let mut sx = f32x8::ZERO;
+    let mut sx2 = f32x8::ZERO;
+    let mut sy = f32x8::ZERO;
+    let mut sy2 = f32x8::ZERO;
+    let mut sxy = f32x8::ZERO;
+    let (mut tx, mut tx2, mut ty, mut ty2, mut txy) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let row_width = prev_rect.w as usize;
+
+    for row in 0..prev_rect.h as usize {
+        let p0 = (prev_rect.y as usize + row) * width + prev_rect.x as usize;
+        let c0 = (curr_rect.y as usize + row) * width + curr_rect.x as usize;
+        let p_row = &prev_gray[p0..p0 + row_width];
+        let c_row = &curr_gray[c0..c0 + row_width];
+
+        let mut pc = p_row.chunks_exact(8);
+        let mut cc = c_row.chunks_exact(8);
+        for (pa, ca) in pc.by_ref().zip(cc.by_ref()) {
+            let p = f32x8::from(<[f32; 8]>::try_from(pa).unwrap());
+            let c = f32x8::from(<[f32; 8]>::try_from(ca).unwrap());
+            sx += p;
+            sx2 += p * p;
+            sy += c;
+            sy2 += c * c;
+            sxy += p * c;
+        }
+        for (&p, &c) in pc.remainder().iter().zip(cc.remainder().iter()) {
+            let (p, c) = (p as f64, c as f64);
+            tx += p;
+            tx2 += p * p;
+            ty += c;
+            ty2 += c * c;
+            txy += p * c;
+        }
+    }
+
+    NccSums {
+        n: f64::from(prev_rect.w) * f64::from(prev_rect.h),
+        sum_x: sx.reduce_add() as f64 + tx,
+        sum_x2: sx2.reduce_add() as f64 + tx2,
+        sum_y: sy.reduce_add() as f64 + ty,
+        sum_y2: sy2.reduce_add() as f64 + ty2,
+        sum_xy: sxy.reduce_add() as f64 + txy,
+    }
+}
+
+#[allow(dead_code)]
+fn ncc_from_sums(s: NccSums) -> f32 {
+    if s.n == 0.0 {
+        return f32::MIN;
+    }
+    let numerator = s.sum_xy - (s.sum_x * s.sum_y / s.n);
+    let var_x = s.sum_x2 - (s.sum_x * s.sum_x / s.n);
+    let var_y = s.sum_y2 - (s.sum_y * s.sum_y / s.n);
+    if var_x <= 1.0 || var_y <= 1.0 {
+        return f32::MIN;
+    }
+    (numerator / (var_x * var_y).sqrt()) as f32
+}
+
+#[allow(dead_code)]
+fn fast_ncc_score_shifted(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    region: Region,
+    dx: i32,
+    dy: i32,
+) -> f32 {
+    let (width, height) = prev.dimensions();
+    let (prev_rect, curr_rect) = match clipped_ncc_rects(width, height, region, dx, dy) {
+        Some(rects) => rects,
+        None => return f32::MIN,
+    };
+
+    #[cfg(test)]
+    with_active_search_budget(|budget| {
+        budget.full_res_ncc_calls += 1;
+        budget.full_res_ncc_pixel_visits += u64::from(prev_rect.w) * u64::from(prev_rect.h);
+    });
+
+    let sums = fused_sums_wide(
+        prev.gray(),
+        curr.gray(),
+        width as usize,
+        prev_rect,
+        curr_rect,
+    );
+    ncc_from_sums(sums)
+}
+
+#[cfg(test)]
+fn legacy_ncc_score_shifted(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    region: Region,
+    dx: i32,
+    dy: i32,
+) -> f32 {
+    let overlap = match compute_overlap(width, height, width, height, dx, dy) {
+        Some(overlap) => overlap,
+        None => return f32::MIN,
+    };
+    let x0 = region.x.max(overlap.prev_x);
+    let y0 = region.y.max(overlap.prev_y);
+    let x1 = (region.x + region.w).min(overlap.prev_x + overlap.width);
+    let y1 = (region.y + region.h).min(overlap.prev_y + overlap.height);
+    if x1 <= x0 || y1 <= y0 {
+        return f32::MIN;
+    }
+
+    let mut prev_sum = 0.0f32;
+    let mut curr_sum = 0.0f32;
+    let mut count = 0usize;
+    for prev_y in y0..y1 {
+        for prev_x in x0..x1 {
+            let curr_x = (prev_x as i32 - dx) as u32;
+            let curr_y = (prev_y as i32 - dy) as u32;
+            let prev_idx = (prev_y * width + prev_x) as usize;
+            let curr_idx = (curr_y * width + curr_x) as usize;
+            prev_sum += prev_gray[prev_idx];
+            curr_sum += curr_gray[curr_idx];
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return f32::MIN;
+    }
+
+    let prev_mean = prev_sum / count as f32;
+    let curr_mean = curr_sum / count as f32;
+    let mut num = 0.0f32;
+    let mut prev_var = 0.0f32;
+    let mut curr_var = 0.0f32;
+    for prev_y in y0..y1 {
+        for prev_x in x0..x1 {
+            let curr_x = (prev_x as i32 - dx) as u32;
+            let curr_y = (prev_y as i32 - dy) as u32;
+            let prev_idx = (prev_y * width + prev_x) as usize;
+            let curr_idx = (curr_y * width + curr_x) as usize;
+            let p = prev_gray[prev_idx] - prev_mean;
+            let c = curr_gray[curr_idx] - curr_mean;
+            num += p * c;
+            prev_var += p * p;
+            curr_var += c * c;
+        }
+    }
+
+    if prev_var <= 1.0 || curr_var <= 1.0 {
+        return f32::MIN;
+    }
+    num / (prev_var.sqrt() * curr_var.sqrt())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
-        edge_projection, estimate_motion, estimate_motion_with_budget, refinement_offsets,
-        template_refine_radius, to_grayscale, MotionSearchOutcome, PreparedFrame, SearchAxis,
-        SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
+        edge_projection, estimate_motion, estimate_motion_with_budget, fast_ncc_score_shifted,
+        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, refinement_offsets,
+        template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums, PreparedFrame, Region,
+        SearchAxis, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -1249,6 +1455,186 @@ mod tests {
             prep.projection(SearchAxis::Horizontal),
             edge_projection(&gray, 160, 200, SearchAxis::Horizontal).as_slice()
         );
+    }
+
+    #[test]
+    fn ncc_from_sums_rejects_low_variance() {
+        let sums = NccSums {
+            n: 8.0,
+            sum_x: 8.0,
+            sum_x2: 8.5,
+            sum_y: 8.0,
+            sum_y2: 100.0,
+            sum_xy: 50.0,
+        };
+        assert_eq!(ncc_from_sums(sums), f32::MIN);
+    }
+
+    #[test]
+    fn ncc_from_sums_rejects_empty_rect() {
+        let sums = NccSums {
+            n: 0.0,
+            sum_x: 0.0,
+            sum_x2: 0.0,
+            sum_y: 0.0,
+            sum_y2: 0.0,
+            sum_xy: 0.0,
+        };
+        assert_eq!(ncc_from_sums(sums), f32::MIN);
+    }
+
+    #[test]
+    fn ncc_from_sums_matches_pearson_for_known_vectors() {
+        let xs = [10.0f64, 20.0, 30.0, 40.0, 50.0];
+        let ys = [12.0f64, 19.0, 33.0, 38.0, 52.0];
+        let n = xs.len() as f64;
+        let sums = NccSums {
+            n,
+            sum_x: xs.iter().sum(),
+            sum_x2: xs.iter().map(|v| v * v).sum(),
+            sum_y: ys.iter().sum(),
+            sum_y2: ys.iter().map(|v| v * v).sum(),
+            sum_xy: xs.iter().zip(ys).map(|(a, b)| a * b).sum(),
+        };
+        let mx = sums.sum_x / n;
+        let my = sums.sum_y / n;
+        let mut num = 0.0;
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for (a, b) in xs.iter().zip(ys) {
+            num += (a - mx) * (b - my);
+            vx += (a - mx) * (a - mx);
+            vy += (b - my) * (b - my);
+        }
+        let expected = (num / (vx * vy).sqrt()) as f32;
+        assert!((ncc_from_sums(sums) - expected).abs() <= 1e-5);
+    }
+
+    #[test]
+    fn fast_ncc_matches_legacy_ncc_across_widths_and_axes() {
+        let canvas = make_aperiodic_canvas(320, 360);
+        for (w, h) in [(177u32, 140u32), (180, 131)] {
+            let prev = crop_xy(&canvas, 0, 0, w, h);
+            let curr_v = crop_xy(&canvas, 0, 37, w, h);
+            let curr_h = crop_xy(&canvas, 41, 0, w, h);
+            let prev_prep = PreparedFrame::new(prev);
+            let curr_v_prep = PreparedFrame::new(curr_v);
+            let curr_h_prep = PreparedFrame::new(curr_h);
+            let region = match_width_region(content_roi(w, h), 512);
+
+            for dy in [32, 35, 37, 40, 43] {
+                let legacy = legacy_ncc_score_shifted(
+                    prev_prep.gray(),
+                    curr_v_prep.gray(),
+                    w,
+                    h,
+                    region,
+                    0,
+                    dy,
+                );
+                let fast = fast_ncc_score_shifted(&prev_prep, &curr_v_prep, region, 0, dy);
+                assert!(
+                    (fast - legacy).abs() <= 1e-4,
+                    "w={w} dy={dy} fast={fast} legacy={legacy}"
+                );
+            }
+            for dx in [36, 39, 41, 44] {
+                let legacy = legacy_ncc_score_shifted(
+                    prev_prep.gray(),
+                    curr_h_prep.gray(),
+                    w,
+                    h,
+                    region,
+                    dx,
+                    0,
+                );
+                let fast = fast_ncc_score_shifted(&prev_prep, &curr_h_prep, region, dx, 0);
+                assert!(
+                    (fast - legacy).abs() <= 1e-4,
+                    "w={w} dx={dx} fast={fast} legacy={legacy}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_ncc_rejects_low_variance_windows_like_legacy() {
+        let mut prev = RgbaImage::from_pixel(120, 120, Rgba([200, 200, 200, 255]));
+        prev.put_pixel(10, 10, Rgba([201, 201, 201, 255]));
+        let curr = prev.clone();
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let region = Region {
+            x: 0,
+            y: 0,
+            w: 120,
+            h: 120,
+        };
+
+        let legacy =
+            legacy_ncc_score_shifted(prev_prep.gray(), curr_prep.gray(), 120, 120, region, 0, 0);
+        let fast = fast_ncc_score_shifted(&prev_prep, &curr_prep, region, 0, 0);
+        assert_eq!(legacy, f32::MIN, "legacy should reject near-flat window");
+        assert_eq!(fast, f32::MIN, "fast must reject the same near-flat window");
+    }
+
+    #[test]
+    fn fast_ncc_handles_constant_windows_as_no_score() {
+        let prev = RgbaImage::from_pixel(120, 120, Rgba([240, 240, 240, 255]));
+        let curr = RgbaImage::from_pixel(120, 120, Rgba([240, 240, 240, 255]));
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let region = Region {
+            x: 0,
+            y: 0,
+            w: 120,
+            h: 120,
+        };
+
+        let score = fast_ncc_score_shifted(&prev_prep, &curr_prep, region, 0, 12);
+        assert_eq!(score, f32::MIN);
+    }
+
+    #[test]
+    fn fast_ncc_preserves_best_offset_on_synthetic_scroll() {
+        let canvas = make_aperiodic_canvas(220, 300);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 0, 41, 180, 180);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let region = match_width_region(content_roi(180, 180), 512);
+
+        let offsets = refinement_offsets(40, 80, template_refine_radius());
+        let legacy_best = offsets
+            .iter()
+            .map(|dy| {
+                (
+                    legacy_ncc_score_shifted(
+                        prev_prep.gray(),
+                        curr_prep.gray(),
+                        180,
+                        180,
+                        region,
+                        0,
+                        *dy,
+                    ),
+                    *dy,
+                )
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)))
+            .expect("legacy scores should not be empty");
+        let fast_best = offsets
+            .iter()
+            .map(|dy| {
+                (
+                    fast_ncc_score_shifted(&prev_prep, &curr_prep, region, 0, *dy),
+                    *dy,
+                )
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)))
+            .expect("fast scores should not be empty");
+
+        assert_eq!(fast_best.1, legacy_best.1);
     }
 
     #[test]
