@@ -4,7 +4,7 @@
 
 **Goal:** Replace eager growing `LinearCanvas` with primary `StripCanvas`, preserving byte-identical stitch output while reducing append copy cost for long screenshots.
 
-**Architecture:** `StripCanvas` stores first frame and appended slices as paste-ordered strips, composes a cached full `RgbaImage` only when `full_image()`/`image()` is requested, and invalidates that cache on append. `Stitcher` owns `Option<StripCanvas>` and changes `full_image()` to `&mut self` because lazy composition mutates cache state.
+**Architecture:** `StripCanvas` stores first frame and appended slices as paste-ordered strips, composes a cached full `RgbaImage` only when `full_image()`/`image()` is requested, and invalidates that cache on append. Because each strip redundantly retains its overlap region (a slow-scroll `Bottom` strip stores `frame_h/2` rows but nets only `slice_px`), strips are compacted into a single base strip once total strip bytes exceed `COMPACT_FACTOR * logical_bytes`; this bounds resident memory at `~COMPACT_FACTOR * logical` while keeping append `O(frame_h)` amortized. `Stitcher` owns `Option<StripCanvas>` and changes `full_image()` to `&mut self` because lazy composition mutates cache state.
 
 **Tech Stack:** Rust, `image::RgbaImage`, `image::imageops::crop_imm`, existing `rollshot-core` test fixtures, existing stitch sequence benchmark harness.
 
@@ -149,6 +149,29 @@ Inside `#[cfg(test)] mod tests`, keep the existing tests and add these helpers/t
         assert_eq!(canvas.height(), 10);
         assert_eq!(canvas.last_append_copied_bytes(), 4 * 4 * 4);
         assert!(canvas.last_append_copied_bytes() < canvas.logical_pixels() * 4);
+    }
+
+    #[test]
+    fn strip_canvas_compacts_to_keep_memory_bounded() {
+        // Slow scroll: slice_px (4) << frame_h/2 (16), so each strip stores
+        // ~16 rows but nets only 4. Without compaction, strip bytes grow to
+        // several times the logical canvas (~3.5x here). Compaction must keep
+        // resident strip+cache bytes within a small multiple of logical.
+        let mut canvas = StripCanvas::new(patterned(8, 32, 7));
+        for i in 0..40u8 {
+            canvas
+                .append(AppendDirection::Bottom, &patterned(8, 32, 50 + i), 4)
+                .unwrap();
+        }
+        let logical_bytes = canvas.logical_pixels() * 4;
+        assert!(
+            canvas.allocated_bytes() <= logical_bytes * 3,
+            "allocated {} should stay bounded vs logical {} (compaction not firing?)",
+            canvas.allocated_bytes(),
+            logical_bytes,
+        );
+        // Output must still be correct after compaction.
+        assert_eq!(canvas.height(), 32 + 40 * 4);
     }
 ```
 
@@ -347,6 +370,7 @@ Use the current validation semantics, replacing `self.image.width()/height()` wi
 
         self.axis = Some(target_axis);
         self.composed_cache = None;
+        self.compact_if_needed();
         Ok(added)
     }
 ```
@@ -454,6 +478,42 @@ Add:
         }
         self.composed_cache = Some(out);
     }
+
+    /// Collapse strips into a single base strip once their redundant overlap
+    /// retention pushes total strip bytes past `COMPACT_FACTOR * logical`. This
+    /// bounds resident memory while keeping append `O(frame_h)` amortized.
+    fn compact_if_needed(&mut self) {
+        let logical_bytes = self.logical_pixels() * 4;
+        let strip_bytes: u64 = self
+            .strips
+            .iter()
+            .map(|strip| strip.image.as_raw().len() as u64)
+            .sum();
+        if strip_bytes <= logical_bytes.saturating_mul(COMPACT_FACTOR) {
+            return;
+        }
+        self.compose_if_needed();
+        let base = self.composed_cache.take().expect("composed image");
+        self.strips.clear();
+        self.strips.push_back(CanvasStrip {
+            image: base,
+            x: 0,
+            y: 0,
+            slice_px: 0,
+            overlap_px: 0,
+        });
+    }
+```
+
+Add the compaction threshold as a module-level const near the top of
+`canvas.rs` (next to the imports):
+
+```rust
+/// Compact strips into a single base strip once their combined byte size
+/// exceeds this multiple of the logical canvas. `2` bounds resident memory at
+/// roughly the same level as the old eager `LinearCanvas` while preserving the
+/// `O(frame_h)` amortized append cost.
+const COMPACT_FACTOR: u64 = 2;
 ```
 
 Add this free function below the impl:
@@ -827,7 +887,12 @@ Expected: report includes append, total, prepare, NCC, verifier sections. Confir
 
 - `p95_append_us` improves on `long_vertical_text` and `long_vertical_jitter`.
 - `append_copied_bytes` no longer scales with final canvas size.
-- `peak_rss_kb_delta` does not regress without explanation.
+- `peak_rss_kb_delta` stays bounded — comparable to the baseline, not a multiple
+  of it. Compaction keeps resident strips at `~2x logical`; a regression to
+  several times the baseline means compaction is not firing and must be fixed,
+  not explained away.
+- `p99`/`max_append_us` may show occasional compaction spikes; note them rather
+  than treating them as regressions.
 - output hash/correctness drift is absent or explicitly explained.
 
 - [ ] **Step 5: Commit source changes are already complete**
@@ -840,6 +905,8 @@ Do not commit `bench-results/` unless the user explicitly asks to version benchm
   - Primary `StripCanvas`: Task 2.
   - Mutable `full_image`: Tasks 3 and 4.
   - Byte-identical topology tests: Task 1 and Task 2.
+  - Bounded memory via compaction: `compact_if_needed` in Task 2; bounded-memory
+    test in Task 1; RSS expectation in Task 6.
   - No P2/P3 matcher work: no task touches matcher preparation or NCC.
   - Benchmark baseline lookup gate: Task 6.
 - Placeholder scan:

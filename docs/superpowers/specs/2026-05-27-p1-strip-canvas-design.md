@@ -182,6 +182,69 @@ fn full_image(&mut self) -> Option<&RgbaImage> {
 `into_image` may consume the canvas and compose once without cloning the cached
 image. It is fine if `Stitcher` does not expose `into_image` yet.
 
+## Compaction
+
+Storing each appended slice as an immutable strip retains the overlap region
+redundantly. Under overlap-and-overwrite, a `Bottom` strip stores
+`total_slice = min(frame_h, slice_px + overlap_px)` rows but adds only
+`slice_px` net rows. When `slice_px < frame_h/2` (slow scroll), each strip
+stores `frame_h/2` rows while netting `slice_px`, so total strip bytes grow to
+roughly `frame_h / (2 * slice_px)` times the logical canvas.
+
+For the P1 benchmark scenarios (`frame_h = 700`, `slice_px ≈ 40`) that is about
+**8x** the final canvas, which would make peak RSS several times *worse* than
+`LinearCanvas`, not better. The overlap cannot be dropped — overwriting it is
+what hides sticky headers (this is exactly why `wayscrollshot`, which stores
+only net-new rows, has no overwrite semantics). So redundancy is reclaimed by
+compaction instead.
+
+When total strip bytes exceed `COMPACT_FACTOR * logical_bytes` (default
+`COMPACT_FACTOR = 2`), `StripCanvas` composes all strips into a single base
+strip at `(0, 0)` and clears the deque:
+
+```rust
+const COMPACT_FACTOR: u64 = 2;
+
+fn compact_if_needed(&mut self) {
+    let logical_bytes = self.logical_pixels() * 4;
+    let strip_bytes: u64 = self
+        .strips
+        .iter()
+        .map(|s| s.image.as_raw().len() as u64)
+        .sum();
+    if strip_bytes <= logical_bytes.saturating_mul(COMPACT_FACTOR) {
+        return;
+    }
+    self.compose_if_needed();
+    let base = self.composed_cache.take().expect("composed image");
+    self.strips.clear();
+    self.strips.push_back(CanvasStrip {
+        image: base,
+        x: 0,
+        y: 0,
+        slice_px: 0,
+        overlap_px: 0,
+    });
+}
+```
+
+`compact_if_needed` runs at the end of every `append`, after cache
+invalidation. Properties:
+
+- Resident strip memory is bounded at `~COMPACT_FACTOR * logical`, i.e. about
+  the same as `LinearCanvas`'s transient peak — not several times larger.
+- Append stays `O(frame_h)` amortized: between compactions the strips grow by
+  `(COMPACT_FACTOR - 1) * logical` bytes, each compaction costs `O(logical)`, so
+  amortized per-append copy is independent of canvas height. This preserves the
+  append-latency win over `LinearCanvas`'s `O(canvas_h)` reallocation.
+- The compaction frame itself spikes to an `O(logical)` copy plus a transient
+  `~3 * logical` allocation during compose. These spikes get rarer as the canvas
+  grows, so `p95_append_us` still improves; `p99`/`max_append_us` may show
+  occasional compaction spikes and should be reported as such.
+
+A composed base strip carries `slice_px = 0` / `overlap_px = 0`; those fields are
+metadata only and are not read during composition.
+
 ## Metrics
 
 Keep the existing metric names so benchmark scripts remain unchanged:
@@ -197,7 +260,9 @@ improvement visible in the existing JSONL records.
 
 Because `full_image()` may allocate the composed cache, callers that export or
 test output should expect `canvas_allocated_bytes` to increase after a
-composition has occurred.
+composition has occurred. Between compactions, `canvas_allocated_bytes` stays
+bounded at roughly `COMPACT_FACTOR * logical` (plus the composed cache when
+present), rather than growing without limit with the number of strips.
 
 ## Stitcher Integration
 
@@ -302,7 +367,12 @@ Expected P1 outcome:
 - `append_copied_bytes` no longer scales with final canvas size.
 - `p95_append_us` drops substantially on `long_vertical_text` and
   `long_vertical_jitter`.
-- Peak RSS decreases on long scenarios.
+- Peak RSS stays bounded at roughly `COMPACT_FACTOR * logical` via compaction,
+  i.e. comparable to the `LinearCanvas` baseline rather than several times
+  larger. A regression to a multiple of the baseline means compaction is not
+  firing and is a failure, not an accepted tradeoff.
+- `p99`/`max_append_us` may show occasional compaction spikes; report them
+  rather than treating them as regressions.
 - Output remains byte-identical for golden fixtures.
 - Synthetic output hashes remain stable unless the legacy output hash was
   dependent on undefined behavior; any hash drift must be explained.
@@ -316,6 +386,10 @@ Expected P1 outcome:
 - Existing unit and integration tests pass.
 - New legacy-vs-strip tests prove byte-identical append topology before the
   legacy implementation is removed or hidden from production use.
+- `StripCanvas` compacts strips so resident memory is bounded at
+  `~COMPACT_FACTOR * logical`; peak RSS does not regress to a multiple of the
+  `LinearCanvas` baseline. A unit test proves strip+cache bytes stay bounded
+  under a slow-scroll (`slice_px < frame_h/2`) append sequence.
 - Benchmark after-run is captured and compared against the saved P1 baseline.
   If `bench-results/` does not contain the baseline, the implementer asks for a
   backup before proceeding; comparison is skipped only when the user explicitly
@@ -333,7 +407,14 @@ The main API risk is changing `full_image()` to require `&mut self`. This is
 acceptable because `full_image()` now performs lazy work. Tests and app callers
 must be updated mechanically.
 
-The main measurement risk is that `canvas_allocated_bytes` may increase after
-`full_image()` because the composed cache is intentionally retained. Benchmark
-comparisons should therefore focus on per-frame append metrics and RSS trends
-before export, and separately note final composition cost if needed.
+The main memory risk is overlap redundancy: without compaction, strips retain
+`frame_h/2` rows per slow-scroll append and resident memory balloons to several
+times the logical canvas (~8x on the P1 fixtures), making peak RSS worse than
+`LinearCanvas`. Compaction (above) is therefore part of P1, not a follow-up; the
+bounded-memory unit test guards against it regressing.
+
+The remaining measurement nuance is that `canvas_allocated_bytes` still rises
+after `full_image()` because the composed cache is retained, and the compaction
+frame transiently allocates `~3 * logical`. Benchmark comparisons should focus
+on per-frame append metrics and steady-state RSS, and separately note the
+compaction/composition spikes.
