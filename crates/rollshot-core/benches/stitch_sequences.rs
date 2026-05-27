@@ -53,6 +53,10 @@ struct Args {
     /// Internal: which run index this worker invocation should record.
     #[arg(long, hide = true, default_value_t = 0)]
     worker_run: usize,
+
+    /// Cargo may append this flag when invoking bench binaries.
+    #[arg(long, hide = true)]
+    bench: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -612,6 +616,7 @@ mod tests {
             no_jsonl: false,
             run_single_scenario: None,
             worker_run: 0,
+            bench: false,
         }
     }
 
