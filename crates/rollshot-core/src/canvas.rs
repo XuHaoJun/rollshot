@@ -672,4 +672,176 @@ mod tests {
         assert_eq!(canvas.allocated_bytes(), 96);
         assert_eq!(canvas.logical_pixels(), 24);
     }
+
+    // ------------------------------------------------------------------
+    // StripCanvas equivalence tests (RED — StripCanvas not yet declared)
+    // ------------------------------------------------------------------
+
+    fn patterned(width: u32, height: u32, seed: u8) -> RgbaImage {
+        let mut img = RgbaImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        seed.wrapping_add((x * 3) as u8),
+                        seed.wrapping_add((y * 5) as u8),
+                        seed.wrapping_add(((x + y) * 7) as u8),
+                        255,
+                    ]),
+                );
+            }
+        }
+        img
+    }
+
+    fn assert_images_eq(left: &RgbaImage, right: &RgbaImage) {
+        assert_eq!(left.dimensions(), right.dimensions());
+        assert_eq!(left.as_raw(), right.as_raw());
+    }
+
+    fn assert_strip_matches_legacy(direction: AppendDirection, frames: &[RgbaImage], slices: &[u32]) {
+        let mut legacy = LinearCanvas::new(frames[0].clone());
+        let mut strip = StripCanvas::new(frames[0].clone());
+
+        assert_images_eq(legacy.image(), strip.image());
+        for (idx, slice_px) in slices.iter().copied().enumerate() {
+            let frame = &frames[idx + 1];
+            assert_eq!(
+                legacy.append(direction, frame, slice_px),
+                strip.append(direction, frame, slice_px)
+            );
+            assert_images_eq(legacy.image(), strip.image());
+            assert_eq!(legacy.axis(), strip.axis());
+            assert_eq!(legacy.width(), strip.width());
+            assert_eq!(legacy.height(), strip.height());
+        }
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_bottom_appends() {
+        let frames = vec![
+            patterned(9, 8, 1),
+            patterned(9, 8, 11),
+            patterned(9, 8, 31),
+        ];
+        assert_strip_matches_legacy(AppendDirection::Bottom, &frames, &[2, 5]);
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_top_prepends() {
+        let frames = vec![
+            patterned(9, 8, 2),
+            patterned(9, 8, 12),
+            patterned(9, 8, 32),
+        ];
+        assert_strip_matches_legacy(AppendDirection::Top, &frames, &[2, 5]);
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_right_appends() {
+        let frames = vec![
+            patterned(8, 9, 3),
+            patterned(8, 9, 13),
+            patterned(8, 9, 33),
+        ];
+        assert_strip_matches_legacy(AppendDirection::Right, &frames, &[2, 5]);
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_left_prepends() {
+        let frames = vec![
+            patterned(8, 9, 4),
+            patterned(8, 9, 14),
+            patterned(8, 9, 34),
+        ];
+        assert_strip_matches_legacy(AppendDirection::Left, &frames, &[2, 5]);
+    }
+
+    #[test]
+    fn strip_canvas_full_image_cache_is_stable_and_invalidated() {
+        let mut canvas = StripCanvas::new(patterned(6, 6, 5));
+        let first = canvas.image().clone();
+        assert_images_eq(&first, canvas.image());
+
+        canvas
+            .append(AppendDirection::Bottom, &patterned(6, 6, 25), 2)
+            .unwrap();
+        let after = canvas.image().clone();
+        assert_ne!(first.as_raw(), after.as_raw());
+        assert_images_eq(&after, canvas.image());
+    }
+
+    #[test]
+    fn strip_canvas_append_copied_bytes_tracks_only_new_strip() {
+        let mut canvas = StripCanvas::new(patterned(4, 8, 6));
+        canvas
+            .append(AppendDirection::Bottom, &patterned(4, 8, 26), 2)
+            .unwrap();
+
+        assert_eq!(canvas.width(), 4);
+        assert_eq!(canvas.height(), 10);
+        assert_eq!(canvas.last_append_copied_bytes(), 4 * 4 * 4);
+        assert!(canvas.last_append_copied_bytes() < canvas.logical_pixels() * 4);
+    }
+
+    #[test]
+    fn strip_canvas_compacts_to_keep_memory_bounded() {
+        // Slow scroll: slice_px (4) << frame_h/2 (16), so each strip stores
+        // ~16 rows but nets only 4. Without compaction, strip bytes grow to
+        // several times the logical canvas (~3.5x here). Compaction must keep
+        // resident strip+cache bytes within a small multiple of logical.
+        let mut canvas = StripCanvas::new(patterned(8, 32, 7));
+        for i in 0..40u8 {
+            canvas
+                .append(AppendDirection::Bottom, &patterned(8, 32, 50 + i), 4)
+                .unwrap();
+        }
+        let logical_bytes = canvas.logical_pixels() * 4;
+        assert!(
+            canvas.allocated_bytes() <= logical_bytes * 3,
+            "allocated {} should stay bounded vs logical {} (compaction not firing?)",
+            canvas.allocated_bytes(),
+            logical_bytes,
+        );
+        // Output must still be correct after compaction.
+        assert_eq!(canvas.height(), 32 + 40 * 4);
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_repeated_top_prepends() {
+        // Multiple prepends: each shifts all prior strips and overwrites the
+        // overlap. Byte-equivalence must hold after every prepend, not just one.
+        let frames = vec![
+            patterned(9, 8, 2),
+            patterned(9, 8, 12),
+            patterned(9, 8, 22),
+            patterned(9, 8, 32),
+            patterned(9, 8, 42),
+        ];
+        assert_strip_matches_legacy(AppendDirection::Top, &frames, &[2, 3, 2, 3]);
+    }
+
+    #[test]
+    fn strip_canvas_matches_legacy_mixed_directions_and_compaction() {
+        // Slow bottom appends force at least one compaction (triggers at the
+        // 5th append for these sizes), then a top prepend and a final bottom
+        // append exercise direction changes *after* compaction. Output must
+        // stay byte-identical to legacy through compaction and shifting.
+        let base = patterned(8, 32, 9);
+        let mut legacy = LinearCanvas::new(base.clone());
+        let mut strip = StripCanvas::new(base);
+        let mut ops: Vec<(AppendDirection, u8, u32)> =
+            (0..30u8).map(|i| (AppendDirection::Bottom, 40 + i, 4)).collect();
+        ops.push((AppendDirection::Top, 200, 3));
+        ops.push((AppendDirection::Bottom, 210, 5));
+        for (dir, seed, slice) in ops {
+            let f = patterned(8, 32, seed);
+            assert_eq!(legacy.append(dir, &f, slice), strip.append(dir, &f, slice));
+            assert_images_eq(legacy.image(), strip.image());
+            assert_eq!(legacy.width(), strip.width());
+            assert_eq!(legacy.height(), strip.height());
+        }
+    }
 }
