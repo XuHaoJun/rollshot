@@ -1,5 +1,6 @@
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
+use std::sync::OnceLock;
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome};
@@ -891,6 +892,82 @@ fn projection_mad(prev: &[f32], curr: &[f32], offset: i32, step: usize) -> f32 {
     sum / count as f32
 }
 
+/// A frame plus its derived matcher inputs. Grayscale is built eagerly; coarse
+/// samples and edge projections are built lazily on first use and cached, so a
+/// frame carried forward as `last_good` does not recompute them next round.
+pub(crate) struct PreparedFrame {
+    rgba: RgbaImage,
+    width: u32,
+    height: u32,
+    signature: Vec<u8>,
+    gray: Vec<f32>,
+    coarse_dims: (u32, u32),
+    coarse: OnceLock<Vec<f32>>,
+    proj_v: OnceLock<Vec<f32>>,
+    proj_h: OnceLock<Vec<f32>>,
+}
+
+impl PreparedFrame {
+    /// Build from an owned frame, computing the duplicate signature internally.
+    pub(crate) fn new(rgba: RgbaImage) -> Self {
+        let signature = crate::duplicate::signature(&rgba);
+        Self::from_parts(rgba, signature)
+    }
+
+    /// Build from an owned frame whose duplicate signature was already computed
+    /// (e.g. by the stitcher's duplicate gate), avoiding a second pass.
+    pub(crate) fn from_parts(rgba: RgbaImage, signature: Vec<u8>) -> Self {
+        let width = rgba.width();
+        let height = rgba.height();
+        let gray = to_grayscale(&rgba);
+        let coarse_dims = coarse_sample_dimensions(width, height, COARSE_DOWNSAMPLE_STEP);
+        Self {
+            rgba,
+            width,
+            height,
+            signature,
+            gray,
+            coarse_dims,
+            coarse: OnceLock::new(),
+            proj_v: OnceLock::new(),
+            proj_h: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn rgba(&self) -> &RgbaImage {
+        &self.rgba
+    }
+
+    pub(crate) fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn gray(&self) -> &[f32] {
+        &self.gray
+    }
+
+    fn coarse(&self) -> &[f32] {
+        self.coarse.get_or_init(|| {
+            coarse_samples(&self.gray, self.width, self.height, COARSE_DOWNSAMPLE_STEP)
+        })
+    }
+
+    fn projection(&self, axis: SearchAxis) -> &[f32] {
+        match axis {
+            SearchAxis::Vertical => self.proj_v.get_or_init(|| {
+                edge_projection(&self.gray, self.width, self.height, SearchAxis::Vertical)
+            }),
+            SearchAxis::Horizontal => self.proj_h.get_or_init(|| {
+                edge_projection(&self.gray, self.width, self.height, SearchAxis::Horizontal)
+            }),
+        }
+    }
+}
+
 fn to_grayscale(img: &RgbaImage) -> Vec<f32> {
     img.pixels()
         .map(|Rgba([r, g, b, _])| 0.299 * *r as f32 + 0.587 * *g as f32 + 0.114 * *b as f32)
@@ -1031,9 +1108,10 @@ fn ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{
-        coarse_axis_offsets, coarse_sample_dimensions, content_roi, estimate_motion,
-        estimate_motion_with_budget, refinement_offsets, template_refine_radius,
-        MotionSearchOutcome, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
+        coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
+        edge_projection, estimate_motion, estimate_motion_with_budget, refinement_offsets,
+        template_refine_radius, to_grayscale, MotionSearchOutcome, PreparedFrame, SearchAxis,
+        SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -1153,6 +1231,53 @@ mod tests {
         assert!(roi.y >= 24);
         assert!(roi.w < 320);
         assert!(roi.h < 320);
+    }
+
+    #[test]
+    fn prepared_frame_signature_matches_old_signature() {
+        let img = make_textured_canvas(160, 200);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(
+            prep.signature(),
+            crate::duplicate::signature(&img).as_slice()
+        );
+    }
+
+    #[test]
+    fn prepared_frame_gray_matches_old_to_grayscale() {
+        let img = make_textured_canvas(160, 200);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(prep.gray(), to_grayscale(&img).as_slice());
+    }
+
+    #[test]
+    fn prepared_frame_coarse_matches_old_coarse_samples() {
+        let img = make_textured_canvas(160, 200);
+        let gray = to_grayscale(&img);
+        let expected = coarse_samples(&gray, 160, 200, COARSE_DOWNSAMPLE_STEP);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(prep.coarse(), expected.as_slice());
+        // Lazy OnceLock build is idempotent.
+        assert_eq!(prep.coarse(), expected.as_slice());
+        assert_eq!(
+            prep.coarse_dims,
+            coarse_sample_dimensions(160, 200, COARSE_DOWNSAMPLE_STEP)
+        );
+    }
+
+    #[test]
+    fn prepared_frame_projection_matches_old_edge_projection() {
+        let img = make_textured_canvas(160, 200);
+        let gray = to_grayscale(&img);
+        let prep = PreparedFrame::new(img.clone());
+        assert_eq!(
+            prep.projection(SearchAxis::Vertical),
+            edge_projection(&gray, 160, 200, SearchAxis::Vertical).as_slice()
+        );
+        assert_eq!(
+            prep.projection(SearchAxis::Horizontal),
+            edge_projection(&gray, 160, 200, SearchAxis::Horizontal).as_slice()
+        );
     }
 
     #[test]
