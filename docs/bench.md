@@ -20,7 +20,7 @@ rationale.
  │       fork: stitch_sequences --run-single-scenario <name> --worker-run <i>
  │              │
  │              ▼ stdout (JSONL)
- │       append to target/bench/stitch_sequences-<sha>-<ts>.jsonl
+ │       append to bench-results/runs/stitch_sequences/stitch_sequences-<sha>-<ts>.jsonl
  │
  ▼
  python3 scripts/bench/summarize.py  (per-scenario report)
@@ -59,14 +59,17 @@ rtk cargo bench -p rollshot-core --bench stitch_sequences -- \
 
 # Custom output path.
 rtk cargo bench -p rollshot-core --bench stitch_sequences -- \
-    --out target/bench/baseline.jsonl
+    --out bench-results/runs/p2-prepared-frame/baseline.jsonl
 
 # View the summary as markdown.
-python3 scripts/bench/summarize.py target/bench/stitch_sequences-*.jsonl
+rtk python3 scripts/bench/summarize.py \
+    bench-results/runs/stitch_sequences/stitch_sequences-*.jsonl
 ```
 
-JSONL filenames include the short git SHA and a UTC timestamp, e.g.
-`target/bench/stitch_sequences-a745845-1716732615.jsonl`.
+By default, JSONL filenames include the short git SHA and a UTC timestamp, e.g.
+`bench-results/runs/stitch_sequences/stitch_sequences-a745845-1716732615.jsonl`.
+Raw run artifacts live outside `target/` so they survive `cargo clean`, but
+`bench-results/runs/` is gitignored.
 
 ## PR workflow
 
@@ -74,19 +77,20 @@ JSONL filenames include the short git SHA and a UTC timestamp, e.g.
 # 1. Capture baseline on main.
 git checkout main
 rtk cargo bench -p rollshot-core --bench stitch_sequences -- \
-    --out target/bench/before.jsonl
+    --out bench-results/runs/p2-prepared-frame/before.jsonl
 
 # 2. Switch to your branch and capture again.
 git checkout my-branch
 rtk cargo bench -p rollshot-core --bench stitch_sequences -- \
-    --out target/bench/after.jsonl
+    --out bench-results/runs/p2-prepared-frame/after.jsonl
 
 # 3. Compare. For normal PRs, paste the markdown into the PR description.
 rtk python3 scripts/bench/compare.py \
-    target/bench/before.jsonl target/bench/after.jsonl
+    bench-results/runs/p2-prepared-frame/before.jsonl \
+    bench-results/runs/p2-prepared-frame/after.jsonl
 
 # For accepted optimization reports that should be committed, emit YAML
-# frontmatter and write the report under bench-results/.
+# frontmatter and write the report under bench-results/compare/.
 rtk python3 scripts/bench/compare.py \
     --include-frontmatter \
     --benchmark-id 2026-05-27-p2-prepared-frame \
@@ -94,12 +98,12 @@ rtk python3 scripts/bench/compare.py \
     --roadmap-item P2 \
     --status user_accepted \
     --date 2026-05-27 \
-    --command "rtk cargo bench -p rollshot-core --bench stitch_sequences -- --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter --repeats 3 --out bench-results/2026-05-27-p2-prepared-frame-after.jsonl" \
+    --command "rtk cargo bench -p rollshot-core --bench stitch_sequences -- --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter --repeats 3 --out bench-results/runs/p2-prepared-frame/after.jsonl" \
     --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter \
     --repeats 3 \
-    bench-results/2026-05-27-p2-prepared-frame-before-abc1234.jsonl \
-    bench-results/2026-05-27-p2-prepared-frame-after.jsonl \
-    > bench-results/2026-05-27-p2-prepared-frame-compare.md
+    bench-results/runs/p2-prepared-frame/before-abc1234.jsonl \
+    bench-results/runs/p2-prepared-frame/after.jsonl \
+    > bench-results/compare/2026-05-27-p2-prepared-frame-compare.md
 ```
 
 The compare report flags any scenario with Δ > +5% on `total_us` (p50),
@@ -110,11 +114,12 @@ hash.
 Committed benchmark reports use:
 
 ```text
-bench-results/YYYY-MM-DD-<scope>-compare.md
+bench-results/compare/YYYY-MM-DD-<scope>-compare.md
 ```
 
-Only commit the compare markdown by default. Raw JSONL files remain local
-artifacts unless a reviewer explicitly asks to version them. Committed reports
+Only commit the compare markdown by default. Raw JSONL and summary files remain
+local artifacts under `bench-results/runs/` unless a reviewer explicitly asks
+to version them. Committed reports
 start with YAML frontmatter containing `kind`, `schema_version`,
 `benchmark_id`, `roadmap_item`, before/after commits, fixtures, repeats, and
 CPU/OS context so reports can be found quickly with `rg` or parsed later.

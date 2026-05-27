@@ -8,15 +8,15 @@ status: user_accepted
 before:
   short_commit: f404e61
   commit: f404e613fa7447a6b04e266b5550501bd0cc5014
-  jsonl: bench-results/2026-05-27-p1-strip-canvas-before-f404e61.jsonl
+  jsonl: bench-results/runs/p1-strip-canvas/before-f404e61.jsonl
 after:
   short_commit: d208cf5
   commit: d208cf5583d485172d24a765601cd3b5482ab248
-  jsonl: bench-results/2026-05-27-p1-strip-canvas-after.jsonl
+  jsonl: bench-results/runs/p1-strip-canvas/after.jsonl
 run:
   date: 2026-05-27
   harness: crates/rollshot-core/benches/stitch_sequences.rs
-  command: "rtk cargo bench -p rollshot-core --bench stitch_sequences -- --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter --repeats 3 --out bench-results/2026-05-27-p1-strip-canvas-after.jsonl"
+  command: "rtk cargo bench -p rollshot-core --bench stitch_sequences -- --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter --repeats 3 --out bench-results/runs/p1-strip-canvas/after.jsonl"
   fixtures:
     - long_vertical_text
     - long_sticky_header
@@ -28,7 +28,7 @@ environment:
   cpu_model: "Intel(R) Core(TM) Ultra 7 265K"
   logical_cpus: 8
 notes:
-  - "Raw JSONL files are local benchmark artifacts and are not intended to be committed."
+  - "Raw JSONL files are local benchmark artifacts under bench-results/runs/ and are not intended to be committed."
   - "Peak RSS is allocator- and machine-dependent; compare trends on this machine."
 ---
 

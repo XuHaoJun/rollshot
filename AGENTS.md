@@ -85,8 +85,8 @@ When already in `crates/rollshot-app/` (check with `pwd`):
 For changes touching `rollshot-core` stitching paths (matcher, canvas,
 verifier, stitcher), also capture before/after numbers:
 
-- `rtk cargo bench -p rollshot-core --bench stitch_sequences -- --out target/bench/after.jsonl`
-- `rtk python3 scripts/bench/compare.py target/bench/before.jsonl target/bench/after.jsonl`
+- `rtk cargo bench -p rollshot-core --bench stitch_sequences -- --out bench-results/runs/<scope>/after.jsonl`
+- `rtk python3 scripts/bench/compare.py bench-results/runs/<scope>/before.jsonl bench-results/runs/<scope>/after.jsonl`
 
 See `docs/bench.md` for the full workflow and metric reference.
 

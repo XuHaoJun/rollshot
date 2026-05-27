@@ -8,3 +8,11 @@ target/
 crates/rollshot-app/node_modules/
 crates/rollshot-app/dist/
 __pycache__/
+
+# Local benchmark artifacts. Accepted compare reports live under
+# bench-results/compare/ and are intentionally not ignored.
+bench-results/runs/
+bench-results/*.jsonl
+bench-results/*.run.md
+bench-results/*.summary.md
+crates/**/bench-results/

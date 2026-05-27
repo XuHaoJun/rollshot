@@ -3,6 +3,8 @@
 
 Usage:
     python3 scripts/bench/summarize.py <jsonl-path>
+
+Raw JSONL files normally live under bench-results/runs/<scope>/.
 """
 
 import argparse

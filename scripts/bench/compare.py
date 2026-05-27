@@ -3,6 +3,9 @@
 
 Usage:
     python3 scripts/bench/compare.py <before.jsonl> <after.jsonl>
+
+Raw JSONL inputs normally live under bench-results/runs/<scope>/.
+Accepted reports that are worth committing live under bench-results/compare/.
 """
 
 import argparse
@@ -166,7 +169,7 @@ def render_frontmatter(args, before_sha, after_sha):
         f"  cpu_model: {yaml_scalar(env['cpu_model'])}",
         f"  logical_cpus: {env['logical_cpus']}",
         "notes:",
-        '  - "Raw JSONL files are local benchmark artifacts and are not intended to be committed."',
+        '  - "Raw JSONL files are local benchmark artifacts under bench-results/runs/ and are not intended to be committed."',
         '  - "Peak RSS is allocator- and machine-dependent; compare trends on this machine."',
         "---",
         "",

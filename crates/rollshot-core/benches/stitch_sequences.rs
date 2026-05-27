@@ -26,6 +26,7 @@ use synthetic::{make_scroll_canvas, SyntheticSpec};
 
 const GIT_SHA: &str = env!("ROLLSHOT_GIT_SHA");
 const FIXTURE_ROOT: &str = "tests/fixtures/linearscroll_v2";
+const DEFAULT_RUNS_DIR: &str = "bench-results/runs/stitch_sequences";
 
 #[derive(Parser, Debug)]
 #[command(about = "rollshot stitch sequence bench harness")]
@@ -34,7 +35,7 @@ struct Args {
     #[arg(long)]
     fixtures: Option<String>,
 
-    /// Output JSONL path. Default: target/bench/stitch_sequences-<sha>-<utc>.jsonl
+    /// Output JSONL path. Default: <repo>/bench-results/runs/stitch_sequences/stitch_sequences-<sha>-<utc>.jsonl
     #[arg(long)]
     out: Option<PathBuf>,
 
@@ -310,10 +311,18 @@ fn load_golden_image(family: &str) -> Option<RgbaImage> {
     image::open(path).ok().map(|i| i.to_rgba8())
 }
 
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rollshot-core lives under crates/ in the workspace")
+        .to_path_buf()
+}
+
 fn default_out_path(now: u64) -> PathBuf {
-    PathBuf::from(format!(
-        "target/bench/stitch_sequences-{GIT_SHA}-{now}.jsonl"
-    ))
+    workspace_root()
+        .join(DEFAULT_RUNS_DIR)
+        .join(format!("stitch_sequences-{GIT_SHA}-{now}.jsonl"))
 }
 
 fn main() {
@@ -645,6 +654,15 @@ mod tests {
     fn select_scenarios_filter_unknown_name_returns_empty() {
         let selected = select_scenarios(&args_with_filter(Some("does_not_exist")));
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn default_out_path_uses_local_bench_results_runs_dir() {
+        let path = default_out_path(1_716_732_615);
+        assert!(path.ends_with(format!(
+            "{DEFAULT_RUNS_DIR}/stitch_sequences-{GIT_SHA}-1716732615.jsonl"
+        )));
+        assert!(!path.starts_with("target"));
     }
 
     #[test]
