@@ -87,9 +87,16 @@ impl Stitcher {
             }
         }
 
+        let (anchor_prepared, frame_prepared) = {
+            let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.prepare_frame_us);
+            (
+                crate::matcher::PreparedFrame::new(anchor.clone()),
+                crate::matcher::PreparedFrame::new(frame.clone()),
+            )
+        };
         let candidate = match estimate_motion(
-            anchor,
-            &frame,
+            &anchor_prepared,
+            &frame_prepared,
             self.locked_axis,
             self.last_motion,
             &self.config,
