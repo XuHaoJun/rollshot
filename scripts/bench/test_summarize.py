@@ -17,6 +17,33 @@ def _write_jsonl(path, records):
             f.write(json.dumps(r) + "\n")
 
 
+def _frame_record(git_sha, scenario="x"):
+    return {
+        "kind": "frame", "scenario": scenario, "run": 0, "frame": 0,
+        "git_sha": git_sha, "outcome": "Appended", "no_match_reason": None,
+        "total_us": 1000, "duplicate_us": 10, "prepare_frame_us": 100,
+        "coarse_us": 50, "template_ncc_us": 600, "edge_projection_us": 0,
+        "verifier_us": 100, "fallback_us": 0, "append_us": 140,
+        "coarse_candidates": 5, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
+        "verifier_candidates": 3, "fallback_features_extracted": 0,
+        "canvas_logical_pixels": 100, "canvas_allocated_bytes": 400,
+        "append_copied_bytes": 80, "best_dx": 0, "best_dy": 40,
+        "best_score": 0.95, "second_best_score": None, "match_method": "Template",
+    }
+
+
+def _summary_record(git_sha, scenario="x"):
+    return {
+        "kind": "summary", "scenario": scenario, "run": 0, "git_sha": git_sha,
+        "peak_rss_kb_delta": 1000, "peak_rss_kb_absolute": 200000,
+        "total_frames": 1, "appended": 1, "duplicate": 0, "no_match": 0,
+        "no_progress": 0, "axis_changed": 0,
+        "final_canvas_logical_pixels": 100, "final_canvas_allocated_bytes": 400,
+        "output_pixel_hash": "deadbeef",
+        "output_max_channel_diff": 1, "output_mismatch_ratio": 0.001,
+    }
+
+
 def test_summarize_handles_empty_jsonl(tmp_path):
     p = tmp_path / "empty.jsonl"
     p.write_text("")
@@ -130,3 +157,48 @@ def test_compare_detects_regression(tmp_path):
     result = compare.main([str(a), str(b)])
     assert "+10.0%" in result
     assert "(none) ✅" not in result
+
+
+def test_compare_can_emit_frontmatter(tmp_path):
+    before = tmp_path / "before.jsonl"
+    after = tmp_path / "after.jsonl"
+    _write_jsonl(before, [_frame_record("abc1234"), _summary_record("abc1234")])
+    _write_jsonl(after, [_frame_record("def5678"), _summary_record("def5678")])
+
+    result = compare.main([
+        "--include-frontmatter",
+        "--benchmark-id", "2026-05-27-p2-prepared-frame",
+        "--benchmark-scope", "p2-prepared-frame",
+        "--roadmap-item", "P2",
+        "--status", "user_accepted",
+        "--date", "2026-05-27",
+        "--command", "rtk cargo bench -p rollshot-core --bench stitch_sequences -- --fixtures a,b --repeats 3 --out after.jsonl",
+        "--fixtures", "a,b",
+        "--repeats", "3",
+        str(before),
+        str(after),
+    ])
+
+    assert result.startswith("---\n")
+    assert "kind: stitch_sequences_benchmark_compare\n" in result
+    assert "schema_version: 1\n" in result
+    assert "benchmark_id: 2026-05-27-p2-prepared-frame\n" in result
+    assert "roadmap_item: P2\n" in result
+    assert "status: user_accepted\n" in result
+    assert "short_commit: abc1234\n" in result
+    assert "short_commit: def5678\n" in result
+    assert "    - a\n" in result
+    assert "    - b\n" in result
+    assert "# Benchmark comparison: abc1234 → def5678" in result
+
+
+def test_compare_without_frontmatter_keeps_original_header(tmp_path):
+    before = tmp_path / "before.jsonl"
+    after = tmp_path / "after.jsonl"
+    _write_jsonl(before, [_frame_record("abc1234"), _summary_record("abc1234")])
+    _write_jsonl(after, [_frame_record("def5678"), _summary_record("def5678")])
+
+    result = compare.main([str(before), str(after)])
+
+    assert result.startswith("# Benchmark comparison: abc1234 → def5678\n")
+    assert "kind: stitch_sequences_benchmark_compare" not in result
