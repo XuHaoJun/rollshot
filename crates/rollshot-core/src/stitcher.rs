@@ -78,7 +78,11 @@ impl Stitcher {
             let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.duplicate_us);
             duplicate::signature(&frame)
         };
-        if duplicate::is_duplicate(anchor.signature(), &signature, self.config.duplicate_threshold) {
+        if duplicate::is_duplicate(
+            anchor.signature(),
+            &signature,
+            self.config.duplicate_threshold,
+        ) {
             self.last_metrics.outcome = StitchOutcomeKind::Duplicate;
             return StitchOutcome::Duplicate;
         }
