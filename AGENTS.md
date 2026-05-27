@@ -80,6 +80,16 @@ When already in `crates/rollshot-app/` (check with `pwd`):
 - `rtk pnpm test`
 - `rtk pnpm run build`
 
+### Performance verification
+
+For changes touching `rollshot-core` stitching paths (matcher, canvas,
+verifier, stitcher), also capture before/after numbers:
+
+- `rtk cargo bench -p rollshot-core --bench stitch_sequences -- --out target/bench/after.jsonl`
+- `rtk python3 scripts/bench/compare.py target/bench/before.jsonl target/bench/after.jsonl`
+
+See `docs/bench.md` for the full workflow and metric reference.
+
 @RTK.md
 
 ## 8. learn-projects

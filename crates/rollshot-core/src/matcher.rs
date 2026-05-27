@@ -3,6 +3,7 @@ use rayon::prelude::*;
 
 use crate::axis::{classify_axis, validate_with_lock, AxisClassification, AxisValidation};
 use crate::feature_matcher::{feature_fallback_candidates, FeatureFallbackOutcome};
+use crate::metrics::{ScopedTimer, StitchMetrics};
 use crate::overlap::compute_overlap;
 use crate::types::{MatchMethod, MotionCandidate, NoMatchReason, ScrollAxis, StitchConfig};
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
@@ -95,7 +96,15 @@ fn estimate_motion_with_budget(
         assert!(active.is_none(), "nested search budgets are not supported");
         *active = Some(SearchBudget::default());
     }
-    let result = estimate_motion(prev, curr, locked_axis, last_motion, config);
+    let mut throwaway_metrics = StitchMetrics::default();
+    let result = estimate_motion(
+        prev,
+        curr,
+        locked_axis,
+        last_motion,
+        config,
+        &mut throwaway_metrics,
+    );
     *budget = ACTIVE_SEARCH_BUDGET
         .lock()
         .expect("search budget mutex poisoned")
@@ -130,6 +139,7 @@ pub(crate) fn estimate_motion(
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     config: &StitchConfig,
+    metrics: &mut StitchMetrics,
 ) -> MotionSearchOutcome {
     // In test builds, serialize every call to `estimate_motion` against
     // other test threads' `estimate_motion` calls. The budget test relies
@@ -158,13 +168,20 @@ pub(crate) fn estimate_motion(
 
     let width = prev.width();
     let height = prev.height();
-    let prev_gray = to_grayscale(prev);
-    let curr_gray = to_grayscale(curr);
+    let (prev_gray, curr_gray) = {
+        let _t = ScopedTimer::new(&mut metrics.prepare_frame_us);
+        (to_grayscale(prev), to_grayscale(curr))
+    };
 
     let mut candidates = Vec::new();
-    let coarse = coarse_candidates(&prev_gray, &curr_gray, width, height, locked_axis, config);
+    let coarse = {
+        let _t = ScopedTimer::new(&mut metrics.coarse_us);
+        coarse_candidates(&prev_gray, &curr_gray, width, height, locked_axis, config)
+    };
+    metrics.coarse_candidates = coarse.len();
     candidates.extend(coarse.iter().copied());
-    candidates.extend(template_candidates(
+    let template_start = std::time::Instant::now();
+    let template_result = template_candidates(
         &prev_gray,
         &curr_gray,
         width,
@@ -173,17 +190,28 @@ pub(crate) fn estimate_motion(
         last_motion,
         &coarse,
         config,
-    ));
-    candidates.extend(edge_projection_candidates(
+        metrics,
+    );
+    metrics.template_ncc_us = template_start.elapsed().as_micros() as u64;
+    candidates.extend(template_result);
+    let edge_start = std::time::Instant::now();
+    let edge_result = edge_projection_candidates(
         &prev_gray,
         &curr_gray,
         width,
         height,
         locked_axis,
         config,
-    ));
+        metrics,
+    );
+    metrics.edge_projection_us = edge_start.elapsed().as_micros() as u64;
+    candidates.extend(edge_result);
 
-    if let Some(candidate) = rank_verified_candidates(prev, curr, locked_axis, candidates, config) {
+    metrics.verifier_candidates += candidates.len();
+    if let Some(candidate) = {
+        let _t = ScopedTimer::new(&mut metrics.verifier_us);
+        rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+    } {
         return MotionSearchOutcome::Candidate(candidate);
     }
 
@@ -203,19 +231,27 @@ pub(crate) fn estimate_motion(
         locked_axis,
         last_motion,
         config,
+        metrics,
     ) {
         return MotionSearchOutcome::Candidate(candidate);
     }
 
-    match feature_fallback_candidates(prev, curr, locked_axis, config) {
+    let fallback_outcome = {
+        let _t = ScopedTimer::new(&mut metrics.fallback_us);
+        feature_fallback_candidates(prev, curr, locked_axis, config)
+    };
+    match fallback_outcome {
         FeatureFallbackOutcome::Disabled => MotionSearchOutcome::NoMatch {
             reason: NoMatchReason::FeatureFallbackDisabled,
             best_candidate: None,
         },
-        FeatureFallbackOutcome::NotEnoughFeatures { .. } => MotionSearchOutcome::NoMatch {
-            reason: NoMatchReason::NotEnoughFeatures,
-            best_candidate: None,
-        },
+        FeatureFallbackOutcome::NotEnoughFeatures { prev, curr } => {
+            metrics.fallback_features_extracted = prev.max(curr);
+            MotionSearchOutcome::NoMatch {
+                reason: NoMatchReason::NotEnoughFeatures,
+                best_candidate: None,
+            }
+        }
         FeatureFallbackOutcome::NotEnoughMatches { raw_matches: _ } => {
             MotionSearchOutcome::NoMatch {
                 reason: NoMatchReason::FeatureLowInliers,
@@ -223,8 +259,14 @@ pub(crate) fn estimate_motion(
             }
         }
         FeatureFallbackOutcome::Candidates { candidates } => {
+            metrics.fallback_features_extracted = candidates.len();
+            metrics.verifier_candidates += candidates.len();
             let best = candidates.first().copied();
-            match rank_verified_candidates(prev, curr, locked_axis, candidates, config) {
+            let result = {
+                let _t = ScopedTimer::new(&mut metrics.verifier_us);
+                rank_verified_candidates(prev, curr, locked_axis, candidates, config)
+            };
+            match result {
                 Some(candidate) => MotionSearchOutcome::Candidate(candidate),
                 None => MotionSearchOutcome::NoMatch {
                     reason: NoMatchReason::FeatureLowInliers,
@@ -248,6 +290,7 @@ fn relaxed_coarse_candidate(
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     config: &StitchConfig,
+    metrics: &mut StitchMetrics,
 ) -> Option<MotionCandidate> {
     // No point retrying if the standard pass already searches near the
     // geometric ceiling.
@@ -266,6 +309,7 @@ fn relaxed_coarse_candidate(
         locked_axis,
         &relaxed_cfg,
     );
+    metrics.coarse_candidates = metrics.coarse_candidates.max(coarse.len());
     if coarse.is_empty() {
         return None;
     }
@@ -284,8 +328,11 @@ fn relaxed_coarse_candidate(
         last_motion,
         &coarse,
         &relaxed_cfg,
+        metrics,
     ));
 
+    metrics.verifier_candidates += candidates.len();
+    let _t = ScopedTimer::new(&mut metrics.verifier_us);
     rank_verified_candidates(prev, curr, locked_axis, candidates, config)
 }
 
@@ -440,6 +487,7 @@ fn template_candidates(
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
     config: &StitchConfig,
+    metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
     let mut out = Vec::new();
     let roi = content_roi(width, height);
@@ -456,6 +504,7 @@ fn template_candidates(
             match_region,
             seed,
             config,
+            metrics,
         ) {
             out.push(candidate);
         }
@@ -474,6 +523,7 @@ fn search_template_axis(
     region: Region,
     last_offset: i32,
     config: &StitchConfig,
+    metrics: &mut StitchMetrics,
 ) -> Option<MotionCandidate> {
     if width < 50 || height < 50 {
         return None;
@@ -492,6 +542,10 @@ fn search_template_axis(
     }
 
     let offsets = refinement_offsets(last_offset, max_offset, template_refine_radius());
+    metrics.ncc_offsets_scored += offsets.len();
+    metrics.ncc_pixel_visits += offsets
+        .len()
+        .saturating_mul(region.w as usize * region.h as usize);
     let scored: Vec<_> = offsets
         .into_par_iter()
         .filter_map(|offset| {
@@ -713,7 +767,9 @@ fn edge_projection_candidates(
     height: u32,
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
+    metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
+    let _ = metrics; // reserved for edge-stage counters; timing is captured by the outer ScopedTimer.
     let mut out = Vec::new();
 
     for axis in search_axes(locked_axis) {
@@ -979,6 +1035,7 @@ mod tests {
         estimate_motion_with_budget, refinement_offsets, template_refine_radius,
         MotionSearchOutcome, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
     };
+    use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
@@ -1107,7 +1164,14 @@ mod tests {
             min_overlap: 280,
             ..StitchConfig::default()
         };
-        let candidate = unwrap_candidate(estimate_motion(&prev, &curr, None, (0, 0), &config));
+        let candidate = unwrap_candidate(estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut StitchMetrics::default(),
+        ));
         assert!(
             candidate.dy <= 40,
             "dy = {} exceeds bounded search",
@@ -1126,6 +1190,7 @@ mod tests {
             None,
             (0, 0),
             &StitchConfig::default(),
+            &mut StitchMetrics::default(),
         ));
         assert_eq!(candidate.dx, 0);
         assert!(
@@ -1140,7 +1205,14 @@ mod tests {
         let prev = make_textured_canvas(160, 160);
         let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
         assert!(matches!(
-            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()),
+            estimate_motion(
+                &prev,
+                &curr,
+                None,
+                (0, 0),
+                &StitchConfig::default(),
+                &mut StitchMetrics::default()
+            ),
             MotionSearchOutcome::NoMatch { .. }
         ));
     }
@@ -1150,7 +1222,14 @@ mod tests {
         let prev = make_textured_canvas(160, 160);
         let curr = make_textured_canvas(160, 200);
         assert!(matches!(
-            estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default()),
+            estimate_motion(
+                &prev,
+                &curr,
+                None,
+                (0, 0),
+                &StitchConfig::default(),
+                &mut StitchMetrics::default()
+            ),
             MotionSearchOutcome::NoMatch { .. }
         ));
     }
@@ -1167,6 +1246,7 @@ mod tests {
             None,
             (0, 0),
             &StitchConfig::default(),
+            &mut StitchMetrics::default(),
         ));
 
         assert_eq!(candidate.dx, 0);
@@ -1189,6 +1269,7 @@ mod tests {
             None,
             (0, 0),
             &StitchConfig::default(),
+            &mut StitchMetrics::default(),
         ));
 
         assert_eq!(candidate.dy, 0);
@@ -1211,6 +1292,7 @@ mod tests {
             Some(ScrollAxis::Horizontal),
             (40, 0),
             &StitchConfig::default(),
+            &mut StitchMetrics::default(),
         ));
 
         assert_eq!(candidate.dy, 0);
@@ -1233,6 +1315,7 @@ mod tests {
             Some(ScrollAxis::Vertical),
             (0, 40),
             &StitchConfig::default(),
+            &mut StitchMetrics::default(),
         );
 
         assert!(matches!(candidate, MotionSearchOutcome::NoMatch { .. }));
@@ -1244,7 +1327,14 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 0, 32, 160, 160);
 
-        let candidate = estimate_motion(&prev, &curr, None, (0, 0), &StitchConfig::default());
+        let candidate = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &StitchConfig::default(),
+            &mut StitchMetrics::default(),
+        );
 
         assert!(matches!(candidate, MotionSearchOutcome::NoMatch { .. }));
     }
@@ -1261,6 +1351,7 @@ mod tests {
             Some(ScrollAxis::Vertical),
             (0, 40),
             &StitchConfig::default(),
+            &mut StitchMetrics::default(),
         ));
 
         assert_eq!(candidate.dy, 0);
@@ -1367,7 +1458,14 @@ mod tests {
         let config = StitchConfig::default();
 
         let started = std::time::Instant::now();
-        let outcome = estimate_motion(&prev, &curr, None, (0, 0), &config);
+        let outcome = estimate_motion(
+            &prev,
+            &curr,
+            None,
+            (0, 0),
+            &config,
+            &mut StitchMetrics::default(),
+        );
         let elapsed = started.elapsed();
         let candidate = unwrap_candidate(outcome);
 

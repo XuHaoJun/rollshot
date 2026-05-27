@@ -1,4 +1,4 @@
-/target/
+target/
 **/*.rs.bk
 .DS_Store
 .idea/
@@ -7,4 +7,4 @@
 .code-review-graph/
 crates/rollshot-app/node_modules/
 crates/rollshot-app/dist/
-crates/rollshot-app/src-tauri/target/
+__pycache__/

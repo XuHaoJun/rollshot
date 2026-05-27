@@ -53,6 +53,7 @@ pub enum CanvasAppendError {
 pub struct LinearCanvas {
     image: RgbaImage,
     axis: Option<ScrollAxis>,
+    last_append_copied_bytes: u64,
 }
 
 impl LinearCanvas {
@@ -60,6 +61,7 @@ impl LinearCanvas {
         Self {
             image: first_frame,
             axis: None,
+            last_append_copied_bytes: 0,
         }
     }
 
@@ -81,6 +83,18 @@ impl LinearCanvas {
 
     pub fn height(&self) -> u32 {
         self.image.height()
+    }
+
+    pub fn allocated_bytes(&self) -> u64 {
+        self.image.as_raw().len() as u64
+    }
+
+    pub fn logical_pixels(&self) -> u64 {
+        self.image.width() as u64 * self.image.height() as u64
+    }
+
+    pub fn last_append_copied_bytes(&self) -> u64 {
+        self.last_append_copied_bytes
     }
 
     /// Appends `slice_px` new pixels from `frame` in the given `direction`.
@@ -175,6 +189,7 @@ impl LinearCanvas {
         let mut combined = RgbaImage::new(self.image.width(), new_height);
         combined.copy_from(&self.image, 0, 0).expect("copy base");
         combined.copy_from(&*slice, 0, paste_y).expect("copy slice");
+        self.last_append_copied_bytes = combined.as_raw().len() as u64;
         self.image = combined;
         slice_px
     }
@@ -201,6 +216,7 @@ impl LinearCanvas {
         combined
             .copy_from(&*kept_old, 0, total_slice)
             .expect("copy base");
+        self.last_append_copied_bytes = combined.as_raw().len() as u64;
         self.image = combined;
         slice_px
     }
@@ -220,6 +236,7 @@ impl LinearCanvas {
         let mut combined = RgbaImage::new(new_width, self.image.height());
         combined.copy_from(&self.image, 0, 0).expect("copy base");
         combined.copy_from(&*slice, paste_x, 0).expect("copy slice");
+        self.last_append_copied_bytes = combined.as_raw().len() as u64;
         self.image = combined;
         slice_px
     }
@@ -246,6 +263,7 @@ impl LinearCanvas {
         combined
             .copy_from(&*kept_old, total_slice, 0)
             .expect("copy base");
+        self.last_append_copied_bytes = combined.as_raw().len() as u64;
         self.image = combined;
         slice_px
     }
@@ -621,5 +639,37 @@ mod tests {
         let added = canvas.append(AppendDirection::Left, &frame, 2).unwrap();
         assert_eq!(added, 2);
         assert_eq!(canvas.width(), w0 + 2);
+    }
+
+    #[test]
+    fn allocated_bytes_matches_image_buffer_length() {
+        let canvas = LinearCanvas::new(solid(8, 4, [0, 0, 0, 255]));
+        // 8 × 4 × 4 channels = 128 bytes
+        assert_eq!(canvas.allocated_bytes(), 128);
+    }
+
+    #[test]
+    fn logical_pixels_matches_width_times_height() {
+        let canvas = LinearCanvas::new(solid(8, 4, [0, 0, 0, 255]));
+        assert_eq!(canvas.logical_pixels(), 32);
+    }
+
+    #[test]
+    fn last_append_copied_bytes_starts_at_zero() {
+        let canvas = LinearCanvas::new(solid(4, 4, [0, 0, 0, 255]));
+        assert_eq!(canvas.last_append_copied_bytes(), 0);
+    }
+
+    #[test]
+    fn last_append_copied_bytes_reflects_combined_buffer_after_append() {
+        let mut canvas = LinearCanvas::new(solid(4, 4, [0, 0, 0, 255]));
+        canvas
+            .append(AppendDirection::Bottom, &solid(4, 4, [200, 0, 0, 255]), 2)
+            .unwrap();
+        // After append: canvas is 4 × 6 = 24 px × 4 channels = 96 bytes copied.
+        assert_eq!(canvas.last_append_copied_bytes(), 96);
+        // allocated_bytes should match.
+        assert_eq!(canvas.allocated_bytes(), 96);
+        assert_eq!(canvas.logical_pixels(), 24);
     }
 }

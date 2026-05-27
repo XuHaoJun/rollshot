@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [dependencies]
 image = { workspace = true }
@@ -12,8 +13,13 @@ imageproc = { version = "0.26", default-features = false }
 rayon = { workspace = true }
 
 [dev-dependencies]
+clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[[bench]]
+name = "stitch_sequences"
+harness = false
 
 [lints]
 workspace = true
