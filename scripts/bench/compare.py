@@ -7,6 +7,9 @@ Usage:
 
 import argparse
 import json
+import os
+import platform
+import subprocess
 import sys
 from collections import defaultdict
 
@@ -64,6 +67,111 @@ def delta_row(before, after):
     diff = after - before
     pct = diff / before
     return (f"{pct * 100:+.1f}%", pct)
+
+
+def yaml_quote(value):
+    text = str(value)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def yaml_scalar(value):
+    if isinstance(value, int):
+        return str(value)
+    text = str(value)
+    if not text:
+        return '""'
+    safe = all(c.isalnum() or c in "-_./:" for c in text)
+    return text if safe else yaml_quote(text)
+
+
+def resolve_commit(short_sha):
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", short_sha],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return short_sha
+    return result.stdout.strip() or short_sha
+
+
+def cpu_model_name():
+    try:
+        result = subprocess.run(
+            ["lscpu"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    for line in result.stdout.splitlines():
+        if line.startswith("Model name:"):
+            return line.split(":", 1)[1].strip() or "unknown"
+    return "unknown"
+
+
+def run_environment():
+    return {
+        "os": platform.platform(),
+        "architecture": platform.machine() or "unknown",
+        "cpu_model": cpu_model_name(),
+        "logical_cpus": os.cpu_count() or 0,
+    }
+
+
+def parse_fixtures(value):
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def render_frontmatter(args, before_sha, after_sha):
+    env = run_environment()
+    fixtures = parse_fixtures(args.fixtures)
+    lines = [
+        "---",
+        "kind: stitch_sequences_benchmark_compare",
+        "schema_version: 1",
+        f"benchmark_id: {yaml_scalar(args.benchmark_id)}",
+        f"benchmark_scope: {yaml_scalar(args.benchmark_scope)}",
+        f"roadmap_item: {yaml_scalar(args.roadmap_item)}",
+        f"status: {yaml_scalar(args.status)}",
+        "before:",
+        f"  short_commit: {yaml_scalar(before_sha)}",
+        f"  commit: {yaml_scalar(resolve_commit(before_sha))}",
+        f"  jsonl: {yaml_scalar(args.before)}",
+        "after:",
+        f"  short_commit: {yaml_scalar(after_sha)}",
+        f"  commit: {yaml_scalar(resolve_commit(after_sha))}",
+        f"  jsonl: {yaml_scalar(args.after)}",
+        "run:",
+        f"  date: {yaml_scalar(args.date)}",
+        "  harness: crates/rollshot-core/benches/stitch_sequences.rs",
+        f"  command: {yaml_scalar(args.command)}",
+        "  fixtures:",
+    ]
+    if fixtures:
+        lines.extend(f"    - {yaml_scalar(fixture)}" for fixture in fixtures)
+    else:
+        lines.append("    []")
+    lines.extend([
+        f"  repeats: {args.repeats}",
+        "environment:",
+        f"  os: {yaml_scalar(env['os'])}",
+        f"  architecture: {yaml_scalar(env['architecture'])}",
+        f"  cpu_model: {yaml_scalar(env['cpu_model'])}",
+        f"  logical_cpus: {env['logical_cpus']}",
+        "notes:",
+        '  - "Raw JSONL files are local benchmark artifacts and are not intended to be committed."',
+        '  - "Peak RSS is allocator- and machine-dependent; compare trends on this machine."',
+        "---",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def render(before_stats, after_stats, summaries_before, summaries_after, before_sha, after_sha):
@@ -139,12 +247,21 @@ def render(before_stats, after_stats, summaries_before, summaries_after, before_
 
 def main(argv=None):
     p = argparse.ArgumentParser()
+    p.add_argument("--include-frontmatter", action="store_true")
+    p.add_argument("--benchmark-id", default="unknown")
+    p.add_argument("--benchmark-scope", default="unknown")
+    p.add_argument("--roadmap-item", default="unknown")
+    p.add_argument("--status", default="draft")
+    p.add_argument("--date", default="unknown")
+    p.add_argument("--command", default="")
+    p.add_argument("--fixtures", default="")
+    p.add_argument("--repeats", type=int, default=0)
     p.add_argument("before")
     p.add_argument("after")
     args = p.parse_args(argv)
     bf, bs, b_sha = load(args.before)
     af, as_, a_sha = load(args.after)
-    return render(
+    body = render(
         per_scenario_stats(bf),
         per_scenario_stats(af),
         bs,
@@ -152,6 +269,9 @@ def main(argv=None):
         b_sha,
         a_sha,
     )
+    if not args.include_frontmatter:
+        return body
+    return render_frontmatter(args, b_sha, a_sha) + body
 
 
 if __name__ == "__main__":
