@@ -916,70 +916,55 @@ Replace the entire body of `push_frame_inner` (lines 58-342) with the following.
 Run: `rtk cargo build -p rollshot-core 2>&1 | tail -20`
 Expected: builds cleanly. (Confirms `anchor` borrow of `self.last_good` ends before `self.last_good = Some(curr)` on the success path, and `duplicate` is still used so no unused-import warning.)
 
-- [ ] **Step 5: Write the anchor-advancement behavioral tests**
+- [ ] **Step 5: Write the anchor-advancement behavioral test**
 
-In `crates/rollshot-core/tests/stitcher.rs`, add these two tests at the end of the file (they use the already-imported `make_scroll_canvas`, `crop_frame`, `StitchOutcome`, `Stitcher`, `StitchConfig`, `Rgba`, `RgbaImage`):
+The "NoMatch preserves the anchor" invariant is **already covered** by the existing
+`bad_frame_returns_no_match_and_preserves_anchor` test (first → white frame =
+NoMatch with `frame_count` still 1 → recovered frame appends). That test must stay
+green; do not duplicate it.
+
+Add one new test for the "Appended advances the anchor to the latest frame"
+invariant. Use **80px** scroll steps — the value the existing
+`normal_scroll_appends_bottom_and_locks_vertical_axis` test proves appends with
+`added` in `76..=84` under default config (a 40px step is below that proven point
+and risks `NoProgress` depending on the default `min_append`).
+
+In `crates/rollshot-core/tests/stitcher.rs`, add at the end of the file (uses the
+already-imported `make_scroll_canvas`, `crop_frame`, `StitchOutcome`, `Stitcher`,
+`StitchConfig`, `AppendDirection`):
 
 ```rust
 #[test]
 fn appended_advances_anchor_to_latest_frame() {
     let canvas = make_scroll_canvas(320, 1200);
     let f0 = crop_frame(&canvas, 0, 320);
-    let f1 = crop_frame(&canvas, 40, 320);
-    let f2 = crop_frame(&canvas, 80, 320);
+    let f1 = crop_frame(&canvas, 80, 320);
+    let f2 = crop_frame(&canvas, 160, 320);
 
     let mut stitcher = Stitcher::new(StitchConfig::default());
     assert_eq!(stitcher.push_frame(f0), StitchOutcome::FirstFrame);
 
     match stitcher.push_frame(f1) {
         StitchOutcome::Appended { added, .. } => {
-            assert!((36..=44).contains(&added), "f0->f1 added={added}");
+            assert!((76..=84).contains(&added), "f0->f1 added={added}");
         }
         other => panic!("expected Appended, got {other:?}"),
     }
 
-    // If the anchor advanced to f1, f1->f2 is a +40 scroll. If it had wrongly
-    // stayed at f0, this would be a +80 scroll and `added` would be ~80.
+    // If the anchor advanced to f1, f1->f2 is a +80 scroll (added ~80). If it
+    // had wrongly stayed at f0, f0->f2 is +160 and `added` would be ~160 (or a
+    // NoMatch) — either way the 76..=84 assert below fails.
     match stitcher.push_frame(f2) {
-        StitchOutcome::Appended { added, .. } => {
+        StitchOutcome::Appended {
+            added, direction, ..
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
             assert!(
-                (36..=44).contains(&added),
+                (76..=84).contains(&added),
                 "f1->f2 added={added} (anchor did not advance to f1)"
             );
         }
         other => panic!("expected Appended, got {other:?}"),
-    }
-}
-
-#[test]
-fn no_match_does_not_advance_anchor() {
-    let canvas = make_scroll_canvas(320, 1200);
-    let f0 = crop_frame(&canvas, 0, 320);
-    let f1 = crop_frame(&canvas, 40, 320);
-    let unrelated = RgbaImage::from_pixel(320, 320, Rgba([255, 255, 255, 255]));
-    let f2 = crop_frame(&canvas, 80, 320);
-
-    let mut stitcher = Stitcher::new(StitchConfig::default());
-    assert_eq!(stitcher.push_frame(f0), StitchOutcome::FirstFrame);
-    assert!(matches!(
-        stitcher.push_frame(f1),
-        StitchOutcome::Appended { .. }
-    ));
-    assert!(matches!(
-        stitcher.push_frame(unrelated),
-        StitchOutcome::NoMatch { .. }
-    ));
-
-    // The anchor must still be f1, so f1->f2 (a +40 scroll) appends. If the
-    // NoMatch had advanced the anchor, f2 would not match.
-    match stitcher.push_frame(f2) {
-        StitchOutcome::Appended { added, .. } => {
-            assert!(
-                (36..=44).contains(&added),
-                "f1->f2 added={added} after NoMatch (anchor wrongly advanced)"
-            );
-        }
-        other => panic!("expected Appended after NoMatch, got {other:?}"),
     }
 }
 ```
@@ -987,7 +972,7 @@ fn no_match_does_not_advance_anchor() {
 - [ ] **Step 6: Run the stitcher tests**
 
 Run: `rtk cargo test -p rollshot-core --test stitcher 2>&1 | tail -30`
-Expected: all stitcher integration tests pass, including the two new ones and the existing `duplicate_frame_returns_duplicate_without_growing`.
+Expected: all stitcher integration tests pass, including the new `appended_advances_anchor_to_latest_frame`, the existing `bad_frame_returns_no_match_and_preserves_anchor` (the NoMatch-preserves-anchor invariant), and `duplicate_frame_returns_duplicate_without_growing`.
 
 - [ ] **Step 7: Commit**
 
@@ -1096,7 +1081,7 @@ EOF
 - [ ] All `rollshot-core` tests pass; `fmt --check` clean; `clippy -D warnings` clean.
 - [ ] `prepare_frame_us` (p50) down ~30–50%; `coarse_us` (p50) down; `append_us`/`peak_rss` not regressed.
 - [ ] `Duplicate` returns before building the curr `PreparedFrame` (gray not built on dup) — confirmed by the early-return placement in Task 3 Step 3.
-- [ ] `NoMatch` leaves `last_good` unchanged (`no_match_does_not_advance_anchor`).
+- [ ] `NoMatch` leaves `last_good` unchanged (existing `bad_frame_returns_no_match_and_preserves_anchor` stays green).
 - [ ] `Appended` advances `last_good` to the new frame (`appended_advances_anchor_to_latest_frame`).
 - [ ] PixelOverlapVerifier still the final gate; ReverseDirection still rejected (existing tests).
 - [ ] Feature-flag-free; `Stitcher` remains `Send + Sync` (`cargo build -p rollshot-core` clean; `OnceLock` used).
