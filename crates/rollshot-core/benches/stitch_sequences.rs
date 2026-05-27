@@ -345,7 +345,13 @@ fn main() {
         std::process::exit(2);
     }
 
-    let out_path = args.out.unwrap_or_else(|| default_out_path(now));
+    // A relative --out is resolved against the workspace root (consistent with
+    // default_out_path), not the cargo-bench CWD, which is the crate dir.
+    let out_path = match args.out {
+        Some(p) if p.is_relative() => workspace_root().join(p),
+        Some(p) => p,
+        None => default_out_path(now),
+    };
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).expect("create bench output dir");
     }
