@@ -81,15 +81,43 @@ git checkout my-branch
 rtk cargo bench -p rollshot-core --bench stitch_sequences -- \
     --out target/bench/after.jsonl
 
-# 3. Compare. Paste the markdown into your PR description.
-python3 scripts/bench/compare.py \
+# 3. Compare. For normal PRs, paste the markdown into the PR description.
+rtk python3 scripts/bench/compare.py \
     target/bench/before.jsonl target/bench/after.jsonl
+
+# For accepted optimization reports that should be committed, emit YAML
+# frontmatter and write the report under bench-results/.
+rtk python3 scripts/bench/compare.py \
+    --include-frontmatter \
+    --benchmark-id 2026-05-27-p2-prepared-frame \
+    --benchmark-scope p2-prepared-frame \
+    --roadmap-item P2 \
+    --status user_accepted \
+    --date 2026-05-27 \
+    --command "rtk cargo bench -p rollshot-core --bench stitch_sequences -- --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter --repeats 3 --out bench-results/2026-05-27-p2-prepared-frame-after.jsonl" \
+    --fixtures long_vertical_text,long_sticky_header,long_vertical_jitter \
+    --repeats 3 \
+    bench-results/2026-05-27-p2-prepared-frame-before-abc1234.jsonl \
+    bench-results/2026-05-27-p2-prepared-frame-after.jsonl \
+    > bench-results/2026-05-27-p2-prepared-frame-compare.md
 ```
 
 The compare report flags any scenario with Δ > +5% on `total_us` (p50),
 `append_us` (p95), `prepare_frame_us` (p50), `template_ncc_us` (p50), or
 `verifier_us` (p50). It also flags output-correctness drift via the pixel
 hash.
+
+Committed benchmark reports use:
+
+```text
+bench-results/YYYY-MM-DD-<scope>-compare.md
+```
+
+Only commit the compare markdown by default. Raw JSONL files remain local
+artifacts unless a reviewer explicitly asks to version them. Committed reports
+start with YAML frontmatter containing `kind`, `schema_version`,
+`benchmark_id`, `roadmap_item`, before/after commits, fixtures, repeats, and
+CPU/OS context so reports can be found quickly with `rg` or parsed later.
 
 ## Adding a scenario
 
