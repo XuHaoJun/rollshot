@@ -170,7 +170,7 @@ fn run_headless(args: &CaptureArgs) -> Result<String, CliError> {
     let stitch_result = stitch_handle
         .join()
         .map_err(|_| CliError::new("stitch thread panicked", 1))?;
-    let (stitcher, mut report, captured, appended, duplicates, no_match, no_progress) =
+    let (mut stitcher, mut report, captured, appended, duplicates, no_match, no_progress) =
         stitch_result?;
     let frames_read = slot.total_produced();
 

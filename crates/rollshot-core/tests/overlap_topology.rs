@@ -15,7 +15,7 @@ use common::{
     paint_sticky_header, paint_sticky_horizontal_band,
 };
 use image::{Rgba, RgbaImage};
-use rollshot_core::{AppendDirection, LinearCanvas, StitchConfig, StitchOutcome, Stitcher};
+use rollshot_core::{AppendDirection, StitchConfig, StitchOutcome, Stitcher, StripCanvas};
 
 #[test]
 fn pure_scroll_down_byte_identical_to_v0_2() {
@@ -25,7 +25,7 @@ fn pure_scroll_down_byte_identical_to_v0_2() {
     let step = 70u32;
 
     let first = crop_frame_xy(&source, 0, 0, frame_w, frame_h);
-    let mut canvas = LinearCanvas::new(first);
+    let mut canvas = StripCanvas::new(first);
     let mut expected_h = frame_h;
 
     let mut y = step;
@@ -61,7 +61,7 @@ fn pure_scroll_up_byte_identical_to_v0_2() {
     let initial_y_start = 700u32;
 
     let first = crop_frame_xy(&source, 0, initial_y_start, frame_w, frame_h);
-    let mut canvas = LinearCanvas::new(first);
+    let mut canvas = StripCanvas::new(first);
     let mut top_y = initial_y_start;
 
     let mut prepended = 0u32;
@@ -100,7 +100,7 @@ fn pure_scroll_right_byte_identical_to_v0_2() {
     let step = 70u32;
 
     let first = crop_frame_xy(&source, 0, 0, frame_w, frame_h);
-    let mut canvas = LinearCanvas::new(first);
+    let mut canvas = StripCanvas::new(first);
     let mut expected_w = frame_w;
 
     let mut x = step;
@@ -136,7 +136,7 @@ fn pure_scroll_left_byte_identical_to_v0_2() {
     let initial_x_start = 700u32;
 
     let first = crop_frame_xy(&source, initial_x_start, 0, frame_w, frame_h);
-    let mut canvas = LinearCanvas::new(first);
+    let mut canvas = StripCanvas::new(first);
     let mut left_x = initial_x_start;
 
     let mut prepended = 0u32;
@@ -667,7 +667,7 @@ fn motion_larger_than_half_frame_falls_back_to_v0_2_behavior() {
     let step = 200u32;
 
     let first = crop_frame_xy(&source, 0, 0, frame_w, frame_h);
-    let mut canvas = LinearCanvas::new(first);
+    let mut canvas = StripCanvas::new(first);
     let mut expected_h = frame_h;
 
     let mut y = step;

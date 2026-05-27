@@ -9,7 +9,7 @@ mod stitcher;
 mod types;
 mod verifier;
 
-pub use canvas::{CanvasAppendError, LinearCanvas};
+pub use canvas::{CanvasAppendError, StripCanvas};
 pub use metrics::{StitchMetrics, StitchOutcomeKind};
 pub use stitcher::Stitcher;
 pub use types::{

@@ -22,7 +22,7 @@ fn first_frame_initializes_stitched_image() {
         StitchOutcome::FirstFrame
     );
 
-    let full = stitcher.full_image().expect("first frame stored");
+    let full = stitcher.full_image().expect("first frame stored").clone();
     assert_eq!(full.dimensions(), (320, 320));
 
     let stats = stitcher.stats();
@@ -69,7 +69,7 @@ fn duplicate_frame_returns_duplicate_without_growing() {
     );
     assert_eq!(stitcher.push_frame(first.clone()), StitchOutcome::Duplicate);
 
-    let full = stitcher.full_image().expect("image stored");
+    let full = stitcher.full_image().expect("image stored").clone();
     assert_eq!(full.dimensions(), (320, 320));
     assert_eq!(stitcher.stats().frame_count, 1);
 }
@@ -128,7 +128,7 @@ fn normal_scroll_appends_bottom_and_locks_vertical_axis() {
         other => panic!("expected Appended, got {other:?}"),
     }
 
-    let full = stitcher.full_image().expect("stitched image");
+    let full = stitcher.full_image().expect("stitched image").clone();
     assert!(full.height() > 320);
     let stats = stitcher.stats();
     assert_eq!(stats.frame_count, 2);

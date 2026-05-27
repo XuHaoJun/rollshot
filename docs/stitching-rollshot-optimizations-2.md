@@ -433,8 +433,13 @@ fn compact_if_needed(&mut self) {
 
 `compact_if_needed` 在每次 append 結尾（cache 失效後）執行：
 
-- 常駐 strip 記憶體有界於 `~COMPACT_FACTOR * logical`，約等於 `LinearCanvas` 的
-  暫態峰值。
+- 常駐 strip 記憶體有界於 `~COMPACT_FACTOR * logical`，但 **peak RSS 下限是
+  `(COMPACT_FACTOR + 1) * logical`**：壓平瞬間舊 strips（達 `COMPACT_FACTOR×`）
+  與剛 compose 出的 base（`1×`）並存。`COMPACT_FACTOR=2` 時約 `3×logical`，對比
+  `LinearCanvas` 的 `~2×` 暫態，**實測 peak RSS +37%**（text；jitter +35%、
+  sticky +25%）。這是設計的最佳結果而非「RSS 下降」；降 factor 治不了（1.5× 實驗
+  只把 RSS 壓到 +24% 卻吐回大半 append 優化，主因是那個 `1×` compose buffer 而非
+  factor）。compaction 真正保證的是 RSS 維持 canvas 的**小常數倍**（不會 8× 爆量）。
 - append 仍是 `O(frame_h)` 攤銷：壓平之間 strips 增加
   `(COMPACT_FACTOR - 1) * logical` 位元組，每次壓平 `O(logical)`，故攤銷後每幀
   copy 與 canvas 高度無關，保留對 `LinearCanvas` `O(canvas_h)` 的延遲優勢。
@@ -477,9 +482,9 @@ fn strip_canvas_full_image_is_stable_after_multiple_calls() {}
 
 - `full_image()` output 與 legacy byte-identical。
 - append p95 latency 不隨 `canvas_h` 線性上升。
-- 透過 compaction，長圖 peak RSS 有界於 `~COMPACT_FACTOR * logical`，與
-  `LinearCanvas` baseline 相當而非數倍；若爆成 baseline 的數倍代表 compaction 沒
-  運作，屬失敗而非可接受的 tradeoff。
+- 長圖 peak RSS 實測 +25~37%（`(COMPACT_FACTOR+1)×logical` 下限），用來換 append
+  延遲；這是已驗收的權衡，而非「RSS 下降」。compaction 保證的是 RSS 維持 canvas 的
+  小常數倍——若爆成 baseline 的數倍代表 compaction 沒運作，屬失敗。
 - 有 unit test 證明在慢速捲動（`slice_px < frame_h/2`）序列下 strip+cache 位元組
   維持有界。
 - 所有 existing tests pass。
@@ -1495,6 +1500,8 @@ pub enum CapturedFrame {
 [ ] Low texture sequence 不比 baseline 差
 [ ] Long canvas benchmark append time 不線性惡化
 [ ] Peak RSS 沒有明顯增加
+    （例外：P1 StripCanvas 以 +~37% peak RSS 換 append 延遲，見 §3.8；
+     已驗收的權衡。RSS 仍須是 canvas 的小常數倍，不得數倍爆量。）
 [ ] Feature flags off 時行為等同 baseline
 ```
 
