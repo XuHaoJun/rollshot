@@ -18,27 +18,32 @@ const COARSE_DOWNSAMPLE_STEP: u32 = 4;
 const COARSE_AXIS_STRIDE: i32 = 8;
 const EDGE_PROJECTION_STEP: u32 = 2;
 
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_MAX_LEVELS: u8 = 4;
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_MIN_LEVEL_SIDE: u32 = 96;
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_KERNEL_SUM: f32 = 16.0;
+#[allow(dead_code)] // wired into estimate_motion in a later task
+const PYRAMID_REFINE_RADIUS: i32 = 4;
 
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
 #[derive(Debug, Clone)]
 struct PyramidLevel {
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     scale_log2: u8,
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     width: u32,
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     height: u32,
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     gray: Vec<f32>,
 }
 
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
 #[derive(Debug, Clone)]
 struct FramePyramid {
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     levels: Vec<PyramidLevel>,
 }
 
@@ -854,6 +859,213 @@ fn coarse_axis_candidate(
     ))
 }
 
+#[allow(dead_code)] // wired into estimate_motion in a later task
+fn coarsest_full_range_search(
+    prev: &PyramidLevel,
+    curr: &PyramidLevel,
+    axis: SearchAxis,
+    max_offset: i32,
+) -> Option<(i32, f32, Option<f32>)> {
+    let offsets: Vec<i32> = (-max_offset..=max_offset).filter(|o| *o != 0).collect();
+    let mut scored: Vec<(f32, i32)> = offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            let score = pyramid_mad(&prev.gray, &curr.gray, prev.width, prev.height, dx, dy);
+            score.is_finite().then_some((score, offset))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let (best_score, best_offset) = *scored.first()?;
+    let second = scored.get(1).map(|(score, _)| *score);
+    Some((best_offset, best_score, second))
+}
+
+#[allow(dead_code, clippy::too_many_arguments)] // wired into estimate_motion in a later task
+fn refine_at_level(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    axis: SearchAxis,
+    seed: i32,
+    max_abs: i32,
+    radius: i32,
+) -> Option<i32> {
+    refinement_offsets(seed, max_abs, radius)
+        .into_iter()
+        .filter(|o| *o != 0)
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            let score = pyramid_mad(prev_gray, curr_gray, width, height, dx, dy);
+            score.is_finite().then_some((score, offset))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(_, offset)| offset)
+}
+
+#[allow(dead_code, clippy::too_many_arguments)] // wired into estimate_motion in a later task
+fn pyramid_axis_candidate(
+    prev: &FramePyramid,
+    curr: &FramePyramid,
+    prev_level0_gray: &[f32],
+    curr_level0_gray: &[f32],
+    level0_width: u32,
+    level0_height: u32,
+    axis: SearchAxis,
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    if prev.levels.is_empty() || curr.levels.is_empty() {
+        return None;
+    }
+    let top_idx = prev.levels.len().min(curr.levels.len()) - 1;
+    let top = &prev.levels[top_idx];
+    let curr_top = &curr.levels[top_idx];
+    if top.width != curr_top.width || top.height != curr_top.height {
+        return None;
+    }
+
+    let top_max = pyramid_max_axis_offset(
+        top.width,
+        top.height,
+        axis,
+        config.min_overlap,
+        top.scale_log2,
+    );
+    if top_max <= 0 {
+        return None;
+    }
+
+    let (top_offset, _top_best_score, top_second_score) =
+        coarsest_full_range_search(top, curr_top, axis, top_max)?;
+
+    let mut offset = top_offset;
+    for level_idx in (0..top_idx).rev() {
+        let level = &prev.levels[level_idx];
+        let curr_level = &curr.levels[level_idx];
+        let level_max = pyramid_max_axis_offset(
+            level.width,
+            level.height,
+            axis,
+            config.min_overlap,
+            level.scale_log2,
+        );
+        if level_max <= 0 {
+            return None;
+        }
+        offset = (offset * 2).clamp(-level_max, level_max);
+        offset = refine_at_level(
+            &level.gray,
+            &curr_level.gray,
+            level.width,
+            level.height,
+            axis,
+            offset,
+            level_max,
+            PYRAMID_REFINE_RADIUS,
+        )?;
+    }
+
+    let level0_max =
+        pyramid_max_axis_offset(level0_width, level0_height, axis, config.min_overlap, 0);
+    if level0_max <= 0 {
+        return None;
+    }
+    offset = (offset * 2).clamp(-level0_max, level0_max);
+    let best_offset = refine_at_level(
+        prev_level0_gray,
+        curr_level0_gray,
+        level0_width,
+        level0_height,
+        axis,
+        offset,
+        level0_max,
+        PYRAMID_REFINE_RADIUS,
+    )?;
+
+    let (dx, dy) = match axis {
+        SearchAxis::Vertical => (0, best_offset),
+        SearchAxis::Horizontal => (best_offset, 0),
+    };
+    let best_score = pyramid_mad(
+        prev_level0_gray,
+        curr_level0_gray,
+        level0_width,
+        level0_height,
+        dx,
+        dy,
+    );
+    if !best_score.is_finite() {
+        return None;
+    }
+
+    Some(candidate(
+        dx,
+        dy,
+        MatchMethod::Pyramid,
+        pyramid_confidence(best_score),
+        top_second_score.map(pyramid_confidence),
+    ))
+}
+
+#[allow(dead_code)] // wired into estimate_motion in a later task
+fn pyramid_candidates(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    let locked_axes;
+    let axes = match locked_axis {
+        Some(axis) => {
+            locked_axes = [SearchAxis::from_scroll_axis(axis)];
+            &locked_axes[..]
+        }
+        None => dual_search_axes(),
+    };
+    pyramid_candidates_for_axes(prev, curr, locked_axis, axes, config, metrics)
+}
+
+#[allow(dead_code)] // wired into estimate_motion in a later task
+fn pyramid_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    axes: &[SearchAxis],
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    let _timer = ScopedTimer::new(&mut metrics.pyramid_us);
+    let prev_pyramid = prev.pyramid();
+    let curr_pyramid = curr.pyramid();
+    let (level0_w, level0_h) = prev.dimensions();
+    let out: Vec<_> = axes
+        .iter()
+        .filter_map(|axis| {
+            pyramid_axis_candidate(
+                prev_pyramid,
+                curr_pyramid,
+                prev.gray(),
+                curr.gray(),
+                level0_w,
+                level0_h,
+                *axis,
+                config,
+            )
+        })
+        .filter(|candidate| candidate_matches_axis(candidate.dx, candidate.dy, locked_axis, config))
+        .collect();
+    metrics.pyramid_candidates = out.len();
+    out
+}
+
 fn coarse_sample_dimensions(width: u32, height: u32, step: u32) -> (u32, u32) {
     let step = step.max(1);
     (width.div_ceil(step).max(1), height.div_ceil(step).max(1))
@@ -883,12 +1095,26 @@ fn coarse_samples(gray: &[f32], width: u32, height: u32, step: u32) -> Vec<f32> 
     out
 }
 
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+fn pyramid_max_axis_offset(
+    level_width: u32,
+    level_height: u32,
+    axis: SearchAxis,
+    min_overlap: u32,
+    scale_log2: u8,
+) -> i32 {
+    let scaled_min_overlap = (min_overlap >> scale_log2).max(1);
+    match axis {
+        SearchAxis::Vertical => level_height.saturating_sub(scaled_min_overlap) as i32,
+        SearchAxis::Horizontal => level_width.saturating_sub(scaled_min_overlap) as i32,
+    }
+}
+
+#[allow(dead_code)] // wired into estimate_motion in a later task
 fn clamp_coord(value: i32, max_exclusive: u32) -> u32 {
     value.clamp(0, max_exclusive.saturating_sub(1) as i32) as u32
 }
 
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[allow(dead_code)] // wired into estimate_motion in a later task
 fn gaussian_downsample_2x(
     gray: &[f32],
     width: u32,
@@ -943,7 +1169,7 @@ fn gaussian_downsample_2x(
     }
 }
 
-#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[allow(dead_code)] // wired into estimate_motion in a later task
 fn build_frame_pyramid(gray: &[f32], width: u32, height: u32) -> FramePyramid {
     let mut levels: Vec<PyramidLevel> = Vec::new();
     let mut scratch = vec![0.0f32; (width * height) as usize];
@@ -1005,6 +1231,23 @@ fn coarse_mad(
         return f32::INFINITY;
     }
     sum / (count as f32 * 255.0)
+}
+
+#[allow(dead_code)] // wired into estimate_motion in a later task
+fn pyramid_mad(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    dx: i32,
+    dy: i32,
+) -> f32 {
+    coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 1)
+}
+
+#[allow(dead_code)] // wired into estimate_motion in a later task
+fn pyramid_confidence(raw_mad: f32) -> f32 {
+    raw_mad.clamp(0.0, 1.0)
 }
 
 fn edge_projection_candidates(
@@ -1159,7 +1402,7 @@ pub(crate) struct PreparedFrame {
     coarse: OnceLock<Vec<f32>>,
     proj_v: OnceLock<Vec<f32>>,
     proj_h: OnceLock<Vec<f32>>,
-    #[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     pyramid: OnceLock<FramePyramid>,
 }
 
@@ -1225,7 +1468,7 @@ impl PreparedFrame {
         }
     }
 
-    #[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+    #[allow(dead_code)] // wired into estimate_motion in a later task
     fn pyramid(&self) -> &FramePyramid {
         self.pyramid
             .get_or_init(|| build_frame_pyramid(&self.gray, self.width, self.height))
@@ -1516,10 +1759,10 @@ mod tests {
         build_frame_pyramid, coarse_axis_offsets, coarse_sample_dimensions, coarse_samples,
         content_roi, cross_axis_check, edge_projection, estimate_motion,
         estimate_motion_with_budget, fast_ncc_score_shifted, gaussian_downsample_2x,
-        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, refinement_offsets,
-        template_refine_radius, to_grayscale, FramePyramid, MotionSearchOutcome, NccSums,
-        PreparedFrame, Region, SearchAxis, SearchBudget, COARSE_AXIS_STRIDE,
-        COARSE_DOWNSAMPLE_STEP, PYRAMID_MAX_LEVELS,
+        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, pyramid_candidates_for_axes,
+        refinement_offsets, template_refine_radius, to_grayscale, FramePyramid,
+        MotionSearchOutcome, NccSums, PreparedFrame, Region, SearchAxis, SearchBudget,
+        COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP, PYRAMID_MAX_LEVELS, PYRAMID_REFINE_RADIUS,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -1594,32 +1837,29 @@ mod tests {
         imageops::crop_imm(canvas, x, y, w, h).to_image()
     }
 
-    // Like `make_textured_canvas` but mixes in an aperiodic per-pixel hash so
-    // wider search ranges (retina-scale perf smoke) cannot lock onto a
-    // periodic alias instead of the true motion.
+    // Like `make_textured_canvas` but with aperiodic content so that wider
+    // search ranges (retina-scale perf smoke) cannot lock onto a periodic
+    // alias instead of the true motion.  Uses the same splitmix hash to
+    // generate per-pixel values directly, avoiding the period-11 stripe
+    // pattern in make_textured_canvas that causes pyramid refinement to
+    // converge on false minima at multiples of 11.
     fn make_aperiodic_canvas(width: u32, height: u32) -> RgbaImage {
-        let mut img = make_textured_canvas(width, height);
+        let mut img = RgbaImage::from_pixel(width, height, Rgba([128, 128, 128, 255]));
         for y in 0..height {
             for x in 0..width {
-                // Splitmix-style hash on (x, y) so each pixel gets a unique,
-                // non-periodic perturbation that the matcher can lock onto.
                 let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                     ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
                 h ^= h >> 30;
                 h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
                 h ^= h >> 27;
-                let noise = (h as u8) & 0x3F;
-                let p = img.get_pixel(x, y);
-                img.put_pixel(
-                    x,
-                    y,
-                    Rgba([
-                        p[0].saturating_add(noise),
-                        p[1].saturating_sub(noise),
-                        p[2].wrapping_add(noise),
-                        255,
-                    ]),
-                );
+                let r = h as u8;
+                h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 27;
+                let g = h as u8;
+                h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 27;
+                let b = h as u8;
+                img.put_pixel(x, y, Rgba([r, g, b, 255]));
             }
         }
         img
@@ -2586,5 +2826,129 @@ mod tests {
             first, second,
             "pyramid OnceLock must return the same instance"
         );
+    }
+
+    #[test]
+    fn pyramid_large_jump_finds_correct_candidate() {
+        let canvas = make_aperiodic_canvas(480, 1200);
+        let prev = crop(&canvas, 0, 320);
+        let curr = crop(&canvas, 210, 320);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].dx, 0);
+        assert!(
+            (candidates[0].dy - 210).abs() <= PYRAMID_REFINE_RADIUS + 2,
+            "dy = {} (expected around 210)",
+            candidates[0].dy
+        );
+        assert_eq!(candidates[0].method, crate::types::MatchMethod::Pyramid);
+        assert!(candidates[0].score <= config.accept_confidence);
+        assert!(metrics.pyramid_us > 0);
+        assert_eq!(metrics.pyramid_candidates, 1);
+    }
+
+    #[test]
+    fn pyramid_large_jump_finds_correct_horizontal_candidate() {
+        let canvas = make_aperiodic_canvas(1200, 360);
+        let prev = crop_xy(&canvas, 0, 0, 320, 320);
+        let curr = crop_xy(&canvas, 210, 0, 320, 320);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Horizontal],
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].dy, 0);
+        assert!(
+            (candidates[0].dx - 210).abs() <= PYRAMID_REFINE_RADIUS + 2,
+            "dx = {} (expected around 210)",
+            candidates[0].dx
+        );
+        assert_eq!(candidates[0].method, crate::types::MatchMethod::Pyramid);
+    }
+
+    #[test]
+    fn pyramid_recovers_retina_pair() {
+        let canvas = make_aperiodic_canvas(1920, 2400);
+        let prev = crop(&canvas, 0, 1200);
+        let curr = crop(&canvas, 600, 1200);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "retina pair must produce a pyramid candidate"
+        );
+        assert_eq!(candidates[0].dx, 0);
+        assert!(
+            (candidates[0].dy - 600).abs() <= PYRAMID_REFINE_RADIUS + 4,
+            "dy = {} (expected around 600 at retina scale)",
+            candidates[0].dy
+        );
+        assert_eq!(candidates[0].method, crate::types::MatchMethod::Pyramid);
+    }
+
+    #[test]
+    fn pyramid_score_contract_matches_ranker() {
+        let canvas = make_aperiodic_canvas(360, 900);
+        let prev = crop(&canvas, 0, 240);
+        let curr = crop(&canvas, 96, 240);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidate = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &config,
+            &mut metrics,
+        )
+        .pop()
+        .expect("pyramid candidate");
+
+        assert!(candidate.score >= 0.0);
+        assert!(candidate.score <= 1.0);
+        if let Some(second) = candidate.second_best_score {
+            assert!(second >= 0.0);
+            assert!(second <= 1.0);
+            assert!(second >= candidate.score);
+        }
     }
 }
