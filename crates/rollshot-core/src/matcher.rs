@@ -1472,6 +1472,99 @@ mod tests {
     }
 
     #[test]
+    fn fast_ncc_matches_f64_reference_on_bright_low_contrast_at_scale() {
+        // Regression guard for the per-row f64 fold in `fused_sums_wide`.
+        // A bright, low-contrast page (light background + sparse dark text) over
+        // a large region is the worst case for the one-pass
+        // `Sum(x^2) - Sum(x)^2/n` formula: the raw second moments are huge and
+        // their difference (the variance) is comparatively tiny. If the SIMD
+        // lane sums are accumulated in f32 across the whole region instead of
+        // folded to f64 per row, the lost low-order bits corrupt the variance
+        // and the score diverges by ~1e-2 or collapses to f32::MIN. Checked
+        // against an exact f64 two-pass reference, not `legacy_ncc_score_shifted`
+        // (which itself drifts ~1e-2 from truth at this scale).
+        let (w, h) = (1024u32, 1200u32);
+        let mut prev = RgbaImage::new(w, h);
+        let mut curr = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let mut hp = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                hp ^= hp >> 29;
+                hp = hp.wrapping_mul(0x94D0_49BB_1331_11EB);
+                let mut hc = (x as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93)
+                    ^ (y as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+                hc ^= hc >> 31;
+                hc = hc.wrapping_mul(0x94D0_49BB_1331_11EB);
+                // Bright bg ~248-254 with ~4% dark "text" pixels at 40.
+                let pv = if (hp >> 8) % 25 == 0 {
+                    40
+                } else {
+                    248 + (hp as u8 % 7)
+                };
+                let cv = if (hc >> 8) % 25 == 0 {
+                    40
+                } else {
+                    248 + (hc as u8 % 7)
+                };
+                prev.put_pixel(x, y, Rgba([pv, pv, pv, 255]));
+                curr.put_pixel(x, y, Rgba([cv, cv, cv, 255]));
+            }
+        }
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        // Region sits fully inside the dy-shifted overlap, so fast scores this
+        // exact rect (clipping is a no-op) and the reference can mirror it.
+        let region = Region {
+            x: 12,
+            y: 40,
+            w: 1000,
+            h: 1100,
+        };
+        let dy = 20i32;
+
+        let pg = prev_prep.gray();
+        let cg = curr_prep.gray();
+        let n = f64::from(region.w) * f64::from(region.h);
+        let (mut mx, mut my) = (0.0f64, 0.0f64);
+        for yy in region.y..region.y + region.h {
+            for xx in region.x..region.x + region.w {
+                mx += f64::from(pg[(yy * w + xx) as usize]);
+                my += f64::from(cg[(((yy as i32 - dy) as u32) * w + xx) as usize]);
+            }
+        }
+        mx /= n;
+        my /= n;
+        let (mut num, mut vx, mut vy) = (0.0f64, 0.0f64, 0.0f64);
+        for yy in region.y..region.y + region.h {
+            for xx in region.x..region.x + region.w {
+                let p = f64::from(pg[(yy * w + xx) as usize]) - mx;
+                let c = f64::from(cg[(((yy as i32 - dy) as u32) * w + xx) as usize]) - my;
+                num += p * c;
+                vx += p * p;
+                vy += c * c;
+            }
+        }
+        assert!(
+            vx > 1.0 && vy > 1.0,
+            "reference window must sit above the reject floor (vx={vx} vy={vy})"
+        );
+        let reference = (num / (vx * vy).sqrt()) as f32;
+
+        let fast = fast_ncc_score_shifted(&prev_prep, &curr_prep, region, 0, dy);
+        assert_ne!(
+            fast,
+            f32::MIN,
+            "fast must not spuriously reject a textured window"
+        );
+        assert!(
+            (fast - reference).abs() <= 1e-3,
+            "fast={fast} reference={reference} diff={}",
+            (fast - reference).abs()
+        );
+    }
+
+    #[test]
     fn fast_ncc_rejects_low_variance_windows_like_legacy() {
         let mut prev = RgbaImage::from_pixel(120, 120, Rgba([200, 200, 200, 255]));
         prev.put_pixel(10, 10, Rgba([201, 201, 201, 255]));
