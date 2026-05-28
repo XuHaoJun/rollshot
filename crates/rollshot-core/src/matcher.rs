@@ -170,8 +170,6 @@ pub(crate) fn estimate_motion(
         };
     }
 
-    let (width, height) = prev.dimensions();
-
     let mut candidates = Vec::new();
     let coarse = {
         let _t = ScopedTimer::new(&mut metrics.coarse_us);
@@ -181,10 +179,8 @@ pub(crate) fn estimate_motion(
     candidates.extend(coarse.iter().copied());
     let template_start = std::time::Instant::now();
     let template_result = template_candidates(
-        prev.gray(),
-        curr.gray(),
-        width,
-        height,
+        prev,
+        curr,
         locked_axis,
         last_motion,
         &coarse,
@@ -274,7 +270,6 @@ fn relaxed_coarse_candidate(
     if config.max_search_ratio >= RELAXED_SEARCH_RATIO - 0.05 {
         return None;
     }
-    let (width, height) = prev.dimensions();
 
     let mut relaxed_cfg = config.clone();
     relaxed_cfg.max_search_ratio = RELAXED_SEARCH_RATIO;
@@ -291,10 +286,8 @@ fn relaxed_coarse_candidate(
     // accept on the same min_overlap budget.
     let mut candidates = coarse.clone();
     candidates.extend(template_candidates(
-        prev.gray(),
-        curr.gray(),
-        width,
-        height,
+        prev,
+        curr,
         locked_axis,
         last_motion,
         &coarse,
@@ -448,12 +441,9 @@ fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCand
         .unwrap_or(predicted)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn template_candidates(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    height: u32,
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
     locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
@@ -461,22 +451,15 @@ fn template_candidates(
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
     let mut out = Vec::new();
+    let (width, height) = prev.dimensions();
     let roi = content_roi(width, height);
     let match_region = match_width_region(roi, config.match_width);
 
     for axis in search_axes(locked_axis) {
         let seed = template_seed(*axis, last_motion, coarse);
-        if let Some(candidate) = search_template_axis(
-            prev_gray,
-            curr_gray,
-            width,
-            height,
-            *axis,
-            match_region,
-            seed,
-            config,
-            metrics,
-        ) {
+        if let Some(candidate) =
+            search_template_axis(prev, curr, *axis, match_region, seed, config, metrics)
+        {
             out.push(candidate);
         }
     }
@@ -484,18 +467,16 @@ fn template_candidates(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn search_template_axis(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    height: u32,
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
     axis: SearchAxis,
     region: Region,
     last_offset: i32,
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Option<MotionCandidate> {
+    let (width, height) = prev.dimensions();
     if width < 50 || height < 50 {
         return None;
     }
@@ -521,12 +502,8 @@ fn search_template_axis(
         .into_par_iter()
         .filter_map(|offset| {
             let score = match axis {
-                SearchAxis::Vertical => {
-                    ncc_score_shifted(prev_gray, curr_gray, width, height, region, 0, offset)
-                }
-                SearchAxis::Horizontal => {
-                    ncc_score_shifted(prev_gray, curr_gray, width, height, region, offset, 0)
-                }
+                SearchAxis::Vertical => fast_ncc_score_shifted(prev, curr, region, 0, offset),
+                SearchAxis::Horizontal => fast_ncc_score_shifted(prev, curr, region, offset, 0),
             };
             score.is_finite().then_some((score, offset))
         })
@@ -1003,77 +980,6 @@ fn signed_predict_iter(max_abs: i32, predict: i32) -> Vec<i32> {
     out
 }
 
-fn ncc_score_shifted(
-    prev_gray: &[f32],
-    curr_gray: &[f32],
-    width: u32,
-    height: u32,
-    region: Region,
-    dx: i32,
-    dy: i32,
-) -> f32 {
-    let overlap = match compute_overlap(width, height, width, height, dx, dy) {
-        Some(overlap) => overlap,
-        None => return f32::MIN,
-    };
-    let x0 = region.x.max(overlap.prev_x);
-    let y0 = region.y.max(overlap.prev_y);
-    let x1 = (region.x + region.w).min(overlap.prev_x + overlap.width);
-    let y1 = (region.y + region.h).min(overlap.prev_y + overlap.height);
-    if x1 <= x0 || y1 <= y0 {
-        return f32::MIN;
-    }
-
-    #[cfg(test)]
-    with_active_search_budget(|budget| {
-        budget.full_res_ncc_calls += 1;
-        budget.full_res_ncc_pixel_visits += u64::from(x1 - x0) * u64::from(y1 - y0) * 2;
-    });
-
-    let mut prev_sum = 0.0f32;
-    let mut curr_sum = 0.0f32;
-    let mut count = 0usize;
-    for prev_y in y0..y1 {
-        for prev_x in x0..x1 {
-            let curr_x = (prev_x as i32 - dx) as u32;
-            let curr_y = (prev_y as i32 - dy) as u32;
-            let prev_idx = (prev_y * width + prev_x) as usize;
-            let curr_idx = (curr_y * width + curr_x) as usize;
-            prev_sum += prev_gray[prev_idx];
-            curr_sum += curr_gray[curr_idx];
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return f32::MIN;
-    }
-
-    let prev_mean = prev_sum / count as f32;
-    let curr_mean = curr_sum / count as f32;
-    let mut num = 0.0f32;
-    let mut prev_var = 0.0f32;
-    let mut curr_var = 0.0f32;
-    for prev_y in y0..y1 {
-        for prev_x in x0..x1 {
-            let curr_x = (prev_x as i32 - dx) as u32;
-            let curr_y = (prev_y as i32 - dy) as u32;
-            let prev_idx = (prev_y * width + prev_x) as usize;
-            let curr_idx = (curr_y * width + curr_x) as usize;
-            let p = prev_gray[prev_idx] - prev_mean;
-            let c = curr_gray[curr_idx] - curr_mean;
-            num += p * c;
-            prev_var += p * p;
-            curr_var += c * c;
-        }
-    }
-
-    if prev_var <= 1.0 || curr_var <= 1.0 {
-        return f32::MIN;
-    }
-    num / (prev_var.sqrt() * curr_var.sqrt())
-}
-
-#[allow(dead_code)]
 fn clipped_ncc_rects(
     width: u32,
     height: u32,
@@ -1105,7 +1011,6 @@ fn clipped_ncc_rects(
     Some((prev_rect, curr_rect))
 }
 
-#[allow(dead_code)]
 struct NccSums {
     n: f64,
     sum_x: f64,
@@ -1115,7 +1020,6 @@ struct NccSums {
     sum_xy: f64,
 }
 
-#[allow(dead_code)]
 fn fused_sums_wide(
     prev_gray: &[f32],
     curr_gray: &[f32],
@@ -1168,7 +1072,6 @@ fn fused_sums_wide(
     }
 }
 
-#[allow(dead_code)]
 fn ncc_from_sums(s: NccSums) -> f32 {
     if s.n == 0.0 {
         return f32::MIN;
@@ -1182,7 +1085,6 @@ fn ncc_from_sums(s: NccSums) -> f32 {
     (numerator / (var_x * var_y).sqrt()) as f32
 }
 
-#[allow(dead_code)]
 fn fast_ncc_score_shifted(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
