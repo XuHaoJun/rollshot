@@ -331,18 +331,20 @@ fn axis_fast_path_candidate(
 
     let edge_start = std::time::Instant::now();
     candidates.extend(edge_projection_candidates_for_axes(
-        prev,
-        curr,
-        &axes,
-        config,
-        metrics,
+        prev, curr, &axes, config, metrics,
     ));
     metrics.edge_projection_us += edge_start.elapsed().as_micros() as u64;
 
     metrics.verifier_candidates += candidates.len();
     let candidate = {
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
-        rank_verified_candidates(prev.rgba(), curr.rgba(), Some(locked_axis), candidates, config)
+        rank_verified_candidates(
+            prev.rgba(),
+            curr.rgba(),
+            Some(locked_axis),
+            candidates,
+            config,
+        )
     }?;
 
     let cross_axis = cross_axis_check(prev, curr, candidate, main_axis, config, metrics);
