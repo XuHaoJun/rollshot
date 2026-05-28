@@ -192,9 +192,20 @@ For each row, slice `prev`/`curr` to the rect width and iterate with
 `chunks_exact(8)`:
 
 - per 8-pixel chunk, build two `f32x8` and accumulate `sum_x`, `sum_x2`,
-  `sum_y`, `sum_y2`, `sum_xy` into five `f32x8` lane accumulators;
-- finish the `< 8` `chunks_exact(...).remainder()` tail in scalar `f64`;
-- reduce the SIMD lanes to `f64` and add the scalar tail.
+  `sum_y`, `sum_y2`, `sum_xy` into five **per-row** `f32x8` lane accumulators;
+- reduce that row's SIMD lanes to `f64` and fold them into the region-wide
+  `f64` running sums before moving to the next row;
+- finish the `< 8` `chunks_exact(...).remainder()` tail in scalar `f64` into the
+  same running sums.
+
+Reduce per row, not once per region: raw second moments (`sum_x2`, `sum_xy`) of a
+high-brightness row are large, so a region-wide `f32` lane accumulator loses the
+low-order bits that `ncc_from_sums` then cancels in `sum_x2 - sum_x^2/n`. On a
+low-contrast (near-flat, bright) window that cancellation can drop `var_x` below
+the `<= 1.0` reject floor (spurious `f32::MIN`) or flip the score sign versus the
+legacy two-pass path. Folding each row's lanes into `f64` bounds the lane
+magnitude to a single row and keeps the fused score within ~1e-8 of an exact f64
+two-pass reference.
 
 Use `chunks_exact(8)` rather than indexed reads: the slice makes the in-bounds
 length provable, so the compiler elides the per-lane bounds checks — important

@@ -27,6 +27,7 @@ pipewire = "0.10"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 nix = { version = "0.29", features = ["fs"] }
 rayon = "1.10"
+wide = "1.4.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
