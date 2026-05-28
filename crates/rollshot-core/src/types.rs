@@ -206,6 +206,24 @@ impl Default for FastHnswConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
+pub struct AxisFastPathConfig {
+    pub enabled: bool,
+    pub cross_axis_probe_radius: i32,
+    pub fallback_to_dual_axis_on_suspicious: bool,
+}
+
+impl Default for AxisFastPathConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cross_axis_probe_radius: 6,
+            fallback_to_dual_axis_on_suspicious: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StitchConfig {
     pub strategy: MatchStrategy,
     pub min_overlap: u32,
@@ -217,6 +235,7 @@ pub struct StitchConfig {
     pub second_best_margin: f32,
     pub max_search_ratio: f32,
     pub match_width: u32,
+    pub axis_fast_path: AxisFastPathConfig,
     pub fast_hnsw: FastHnswConfig,
     pub verifier: VerifierConfig,
 }
@@ -234,6 +253,7 @@ impl Default for StitchConfig {
             second_best_margin: 0.001,
             max_search_ratio: 0.4,
             match_width: 512,
+            axis_fast_path: AxisFastPathConfig::default(),
             fast_hnsw: FastHnswConfig::default(),
             verifier: VerifierConfig::default(),
         }
@@ -253,6 +273,9 @@ mod tests {
         assert_eq!(cfg.max_cross_axis_px, 6);
         assert_eq!(cfg.verifier.downsample_step, 4);
         assert_eq!(cfg.max_search_ratio, 0.4);
+        assert!(cfg.axis_fast_path.enabled);
+        assert_eq!(cfg.axis_fast_path.cross_axis_probe_radius, 6);
+        assert!(cfg.axis_fast_path.fallback_to_dual_axis_on_suspicious);
     }
 
     #[test]
