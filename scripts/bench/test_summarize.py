@@ -159,6 +159,30 @@ def test_compare_detects_regression(tmp_path):
     assert "(none) ✅" not in result
 
 
+def test_compare_reports_algorithmic_counter_deltas(tmp_path):
+    before = tmp_path / "before.jsonl"
+    after = tmp_path / "after.jsonl"
+
+    base = _frame_record("old")
+    old_summary = _summary_record("old")
+    improved = dict(base)
+    improved["git_sha"] = "new"
+    improved["coarse_candidates"] = 1
+    improved["ncc_offsets_scored"] = 5
+    improved["ncc_pixel_visits"] = 500
+    improved["verifier_candidates"] = 2
+    new_summary = dict(old_summary)
+    new_summary["git_sha"] = "new"
+
+    _write_jsonl(before, [base, old_summary])
+    _write_jsonl(after, [improved, new_summary])
+
+    result = compare.main([str(before), str(after)])
+
+    assert "## Algorithmic counters (p50)" in result
+    assert "| x | 5 | 1 | -4 | -80.0% | 10 | 5 | -5 | -50.0% | 1,000 | 500 | -500 | -50.0% | 3 | 2 | -1 | -33.3% |" in result
+
+
 def test_compare_can_emit_frontmatter(tmp_path):
     before = tmp_path / "before.jsonl"
     after = tmp_path / "after.jsonl"

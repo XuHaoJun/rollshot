@@ -32,7 +32,6 @@ notes:
   - "Raw JSONL files are local benchmark artifacts under bench-results/runs/ and are not intended to be committed."
   - "Peak RSS is allocator- and machine-dependent; compare trends on this machine."
 ---
-
 # Benchmark comparison: 3bd1fe4 → 0341832
 
 ## Total time per frame (p50)
@@ -89,6 +88,15 @@ notes:
 | long_vertical_jitter | 961 | 881 | -80 | -8.3% |
 | long_vertical_text | 1,150 | 1,140 | -10 | -0.9% |
 
+## Algorithmic counters (p50)
+
+| scenario | coarse candidates before | after | Δ | Δ% | NCC offsets before | after | Δ | Δ% | NCC pixel visits before | after | Δ | Δ% | verifier candidates before | after | Δ | Δ% |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| linear_horizontal_right | 2 | 1 | -1 | -50.0% | 242 | 154 | -88 | -36.4% | 13,931,456 | 8,865,472 | -5,065,984 | -36.4% | 6 | 3 | -3 | -50.0% |
+| long_sticky_header | 2 | 1 | -1 | -50.0% | 322 | 174 | -148 | -46.0% | 92,323,840 | 49,889,280 | -42,434,560 | -46.0% | 6 | 3 | -3 | -50.0% |
+| long_vertical_jitter | 2 | 1 | -1 | -50.0% | 277 | 174 | -103 | -37.2% | 79,421,440 | 49,889,280 | -29,532,160 | -37.2% | 6 | 3 | -3 | -50.0% |
+| long_vertical_text | 2 | 1 | -1 | -50.0% | 277 | 174 | -103 | -37.2% | 79,421,440 | 49,889,280 | -29,532,160 | -37.2% | 6 | 3 | -3 | -50.0% |
+
 ## Peak RSS Δ (kB)
 
 | scenario | before kB | after kB | Δ kB |
@@ -110,3 +118,4 @@ notes:
 | long_sticky_header | `fd57675e84120080` | `fd57675e84120080` | same |
 | long_vertical_jitter | `420a65270e9feaaf` | `420a65270e9feaaf` | same |
 | long_vertical_text | `5c0f3290b99f1b97` | `5c0f3290b99f1b97` | same |
+
