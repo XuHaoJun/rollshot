@@ -112,9 +112,7 @@ fn appended_outcome_populates_all_stages() {
     );
     assert!(m.verifier_us > 0, "verifier_us={}", m.verifier_us);
     assert!(m.append_us > 0, "append_us={}", m.append_us);
-    assert!(
-        m.coarse_candidates > 0 || m.pyramid_candidates > 0 || m.ncc_offsets_scored > 0
-    );
+    assert!(m.coarse_candidates > 0 || m.pyramid_candidates > 0 || m.ncc_offsets_scored > 0);
     assert!(m.canvas_logical_pixels > 0);
     assert!(m.canvas_allocated_bytes > 0);
     assert!(m.append_copied_bytes > 0);

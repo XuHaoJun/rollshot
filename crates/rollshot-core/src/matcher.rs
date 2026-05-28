@@ -1189,9 +1189,8 @@ fn pyramid_mad(
     #[cfg(test)]
     if let Some(overlap) = compute_overlap(width, height, width, height, dx, dy) {
         with_active_search_budget(|budget| {
-            budget.pyramid_pixel_visits = budget
-                .pyramid_pixel_visits
-                .saturating_add(overlap.area());
+            budget.pyramid_pixel_visits =
+                budget.pyramid_pixel_visits.saturating_add(overlap.area());
         });
     }
     score
@@ -2972,7 +2971,10 @@ mod tests {
         let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
         let pyramid = vec![candidate(0, 200, MatchMethod::Pyramid, 0.05, None)];
         let seed = template_seed(SearchAxis::Vertical, (0, 16), &coarse, &pyramid);
-        assert_eq!(seed, 16, "nonzero last_motion must dominate pyramid + coarse");
+        assert_eq!(
+            seed, 16,
+            "nonzero last_motion must dominate pyramid + coarse"
+        );
     }
 
     #[test]
@@ -2980,6 +2982,9 @@ mod tests {
         let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
         let pyramid = vec![candidate(0, 200, MatchMethod::Pyramid, 0.05, None)];
         let seed = template_seed(SearchAxis::Vertical, (0, 0), &coarse, &pyramid);
-        assert_eq!(seed, 200, "with no last_motion, pyramid must win over coarse");
+        assert_eq!(
+            seed, 200,
+            "with no last_motion, pyramid must win over coarse"
+        );
     }
 }
