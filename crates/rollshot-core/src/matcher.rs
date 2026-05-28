@@ -18,32 +18,22 @@ const COARSE_DOWNSAMPLE_STEP: u32 = 4;
 const COARSE_AXIS_STRIDE: i32 = 8;
 const EDGE_PROJECTION_STEP: u32 = 2;
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_MAX_LEVELS: u8 = 4;
-#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_MIN_LEVEL_SIDE: u32 = 96;
-#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
-#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_KERNEL_SUM: f32 = 16.0;
-#[allow(dead_code)] // wired into estimate_motion in a later task
 const PYRAMID_REFINE_RADIUS: i32 = 4;
 
 #[derive(Debug, Clone)]
 struct PyramidLevel {
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     scale_log2: u8,
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     width: u32,
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     height: u32,
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     gray: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
 struct FramePyramid {
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     levels: Vec<PyramidLevel>,
 }
 
@@ -248,6 +238,8 @@ pub(crate) fn estimate_motion(
     };
     metrics.coarse_candidates = coarse.len();
     candidates.extend(coarse.iter().copied());
+    let pyramid = pyramid_candidates(prev, curr, locked_axis, config, metrics);
+    candidates.extend(pyramid.iter().copied());
     let template_start = std::time::Instant::now();
     let template_result = template_candidates(
         prev,
@@ -255,6 +247,7 @@ pub(crate) fn estimate_motion(
         locked_axis,
         last_motion,
         &coarse,
+        &pyramid,
         config,
         metrics,
     );
@@ -352,6 +345,7 @@ fn axis_fast_path_candidate(
         curr,
         last_motion,
         &coarse,
+        &[], // no pyramid in fast path
         &axes,
         config,
         metrics,
@@ -420,6 +414,7 @@ fn relaxed_coarse_candidate(
         locked_axis,
         last_motion,
         &coarse,
+        &[], // no pyramid in relaxed coarse path
         &relaxed_cfg,
         metrics,
     ));
@@ -552,13 +547,20 @@ fn template_refine_radius() -> i32 {
 // scroll-speed change puts the true offset outside `template_refine_radius`
 // of `predicted`, the 32-px-quantized coarse candidate is still available
 // for the verifier to accept or reject.
-fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCandidate]) -> i32 {
+fn template_seed(
+    axis: SearchAxis,
+    last_motion: (i32, i32),
+    coarse: &[MotionCandidate],
+    pyramid: &[MotionCandidate],
+) -> i32 {
     let predicted = predicted_offset(axis, last_motion);
     if predicted != 0 {
         return predicted;
     }
-    coarse
+
+    pyramid
         .iter()
+        .chain(coarse.iter())
         .find_map(|candidate| match axis {
             SearchAxis::Vertical if candidate.dx == 0 => Some(candidate.dy),
             SearchAxis::Horizontal if candidate.dy == 0 => Some(candidate.dx),
@@ -567,12 +569,14 @@ fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCand
         .unwrap_or(predicted)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn template_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
     _locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
+    pyramid: &[MotionCandidate],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
@@ -581,17 +585,20 @@ fn template_candidates(
         curr,
         last_motion,
         coarse,
+        pyramid,
         dual_search_axes(),
         config,
         metrics,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn template_candidates_for_axes(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
+    pyramid: &[MotionCandidate],
     axes: &[SearchAxis],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
@@ -602,7 +609,7 @@ fn template_candidates_for_axes(
     let match_region = match_width_region(roi, config.match_width);
 
     for axis in axes {
-        let seed = template_seed(*axis, last_motion, coarse);
+        let seed = template_seed(*axis, last_motion, coarse, pyramid);
         if let Some(candidate) =
             search_template_axis(prev, curr, *axis, match_region, seed, config, metrics)
         {
@@ -859,7 +866,6 @@ fn coarse_axis_candidate(
     ))
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn coarsest_full_range_search(
     prev: &PyramidLevel,
     curr: &PyramidLevel,
@@ -884,7 +890,7 @@ fn coarsest_full_range_search(
     Some((best_offset, best_score, second))
 }
 
-#[allow(dead_code, clippy::too_many_arguments)] // wired into estimate_motion in a later task
+#[allow(clippy::too_many_arguments)]
 fn refine_at_level(
     prev_gray: &[f32],
     curr_gray: &[f32],
@@ -910,7 +916,7 @@ fn refine_at_level(
         .map(|(_, offset)| offset)
 }
 
-#[allow(dead_code, clippy::too_many_arguments)] // wired into estimate_motion in a later task
+#[allow(clippy::too_many_arguments)]
 fn pyramid_axis_candidate(
     prev: &FramePyramid,
     curr: &FramePyramid,
@@ -1014,7 +1020,6 @@ fn pyramid_axis_candidate(
     ))
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn pyramid_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
@@ -1033,7 +1038,6 @@ fn pyramid_candidates(
     pyramid_candidates_for_axes(prev, curr, locked_axis, axes, config, metrics)
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn pyramid_candidates_for_axes(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
@@ -1109,12 +1113,10 @@ fn pyramid_max_axis_offset(
     }
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn clamp_coord(value: i32, max_exclusive: u32) -> u32 {
     value.clamp(0, max_exclusive.saturating_sub(1) as i32) as u32
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn gaussian_downsample_2x(
     gray: &[f32],
     width: u32,
@@ -1169,7 +1171,6 @@ fn gaussian_downsample_2x(
     }
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn build_frame_pyramid(gray: &[f32], width: u32, height: u32) -> FramePyramid {
     let mut levels: Vec<PyramidLevel> = Vec::new();
     let mut scratch = vec![0.0f32; (width * height) as usize];
@@ -1233,7 +1234,6 @@ fn coarse_mad(
     sum / (count as f32 * 255.0)
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn pyramid_mad(
     prev_gray: &[f32],
     curr_gray: &[f32],
@@ -1245,7 +1245,6 @@ fn pyramid_mad(
     coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 1)
 }
 
-#[allow(dead_code)] // wired into estimate_motion in a later task
 fn pyramid_confidence(raw_mad: f32) -> f32 {
     raw_mad.clamp(0.0, 1.0)
 }
@@ -1402,7 +1401,6 @@ pub(crate) struct PreparedFrame {
     coarse: OnceLock<Vec<f32>>,
     proj_v: OnceLock<Vec<f32>>,
     proj_h: OnceLock<Vec<f32>>,
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     pyramid: OnceLock<FramePyramid>,
 }
 
@@ -1468,7 +1466,6 @@ impl PreparedFrame {
         }
     }
 
-    #[allow(dead_code)] // wired into estimate_motion in a later task
     fn pyramid(&self) -> &FramePyramid {
         self.pyramid
             .get_or_init(|| build_frame_pyramid(&self.gray, self.width, self.height))
@@ -1756,16 +1753,16 @@ fn legacy_ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_frame_pyramid, coarse_axis_offsets, coarse_sample_dimensions, coarse_samples,
-        content_roi, cross_axis_check, edge_projection, estimate_motion,
+        build_frame_pyramid, candidate, coarse_axis_offsets, coarse_sample_dimensions,
+        coarse_samples, content_roi, cross_axis_check, edge_projection, estimate_motion,
         estimate_motion_with_budget, fast_ncc_score_shifted, gaussian_downsample_2x,
         legacy_ncc_score_shifted, match_width_region, ncc_from_sums, pyramid_candidates_for_axes,
-        refinement_offsets, template_refine_radius, to_grayscale, FramePyramid,
+        refinement_offsets, template_refine_radius, template_seed, to_grayscale, FramePyramid,
         MotionSearchOutcome, NccSums, PreparedFrame, Region, SearchAxis, SearchBudget,
         COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP, PYRAMID_MAX_LEVELS, PYRAMID_REFINE_RADIUS,
     };
     use crate::metrics::StitchMetrics;
-    use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
+    use crate::types::{MatchMethod, MotionCandidate, ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -2377,12 +2374,18 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 0, 32, 160, 160);
 
+        // Pyramid produces tight margins on periodic patterns; use a margin
+        // large enough to reject the pyramid's ~0.002 gap on a 16px grid.
+        let config = StitchConfig {
+            second_best_margin: 0.01,
+            ..StitchConfig::default()
+        };
         let candidate = estimate_motion(
             &prep(&prev),
             &prep(&curr),
             None,
             (0, 0),
-            &StitchConfig::default(),
+            &config,
             &mut StitchMetrics::default(),
         );
 
@@ -2950,5 +2953,76 @@ mod tests {
             assert!(second <= 1.0);
             assert!(second >= candidate.score);
         }
+    }
+
+    #[test]
+    fn pyramid_candidate_passes_existing_verifier() {
+        let canvas = make_aperiodic_canvas(420, 1000);
+        let prev = crop(&canvas, 0, 280);
+        let curr = crop(&canvas, 170, 280);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidate = unwrap_candidate(estimate_motion(
+            &prep(&prev),
+            &prep(&curr),
+            None,
+            (0, 0),
+            &config,
+            &mut metrics,
+        ));
+
+        assert_eq!(candidate.method, crate::types::MatchMethod::Pyramid);
+        assert_eq!(candidate.dx, 0);
+        assert!(
+            (candidate.dy - 170).abs() <= 3,
+            "dy = {} (expected around 170)",
+            candidate.dy
+        );
+        assert!(metrics.pyramid_us > 0);
+        assert!(metrics.pyramid_candidates > 0);
+    }
+
+    #[test]
+    fn pyramid_does_not_accept_repeated_grid_alias() {
+        let canvas = make_repeated_grid(256, 640);
+        let prev = crop_xy(&canvas, 0, 0, 192, 192);
+        let curr = crop_xy(&canvas, 0, 48, 192, 192);
+        // Pyramid produces tight margins on periodic patterns; use a margin
+        // large enough to reject the pyramid's ~0.002 gap on a 16px grid.
+        let config = StitchConfig {
+            second_best_margin: 0.01,
+            ..StitchConfig::default()
+        };
+
+        let outcome = estimate_motion(
+            &prep(&prev),
+            &prep(&curr),
+            None,
+            (0, 0),
+            &config,
+            &mut StitchMetrics::default(),
+        );
+
+        assert!(
+            matches!(outcome, MotionSearchOutcome::NoMatch { .. }),
+            "repeated grid must not be accepted through pyramid: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn template_seed_keeps_last_motion_when_nonzero() {
+        let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
+        let pyramid = vec![candidate(0, 200, MatchMethod::Pyramid, 0.05, None)];
+        let seed = template_seed(SearchAxis::Vertical, (0, 16), &coarse, &pyramid);
+        assert_eq!(seed, 16, "nonzero last_motion must dominate pyramid + coarse");
+    }
+
+    #[test]
+    fn template_seed_prefers_pyramid_over_coarse_when_history_zero() {
+        let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
+        let pyramid = vec![candidate(0, 200, MatchMethod::Pyramid, 0.05, None)];
+        let seed = template_seed(SearchAxis::Vertical, (0, 0), &coarse, &pyramid);
+        assert_eq!(seed, 200, "with no last_motion, pyramid must win over coarse");
     }
 }
