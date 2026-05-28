@@ -182,6 +182,7 @@ fn stage_sum_covers_at_least_80_percent_of_total() {
     let stage_sum = m.duplicate_us
         + m.prepare_frame_us
         + m.coarse_us
+        + m.pyramid_us
         + m.template_ncc_us
         + m.edge_projection_us
         + m.verifier_us
