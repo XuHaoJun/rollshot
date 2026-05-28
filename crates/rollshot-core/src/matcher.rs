@@ -23,6 +23,22 @@ const PYRAMID_MIN_LEVEL_SIDE: u32 = 96;
 const PYRAMID_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
 const PYRAMID_KERNEL_SUM: f32 = 16.0;
 const PYRAMID_REFINE_RADIUS: i32 = 4;
+// How far around the level-0 best offset we sweep to find a true competing
+// alternative for `second_best_score`. Big enough to catch aliases on the
+// fixtures we ship (16 px grid, 20 px stripe band), small enough to leave
+// large-period content (e.g. 36 px stripes in `make_scroll_canvas`) at
+// "no real second" — where the absence of a tight gap correctly lets the
+// candidate through. Must exceed `PYRAMID_REFINE_RADIUS` so the exclusion
+// zone around best doesn't swallow the entire sweep.
+const PYRAMID_SECOND_BEST_SWEEP_RADIUS: i32 = 32;
+// Pyramid candidates operate on Gaussian-downsampled data, so the inherent
+// per-pixel MAD difference between true and alias offsets shrinks at deep
+// levels. Demand a stricter level-0 margin than `second_best_margin`
+// (default 0.001) before the candidate reaches `passes_second_best_margin`,
+// so periodic content that's a few pixels off from band-aligned can't slip
+// through on residual cross-pixel noise (e.g. the cli-smoke fixture's
+// sparse corner features).
+const PYRAMID_MIN_LEVEL0_MARGIN: f32 = 0.005;
 
 #[derive(Debug, Clone)]
 struct PyramidLevel {
@@ -814,9 +830,9 @@ fn coarsest_full_range_search(
     curr: &PyramidLevel,
     axis: SearchAxis,
     max_offset: i32,
-) -> Option<(i32, f32, Option<f32>)> {
+) -> Option<(i32, f32)> {
     let offsets: Vec<i32> = (-max_offset..=max_offset).filter(|o| *o != 0).collect();
-    let mut scored: Vec<(f32, i32)> = offsets
+    offsets
         .into_par_iter()
         .filter_map(|offset| {
             let (dx, dy) = match axis {
@@ -826,11 +842,60 @@ fn coarsest_full_range_search(
             let score = pyramid_mad(&prev.gray, &curr.gray, prev.width, prev.height, dx, dy);
             score.is_finite().then_some((score, offset))
         })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(score, offset)| (offset, score))
+}
+
+// Find the best level-0 MAD over offsets near `best_offset` but outside its
+// refinement window. The result is comparable to `best_score` (same scale,
+// same MAD definition), unlike the previous top-level `second` which mixed
+// scales and silently inflated `passes_second_best_margin`'s perceived gap.
+//
+// We exclude `±PYRAMID_REFINE_RADIUS` around `best_offset` because anything
+// in that window collapses to `best` itself under refinement. The outer
+// `PYRAMID_SECOND_BEST_SWEEP_RADIUS` is sized to catch aliases on
+// short-period repeating content (≤ 32 px) but to leave wider-period
+// "legitimate but slightly textured" content alone — for those, this sweep
+// returns a high MAD or `None`, the margin check is a no-op, and the
+// candidate flows to the verifier as before.
+//
+// `#[inline(never)]` keeps this cold path from changing inlining decisions
+// on `coarse_mad` in the hot regular matcher (its call site here uses step
+// 2; everywhere else uses step 1). Without it the bench showed a +60-80 µs
+// prepare/coarse regression on scenarios where pyramid never ran.
+#[inline(never)]
+fn level0_second_best_sweep(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    axis: SearchAxis,
+    best_offset: i32,
+    max_abs: i32,
+) -> Option<f32> {
+    let inner = PYRAMID_REFINE_RADIUS + 1;
+    let outer = PYRAMID_SECOND_BEST_SWEEP_RADIUS;
+    let offsets: Vec<i32> = (inner..=outer)
+        .flat_map(|d| [best_offset + d, best_offset - d])
+        .filter(|o| *o != 0 && o.abs() <= max_abs)
         .collect();
-    scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    let (best_score, best_offset) = *scored.first()?;
-    let second = scored.get(1).map(|(score, _)| *score);
-    Some((best_offset, best_score, second))
+    offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            // Step-2 sub-sample: 4× cheaper, with negligible accuracy loss
+            // because we only need the *gap* to `best_score` (which also
+            // uses MAD at this scale), not an exact MAD value. Bypassing
+            // `pyramid_mad` keeps this sweep out of the structural budget
+            // counter, which is sized for the level-by-level pyramid chain
+            // only — the ambiguity check is a separate per-frame phase.
+            let score = coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 2);
+            score.is_finite().then_some(score)
+        })
+        .min_by(|a, b| a.total_cmp(b))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -891,8 +956,16 @@ fn pyramid_axis_candidate(
         return None;
     }
 
-    let (top_offset, _top_best_score, top_second_score) =
-        coarsest_full_range_search(top, curr_top, axis, top_max)?;
+    let (top_offset, top_best_score) = coarsest_full_range_search(top, curr_top, axis, top_max)?;
+
+    // Early exit: if the coarsest level can't find a remotely correlated
+    // offset, refinement won't fix it — refining a high-MAD seed converges
+    // to a slightly-less-bad neighbor, not to a real match. Bail before
+    // paying for the per-level refinement chain. Uses the same threshold
+    // the ranker would later use to reject the candidate anyway.
+    if pyramid_confidence(top_best_score) > config.accept_confidence {
+        return None;
+    }
 
     let mut offset = top_offset;
     for level_idx in (0..top_idx).rev() {
@@ -954,12 +1027,38 @@ fn pyramid_axis_candidate(
         return None;
     }
 
+    // Compute second_best in the SAME scale as best_score, so the spec
+    // contract "lower score = better, gap = ambiguity" holds and
+    // `passes_second_best_margin` sees a real level-0 MAD gap.
+    let second_score = level0_second_best_sweep(
+        prev_level0_gray,
+        curr_level0_gray,
+        level0_width,
+        level0_height,
+        axis,
+        best_offset,
+        level0_max,
+    );
+
+    // Pyramid-internal margin gate. The global `second_best_margin` (default
+    // 0.001) is too loose to reject candidates whose only discriminator at
+    // level 0 is sparse pixel noise (e.g. a few corner features in a sea of
+    // band-aligned content). For aperiodic content the gap is order 0.1+ and
+    // this gate is a no-op; for periodic / alias-prone content it returns
+    // None so the candidate never reaches the verifier and the pipeline
+    // falls through to the feature fallback as designed.
+    if let Some(s) = second_score {
+        if s - best_score < PYRAMID_MIN_LEVEL0_MARGIN {
+            return None;
+        }
+    }
+
     Some(candidate(
         dx,
         dy,
         MatchMethod::Pyramid,
         pyramid_confidence(best_score),
-        top_second_score.map(pyramid_confidence),
+        second_score.map(pyramid_confidence),
     ))
 }
 
@@ -2325,18 +2424,12 @@ mod tests {
         let prev = crop_xy(&canvas, 0, 0, 160, 160);
         let curr = crop_xy(&canvas, 0, 32, 160, 160);
 
-        // Pyramid produces tight margins on periodic patterns; use a margin
-        // large enough to reject the pyramid's ~0.002 gap on a 16px grid.
-        let config = StitchConfig {
-            second_best_margin: 0.01,
-            ..StitchConfig::default()
-        };
         let candidate = estimate_motion(
             &prep(&prev),
             &prep(&curr),
             None,
             (0, 0),
-            &config,
+            &StitchConfig::default(),
             &mut StitchMetrics::default(),
         );
 
@@ -2944,25 +3037,25 @@ mod tests {
         let canvas = make_repeated_grid(256, 640);
         let prev = crop_xy(&canvas, 0, 0, 192, 192);
         let curr = crop_xy(&canvas, 0, 48, 192, 192);
-        // Pyramid produces tight margins on periodic patterns; use a margin
-        // large enough to reject the pyramid's ~0.002 gap on a 16px grid.
-        let config = StitchConfig {
-            second_best_margin: 0.01,
-            ..StitchConfig::default()
-        };
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
 
-        let outcome = estimate_motion(
-            &prep(&prev),
-            &prep(&curr),
+        // Unit-level assertion: the pyramid stage must filter the alias
+        // before it reaches the verifier. End-to-end pipeline rejection on
+        // repeated grids is already covered by
+        // `repeated_grid_is_rejected_by_second_best_margin`.
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
             None,
-            (0, 0),
-            &config,
+            &[SearchAxis::Vertical],
+            &StitchConfig::default(),
             &mut StitchMetrics::default(),
         );
 
         assert!(
-            matches!(outcome, MotionSearchOutcome::NoMatch { .. }),
-            "repeated grid must not be accepted through pyramid: {outcome:?}"
+            candidates.is_empty(),
+            "pyramid must not produce a candidate on repeated_grid: {candidates:?}"
         );
     }
 
