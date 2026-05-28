@@ -1025,6 +1025,23 @@ fn pyramid_does_not_accept_repeated_grid_alias() {}
 - repeated pattern 不 regression。
 - 如果 pyramid candidate 與 coarse candidate 衝突，verifier / ranking 能選對。
 
+### 7.10 P5 優化失敗分析
+
+P5 成功新增了 pyramid recovery，但沒有帶來可證明的整體性能改善，反而讓 common small-frame path 出現明顯 wall-time regression。
+
+具體數據：
+
+- `pyramid_us` 在所有 scenario 的 p50 都是 0，代表 round-2 deferral 有效，median frame 沒有真的跑 pyramid。
+- 但 total p50 多個小 frame 場景變慢：`linear_horizontal_left` +47.1%、`linear_vertical_down` +45.0%、`linear_vertical_up` +36.6%、`duplicate_frames` +34.6%。
+- append p95 也有退步：`low_feature_text` +52.0%、`linear_vertical_up` +35.3%、`linear_horizontal_left` +31.4%。
+- algorithmic counters 幾乎沒變，表示不是搜尋次數、NCC pixel visits、verifier candidates 增加造成的。
+
+最可能原因：新增大量 pyramid helper code 到 `matcher.rs` 後，改變 LLVM inlining / code layout / i-cache 行為，讓即使不跑 pyramid 的 hot path 也變慢。
+
+`long_*` 主力場景大致持平，但 P5 原驗收要求「小位移 steady sequence 不變慢太多」，目前這點沒有過。correctness 沒壞，output hash 全部一致；所以這不是功能失敗，是效能驗證失敗。
+
+結論：pyramid recovery 做到了，但 optimization 沒做到，因為 common path 沒有受益，還疑似被新增 cold-path code 影響變慢。
+
 ---
 
 ## 8. P6 — Indexed Feature Fallback / HNSW
