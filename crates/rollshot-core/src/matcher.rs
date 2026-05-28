@@ -38,6 +38,32 @@ enum SearchAxis {
     Horizontal,
 }
 
+impl SearchAxis {
+    #[expect(dead_code, reason = "staged for Task 3/4 axis-aware search")]
+    fn from_scroll_axis(axis: ScrollAxis) -> Self {
+        match axis {
+            ScrollAxis::Vertical => Self::Vertical,
+            ScrollAxis::Horizontal => Self::Horizontal,
+        }
+    }
+
+    #[expect(dead_code, reason = "staged for Task 3/4 axis-aware search")]
+    fn cross_axis_delta(self, dx: i32, dy: i32) -> i32 {
+        match self {
+            Self::Vertical => dx,
+            Self::Horizontal => dy,
+        }
+    }
+
+    #[expect(dead_code, reason = "staged for Task 3/4 axis-aware search")]
+    fn with_cross_axis_delta(self, main_offset: i32, cross_offset: i32) -> (i32, i32) {
+        match self {
+            Self::Vertical => (cross_offset, main_offset),
+            Self::Horizontal => (main_offset, cross_offset),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum MotionSearchOutcome {
     Candidate(MotionCandidate),
@@ -397,13 +423,10 @@ fn candidate(
     }
 }
 
-fn search_axes(locked_axis: Option<ScrollAxis>) -> &'static [SearchAxis] {
-    match locked_axis {
-        Some(ScrollAxis::Vertical) | Some(ScrollAxis::Horizontal) => {
-            &[SearchAxis::Vertical, SearchAxis::Horizontal]
-        }
-        None => &[SearchAxis::Vertical, SearchAxis::Horizontal],
-    }
+const DUAL_SEARCH_AXES: &[SearchAxis] = &[SearchAxis::Vertical, SearchAxis::Horizontal];
+
+fn dual_search_axes() -> &'static [SearchAxis] {
+    DUAL_SEARCH_AXES
 }
 
 fn predicted_offset(axis: SearchAxis, last_motion: (i32, i32)) -> i32 {
@@ -444,9 +467,29 @@ fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCand
 fn template_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
-    locked_axis: Option<ScrollAxis>,
+    _locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    template_candidates_for_axes(
+        prev,
+        curr,
+        last_motion,
+        coarse,
+        dual_search_axes(),
+        config,
+        metrics,
+    )
+}
+
+fn template_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    last_motion: (i32, i32),
+    coarse: &[MotionCandidate],
+    axes: &[SearchAxis],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
@@ -455,7 +498,7 @@ fn template_candidates(
     let roi = content_roi(width, height);
     let match_region = match_width_region(roi, config.match_width);
 
-    for axis in search_axes(locked_axis) {
+    for axis in axes {
         let seed = template_seed(*axis, last_motion, coarse);
         if let Some(candidate) =
             search_template_axis(prev, curr, *axis, match_region, seed, config, metrics)
@@ -567,6 +610,16 @@ fn coarse_candidates(
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
+    coarse_candidates_for_axes(prev, curr, locked_axis, dual_search_axes(), config)
+}
+
+fn coarse_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    axes: &[SearchAxis],
+    config: &StitchConfig,
+) -> Vec<MotionCandidate> {
     let (width, height) = prev.dimensions();
     let step = COARSE_DOWNSAMPLE_STEP as i32;
     let (sample_w, sample_h) = prev.coarse_dims;
@@ -576,7 +629,7 @@ fn coarse_candidates(
     let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
 
     let mut out = Vec::new();
-    for axis in search_axes(locked_axis) {
+    for axis in axes {
         let max_offset = match axis {
             SearchAxis::Vertical => max_dy,
             SearchAxis::Horizontal => max_dx,
@@ -710,7 +763,23 @@ fn coarse_mad(
 fn edge_projection_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
-    locked_axis: Option<ScrollAxis>,
+    _locked_axis: Option<ScrollAxis>,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    edge_projection_candidates_for_axes(
+        prev,
+        curr,
+        dual_search_axes(),
+        config,
+        metrics,
+    )
+}
+
+fn edge_projection_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    axes: &[SearchAxis],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
@@ -718,7 +787,7 @@ fn edge_projection_candidates(
     let (width, height) = prev.dimensions();
     let mut out = Vec::new();
 
-    for axis in search_axes(locked_axis) {
+    for axis in axes {
         if let Some(candidate) = edge_projection_axis(
             prev.projection(*axis),
             curr.projection(*axis),
