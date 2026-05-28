@@ -104,6 +104,7 @@ struct SearchBudget {
     coarse_score_calls: u64,
     full_res_ncc_calls: u64,
     full_res_ncc_pixel_visits: u64,
+    pyramid_pixel_visits: u64,
     verifier_calls: u64,
 }
 
@@ -1184,7 +1185,16 @@ fn pyramid_mad(
     dx: i32,
     dy: i32,
 ) -> f32 {
-    coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 1)
+    let score = coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 1);
+    #[cfg(test)]
+    if let Some(overlap) = compute_overlap(width, height, width, height, dx, dy) {
+        with_active_search_budget(|budget| {
+            budget.pyramid_pixel_visits = budget
+                .pyramid_pixel_visits
+                .saturating_add(overlap.area());
+        });
+    }
+    score
 }
 
 fn pyramid_confidence(raw_mad: f32) -> f32 {
@@ -2419,6 +2429,11 @@ mod tests {
             budget.full_res_ncc_pixel_visits <= 200_000_000,
             "full_res_ncc_pixel_visits = {}",
             budget.full_res_ncc_pixel_visits
+        );
+        assert!(
+            budget.pyramid_pixel_visits <= 50_000_000,
+            "pyramid_pixel_visits = {}",
+            budget.pyramid_pixel_visits
         );
     }
 
