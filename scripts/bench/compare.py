@@ -60,6 +60,10 @@ def per_scenario_stats(frames):
             "p50_coarse_us": quantile([r["coarse_us"] for r in recs], 0.50),
             "p50_ncc_us": quantile([r["template_ncc_us"] for r in recs], 0.50),
             "p50_verifier_us": quantile([r["verifier_us"] for r in recs], 0.50),
+            "p50_coarse_candidates": quantile([r["coarse_candidates"] for r in recs], 0.50),
+            "p50_ncc_offsets_scored": quantile([r["ncc_offsets_scored"] for r in recs], 0.50),
+            "p50_ncc_pixel_visits": quantile([r["ncc_pixel_visits"] for r in recs], 0.50),
+            "p50_verifier_candidates": quantile([r["verifier_candidates"] for r in recs], 0.50),
         }
     return out
 
@@ -209,6 +213,27 @@ def render(before_stats, after_stats, summaries_before, summaries_after, before_
     all_regressions.extend(section("Coarse (p50)", "p50_coarse_us", "p50 coarse"))
     all_regressions.extend(section("NCC (p50) — P3 target", "p50_ncc_us", "p50 ncc"))
     all_regressions.extend(section("Verifier (p50)", "p50_verifier_us", "p50 verifier"))
+
+    lines.append("## Algorithmic counters (p50)")
+    lines.append("")
+    lines.append("| scenario | coarse candidates before | after | Δ | Δ% | NCC offsets before | after | Δ | Δ% | NCC pixel visits before | after | Δ | Δ% | verifier candidates before | after | Δ | Δ% |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    counter_fields = [
+        "p50_coarse_candidates",
+        "p50_ncc_offsets_scored",
+        "p50_ncc_pixel_visits",
+        "p50_verifier_candidates",
+    ]
+    for scn in keys:
+        cells = [scn]
+        for field in counter_fields:
+            b = before_stats.get(scn, {}).get(field, 0)
+            a = after_stats.get(scn, {}).get(field, 0)
+            pct_str, _pct = delta_row(b, a)
+            diff = a - b
+            cells.extend([f"{b:,}", f"{a:,}", f"{diff:+,}", pct_str])
+        lines.append(f"| {' | '.join(cells)} |")
+    lines.append("")
 
     lines.append("## Peak RSS Δ (kB)")
     lines.append("")

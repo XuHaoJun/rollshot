@@ -32,10 +32,42 @@ struct CandidateScore {
     verifier_score: f32,
 }
 
+const CROSS_AXIS_RESIDUAL_IMPROVEMENT: f32 = 0.03;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CrossAxisCheck {
+    estimated_cross_px: i32,
+    residual_score: f32,
+    suspicious: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SearchAxis {
     Vertical,
     Horizontal,
+}
+
+impl SearchAxis {
+    fn from_scroll_axis(axis: ScrollAxis) -> Self {
+        match axis {
+            ScrollAxis::Vertical => Self::Vertical,
+            ScrollAxis::Horizontal => Self::Horizontal,
+        }
+    }
+
+    fn cross_axis_delta(self, dx: i32, dy: i32) -> i32 {
+        match self {
+            Self::Vertical => dx,
+            Self::Horizontal => dy,
+        }
+    }
+
+    fn with_cross_axis_delta(self, main_offset: i32, cross_offset: i32) -> (i32, i32) {
+        match self {
+            Self::Vertical => (cross_offset, main_offset),
+            Self::Horizontal => (main_offset, cross_offset),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -170,6 +202,16 @@ pub(crate) fn estimate_motion(
         };
     }
 
+    if let Some(axis) = locked_axis {
+        if config.axis_fast_path.enabled {
+            if let Some(candidate) =
+                axis_fast_path_candidate(prev, curr, axis, last_motion, config, metrics)
+            {
+                return MotionSearchOutcome::Candidate(candidate);
+            }
+        }
+    }
+
     let mut candidates = Vec::new();
     let coarse = {
         let _t = ScopedTimer::new(&mut metrics.coarse_us);
@@ -253,6 +295,64 @@ pub(crate) fn estimate_motion(
             }
         }
     }
+}
+
+fn axis_fast_path_candidate(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: ScrollAxis,
+    last_motion: (i32, i32),
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Option<MotionCandidate> {
+    let main_axis = SearchAxis::from_scroll_axis(locked_axis);
+    let axes = [main_axis];
+
+    let coarse = {
+        let _t = ScopedTimer::new(&mut metrics.coarse_us);
+        coarse_candidates_for_axes(prev, curr, Some(locked_axis), &axes, config)
+    };
+    metrics.coarse_candidates = metrics.coarse_candidates.max(coarse.len());
+
+    let mut candidates = Vec::new();
+    candidates.extend(coarse.iter().copied());
+
+    let template_start = std::time::Instant::now();
+    candidates.extend(template_candidates_for_axes(
+        prev,
+        curr,
+        last_motion,
+        &coarse,
+        &axes,
+        config,
+        metrics,
+    ));
+    metrics.template_ncc_us += template_start.elapsed().as_micros() as u64;
+
+    let edge_start = std::time::Instant::now();
+    candidates.extend(edge_projection_candidates_for_axes(
+        prev, curr, &axes, config, metrics,
+    ));
+    metrics.edge_projection_us += edge_start.elapsed().as_micros() as u64;
+
+    metrics.verifier_candidates += candidates.len();
+    let candidate = {
+        let _t = ScopedTimer::new(&mut metrics.verifier_us);
+        rank_verified_candidates(
+            prev.rgba(),
+            curr.rgba(),
+            Some(locked_axis),
+            candidates,
+            config,
+        )
+    }?;
+
+    let cross_axis = cross_axis_check(prev, curr, candidate, main_axis, config, metrics);
+    if cross_axis.suspicious && config.axis_fast_path.fallback_to_dual_axis_on_suspicious {
+        return None;
+    }
+
+    Some(candidate)
 }
 
 const RELAXED_SEARCH_RATIO: f32 = 0.85;
@@ -397,13 +497,10 @@ fn candidate(
     }
 }
 
-fn search_axes(locked_axis: Option<ScrollAxis>) -> &'static [SearchAxis] {
-    match locked_axis {
-        Some(ScrollAxis::Vertical) | Some(ScrollAxis::Horizontal) => {
-            &[SearchAxis::Vertical, SearchAxis::Horizontal]
-        }
-        None => &[SearchAxis::Vertical, SearchAxis::Horizontal],
-    }
+const DUAL_SEARCH_AXES: &[SearchAxis] = &[SearchAxis::Vertical, SearchAxis::Horizontal];
+
+fn dual_search_axes() -> &'static [SearchAxis] {
+    DUAL_SEARCH_AXES
 }
 
 fn predicted_offset(axis: SearchAxis, last_motion: (i32, i32)) -> i32 {
@@ -444,9 +541,29 @@ fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCand
 fn template_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
-    locked_axis: Option<ScrollAxis>,
+    _locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    template_candidates_for_axes(
+        prev,
+        curr,
+        last_motion,
+        coarse,
+        dual_search_axes(),
+        config,
+        metrics,
+    )
+}
+
+fn template_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    last_motion: (i32, i32),
+    coarse: &[MotionCandidate],
+    axes: &[SearchAxis],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
@@ -455,7 +572,7 @@ fn template_candidates(
     let roi = content_roi(width, height);
     let match_region = match_width_region(roi, config.match_width);
 
-    for axis in search_axes(locked_axis) {
+    for axis in axes {
         let seed = template_seed(*axis, last_motion, coarse);
         if let Some(candidate) =
             search_template_axis(prev, curr, *axis, match_region, seed, config, metrics)
@@ -540,6 +657,65 @@ fn search_template_axis(
     ))
 }
 
+fn cross_axis_check(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    candidate: MotionCandidate,
+    main_axis: SearchAxis,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> CrossAxisCheck {
+    let radius = config.axis_fast_path.cross_axis_probe_radius.max(0);
+    if radius == 0 {
+        return CrossAxisCheck {
+            estimated_cross_px: 0,
+            residual_score: 0.0,
+            suspicious: false,
+        };
+    }
+
+    let (width, height) = prev.dimensions();
+    let region = match_width_region(content_roi(width, height), config.match_width);
+    let main_offset = predicted_offset(main_axis, (candidate.dx, candidate.dy));
+    let current_cross = main_axis.cross_axis_delta(candidate.dx, candidate.dy);
+    let offsets: Vec<i32> = (-radius..=radius).collect();
+
+    metrics.ncc_offsets_scored += offsets.len();
+    metrics.ncc_pixel_visits += offsets
+        .len()
+        .saturating_mul(region.w as usize * region.h as usize);
+
+    let mut best_cross = current_cross;
+    let mut best_score = f32::MIN;
+    let mut base_score = f32::MIN;
+
+    for cross_offset in offsets {
+        let (dx, dy) = main_axis.with_cross_axis_delta(main_offset, cross_offset);
+        let score = fast_ncc_score_shifted(prev, curr, region, dx, dy);
+        if cross_offset == current_cross {
+            base_score = score;
+        }
+        if score.is_finite() && (!best_score.is_finite() || score > best_score) {
+            best_score = score;
+            best_cross = cross_offset;
+        }
+    }
+
+    let residual_score = if best_score.is_finite() && base_score.is_finite() {
+        best_score - base_score
+    } else {
+        0.0
+    };
+    let suspicious = best_cross.abs() > config.max_cross_axis_px
+        || residual_score > CROSS_AXIS_RESIDUAL_IMPROVEMENT;
+
+    CrossAxisCheck {
+        estimated_cross_px: best_cross,
+        residual_score,
+        suspicious,
+    }
+}
+
 fn content_roi(width: u32, height: u32) -> Region {
     let side = ((width as f32 * SIDE_IGNORE_RATIO) as u32).max(MIN_IGNORE_PX);
     let top = ((height as f32 * TOP_IGNORE_RATIO) as u32).max(MIN_IGNORE_PX);
@@ -567,6 +743,16 @@ fn coarse_candidates(
     locked_axis: Option<ScrollAxis>,
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
+    coarse_candidates_for_axes(prev, curr, locked_axis, dual_search_axes(), config)
+}
+
+fn coarse_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    axes: &[SearchAxis],
+    config: &StitchConfig,
+) -> Vec<MotionCandidate> {
     let (width, height) = prev.dimensions();
     let step = COARSE_DOWNSAMPLE_STEP as i32;
     let (sample_w, sample_h) = prev.coarse_dims;
@@ -576,7 +762,7 @@ fn coarse_candidates(
     let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
 
     let mut out = Vec::new();
-    for axis in search_axes(locked_axis) {
+    for axis in axes {
         let max_offset = match axis {
             SearchAxis::Vertical => max_dy,
             SearchAxis::Horizontal => max_dx,
@@ -710,7 +896,17 @@ fn coarse_mad(
 fn edge_projection_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
-    locked_axis: Option<ScrollAxis>,
+    _locked_axis: Option<ScrollAxis>,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    edge_projection_candidates_for_axes(prev, curr, dual_search_axes(), config, metrics)
+}
+
+fn edge_projection_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    axes: &[SearchAxis],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
@@ -718,7 +914,7 @@ fn edge_projection_candidates(
     let (width, height) = prev.dimensions();
     let mut out = Vec::new();
 
-    for axis in search_axes(locked_axis) {
+    for axis in axes {
         if let Some(candidate) = edge_projection_axis(
             prev.projection(*axis),
             curr.projection(*axis),
@@ -1195,10 +1391,11 @@ fn legacy_ncc_score_shifted(
 mod tests {
     use super::{
         coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
-        edge_projection, estimate_motion, estimate_motion_with_budget, fast_ncc_score_shifted,
-        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, refinement_offsets,
-        template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums, PreparedFrame, Region,
-        SearchAxis, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
+        cross_axis_check, edge_projection, estimate_motion, estimate_motion_with_budget,
+        fast_ncc_score_shifted, legacy_ncc_score_shifted, match_width_region, ncc_from_sums,
+        refinement_offsets, template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums,
+        PreparedFrame, Region, SearchAxis, SearchBudget, COARSE_AXIS_STRIDE,
+        COARSE_DOWNSAMPLE_STEP,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -1992,5 +2189,216 @@ mod tests {
                 "release perf smoke exceeded 1.0s: elapsed={elapsed:?}, budget={budget:?}"
             );
         }
+    }
+
+    #[test]
+    fn cross_axis_check_allows_zero_cross_axis_motion() {
+        let canvas = make_aperiodic_canvas(260, 360);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 0, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &StitchConfig::default(),
+            &mut metrics,
+        );
+
+        assert_eq!(check.estimated_cross_px, 0);
+        assert!(
+            !check.suspicious,
+            "zero-cross vertical motion should not be suspicious: {check:?}"
+        );
+        assert!(metrics.ncc_offsets_scored > 0);
+    }
+
+    #[test]
+    fn cross_axis_check_flags_drift_beyond_tolerance() {
+        let canvas = make_aperiodic_canvas(280, 380);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 10, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                cross_axis_probe_radius: 12,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &config,
+            &mut metrics,
+        );
+
+        assert!(check.suspicious, "dx drift should be suspicious: {check:?}");
+        assert!(
+            check.estimated_cross_px.abs() > config.max_cross_axis_px,
+            "estimated_cross_px = {}",
+            check.estimated_cross_px
+        );
+    }
+
+    #[test]
+    fn cross_axis_check_radius_zero_skips_probe() {
+        let canvas = make_aperiodic_canvas(260, 360);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 0, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                cross_axis_probe_radius: 0,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(check.estimated_cross_px, 0);
+        assert!(!check.suspicious, "radius=0 should not flag suspicious");
+        assert_eq!(
+            metrics.ncc_offsets_scored, 0,
+            "radius=0 should not score any offsets"
+        );
+    }
+
+    #[test]
+    fn locked_vertical_uses_main_axis_fast_path() {
+        let canvas = make_aperiodic_canvas(420, 760);
+        let prev = crop_xy(&canvas, 0, 0, 320, 320);
+        let curr = crop_xy(&canvas, 0, 84, 320, 320);
+
+        let mut fast_budget = SearchBudget::default();
+        let fast_candidate = unwrap_candidate(estimate_motion_with_budget(
+            &prev,
+            &curr,
+            Some(ScrollAxis::Vertical),
+            (0, 84),
+            &StitchConfig::default(),
+            &mut fast_budget,
+        ));
+
+        let dual_config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                enabled: false,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+        let mut dual_budget = SearchBudget::default();
+        let dual_candidate = unwrap_candidate(estimate_motion_with_budget(
+            &prev,
+            &curr,
+            Some(ScrollAxis::Vertical),
+            (0, 84),
+            &dual_config,
+            &mut dual_budget,
+        ));
+
+        assert_eq!(fast_candidate.dx, 0);
+        assert!(
+            (fast_candidate.dy - 84).abs() <= 2,
+            "dy = {} (expected ~84)",
+            fast_candidate.dy
+        );
+        assert_eq!(fast_candidate.dx, dual_candidate.dx);
+        assert_eq!(fast_candidate.dy, dual_candidate.dy);
+        assert!(
+            fast_budget.full_res_ncc_calls < dual_budget.full_res_ncc_calls,
+            "fast budget = {fast_budget:?}, dual budget = {dual_budget:?}"
+        );
+    }
+
+    #[test]
+    fn locked_vertical_axis_change_still_returns_horizontal_candidate() {
+        let canvas = make_wide_canvas(700, 180);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 42, 0, 180, 180);
+
+        let candidate = unwrap_candidate(estimate_motion(
+            &prep(&prev),
+            &prep(&curr),
+            Some(ScrollAxis::Vertical),
+            (0, 40),
+            &StitchConfig::default(),
+            &mut StitchMetrics::default(),
+        ));
+
+        assert_eq!(candidate.dy, 0);
+        assert!(
+            (candidate.dx - 42).abs() <= 2,
+            "dx = {} (expected ~42)",
+            candidate.dx
+        );
+    }
+
+    #[test]
+    fn cross_axis_drift_does_not_accept_main_axis_fast_path() {
+        let canvas = make_aperiodic_canvas(300, 420);
+        let prev = crop_xy(&canvas, 0, 0, 200, 200);
+        let curr = crop_xy(&canvas, 10, 48, 200, 200);
+        let config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                cross_axis_probe_radius: 12,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+
+        let outcome = estimate_motion(
+            &prep(&prev),
+            &prep(&curr),
+            Some(ScrollAxis::Vertical),
+            (0, 48),
+            &config,
+            &mut StitchMetrics::default(),
+        );
+
+        assert!(
+            matches!(outcome, MotionSearchOutcome::NoMatch { .. }),
+            "cross-axis drift should not be accepted as a pure vertical append: {outcome:?}"
+        );
     }
 }

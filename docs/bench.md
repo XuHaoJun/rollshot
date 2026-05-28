@@ -109,7 +109,8 @@ rtk python3 scripts/bench/compare.py \
 The compare report flags any scenario with Δ > +5% on `total_us` (p50),
 `append_us` (p95), `prepare_frame_us` (p50), `template_ncc_us` (p50), or
 `verifier_us` (p50). It also flags output-correctness drift via the pixel
-hash.
+hash. It includes p50 algorithmic counter deltas for `coarse_candidates`,
+`ncc_offsets_scored`, `ncc_pixel_visits`, and `verifier_candidates`.
 
 Committed benchmark reports use:
 
