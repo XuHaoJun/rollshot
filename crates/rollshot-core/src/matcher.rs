@@ -18,6 +18,30 @@ const COARSE_DOWNSAMPLE_STEP: u32 = 4;
 const COARSE_AXIS_STRIDE: i32 = 8;
 const EDGE_PROJECTION_STEP: u32 = 2;
 
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+const PYRAMID_MAX_LEVELS: u8 = 4;
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+const PYRAMID_MIN_LEVEL_SIDE: u32 = 96;
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+const PYRAMID_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+const PYRAMID_KERNEL_SUM: f32 = 16.0;
+
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[derive(Debug, Clone)]
+struct PyramidLevel {
+    scale_log2: u8,
+    width: u32,
+    height: u32,
+    gray: Vec<f32>,
+}
+
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+#[derive(Debug, Clone)]
+struct FramePyramid {
+    levels: Vec<PyramidLevel>,
+}
+
 #[derive(Clone, Copy)]
 struct Region {
     x: u32,
@@ -859,6 +883,96 @@ fn coarse_samples(gray: &[f32], width: u32, height: u32, step: u32) -> Vec<f32> 
     out
 }
 
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+fn clamp_coord(value: i32, max_exclusive: u32) -> u32 {
+    value.clamp(0, max_exclusive.saturating_sub(1) as i32) as u32
+}
+
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+fn gaussian_downsample_2x(
+    gray: &[f32],
+    width: u32,
+    height: u32,
+    scratch: &mut [f32],
+) -> PyramidLevel {
+    let out_w = width.div_ceil(2).max(1);
+    let out_h = height.div_ceil(2).max(1);
+    let in_len = (width * height) as usize;
+    assert!(scratch.len() >= in_len, "pyramid scratch buffer too small");
+
+    {
+        let blurred_h = &mut scratch[..in_len];
+        blurred_h
+            .par_chunks_mut(width as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let y = y as u32;
+                for x in 0..width {
+                    let mut sum = 0.0f32;
+                    for (k, weight) in PYRAMID_KERNEL.iter().enumerate() {
+                        let xx = clamp_coord(x as i32 + k as i32 - 2, width);
+                        sum += gray[(y * width + xx) as usize] * *weight;
+                    }
+                    row[x as usize] = sum / PYRAMID_KERNEL_SUM;
+                }
+            });
+    }
+
+    let blurred_h: &[f32] = &scratch[..in_len];
+    let mut out = vec![0.0f32; (out_w * out_h) as usize];
+    out.par_chunks_mut(out_w as usize)
+        .enumerate()
+        .for_each(|(oy, out_row)| {
+            let src_y = ((oy as u32) * 2).min(height - 1);
+            for ox in 0..out_w {
+                let src_x = (ox * 2).min(width - 1);
+                let mut sum = 0.0f32;
+                for (k, weight) in PYRAMID_KERNEL.iter().enumerate() {
+                    let yy = clamp_coord(src_y as i32 + k as i32 - 2, height);
+                    sum += blurred_h[(yy * width + src_x) as usize] * *weight;
+                }
+                out_row[ox as usize] = sum / PYRAMID_KERNEL_SUM;
+            }
+        });
+
+    PyramidLevel {
+        scale_log2: 0,
+        width: out_w,
+        height: out_h,
+        gray: out,
+    }
+}
+
+#[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+fn build_frame_pyramid(gray: &[f32], width: u32, height: u32) -> FramePyramid {
+    let mut levels: Vec<PyramidLevel> = Vec::new();
+    let mut scratch = vec![0.0f32; (width * height) as usize];
+    let mut cur_gray: &[f32] = gray;
+    let mut cur_w = width;
+    let mut cur_h = height;
+    let mut scale_log2: u8 = 0;
+
+    while levels.len() < (PYRAMID_MAX_LEVELS as usize - 1) {
+        if cur_w <= PYRAMID_MIN_LEVEL_SIDE || cur_h <= PYRAMID_MIN_LEVEL_SIDE {
+            break;
+        }
+        scale_log2 += 1;
+        let next = gaussian_downsample_2x(cur_gray, cur_w, cur_h, &mut scratch);
+        levels.push(PyramidLevel {
+            scale_log2,
+            width: next.width,
+            height: next.height,
+            gray: next.gray,
+        });
+        let last = levels.last().expect("just pushed");
+        cur_gray = &last.gray;
+        cur_w = last.width;
+        cur_h = last.height;
+    }
+
+    FramePyramid { levels }
+}
+
 fn coarse_mad(
     prev_gray: &[f32],
     curr_gray: &[f32],
@@ -1045,6 +1159,8 @@ pub(crate) struct PreparedFrame {
     coarse: OnceLock<Vec<f32>>,
     proj_v: OnceLock<Vec<f32>>,
     proj_h: OnceLock<Vec<f32>>,
+    #[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+    pyramid: OnceLock<FramePyramid>,
 }
 
 impl PreparedFrame {
@@ -1071,6 +1187,7 @@ impl PreparedFrame {
             coarse: OnceLock::new(),
             proj_v: OnceLock::new(),
             proj_h: OnceLock::new(),
+            pyramid: OnceLock::new(),
         }
     }
 
@@ -1106,6 +1223,12 @@ impl PreparedFrame {
                 edge_projection(&self.gray, self.width, self.height, SearchAxis::Horizontal)
             }),
         }
+    }
+
+    #[allow(dead_code)] // wired in by Task 4 (pyramid candidate search)
+    fn pyramid(&self) -> &FramePyramid {
+        self.pyramid
+            .get_or_init(|| build_frame_pyramid(&self.gray, self.width, self.height))
     }
 }
 
@@ -1390,12 +1513,13 @@ fn legacy_ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{
-        coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
-        cross_axis_check, edge_projection, estimate_motion, estimate_motion_with_budget,
-        fast_ncc_score_shifted, legacy_ncc_score_shifted, match_width_region, ncc_from_sums,
-        refinement_offsets, template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums,
+        build_frame_pyramid, coarse_axis_offsets, coarse_sample_dimensions, coarse_samples,
+        content_roi, cross_axis_check, edge_projection, estimate_motion,
+        estimate_motion_with_budget, fast_ncc_score_shifted, gaussian_downsample_2x,
+        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, refinement_offsets,
+        template_refine_radius, to_grayscale, FramePyramid, MotionSearchOutcome, NccSums,
         PreparedFrame, Region, SearchAxis, SearchBudget, COARSE_AXIS_STRIDE,
-        COARSE_DOWNSAMPLE_STEP,
+        COARSE_DOWNSAMPLE_STEP, PYRAMID_MAX_LEVELS,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -2399,6 +2523,68 @@ mod tests {
         assert!(
             matches!(outcome, MotionSearchOutcome::NoMatch { .. }),
             "cross-axis drift should not be accepted as a pure vertical append: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn pyramid_downsample_dimensions_are_correct() {
+        let gray = vec![10.0; 5 * 3];
+        let mut scratch = vec![0.0f32; 5 * 3];
+        let down = gaussian_downsample_2x(&gray, 5, 3, &mut scratch);
+        assert_eq!(down.width, 3);
+        assert_eq!(down.height, 2);
+        assert_eq!(down.gray.len(), 6);
+    }
+
+    #[test]
+    fn pyramid_gaussian_downsample_is_deterministic() {
+        let gray = vec![
+            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0,
+            140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 210.0, 220.0, 230.0, 240.0,
+        ];
+        let mut scratch_a = vec![0.0f32; 25];
+        let mut scratch_b = vec![0.0f32; 25];
+        let a = gaussian_downsample_2x(&gray, 5, 5, &mut scratch_a);
+        let b = gaussian_downsample_2x(&gray, 5, 5, &mut scratch_b);
+        assert_eq!(a.width, 3);
+        assert_eq!(a.height, 3);
+        assert_eq!(a.gray, b.gray);
+        assert!(
+            a.gray
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=240.0).contains(v)),
+            "downsampled values should stay in input luminance range: {:?}",
+            a.gray
+        );
+    }
+
+    #[test]
+    fn frame_pyramid_respects_level_limits() {
+        let img = make_textured_canvas(640, 480);
+        let prep = PreparedFrame::new(img);
+        let pyramid = build_frame_pyramid(prep.gray(), 640, 480);
+        assert!(
+            !pyramid.levels.is_empty(),
+            "640x480 must produce at least one downsampled level"
+        );
+        assert!(pyramid.levels.len() <= (PYRAMID_MAX_LEVELS as usize - 1));
+        assert_eq!(pyramid.levels[0].scale_log2, 1);
+        assert_eq!(pyramid.levels[0].width, 320);
+        assert_eq!(pyramid.levels[0].height, 240);
+        for (i, level) in pyramid.levels.iter().enumerate() {
+            assert_eq!(level.scale_log2, (i + 1) as u8);
+        }
+    }
+
+    #[test]
+    fn prepared_frame_pyramid_is_cached() {
+        let img = make_textured_canvas(640, 480);
+        let prep = PreparedFrame::new(img);
+        let first = prep.pyramid() as *const FramePyramid;
+        let second = prep.pyramid() as *const FramePyramid;
+        assert_eq!(
+            first, second,
+            "pyramid OnceLock must return the same instance"
         );
     }
 }
