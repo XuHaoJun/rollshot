@@ -248,15 +248,18 @@ pub(crate) fn estimate_motion(
         }
     }
 
-    let mut candidates = Vec::new();
+    // Round 1: coarse + template (coarse-seeded) + edge. Pyramid is deferred
+    // to a second round below — it's the most expensive matcher (~0.5-2 ms
+    // per frame on small frames, more on retina) and only earns its keep
+    // on large-motion recovery, where the cheaper round-1 matchers can't
+    // see the offset. Skipping it when round 1 already produces a verifier-
+    // passing candidate saves the full pyramid cost on the common case.
     let coarse = {
         let _t = ScopedTimer::new(&mut metrics.coarse_us);
         coarse_candidates(prev, curr, locked_axis, config)
     };
     metrics.coarse_candidates = coarse.len();
-    candidates.extend(coarse.iter().copied());
-    let pyramid = pyramid_candidates(prev, curr, locked_axis, config, metrics);
-    candidates.extend(pyramid.iter().copied());
+
     let template_start = std::time::Instant::now();
     let template_result = template_candidates(
         prev,
@@ -264,23 +267,43 @@ pub(crate) fn estimate_motion(
         locked_axis,
         last_motion,
         &coarse,
-        &pyramid,
         config,
         metrics,
     );
     metrics.template_ncc_us = template_start.elapsed().as_micros() as u64;
-    candidates.extend(template_result);
+
     let edge_start = std::time::Instant::now();
     let edge_result = edge_projection_candidates(prev, curr, locked_axis, config, metrics);
     metrics.edge_projection_us = edge_start.elapsed().as_micros() as u64;
-    candidates.extend(edge_result);
 
-    metrics.verifier_candidates += candidates.len();
+    let mut round1: Vec<MotionCandidate> =
+        Vec::with_capacity(coarse.len() + template_result.len() + edge_result.len());
+    round1.extend(coarse.iter().copied());
+    round1.extend(template_result);
+    round1.extend(edge_result);
+
+    metrics.verifier_candidates += round1.len();
     if let Some(candidate) = {
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
-        rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
+        rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, round1, config)
     } {
         return MotionSearchOutcome::Candidate(candidate);
+    }
+
+    // Round 2: pyramid recovery. Only invoked when round 1 produced no
+    // verifier-passing candidate — i.e. coarse couldn't reach the true
+    // offset, or every candidate failed the margin / accept_confidence /
+    // verifier gates. Pyramid candidates go through the verifier on their
+    // own (no need to re-test round-1 candidates that already failed).
+    let pyramid = pyramid_candidates(prev, curr, locked_axis, config, metrics);
+    if !pyramid.is_empty() {
+        metrics.verifier_candidates += pyramid.len();
+        if let Some(candidate) = {
+            let _t = ScopedTimer::new(&mut metrics.verifier_us);
+            rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, pyramid, config)
+        } {
+            return MotionSearchOutcome::Candidate(candidate);
+        }
     }
 
     let fallback_outcome = {
@@ -350,7 +373,6 @@ fn axis_fast_path_candidate(
         curr,
         last_motion,
         &coarse,
-        &[], // no pyramid in fast path
         &axes,
         config,
         metrics,
@@ -506,20 +528,20 @@ fn template_refine_radius() -> i32 {
 // scroll-speed change puts the true offset outside `template_refine_radius`
 // of `predicted`, the 32-px-quantized coarse candidate is still available
 // for the verifier to accept or reject.
-fn template_seed(
-    axis: SearchAxis,
-    last_motion: (i32, i32),
-    coarse: &[MotionCandidate],
-    pyramid: &[MotionCandidate],
-) -> i32 {
+//
+// Pyramid intentionally is NOT consulted here: `estimate_motion` runs
+// pyramid only as a round-2 recovery path *after* coarse-seeded template
+// has already failed verification, so by the time pyramid produces a
+// candidate, the template stage is done. Pyramid's candidate enters the
+// pool directly at the verifier, refined to ±PYRAMID_REFINE_RADIUS pixels.
+fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCandidate]) -> i32 {
     let predicted = predicted_offset(axis, last_motion);
     if predicted != 0 {
         return predicted;
     }
 
-    pyramid
+    coarse
         .iter()
-        .chain(coarse.iter())
         .find_map(|candidate| match axis {
             SearchAxis::Vertical if candidate.dx == 0 => Some(candidate.dy),
             SearchAxis::Horizontal if candidate.dy == 0 => Some(candidate.dx),
@@ -535,7 +557,6 @@ fn template_candidates(
     _locked_axis: Option<ScrollAxis>,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
-    pyramid: &[MotionCandidate],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
@@ -544,20 +565,17 @@ fn template_candidates(
         curr,
         last_motion,
         coarse,
-        pyramid,
         dual_search_axes(),
         config,
         metrics,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn template_candidates_for_axes(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
     last_motion: (i32, i32),
     coarse: &[MotionCandidate],
-    pyramid: &[MotionCandidate],
     axes: &[SearchAxis],
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
@@ -568,7 +586,7 @@ fn template_candidates_for_axes(
     let match_region = match_width_region(roi, config.match_width);
 
     for axis in axes {
-        let seed = template_seed(*axis, last_motion, coarse, pyramid);
+        let seed = template_seed(*axis, last_motion, coarse);
         if let Some(candidate) =
             search_template_axis(prev, curr, *axis, match_region, seed, config, metrics)
         {
@@ -3062,22 +3080,14 @@ mod tests {
     #[test]
     fn template_seed_keeps_last_motion_when_nonzero() {
         let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
-        let pyramid = vec![candidate(0, 200, MatchMethod::Pyramid, 0.05, None)];
-        let seed = template_seed(SearchAxis::Vertical, (0, 16), &coarse, &pyramid);
-        assert_eq!(
-            seed, 16,
-            "nonzero last_motion must dominate pyramid + coarse"
-        );
+        let seed = template_seed(SearchAxis::Vertical, (0, 16), &coarse);
+        assert_eq!(seed, 16, "nonzero last_motion must dominate coarse");
     }
 
     #[test]
-    fn template_seed_prefers_pyramid_over_coarse_when_history_zero() {
+    fn template_seed_falls_back_to_coarse_when_history_zero() {
         let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
-        let pyramid = vec![candidate(0, 200, MatchMethod::Pyramid, 0.05, None)];
-        let seed = template_seed(SearchAxis::Vertical, (0, 0), &coarse, &pyramid);
-        assert_eq!(
-            seed, 200,
-            "with no last_motion, pyramid must win over coarse"
-        );
+        let seed = template_seed(SearchAxis::Vertical, (0, 0), &coarse);
+        assert_eq!(seed, 80, "with no last_motion, coarse provides the seed");
     }
 }
