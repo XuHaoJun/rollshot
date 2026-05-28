@@ -32,6 +32,17 @@ struct CandidateScore {
     verifier_score: f32,
 }
 
+#[cfg(test)]
+const CROSS_AXIS_RESIDUAL_IMPROVEMENT: f32 = 0.03;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CrossAxisCheck {
+    estimated_cross_px: i32,
+    residual_score: f32,
+    suspicious: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SearchAxis {
     Vertical,
@@ -47,7 +58,7 @@ impl SearchAxis {
         }
     }
 
-    #[expect(dead_code, reason = "staged for Task 3/4 axis-aware search")]
+    #[cfg(test)]
     fn cross_axis_delta(self, dx: i32, dy: i32) -> i32 {
         match self {
             Self::Vertical => dx,
@@ -55,7 +66,7 @@ impl SearchAxis {
         }
     }
 
-    #[expect(dead_code, reason = "staged for Task 3/4 axis-aware search")]
+    #[cfg(test)]
     fn with_cross_axis_delta(self, main_offset: i32, cross_offset: i32) -> (i32, i32) {
         match self {
             Self::Vertical => (cross_offset, main_offset),
@@ -583,6 +594,66 @@ fn search_template_axis(
     ))
 }
 
+#[cfg(test)]
+fn cross_axis_check(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    candidate: MotionCandidate,
+    main_axis: SearchAxis,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> CrossAxisCheck {
+    let radius = config.axis_fast_path.cross_axis_probe_radius.max(0);
+    if radius == 0 {
+        return CrossAxisCheck {
+            estimated_cross_px: 0,
+            residual_score: 0.0,
+            suspicious: false,
+        };
+    }
+
+    let (width, height) = prev.dimensions();
+    let region = match_width_region(content_roi(width, height), config.match_width);
+    let main_offset = predicted_offset(main_axis, (candidate.dx, candidate.dy));
+    let current_cross = main_axis.cross_axis_delta(candidate.dx, candidate.dy);
+    let offsets: Vec<i32> = (-radius..=radius).collect();
+
+    metrics.ncc_offsets_scored += offsets.len();
+    metrics.ncc_pixel_visits += offsets
+        .len()
+        .saturating_mul(region.w as usize * region.h as usize);
+
+    let mut best_cross = current_cross;
+    let mut best_score = f32::MIN;
+    let mut base_score = f32::MIN;
+
+    for cross_offset in offsets {
+        let (dx, dy) = main_axis.with_cross_axis_delta(main_offset, cross_offset);
+        let score = fast_ncc_score_shifted(prev, curr, region, dx, dy);
+        if cross_offset == current_cross {
+            base_score = score;
+        }
+        if score.is_finite() && (!best_score.is_finite() || score > best_score) {
+            best_score = score;
+            best_cross = cross_offset;
+        }
+    }
+
+    let residual_score = if best_score.is_finite() && base_score.is_finite() {
+        best_score - base_score
+    } else {
+        0.0
+    };
+    let suspicious = best_cross.abs() > config.max_cross_axis_px
+        || residual_score > CROSS_AXIS_RESIDUAL_IMPROVEMENT;
+
+    CrossAxisCheck {
+        estimated_cross_px: best_cross,
+        residual_score,
+        suspicious,
+    }
+}
+
 fn content_roi(width: u32, height: u32) -> Region {
     let side = ((width as f32 * SIDE_IGNORE_RATIO) as u32).max(MIN_IGNORE_PX);
     let top = ((height as f32 * TOP_IGNORE_RATIO) as u32).max(MIN_IGNORE_PX);
@@ -767,13 +838,7 @@ fn edge_projection_candidates(
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
-    edge_projection_candidates_for_axes(
-        prev,
-        curr,
-        dual_search_axes(),
-        config,
-        metrics,
-    )
+    edge_projection_candidates_for_axes(prev, curr, dual_search_axes(), config, metrics)
 }
 
 fn edge_projection_candidates_for_axes(
@@ -1264,10 +1329,11 @@ fn legacy_ncc_score_shifted(
 mod tests {
     use super::{
         coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
-        edge_projection, estimate_motion, estimate_motion_with_budget, fast_ncc_score_shifted,
-        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, refinement_offsets,
-        template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums, PreparedFrame, Region,
-        SearchAxis, SearchBudget, COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP,
+        cross_axis_check, edge_projection, estimate_motion, estimate_motion_with_budget,
+        fast_ncc_score_shifted, legacy_ncc_score_shifted, match_width_region, ncc_from_sums,
+        refinement_offsets, template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums,
+        PreparedFrame, Region, SearchAxis, SearchBudget, COARSE_AXIS_STRIDE,
+        COARSE_DOWNSAMPLE_STEP,
     };
     use crate::metrics::StitchMetrics;
     use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
@@ -2061,5 +2127,118 @@ mod tests {
                 "release perf smoke exceeded 1.0s: elapsed={elapsed:?}, budget={budget:?}"
             );
         }
+    }
+
+    #[test]
+    fn cross_axis_check_allows_zero_cross_axis_motion() {
+        let canvas = make_aperiodic_canvas(260, 360);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 0, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &StitchConfig::default(),
+            &mut metrics,
+        );
+
+        assert_eq!(check.estimated_cross_px, 0);
+        assert!(
+            !check.suspicious,
+            "zero-cross vertical motion should not be suspicious: {check:?}"
+        );
+        assert!(metrics.ncc_offsets_scored > 0);
+    }
+
+    #[test]
+    fn cross_axis_check_flags_drift_beyond_tolerance() {
+        let canvas = make_aperiodic_canvas(280, 380);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 10, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                cross_axis_probe_radius: 12,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &config,
+            &mut metrics,
+        );
+
+        assert!(check.suspicious, "dx drift should be suspicious: {check:?}");
+        assert!(
+            check.estimated_cross_px.abs() > config.max_cross_axis_px,
+            "estimated_cross_px = {}",
+            check.estimated_cross_px
+        );
+    }
+
+    #[test]
+    fn cross_axis_check_radius_zero_skips_probe() {
+        let canvas = make_aperiodic_canvas(260, 360);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 0, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                cross_axis_probe_radius: 0,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(check.estimated_cross_px, 0);
+        assert!(!check.suspicious, "radius=0 should not flag suspicious");
+        assert_eq!(
+            metrics.ncc_offsets_scored, 0,
+            "radius=0 should not score any offsets"
+        );
     }
 }
