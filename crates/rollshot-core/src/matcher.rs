@@ -266,18 +266,6 @@ pub(crate) fn estimate_motion(
         return MotionSearchOutcome::Candidate(candidate);
     }
 
-    // Relaxed coarse pass: standard coarse search is bounded by
-    // `max_search_ratio` (≈0.4 of the frame); a single fast scroll can jump
-    // farther than that and miss every regular matcher. Before falling back
-    // to the feature matcher, retry coarse with the ratio pushed near the
-    // geometric ceiling so we can recover the candidate through the same
-    // downsampled MAD path used in steady-state.
-    if let Some(candidate) =
-        relaxed_coarse_candidate(prev, curr, locked_axis, last_motion, config, metrics)
-    {
-        return MotionSearchOutcome::Candidate(candidate);
-    }
-
     let fallback_outcome = {
         let _t = ScopedTimer::new(&mut metrics.fallback_us);
         feature_fallback_candidates(prev.rgba(), curr.rgba(), locked_axis, config)
@@ -376,52 +364,6 @@ fn axis_fast_path_candidate(
     }
 
     Some(candidate)
-}
-
-const RELAXED_SEARCH_RATIO: f32 = 0.85;
-
-fn relaxed_coarse_candidate(
-    prev: &PreparedFrame,
-    curr: &PreparedFrame,
-    locked_axis: Option<ScrollAxis>,
-    last_motion: (i32, i32),
-    config: &StitchConfig,
-    metrics: &mut StitchMetrics,
-) -> Option<MotionCandidate> {
-    // No point retrying if the standard pass already searches near the
-    // geometric ceiling.
-    if config.max_search_ratio >= RELAXED_SEARCH_RATIO - 0.05 {
-        return None;
-    }
-
-    let mut relaxed_cfg = config.clone();
-    relaxed_cfg.max_search_ratio = RELAXED_SEARCH_RATIO;
-
-    let coarse = coarse_candidates(prev, curr, locked_axis, &relaxed_cfg);
-    metrics.coarse_candidates = metrics.coarse_candidates.max(coarse.len());
-    if coarse.is_empty() {
-        return None;
-    }
-
-    // Coarse is stride-8 in sample space (32 px in pixel space) — too coarse
-    // to pass the verifier on its own. Use it to seed a relaxed template
-    // refinement, which lands on a single-pixel offset that the verifier can
-    // accept on the same min_overlap budget.
-    let mut candidates = coarse.clone();
-    candidates.extend(template_candidates(
-        prev,
-        curr,
-        locked_axis,
-        last_motion,
-        &coarse,
-        &[], // no pyramid in relaxed coarse path
-        &relaxed_cfg,
-        metrics,
-    ));
-
-    metrics.verifier_candidates += candidates.len();
-    let _t = ScopedTimer::new(&mut metrics.verifier_us);
-    rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
 }
 
 fn rank_verified_candidates(
