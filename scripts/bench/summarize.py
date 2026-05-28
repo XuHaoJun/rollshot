@@ -67,6 +67,7 @@ def aggregate_per_scenario(frames):
             "p99_total_us": quantile(total_us, 0.99),
             "p50_prepare_us": quantile([r["prepare_frame_us"] for r in recs], 0.50),
             "p50_coarse_us": quantile([r["coarse_us"] for r in recs], 0.50),
+            "p50_pyramid_us": quantile([r.get("pyramid_us", 0) for r in recs], 0.50),
             "p50_ncc_us": quantile([r["template_ncc_us"] for r in recs], 0.50),
             "p50_edge_us": quantile([r["edge_projection_us"] for r in recs], 0.50),
             "p50_verifier_us": quantile([r["verifier_us"] for r in recs], 0.50),
@@ -106,14 +107,14 @@ def render_markdown(agg, summaries):
     lines.append("## Stage breakdown (p50 µs)")
     lines.append("")
     lines.append(
-        "| scenario | prepare | coarse | ncc | edge | verifier | fallback | append |"
+        "| scenario | prepare | coarse | pyramid | ncc | edge | verifier | fallback | append |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for scn, m in sorted(agg.items()):
         lines.append(
             f"| {scn} | {m['p50_prepare_us']:,} | {m['p50_coarse_us']:,} | "
-            f"{m['p50_ncc_us']:,} | {m['p50_edge_us']:,} | {m['p50_verifier_us']:,} | "
-            f"{m['p50_fallback_us']:,} | {m['p50_append_us']:,} |"
+            f"{m['p50_pyramid_us']:,} | {m['p50_ncc_us']:,} | {m['p50_edge_us']:,} | "
+            f"{m['p50_verifier_us']:,} | {m['p50_fallback_us']:,} | {m['p50_append_us']:,} |"
         )
     lines.append("")
 

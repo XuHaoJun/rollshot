@@ -72,6 +72,8 @@ fn first_frame_outcome_populates_minimal_fields() {
     assert!(m.total_us > 0);
     assert_eq!(m.duplicate_us, 0);
     assert_eq!(m.coarse_us, 0);
+    assert_eq!(m.pyramid_us, 0);
+    assert_eq!(m.pyramid_candidates, 0);
     assert_eq!(m.template_ncc_us, 0);
     assert_eq!(m.verifier_us, 0);
     assert_eq!(m.append_us, 0);
@@ -105,12 +107,14 @@ fn appended_outcome_populates_all_stages() {
         m.prepare_frame_us
     );
     assert!(
-        m.coarse_us > 0 || m.template_ncc_us > 0,
+        m.coarse_us > 0 || m.pyramid_us > 0 || m.template_ncc_us > 0,
         "matcher stages should record some time"
     );
     assert!(m.verifier_us > 0, "verifier_us={}", m.verifier_us);
     assert!(m.append_us > 0, "append_us={}", m.append_us);
-    assert!(m.coarse_candidates > 0 || m.ncc_offsets_scored > 0);
+    assert!(
+        m.coarse_candidates > 0 || m.pyramid_candidates > 0 || m.ncc_offsets_scored > 0
+    );
     assert!(m.canvas_logical_pixels > 0);
     assert!(m.canvas_allocated_bytes > 0);
     assert!(m.append_copied_bytes > 0);
