@@ -65,7 +65,8 @@ Expected: command exits 0 and writes `bench-results/runs/p4-axis-fast-path/befor
 Run:
 
 ```bash
-rtk python3 scripts/bench/summarize.py bench-results/runs/p4-axis-fast-path/before.jsonl | rtk rg "ncc_offsets|template_ncc|Scenario|Fixture"
+rtk python3 scripts/bench/summarize.py bench-results/runs/p4-axis-fast-path/before.jsonl > /tmp/p4-baseline-summary.txt
+rtk rg "ncc_offsets|template_ncc|Scenario|Fixture" /tmp/p4-baseline-summary.txt
 ```
 
 Expected: output includes fixture rows or summary fields for NCC offsets/timing. Keep the raw JSONL local.
@@ -555,6 +556,46 @@ In the matcher test module, add these tests near the existing NCC tests:
             check.estimated_cross_px
         );
     }
+
+    #[test]
+    fn cross_axis_check_radius_zero_skips_probe() {
+        let canvas = make_aperiodic_canvas(260, 360);
+        let prev = crop_xy(&canvas, 0, 0, 180, 180);
+        let curr = crop_xy(&canvas, 0, 40, 180, 180);
+        let candidate = MotionCandidate {
+            dx: 0,
+            dy: 40,
+            method: crate::types::MatchMethod::Template,
+            score: 0.01,
+            second_best_score: None,
+            inliers: None,
+            raw_matches: None,
+        };
+        let config = StitchConfig {
+            axis_fast_path: crate::types::AxisFastPathConfig {
+                cross_axis_probe_radius: 0,
+                ..crate::types::AxisFastPathConfig::default()
+            },
+            ..StitchConfig::default()
+        };
+        let mut metrics = StitchMetrics::default();
+
+        let check = cross_axis_check(
+            &prep(&prev),
+            &prep(&curr),
+            candidate,
+            SearchAxis::Vertical,
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(check.estimated_cross_px, 0);
+        assert!(!check.suspicious, "radius=0 should not flag suspicious");
+        assert_eq!(
+            metrics.ncc_offsets_scored, 0,
+            "radius=0 should not score any offsets"
+        );
+    }
 ```
 
 - [ ] **Step 5: Verify sentinel tests**
@@ -565,7 +606,7 @@ Run:
 rtk cargo test -p rollshot-core --lib matcher::tests::cross_axis_check
 ```
 
-Expected: both tests pass.
+Expected: all three tests pass (zero_cross_axis_motion, drift_beyond_tolerance, radius_zero_skips_probe).
 
 - [ ] **Step 6: Commit sentinel**
 
@@ -666,6 +707,32 @@ In `estimate_motion`, immediately after the dimension-mismatch check and before 
 ```
 
 Leave the existing dual-axis flow below it intact. It is the fallback for disabled config, first-motion no-lock, suspicious sentinel, and fast-path miss.
+
+The control flow in `estimate_motion` after wiring:
+
+```
+estimate_motion(prev, curr, locked_axis, last_motion, config, metrics)
+│
+├─ dimension mismatch? → NoMatch
+│
+├─ locked_axis.is_some() && config.axis_fast_path.enabled?
+│  │
+│  ├─ axis_fast_path_candidate(...)
+│  │  ├─ coarse_candidates_for_axes (main axis only)
+│  │  ├─ template_candidates_for_axes (main axis only)
+│  │  ├─ edge_projection_candidates_for_axes (main axis only)
+│  │  ├─ rank_verified_candidates → candidate?
+│  │  │  ├─ None → return None (fall through to dual-axis)
+│  │  │  └─ Some → cross_axis_check
+│  │  │     ├─ not suspicious → return Some(candidate) ✓
+│  │  │     └─ suspicious && fallback_to_dual_axis → return None (fall through)
+│  │  └─ return result
+│  │
+│  ├─ Some(candidate) → return Candidate(candidate)
+│  └─ None → fall through to existing dual-axis flow
+│
+└─ (existing) dual-axis: coarse → template → edge → relaxed → feature fallback
+```
 
 - [ ] **Step 3: Add an enabled-vs-disabled structural budget test**
 
