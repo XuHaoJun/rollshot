@@ -1027,12 +1027,8 @@ fn fused_sums_wide(
     prev_rect: Region,
     curr_rect: Region,
 ) -> NccSums {
-    let mut sx = f32x8::ZERO;
-    let mut sx2 = f32x8::ZERO;
-    let mut sy = f32x8::ZERO;
-    let mut sy2 = f32x8::ZERO;
-    let mut sxy = f32x8::ZERO;
-    let (mut tx, mut tx2, mut ty, mut ty2, mut txy) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let (mut sum_x, mut sum_x2, mut sum_y, mut sum_y2, mut sum_xy) =
+        (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let row_width = prev_rect.w as usize;
 
     for row in 0..prev_rect.h as usize {
@@ -1041,6 +1037,11 @@ fn fused_sums_wide(
         let p_row = &prev_gray[p0..p0 + row_width];
         let c_row = &curr_gray[c0..c0 + row_width];
 
+        let mut sx = f32x8::ZERO;
+        let mut sx2 = f32x8::ZERO;
+        let mut sy = f32x8::ZERO;
+        let mut sy2 = f32x8::ZERO;
+        let mut sxy = f32x8::ZERO;
         let mut pc = p_row.chunks_exact(8);
         let mut cc = c_row.chunks_exact(8);
         for (pa, ca) in pc.by_ref().zip(cc.by_ref()) {
@@ -1052,23 +1053,34 @@ fn fused_sums_wide(
             sy2 += c * c;
             sxy += p * c;
         }
+        // Reduce each row's lane sums into f64 before moving on. The raw second
+        // moments (Sum(x^2), Sum(xy)) of a high-brightness row are large, so a
+        // per-region f32 lane accumulator loses the low-order bits that
+        // `Sum(x^2) - Sum(x)^2/n` then cancels against — collapsing the variance
+        // signal on low-contrast windows. Folding to f64 each row keeps the
+        // lane magnitude bounded to one row.
+        sum_x += f64::from(sx.reduce_add());
+        sum_x2 += f64::from(sx2.reduce_add());
+        sum_y += f64::from(sy.reduce_add());
+        sum_y2 += f64::from(sy2.reduce_add());
+        sum_xy += f64::from(sxy.reduce_add());
         for (&p, &c) in pc.remainder().iter().zip(cc.remainder().iter()) {
-            let (p, c) = (p as f64, c as f64);
-            tx += p;
-            tx2 += p * p;
-            ty += c;
-            ty2 += c * c;
-            txy += p * c;
+            let (p, c) = (f64::from(p), f64::from(c));
+            sum_x += p;
+            sum_x2 += p * p;
+            sum_y += c;
+            sum_y2 += c * c;
+            sum_xy += p * c;
         }
     }
 
     NccSums {
         n: f64::from(prev_rect.w) * f64::from(prev_rect.h),
-        sum_x: sx.reduce_add() as f64 + tx,
-        sum_x2: sx2.reduce_add() as f64 + tx2,
-        sum_y: sy.reduce_add() as f64 + ty,
-        sum_y2: sy2.reduce_add() as f64 + ty2,
-        sum_xy: sxy.reduce_add() as f64 + txy,
+        sum_x,
+        sum_x2,
+        sum_y,
+        sum_y2,
+        sum_xy,
     }
 }
 
