@@ -115,7 +115,10 @@ pub struct OverlayConfig {
     pub backend: String,      // e.g. "auto" / "linux-portal" (BackendKind::from_cli_flag)
     pub fps: u32,
     pub show_cursor: bool,
-    // output targeting: see P3.6
+    // output targeting (P3.6): the exact field type is a plan decision —
+    // either Option<String> (a wl_output name) or an enum mirroring
+    // iced_layershell StartMode. Phase 3's verified path is single-output
+    // (StartMode::Active), so this may stay absent until multi-output lands.
 }
 
 /// Blocks the calling thread (iced `.run()` blocks). Returns the finalized
@@ -183,6 +186,12 @@ frame_region = Region {
 on the anchored output. Unit tests cover 100%, 125%, and 150% scale, including
 clamp-at-edge. This function is the R4 risk surface; getting it right in pure
 code (testable cross-platform) is the point of isolating it.
+
+Note: this uses an **independent per-axis scale** (`scale_x`, `scale_y`), an
+intentional refinement of the parent spec's "multiply by the output scale"
+(single scale). The two are equivalent when the surface aspect ratio matches the
+frame; the per-axis form is strictly more robust if they ever diverge. This is a
+deliberate tightening, not drift from the parent spec.
 
 ### P3.6 — Output anchoring (R5 / R7)
 
