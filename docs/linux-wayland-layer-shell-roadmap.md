@@ -136,6 +136,15 @@ Decision gate:
 - If the spike fails on transparency, input region, preview refresh, or KDE 6
   layer behavior, switch the next spec to the fallback stack.
 
+Status (2026-05-29): **DONE — GO.** Runtime-verified on KDE 6.6.5 Wayland /
+NVIDIA RTX 5070 Ti. R1 GPU coexistence and R6 (transparency / above-fullscreen
+layer / Esc / scroll passthrough / live-preview refresh) PASS; R2 focus and R3
+self-capture are documented with mitigations (carried into Phase 3 below). The
+`smithay-client-toolkit` fallback is NOT triggered. Decision record + full risk
+table: `spikes/layershell-feasibility/FINDINGS.md`. The throwaway spike crate
+(`spikes/layershell-feasibility/`, workspace-detached) is kept as the Phase 3
+implementation reference.
+
 ### Phase 3: Native Linux Capture Overlay
 
 Purpose:
@@ -166,6 +175,21 @@ Acceptance checks:
 - The user can scroll the target content while stitching is active.
 - The live stitching preview updates during scrolling.
 - Pressing Esc finishes stitching and triggers the save handoff.
+
+Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
+
+- **R2 focus (design decision):** during the overlay phase, hide or de-focus the
+  Tauri host window so a focusable toplevel cannot steal keyboard focus from the
+  exclusive-keyboard layer (the `coexist` spike showed KWin doing this). Keep
+  webkit's GPU context alive for R1, but its window need not be visible/focusable.
+- **R3 self-capture (must implement):** Linux has no exclude-from-capture, so the
+  overlay is composited into portal/PipeWire frames. Hide overlay chrome during
+  capture frames — keep chrome outside the crop rect and crop to the region, or
+  unmap / transparent-ify the overlay per capture frame (flameshot/spectacle
+  pattern).
+- **Runtime tests not yet run in the spike** (exercise during Phase 3): R4
+  fractional scaling at 100% and 150% (the D4 coordinate-mapping risk), R5
+  output match (overlay output == captured monitor), R7 multi-monitor.
 
 ### Phase 4: Tauri Save Handoff
 
