@@ -17,9 +17,9 @@
 | R6 controls/text | 4 | compiles | Crop rectangle drag via mouse events (`ButtonPressed`/`CursorMoved`/`ButtonReleased`). Canvas `Program` trait draws rect outline with `stroke_rectangle`. Toolbar with "Finish"/"Cancel" buttons + status text pinned top-right via `Stack`. Toolbar uses sentinel magenta `Color::from_rgba(1.0, 0.0, 1.0, 1.0)` solid background (scanned by Task 7). Requires `iced` feature `canvas`. Note: `ButtonPressed` lacks cursor position in iced 0.14 — drag start is deferred to first `CursorMoved`. |
 | R6 input region / scroll passthrough | 5 | compiles | `SetInputRegion(ActionCallback)` from `#[to_layer_message]` confirmed at compile time. Callback receives `&WlRegion`, calls `region.add(x, y, w, h)` to restrict input to the toolbar rectangle. After crop confirmation, the overlay emits `SetInputRegion` to set click-through on the crop area, leaving only the toolbar (top-right ~300x50px) receptive to input. `events_transparent: false` on the surface; the compositor handles the rest. Runtime scroll passthrough requires KDE 6 Wayland. |
 | R6 preview refresh | 6 | compiles | `std::sync::mpsc` channel bridges an external producer thread into iced via `Subscription::run` + `futures::stream::unfold`. The receiver is parked in a `static Mutex<Option<Receiver>>`, consumed once by the subscription. Producer thread sends `image::Handle::from_rgba(200,200,...)` every 100ms cycling R/G/B. `Message::NewPreview(handle)` stores the handle; `view` renders it with `iced::widget::image` beneath the crop canvas. Subscription is batched with `event::listen()`. `iced` feature `image` required. |
-| R3 self-capture | 7 | | |
-| R4 fractional scaling | 7 | | |
-| R5 output match | 7 | | |
+| R3 self-capture | 7 | compiles | `capture_check` binary spawns overlay on thread, drives portal monitor capture on main thread, scans for sentinel magenta RGBA(255,0,255,255) in captured frame. Compilation verified; runtime capture requires KDE 6 Wayland portal. |
+| R4 fractional scaling | 7 | compiles | Binary reports `source_size`, `effective_region`, and frame pixel dimensions from `FrameMetadata`. Coordinate mapping between overlay logical coords and frame pixel coords requires output scale factor. Compilation verified; runtime capture requires KDE 6 Wayland portal. |
+| R5 output match | 7 | compiles | Binary reports `pixel_format`, `stride`, `backend` from `FrameMetadata` and saves captured frame as PNG. Compilation verified; runtime capture requires KDE 6 Wayland portal. |
 | R7 multi-monitor | 8 | | |
 
 ## Decision

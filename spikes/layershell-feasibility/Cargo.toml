@@ -24,3 +24,17 @@ version = "0.55"
 
 [dependencies.tao]
 version = "0.35"
+
+[[bin]]
+name = "capture_check"
+path = "src/bin/capture_check.rs"
+
+[dependencies.rollshot-capture]
+path = "../../crates/rollshot-capture"
+
+[dependencies.rollshot-core]
+path = "../../crates/rollshot-core"
+
+[dependencies.image]
+version = "0.25"
+features = ["png"]
