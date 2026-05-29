@@ -14,7 +14,7 @@
 | R6 transparency/layer/Esc | 2 | compiles | Transparent fullscreen overlay compiles. `Color::TRANSPARENT` style, `Layer::Overlay`, all-anchors sizing, `KeyboardInteractivity::Exclusive`. Esc via `keyboard::Key::Named(keyboard::key::Named::Escape)` confirmed at compile time. Runtime observation requires KDE 6 hardware. |
 | R1 wgpu coexistence | 3 | compiles | wry 0.55.1 + tao 0.35.3 webkit2gtk webview on main thread + iced_layershell overlay on spawned thread. `build_gtk` used for Wayland-compatible GTK embedding. GTK init handled by tao's EventLoop. Runtime observation requires KDE 6 hardware. |
 | R2 focus/clipboard | 3 | compiles | Overlay thread uses `KeyboardInteractivity::Exclusive`; main thread runs tao event loop with `ControlFlow::Wait`. Both threads share the same process; clipboard/focus contention is a runtime concern. Compilation verified; runtime requires KDE 6. |
-| R6 controls/text | 4 | | |
+| R6 controls/text | 4 | compiles | Crop rectangle drag via mouse events (`ButtonPressed`/`CursorMoved`/`ButtonReleased`). Canvas `Program` trait draws rect outline with `stroke_rectangle`. Toolbar with "Finish"/"Cancel" buttons + status text pinned top-right via `Stack`. Toolbar uses sentinel magenta `Color::from_rgba(1.0, 0.0, 1.0, 1.0)` solid background (scanned by Task 7). Requires `iced` feature `canvas`. Note: `ButtonPressed` lacks cursor position in iced 0.14 — drag start is deferred to first `CursorMoved`. |
 | R6 input region / scroll passthrough | 5 | | |
 | R6 preview refresh | 6 | | |
 | R3 self-capture | 7 | | |
