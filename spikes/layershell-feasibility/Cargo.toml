@@ -1,0 +1,40 @@
+[package]
+name = "layershell-feasibility"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Detach from the rollshot root workspace
+[workspace]
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "image"] }
+iced_layershell = "0.18"
+
+[[bin]]
+name = "overlay"
+path = "src/bin/overlay.rs"
+
+[[bin]]
+name = "coexist"
+path = "src/bin/coexist.rs"
+
+[dependencies.wry]
+version = "0.55"
+
+[dependencies.tao]
+version = "0.35"
+
+[[bin]]
+name = "capture_check"
+path = "src/bin/capture_check.rs"
+
+[dependencies.rollshot-capture]
+path = "../../crates/rollshot-capture"
+
+[dependencies.rollshot-core]
+path = "../../crates/rollshot-core"
+
+[dependencies.image]
+version = "0.25"
+features = ["png"]
