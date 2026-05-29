@@ -88,7 +88,7 @@ struct Shared {
 
 /// Live capture+stitch driver: a reader thread fills a latest-wins slot, a
 /// stitch thread crops to `region` and pushes to the stitcher, emitting a
-/// downscaled preview handle after each frame.
+/// full-resolution preview handle after each frame.
 #[allow(dead_code)]
 pub struct Driver {
     stop: Arc<AtomicBool>,
@@ -97,7 +97,6 @@ pub struct Driver {
     stitch: Option<JoinHandle<()>>,
     source_size: Size,
     preview_tx: UnboundedSender<ImageHandle>,
-    preview_max_edge: u32,
 }
 
 #[allow(dead_code)]
@@ -113,7 +112,6 @@ impl Driver {
         fps: u32,
         show_cursor: bool,
         preview_tx: UnboundedSender<ImageHandle>,
-        preview_max_edge: u32,
     ) -> Result<Self, String> {
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
@@ -169,7 +167,6 @@ impl Driver {
             stitch: None,
             source_size,
             preview_tx,
-            preview_max_edge,
         })
     }
 
@@ -186,7 +183,6 @@ impl Driver {
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
         let preview_tx = self.preview_tx.clone();
-        let preview_max_edge = self.preview_max_edge;
         self.stitch = Some(std::thread::spawn(move || {
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
             while !stop.load(Ordering::Relaxed) {
@@ -210,7 +206,7 @@ impl Driver {
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
                         stitcher.push_frame(cropped.image);
                         if let Some(preview) = stitcher.full_image() {
-                            let handle = downscale_handle(preview, preview_max_edge);
+                            let handle = preview_handle(preview);
                             let _ = preview_tx.unbounded_send(handle);
                         }
                     }
@@ -292,27 +288,18 @@ fn wait_for_source_size(
     }
 }
 
-/// Downscale an RGBA image to `max_edge` on its long side and wrap it as an
-/// iced image handle (the preview path proven by the Phase 2 spike, R6).
+/// Wrap the stitcher's RGBA image as an iced image handle without reducing
+/// resolution. The UI may scale how it is displayed, but the preview data stays
+/// pixel-for-pixel aligned with the stitcher output.
 #[allow(dead_code)]
-fn downscale_handle(image: &image::RgbaImage, max_edge: u32) -> ImageHandle {
-    let max_edge = max_edge.max(1);
-    let (w, h) = (image.width(), image.height());
-    let largest = w.max(h).max(1);
-    let scale = (max_edge as f32 / largest as f32).min(1.0);
-    let pw = ((w as f32 * scale).round() as u32).max(1);
-    let ph = ((h as f32 * scale).round() as u32).max(1);
-    let resized = if pw == w && ph == h {
-        image.clone()
-    } else {
-        image::imageops::resize(image, pw, ph, image::imageops::FilterType::Nearest)
-    };
-    ImageHandle::from_rgba(resized.width(), resized.height(), resized.into_raw())
+fn preview_handle(image: &image::RgbaImage) -> ImageHandle {
+    ImageHandle::from_rgba(image.width(), image.height(), image.clone().into_raw())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_stitch_config, stitch_stream};
+    use super::{overlay_stitch_config, preview_handle, stitch_stream};
+    use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use std::time::SystemTime;
@@ -358,5 +345,19 @@ mod tests {
             "stitched height grows past one frame"
         );
         assert!(result.stats.frame_count >= 1);
+    }
+
+    #[test]
+    fn preview_handle_preserves_source_resolution() {
+        let image = RgbaImage::from_pixel(1920, 1080, Rgba([12, 34, 56, 255]));
+
+        let handle = preview_handle(&image);
+
+        match handle {
+            ImageHandle::Rgba { width, height, .. } => {
+                assert_eq!((width, height), (1920, 1080));
+            }
+            _ => panic!("preview handle should use raw RGBA pixels"),
+        }
     }
 }
