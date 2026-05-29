@@ -1,10 +1,37 @@
 use rollshot_capture::{crop_frame, CaptureError, FrameStream, Region};
 use rollshot_core::{StitchConfig, Stitcher};
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use iced::futures::channel::mpsc::UnboundedSender;
+use iced::widget::image::Handle as ImageHandle;
+use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, Size};
+
+use crate::coords::LogicalRect;
+
 use crate::CaptureResult;
+
+/// Wrapper that marks `Box<dyn FrameStream>` as `Send`. The PipeWire stream's
+/// `next_frame()` accesses only the thread-safe `FrameQueue` (Arc+Mutex+Condvar).
+struct SendStream(Box<dyn FrameStream>);
+// SAFETY: LinuxPortalFrameStream::next_frame() reads from a FrameQueue which
+// is Arc<Mutex<VecDeque<_>>> + Condvar — all Send+Sync. The Rc-based PipeWire
+// internals are never touched from the reader thread.
+#[allow(unsafe_code)]
+unsafe impl Send for SendStream {}
+
+impl SendStream {
+    fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
+        self.0.next_frame()
+    }
+}
 
 /// StitchConfig the overlay uses (matches the Tauri app default,
 /// session.rs:188-190).
+#[allow(dead_code)]
 pub fn overlay_stitch_config() -> StitchConfig {
     let mut config = StitchConfig::default();
     config.min_overlap = 32;
@@ -14,6 +41,7 @@ pub fn overlay_stitch_config() -> StitchConfig {
 /// Crop+stitch a finite frame stream to completion. This is the tested core
 /// the threaded live driver (Task 5) wraps. Mirrors the crop+push+finalize of
 /// session.rs:199-212,214-231.
+#[allow(dead_code)]
 pub fn stitch_stream(
     mut stream: Box<dyn FrameStream>,
     region: Region,
@@ -39,6 +67,209 @@ pub fn stitch_stream(
         image,
         stats: stitcher.stats(),
     })
+}
+
+struct Shared {
+    latest: Mutex<Option<CapturedFrame>>,
+    seq: AtomicU64,
+    stitcher: Mutex<Stitcher>,
+    error: Mutex<Option<String>>,
+}
+
+/// Live capture+stitch driver: a reader thread fills a latest-wins slot, a
+/// stitch thread crops to `region` and pushes to the stitcher, emitting a
+/// downscaled preview handle after each frame.
+#[allow(dead_code)]
+pub struct Driver {
+    stop: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+    reader: Option<JoinHandle<()>>,
+    stitch: Option<JoinHandle<()>>,
+}
+
+#[allow(dead_code)]
+impl Driver {
+    /// Start capture, wait for the first frame to learn `source_size`, map the
+    /// logical crop to frame pixels, then start stitching. `preview_tx` receives
+    /// a downscaled stitch preview after each accepted frame.
+    pub fn start(
+        backend: &str,
+        fps: u32,
+        show_cursor: bool,
+        crop_logical: LogicalRect,
+        overlay_logical: Size,
+        preview_tx: UnboundedSender<ImageHandle>,
+        preview_max_edge: u32,
+    ) -> Result<Self, String> {
+        let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
+        let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
+        let stream = backend_impl
+            .start(CaptureOptions {
+                region: RegionMode::FullSource,
+                fps,
+                show_cursor,
+                prefer_portal_region: false,
+            })
+            .map_err(|e| e.to_string())?;
+        let mut stream = SendStream(stream);
+
+        let shared = Arc::new(Shared {
+            latest: Mutex::new(None),
+            seq: AtomicU64::new(0),
+            stitcher: Mutex::new(Stitcher::new(overlay_stitch_config())),
+            error: Mutex::new(None),
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let reader = {
+            let shared = Arc::clone(&shared);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match stream.next_frame() {
+                        Ok(frame) => {
+                            if let Ok(mut slot) = shared.latest.lock() {
+                                *slot = Some(frame);
+                                shared.seq.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(CaptureError::EndOfStream) => break,
+                        Err(CaptureError::Timeout { .. }) => continue,
+                        Err(err) => {
+                            if let Ok(mut e) = shared.error.lock() {
+                                *e = Some(err.to_string());
+                            }
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+
+        let source_size = wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
+        let region = crate::coords::map_crop_to_frame(crop_logical, overlay_logical, source_size);
+
+        let stitch = {
+            let shared = Arc::clone(&shared);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut last_seq = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let seq = shared.seq.load(Ordering::Relaxed);
+                    let frame = if seq == last_seq {
+                        None
+                    } else {
+                        last_seq = seq;
+                        shared.latest.lock().ok().and_then(|s| s.clone())
+                    };
+                    if let Some(frame) = frame {
+                        let cropped = match crop_frame(&frame, region) {
+                            Ok(c) => c,
+                            Err(err) => {
+                                if let Ok(mut e) = shared.error.lock() {
+                                    *e = Some(err.to_string());
+                                }
+                                break;
+                            }
+                        };
+                        if let Ok(mut stitcher) = shared.stitcher.lock() {
+                            stitcher.push_frame(cropped.image);
+                            if let Some(preview) = stitcher.full_image() {
+                                let handle = downscale_handle(preview, preview_max_edge);
+                                let _ = preview_tx.unbounded_send(handle);
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+        };
+
+        Ok(Self {
+            stop,
+            shared,
+            reader: Some(reader),
+            stitch: Some(stitch),
+        })
+    }
+
+    /// Stop both threads and produce the finalized capture.
+    pub fn finalize(mut self) -> Result<CaptureResult, String> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.stitch.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.reader.take() {
+            let _ = h.join();
+        }
+        if let Ok(e) = self.shared.error.lock() {
+            if let Some(msg) = e.as_ref() {
+                return Err(msg.clone());
+            }
+        }
+        let mut stitcher = self
+            .shared
+            .stitcher
+            .lock()
+            .map_err(|_| "stitcher lock poisoned".to_string())?;
+        let image = stitcher
+            .full_image()
+            .ok_or_else(|| "stitcher produced no output".to_string())?
+            .clone();
+        Ok(CaptureResult {
+            image,
+            stats: stitcher.stats(),
+        })
+    }
+}
+
+/// Block until the reader stores the first frame, returning its `source_size`
+/// (falling back to the frame's pixel dimensions if metadata omits it).
+#[allow(dead_code)]
+fn wait_for_source_size(
+    shared: &Arc<Shared>,
+    stop: &Arc<AtomicBool>,
+    timeout: Duration,
+) -> Result<Size, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(e) = shared.error.lock() {
+            if let Some(msg) = e.as_ref() {
+                return Err(msg.clone());
+            }
+        }
+        if let Ok(slot) = shared.latest.lock() {
+            if let Some(frame) = slot.as_ref() {
+                return Ok(frame.metadata.source_size.unwrap_or(Size {
+                    width: frame.image.width(),
+                    height: frame.image.height(),
+                }));
+            }
+        }
+        if Instant::now() >= deadline {
+            stop.store(true, Ordering::Relaxed);
+            return Err("timed out waiting for first capture frame".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Downscale an RGBA image to `max_edge` on its long side and wrap it as an
+/// iced image handle (the preview path proven by the Phase 2 spike, R6).
+#[allow(dead_code)]
+fn downscale_handle(image: &image::RgbaImage, max_edge: u32) -> ImageHandle {
+    let max_edge = max_edge.max(1);
+    let (w, h) = (image.width(), image.height());
+    let largest = w.max(h).max(1);
+    let scale = (max_edge as f32 / largest as f32).min(1.0);
+    let pw = ((w as f32 * scale).round() as u32).max(1);
+    let ph = ((h as f32 * scale).round() as u32).max(1);
+    let resized = if pw == w && ph == h {
+        image.clone()
+    } else {
+        image::imageops::resize(image, pw, ph, image::imageops::FilterType::Nearest)
+    };
+    ImageHandle::from_rgba(resized.width(), resized.height(), resized.into_raw())
 }
 
 #[cfg(test)]

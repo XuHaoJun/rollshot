@@ -13,5 +13,5 @@ rollshot-core = { path = "../rollshot-core" }
 iced = { version = "0.14", features = ["canvas", "image"] }
 iced_layershell = "0.18"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
