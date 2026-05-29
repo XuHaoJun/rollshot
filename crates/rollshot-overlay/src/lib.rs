@@ -47,13 +47,19 @@ impl std::error::Error for OverlayError {}
 mod coords;
 #[cfg(target_os = "linux")]
 mod driver;
-// #[cfg(target_os = "linux")]
-// mod overlay;
+#[cfg(target_os = "linux")]
+mod overlay;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
-pub fn run_overlay(_config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
-    // TODO: once linux modules land, gate the real impl behind #[cfg(target_os = "linux")]
-    // and restore the non-linux stub returning Err(OverlayError::Unsupported).
-    Err(OverlayError::Unsupported)
+pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    #[cfg(target_os = "linux")]
+    {
+        overlay::run(config)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        Err(OverlayError::Unsupported)
+    }
 }
