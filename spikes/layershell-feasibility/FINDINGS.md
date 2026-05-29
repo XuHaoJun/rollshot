@@ -10,7 +10,7 @@
 ## Risk results (filled per task)
 | Risk | Task | Result | Notes |
 |------|------|--------|-------|
-| R6 transparency/layer/Esc | 2 | | |
+| R6 transparency/layer/Esc | 2 | compiles | Transparent fullscreen overlay compiles. `Color::TRANSPARENT` style, `Layer::Overlay`, all-anchors sizing, `KeyboardInteractivity::Exclusive`. Esc via `keyboard::Key::Named(keyboard::key::Named::Escape)` confirmed at compile time. Runtime observation requires KDE 6 hardware. |
 | R1 wgpu coexistence | 3 | | |
 | R2 focus/clipboard | 3 | | |
 | R6 controls/text | 4 | | |
