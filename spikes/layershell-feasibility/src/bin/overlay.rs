@@ -5,6 +5,11 @@ use std::sync::mpsc;
 use std::thread;
 
 fn main() -> Result<(), iced_layershell::Error> {
+    let start_mode = match std::env::args().nth(1) {
+        Some(name) => iced_layershell::settings::StartMode::TargetScreen(name),
+        None => iced_layershell::settings::StartMode::Active,
+    };
+
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
@@ -25,5 +30,5 @@ fn main() -> Result<(), iced_layershell::Error> {
         }
     });
 
-    overlay_app::run(iced_layershell::settings::StartMode::Active, rx)
+    overlay_app::run(start_mode, rx)
 }

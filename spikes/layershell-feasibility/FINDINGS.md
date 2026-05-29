@@ -20,7 +20,7 @@
 | R3 self-capture | 7 | compiles | `capture_check` binary spawns overlay on thread, drives portal monitor capture on main thread, scans for sentinel magenta RGBA(255,0,255,255) in captured frame. Compilation verified; runtime capture requires KDE 6 Wayland portal. |
 | R4 fractional scaling | 7 | compiles | Binary reports `source_size`, `effective_region`, and frame pixel dimensions from `FrameMetadata`. Coordinate mapping between overlay logical coords and frame pixel coords requires output scale factor. Compilation verified; runtime capture requires KDE 6 Wayland portal. |
 | R5 output match | 7 | compiles | Binary reports `pixel_format`, `stride`, `backend` from `FrameMetadata` and saves captured frame as PNG. Compilation verified; runtime capture requires KDE 6 Wayland portal. |
-| R7 multi-monitor | 8 | | |
+| R7 multi-monitor | 8 | compiles | `main` reads output name from `argv[1]`; if present, uses `StartMode::TargetScreen(name)`, otherwise `StartMode::Active`. Code targets output by name via `StartMode::TargetScreen`; runtime multi-monitor test requires KDE 6 with multiple outputs. |
 
 ## Decision
 <filled in Task 9>
