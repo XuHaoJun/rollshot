@@ -261,7 +261,7 @@ harness binary (stands in for Tauri in Phase 3)
       confirm region -> coords::map_crop_to_frame(logical -> frame px)
                      -> driver.begin_stitch(region_px)
         driver stitch thread: crop_frame(region_px) -> Stitcher::push_frame
-        driver -> full_image() -> full-resolution RGBA handle -> mpsc
+        driver -> full_image() -> native-resolution viewport RGBA handle -> mpsc
                -> overlay redraw (live preview, drawn OUTSIDE crop region)
       Esc -> driver.finalize() -> Stitcher::full_image() -> CaptureResult
            -> stash result + request clean iced exit
@@ -302,8 +302,8 @@ Manual KDE 6 Wayland acceptance (the harness binary) — roadmap Phase 3 checks:
 1. Overlay appears above fullscreen apps.
 2. User selects a crop region.
 3. User scrolls target content while stitching is active.
-4. Live stitching preview updates during scrolling and uses full-resolution
-   stitched preview data.
+4. Live stitching preview updates during scrolling and uses native-resolution
+   stitched preview pixels within a bounded viewport.
 5. Esc finishes stitching and `run_overlay` returns a `CaptureResult` (harness
    saves the PNG) — the handoff fires.
 
