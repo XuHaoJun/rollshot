@@ -533,6 +533,17 @@ overlay needs. It is not unit-tested (it owns threads + a real backend + an
 iced preview channel); correctness of the crop+stitch math is covered by Task 4,
 and runtime behavior by Task 9. It mirrors `session.rs:374-561`.
 
+> **Post-acceptance reorder (capture before overlay):** Task 9 KDE 6 acceptance
+> found the portal screen-share picker dialog baked into frame 0 (top-left of
+> the capture). The landed code therefore **splits** the single `Driver::start`
+> shown below into `start_capture()` (backend + reader thread + first-frame
+> `source_size`, run **before** the overlay in `run_overlay`) and
+> `begin_stitch(crop_logical, overlay_logical)` (crop mapping + stitch thread, on
+> crop-confirm), and adds `cancel()` (the driver is now live during selection).
+> The `Driver::start(...)` signature in Step 1 below is the as-designed
+> snapshot; the reader + stitch-loop + finalize internals are unchanged. See
+> spec P3.2 + Data Flow and the landed `driver.rs`.
+
 **Files:**
 - Modify: `crates/rollshot-overlay/src/driver.rs`
 
@@ -780,7 +791,8 @@ rtk git commit -m "feat(overlay): threaded live driver with preview channel"
 
 Port `spikes/layershell-feasibility/src/overlay_app.rs` into
 `crates/rollshot-overlay/src/overlay.rs`, then adapt it: real driver instead of
-the RGB-cycling stub, crop-confirm → coords → `Driver::start`, Esc → finalize,
+the RGB-cycling stub, crop-confirm → coords → `begin_stitch` (capture started
+earlier in `run_overlay`, see Task 5 reorder note), Esc → finalize/cancel,
 and the R3 chrome rules. The layer settings below are copied verbatim from the
 spike (R6 PASS on KDE 6).
 
@@ -806,6 +818,13 @@ Keep `subscription`, `preview_stream`, the `CropCanvas`, and the transparent
 `style` exactly as in the spike.
 
 - [ ] **Step 3: Wire crop-confirm → coords → driver start**
+
+> **Reorder note:** capture is already live (started in `run_overlay` before the
+> overlay), so `Message::Finish` does NOT call `Driver::start`. It calls
+> `driver.begin_stitch(crop_logical, overlay_logical)` on the existing driver
+> (in `DRIVER_SLOT`), which maps the crop using the `source_size` learned at
+> `start_capture`. The `Driver::start(...)` call shown in this step is
+> superseded; see spec P3.2.
 
 Add a module constant `const PREVIEW_MAX_EDGE: u32 = 480;` near the top of
 `overlay.rs`. On `Message::Finish`:
@@ -839,6 +858,11 @@ Replace the spike's `std::process::exit(0)` (BANNED — P3.3): on Esc, call
 `run()` function reads, then request the clean event-loop exit (Task 7 wires the
 exact exit action). On `Message::Cancel` (or Esc before any region is
 confirmed), store `Ok(None)` and request exit.
+
+> **Reorder note:** because the driver is now live during selection, Cancel /
+> Esc-before-confirm also calls `driver.cancel()` to tear down the reader thread
+> + PipeWire stream before exiting; Esc with a confirmed crop calls
+> `driver.finalize()` as described. See spec P3.2.
 
 - [ ] **Step 5: R3 — draw nothing inside the crop region during capture (P3.4)**
 
@@ -987,6 +1011,13 @@ rtk git commit -m "feat(overlay): harness binary for KDE 6 acceptance"
 The layer-shell surface cannot be unit-tested; this task is the runtime gate,
 run on a KDE 6 Wayland session. Record every result in
 `crates/rollshot-overlay/NOTES.md`.
+
+> **Acceptance finding (resolved by the reorder):** the first acceptance run
+> captured the portal screen-share **picker dialog** into the top-left of the
+> saved PNG — it bled into frame 0, which the stitcher bakes as the canvas base.
+> Fix: the capture-before-overlay reorder (spec P3.2; `start_capture` runs before
+> the overlay, `begin_stitch` on confirm). Re-run after the reorder to confirm
+> the picker no longer appears in the output, then record results below.
 
 **Files:**
 - Create: `crates/rollshot-overlay/NOTES.md`

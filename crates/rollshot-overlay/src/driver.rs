@@ -95,19 +95,23 @@ pub struct Driver {
     shared: Arc<Shared>,
     reader: Option<JoinHandle<()>>,
     stitch: Option<JoinHandle<()>>,
+    source_size: Size,
+    preview_tx: UnboundedSender<ImageHandle>,
+    preview_max_edge: u32,
 }
 
 #[allow(dead_code)]
 impl Driver {
-    /// Start capture, wait for the first frame to learn `source_size`, map the
-    /// logical crop to frame pixels, then start stitching. `preview_tx` receives
-    /// a downscaled stitch preview after each accepted frame.
-    pub fn start(
+    /// Start capture + the reader thread, blocking until the portal handshake
+    /// completes (the user picks a monitor and clicks Share) and the first frame
+    /// arrives, so `source_size` is known. Stitching does NOT start here: call
+    /// `begin_stitch` once the crop is chosen. Running the portal before the
+    /// overlay exists keeps its screen-share picker dialog out of every captured
+    /// frame (it appears + dismisses on a clean desktop, before any stitching).
+    pub fn start_capture(
         backend: &str,
         fps: u32,
         show_cursor: bool,
-        crop_logical: LogicalRect,
-        overlay_logical: Size,
         preview_tx: UnboundedSender<ImageHandle>,
         preview_max_edge: u32,
     ) -> Result<Self, String> {
@@ -157,54 +161,67 @@ impl Driver {
         };
 
         let source_size = wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
-        let region = crate::coords::map_crop_to_frame(crop_logical, overlay_logical, source_size);
-
-        let stitch = {
-            let shared = Arc::clone(&shared);
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || {
-                let mut last_seq = 0u64;
-                while !stop.load(Ordering::Relaxed) {
-                    let seq = shared.seq.load(Ordering::Relaxed);
-                    let frame = if seq == last_seq {
-                        None
-                    } else {
-                        last_seq = seq;
-                        shared.latest.lock().ok().and_then(|s| s.clone())
-                    };
-                    if let Some(frame) = frame {
-                        let cropped = match crop_frame(&frame, region) {
-                            Ok(c) => c,
-                            Err(err) => {
-                                if let Ok(mut e) = shared.error.lock() {
-                                    *e = Some(err.to_string());
-                                }
-                                break;
-                            }
-                        };
-                        if let Ok(mut stitcher) = shared.stitcher.lock() {
-                            stitcher.push_frame(cropped.image);
-                            if let Some(preview) = stitcher.full_image() {
-                                let handle = downscale_handle(preview, preview_max_edge);
-                                let _ = preview_tx.unbounded_send(handle);
-                            }
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            })
-        };
 
         Ok(Self {
             stop,
             shared,
             reader: Some(reader),
-            stitch: Some(stitch),
+            stitch: None,
+            source_size,
+            preview_tx,
+            preview_max_edge,
         })
     }
 
-    /// Stop both threads and produce the finalized capture.
-    pub fn finalize(mut self) -> Result<CaptureResult, String> {
+    /// Map the chosen crop (overlay-logical px) to frame pixels and start the
+    /// stitch thread. The canvas-base frame is taken from a frame captured
+    /// *after* this call (`last_seq` seeded to the current seq), i.e. live,
+    /// once the picker is gone and the overlay has settled into capture chrome.
+    pub fn begin_stitch(&mut self, crop_logical: LogicalRect, overlay_logical: Size) {
+        if self.stitch.is_some() {
+            return;
+        }
+        let region =
+            crate::coords::map_crop_to_frame(crop_logical, overlay_logical, self.source_size);
+        let shared = Arc::clone(&self.shared);
+        let stop = Arc::clone(&self.stop);
+        let preview_tx = self.preview_tx.clone();
+        let preview_max_edge = self.preview_max_edge;
+        self.stitch = Some(std::thread::spawn(move || {
+            let mut last_seq = shared.seq.load(Ordering::Relaxed);
+            while !stop.load(Ordering::Relaxed) {
+                let seq = shared.seq.load(Ordering::Relaxed);
+                let frame = if seq == last_seq {
+                    None
+                } else {
+                    last_seq = seq;
+                    shared.latest.lock().ok().and_then(|s| s.clone())
+                };
+                if let Some(frame) = frame {
+                    let cropped = match crop_frame(&frame, region) {
+                        Ok(c) => c,
+                        Err(err) => {
+                            if let Ok(mut e) = shared.error.lock() {
+                                *e = Some(err.to_string());
+                            }
+                            break;
+                        }
+                    };
+                    if let Ok(mut stitcher) = shared.stitcher.lock() {
+                        stitcher.push_frame(cropped.image);
+                        if let Some(preview) = stitcher.full_image() {
+                            let handle = downscale_handle(preview, preview_max_edge);
+                            let _ = preview_tx.unbounded_send(handle);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }));
+    }
+
+    /// Signal both threads to stop and join them.
+    fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.stitch.take() {
             let _ = h.join();
@@ -212,6 +229,17 @@ impl Driver {
         if let Some(h) = self.reader.take() {
             let _ = h.join();
         }
+    }
+
+    /// Stop capture without producing a result (user cancelled at/ before the
+    /// crop, or the loop exited early). Tears the PipeWire stream down cleanly.
+    pub fn cancel(mut self) {
+        self.stop_and_join();
+    }
+
+    /// Stop both threads and produce the finalized capture.
+    pub fn finalize(mut self) -> Result<CaptureResult, String> {
+        self.stop_and_join();
         if let Ok(e) = self.shared.error.lock() {
             if let Some(msg) = e.as_ref() {
                 return Err(msg.clone());

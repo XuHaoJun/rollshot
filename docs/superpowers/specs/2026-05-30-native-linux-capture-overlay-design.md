@@ -89,14 +89,37 @@ support-matrix rule.
 This resolves the D3 open question. `rollshot-overlay::driver` reimplements the
 latest-wins reader + stitch-loop pattern (mirroring
 `crates/rollshot-app/src-tauri/src/session.rs:374-561`), scoped to exactly what
-the overlay needs:
+the overlay needs. The driver has a **two-phase** lifecycle (split per the
+capture-ordering decision below):
 
-- a reader thread: `backend.start(CaptureOptions { region: FullSource, .. })`
-  then `next_frame()` into a latest-wins slot (seq counter), per
-  `session.rs:410-428`;
-- a stitch thread: on new seq, `crop_frame(&frame, region)` →
-  `Stitcher::push_frame`, per `session.rs:535-561` and `:199-212`;
+- `start_capture()`: create the backend, `backend.start(CaptureOptions {
+  region: FullSource, .. })`, and spawn the reader thread — `next_frame()` into
+  a latest-wins slot (seq counter), per `session.rs:410-428`. Blocks until the
+  portal handshake completes (user clicks Share) and the first frame arrives, so
+  `source_size` is known. **No stitching yet.**
+- `begin_stitch(crop_logical, overlay_logical)`: map the crop to frame pixels
+  (P3.5) using the learned `source_size`, then spawn the stitch thread — on new
+  seq, `crop_frame(&frame, region)` → `Stitcher::push_frame`, per
+  `session.rs:535-561` and `:199-212`. The stitch thread seeds `last_seq` to the
+  current seq, so the canvas-base frame is a live frame captured *after* this
+  call.
 - `finalize()`: stop both threads, `Stitcher::full_image()` → `CaptureResult`.
+- `cancel()`: stop both threads without producing a result — for cancel /
+  Esc-before-confirm / early loop exit. Needed because the driver is now live
+  during crop-selection (it was not in the original flow).
+
+**Capture ordering (DECIDED — post-acceptance iteration):** `start_capture()`
+runs **before** the overlay surface exists (in `run_overlay`), not on
+crop-confirm. Rationale: on KDE 6 the portal screen-share **picker dialog**
+bleeds into the first PipeWire frame(s) delivered just after Share; because
+`Stitcher::accept_first_frame` bakes frame 0 as the canvas base and scrolling
+only appends, frame 0's content is permanently baked into the top of the output.
+Starting capture first makes the picker appear and dismiss on a clean desktop,
+and `begin_stitch`'s post-call canvas-base frame is taken once the picker is
+gone — so the picker never reaches the stitcher. (The original
+"`driver.start` on crop-confirm" flow put the picker in the top-left of the
+capture; found during Task 9 KDE 6 acceptance.) User-visible on-screen sequence
+becomes: picker → crop-select → scroll → Esc.
 
 **We do NOT extract a shared driver** or touch `cmd_capture.rs` /
 `session.rs`. The triplicate driver logic is a known, recorded cost; a future
@@ -229,16 +252,20 @@ public API (`CaptureBackend::start`, `FrameStream::next_frame`) is unchanged.
 ```text
 harness binary (stands in for Tauri in Phase 3)
   run_overlay(config)            [blocks this thread]
-    iced_layershell overlay (transparent, anchored to output)
-      crop-select phase: user drags box; border drawn; scroll NOT yet captured
-      confirm region -> coords::map_crop_to_frame(logical -> frame px)
-                     -> driver.start(region_px)
+    driver.start_capture()  -> portal handshake (picker -> Share), reader thread,
+                               first frame -> source_size
+        (BEFORE the overlay, so the picker dialog is never in a captured frame)
         driver reader thread: backend.start(FullSource) -> next_frame -> latest slot
+    iced_layershell overlay (transparent, anchored to output)
+      crop-select phase: user drags box; border drawn; scroll NOT yet stitched
+      confirm region -> coords::map_crop_to_frame(logical -> frame px)
+                     -> driver.begin_stitch(region_px)
         driver stitch thread: crop_frame(region_px) -> Stitcher::push_frame
         driver -> full_image() -> downscale -> mpsc -> overlay redraw (live preview,
                                                        drawn OUTSIDE crop region)
       Esc -> driver.finalize() -> Stitcher::full_image() -> CaptureResult
            -> stash result + request clean iced exit
+      Cancel / Esc-before-confirm -> driver.cancel() -> Ok(None)
   run_overlay returns Ok(Some(CaptureResult))
   harness: save CaptureResult.image as PNG + print stats
 ```

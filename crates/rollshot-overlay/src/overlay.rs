@@ -27,22 +27,11 @@ static PREVIEW_RX: Mutex<Option<iced::futures::channel::mpsc::UnboundedReceiver<
     Mutex::new(None);
 static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex::new(None);
 
-// Holds the preview sender so the update function can hand it to Driver::start.
-static PREVIEW_TX: Mutex<Option<iced::futures::channel::mpsc::UnboundedSender<image::Handle>>> =
-    Mutex::new(None);
-
-// Holds the overlay config so the update function can access it.
-static OVERLAY_CFG: Mutex<Option<OverlayConfig>> = Mutex::new(None);
-
-// Driver start runs on a background thread (so portal negotiation + the
-// first-frame wait never block the iced event loop). The started Driver is
-// stashed here and a readiness signal is sent over the channel below.
+// Capture starts in `run()` before the overlay surface exists, so the portal
+// screen-share picker dialog appears + dismisses on a clean desktop and never
+// lands in a captured frame. The live Driver is stashed here for the update fn
+// to drive: `begin_stitch` on Finish, `finalize`/`cancel` on Esc.
 static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
-static DRIVER_RX: Mutex<
-    Option<iced::futures::channel::mpsc::UnboundedReceiver<Result<(), String>>>,
-> = Mutex::new(None);
-static DRIVER_TX: Mutex<Option<iced::futures::channel::mpsc::UnboundedSender<Result<(), String>>>> =
-    Mutex::new(None);
 
 #[derive(Default)]
 pub struct Overlay {
@@ -50,7 +39,6 @@ pub struct Overlay {
     crop: Option<Rectangle>,
     crop_confirmed: bool,
     preview: Option<image::Handle>,
-    driver: Option<Driver>,
     window_size: Option<iced::Size>,
 }
 
@@ -61,9 +49,6 @@ pub enum Message {
     Finish,
     Cancel,
     NewPreview(image::Handle),
-    /// The background driver-start finished: `Ok` means the Driver is in
-    /// `DRIVER_SLOT`; `Err` carries the failure message.
-    DriverStarted(Result<(), String>),
 }
 
 fn namespace() -> String {
@@ -82,24 +67,8 @@ fn preview_stream() -> iced::Subscription<Message> {
     })
 }
 
-fn driver_stream() -> iced::Subscription<Message> {
-    iced::Subscription::run(|| {
-        let rx = DRIVER_RX
-            .lock()
-            .unwrap()
-            .take()
-            .expect("driver channel already consumed");
-
-        rx.map(Message::DriverStarted)
-    })
-}
-
 fn subscription(_: &Overlay) -> iced::Subscription<Message> {
-    iced::Subscription::batch([
-        event::listen().map(Message::IcedEvent),
-        preview_stream(),
-        driver_stream(),
-    ])
+    iced::Subscription::batch([event::listen().map(Message::IcedEvent), preview_stream()])
 }
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
@@ -143,25 +112,18 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
             ..
         })) => {
-            // Finalize the driver if one is running (or just finished starting,
-            // racing the DriverStarted message); otherwise this is a cancel.
-            let driver = state
-                .driver
-                .take()
-                .or_else(|| DRIVER_SLOT.lock().unwrap().take());
-            match driver {
-                Some(driver) => match driver.finalize() {
-                    Ok(result) => {
-                        *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
-                    }
-                    Err(e) => {
-                        *RESULT_SLOT.lock().unwrap() = Some(Err(e));
-                    }
-                },
-                None => {
-                    *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
+            let driver = DRIVER_SLOT.lock().unwrap().take();
+            let outcome = match (state.crop_confirmed, driver) {
+                // Capturing: stop the threads and produce the finalized result.
+                (true, Some(driver)) => driver.finalize().map(Some),
+                // Esc before a crop was confirmed: cancel + tear down capture.
+                (false, Some(driver)) => {
+                    driver.cancel();
+                    Ok(None)
                 }
-            }
+                (_, None) => Ok(None),
+            };
+            *RESULT_SLOT.lock().unwrap() = Some(outcome);
             iced::exit()
         }
         Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
@@ -169,8 +131,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             ..
         })) if !state.crop_confirmed && state.crop.is_some() => Task::done(Message::Finish),
         Message::Finish => {
-            // Ignore duplicate Finish (e.g. double-click / repeated Enter): a
-            // second pass would re-take the preview sender and panic.
+            // Ignore duplicate Finish (e.g. double-click / repeated Enter): the
+            // crop is already confirmed and stitching has begun.
             if state.crop_confirmed {
                 return Task::none();
             }
@@ -204,33 +166,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 height: ws.height as u32,
             };
 
-            let cfg: OverlayConfig = OVERLAY_CFG.lock().unwrap().as_ref().unwrap().clone();
-            let preview_tx = PREVIEW_TX.lock().unwrap().take().unwrap();
-            let driver_tx = DRIVER_TX.lock().unwrap().take().unwrap();
-
-            // Start the driver off the UI thread: Driver::start does portal
-            // negotiation and blocks until the first frame, which would
-            // otherwise freeze the overlay (it holds an exclusive keyboard
-            // grab). Report readiness back via DriverStarted.
-            std::thread::spawn(move || {
-                match Driver::start(
-                    &cfg.backend,
-                    cfg.fps,
-                    cfg.show_cursor,
-                    crop_logical,
-                    overlay_logical,
-                    preview_tx,
-                    PREVIEW_MAX_EDGE,
-                ) {
-                    Ok(driver) => {
-                        *DRIVER_SLOT.lock().unwrap() = Some(driver);
-                        let _ = driver_tx.unbounded_send(Ok(()));
-                    }
-                    Err(e) => {
-                        let _ = driver_tx.unbounded_send(Err(e));
-                    }
-                }
-            });
+            // Capture is already running (started in `run()` before the overlay
+            // appeared, so the picker dialog is long gone). Just map the crop to
+            // frame pixels and start stitching live frames from here on.
+            if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
+                driver.begin_stitch(crop_logical, overlay_logical);
+            }
 
             // Keep only the toolbar interactive (plan T6 S3); the crop interior
             // + everything else passes through so the user can scroll the
@@ -245,17 +186,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 },
             )))
         }
-        Message::DriverStarted(Ok(())) => {
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
-                state.driver = Some(driver);
-            }
-            Task::none()
-        }
-        Message::DriverStarted(Err(msg)) => {
-            *RESULT_SLOT.lock().unwrap() = Some(Err(msg));
-            iced::exit()
-        }
         Message::Cancel => {
+            if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+                driver.cancel();
+            }
             *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
             iced::exit()
         }
@@ -447,12 +381,11 @@ fn view(state: &Overlay) -> Element<'_, Message> {
     if state.crop_confirmed {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
-        let status = if state.driver.is_some() {
-            "Capturing — scroll the target, Esc to finish"
-        } else {
-            "Starting capture…"
-        };
-        let toolbar = magenta_toolbar(text(status).size(16).into());
+        let toolbar = magenta_toolbar(
+            text("Capturing — scroll the target, Esc to finish")
+                .size(16)
+                .into(),
+        );
         let chrome: Element<'_, Message> = if let Some(handle) = &state.preview {
             column![
                 toolbar,
@@ -517,17 +450,26 @@ fn style(_state: &Overlay, theme: &iced::Theme) -> iced::theme::Style {
 
 pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
-    let (driver_tx, driver_rx) = iced::futures::channel::mpsc::unbounded();
 
     *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
-    *PREVIEW_TX.lock().unwrap() = Some(preview_tx);
-    *DRIVER_RX.lock().unwrap() = Some(driver_rx);
-    *DRIVER_TX.lock().unwrap() = Some(driver_tx);
     *DRIVER_SLOT.lock().unwrap() = None;
-    *OVERLAY_CFG.lock().unwrap() = Some(config);
     *RESULT_SLOT.lock().unwrap() = None;
 
-    application(Overlay::default, namespace, update, view)
+    // Start capture BEFORE building the overlay: the portal screen-share picker
+    // then appears (and dismisses) on a clean desktop, so it is never composited
+    // into a captured frame. Blocks until the user clicks Share and the first
+    // frame arrives.
+    let driver = Driver::start_capture(
+        &config.backend,
+        config.fps,
+        config.show_cursor,
+        preview_tx,
+        PREVIEW_MAX_EDGE,
+    )
+    .map_err(OverlayError::Capture)?;
+    *DRIVER_SLOT.lock().unwrap() = Some(driver);
+
+    let run_result = application(Overlay::default, namespace, update, view)
         .style(style)
         .subscription(subscription)
         .settings(Settings {
@@ -543,10 +485,17 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
             },
             ..Default::default()
         })
-        .run()
-        .map_err(|e| OverlayError::Overlay(e.to_string()))?;
+        .run();
 
-    // After the iced app exits, read the result slot.
+    // Safety net: if the loop exited without finalize/cancel taking the driver,
+    // tear capture down so the PipeWire stream + reader thread don't leak.
+    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+        driver.cancel();
+    }
+
+    run_result.map_err(|e| OverlayError::Overlay(e.to_string()))?;
+
+    // After the iced app exits cleanly, read the result slot.
     match RESULT_SLOT.lock().unwrap().take().unwrap_or(Ok(None)) {
         Ok(opt) => Ok(opt),
         Err(e) => Err(OverlayError::Capture(e)),
