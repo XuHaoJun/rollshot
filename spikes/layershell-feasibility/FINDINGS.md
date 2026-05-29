@@ -23,4 +23,57 @@
 | R7 multi-monitor | 8 | compiles | `main` reads output name from `argv[1]`; if present, uses `StartMode::TargetScreen(name)`, otherwise `StartMode::Active`. Code targets output by name via `StartMode::TargetScreen`; runtime multi-monitor test requires KDE 6 with multiple outputs. |
 
 ## Decision
-<filled in Task 9>
+
+### 1. Go / no-go for `iced_layershell` as the Linux overlay stack
+
+**CONDITIONAL GO.**
+
+Compilation-level evidence is strongly positive: `iced_layershell` 0.18.1 + `iced` 0.14 resolve cleanly from crates.io, all required APIs exist at the type level, and the overlay, input region, keyboard, and channel-driven preview APIs all compile without workarounds. The three spike binaries (`overlay`, `coexist`, `capture_check`) build successfully, and production crate tests (90) continue to pass.
+
+However, **zero runtime verification** has occurred. The critical behaviors — transparency vs opaque fill, above-fullscreen layering, GPU coexistence between wry and iced, and input region scroll passthrough — are all observable only on a real KDE Plasma 6 Wayland session. Compilation confirms API availability; it does not confirm compositor behavior.
+
+**Recommendation:** Proceed with `iced_layershell` as the primary Linux overlay path. The runtime verification tasks (R6 transparency, R1 GPU coexistence, R3 self-capture, R4 scaling) **must** be completed on real KDE 6 Wayland hardware before committing to the full overlay implementation plan. If any of those fail at runtime, the smithay-client-toolkit fallback (see §3) becomes the path.
+
+### 2. Process model
+
+**Primary: in-process spawned thread. Separate-process fallback as insurance.**
+
+The `coexist.rs` binary proves the API shape: overlay on a spawned `std::thread`, wry/tao webview on the main thread. Key details confirmed at compile time:
+
+- `build_gtk` (not `build`) is required for Wayland-compatible GTK embedding — `build` targets X11 only.
+- `tao::EventLoop::new()` handles `gtk::init` automatically, so wry's GTK requirement is satisfied without explicit initialization.
+- Both threads share the same process; no IPC is needed for the overlay-to-webview data path.
+
+If R1 GPU coexistence fails at runtime (e.g., wgpu/EGL contention between iced's renderer and webkit2gtk's GPU context), the separate-process fallback — overlay in its own process, communicating via a socket or shared memory — remains viable. That fallback is not spiked here; it would need its own feasibility check.
+
+### 3. smithay-client-toolkit fallback trigger
+
+**No compilation-level triggers found.** `iced_layershell` provides all needed APIs at the type level: transparent surface, overlay layer, exclusive keyboard, input region control, and output targeting.
+
+The fallback triggers are **runtime-only**:
+
+- Transparency failure: overlay surface is opaque (black/grey fill) despite `Color::TRANSPARENT` and ARGB surface config.
+- Layering failure: overlay does not appear above fullscreen applications.
+- GPU contention: iced and wry cannot share a GPU context in-process (EGL/wgpu conflicts).
+- Input region failure: `SetInputRegion` does not produce click-through behavior on KWin.
+
+If any of these are observed during runtime testing on KDE 6 Wayland, the next step is to evaluate `smithay-client-toolkit` as a lower-level alternative that bypasses `iced_layershell`'s abstraction.
+
+### 4. KDE-specific behaviors and workarounds discovered
+
+- **`build_gtk` vs `build`:** Wayland requires `build_gtk`; `build` is X11-only. This is a gotcha that would surface as a runtime failure on Wayland if missed.
+- **`ButtonPressed` lacks cursor position:** In iced 0.14, `ButtonPressed` mouse events do not include the cursor position. Drag start must be deferred to the first `CursorMoved` event. This is an API limitation, not a KDE-specific issue.
+- **GTK init automatic:** `tao::EventLoop::new()` calls `gtk::init` internally, so wry's GTK dependency is satisfied without explicit setup. No conflict with iced's own initialization.
+- **`SetInputRegion` via `to_layer_message`:** The `#[to_layer_message]` macro generates the `SetInputRegion(ActionCallback)` variant. The callback receives `&WlRegion`, enabling compositor-level input restriction. This is the correct Wayland-native approach for click-through regions.
+
+### 5. Unresolved risks for Phase 3 overlay spec
+
+| Risk | Status | What's ready | What's pending |
+|------|--------|--------------|----------------|
+| R3 self-capture | Compiles | Sentinel color scanning logic; `capture_check` binary | Runtime test: does portal capture include the overlay? Is the sentinel pixel absent from the captured frame? |
+| R4 fractional scaling | Compiles | Coordinate mapping code structure; `FrameMetadata` reports `source_size` and `effective_region` | Runtime test at 100% and 150% scaling: do logical overlay coords map correctly to frame pixel coords? |
+| R6 input region | Compiles | `SetInputRegion` API; `WlRegion.add()` for restricting input rectangles | Runtime test: does scroll passthrough work? Does click-through on the crop area behave correctly on KWin? |
+| R6 preview refresh | Compiles | Channel-driven `Subscription::run` pattern; `mpsc` bridge | Runtime test: is refresh smooth? What's the latency from external send to overlay render? |
+| R1 GPU coexistence | Compiles | Spawned-thread model; `build_gtk` for Wayland | Runtime test: can iced and wry share GPU context without EGL/wgpu conflicts on Mesa/VMware? |
+
+All runtime tests require a KDE Plasma 6 Wayland session with hardware GPU access (not a headless VM).
