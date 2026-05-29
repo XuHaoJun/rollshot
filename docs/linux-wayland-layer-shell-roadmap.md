@@ -205,6 +205,11 @@ Carried into Phase 4:
 - **Tauri save dialog handoff (D5).**
 - **R2:** hide / de-focus the Tauri host window during the overlay phase.
 - **R5/R7 multi-output follow-up** from Phase 3 acceptance (if not resolved).
+- **Driver-start thread cleanup:** the overlay starts the capture driver on a
+  background thread so portal negotiation + the first-frame wait never block the
+  iced event loop. If the user cancels (Esc) during that start window, the
+  in-flight start thread is orphaned — harmless for the short-lived harness, but
+  the long-lived Tauri host must join or abort it.
 
 ### Phase 4: Tauri Save Handoff
 

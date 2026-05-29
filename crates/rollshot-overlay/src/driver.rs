@@ -14,12 +14,22 @@ use crate::coords::LogicalRect;
 
 use crate::CaptureResult;
 
-/// Wrapper that marks `Box<dyn FrameStream>` as `Send`. The PipeWire stream's
-/// `next_frame()` accesses only the thread-safe `FrameQueue` (Arc+Mutex+Condvar).
+/// Wrapper that lets us move a `Box<dyn FrameStream>` to the reader thread.
+/// `FrameStream` is not `Send` because the Linux PipeWire backend holds
+/// `Rc`-based handles (thread-loop, stream, context, core).
 struct SendStream(Box<dyn FrameStream>);
-// SAFETY: LinuxPortalFrameStream::next_frame() reads from a FrameQueue which
-// is Arc<Mutex<VecDeque<_>>> + Condvar — all Send+Sync. The Rc-based PipeWire
-// internals are never touched from the reader thread.
+// SAFETY: the stream is *moved* wholesale onto the reader thread and is never
+// touched from any other thread afterwards, so the non-atomic `Rc` refcounts
+// inside the PipeWire handles are never mutated concurrently — there is no
+// cross-thread aliasing, only a one-time ownership transfer.
+// - next_frame() reads only the shared FrameQueue (Arc<Mutex<VecDeque>> +
+//   Condvar), which is Send+Sync (pipewire.rs: LinuxPortalFrameStream).
+// - Drop also runs on the reader thread: PipeWireConnection::drop calls
+//   thread_loop.stop() + stream.disconnect(). PipeWire allows stopping a
+//   thread-loop / disconnecting a stream from a thread other than the loop's
+//   own internal pthread, and PortalSession teardown dispatches its D-Bus
+//   close to a separate thread (portal.rs Drop). Since this thread is the sole
+//   remaining owner, the Rc drops resolve here with no concurrent access.
 #[allow(unsafe_code)]
 unsafe impl Send for SendStream {}
 
