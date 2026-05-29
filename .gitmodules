@@ -16,3 +16,6 @@
 [submodule "learn-projects/scap"]
 	path = learn-projects/scap
 	url = https://github.com/zed-industries/scap.git
+[submodule "learn-projects/exwlshelleventloop"]
+	path = learn-projects/exwlshelleventloop
+	url = https://github.com/waycrate/exwlshelleventloop.git
