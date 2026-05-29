@@ -88,7 +88,7 @@ struct Shared {
 
 /// Live capture+stitch driver: a reader thread fills a latest-wins slot, a
 /// stitch thread crops to `region` and pushes to the stitcher, emitting a
-/// native-resolution preview viewport after each frame.
+/// full-resolution preview handle after each frame.
 #[allow(dead_code)]
 pub struct Driver {
     stop: Arc<AtomicBool>,
@@ -183,10 +183,6 @@ impl Driver {
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
         let preview_tx = self.preview_tx.clone();
-        let preview_size = Size {
-            width: region.width,
-            height: region.height,
-        };
         self.stitch = Some(std::thread::spawn(move || {
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
             while !stop.load(Ordering::Relaxed) {
@@ -210,7 +206,7 @@ impl Driver {
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
                         stitcher.push_frame(cropped.image);
                         if let Some(preview) = stitcher.full_image() {
-                            let handle = preview_handle(preview, preview_size);
+                            let handle = preview_handle(preview);
                             let _ = preview_tx.unbounded_send(handle);
                         }
                     }
@@ -292,17 +288,12 @@ fn wait_for_source_size(
     }
 }
 
-/// Wrap a native-resolution viewport of the stitcher's RGBA image as an iced
-/// image handle. The UI may scale display size, but preview pixels are never
-/// resampled before upload.
+/// Wrap the stitcher's RGBA image as an iced image handle without reducing
+/// resolution. The UI may scale how it is displayed, but the preview data stays
+/// pixel-for-pixel aligned with the stitcher output.
 #[allow(dead_code)]
-fn preview_handle(image: &image::RgbaImage, viewport: Size) -> ImageHandle {
-    let width = image.width().min(viewport.width.max(1));
-    let height = image.height().min(viewport.height.max(1));
-    let x = image.width().saturating_sub(width);
-    let y = image.height().saturating_sub(height);
-    let viewport = image::imageops::crop_imm(image, x, y, width, height).to_image();
-    ImageHandle::from_rgba(viewport.width(), viewport.height(), viewport.into_raw())
+fn preview_handle(image: &image::RgbaImage) -> ImageHandle {
+    ImageHandle::from_rgba(image.width(), image.height(), image.clone().into_raw())
 }
 
 #[cfg(test)]
@@ -310,7 +301,7 @@ mod tests {
     use super::{overlay_stitch_config, preview_handle, stitch_stream};
     use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
-    use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region, Size};
+    use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -360,49 +351,11 @@ mod tests {
     fn preview_handle_preserves_source_resolution() {
         let image = RgbaImage::from_pixel(1920, 1080, Rgba([12, 34, 56, 255]));
 
-        let handle = preview_handle(
-            &image,
-            Size {
-                width: 1920,
-                height: 1080,
-            },
-        );
+        let handle = preview_handle(&image);
 
         match handle {
             ImageHandle::Rgba { width, height, .. } => {
                 assert_eq!((width, height), (1920, 1080));
-            }
-            _ => panic!("preview handle should use raw RGBA pixels"),
-        }
-    }
-
-    #[test]
-    fn preview_handle_uses_native_resolution_viewport_for_large_canvas() {
-        let mut image = RgbaImage::new(1920, 12_000);
-        for y in 0..image.height() {
-            for x in 0..image.width() {
-                image.put_pixel(x, y, Rgba([(y % 251) as u8, (x % 251) as u8, 99, 255]));
-            }
-        }
-
-        let handle = preview_handle(
-            &image,
-            Size {
-                width: 1920,
-                height: 1080,
-            },
-        );
-
-        match handle {
-            ImageHandle::Rgba {
-                width,
-                height,
-                pixels,
-                ..
-            } => {
-                assert_eq!((width, height), (1920, 1080));
-                let first = &pixels[..4];
-                assert_eq!(first, [((12_000 - 1080) % 251) as u8, 0, 99, 255]);
             }
             _ => panic!("preview handle should use raw RGBA pixels"),
         }

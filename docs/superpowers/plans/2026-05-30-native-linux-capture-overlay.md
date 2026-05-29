@@ -572,7 +572,7 @@ struct Shared {
 
 /// Live capture+stitch driver: a reader thread fills a latest-wins slot, a
 /// stitch thread crops to `region` and pushes to the stitcher, emitting a
-/// native-resolution preview viewport after each frame.
+/// full-resolution preview handle after each frame.
 pub struct Driver {
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
@@ -583,7 +583,7 @@ pub struct Driver {
 impl Driver {
     /// Start capture, wait for the first frame to learn `source_size`, map the
     /// logical crop to frame pixels, then start stitching. `preview_tx` receives
-    /// a native-resolution stitch preview viewport after each accepted frame.
+    /// a full-resolution stitch preview after each accepted frame.
     pub fn start(
         backend: &str,
         fps: u32,
@@ -640,10 +640,6 @@ impl Driver {
         // Wait for the first frame so we can read source_size and map the crop.
         let source_size = wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
         let region = crate::coords::map_crop_to_frame(crop_logical, overlay_logical, source_size);
-        let preview_size = Size {
-            width: region.width,
-            height: region.height,
-        };
 
         // Stitch thread: on a new seq, crop+push, then emit preview
         // (session.rs:535-561).
@@ -673,7 +669,7 @@ impl Driver {
                         if let Ok(mut stitcher) = shared.stitcher.lock() {
                             stitcher.push_frame(cropped.image);
                             if let Some(preview) = stitcher.full_image() {
-                                let handle = preview_handle(preview, preview_size);
+                                let handle = preview_handle(preview);
                                 let _ = preview_tx.unbounded_send(handle);
                             }
                         }
@@ -751,16 +747,11 @@ fn wait_for_source_size(
     }
 }
 
-/// Wrap a native-resolution viewport of the stitcher's RGBA image as an iced
-/// image handle. The UI may scale display size, but preview pixels are never
-/// resampled before upload.
-fn preview_handle(image: &image::RgbaImage, viewport: Size) -> ImageHandle {
-    let width = image.width().min(viewport.width.max(1));
-    let height = image.height().min(viewport.height.max(1));
-    let x = image.width().saturating_sub(width);
-    let y = image.height().saturating_sub(height);
-    let viewport = image::imageops::crop_imm(image, x, y, width, height).to_image();
-    ImageHandle::from_rgba(viewport.width(), viewport.height(), viewport.into_raw())
+/// Wrap the stitcher's RGBA image as an iced image handle without reducing
+/// resolution. The UI may scale how it is displayed, but the preview data stays
+/// pixel-for-pixel aligned with the stitcher output.
+fn preview_handle(image: &image::RgbaImage) -> ImageHandle {
+    ImageHandle::from_rgba(image.width(), image.height(), image.clone().into_raw())
 }
 ```
 
