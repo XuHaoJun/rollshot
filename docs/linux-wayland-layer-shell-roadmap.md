@@ -176,6 +176,13 @@ Acceptance checks:
 - The live stitching preview updates during scrolling.
 - Pressing Esc finishes stitching and triggers the save handoff.
 
+Status (2026-05-29): **DONE — implementation complete; KDE 6 runtime acceptance pending.**
+
+The `rollshot-overlay` crate is built, tested, and integrated. All unit tests pass
+(6 tests: 5 coords + 1 driver core). Workspace-wide verification clean (332 tests,
+clippy, fmt). The harness binary (`capture_overlay`) compiles. Runtime acceptance on
+KDE 6 Wayland is deferred to the next available KDE 6 session.
+
 Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
 
 - **R2 focus (design decision):** during the overlay phase, hide or de-focus the
@@ -190,6 +197,14 @@ Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
 - **Runtime tests not yet run in the spike** (exercise during Phase 3): R4
   fractional scaling at 100% and 150% (the D4 coordinate-mapping risk), R5
   output match (overlay output == captured monitor), R7 multi-monitor.
+
+Carried into Phase 4:
+
+- **Tauri wiring:** `src-tauri` Linux branch spawns `run_overlay` on a thread
+  and feeds `CaptureResult.image` into `AppSession`'s final-image + save flow.
+- **Tauri save dialog handoff (D5).**
+- **R2:** hide / de-focus the Tauri host window during the overlay phase.
+- **R5/R7 multi-output follow-up** from Phase 3 acceptance (if not resolved).
 
 ### Phase 4: Tauri Save Handoff
 

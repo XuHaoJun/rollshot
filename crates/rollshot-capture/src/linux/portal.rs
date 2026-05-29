@@ -284,11 +284,12 @@ impl PortalClient {
                 })
                 .collect();
             let chosen = choose_stream(&stream_infos)?;
-            if streams
-                .streams()
-                .iter()
-                .any(|s| matches!(s.source_type(), Some(ashpd::desktop::screencast::SourceType::Window)))
-            {
+            if streams.streams().iter().any(|s| {
+                matches!(
+                    s.source_type(),
+                    Some(ashpd::desktop::screencast::SourceType::Window)
+                )
+            }) {
                 return Err(CaptureError::Backend(anyhow::anyhow!(
                     "window capture is not supported; select a monitor"
                 )));

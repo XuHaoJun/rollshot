@@ -1,5 +1,7 @@
 use iced::widget::{button, canvas, container, image, row, text};
-use iced::{event, keyboard, mouse, window, Color, Element, Event, Length, Point, Rectangle, Size, Task};
+use iced::{
+    event, keyboard, mouse, window, Color, Element, Event, Length, Point, Rectangle, Size, Task,
+};
 use iced_layershell::actions::ActionCallback;
 use iced_layershell::build_pattern::application;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
