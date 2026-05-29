@@ -572,7 +572,7 @@ struct Shared {
 
 /// Live capture+stitch driver: a reader thread fills a latest-wins slot, a
 /// stitch thread crops to `region` and pushes to the stitcher, emitting a
-/// full-resolution preview handle after each frame.
+/// downscaled preview handle after each frame.
 pub struct Driver {
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
@@ -583,7 +583,7 @@ pub struct Driver {
 impl Driver {
     /// Start capture, wait for the first frame to learn `source_size`, map the
     /// logical crop to frame pixels, then start stitching. `preview_tx` receives
-    /// a full-resolution stitch preview after each accepted frame.
+    /// a downscaled stitch preview after each accepted frame.
     pub fn start(
         backend: &str,
         fps: u32,
@@ -591,6 +591,7 @@ impl Driver {
         crop_logical: LogicalRect,
         overlay_logical: Size,
         preview_tx: UnboundedSender<ImageHandle>,
+        preview_max_edge: u32,
     ) -> Result<Self, String> {
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
@@ -669,7 +670,7 @@ impl Driver {
                         if let Ok(mut stitcher) = shared.stitcher.lock() {
                             stitcher.push_frame(cropped.image);
                             if let Some(preview) = stitcher.full_image() {
-                                let handle = preview_handle(preview);
+                                let handle = downscale_handle(preview, preview_max_edge);
                                 let _ = preview_tx.unbounded_send(handle);
                             }
                         }
@@ -747,11 +748,21 @@ fn wait_for_source_size(
     }
 }
 
-/// Wrap the stitcher's RGBA image as an iced image handle without reducing
-/// resolution. The UI may scale how it is displayed, but the preview data stays
-/// pixel-for-pixel aligned with the stitcher output.
-fn preview_handle(image: &image::RgbaImage) -> ImageHandle {
-    ImageHandle::from_rgba(image.width(), image.height(), image.clone().into_raw())
+/// Downscale an RGBA image to `max_edge` on its long side and wrap it as an
+/// iced image handle (the preview path proven by the Phase 2 spike, R6).
+fn downscale_handle(image: &image::RgbaImage, max_edge: u32) -> ImageHandle {
+    let max_edge = max_edge.max(1);
+    let (w, h) = (image.width(), image.height());
+    let largest = w.max(h).max(1);
+    let scale = (max_edge as f32 / largest as f32).min(1.0);
+    let pw = ((w as f32 * scale).round() as u32).max(1);
+    let ph = ((h as f32 * scale).round() as u32).max(1);
+    let resized = if pw == w && ph == h {
+        image.clone()
+    } else {
+        image::imageops::resize(image, pw, ph, image::imageops::FilterType::Nearest)
+    };
+    ImageHandle::from_rgba(resized.width(), resized.height(), resized.into_raw())
 }
 ```
 
@@ -815,7 +826,8 @@ Keep `subscription`, `preview_stream`, the `CropCanvas`, and the transparent
 > `start_capture`. The `Driver::start(...)` call shown in this step is
 > superseded; see spec P3.2.
 
-On `Message::Finish`:
+Add a module constant `const PREVIEW_MAX_EDGE: u32 = 480;` near the top of
+`overlay.rs`. On `Message::Finish`:
 1. Capture the crop rectangle in overlay-logical pixels as a
    `crate::coords::LogicalRect` (`crop_logical`), and read the overlay's logical
    size (`overlay_logical: rollshot_capture::Size`) — for Phase 3 single-output
@@ -826,7 +838,7 @@ On `Message::Finish`:
 ```rust
 let driver = crate::driver::Driver::start(
     &cfg.backend, cfg.fps, cfg.show_cursor,
-    crop_logical, overlay_logical, preview_tx,
+    crop_logical, overlay_logical, preview_tx, PREVIEW_MAX_EDGE,
 ).map_err(OverlayError::Capture)?;
 // store `driver` in overlay state for finalize on Esc
 ```

@@ -19,6 +19,7 @@ use crate::OverlayConfig;
 use crate::OverlayError;
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
+const PREVIEW_MAX_EDGE: u32 = 480;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
@@ -458,8 +459,14 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
     // then appears (and dismisses) on a clean desktop, so it is never composited
     // into a captured frame. Blocks until the user clicks Share and the first
     // frame arrives.
-    let driver = Driver::start_capture(&config.backend, config.fps, config.show_cursor, preview_tx)
-        .map_err(OverlayError::Capture)?;
+    let driver = Driver::start_capture(
+        &config.backend,
+        config.fps,
+        config.show_cursor,
+        preview_tx,
+        PREVIEW_MAX_EDGE,
+    )
+    .map_err(OverlayError::Capture)?;
     *DRIVER_SLOT.lock().unwrap() = Some(driver);
 
     let run_result = application(Overlay::default, namespace, update, view)
