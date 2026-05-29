@@ -1,4 +1,4 @@
-use iced::widget::{button, canvas, container, row, text};
+use iced::widget::{button, canvas, container, image, row, text};
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Task, event, keyboard, mouse};
 use iced_layershell::Settings;
 use iced_layershell::actions::ActionCallback;
@@ -7,13 +7,18 @@ use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::{LayerShellSettings, StartMode};
 use iced_layershell::to_layer_message;
 
+use std::sync::Mutex;
+
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
+
+static PREVIEW_RX: Mutex<Option<std::sync::mpsc::Receiver<image::Handle>>> = Mutex::new(None);
 
 #[derive(Default)]
 pub struct Overlay {
     drag_start: Option<Point>,
     crop: Option<Rectangle>,
     crop_confirmed: bool,
+    preview: Option<image::Handle>,
 }
 
 #[to_layer_message]
@@ -22,29 +27,44 @@ pub enum Message {
     IcedEvent(Event),
     Finish,
     Cancel,
+    NewPreview(image::Handle),
 }
 
 fn namespace() -> String {
     "rollshot-spike-overlay".to_string()
 }
 
+fn preview_stream() -> iced::Subscription<Message> {
+    iced::Subscription::run(|| {
+        let rx = PREVIEW_RX
+            .lock()
+            .unwrap()
+            .take()
+            .expect("preview channel already consumed");
+
+        iced::futures::stream::unfold(rx, |rx| async move {
+            let handle = rx.recv().ok()?;
+            Some((Message::NewPreview(handle), rx))
+        })
+    })
+}
+
 fn subscription(_: &Overlay) -> iced::Subscription<Message> {
-    event::listen().map(Message::IcedEvent)
+    iced::Subscription::batch([
+        event::listen().map(Message::IcedEvent),
+        preview_stream(),
+    ])
 }
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::IcedEvent(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))) => {
-            // Note: without cursor position from the event we store None;
-            // the CursorMoved event below will set drag_start on first move.
-            // This is a known limitation — the crop drag starts on first move after click.
             state.drag_start = Some(Point::ORIGIN);
             state.crop = None;
             Task::none()
         }
         Message::IcedEvent(Event::Mouse(mouse::Event::CursorMoved { position })) => {
             if let Some(start) = state.drag_start {
-                // Update drag_start on first move if it was set to ORIGIN
                 if start == Point::ORIGIN && state.crop.is_none() {
                     state.drag_start = Some(position);
                 }
@@ -71,14 +91,16 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         Message::Finish => {
             eprintln!("crop confirmed: {:?}", state.crop);
             state.crop_confirmed = true;
-            // Restrict input to just the toolbar area (top-right corner).
-            // Toolbar is padded 16px from edges, ~300px wide, ~50px tall.
             Task::done(Message::SetInputRegion(ActionCallback::new(|region| {
                 region.add(16, 16, 300, 50);
             })))
         }
         Message::Cancel => {
             std::process::exit(0);
+        }
+        Message::NewPreview(handle) => {
+            state.preview = Some(handle);
+            Task::none()
         }
         _ => Task::none(),
     }
@@ -130,6 +152,18 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill);
 
+    let content: Element<'_, Message> = if let Some(handle) = &state.preview {
+        iced::widget::stack![
+            image(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill),
+            canvas_widget,
+        ]
+        .into()
+    } else {
+        canvas_widget.into()
+    };
+
     let toolbar = if state.crop_confirmed {
         container(
             row![text(status).size(16)]
@@ -159,7 +193,7 @@ fn view(state: &Overlay) -> Element<'_, Message> {
     };
 
     iced::widget::stack![
-        canvas_widget,
+        content,
         container(toolbar)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -178,7 +212,13 @@ fn style(_state: &Overlay, theme: &iced::Theme) -> iced::theme::Style {
 }
 
 /// `start_mode` lets callers target a specific output by name (Task 8).
-pub fn run(start_mode: StartMode) -> Result<(), iced_layershell::Error> {
+/// `rx` receives preview image handles from an external producer thread.
+pub fn run(
+    start_mode: StartMode,
+    rx: std::sync::mpsc::Receiver<image::Handle>,
+) -> Result<(), iced_layershell::Error> {
+    *PREVIEW_RX.lock().unwrap() = Some(rx);
+
     application(Overlay::default, namespace, update, view)
         .style(style)
         .subscription(subscription)

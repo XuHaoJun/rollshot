@@ -8,10 +8,11 @@ use wry::{WebViewBuilder, WebViewBuilderExtUnix};
 
 fn main() -> wry::Result<()> {
     // 1. Spawn the layer-shell overlay on its OWN thread
+    let (_tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("overlay".into())
-        .spawn(|| {
-            let _ = overlay_app::run(iced_layershell::settings::StartMode::Active);
+        .spawn(move || {
+            let _ = overlay_app::run(iced_layershell::settings::StartMode::Active, rx);
         })
         .expect("spawn overlay thread");
 
