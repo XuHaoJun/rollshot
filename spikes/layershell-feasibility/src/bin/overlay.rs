@@ -1,7 +1,6 @@
 #[path = "../overlay_app.rs"]
 mod overlay_app;
 
-use std::sync::mpsc;
 use std::thread;
 
 fn main() -> Result<(), iced_layershell::Error> {
@@ -10,7 +9,7 @@ fn main() -> Result<(), iced_layershell::Error> {
         None => iced_layershell::settings::StartMode::Active,
     };
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = iced::futures::channel::mpsc::unbounded();
 
     thread::spawn(move || {
         let colors: [(u8, u8, u8); 3] = [(255, 0, 0), (0, 255, 0), (0, 0, 255)];
@@ -22,7 +21,7 @@ fn main() -> Result<(), iced_layershell::Error> {
                 pixels.extend_from_slice(&[r, g, b, 255]);
             }
             let handle = iced::widget::image::Handle::from_rgba(200, 200, pixels);
-            if tx.send(handle).is_err() {
+            if tx.unbounded_send(handle).is_err() {
                 break;
             }
             i += 1;

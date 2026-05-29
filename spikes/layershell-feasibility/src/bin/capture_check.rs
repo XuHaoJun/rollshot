@@ -10,7 +10,7 @@ const SENTINEL_A: u8 = 255;
 
 fn main() {
     // 1. Spawn the overlay on a background thread
-    let (_tx, rx) = std::sync::mpsc::channel();
+    let (_tx, rx) = iced::futures::channel::mpsc::unbounded();
     std::thread::Builder::new()
         .name("overlay".into())
         .spawn(move || {
@@ -65,10 +65,13 @@ fn main() {
         .count();
 
     println!("R3 sentinel_pixels: {sentinel_count}");
-    if sentinel_count > 0 {
-        println!("R3 self-capture: PASS (overlay toolbar visible in captured frame)");
+    if sentinel_count == 0 {
+        println!("R3 self-capture: PASS (overlay NOT in captured frame — no sentinel pixels)");
     } else {
-        println!("R3 self-capture: FAIL (no sentinel pixels found)");
+        println!(
+            "R3 self-capture: FAIL (overlay self-captured — {sentinel_count} sentinel pixels; \
+             Phase 3 must keep the crop region transparent + input-region-clear during capture)"
+        );
     }
 
     // 4. R4 — report frame metadata for fractional scaling analysis

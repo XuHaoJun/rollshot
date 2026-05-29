@@ -7,11 +7,14 @@ use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::{LayerShellSettings, StartMode};
 use iced_layershell::to_layer_message;
 
+use iced::futures::StreamExt;
 use std::sync::Mutex;
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 
-static PREVIEW_RX: Mutex<Option<std::sync::mpsc::Receiver<image::Handle>>> = Mutex::new(None);
+static PREVIEW_RX: Mutex<
+    Option<iced::futures::channel::mpsc::UnboundedReceiver<image::Handle>>,
+> = Mutex::new(None);
 
 #[derive(Default)]
 pub struct Overlay {
@@ -42,10 +45,9 @@ fn preview_stream() -> iced::Subscription<Message> {
             .take()
             .expect("preview channel already consumed");
 
-        iced::futures::stream::unfold(rx, |rx| async move {
-            let handle = rx.recv().ok()?;
-            Some((Message::NewPreview(handle), rx))
-        })
+        // Async receiver: the stream parks (yields) between frames instead of
+        // blocking the executor thread, so `event::listen()` keeps flowing.
+        rx.map(Message::NewPreview)
     })
 }
 
@@ -91,6 +93,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         Message::Finish => {
             eprintln!("crop confirmed: {:?}", state.crop);
             state.crop_confirmed = true;
+            // Top-left toolbar rect — matches view()'s align Start + 16px padding.
+            // Everything outside it stays click/scroll-through.
             Task::done(Message::SetInputRegion(ActionCallback::new(|region| {
                 region.add(16, 16, 300, 50);
             })))
@@ -197,7 +201,7 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         container(toolbar)
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_x(iced::Alignment::End)
+            .align_x(iced::Alignment::Start)
             .align_y(iced::Alignment::Start)
             .padding(16),
     ]
@@ -215,7 +219,7 @@ fn style(_state: &Overlay, theme: &iced::Theme) -> iced::theme::Style {
 /// `rx` receives preview image handles from an external producer thread.
 pub fn run(
     start_mode: StartMode,
-    rx: std::sync::mpsc::Receiver<image::Handle>,
+    rx: iced::futures::channel::mpsc::UnboundedReceiver<image::Handle>,
 ) -> Result<(), iced_layershell::Error> {
     *PREVIEW_RX.lock().unwrap() = Some(rx);
 
