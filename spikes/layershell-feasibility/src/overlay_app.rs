@@ -1,6 +1,7 @@
 use iced::widget::{button, canvas, container, row, text};
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Task, event, keyboard, mouse};
 use iced_layershell::Settings;
+use iced_layershell::actions::ActionCallback;
 use iced_layershell::build_pattern::application;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::{LayerShellSettings, StartMode};
@@ -12,6 +13,7 @@ const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 pub struct Overlay {
     drag_start: Option<Point>,
     crop: Option<Rectangle>,
+    crop_confirmed: bool,
 }
 
 #[to_layer_message]
@@ -68,7 +70,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         }
         Message::Finish => {
             eprintln!("crop confirmed: {:?}", state.crop);
-            Task::none()
+            state.crop_confirmed = true;
+            // Restrict input to just the toolbar area (top-right corner).
+            // Toolbar is padded 16px from edges, ~300px wide, ~50px tall.
+            Task::done(Message::SetInputRegion(ActionCallback::new(|region| {
+                region.add(16, 16, 300, 50);
+            })))
         }
         Message::Cancel => {
             std::process::exit(0);
@@ -110,29 +117,46 @@ impl canvas::Program<Message> for CropCanvas {
 }
 
 fn view(state: &Overlay) -> Element<'_, Message> {
-    let status = match state.crop {
-        Some(r) => format!("Crop: {}x{}", r.width as u32, r.height as u32),
-        None => "Drag to select crop area".to_string(),
+    let status = if state.crop_confirmed {
+        "Scroll passthrough active".to_string()
+    } else {
+        match state.crop {
+            Some(r) => format!("Crop: {}x{}", r.width as u32, r.height as u32),
+            None => "Drag to select crop area".to_string(),
+        }
     };
 
     let canvas_widget = canvas(CropCanvas { crop: state.crop })
         .width(Length::Fill)
         .height(Length::Fill);
 
-    let toolbar = container(
-        row![
-            button("Finish").on_press(Message::Finish),
-            button("Cancel").on_press(Message::Cancel),
-            text(status).size(16),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(8)
-    .style(|_theme| container::Style {
-        background: Some(iced::Background::Color(SENTINEL_MAGENTA)),
-        ..Default::default()
-    });
+    let toolbar = if state.crop_confirmed {
+        container(
+            row![text(status).size(16)]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+        )
+        .padding(8)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(SENTINEL_MAGENTA)),
+            ..Default::default()
+        })
+    } else {
+        container(
+            row![
+                button("Finish").on_press(Message::Finish),
+                button("Cancel").on_press(Message::Cancel),
+                text(status).size(16),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding(8)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(SENTINEL_MAGENTA)),
+            ..Default::default()
+        })
+    };
 
     iced::widget::stack![
         canvas_widget,
