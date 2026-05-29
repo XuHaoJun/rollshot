@@ -1,5 +1,5 @@
 use iced::widget::{button, canvas, container, image, row, text};
-use iced::{event, keyboard, mouse, Color, Element, Event, Length, Point, Rectangle, Size, Task};
+use iced::{event, keyboard, mouse, window, Color, Element, Event, Length, Point, Rectangle, Size, Task};
 use iced_layershell::actions::ActionCallback;
 use iced_layershell::build_pattern::application;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
@@ -30,6 +30,7 @@ pub struct Overlay {
     crop_confirmed: bool,
     preview: Option<image::Handle>,
     driver: Option<Driver>,
+    window_size: Option<iced::Size>,
 }
 
 #[to_layer_message]
@@ -63,6 +64,10 @@ fn subscription(_: &Overlay) -> iced::Subscription<Message> {
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
+        Message::IcedEvent(Event::Window(window::Event::Opened { size, .. })) => {
+            state.window_size = Some(size);
+            Task::none()
+        }
         Message::IcedEvent(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)))
             if !state.crop_confirmed =>
         {
@@ -134,14 +139,16 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 height: crop.height,
             };
 
-            // Overlay logical size: we use the crop's bottom-right corner as
-            // a lower-bound estimate. The real overlay covers the full screen,
-            // but we don't have the screen size available here. The driver's
-            // map_crop_to_frame will scale relative to source_size; since the
-            // overlay is fullscreen the two match 1:1 in the common case.
+            // Use the actual overlay surface size captured from the window
+            // Opened event. The overlay is fullscreen (layer-shell anchors all
+            // four edges), so this equals the screen size.
+            let ws = state.window_size.unwrap_or(iced::Size {
+                width: crop.x + crop.width,
+                height: crop.y + crop.height,
+            });
             let overlay_logical = rollshot_capture::Size {
-                width: (crop.x + crop.width) as u32,
-                height: (crop.y + crop.height) as u32,
+                width: ws.width as u32,
+                height: ws.height as u32,
             };
 
             let cfg: OverlayConfig = (*OVERLAY_CFG.lock().unwrap().as_ref().unwrap()).clone();
