@@ -6,13 +6,14 @@
 - Mesa / GPU: VMware SVGA II Adapter (Mesa 25.2.8, libgl1-mesa-dri)
 - Session: XDG_SESSION_TYPE=tty (not Wayland — runtime tests require a Plasma Wayland session)
 - iced_layershell dep form: crates.io 0.18 (iced 0.14 + iced_layershell 0.18, resolved from crates.io)
+- wry: 0.55.1, tao: 0.35.3 (for coexist bin — matches Tauri v2's webkit2gtk footprint)
 
 ## Risk results (filled per task)
 | Risk | Task | Result | Notes |
 |------|------|--------|-------|
 | R6 transparency/layer/Esc | 2 | compiles | Transparent fullscreen overlay compiles. `Color::TRANSPARENT` style, `Layer::Overlay`, all-anchors sizing, `KeyboardInteractivity::Exclusive`. Esc via `keyboard::Key::Named(keyboard::key::Named::Escape)` confirmed at compile time. Runtime observation requires KDE 6 hardware. |
-| R1 wgpu coexistence | 3 | | |
-| R2 focus/clipboard | 3 | | |
+| R1 wgpu coexistence | 3 | compiles | wry 0.55.1 + tao 0.35.3 webkit2gtk webview on main thread + iced_layershell overlay on spawned thread. `build_gtk` used for Wayland-compatible GTK embedding. GTK init handled by tao's EventLoop. Runtime observation requires KDE 6 hardware. |
+| R2 focus/clipboard | 3 | compiles | Overlay thread uses `KeyboardInteractivity::Exclusive`; main thread runs tao event loop with `ControlFlow::Wait`. Both threads share the same process; clipboard/focus contention is a runtime concern. Compilation verified; runtime requires KDE 6. |
 | R6 controls/text | 4 | | |
 | R6 input region / scroll passthrough | 5 | | |
 | R6 preview refresh | 6 | | |

@@ -14,3 +14,13 @@ iced_layershell = "0.18"
 [[bin]]
 name = "overlay"
 path = "src/bin/overlay.rs"
+
+[[bin]]
+name = "coexist"
+path = "src/bin/coexist.rs"
+
+[dependencies.wry]
+version = "0.55"
+
+[dependencies.tao]
+version = "0.35"
