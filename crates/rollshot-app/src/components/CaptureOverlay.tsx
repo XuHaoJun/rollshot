@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { save } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   confirmRegion,
@@ -7,7 +6,6 @@ import {
   getStitchPreview,
   launchOptions,
   overlayExclusion,
-  saveImage,
   setInputPassthrough,
   sessionStatus,
   startCapture,
@@ -17,6 +15,7 @@ import {
   type OverlayExclusion,
   type SessionStatus,
 } from '../api/capture'
+import { promptSaveStitchedPng } from '../api/save'
 import type { PreviewScale, SourceRegion } from '../region/geometry'
 import { sourceRegionToCssRect } from '../region/geometry'
 import { choosePreviewPlacement } from '../overlay/placement'
@@ -165,15 +164,7 @@ export function CaptureOverlay() {
 
   const saveCurrentImage = useCallback(async (closeAfter: boolean) => {
     try {
-      const selected = await save({
-        title: 'Save stitched PNG',
-        defaultPath: 'rollshot.png',
-        filters: [{ name: 'PNG image', extensions: ['png'] }],
-      })
-      if (selected) {
-        const done = await saveImage(selected)
-        setMessage(done.output_path ? `Saved ${done.output_path}` : 'Saved image')
-      }
+      await promptSaveStitchedPng(setMessage)
       if (closeAfter) {
         await closeOverlay()
       }
