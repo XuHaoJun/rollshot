@@ -200,9 +200,14 @@ surfaced two live-preview issues, now resolved, plus one open bug:
 - *Preview placement.* Chrome now **hugs the crop's near edge** (connected-popover)
   on the side `choose_chrome_band` picks, instead of filling the band. Verified.
 
-**Still open:** live stitching appears to stall on pause / slow scroll — under
-diagnosis (per-frame `StitchOutcome` + reader timeout/error logging added to the
-driver to tell anchor-stranding apart from idle-then-resume). R4 fractional scaling
+**Live-stitch stall (diagnosed):** a scroll jump too big to match leaves the
+stitcher anchor (`last_good`) unadvanced, so later frames sit far past it (~130px
+overlap) and loop on `NoMatch{ReverseDirection}` until Esc. It is a matcher-
+throughput effect: a debug build lets fast scrolling outrun the unoptimized
+matcher (latest-wins skips far → big jumps), while **release keeps up and is
+smooth**. Mitigated at the overlay level by defaulting capture to 30fps + a
+debug-build hint; the durable fix — re-anchoring after a `NoMatch` streak — is a
+`rollshot-core` robustness follow-up (out of scope here). R4 fractional scaling
 (100%/150%) and R5/R7 multi-output remain unrun.
 
 Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):

@@ -271,8 +271,11 @@ P3.4's "fixed-width viewport" sketch:
   the band; `preview_viewport_size` is anchor-aware so the cap reflects the room
   actually beside/below the crop (no off-screen overflow).
 
-Open: live stitching appears to stall on pause / slow scroll (driver
-instrumentation added to diagnose; not a sizing/placement issue).
+Note: a too-big scroll jump can strand the stitcher anchor (`last_good`) and
+freeze live stitching until Esc. This is matcher throughput (smooth in release;
+a debug build's unoptimized matcher is outrun by fast scrolling) — not a
+sizing/placement issue. The harness defaults to 30fps to mitigate; the durable
+re-anchor-after-`NoMatch` fix is a `rollshot-core` follow-up.
 
 ## Data Flow (Phase 3)
 
