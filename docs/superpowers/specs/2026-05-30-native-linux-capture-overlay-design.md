@@ -89,14 +89,37 @@ support-matrix rule.
 This resolves the D3 open question. `rollshot-overlay::driver` reimplements the
 latest-wins reader + stitch-loop pattern (mirroring
 `crates/rollshot-app/src-tauri/src/session.rs:374-561`), scoped to exactly what
-the overlay needs:
+the overlay needs. The driver has a **two-phase** lifecycle (split per the
+capture-ordering decision below):
 
-- a reader thread: `backend.start(CaptureOptions { region: FullSource, .. })`
-  then `next_frame()` into a latest-wins slot (seq counter), per
-  `session.rs:410-428`;
-- a stitch thread: on new seq, `crop_frame(&frame, region)` →
-  `Stitcher::push_frame`, per `session.rs:535-561` and `:199-212`;
+- `start_capture()`: create the backend, `backend.start(CaptureOptions {
+  region: FullSource, .. })`, and spawn the reader thread — `next_frame()` into
+  a latest-wins slot (seq counter), per `session.rs:410-428`. Blocks until the
+  portal handshake completes (user clicks Share) and the first frame arrives, so
+  `source_size` is known. **No stitching yet.**
+- `begin_stitch(crop_logical, overlay_logical)`: map the crop to frame pixels
+  (P3.5) using the learned `source_size`, then spawn the stitch thread — on new
+  seq, `crop_frame(&frame, region)` → `Stitcher::push_frame`, per
+  `session.rs:535-561` and `:199-212`. The stitch thread seeds `last_seq` to the
+  current seq, so the canvas-base frame is a live frame captured *after* this
+  call.
 - `finalize()`: stop both threads, `Stitcher::full_image()` → `CaptureResult`.
+- `cancel()`: stop both threads without producing a result — for cancel /
+  Esc-before-confirm / early loop exit. Needed because the driver is now live
+  during crop-selection (it was not in the original flow).
+
+**Capture ordering (DECIDED — post-acceptance iteration):** `start_capture()`
+runs **before** the overlay surface exists (in `run_overlay`), not on
+crop-confirm. Rationale: on KDE 6 the portal screen-share **picker dialog**
+bleeds into the first PipeWire frame(s) delivered just after Share; because
+`Stitcher::accept_first_frame` bakes frame 0 as the canvas base and scrolling
+only appends, frame 0's content is permanently baked into the top of the output.
+Starting capture first makes the picker appear and dismiss on a clean desktop,
+and `begin_stitch`'s post-call canvas-base frame is taken once the picker is
+gone — so the picker never reaches the stitcher. (The original
+"`driver.start` on crop-confirm" flow put the picker in the top-left of the
+capture; found during Task 9 KDE 6 acceptance.) User-visible on-screen sequence
+becomes: picker → crop-select → scroll → Esc.
 
 **We do NOT extract a shared driver** or touch `cmd_capture.rs` /
 `session.rs`. The triplicate driver logic is a known, recorded cost; a future
@@ -224,21 +247,55 @@ This is the one sanctioned change to `rollshot-capture`. It is NOT reverted
 (unlike the spike's Task 7). `rollshot-capture` tests must still pass; the
 public API (`CaptureBackend::start`, `FrameStream::next_frame`) is unchanged.
 
+### P3.8 — Preview sizing & placement (DECIDED — post-acceptance iteration)
+
+KDE 6 / NVIDIA runtime acceptance refined two preview details left open by
+P3.4's "fixed-width viewport" sketch:
+
+- **Texture envelope (why the preview must stay small).** The iced_layershell/wgpu
+  image path renders ≤~480px previews reliably (the Phase 2 spike's 200×200
+  swatch; the original ≤480 downscale), but a ~960×1380 texture re-uploaded every
+  frame flickered / never composited on this path. The preview is therefore bounded
+  to a stable envelope: **fixed width 280** (matching wayscrollshot's
+  `PREVIEW_MAX_WIDTH`) and a **480px height cap** (`PREVIEW_WIDTH` /
+  `PREVIEW_MAX_HEIGHT` in `overlay.rs`). This supersedes the implication that the
+  viewport could be as tall as the chrome band.
+- **Grow-then-follow.** `driver::preview_viewport_handle(image, width, max_height)`
+  scales the stitch to the fixed width and takes the bottom
+  `min(scaled_height, max_height)` rows with no padding: the preview grows with the
+  scroll while short, then stays bounded and tracks the latest (bottom) content once
+  it would exceed the cap. `view()` renders the handle at its natural size so the
+  growth is visible. (Replaces the earlier fixed-size, transparent-padded viewport.)
+- **Hug the crop.** `place_outside_crop` anchors the chrome to the crop's near edge
+  (connected-popover) on the side `choose_chrome_band` selects, rather than filling
+  the band; `preview_viewport_size` is anchor-aware so the cap reflects the room
+  actually beside/below the crop (no off-screen overflow).
+
+Note: a too-big scroll jump can strand the stitcher anchor (`last_good`) and
+freeze live stitching until Esc. This is matcher throughput (smooth in release;
+a debug build's unoptimized matcher is outrun by fast scrolling) — not a
+sizing/placement issue. The harness defaults to 30fps to mitigate; the durable
+re-anchor-after-`NoMatch` fix is a `rollshot-core` follow-up.
+
 ## Data Flow (Phase 3)
 
 ```text
 harness binary (stands in for Tauri in Phase 3)
   run_overlay(config)            [blocks this thread]
-    iced_layershell overlay (transparent, anchored to output)
-      crop-select phase: user drags box; border drawn; scroll NOT yet captured
-      confirm region -> coords::map_crop_to_frame(logical -> frame px)
-                     -> driver.start(region_px)
+    driver.start_capture()  -> portal handshake (picker -> Share), reader thread,
+                               first frame -> source_size
+        (BEFORE the overlay, so the picker dialog is never in a captured frame)
         driver reader thread: backend.start(FullSource) -> next_frame -> latest slot
+    iced_layershell overlay (transparent, anchored to output)
+      crop-select phase: user drags box; border drawn; scroll NOT yet stitched
+      confirm region -> coords::map_crop_to_frame(logical -> frame px)
+                     -> driver.begin_stitch(region_px)
         driver stitch thread: crop_frame(region_px) -> Stitcher::push_frame
-        driver -> full_image() -> downscale -> mpsc -> overlay redraw (live preview,
-                                                       drawn OUTSIDE crop region)
+        driver -> full_image() -> fixed-width available-height bottom viewport -> mpsc
+               -> overlay redraw (live preview, drawn OUTSIDE crop region)
       Esc -> driver.finalize() -> Stitcher::full_image() -> CaptureResult
            -> stash result + request clean iced exit
+      Cancel / Esc-before-confirm -> driver.cancel() -> Ok(None)
   run_overlay returns Ok(Some(CaptureResult))
   harness: save CaptureResult.image as PNG + print stats
 ```
@@ -275,7 +332,9 @@ Manual KDE 6 Wayland acceptance (the harness binary) — roadmap Phase 3 checks:
 1. Overlay appears above fullscreen apps.
 2. User selects a crop region.
 3. User scrolls target content while stitching is active.
-4. Live stitching preview updates during scrolling.
+4. Live stitching preview updates during scrolling and keeps a fixed-width
+   viewport, sized to the available chrome band, instead of shrinking
+   horizontally as the stitched image gets taller.
 5. Esc finishes stitching and `run_overlay` returns a `CaptureResult` (harness
    saves the PNG) — the handoff fires.
 

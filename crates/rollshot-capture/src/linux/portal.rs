@@ -255,8 +255,7 @@ impl PortalClient {
                 screencast.select_sources(
                     &session,
                     cursor_mode,
-                    ashpd::desktop::screencast::SourceType::Monitor
-                        | ashpd::desktop::screencast::SourceType::Window,
+                    ashpd::desktop::screencast::SourceType::Monitor.into(),
                     false,
                     None,
                     ashpd::desktop::PersistMode::DoNot,
@@ -285,6 +284,16 @@ impl PortalClient {
                 })
                 .collect();
             let chosen = choose_stream(&stream_infos)?;
+            if streams.streams().iter().any(|s| {
+                matches!(
+                    s.source_type(),
+                    Some(ashpd::desktop::screencast::SourceType::Window)
+                )
+            }) {
+                return Err(CaptureError::Backend(anyhow::anyhow!(
+                    "window capture is not supported; select a monitor"
+                )));
+            }
             let node_id = chosen.node_id;
 
             trace_capture_stage("opening pipewire remote");

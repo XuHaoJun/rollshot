@@ -154,7 +154,9 @@ Purpose:
 Scope:
 
 - Native layer-shell crop picker.
-- Native layer-shell live stitching preview.
+- Native layer-shell live stitching preview using a fixed-width viewport sized
+  to the available chrome band, showing the bottom of the stitched preview as
+  it grows.
 - Finish/cancel controls.
 - Esc finishes stitching.
 - Existing `rollshot-capture` and `rollshot-core` remain the capture/stitching
@@ -173,8 +175,40 @@ Acceptance checks:
 - On KDE 6 Wayland, the overlay appears above fullscreen apps.
 - The user can select a crop region.
 - The user can scroll the target content while stitching is active.
-- The live stitching preview updates during scrolling.
+- The live stitching preview updates during scrolling and does not lose
+  horizontal detail as the stitched image gets taller.
 - Pressing Esc finishes stitching and triggers the save handoff.
+
+Status (2026-05-29): **DONE — implementation complete; KDE 6 runtime acceptance pending.**
+
+The `rollshot-overlay` crate is built, tested, and integrated. All unit tests pass
+(10 tests: 5 coords + 1 driver core + 4 preview viewport regressions).
+Workspace-wide verification clean (332 tests, clippy, fmt). The harness binary
+(`capture_overlay`) compiles. Runtime acceptance on KDE 6 Wayland is deferred to
+the next available KDE 6 session.
+
+**Runtime update (2026-05-30, KDE 6 Wayland / NVIDIA):** acceptance on the harness
+surfaced two live-preview issues, now resolved, plus one open bug:
+
+- *Preview did not render (texture envelope).* The fixed-width viewport shipped at
+  960px wide × band-tall; the iced_layershell/wgpu path cannot upload that texture
+  stably each frame, so the preview flickered / stayed blank. Fixed by bounding the
+  preview to a stable envelope (fixed width 280 + 480px height cap) and reworking it
+  to **grow-then-follow** — grows with the scroll up to the cap, then follows the
+  bottom of the stitch (see spec P3.8). Verified: preview shows, grows, keeps a
+  fixed horizontal width.
+- *Preview placement.* Chrome now **hugs the crop's near edge** (connected-popover)
+  on the side `choose_chrome_band` picks, instead of filling the band. Verified.
+
+**Live-stitch stall (diagnosed):** a scroll jump too big to match leaves the
+stitcher anchor (`last_good`) unadvanced, so later frames sit far past it (~130px
+overlap) and loop on `NoMatch{ReverseDirection}` until Esc. It is a matcher-
+throughput effect: a debug build lets fast scrolling outrun the unoptimized
+matcher (latest-wins skips far → big jumps), while **release keeps up and is
+smooth**. Mitigated at the overlay level by defaulting capture to 30fps + a
+debug-build hint; the durable fix — re-anchoring after a `NoMatch` streak — is a
+`rollshot-core` robustness follow-up (out of scope here). R4 fractional scaling
+(100%/150%) and R5/R7 multi-output remain unrun.
 
 Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
 
@@ -190,6 +224,19 @@ Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
 - **Runtime tests not yet run in the spike** (exercise during Phase 3): R4
   fractional scaling at 100% and 150% (the D4 coordinate-mapping risk), R5
   output match (overlay output == captured monitor), R7 multi-monitor.
+
+Carried into Phase 4:
+
+- **Tauri wiring:** `src-tauri` Linux branch spawns `run_overlay` on a thread
+  and feeds `CaptureResult.image` into `AppSession`'s final-image + save flow.
+- **Tauri save dialog handoff (D5).**
+- **R2:** hide / de-focus the Tauri host window during the overlay phase.
+- **R5/R7 multi-output follow-up** from Phase 3 acceptance (if not resolved).
+- **Driver-start thread cleanup:** the overlay starts the capture driver on a
+  background thread so portal negotiation + the first-frame wait never block the
+  iced event loop. If the user cancels (Esc) during that start window, the
+  in-flight start thread is orphaned — harmless for the short-lived harness, but
+  the long-lived Tauri host must join or abort it.
 
 ### Phase 4: Tauri Save Handoff
 
@@ -240,7 +287,9 @@ The roadmap is complete when this flow works on KDE 6 Wayland:
 2. Native layer-shell overlay appears above fullscreen apps.
 3. User drags a crop region.
 4. User scrolls target content.
-5. Live stitching preview remains visible and updates.
+5. Live stitching preview remains visible, updates, and keeps a fixed-width
+   viewport sized to the available chrome band while showing the bottom of the
+   stitched preview.
 6. User presses Esc.
 7. Tauri save dialog opens.
 8. Saved PNG output matches current behavior.

@@ -533,6 +533,26 @@ overlay needs. It is not unit-tested (it owns threads + a real backend + an
 iced preview channel); correctness of the crop+stitch math is covered by Task 4,
 and runtime behavior by Task 9. It mirrors `session.rs:374-561`.
 
+> **Post-acceptance reorder (capture before overlay):** Task 9 KDE 6 acceptance
+> found the portal screen-share picker dialog baked into frame 0 (top-left of
+> the capture). The landed code therefore **splits** the single `Driver::start`
+> shown below into `start_capture()` (backend + reader thread + first-frame
+> `source_size`, run **before** the overlay in `run_overlay`) and
+> `begin_stitch(crop_logical, overlay_logical)` (crop mapping + stitch thread, on
+> crop-confirm), and adds `cancel()` (the driver is now live during selection).
+> The `Driver::start(...)` signature in Step 1 below is the as-designed
+> snapshot; the reader + stitch-loop + finalize internals are unchanged. See
+> spec P3.2 + Data Flow and the landed `driver.rs`.
+
+> **Post-acceptance preview iteration (2026-05-30):** the `preview_viewport_handle`
+> sketched below took a single `preview_size: Size` and padded to a fixed viewport.
+> KDE 6 runtime acceptance found large preview textures (~960×1380) flicker on the
+> iced_layershell/wgpu path, so the landed code bounds the preview (fixed width 280
+> + 480px height cap) and reworks it to **grow-then-follow** via
+> `preview_viewport_handle(image, width, max_height)` (no padding); `view()` renders
+> the handle at natural size and `place_outside_crop` hugs the crop's near edge.
+> Authoritative current behavior: spec P3.8.
+
 **Files:**
 - Modify: `crates/rollshot-overlay/src/driver.rs`
 
@@ -560,8 +580,8 @@ struct Shared {
 }
 
 /// Live capture+stitch driver: a reader thread fills a latest-wins slot, a
-/// stitch thread crops to `region` and pushes to the stitcher, emitting a
-/// downscaled preview handle after each frame.
+/// stitch thread crops to `region` and pushes to the stitcher, emitting a fixed
+/// preview viewport after each frame.
 pub struct Driver {
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
@@ -572,7 +592,8 @@ pub struct Driver {
 impl Driver {
     /// Start capture, wait for the first frame to learn `source_size`, map the
     /// logical crop to frame pixels, then start stitching. `preview_tx` receives
-    /// a downscaled stitch preview after each accepted frame.
+    /// a fixed-width, available-height stitch preview viewport after each
+    /// accepted frame.
     pub fn start(
         backend: &str,
         fps: u32,
@@ -580,7 +601,7 @@ impl Driver {
         crop_logical: LogicalRect,
         overlay_logical: Size,
         preview_tx: UnboundedSender<ImageHandle>,
-        preview_max_edge: u32,
+        preview_size: Size,
     ) -> Result<Self, String> {
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
@@ -659,7 +680,7 @@ impl Driver {
                         if let Ok(mut stitcher) = shared.stitcher.lock() {
                             stitcher.push_frame(cropped.image);
                             if let Some(preview) = stitcher.full_image() {
-                                let handle = downscale_handle(preview, preview_max_edge);
+                                let handle = preview_viewport_handle(preview, preview_size);
                                 let _ = preview_tx.unbounded_send(handle);
                             }
                         }
@@ -737,21 +758,11 @@ fn wait_for_source_size(
     }
 }
 
-/// Downscale an RGBA image to `max_edge` on its long side and wrap it as an
-/// iced image handle (the preview path proven by the Phase 2 spike, R6).
-fn downscale_handle(image: &image::RgbaImage, max_edge: u32) -> ImageHandle {
-    let max_edge = max_edge.max(1);
-    let (w, h) = (image.width(), image.height());
-    let largest = w.max(h).max(1);
-    let scale = (max_edge as f32 / largest as f32).min(1.0);
-    let pw = ((w as f32 * scale).round() as u32).max(1);
-    let ph = ((h as f32 * scale).round() as u32).max(1);
-    let resized = if pw == w && ph == h {
-        image.clone()
-    } else {
-        image::imageops::resize(image, pw, ph, image::imageops::FilterType::Nearest)
-    };
-    ImageHandle::from_rgba(resized.width(), resized.height(), resized.into_raw())
+/// Build a wayscrollshot-style preview: scale the stitched image to a fixed
+/// viewport width, then show the bottom of the resulting tall preview inside
+/// the available viewport height.
+fn preview_viewport_handle(image: &image::RgbaImage, viewport: Size) -> ImageHandle {
+    // See implementation in crates/rollshot-overlay/src/driver.rs.
 }
 ```
 
@@ -780,7 +791,8 @@ rtk git commit -m "feat(overlay): threaded live driver with preview channel"
 
 Port `spikes/layershell-feasibility/src/overlay_app.rs` into
 `crates/rollshot-overlay/src/overlay.rs`, then adapt it: real driver instead of
-the RGB-cycling stub, crop-confirm → coords → `Driver::start`, Esc → finalize,
+the RGB-cycling stub, crop-confirm → coords → `begin_stitch` (capture started
+earlier in `run_overlay`, see Task 5 reorder note), Esc → finalize/cancel,
 and the R3 chrome rules. The layer settings below are copied verbatim from the
 spike (R6 PASS on KDE 6).
 
@@ -807,8 +819,15 @@ Keep `subscription`, `preview_stream`, the `CropCanvas`, and the transparent
 
 - [ ] **Step 3: Wire crop-confirm → coords → driver start**
 
-Add a module constant `const PREVIEW_MAX_EDGE: u32 = 480;` near the top of
-`overlay.rs`. On `Message::Finish`:
+> **Reorder note:** capture is already live (started in `run_overlay` before the
+> overlay), so `Message::Finish` does NOT call `Driver::start`. It calls
+> `driver.begin_stitch(crop_logical, overlay_logical)` on the existing driver
+> (in `DRIVER_SLOT`), which maps the crop using the `source_size` learned at
+> `start_capture`. The `Driver::start(...)` call shown in this step is
+> superseded; see spec P3.2.
+
+Add `PREVIEW_WIDTH` / `PREVIEW_HEIGHT` constants near the top of `overlay.rs`.
+On `Message::Finish`:
 1. Capture the crop rectangle in overlay-logical pixels as a
    `crate::coords::LogicalRect` (`crop_logical`), and read the overlay's logical
    size (`overlay_logical: rollshot_capture::Size`) — for Phase 3 single-output
@@ -819,7 +838,8 @@ Add a module constant `const PREVIEW_MAX_EDGE: u32 = 480;` near the top of
 ```rust
 let driver = crate::driver::Driver::start(
     &cfg.backend, cfg.fps, cfg.show_cursor,
-    crop_logical, overlay_logical, preview_tx, PREVIEW_MAX_EDGE,
+    crop_logical, overlay_logical, preview_tx,
+    rollshot_capture::Size { width: PREVIEW_WIDTH, height: PREVIEW_HEIGHT },
 ).map_err(OverlayError::Capture)?;
 // store `driver` in overlay state for finalize on Esc
 ```
@@ -839,6 +859,11 @@ Replace the spike's `std::process::exit(0)` (BANNED — P3.3): on Esc, call
 `run()` function reads, then request the clean event-loop exit (Task 7 wires the
 exact exit action). On `Message::Cancel` (or Esc before any region is
 confirmed), store `Ok(None)` and request exit.
+
+> **Reorder note:** because the driver is now live during selection, Cancel /
+> Esc-before-confirm also calls `driver.cancel()` to tear down the reader thread
+> + PipeWire stream before exiting; Esc with a confirmed crop calls
+> `driver.finalize()` as described. See spec P3.2.
 
 - [ ] **Step 5: R3 — draw nothing inside the crop region during capture (P3.4)**
 
@@ -987,6 +1012,13 @@ rtk git commit -m "feat(overlay): harness binary for KDE 6 acceptance"
 The layer-shell surface cannot be unit-tested; this task is the runtime gate,
 run on a KDE 6 Wayland session. Record every result in
 `crates/rollshot-overlay/NOTES.md`.
+
+> **Acceptance finding (resolved by the reorder):** the first acceptance run
+> captured the portal screen-share **picker dialog** into the top-left of the
+> saved PNG — it bled into frame 0, which the stitcher bakes as the canvas base.
+> Fix: the capture-before-overlay reorder (spec P3.2; `start_capture` runs before
+> the overlay, `begin_stitch` on confirm). Re-run after the reorder to confirm
+> the picker no longer appears in the output, then record results below.
 
 **Files:**
 - Create: `crates/rollshot-overlay/NOTES.md`
