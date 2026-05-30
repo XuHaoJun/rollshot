@@ -187,6 +187,24 @@ Workspace-wide verification clean (332 tests, clippy, fmt). The harness binary
 (`capture_overlay`) compiles. Runtime acceptance on KDE 6 Wayland is deferred to
 the next available KDE 6 session.
 
+**Runtime update (2026-05-30, KDE 6 Wayland / NVIDIA):** acceptance on the harness
+surfaced two live-preview issues, now resolved, plus one open bug:
+
+- *Preview did not render (texture envelope).* The fixed-width viewport shipped at
+  960px wide × band-tall; the iced_layershell/wgpu path cannot upload that texture
+  stably each frame, so the preview flickered / stayed blank. Fixed by bounding the
+  preview to a stable envelope (fixed width 280 + 480px height cap) and reworking it
+  to **grow-then-follow** — grows with the scroll up to the cap, then follows the
+  bottom of the stitch (see spec P3.8). Verified: preview shows, grows, keeps a
+  fixed horizontal width.
+- *Preview placement.* Chrome now **hugs the crop's near edge** (connected-popover)
+  on the side `choose_chrome_band` picks, instead of filling the band. Verified.
+
+**Still open:** live stitching appears to stall on pause / slow scroll — under
+diagnosis (per-frame `StitchOutcome` + reader timeout/error logging added to the
+driver to tell anchor-stranding apart from idle-then-resume). R4 fractional scaling
+(100%/150%) and R5/R7 multi-output remain unrun.
+
 Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
 
 - **R2 focus (design decision):** during the overlay phase, hide or de-focus the

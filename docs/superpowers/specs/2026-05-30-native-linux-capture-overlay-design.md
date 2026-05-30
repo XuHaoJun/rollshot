@@ -247,6 +247,33 @@ This is the one sanctioned change to `rollshot-capture`. It is NOT reverted
 (unlike the spike's Task 7). `rollshot-capture` tests must still pass; the
 public API (`CaptureBackend::start`, `FrameStream::next_frame`) is unchanged.
 
+### P3.8 — Preview sizing & placement (DECIDED — post-acceptance iteration)
+
+KDE 6 / NVIDIA runtime acceptance refined two preview details left open by
+P3.4's "fixed-width viewport" sketch:
+
+- **Texture envelope (why the preview must stay small).** The iced_layershell/wgpu
+  image path renders ≤~480px previews reliably (the Phase 2 spike's 200×200
+  swatch; the original ≤480 downscale), but a ~960×1380 texture re-uploaded every
+  frame flickered / never composited on this path. The preview is therefore bounded
+  to a stable envelope: **fixed width 280** (matching wayscrollshot's
+  `PREVIEW_MAX_WIDTH`) and a **480px height cap** (`PREVIEW_WIDTH` /
+  `PREVIEW_MAX_HEIGHT` in `overlay.rs`). This supersedes the implication that the
+  viewport could be as tall as the chrome band.
+- **Grow-then-follow.** `driver::preview_viewport_handle(image, width, max_height)`
+  scales the stitch to the fixed width and takes the bottom
+  `min(scaled_height, max_height)` rows with no padding: the preview grows with the
+  scroll while short, then stays bounded and tracks the latest (bottom) content once
+  it would exceed the cap. `view()` renders the handle at its natural size so the
+  growth is visible. (Replaces the earlier fixed-size, transparent-padded viewport.)
+- **Hug the crop.** `place_outside_crop` anchors the chrome to the crop's near edge
+  (connected-popover) on the side `choose_chrome_band` selects, rather than filling
+  the band; `preview_viewport_size` is anchor-aware so the cap reflects the room
+  actually beside/below the crop (no off-screen overflow).
+
+Open: live stitching appears to stall on pause / slow scroll (driver
+instrumentation added to diagnose; not a sizing/placement issue).
+
 ## Data Flow (Phase 3)
 
 ```text

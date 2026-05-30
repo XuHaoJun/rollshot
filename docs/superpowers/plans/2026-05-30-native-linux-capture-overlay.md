@@ -544,6 +544,15 @@ and runtime behavior by Task 9. It mirrors `session.rs:374-561`.
 > snapshot; the reader + stitch-loop + finalize internals are unchanged. See
 > spec P3.2 + Data Flow and the landed `driver.rs`.
 
+> **Post-acceptance preview iteration (2026-05-30):** the `preview_viewport_handle`
+> sketched below took a single `preview_size: Size` and padded to a fixed viewport.
+> KDE 6 runtime acceptance found large preview textures (~960×1380) flicker on the
+> iced_layershell/wgpu path, so the landed code bounds the preview (fixed width 280
+> + 480px height cap) and reworks it to **grow-then-follow** via
+> `preview_viewport_handle(image, width, max_height)` (no padding); `view()` renders
+> the handle at natural size and `place_outside_crop` hugs the crop's near edge.
+> Authoritative current behavior: spec P3.8.
+
 **Files:**
 - Modify: `crates/rollshot-overlay/src/driver.rs`
 
