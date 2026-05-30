@@ -145,19 +145,9 @@ impl Driver {
                                 shared.seq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Err(CaptureError::EndOfStream) => {
-                            eprintln!("[overlay] reader: end of stream");
-                            break;
-                        }
-                        Err(CaptureError::Timeout { .. }) => {
-                            // Instrumentation (temporary): a static screen makes
-                            // PipeWire idle; this is recoverable, the loop keeps
-                            // waiting for the next change.
-                            eprintln!("[overlay] reader: frame timeout (idle, still waiting)");
-                            continue;
-                        }
+                        Err(CaptureError::EndOfStream) => break,
+                        Err(CaptureError::Timeout { .. }) => continue,
                         Err(err) => {
-                            eprintln!("[overlay] reader: stopped on error: {err}");
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -219,24 +209,14 @@ impl Driver {
                         }
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
-                        let outcome = stitcher.push_frame(cropped.image);
+                        stitcher.push_frame(cropped.image);
                         if let Some(preview) = stitcher.full_image() {
-                            // Instrumentation (temporary): trace why live
-                            // stitching appears to stall on pause / slow scroll —
-                            // Duplicate/NoMatch (no growth) vs Appended.
-                            eprintln!(
-                                "[overlay] stitch: {outcome:?} stitched={}x{}",
-                                preview.width(),
-                                preview.height()
-                            );
                             let handle = preview_viewport_handle(
                                 preview,
                                 preview_size.width,
                                 preview_size.height,
                             );
                             let _ = preview_tx.unbounded_send(handle);
-                        } else {
-                            eprintln!("[overlay] stitch: {outcome:?} (no canvas yet)");
                         }
                     }
                 }
