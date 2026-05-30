@@ -154,7 +154,9 @@ Purpose:
 Scope:
 
 - Native layer-shell crop picker.
-- Native layer-shell live stitching preview.
+- Native layer-shell live stitching preview using a fixed-width viewport sized
+  to the available chrome band, showing the bottom of the stitched preview as
+  it grows.
 - Finish/cancel controls.
 - Esc finishes stitching.
 - Existing `rollshot-capture` and `rollshot-core` remain the capture/stitching
@@ -173,15 +175,17 @@ Acceptance checks:
 - On KDE 6 Wayland, the overlay appears above fullscreen apps.
 - The user can select a crop region.
 - The user can scroll the target content while stitching is active.
-- The live stitching preview updates during scrolling.
+- The live stitching preview updates during scrolling and does not lose
+  horizontal detail as the stitched image gets taller.
 - Pressing Esc finishes stitching and triggers the save handoff.
 
 Status (2026-05-29): **DONE — implementation complete; KDE 6 runtime acceptance pending.**
 
 The `rollshot-overlay` crate is built, tested, and integrated. All unit tests pass
-(6 tests: 5 coords + 1 driver core). Workspace-wide verification clean (332 tests,
-clippy, fmt). The harness binary (`capture_overlay`) compiles. Runtime acceptance on
-KDE 6 Wayland is deferred to the next available KDE 6 session.
+(10 tests: 5 coords + 1 driver core + 4 preview viewport regressions).
+Workspace-wide verification clean (332 tests, clippy, fmt). The harness binary
+(`capture_overlay`) compiles. Runtime acceptance on KDE 6 Wayland is deferred to
+the next available KDE 6 session.
 
 Carried over from the Phase 2 spike (must address in the Phase 3 spec/plan):
 
@@ -260,7 +264,9 @@ The roadmap is complete when this flow works on KDE 6 Wayland:
 2. Native layer-shell overlay appears above fullscreen apps.
 3. User drags a crop region.
 4. User scrolls target content.
-5. Live stitching preview remains visible and updates.
+5. Live stitching preview remains visible, updates, and keeps a fixed-width
+   viewport sized to the available chrome band while showing the bottom of the
+   stitched preview.
 6. User presses Esc.
 7. Tauri save dialog opens.
 8. Saved PNG output matches current behavior.

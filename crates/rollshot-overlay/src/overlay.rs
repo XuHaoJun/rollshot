@@ -19,7 +19,10 @@ use crate::OverlayConfig;
 use crate::OverlayError;
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
-const PREVIEW_MAX_EDGE: u32 = 480;
+const PREVIEW_WIDTH: u32 = 960;
+const TOOLBAR_W: f32 = 300.0;
+const TOOLBAR_H: f32 = 50.0;
+const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
@@ -169,8 +172,9 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             // Capture is already running (started in `run()` before the overlay
             // appeared, so the picker dialog is long gone). Just map the crop to
             // frame pixels and start stitching live frames from here on.
+            let preview_size = preview_viewport_size(crop, ws);
             if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                driver.begin_stitch(crop_logical, overlay_logical);
+                driver.begin_stitch(crop_logical, overlay_logical, preview_size);
             }
 
             // Keep only the toolbar interactive (plan T6 S3); the crop interior
@@ -322,8 +326,6 @@ fn place_outside_crop<'a>(
 /// the crop interior + everything else passes through so the user can scroll the
 /// target. Clamped to the band, so it never enters the crop (spec P3.4).
 fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, i32, i32)> {
-    const TOOLBAR_W: f32 = 300.0;
-    const TOOLBAR_H: f32 = 50.0;
     let band = choose_chrome_band(crop, window)?;
     let (x, y, w, h) = match band {
         Band::Top => (
@@ -360,6 +362,27 @@ fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, 
     Some((x as i32, y as i32, w as i32, h as i32))
 }
 
+fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_capture::Size {
+    let band = choose_chrome_band(crop, window);
+    let (available_width, available_height) = match band {
+        Some(Band::Top) => (window.width, crop.y.max(0.0)),
+        Some(Band::Bottom) => (
+            window.width,
+            (window.height - (crop.y + crop.height)).max(0.0),
+        ),
+        Some(Band::Left) => (crop.x.max(0.0), window.height),
+        Some(Band::Right) => (
+            (window.width - (crop.x + crop.width)).max(0.0),
+            window.height,
+        ),
+        None => (PREVIEW_WIDTH as f32, 1.0),
+    };
+    let width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0) as u32;
+    let height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
+
+    rollshot_capture::Size { width, height }
+}
+
 fn magenta_toolbar<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
     container(content)
         .padding(8)
@@ -386,19 +409,6 @@ fn view(state: &Overlay) -> Element<'_, Message> {
                 .size(16)
                 .into(),
         );
-        let chrome: Element<'_, Message> = if let Some(handle) = &state.preview {
-            column![
-                toolbar,
-                image(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-            ]
-            .spacing(8)
-            .into()
-        } else {
-            toolbar
-        };
-
         let crop = state.crop.unwrap_or(Rectangle {
             x: 0.0,
             y: 0.0,
@@ -406,6 +416,20 @@ fn view(state: &Overlay) -> Element<'_, Message> {
             height: 0.0,
         });
         let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
+        let preview_size = preview_viewport_size(crop, window);
+
+        let chrome: Element<'_, Message> = if let Some(handle) = &state.preview {
+            column![
+                toolbar,
+                image(handle.clone())
+                    .width(Length::Fixed(preview_size.width as f32))
+                    .height(Length::Fixed(preview_size.height as f32)),
+            ]
+            .spacing(CHROME_SPACING)
+            .into()
+        } else {
+            toolbar
+        };
 
         return match place_outside_crop(crop, window, chrome) {
             Some(placed) => iced::widget::stack![canvas_widget, placed].into(),
@@ -459,14 +483,8 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
     // then appears (and dismisses) on a clean desktop, so it is never composited
     // into a captured frame. Blocks until the user clicks Share and the first
     // frame arrives.
-    let driver = Driver::start_capture(
-        &config.backend,
-        config.fps,
-        config.show_cursor,
-        preview_tx,
-        PREVIEW_MAX_EDGE,
-    )
-    .map_err(OverlayError::Capture)?;
+    let driver = Driver::start_capture(&config.backend, config.fps, config.show_cursor, preview_tx)
+        .map_err(OverlayError::Capture)?;
     *DRIVER_SLOT.lock().unwrap() = Some(driver);
 
     let run_result = application(Overlay::default, namespace, update, view)
@@ -499,5 +517,46 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
     match RESULT_SLOT.lock().unwrap().take().unwrap_or(Ok(None)) {
         Ok(opt) => Ok(opt),
         Err(e) => Err(OverlayError::Capture(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{preview_viewport_size, CHROME_SPACING, PREVIEW_WIDTH, TOOLBAR_H};
+    use iced::{Rectangle, Size};
+
+    #[test]
+    fn preview_viewport_uses_fixed_width_and_bottom_band_height() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 2400.0,
+            height: 900.0,
+        };
+        let window = Size::new(2560.0, 1440.0);
+
+        let viewport = preview_viewport_size(crop, window);
+
+        assert_eq!(viewport.width, PREVIEW_WIDTH);
+        assert_eq!(viewport.height, (440.0 - TOOLBAR_H - CHROME_SPACING) as u32);
+    }
+
+    #[test]
+    fn preview_viewport_clamps_width_to_side_band() {
+        let crop = Rectangle {
+            x: 200.0,
+            y: 10.0,
+            width: 2300.0,
+            height: 1420.0,
+        };
+        let window = Size::new(2560.0, 1440.0);
+
+        let viewport = preview_viewport_size(crop, window);
+
+        assert_eq!(viewport.width, 200);
+        assert_eq!(
+            viewport.height,
+            (1440.0 - TOOLBAR_H - CHROME_SPACING) as u32
+        );
     }
 }
