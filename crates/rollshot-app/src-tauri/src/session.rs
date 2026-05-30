@@ -290,12 +290,11 @@ fn encode_preview_image_png(image: &RgbaImage, max_edge: u32) -> Result<Vec<u8>,
     Ok(cursor.into_inner())
 }
 
-#[cfg(test)]
 fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|err| format!("failed to encode png: {err}"))?;
+        .map_err(|err| format!("failed to encode preview png: {err}"))?;
     Ok(cursor.into_inner())
 }
 
@@ -472,6 +471,10 @@ impl SharedSession {
     }
 
     pub fn stitch_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
+        // The live stitch preview uses the shared fixed grow-then-follow viewport
+        // (consistent with the native overlay), so the caller's max_edge no
+        // longer applies here.
+        let _ = max_edge;
         let image = {
             let mut inner = self
                 .inner
@@ -485,7 +488,14 @@ impl SharedSession {
         };
         image
             .as_ref()
-            .map(|image| encode_preview_image_png(image, max_edge))
+            .map(|image| {
+                let view = rollshot_overlay_core::preview::preview_viewport(
+                    image,
+                    rollshot_overlay_core::preview::PREVIEW_WIDTH,
+                    rollshot_overlay_core::preview::PREVIEW_MAX_HEIGHT,
+                );
+                encode_rgba_png(&view)
+            })
             .transpose()
     }
 
@@ -661,6 +671,7 @@ mod tests {
     };
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
+    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::SystemTime;
@@ -756,6 +767,39 @@ mod tests {
 
         assert_eq!(image.width(), 200);
         assert_eq!(image.height(), 100);
+    }
+
+    #[test]
+    fn stitch_preview_png_uses_shared_viewport_and_ignores_max_edge() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(make_test_frame(960, 600));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 960,
+                    height: 600,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner
+                .push_stitch_frame(make_test_frame(960, 600))
+                .expect("push frame");
+        }
+
+        let bytes = session
+            .stitch_preview_png(128)
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes).expect("decode png");
+
+        assert_eq!(image.width(), PREVIEW_WIDTH);
+        assert_eq!(
+            image.height(),
+            (600 * PREVIEW_WIDTH / 960).min(PREVIEW_MAX_HEIGHT)
+        );
     }
 
     #[test]
