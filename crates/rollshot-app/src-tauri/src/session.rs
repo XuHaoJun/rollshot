@@ -644,6 +644,7 @@ impl SharedSession {
             .map_err(|_| "overlay exclusion lock poisoned".to_string())
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub fn set_overlay_exclusion(&self, state: OverlayExclusion) {
         if let Ok(mut current) = self.overlay_exclusion.lock() {
             *current = state;
@@ -1038,8 +1039,7 @@ mod tests {
     fn store_capture_result_then_save_writes_png() {
         use rollshot_core::StitchStats;
 
-        let dir = std::env::temp_dir()
-            .join(format!("rollshot-native-save-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rollshot-native-save-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create tempdir");
         let out = dir.join("native.png");
 
@@ -1156,6 +1156,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn shared_session_can_store_overlay_exclusion_state() {
         let session = SharedSession::new();

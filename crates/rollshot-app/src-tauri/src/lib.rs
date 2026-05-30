@@ -3,6 +3,7 @@ mod commands;
 mod css_token_sync;
 mod launch;
 mod native_capture;
+#[cfg(not(target_os = "linux"))]
 mod overlay;
 mod scroll;
 mod session;
@@ -13,7 +14,24 @@ use std::sync::Arc;
 
 use launch::LaunchMode;
 use session::SharedSession;
-use tauri::Manager;
+#[cfg(not(target_os = "linux"))]
+fn setup_host_window(app: &mut tauri::App, shared_session: &Arc<SharedSession>) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        let overlay_exclusion = overlay::configure_overlay_window(&window);
+        shared_session.set_overlay_exclusion(overlay_exclusion);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn setup_host_window(_app: &mut tauri::App, _shared_session: &Arc<SharedSession>) {
+    // R2: the native layer-shell overlay (run_native_capture) owns capture
+    // input via an exclusive-keyboard layer surface. The host window must stay
+    // hidden/unfocused so it cannot steal that focus (KWin would, per the Phase
+    // 2/3 spike). The webview is still created (tauri.conf.json visible:false)
+    // so its GPU context stays alive for wgpu/webkit coexistence (R1); we simply
+    // never show or focus it.
+}
 
 pub fn run() {
     let launch_mode = match launch::parse_launch_args(std::env::args()) {
@@ -37,10 +55,7 @@ pub fn run() {
         .setup({
             let shared_session = Arc::clone(&shared_session);
             move |app| {
-                if let Some(window) = app.get_webview_window("main") {
-                    let overlay_exclusion = overlay::configure_overlay_window(&window);
-                    shared_session.set_overlay_exclusion(overlay_exclusion);
-                }
+                setup_host_window(app, &shared_session);
                 Ok(())
             }
         })
