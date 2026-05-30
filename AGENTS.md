@@ -196,8 +196,8 @@ implementation — no design doc, no plan file.
   choices), you MAY proactively *suggest* skipping the spec/plan and wait for
   the user's go-ahead — but default to the normal flow until they agree.
 - Skipping the spec/plan does NOT skip engineering discipline: still apply §1
-  (surface assumptions, ask when unclear), §4 (goal-driven / TDD), §5
-  (branching), and §7 (verification).
+  (surface assumptions, ask when unclear), §4 (goal-driven / TDD), and §7
+  (verification).
 
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
