@@ -27,6 +27,7 @@ pub struct StitchMetrics {
     pub duplicate_us: u64,
     pub prepare_frame_us: u64,
     pub coarse_us: u64,
+    pub pyramid_us: u64,
     pub template_ncc_us: u64,
     pub edge_projection_us: u64,
     pub verifier_us: u64,
@@ -35,6 +36,7 @@ pub struct StitchMetrics {
 
     // Algorithmic counters (CPU-independent).
     pub coarse_candidates: usize,
+    pub pyramid_candidates: usize,
     pub ncc_offsets_scored: usize,
     pub ncc_pixel_visits: usize,
     pub verifier_candidates: usize,
@@ -164,6 +166,8 @@ mod tests {
         assert_eq!(m.outcome, StitchOutcomeKind::None);
         assert!(m.no_match_reason.is_none());
         assert_eq!(m.coarse_us, 0);
+        assert_eq!(m.pyramid_us, 0);
+        assert_eq!(m.pyramid_candidates, 0);
         assert_eq!(m.append_us, 0);
     }
 

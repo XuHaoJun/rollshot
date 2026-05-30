@@ -58,6 +58,7 @@ def per_scenario_stats(frames):
             "p95_append_us": quantile([r["append_us"] for r in recs], 0.95),
             "p50_prepare_us": quantile([r["prepare_frame_us"] for r in recs], 0.50),
             "p50_coarse_us": quantile([r["coarse_us"] for r in recs], 0.50),
+            "p50_pyramid_us": quantile([r.get("pyramid_us", 0) for r in recs], 0.50),
             "p50_ncc_us": quantile([r["template_ncc_us"] for r in recs], 0.50),
             "p50_verifier_us": quantile([r["verifier_us"] for r in recs], 0.50),
             "p50_coarse_candidates": quantile([r["coarse_candidates"] for r in recs], 0.50),
@@ -211,6 +212,7 @@ def render(before_stats, after_stats, summaries_before, summaries_after, before_
     all_regressions.extend(section("Append time (p95) — P1 target", "p95_append_us", "p95 append"))
     all_regressions.extend(section("Prepare (p50) — P2 target", "p50_prepare_us", "p50 prepare"))
     all_regressions.extend(section("Coarse (p50)", "p50_coarse_us", "p50 coarse"))
+    all_regressions.extend(section("Pyramid (p50)", "p50_pyramid_us", "p50 pyramid"))
     all_regressions.extend(section("NCC (p50) — P3 target", "p50_ncc_us", "p50 ncc"))
     all_regressions.extend(section("Verifier (p50)", "p50_verifier_us", "p50 verifier"))
 

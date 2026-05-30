@@ -35,6 +35,7 @@ impl AppendDirection {
 pub enum MatchMethod {
     Template,
     Coarse,
+    Pyramid,
     Edge,
     /// FAST corners + linear KNN matching. The "Hnsw" in the name is
     /// reserved for a future ANN upgrade — see

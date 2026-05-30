@@ -24,7 +24,8 @@ def _frame_record(git_sha, scenario="x"):
         "total_us": 1000, "duplicate_us": 10, "prepare_frame_us": 100,
         "coarse_us": 50, "template_ncc_us": 600, "edge_projection_us": 0,
         "verifier_us": 100, "fallback_us": 0, "append_us": 140,
-        "coarse_candidates": 5, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
+        "coarse_candidates": 5, "pyramid_us": 0, "pyramid_candidates": 0,
+        "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
         "verifier_candidates": 3, "fallback_features_extracted": 0,
         "canvas_logical_pixels": 100, "canvas_allocated_bytes": 400,
         "append_copied_bytes": 80, "best_dx": 0, "best_dy": 40,
@@ -58,9 +59,9 @@ def test_summarize_handles_single_frame(tmp_path):
             "kind": "frame", "scenario": "x", "run": 0, "frame": 0,
             "git_sha": "abc", "outcome": "Appended", "no_match_reason": None,
             "total_us": 1000, "duplicate_us": 10, "prepare_frame_us": 100,
-            "coarse_us": 50, "template_ncc_us": 600, "edge_projection_us": 0,
+            "coarse_us": 50, "pyramid_us": 25, "template_ncc_us": 600, "edge_projection_us": 0,
             "verifier_us": 100, "fallback_us": 0, "append_us": 140,
-            "coarse_candidates": 5, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
+            "coarse_candidates": 5, "pyramid_candidates": 3, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
             "verifier_candidates": 3, "fallback_features_extracted": 0,
             "canvas_logical_pixels": 100, "canvas_allocated_bytes": 400,
             "append_copied_bytes": 80, "best_dx": 0, "best_dy": 40,
@@ -80,6 +81,7 @@ def test_summarize_handles_single_frame(tmp_path):
     assert "Bench summary" in result
     assert "abc" in result
     assert "| x |" in result
+    assert "| scenario | prepare | coarse | pyramid | ncc | edge | verifier | fallback | append |" in result
 
 
 def test_summarize_skips_malformed_lines(tmp_path):
@@ -98,9 +100,9 @@ def test_compare_no_regressions(tmp_path):
         "kind": "frame", "scenario": "x", "run": 0, "frame": 0,
         "git_sha": "abc", "outcome": "Appended", "no_match_reason": None,
         "total_us": 1000, "duplicate_us": 10, "prepare_frame_us": 100,
-        "coarse_us": 50, "template_ncc_us": 600, "edge_projection_us": 0,
+        "coarse_us": 50, "pyramid_us": 0, "template_ncc_us": 600, "edge_projection_us": 0,
         "verifier_us": 100, "fallback_us": 0, "append_us": 140,
-        "coarse_candidates": 5, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
+        "coarse_candidates": 5, "pyramid_candidates": 0, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
         "verifier_candidates": 3, "fallback_features_extracted": 0,
         "canvas_logical_pixels": 100, "canvas_allocated_bytes": 400,
         "append_copied_bytes": 80, "best_dx": 0, "best_dy": 40,
@@ -128,9 +130,9 @@ def test_compare_detects_regression(tmp_path):
         "kind": "frame", "scenario": "x", "run": 0, "frame": 0,
         "git_sha": "old", "outcome": "Appended", "no_match_reason": None,
         "total_us": 1000, "duplicate_us": 10, "prepare_frame_us": 100,
-        "coarse_us": 50, "template_ncc_us": 600, "edge_projection_us": 0,
+        "coarse_us": 50, "pyramid_us": 0, "template_ncc_us": 600, "edge_projection_us": 0,
         "verifier_us": 100, "fallback_us": 0, "append_us": 140,
-        "coarse_candidates": 5, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
+        "coarse_candidates": 5, "pyramid_candidates": 0, "ncc_offsets_scored": 10, "ncc_pixel_visits": 1000,
         "verifier_candidates": 3, "fallback_features_extracted": 0,
         "canvas_logical_pixels": 100, "canvas_allocated_bytes": 400,
         "append_copied_bytes": 80, "best_dx": 0, "best_dy": 40,

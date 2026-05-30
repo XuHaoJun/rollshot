@@ -18,6 +18,41 @@ const COARSE_DOWNSAMPLE_STEP: u32 = 4;
 const COARSE_AXIS_STRIDE: i32 = 8;
 const EDGE_PROJECTION_STEP: u32 = 2;
 
+const PYRAMID_MAX_LEVELS: u8 = 4;
+const PYRAMID_MIN_LEVEL_SIDE: u32 = 96;
+const PYRAMID_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+const PYRAMID_KERNEL_SUM: f32 = 16.0;
+const PYRAMID_REFINE_RADIUS: i32 = 4;
+// How far around the level-0 best offset we sweep to find a true competing
+// alternative for `second_best_score`. Big enough to catch aliases on the
+// fixtures we ship (16 px grid, 20 px stripe band), small enough to leave
+// large-period content (e.g. 36 px stripes in `make_scroll_canvas`) at
+// "no real second" — where the absence of a tight gap correctly lets the
+// candidate through. Must exceed `PYRAMID_REFINE_RADIUS` so the exclusion
+// zone around best doesn't swallow the entire sweep.
+const PYRAMID_SECOND_BEST_SWEEP_RADIUS: i32 = 32;
+// Pyramid candidates operate on Gaussian-downsampled data, so the inherent
+// per-pixel MAD difference between true and alias offsets shrinks at deep
+// levels. Demand a stricter level-0 margin than `second_best_margin`
+// (default 0.001) before the candidate reaches `passes_second_best_margin`,
+// so periodic content that's a few pixels off from band-aligned can't slip
+// through on residual cross-pixel noise (e.g. the cli-smoke fixture's
+// sparse corner features).
+const PYRAMID_MIN_LEVEL0_MARGIN: f32 = 0.005;
+
+#[derive(Debug, Clone)]
+struct PyramidLevel {
+    scale_log2: u8,
+    width: u32,
+    height: u32,
+    gray: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct FramePyramid {
+    levels: Vec<PyramidLevel>,
+}
+
 #[derive(Clone, Copy)]
 struct Region {
     x: u32,
@@ -85,6 +120,7 @@ struct SearchBudget {
     coarse_score_calls: u64,
     full_res_ncc_calls: u64,
     full_res_ncc_pixel_visits: u64,
+    pyramid_pixel_visits: u64,
     verifier_calls: u64,
 }
 
@@ -212,13 +248,18 @@ pub(crate) fn estimate_motion(
         }
     }
 
-    let mut candidates = Vec::new();
+    // Round 1: coarse + template (coarse-seeded) + edge. Pyramid is deferred
+    // to a second round below — it's the most expensive matcher (~0.5-2 ms
+    // per frame on small frames, more on retina) and only earns its keep
+    // on large-motion recovery, where the cheaper round-1 matchers can't
+    // see the offset. Skipping it when round 1 already produces a verifier-
+    // passing candidate saves the full pyramid cost on the common case.
     let coarse = {
         let _t = ScopedTimer::new(&mut metrics.coarse_us);
         coarse_candidates(prev, curr, locked_axis, config)
     };
     metrics.coarse_candidates = coarse.len();
-    candidates.extend(coarse.iter().copied());
+
     let template_start = std::time::Instant::now();
     let template_result = template_candidates(
         prev,
@@ -230,30 +271,39 @@ pub(crate) fn estimate_motion(
         metrics,
     );
     metrics.template_ncc_us = template_start.elapsed().as_micros() as u64;
-    candidates.extend(template_result);
+
     let edge_start = std::time::Instant::now();
     let edge_result = edge_projection_candidates(prev, curr, locked_axis, config, metrics);
     metrics.edge_projection_us = edge_start.elapsed().as_micros() as u64;
-    candidates.extend(edge_result);
 
-    metrics.verifier_candidates += candidates.len();
+    let mut round1: Vec<MotionCandidate> =
+        Vec::with_capacity(coarse.len() + template_result.len() + edge_result.len());
+    round1.extend(coarse.iter().copied());
+    round1.extend(template_result);
+    round1.extend(edge_result);
+
+    metrics.verifier_candidates += round1.len();
     if let Some(candidate) = {
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
-        rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
+        rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, round1, config)
     } {
         return MotionSearchOutcome::Candidate(candidate);
     }
 
-    // Relaxed coarse pass: standard coarse search is bounded by
-    // `max_search_ratio` (≈0.4 of the frame); a single fast scroll can jump
-    // farther than that and miss every regular matcher. Before falling back
-    // to the feature matcher, retry coarse with the ratio pushed near the
-    // geometric ceiling so we can recover the candidate through the same
-    // downsampled MAD path used in steady-state.
-    if let Some(candidate) =
-        relaxed_coarse_candidate(prev, curr, locked_axis, last_motion, config, metrics)
-    {
-        return MotionSearchOutcome::Candidate(candidate);
+    // Round 2: pyramid recovery. Only invoked when round 1 produced no
+    // verifier-passing candidate — i.e. coarse couldn't reach the true
+    // offset, or every candidate failed the margin / accept_confidence /
+    // verifier gates. Pyramid candidates go through the verifier on their
+    // own (no need to re-test round-1 candidates that already failed).
+    let pyramid = pyramid_candidates(prev, curr, locked_axis, config, metrics);
+    if !pyramid.is_empty() {
+        metrics.verifier_candidates += pyramid.len();
+        if let Some(candidate) = {
+            let _t = ScopedTimer::new(&mut metrics.verifier_us);
+            rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, pyramid, config)
+        } {
+            return MotionSearchOutcome::Candidate(candidate);
+        }
     }
 
     let fallback_outcome = {
@@ -353,51 +403,6 @@ fn axis_fast_path_candidate(
     }
 
     Some(candidate)
-}
-
-const RELAXED_SEARCH_RATIO: f32 = 0.85;
-
-fn relaxed_coarse_candidate(
-    prev: &PreparedFrame,
-    curr: &PreparedFrame,
-    locked_axis: Option<ScrollAxis>,
-    last_motion: (i32, i32),
-    config: &StitchConfig,
-    metrics: &mut StitchMetrics,
-) -> Option<MotionCandidate> {
-    // No point retrying if the standard pass already searches near the
-    // geometric ceiling.
-    if config.max_search_ratio >= RELAXED_SEARCH_RATIO - 0.05 {
-        return None;
-    }
-
-    let mut relaxed_cfg = config.clone();
-    relaxed_cfg.max_search_ratio = RELAXED_SEARCH_RATIO;
-
-    let coarse = coarse_candidates(prev, curr, locked_axis, &relaxed_cfg);
-    metrics.coarse_candidates = metrics.coarse_candidates.max(coarse.len());
-    if coarse.is_empty() {
-        return None;
-    }
-
-    // Coarse is stride-8 in sample space (32 px in pixel space) — too coarse
-    // to pass the verifier on its own. Use it to seed a relaxed template
-    // refinement, which lands on a single-pixel offset that the verifier can
-    // accept on the same min_overlap budget.
-    let mut candidates = coarse.clone();
-    candidates.extend(template_candidates(
-        prev,
-        curr,
-        locked_axis,
-        last_motion,
-        &coarse,
-        &relaxed_cfg,
-        metrics,
-    ));
-
-    metrics.verifier_candidates += candidates.len();
-    let _t = ScopedTimer::new(&mut metrics.verifier_us);
-    rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
 }
 
 fn rank_verified_candidates(
@@ -523,11 +528,18 @@ fn template_refine_radius() -> i32 {
 // scroll-speed change puts the true offset outside `template_refine_radius`
 // of `predicted`, the 32-px-quantized coarse candidate is still available
 // for the verifier to accept or reject.
+//
+// Pyramid intentionally is NOT consulted here: `estimate_motion` runs
+// pyramid only as a round-2 recovery path *after* coarse-seeded template
+// has already failed verification, so by the time pyramid produces a
+// candidate, the template stage is done. Pyramid's candidate enters the
+// pool directly at the verifier, refined to ±PYRAMID_REFINE_RADIUS pixels.
 fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCandidate]) -> i32 {
     let predicted = predicted_offset(axis, last_motion);
     if predicted != 0 {
         return predicted;
     }
+
     coarse
         .iter()
         .find_map(|candidate| match axis {
@@ -538,6 +550,7 @@ fn template_seed(axis: SearchAxis, last_motion: (i32, i32), coarse: &[MotionCand
         .unwrap_or(predicted)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn template_candidates(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
@@ -830,6 +843,293 @@ fn coarse_axis_candidate(
     ))
 }
 
+fn coarsest_full_range_search(
+    prev: &PyramidLevel,
+    curr: &PyramidLevel,
+    axis: SearchAxis,
+    max_offset: i32,
+) -> Option<(i32, f32)> {
+    let offsets: Vec<i32> = (-max_offset..=max_offset).filter(|o| *o != 0).collect();
+    offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            let score = pyramid_mad(&prev.gray, &curr.gray, prev.width, prev.height, dx, dy);
+            score.is_finite().then_some((score, offset))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(score, offset)| (offset, score))
+}
+
+// Find the best level-0 MAD over offsets near `best_offset` but outside its
+// refinement window. The result is comparable to `best_score` (same scale,
+// same MAD definition), unlike the previous top-level `second` which mixed
+// scales and silently inflated `passes_second_best_margin`'s perceived gap.
+//
+// We exclude `±PYRAMID_REFINE_RADIUS` around `best_offset` because anything
+// in that window collapses to `best` itself under refinement. The outer
+// `PYRAMID_SECOND_BEST_SWEEP_RADIUS` is sized to catch aliases on
+// short-period repeating content (≤ 32 px) but to leave wider-period
+// "legitimate but slightly textured" content alone — for those, this sweep
+// returns a high MAD or `None`, the margin check is a no-op, and the
+// candidate flows to the verifier as before.
+//
+// `#[inline(never)]` keeps this cold path from changing inlining decisions
+// on `coarse_mad` in the hot regular matcher (its call site here uses step
+// 2; everywhere else uses step 1). Without it the bench showed a +60-80 µs
+// prepare/coarse regression on scenarios where pyramid never ran.
+#[inline(never)]
+fn level0_second_best_sweep(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    axis: SearchAxis,
+    best_offset: i32,
+    max_abs: i32,
+) -> Option<f32> {
+    let inner = PYRAMID_REFINE_RADIUS + 1;
+    let outer = PYRAMID_SECOND_BEST_SWEEP_RADIUS;
+    let offsets: Vec<i32> = (inner..=outer)
+        .flat_map(|d| [best_offset + d, best_offset - d])
+        .filter(|o| *o != 0 && o.abs() <= max_abs)
+        .collect();
+    offsets
+        .into_par_iter()
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            // Step-2 sub-sample: 4× cheaper, with negligible accuracy loss
+            // because we only need the *gap* to `best_score` (which also
+            // uses MAD at this scale), not an exact MAD value. Bypassing
+            // `pyramid_mad` keeps this sweep out of the structural budget
+            // counter, which is sized for the level-by-level pyramid chain
+            // only — the ambiguity check is a separate per-frame phase.
+            let score = coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 2);
+            score.is_finite().then_some(score)
+        })
+        .min_by(|a, b| a.total_cmp(b))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_at_level(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    axis: SearchAxis,
+    seed: i32,
+    max_abs: i32,
+    radius: i32,
+) -> Option<i32> {
+    refinement_offsets(seed, max_abs, radius)
+        .into_iter()
+        .filter(|o| *o != 0)
+        .filter_map(|offset| {
+            let (dx, dy) = match axis {
+                SearchAxis::Vertical => (0, offset),
+                SearchAxis::Horizontal => (offset, 0),
+            };
+            let score = pyramid_mad(prev_gray, curr_gray, width, height, dx, dy);
+            score.is_finite().then_some((score, offset))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(_, offset)| offset)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pyramid_axis_candidate(
+    prev: &FramePyramid,
+    curr: &FramePyramid,
+    prev_level0_gray: &[f32],
+    curr_level0_gray: &[f32],
+    level0_width: u32,
+    level0_height: u32,
+    axis: SearchAxis,
+    config: &StitchConfig,
+) -> Option<MotionCandidate> {
+    if prev.levels.is_empty() || curr.levels.is_empty() {
+        return None;
+    }
+    let top_idx = prev.levels.len().min(curr.levels.len()) - 1;
+    let top = &prev.levels[top_idx];
+    let curr_top = &curr.levels[top_idx];
+    if top.width != curr_top.width || top.height != curr_top.height {
+        return None;
+    }
+
+    let top_max = pyramid_max_axis_offset(
+        top.width,
+        top.height,
+        axis,
+        config.min_overlap,
+        top.scale_log2,
+    );
+    if top_max <= 0 {
+        return None;
+    }
+
+    let (top_offset, top_best_score) = coarsest_full_range_search(top, curr_top, axis, top_max)?;
+
+    // Early exit: if the coarsest level can't find a remotely correlated
+    // offset, refinement won't fix it — refining a high-MAD seed converges
+    // to a slightly-less-bad neighbor, not to a real match. Bail before
+    // paying for the per-level refinement chain. Uses the same threshold
+    // the ranker would later use to reject the candidate anyway.
+    if pyramid_confidence(top_best_score) > config.accept_confidence {
+        return None;
+    }
+
+    let mut offset = top_offset;
+    for level_idx in (0..top_idx).rev() {
+        let level = &prev.levels[level_idx];
+        let curr_level = &curr.levels[level_idx];
+        let level_max = pyramid_max_axis_offset(
+            level.width,
+            level.height,
+            axis,
+            config.min_overlap,
+            level.scale_log2,
+        );
+        if level_max <= 0 {
+            return None;
+        }
+        offset = (offset * 2).clamp(-level_max, level_max);
+        offset = refine_at_level(
+            &level.gray,
+            &curr_level.gray,
+            level.width,
+            level.height,
+            axis,
+            offset,
+            level_max,
+            PYRAMID_REFINE_RADIUS,
+        )?;
+    }
+
+    let level0_max =
+        pyramid_max_axis_offset(level0_width, level0_height, axis, config.min_overlap, 0);
+    if level0_max <= 0 {
+        return None;
+    }
+    offset = (offset * 2).clamp(-level0_max, level0_max);
+    let best_offset = refine_at_level(
+        prev_level0_gray,
+        curr_level0_gray,
+        level0_width,
+        level0_height,
+        axis,
+        offset,
+        level0_max,
+        PYRAMID_REFINE_RADIUS,
+    )?;
+
+    let (dx, dy) = match axis {
+        SearchAxis::Vertical => (0, best_offset),
+        SearchAxis::Horizontal => (best_offset, 0),
+    };
+    let best_score = pyramid_mad(
+        prev_level0_gray,
+        curr_level0_gray,
+        level0_width,
+        level0_height,
+        dx,
+        dy,
+    );
+    if !best_score.is_finite() {
+        return None;
+    }
+
+    // Compute second_best in the SAME scale as best_score, so the spec
+    // contract "lower score = better, gap = ambiguity" holds and
+    // `passes_second_best_margin` sees a real level-0 MAD gap.
+    let second_score = level0_second_best_sweep(
+        prev_level0_gray,
+        curr_level0_gray,
+        level0_width,
+        level0_height,
+        axis,
+        best_offset,
+        level0_max,
+    );
+
+    // Pyramid-internal margin gate. The global `second_best_margin` (default
+    // 0.001) is too loose to reject candidates whose only discriminator at
+    // level 0 is sparse pixel noise (e.g. a few corner features in a sea of
+    // band-aligned content). For aperiodic content the gap is order 0.1+ and
+    // this gate is a no-op; for periodic / alias-prone content it returns
+    // None so the candidate never reaches the verifier and the pipeline
+    // falls through to the feature fallback as designed.
+    if let Some(s) = second_score {
+        if s - best_score < PYRAMID_MIN_LEVEL0_MARGIN {
+            return None;
+        }
+    }
+
+    Some(candidate(
+        dx,
+        dy,
+        MatchMethod::Pyramid,
+        pyramid_confidence(best_score),
+        second_score.map(pyramid_confidence),
+    ))
+}
+
+fn pyramid_candidates(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    let locked_axes;
+    let axes = match locked_axis {
+        Some(axis) => {
+            locked_axes = [SearchAxis::from_scroll_axis(axis)];
+            &locked_axes[..]
+        }
+        None => dual_search_axes(),
+    };
+    pyramid_candidates_for_axes(prev, curr, locked_axis, axes, config, metrics)
+}
+
+fn pyramid_candidates_for_axes(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    axes: &[SearchAxis],
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
+    let _timer = ScopedTimer::new(&mut metrics.pyramid_us);
+    let prev_pyramid = prev.pyramid();
+    let curr_pyramid = curr.pyramid();
+    let (level0_w, level0_h) = prev.dimensions();
+    let out: Vec<_> = axes
+        .iter()
+        .filter_map(|axis| {
+            pyramid_axis_candidate(
+                prev_pyramid,
+                curr_pyramid,
+                prev.gray(),
+                curr.gray(),
+                level0_w,
+                level0_h,
+                *axis,
+                config,
+            )
+        })
+        .filter(|candidate| candidate_matches_axis(candidate.dx, candidate.dy, locked_axis, config))
+        .collect();
+    metrics.pyramid_candidates = out.len();
+    out
+}
+
 fn coarse_sample_dimensions(width: u32, height: u32, step: u32) -> (u32, u32) {
     let step = step.max(1);
     (width.div_ceil(step).max(1), height.div_ceil(step).max(1))
@@ -857,6 +1157,107 @@ fn coarse_samples(gray: &[f32], width: u32, height: u32, step: u32) -> Vec<f32> 
         y += step;
     }
     out
+}
+
+fn pyramid_max_axis_offset(
+    level_width: u32,
+    level_height: u32,
+    axis: SearchAxis,
+    min_overlap: u32,
+    scale_log2: u8,
+) -> i32 {
+    let scaled_min_overlap = (min_overlap >> scale_log2).max(1);
+    match axis {
+        SearchAxis::Vertical => level_height.saturating_sub(scaled_min_overlap) as i32,
+        SearchAxis::Horizontal => level_width.saturating_sub(scaled_min_overlap) as i32,
+    }
+}
+
+fn clamp_coord(value: i32, max_exclusive: u32) -> u32 {
+    value.clamp(0, max_exclusive.saturating_sub(1) as i32) as u32
+}
+
+fn gaussian_downsample_2x(
+    gray: &[f32],
+    width: u32,
+    height: u32,
+    scratch: &mut [f32],
+) -> PyramidLevel {
+    let out_w = width.div_ceil(2).max(1);
+    let out_h = height.div_ceil(2).max(1);
+    let in_len = (width * height) as usize;
+    assert!(scratch.len() >= in_len, "pyramid scratch buffer too small");
+
+    {
+        let blurred_h = &mut scratch[..in_len];
+        blurred_h
+            .par_chunks_mut(width as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let y = y as u32;
+                for x in 0..width {
+                    let mut sum = 0.0f32;
+                    for (k, weight) in PYRAMID_KERNEL.iter().enumerate() {
+                        let xx = clamp_coord(x as i32 + k as i32 - 2, width);
+                        sum += gray[(y * width + xx) as usize] * *weight;
+                    }
+                    row[x as usize] = sum / PYRAMID_KERNEL_SUM;
+                }
+            });
+    }
+
+    let blurred_h: &[f32] = &scratch[..in_len];
+    let mut out = vec![0.0f32; (out_w * out_h) as usize];
+    out.par_chunks_mut(out_w as usize)
+        .enumerate()
+        .for_each(|(oy, out_row)| {
+            let src_y = ((oy as u32) * 2).min(height - 1);
+            for ox in 0..out_w {
+                let src_x = (ox * 2).min(width - 1);
+                let mut sum = 0.0f32;
+                for (k, weight) in PYRAMID_KERNEL.iter().enumerate() {
+                    let yy = clamp_coord(src_y as i32 + k as i32 - 2, height);
+                    sum += blurred_h[(yy * width + src_x) as usize] * *weight;
+                }
+                out_row[ox as usize] = sum / PYRAMID_KERNEL_SUM;
+            }
+        });
+
+    PyramidLevel {
+        scale_log2: 0,
+        width: out_w,
+        height: out_h,
+        gray: out,
+    }
+}
+
+fn build_frame_pyramid(gray: &[f32], width: u32, height: u32) -> FramePyramid {
+    let mut levels: Vec<PyramidLevel> = Vec::new();
+    let mut scratch = vec![0.0f32; (width * height) as usize];
+    let mut cur_gray: &[f32] = gray;
+    let mut cur_w = width;
+    let mut cur_h = height;
+    let mut scale_log2: u8 = 0;
+
+    while levels.len() < (PYRAMID_MAX_LEVELS as usize - 1) {
+        if cur_w <= PYRAMID_MIN_LEVEL_SIDE || cur_h <= PYRAMID_MIN_LEVEL_SIDE {
+            break;
+        }
+        scale_log2 += 1;
+        let next = gaussian_downsample_2x(cur_gray, cur_w, cur_h, &mut scratch);
+        levels.push(PyramidLevel {
+            scale_log2,
+            width: next.width,
+            height: next.height,
+            gray: next.gray,
+        });
+        let last = levels.last().expect("just pushed");
+        cur_gray = &last.gray;
+        cur_w = last.width;
+        cur_h = last.height;
+    }
+
+    FramePyramid { levels }
 }
 
 fn coarse_mad(
@@ -891,6 +1292,29 @@ fn coarse_mad(
         return f32::INFINITY;
     }
     sum / (count as f32 * 255.0)
+}
+
+fn pyramid_mad(
+    prev_gray: &[f32],
+    curr_gray: &[f32],
+    width: u32,
+    height: u32,
+    dx: i32,
+    dy: i32,
+) -> f32 {
+    let score = coarse_mad(prev_gray, curr_gray, width, height, dx, dy, 1);
+    #[cfg(test)]
+    if let Some(overlap) = compute_overlap(width, height, width, height, dx, dy) {
+        with_active_search_budget(|budget| {
+            budget.pyramid_pixel_visits =
+                budget.pyramid_pixel_visits.saturating_add(overlap.area());
+        });
+    }
+    score
+}
+
+fn pyramid_confidence(raw_mad: f32) -> f32 {
+    raw_mad.clamp(0.0, 1.0)
 }
 
 fn edge_projection_candidates(
@@ -1045,6 +1469,7 @@ pub(crate) struct PreparedFrame {
     coarse: OnceLock<Vec<f32>>,
     proj_v: OnceLock<Vec<f32>>,
     proj_h: OnceLock<Vec<f32>>,
+    pyramid: OnceLock<FramePyramid>,
 }
 
 impl PreparedFrame {
@@ -1071,6 +1496,7 @@ impl PreparedFrame {
             coarse: OnceLock::new(),
             proj_v: OnceLock::new(),
             proj_h: OnceLock::new(),
+            pyramid: OnceLock::new(),
         }
     }
 
@@ -1106,6 +1532,11 @@ impl PreparedFrame {
                 edge_projection(&self.gray, self.width, self.height, SearchAxis::Horizontal)
             }),
         }
+    }
+
+    fn pyramid(&self) -> &FramePyramid {
+        self.pyramid
+            .get_or_init(|| build_frame_pyramid(&self.gray, self.width, self.height))
     }
 }
 
@@ -1390,15 +1821,16 @@ fn legacy_ncc_score_shifted(
 #[cfg(test)]
 mod tests {
     use super::{
-        coarse_axis_offsets, coarse_sample_dimensions, coarse_samples, content_roi,
-        cross_axis_check, edge_projection, estimate_motion, estimate_motion_with_budget,
-        fast_ncc_score_shifted, legacy_ncc_score_shifted, match_width_region, ncc_from_sums,
-        refinement_offsets, template_refine_radius, to_grayscale, MotionSearchOutcome, NccSums,
-        PreparedFrame, Region, SearchAxis, SearchBudget, COARSE_AXIS_STRIDE,
-        COARSE_DOWNSAMPLE_STEP,
+        build_frame_pyramid, candidate, coarse_axis_offsets, coarse_sample_dimensions,
+        coarse_samples, content_roi, cross_axis_check, edge_projection, estimate_motion,
+        estimate_motion_with_budget, fast_ncc_score_shifted, gaussian_downsample_2x,
+        legacy_ncc_score_shifted, match_width_region, ncc_from_sums, pyramid_candidates_for_axes,
+        refinement_offsets, template_refine_radius, template_seed, to_grayscale, FramePyramid,
+        MotionSearchOutcome, NccSums, PreparedFrame, Region, SearchAxis, SearchBudget,
+        COARSE_AXIS_STRIDE, COARSE_DOWNSAMPLE_STEP, PYRAMID_MAX_LEVELS, PYRAMID_REFINE_RADIUS,
     };
     use crate::metrics::StitchMetrics;
-    use crate::types::{MotionCandidate, ScrollAxis, StitchConfig};
+    use crate::types::{MatchMethod, MotionCandidate, ScrollAxis, StitchConfig};
     use image::{imageops, Rgba, RgbaImage};
 
     fn make_textured_canvas(width: u32, height: u32) -> RgbaImage {
@@ -1470,32 +1902,29 @@ mod tests {
         imageops::crop_imm(canvas, x, y, w, h).to_image()
     }
 
-    // Like `make_textured_canvas` but mixes in an aperiodic per-pixel hash so
-    // wider search ranges (retina-scale perf smoke) cannot lock onto a
-    // periodic alias instead of the true motion.
+    // Like `make_textured_canvas` but with aperiodic content so that wider
+    // search ranges (retina-scale perf smoke) cannot lock onto a periodic
+    // alias instead of the true motion.  Uses the same splitmix hash to
+    // generate per-pixel values directly, avoiding the period-11 stripe
+    // pattern in make_textured_canvas that causes pyramid refinement to
+    // converge on false minima at multiples of 11.
     fn make_aperiodic_canvas(width: u32, height: u32) -> RgbaImage {
-        let mut img = make_textured_canvas(width, height);
+        let mut img = RgbaImage::from_pixel(width, height, Rgba([128, 128, 128, 255]));
         for y in 0..height {
             for x in 0..width {
-                // Splitmix-style hash on (x, y) so each pixel gets a unique,
-                // non-periodic perturbation that the matcher can lock onto.
                 let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                     ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
                 h ^= h >> 30;
                 h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
                 h ^= h >> 27;
-                let noise = (h as u8) & 0x3F;
-                let p = img.get_pixel(x, y);
-                img.put_pixel(
-                    x,
-                    y,
-                    Rgba([
-                        p[0].saturating_add(noise),
-                        p[1].saturating_sub(noise),
-                        p[2].wrapping_add(noise),
-                        255,
-                    ]),
-                );
+                let r = h as u8;
+                h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 27;
+                let g = h as u8;
+                h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 27;
+                let b = h as u8;
+                img.put_pixel(x, y, Rgba([r, g, b, 255]));
             }
         }
         img
@@ -2111,6 +2540,11 @@ mod tests {
             "full_res_ncc_pixel_visits = {}",
             budget.full_res_ncc_pixel_visits
         );
+        assert!(
+            budget.pyramid_pixel_visits <= 50_000_000,
+            "pyramid_pixel_visits = {}",
+            budget.pyramid_pixel_visits
+        );
     }
 
     #[test]
@@ -2400,5 +2834,260 @@ mod tests {
             matches!(outcome, MotionSearchOutcome::NoMatch { .. }),
             "cross-axis drift should not be accepted as a pure vertical append: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn pyramid_downsample_dimensions_are_correct() {
+        let gray = vec![10.0; 5 * 3];
+        let mut scratch = vec![0.0f32; 5 * 3];
+        let down = gaussian_downsample_2x(&gray, 5, 3, &mut scratch);
+        assert_eq!(down.width, 3);
+        assert_eq!(down.height, 2);
+        assert_eq!(down.gray.len(), 6);
+    }
+
+    #[test]
+    fn pyramid_gaussian_downsample_is_deterministic() {
+        let gray = vec![
+            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0,
+            140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 210.0, 220.0, 230.0, 240.0,
+        ];
+        let mut scratch_a = vec![0.0f32; 25];
+        let mut scratch_b = vec![0.0f32; 25];
+        let a = gaussian_downsample_2x(&gray, 5, 5, &mut scratch_a);
+        let b = gaussian_downsample_2x(&gray, 5, 5, &mut scratch_b);
+        assert_eq!(a.width, 3);
+        assert_eq!(a.height, 3);
+        assert_eq!(a.gray, b.gray);
+        assert!(
+            a.gray
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=240.0).contains(v)),
+            "downsampled values should stay in input luminance range: {:?}",
+            a.gray
+        );
+    }
+
+    #[test]
+    fn frame_pyramid_respects_level_limits() {
+        let img = make_textured_canvas(640, 480);
+        let prep = PreparedFrame::new(img);
+        let pyramid = build_frame_pyramid(prep.gray(), 640, 480);
+        assert!(
+            !pyramid.levels.is_empty(),
+            "640x480 must produce at least one downsampled level"
+        );
+        assert!(pyramid.levels.len() <= (PYRAMID_MAX_LEVELS as usize - 1));
+        assert_eq!(pyramid.levels[0].scale_log2, 1);
+        assert_eq!(pyramid.levels[0].width, 320);
+        assert_eq!(pyramid.levels[0].height, 240);
+        for (i, level) in pyramid.levels.iter().enumerate() {
+            assert_eq!(level.scale_log2, (i + 1) as u8);
+        }
+    }
+
+    #[test]
+    fn prepared_frame_pyramid_is_cached() {
+        let img = make_textured_canvas(640, 480);
+        let prep = PreparedFrame::new(img);
+        let first = prep.pyramid() as *const FramePyramid;
+        let second = prep.pyramid() as *const FramePyramid;
+        assert_eq!(
+            first, second,
+            "pyramid OnceLock must return the same instance"
+        );
+    }
+
+    #[test]
+    fn pyramid_large_jump_finds_correct_candidate() {
+        let canvas = make_aperiodic_canvas(480, 1200);
+        let prev = crop(&canvas, 0, 320);
+        let curr = crop(&canvas, 210, 320);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].dx, 0);
+        assert!(
+            (candidates[0].dy - 210).abs() <= PYRAMID_REFINE_RADIUS + 2,
+            "dy = {} (expected around 210)",
+            candidates[0].dy
+        );
+        assert_eq!(candidates[0].method, crate::types::MatchMethod::Pyramid);
+        assert!(candidates[0].score <= config.accept_confidence);
+        assert!(metrics.pyramid_us > 0);
+        assert_eq!(metrics.pyramid_candidates, 1);
+    }
+
+    #[test]
+    fn pyramid_large_jump_finds_correct_horizontal_candidate() {
+        let canvas = make_aperiodic_canvas(1200, 360);
+        let prev = crop_xy(&canvas, 0, 0, 320, 320);
+        let curr = crop_xy(&canvas, 210, 0, 320, 320);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Horizontal],
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].dy, 0);
+        assert!(
+            (candidates[0].dx - 210).abs() <= PYRAMID_REFINE_RADIUS + 2,
+            "dx = {} (expected around 210)",
+            candidates[0].dx
+        );
+        assert_eq!(candidates[0].method, crate::types::MatchMethod::Pyramid);
+    }
+
+    #[test]
+    fn pyramid_recovers_retina_pair() {
+        let canvas = make_aperiodic_canvas(1920, 2400);
+        let prev = crop(&canvas, 0, 1200);
+        let curr = crop(&canvas, 600, 1200);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &config,
+            &mut metrics,
+        );
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "retina pair must produce a pyramid candidate"
+        );
+        assert_eq!(candidates[0].dx, 0);
+        assert!(
+            (candidates[0].dy - 600).abs() <= PYRAMID_REFINE_RADIUS + 4,
+            "dy = {} (expected around 600 at retina scale)",
+            candidates[0].dy
+        );
+        assert_eq!(candidates[0].method, crate::types::MatchMethod::Pyramid);
+    }
+
+    #[test]
+    fn pyramid_score_contract_matches_ranker() {
+        let canvas = make_aperiodic_canvas(360, 900);
+        let prev = crop(&canvas, 0, 240);
+        let curr = crop(&canvas, 96, 240);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidate = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &config,
+            &mut metrics,
+        )
+        .pop()
+        .expect("pyramid candidate");
+
+        assert!(candidate.score >= 0.0);
+        assert!(candidate.score <= 1.0);
+        if let Some(second) = candidate.second_best_score {
+            assert!(second >= 0.0);
+            assert!(second <= 1.0);
+            assert!(second >= candidate.score);
+        }
+    }
+
+    #[test]
+    fn pyramid_candidate_passes_existing_verifier() {
+        let canvas = make_aperiodic_canvas(420, 1000);
+        let prev = crop(&canvas, 0, 280);
+        let curr = crop(&canvas, 170, 280);
+        let config = StitchConfig::default();
+        let mut metrics = StitchMetrics::default();
+
+        let candidate = unwrap_candidate(estimate_motion(
+            &prep(&prev),
+            &prep(&curr),
+            None,
+            (0, 0),
+            &config,
+            &mut metrics,
+        ));
+
+        assert_eq!(candidate.method, crate::types::MatchMethod::Pyramid);
+        assert_eq!(candidate.dx, 0);
+        assert!(
+            (candidate.dy - 170).abs() <= 3,
+            "dy = {} (expected around 170)",
+            candidate.dy
+        );
+        assert!(metrics.pyramid_us > 0);
+        assert!(metrics.pyramid_candidates > 0);
+    }
+
+    #[test]
+    fn pyramid_does_not_accept_repeated_grid_alias() {
+        let canvas = make_repeated_grid(256, 640);
+        let prev = crop_xy(&canvas, 0, 0, 192, 192);
+        let curr = crop_xy(&canvas, 0, 48, 192, 192);
+        let prev_prep = PreparedFrame::new(prev);
+        let curr_prep = PreparedFrame::new(curr);
+
+        // Unit-level assertion: the pyramid stage must filter the alias
+        // before it reaches the verifier. End-to-end pipeline rejection on
+        // repeated grids is already covered by
+        // `repeated_grid_is_rejected_by_second_best_margin`.
+        let candidates = pyramid_candidates_for_axes(
+            &prev_prep,
+            &curr_prep,
+            None,
+            &[SearchAxis::Vertical],
+            &StitchConfig::default(),
+            &mut StitchMetrics::default(),
+        );
+
+        assert!(
+            candidates.is_empty(),
+            "pyramid must not produce a candidate on repeated_grid: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn template_seed_keeps_last_motion_when_nonzero() {
+        let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
+        let seed = template_seed(SearchAxis::Vertical, (0, 16), &coarse);
+        assert_eq!(seed, 16, "nonzero last_motion must dominate coarse");
+    }
+
+    #[test]
+    fn template_seed_falls_back_to_coarse_when_history_zero() {
+        let coarse = vec![candidate(0, 80, MatchMethod::Coarse, 0.1, None)];
+        let seed = template_seed(SearchAxis::Vertical, (0, 0), &coarse);
+        assert_eq!(seed, 80, "with no last_motion, coarse provides the seed");
     }
 }
