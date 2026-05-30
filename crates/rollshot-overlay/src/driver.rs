@@ -297,39 +297,17 @@ fn wait_for_source_size(
     }
 }
 
-/// Build a wayscrollshot-style preview that grows, then follows the bottom.
-///
-/// Scales the stitched image to the fixed `width`, then takes the bottom
-/// `min(scaled_height, max_height)` rows. While the stitch is short the handle
-/// is short (the preview visibly grows with the scroll); once it would exceed
-/// `max_height` the handle stays bounded and tracks the latest (bottom) content.
-/// Keeping the texture ≤ `width × max_height` every frame avoids the
-/// large-texture flicker on the iced_layershell/wgpu path.
+/// Wrap the shared grow-then-follow preview viewport
+/// (`rollshot_overlay_core::preview::preview_viewport`) as an iced image handle.
 #[allow(dead_code)]
 fn preview_viewport_handle(image: &image::RgbaImage, width: u32, max_height: u32) -> ImageHandle {
-    let width = width.max(1);
-    let max_height = max_height.max(1);
-    let scale = width as f32 / image.width().max(1) as f32;
-    let scaled_height = ((image.height() as f32 * scale).round() as u32).max(1);
-    let scaled = if image.width() == width && image.height() == scaled_height {
-        image.clone()
-    } else {
-        image::imageops::resize(
-            image,
-            width,
-            scaled_height,
-            image::imageops::FilterType::Triangle,
-        )
-    };
-    let out_height = scaled.height().min(max_height);
-    let src_y = scaled.height() - out_height;
-    let crop = image::imageops::crop_imm(&scaled, 0, src_y, width, out_height).to_image();
-    ImageHandle::from_rgba(crop.width(), crop.height(), crop.into_raw())
+    let view = rollshot_overlay_core::preview::preview_viewport(image, width, max_height);
+    ImageHandle::from_rgba(view.width(), view.height(), view.into_raw())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_stitch_config, preview_viewport_handle, stitch_stream};
+    use super::{overlay_stitch_config, stitch_stream};
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use std::time::SystemTime;
@@ -375,49 +353,5 @@ mod tests {
             "stitched height grows past one frame"
         );
         assert!(result.stats.frame_count >= 1);
-    }
-
-    #[test]
-    fn preview_viewport_handle_grows_to_content_below_cap() {
-        // Stitch shorter than the cap: the handle is the scaled content height,
-        // not padded up to the cap — so the preview visibly grows with scroll.
-        let image = RgbaImage::from_pixel(1920, 1080, Rgba([12, 34, 56, 255]));
-
-        let handle = preview_viewport_handle(&image, 960, 2_000);
-
-        match handle {
-            iced::widget::image::Handle::Rgba { width, height, .. } => {
-                // 1920->960 halves width; 1080->540 < 2000 cap, so no clamp.
-                assert_eq!((width, height), (960, 540));
-            }
-            _ => panic!("preview handle should use raw RGBA pixels"),
-        }
-    }
-
-    #[test]
-    fn preview_viewport_handle_caps_and_follows_bottom_for_tall_canvas() {
-        let mut image = RgbaImage::new(960, 6_000);
-        for y in 0..image.height() {
-            for x in 0..image.width() {
-                image.put_pixel(x, y, Rgba([(y % 251) as u8, (x % 251) as u8, 99, 255]));
-            }
-        }
-
-        let handle = preview_viewport_handle(&image, 960, 540);
-
-        match handle {
-            iced::widget::image::Handle::Rgba {
-                width,
-                height,
-                pixels,
-                ..
-            } => {
-                // Capped at 540 tall, showing the bottom: the first row is row
-                // (6000 - 540) of the source, not row 0.
-                assert_eq!((width, height), (960, 540));
-                assert_eq!(&pixels[..4], &[((6_000 - 540) % 251) as u8, 0, 99, 255]);
-            }
-            _ => panic!("preview handle should use raw RGBA pixels"),
-        }
     }
 }

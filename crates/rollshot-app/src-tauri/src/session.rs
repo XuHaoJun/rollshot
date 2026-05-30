@@ -290,12 +290,11 @@ fn encode_preview_image_png(image: &RgbaImage, max_edge: u32) -> Result<Vec<u8>,
     Ok(cursor.into_inner())
 }
 
-#[cfg(test)]
 fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|err| format!("failed to encode png: {err}"))?;
+        .map_err(|err| format!("failed to encode preview png: {err}"))?;
     Ok(cursor.into_inner())
 }
 
@@ -471,7 +470,10 @@ impl SharedSession {
         inner.confirm_region(region)
     }
 
-    pub fn stitch_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
+    pub fn stitch_preview_png(&self) -> Result<Option<Vec<u8>>, String> {
+        // The live stitch preview uses the shared fixed grow-then-follow viewport
+        // (consistent with the native overlay): a fixed-width strip that grows,
+        // then follows the bottom of the stitch.
         let image = {
             let mut inner = self
                 .inner
@@ -485,7 +487,14 @@ impl SharedSession {
         };
         image
             .as_ref()
-            .map(|image| encode_preview_image_png(image, max_edge))
+            .map(|image| {
+                let view = rollshot_overlay_core::preview::preview_viewport(
+                    image,
+                    rollshot_overlay_core::preview::PREVIEW_WIDTH,
+                    rollshot_overlay_core::preview::PREVIEW_MAX_HEIGHT,
+                );
+                encode_rgba_png(&view)
+            })
             .transpose()
     }
 
@@ -661,6 +670,7 @@ mod tests {
     };
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
+    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::SystemTime;
@@ -756,6 +766,43 @@ mod tests {
 
         assert_eq!(image.width(), 200);
         assert_eq!(image.height(), 100);
+    }
+
+    #[test]
+    fn stitch_preview_png_uses_shared_viewport() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(make_test_frame(960, 600));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 960,
+                    height: 600,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner
+                .push_stitch_frame(make_test_frame(960, 600))
+                .expect("push frame");
+        }
+
+        let bytes = session
+            .stitch_preview_png()
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes).expect("decode png");
+
+        // A fixed PREVIEW_WIDTH (not a max-edge downscale) proves the shared
+        // viewport is used.
+        assert_eq!(image.width(), PREVIEW_WIDTH);
+        // Mirror preview_viewport's float-rounded scaling (not integer division)
+        // so this expectation can't drift from production rounding if the
+        // constants change.
+        let scale = PREVIEW_WIDTH as f32 / 960.0;
+        let expected_height = ((600.0 * scale).round() as u32).min(PREVIEW_MAX_HEIGHT);
+        assert_eq!(image.height(), expected_height);
     }
 
     #[test]

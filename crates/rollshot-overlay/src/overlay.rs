@@ -17,15 +17,10 @@ use crate::driver::Driver;
 use crate::CaptureResult;
 use crate::OverlayConfig;
 use crate::OverlayError;
+use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
+use rollshot_overlay_core::tokens;
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
-// Fixed preview width (matches wayscrollshot's PREVIEW_MAX_WIDTH). Combined with
-// PREVIEW_MAX_HEIGHT this keeps the per-frame preview texture small. iced's
-// layer-shell/wgpu path renders ≤480px previews stably (the Phase 2 spike's
-// 200×200 swatch and the old ≤480 downscale), but ~960×~1380 textures flicker /
-// never composite — so the viewport is bounded to that proven-stable envelope.
-const PREVIEW_WIDTH: u32 = 280;
-const PREVIEW_MAX_HEIGHT: u32 = 480;
 const TOOLBAR_W: f32 = 300.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
@@ -211,6 +206,36 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     }
 }
 
+fn token_color(c: tokens::Rgba) -> Color {
+    Color::from_rgba(
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        c.a,
+    )
+}
+
+fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Size); 4] {
+    let cx = crop.x.clamp(0.0, bounds.width);
+    let cy = crop.y.clamp(0.0, bounds.height);
+    let right = (crop.x + crop.width).clamp(0.0, bounds.width);
+    let bottom = (crop.y + crop.height).clamp(0.0, bounds.height);
+    let visible_h = (bottom - cy).max(0.0);
+
+    [
+        (Point::ORIGIN, Size::new(bounds.width, cy)),
+        (
+            Point::new(0.0, bottom),
+            Size::new(bounds.width, (bounds.height - bottom).max(0.0)),
+        ),
+        (Point::new(0.0, cy), Size::new(cx, visible_h)),
+        (
+            Point::new(right, cy),
+            Size::new((bounds.width - right).max(0.0), visible_h),
+        ),
+    ]
+}
+
 struct CropCanvas {
     crop: Option<Rectangle>,
     confirmed: bool,
@@ -225,21 +250,60 @@ impl canvas::Program<Message> for CropCanvas {
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        // R3: draw nothing inside the crop region during capture phase.
+        // R3: during capture (confirmed) draw nothing — chrome lives outside the
+        // crop and the region is cropped before stitching. Selection-phase only.
         if !self.confirmed {
-            if let Some(crop) = self.crop {
-                let stroke = canvas::Stroke::default()
-                    .with_color(Color::WHITE)
-                    .with_width(2.0);
-                frame.stroke_rectangle(
-                    Point::new(crop.x, crop.y),
-                    Size::new(crop.width, crop.height),
-                    stroke,
-                );
+            match self.crop {
+                Some(crop) => {
+                    // Dark mask over everything outside the crop (four bands),
+                    // matching the app's box-shadow dimming.
+                    let mask = token_color(tokens::CROP_MASK);
+                    for (origin, size) in crop_mask_bands(crop, bounds) {
+                        if size.width > 0.0 && size.height > 0.0 {
+                            frame.fill_rectangle(origin, size, mask);
+                        }
+                    }
+
+                    // 1px white halo just outside the border.
+                    let bw = tokens::CROP_BORDER_WIDTH;
+                    let halo = canvas::Stroke::default()
+                        .with_color(token_color(tokens::CROP_BORDER_HALO))
+                        .with_width(1.0);
+                    frame.stroke_rectangle(
+                        Point::new(crop.x - bw, crop.y - bw),
+                        Size::new(crop.width + bw * 2.0, crop.height + bw * 2.0),
+                        halo,
+                    );
+                    // Sky-blue crop border.
+                    let border = canvas::Stroke::default()
+                        .with_color(token_color(tokens::CROP_BORDER))
+                        .with_width(bw);
+                    frame.stroke_rectangle(
+                        Point::new(crop.x, crop.y),
+                        Size::new(crop.width, crop.height),
+                        border,
+                    );
+                }
+                None => {
+                    // Dim the whole layer before a rect is drawn.
+                    frame.fill_rectangle(
+                        Point::ORIGIN,
+                        bounds.size(),
+                        token_color(tokens::CROP_DIM),
+                    );
+                }
+            }
+
+            // Cursor crosshair guides.
+            if let Some(pos) = cursor.position_in(bounds) {
+                let guide = token_color(tokens::CROP_GUIDE);
+                let gw = tokens::CROP_GUIDE_WIDTH;
+                frame.fill_rectangle(Point::new(0.0, pos.y), Size::new(bounds.width, gw), guide);
+                frame.fill_rectangle(Point::new(pos.x, 0.0), Size::new(gw, bounds.height), guide);
             }
         }
 
@@ -554,10 +618,9 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        preview_viewport_size, CHROME_SPACING, PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH, TOOLBAR_H,
-    };
-    use iced::{Rectangle, Size};
+    use super::{crop_mask_bands, preview_viewport_size, token_color, CHROME_SPACING, TOOLBAR_H};
+    use iced::{Point, Rectangle, Size};
+    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
 
     #[test]
     fn preview_viewport_uses_fixed_width_and_bottom_band_height() {
@@ -593,5 +656,38 @@ mod tests {
         // textures flickered / never showed).
         assert_eq!(viewport.width, 200);
         assert_eq!(viewport.height, PREVIEW_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn crop_mask_bands_clamp_crop_to_canvas_bounds() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        let crop = Rectangle {
+            x: -10.0,
+            y: 10.0,
+            width: 70.0,
+            height: 90.0,
+        };
+
+        let bands = crop_mask_bands(crop, bounds);
+
+        assert_eq!(bands[0], (Point::ORIGIN, Size::new(100.0, 10.0)));
+        assert_eq!(bands[1], (Point::new(0.0, 80.0), Size::new(100.0, 0.0)));
+        assert_eq!(bands[2], (Point::new(0.0, 10.0), Size::new(0.0, 70.0)));
+        assert_eq!(bands[3], (Point::new(60.0, 10.0), Size::new(40.0, 70.0)));
+    }
+
+    #[test]
+    fn token_color_preserves_rgba_channels() {
+        let color = token_color(rollshot_overlay_core::tokens::CROP_MASK);
+
+        assert_eq!(color.r, 0.0);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 0.0);
+        assert!((color.a - 0.24).abs() < f32::EPSILON);
     }
 }

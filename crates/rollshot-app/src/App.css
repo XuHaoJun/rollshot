@@ -48,6 +48,15 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --radius: 0.5rem;
+  /* Crop overlay tokens — kept in sync with rollshot_overlay_core::tokens by the
+     sync test in crates/rollshot-app/src-tauri/src/css_token_sync.rs. */
+  --crop-border: #38bdf8;
+  --crop-border-width: 2px;
+  --crop-border-halo: rgba(255, 255, 255, 0.72);
+  --crop-mask: rgba(0, 0, 0, 0.24);
+  --crop-dim: rgba(0, 0, 0, 0.22);
+  --crop-guide: rgba(147, 197, 253, 0.48);
+  --crop-guide-width: 1px;
   color: var(--foreground);
   background: transparent;
   font-family:
@@ -103,7 +112,7 @@ button:not(:disabled),
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--crop-dim);
 }
 
 .selection-layer-has-rect .selection-dim {
@@ -113,29 +122,29 @@ button:not(:disabled),
 .selection-guide {
   position: absolute;
   pointer-events: none;
-  background: rgba(147, 197, 253, 0.48);
+  background: var(--crop-guide);
 }
 
 .selection-guide-x {
   left: 0;
   right: 0;
-  height: 1px;
+  height: var(--crop-guide-width);
 }
 
 .selection-guide-y {
   top: 0;
   bottom: 0;
-  width: 1px;
+  width: var(--crop-guide-width);
 }
 
 .selection-box {
   position: absolute;
   pointer-events: none;
-  border: 2px solid #38bdf8;
+  border: var(--crop-border-width) solid var(--crop-border);
   background: transparent;
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.72),
-    0 0 0 9999px rgba(0, 0, 0, 0.24);
+    0 0 0 1px var(--crop-border-halo),
+    0 0 0 9999px var(--crop-mask);
 }
 
 .capture-mask {
