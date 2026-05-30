@@ -56,6 +56,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Branching
 
+**Before the first commit of a unit of work, check the current branch (`git rev-parse --abbrev-ref HEAD`) and decide where to commit:**
+
+- **On `main` (the default branch):** create a new branch FIRST (`git checkout -b <name>`), THEN commit. NEVER commit work directly on `main` — branch first, even for docs / spec / plan artifacts.
+- **On any non-`main` branch:** do NOT create a new branch. Commit on the current branch.
+
+This applies at every commit point, including superpowers workflow artifacts — e.g. after a spec is approved (commit the spec) and after a plan is written (commit the plan): branch-first-if-on-`main`, otherwise stay on the current branch.
+
 - New branches: use `git checkout -b <name>` in place.
 - Never set up git worktrees unless explicitly asked.
 
