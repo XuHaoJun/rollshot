@@ -36,6 +36,39 @@ describe('capture api wrappers', () => {
     expect(invokeMock).toHaveBeenCalledWith('save_image', { path: '/tmp/out.png' })
   })
 
+  it('runs native capture and returns the done image dto', async () => {
+    const { runNativeCapture } = await import('./capture')
+    invokeMock.mockResolvedValueOnce({
+      image_width: 800,
+      image_height: 1200,
+      output_path: null,
+    })
+
+    await expect(
+      runNativeCapture({ backend: 'auto', fps: 30, show_cursor: false }),
+    ).resolves.toEqual({ image_width: 800, image_height: 1200, output_path: null })
+    expect(invokeMock).toHaveBeenCalledWith('run_native_capture', {
+      options: { backend: 'auto', fps: 30, show_cursor: false },
+    })
+  })
+
+  it('returns null when native capture is cancelled', async () => {
+    const { runNativeCapture } = await import('./capture')
+    invokeMock.mockResolvedValueOnce(null)
+
+    await expect(
+      runNativeCapture({ backend: 'auto', fps: 30, show_cursor: false }),
+    ).resolves.toBeNull()
+  })
+
+  it('reads the native overlay capability flag', async () => {
+    const { usesNativeOverlay } = await import('./capture')
+    invokeMock.mockResolvedValueOnce(true)
+
+    await expect(usesNativeOverlay()).resolves.toBe(true)
+    expect(invokeMock).toHaveBeenCalledWith('uses_native_overlay')
+  })
+
   it('sends stop_stitching and returns done image dto', async () => {
     const { stopStitching } = await import('./capture')
     invokeMock.mockResolvedValueOnce({
