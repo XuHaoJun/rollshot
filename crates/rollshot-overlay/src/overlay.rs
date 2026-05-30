@@ -254,20 +254,21 @@ impl canvas::Program<Message> for CropCanvas {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        // R3: during capture (confirmed) draw nothing — chrome lives outside the
-        // crop and the region is cropped before stitching. Selection-phase only.
-        if !self.confirmed {
-            match self.crop {
-                Some(crop) => {
-                    // Dark mask over everything outside the crop (four bands),
-                    // matching the app's box-shadow dimming.
-                    let mask = token_color(tokens::CROP_MASK);
-                    for (origin, size) in crop_mask_bands(crop, bounds) {
-                        if size.width > 0.0 && size.height > 0.0 {
-                            frame.fill_rectangle(origin, size, mask);
-                        }
+        // R3: during capture (confirmed) draw the dark mask outside the crop so
+        // the selected region stays visually highlighted.  Chrome lives outside
+        // the crop and the region is cropped before stitching.
+        match self.crop {
+            Some(crop) => {
+                // Dark mask over everything outside the crop (four bands),
+                // matching the app's box-shadow dimming.
+                let mask = token_color(tokens::CROP_MASK);
+                for (origin, size) in crop_mask_bands(crop, bounds) {
+                    if size.width > 0.0 && size.height > 0.0 {
+                        frame.fill_rectangle(origin, size, mask);
                     }
+                }
 
+                if !self.confirmed {
                     // 1px white halo just outside the border.
                     let bw = tokens::CROP_BORDER_WIDTH;
                     let halo = canvas::Stroke::default()
@@ -288,7 +289,9 @@ impl canvas::Program<Message> for CropCanvas {
                         border,
                     );
                 }
-                None => {
+            }
+            None => {
+                if !self.confirmed {
                     // Dim the whole layer before a rect is drawn.
                     frame.fill_rectangle(
                         Point::ORIGIN,
@@ -297,7 +300,9 @@ impl canvas::Program<Message> for CropCanvas {
                     );
                 }
             }
+        }
 
+        if !self.confirmed {
             // Cursor crosshair guides.
             if let Some(pos) = cursor.position_in(bounds) {
                 let guide = token_color(tokens::CROP_GUIDE);
