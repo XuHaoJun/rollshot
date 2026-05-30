@@ -5,6 +5,7 @@ members = [
     "crates/rollshot-cli",
     "crates/rollshot-app/src-tauri",
     "crates/rollshot-overlay",
+    "crates/rollshot-overlay-core",
 ]
 resolver = "2"
 
