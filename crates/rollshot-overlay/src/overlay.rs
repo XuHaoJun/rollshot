@@ -19,7 +19,13 @@ use crate::OverlayConfig;
 use crate::OverlayError;
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
-const PREVIEW_WIDTH: u32 = 960;
+// Fixed preview width (matches wayscrollshot's PREVIEW_MAX_WIDTH). Combined with
+// PREVIEW_MAX_HEIGHT this keeps the per-frame preview texture small. iced's
+// layer-shell/wgpu path renders ≤480px previews stably (the Phase 2 spike's
+// 200×200 swatch and the old ≤480 downscale), but ~960×~1380 textures flicker /
+// never composite — so the viewport is bounded to that proven-stable envelope.
+const PREVIEW_WIDTH: u32 = 280;
+const PREVIEW_MAX_HEIGHT: u32 = 480;
 const TOOLBAR_W: f32 = 300.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
@@ -279,42 +285,64 @@ fn place_outside_crop<'a>(
     chrome: Element<'a, Message>,
 ) -> Option<Element<'a, Message>> {
     let band = choose_chrome_band(crop, window)?;
-    let top = crop.y.max(0.0);
-    let bottom = (window.height - (crop.y + crop.height)).max(0.0);
-    let left = crop.x.max(0.0);
-    let right = (window.width - (crop.x + crop.width)).max(0.0);
+    // Anchor the chrome to the crop's near edge so it hugs the crop like a
+    // connected popover, on whichever side `choose_chrome_band` found room.
+    let crop_x = crop.x.max(0.0);
+    let crop_y = crop.y.max(0.0);
 
     let placed: Element<'a, Message> = match band {
-        Band::Top => column![
-            container(chrome)
-                .width(Length::Fill)
-                .height(Length::Fixed(top)),
-            Space::new().width(Length::Fill).height(Length::Fill),
-        ]
-        .into(),
+        // Directly below the crop, left edge aligned to the crop; grows down.
         Band::Bottom => column![
             Space::new()
                 .width(Length::Fill)
                 .height(Length::Fixed(crop.y + crop.height)),
-            container(chrome)
-                .width(Length::Fill)
-                .height(Length::Fixed(bottom)),
+            row![
+                Space::new()
+                    .width(Length::Fixed(crop_x))
+                    .height(Length::Shrink),
+                chrome,
+            ],
         ]
         .into(),
-        Band::Left => row![
-            container(chrome)
-                .width(Length::Fixed(left))
-                .height(Length::Fill),
+        // Directly above the crop, bottom-anchored to the crop's top; grows up.
+        Band::Top => column![
+            container(row![
+                Space::new()
+                    .width(Length::Fixed(crop_x))
+                    .height(Length::Shrink),
+                chrome,
+            ])
+            .width(Length::Fill)
+            .height(Length::Fixed(crop_y))
+            .align_y(iced::Alignment::End),
             Space::new().width(Length::Fill).height(Length::Fill),
         ]
         .into(),
+        // Left of the crop, right edge aligned to the crop's left; top aligned.
+        Band::Left => row![
+            container(column![
+                Space::new()
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(crop_y)),
+                chrome,
+            ])
+            .width(Length::Fixed(crop_x))
+            .height(Length::Fill)
+            .align_x(iced::Alignment::End),
+            Space::new().width(Length::Fill).height(Length::Fill),
+        ]
+        .into(),
+        // Right of the crop, left edge aligned to the crop's right; top aligned.
         Band::Right => row![
             Space::new()
                 .width(Length::Fixed(crop.x + crop.width))
                 .height(Length::Fill),
-            container(chrome)
-                .width(Length::Fixed(right))
-                .height(Length::Fill),
+            column![
+                Space::new()
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(crop_y)),
+                chrome,
+            ],
         ]
         .into(),
     };
@@ -364,21 +392,27 @@ fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, 
 
 fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_capture::Size {
     let band = choose_chrome_band(crop, window);
+    // Space actually available from the crop's anchor edge to the screen edge,
+    // matching where `place_outside_crop` pins the chrome (so the capped preview
+    // never overflows past the screen).
     let (available_width, available_height) = match band {
-        Some(Band::Top) => (window.width, crop.y.max(0.0)),
+        Some(Band::Top) => ((window.width - crop.x.max(0.0)).max(0.0), crop.y.max(0.0)),
         Some(Band::Bottom) => (
-            window.width,
+            (window.width - crop.x.max(0.0)).max(0.0),
             (window.height - (crop.y + crop.height)).max(0.0),
         ),
-        Some(Band::Left) => (crop.x.max(0.0), window.height),
+        Some(Band::Left) => (crop.x.max(0.0), (window.height - crop.y.max(0.0)).max(0.0)),
         Some(Band::Right) => (
             (window.width - (crop.x + crop.width)).max(0.0),
-            window.height,
+            (window.height - crop.y.max(0.0)).max(0.0),
         ),
         None => (PREVIEW_WIDTH as f32, 1.0),
     };
     let width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0) as u32;
-    let height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
+    let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
+    // Cap the height so the texture stays in the proven-stable envelope; a tall
+    // side band would otherwise produce a ~280×1380 preview that flickers.
+    let height = band_height.clamp(1, PREVIEW_MAX_HEIGHT);
 
     rollshot_capture::Size { width, height }
 }
@@ -416,17 +450,15 @@ fn view(state: &Overlay) -> Element<'_, Message> {
             height: 0.0,
         });
         let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
-        let preview_size = preview_viewport_size(crop, window);
 
         let chrome: Element<'_, Message> = if let Some(handle) = &state.preview {
-            column![
-                toolbar,
-                image(handle.clone())
-                    .width(Length::Fixed(preview_size.width as f32))
-                    .height(Length::Fixed(preview_size.height as f32)),
-            ]
-            .spacing(CHROME_SPACING)
-            .into()
+            // The driver builds the handle as a fixed-width, bottom-anchored
+            // viewport that grows up to a cap (driver::preview_viewport_handle),
+            // so rendering it at its natural size makes the preview grow with the
+            // scroll and then follow the bottom once capped.
+            column![toolbar, image(handle.clone())]
+                .spacing(CHROME_SPACING)
+                .into()
         } else {
             toolbar
         };
@@ -522,7 +554,9 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
 #[cfg(test)]
 mod tests {
-    use super::{preview_viewport_size, CHROME_SPACING, PREVIEW_WIDTH, TOOLBAR_H};
+    use super::{
+        preview_viewport_size, CHROME_SPACING, PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH, TOOLBAR_H,
+    };
     use iced::{Rectangle, Size};
 
     #[test]
@@ -553,10 +587,11 @@ mod tests {
 
         let viewport = preview_viewport_size(crop, window);
 
+        // A tall side band offers ~1382px of height, but the preview texture is
+        // capped so the per-frame upload stays small enough to render without
+        // flicker on the iced_layershell/wgpu path (the larger 960×~1380
+        // textures flickered / never showed).
         assert_eq!(viewport.width, 200);
-        assert_eq!(
-            viewport.height,
-            (1440.0 - TOOLBAR_H - CHROME_SPACING) as u32
-        );
+        assert_eq!(viewport.height, PREVIEW_MAX_HEIGHT);
     }
 }

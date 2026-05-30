@@ -145,9 +145,19 @@ impl Driver {
                                 shared.seq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Err(CaptureError::EndOfStream) => break,
-                        Err(CaptureError::Timeout { .. }) => continue,
+                        Err(CaptureError::EndOfStream) => {
+                            eprintln!("[overlay] reader: end of stream");
+                            break;
+                        }
+                        Err(CaptureError::Timeout { .. }) => {
+                            // Instrumentation (temporary): a static screen makes
+                            // PipeWire idle; this is recoverable, the loop keeps
+                            // waiting for the next change.
+                            eprintln!("[overlay] reader: frame timeout (idle, still waiting)");
+                            continue;
+                        }
                         Err(err) => {
+                            eprintln!("[overlay] reader: stopped on error: {err}");
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -209,10 +219,24 @@ impl Driver {
                         }
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
-                        stitcher.push_frame(cropped.image);
+                        let outcome = stitcher.push_frame(cropped.image);
                         if let Some(preview) = stitcher.full_image() {
-                            let handle = preview_viewport_handle(preview, preview_size);
+                            // Instrumentation (temporary): trace why live
+                            // stitching appears to stall on pause / slow scroll —
+                            // Duplicate/NoMatch (no growth) vs Appended.
+                            eprintln!(
+                                "[overlay] stitch: {outcome:?} stitched={}x{}",
+                                preview.width(),
+                                preview.height()
+                            );
+                            let handle = preview_viewport_handle(
+                                preview,
+                                preview_size.width,
+                                preview_size.height,
+                            );
                             let _ = preview_tx.unbounded_send(handle);
+                        } else {
+                            eprintln!("[overlay] stitch: {outcome:?} (no canvas yet)");
                         }
                     }
                 }
@@ -293,43 +317,41 @@ fn wait_for_source_size(
     }
 }
 
-/// Build a wayscrollshot-style preview: scale the stitched image to a fixed
-/// viewport width, then show the bottom of the resulting tall preview inside a
-/// fixed-size viewport.
+/// Build a wayscrollshot-style preview that grows, then follows the bottom.
+///
+/// Scales the stitched image to the fixed `width`, then takes the bottom
+/// `min(scaled_height, max_height)` rows. While the stitch is short the handle
+/// is short (the preview visibly grows with the scroll); once it would exceed
+/// `max_height` the handle stays bounded and tracks the latest (bottom) content.
+/// Keeping the texture ≤ `width × max_height` every frame avoids the
+/// large-texture flicker on the iced_layershell/wgpu path.
 #[allow(dead_code)]
-fn preview_viewport_handle(image: &image::RgbaImage, viewport: Size) -> ImageHandle {
-    let target_width = viewport.width.max(1);
-    let target_height = viewport.height.max(1);
-    let scale = target_width as f32 / image.width().max(1) as f32;
+fn preview_viewport_handle(image: &image::RgbaImage, width: u32, max_height: u32) -> ImageHandle {
+    let width = width.max(1);
+    let max_height = max_height.max(1);
+    let scale = width as f32 / image.width().max(1) as f32;
     let scaled_height = ((image.height() as f32 * scale).round() as u32).max(1);
-    let scaled = if image.width() == target_width && image.height() == scaled_height {
+    let scaled = if image.width() == width && image.height() == scaled_height {
         image.clone()
     } else {
         image::imageops::resize(
             image,
-            target_width,
+            width,
             scaled_height,
             image::imageops::FilterType::Triangle,
         )
     };
-    let src_y = scaled.height().saturating_sub(target_height);
-    let src_height = scaled.height().min(target_height);
-    let crop = image::imageops::crop_imm(&scaled, 0, src_y, target_width, src_height).to_image();
-    let mut viewport_image =
-        image::RgbaImage::from_pixel(target_width, target_height, image::Rgba([0, 0, 0, 0]));
-    image::imageops::replace(&mut viewport_image, &crop, 0, 0);
-    ImageHandle::from_rgba(
-        viewport_image.width(),
-        viewport_image.height(),
-        viewport_image.into_raw(),
-    )
+    let out_height = scaled.height().min(max_height);
+    let src_y = scaled.height() - out_height;
+    let crop = image::imageops::crop_imm(&scaled, 0, src_y, width, out_height).to_image();
+    ImageHandle::from_rgba(crop.width(), crop.height(), crop.into_raw())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{overlay_stitch_config, preview_viewport_handle, stitch_stream};
     use image::{Rgba, RgbaImage};
-    use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region, Size};
+    use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -376,19 +398,16 @@ mod tests {
     }
 
     #[test]
-    fn preview_viewport_handle_uses_fixed_viewport_size() {
+    fn preview_viewport_handle_grows_to_content_below_cap() {
+        // Stitch shorter than the cap: the handle is the scaled content height,
+        // not padded up to the cap — so the preview visibly grows with scroll.
         let image = RgbaImage::from_pixel(1920, 1080, Rgba([12, 34, 56, 255]));
 
-        let handle = preview_viewport_handle(
-            &image,
-            Size {
-                width: 960,
-                height: 540,
-            },
-        );
+        let handle = preview_viewport_handle(&image, 960, 2_000);
 
         match handle {
             iced::widget::image::Handle::Rgba { width, height, .. } => {
+                // 1920->960 halves width; 1080->540 < 2000 cap, so no clamp.
                 assert_eq!((width, height), (960, 540));
             }
             _ => panic!("preview handle should use raw RGBA pixels"),
@@ -396,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_viewport_handle_keeps_width_fixed_for_tall_canvas() {
+    fn preview_viewport_handle_caps_and_follows_bottom_for_tall_canvas() {
         let mut image = RgbaImage::new(960, 6_000);
         for y in 0..image.height() {
             for x in 0..image.width() {
@@ -404,13 +423,7 @@ mod tests {
             }
         }
 
-        let handle = preview_viewport_handle(
-            &image,
-            Size {
-                width: 960,
-                height: 540,
-            },
-        );
+        let handle = preview_viewport_handle(&image, 960, 540);
 
         match handle {
             iced::widget::image::Handle::Rgba {
@@ -419,6 +432,8 @@ mod tests {
                 pixels,
                 ..
             } => {
+                // Capped at 540 tall, showing the bottom: the first row is row
+                // (6000 - 540) of the source, not row 0.
                 assert_eq!((width, height), (960, 540));
                 assert_eq!(&pixels[..4], &[((6_000 - 540) % 251) as u8, 0, 99, 255]);
             }
