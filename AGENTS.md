@@ -182,6 +182,29 @@ to the plan being worked on — that plan is the source of truth for the
 duration of the workflow. The plan becomes a frozen snapshot only after the
 workflow completes and the branch lands.
 
+## 11. Spec/Plan Process — Default Flow and Lightweight Escape
+
+The default for creative/implementation work is the full superpowers flow:
+brainstorm → spec → approval → writing-plans → execute. The native superpowers
+skills require this even for tasks that look simple (their HARD-GATE and the
+"This Is Too Simple To Need A Design" anti-pattern), allowing only a *short*
+design — never skipping it.
+
+**Lightweight escape (user-initiated).** This instruction overrides that gate
+(superpowers' own Instruction Priority puts user instructions above skills).
+When the user explicitly says to skip the spec/plan and implement directly
+(e.g. "just do it", "skip the spec", "no plan needed", "直接做"), go straight to
+implementation — no design doc, no plan file.
+
+- You may NOT decide on your own that a task is "too simple" to spec — the skip
+  is the user's call.
+- When you judge a task trivial (e.g. a single-file change with no design
+  choices), you MAY proactively *suggest* skipping the spec/plan and wait for
+  the user's go-ahead — but default to the normal flow until they agree.
+- Skipping the spec/plan does NOT skip engineering discipline: still apply §1
+  (surface assumptions, ask when unclear), §4 (goal-driven / TDD), §5
+  (branching), and §7 (verification).
+
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
