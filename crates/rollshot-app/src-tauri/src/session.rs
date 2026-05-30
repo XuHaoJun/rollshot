@@ -230,6 +230,18 @@ impl AppSession {
         Ok(done)
     }
 
+    fn set_final_image(&mut self, image: RgbaImage, stats: StitchStats) -> DoneImageDto {
+        let done = DoneImageDto {
+            image_width: image.width(),
+            image_height: image.height(),
+            output_path: self.output_path.clone(),
+        };
+        self.final_image = Some(image);
+        self.stitch_stats = StitchStatsDto::from(stats);
+        self.error = None;
+        done
+    }
+
     fn save_image(&mut self, path: &Path) -> Result<DoneImageDto, String> {
         let image = self
             .final_image
@@ -597,6 +609,18 @@ impl SharedSession {
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
         inner.save_image(path)
+    }
+
+    pub fn store_capture_result(
+        &self,
+        image: RgbaImage,
+        stats: StitchStats,
+    ) -> Result<DoneImageDto, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        Ok(inner.set_final_image(image, stats))
     }
 
     pub fn final_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
@@ -979,6 +1003,61 @@ mod tests {
         let decoded = image::open(&output).expect("decode saved png");
         assert_eq!(decoded.width(), 80);
         let _ = std::fs::remove_dir_all(&tempdir);
+    }
+
+    #[test]
+    fn store_capture_result_sets_done_image() {
+        use rollshot_core::StitchStats;
+
+        let session = SharedSession::new();
+        let image = RgbaImage::from_pixel(40, 90, Rgba([1, 2, 3, 255]));
+
+        let done = session
+            .store_capture_result(image, StitchStats::default())
+            .expect("store capture result");
+
+        assert_eq!(done.image_width, 40);
+        assert_eq!(done.image_height, 90);
+        assert_eq!(done.output_path, None);
+
+        match session.status().expect("status") {
+            SessionStatus::Done {
+                image_width,
+                image_height,
+                output_path,
+            } => {
+                assert_eq!(image_width, 40);
+                assert_eq!(image_height, 90);
+                assert_eq!(output_path, None);
+            }
+            other => panic!("expected done status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_capture_result_then_save_writes_png() {
+        use rollshot_core::StitchStats;
+
+        let dir = std::env::temp_dir()
+            .join(format!("rollshot-native-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let out = dir.join("native.png");
+
+        let session = SharedSession::new();
+        session
+            .store_capture_result(
+                RgbaImage::from_pixel(60, 120, Rgba([9, 9, 9, 255])),
+                StitchStats::default(),
+            )
+            .expect("store capture result");
+
+        let saved = session.save_image(&out).expect("save png");
+
+        assert_eq!(saved.output_path, Some(out.to_string_lossy().to_string()));
+        let decoded = image::open(&out).expect("decode saved png");
+        assert_eq!(decoded.width(), 60);
+        assert_eq!(decoded.height(), 120);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
