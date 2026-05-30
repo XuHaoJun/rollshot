@@ -17,15 +17,9 @@ use crate::driver::Driver;
 use crate::CaptureResult;
 use crate::OverlayConfig;
 use crate::OverlayError;
+use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
-// Fixed preview width (matches wayscrollshot's PREVIEW_MAX_WIDTH). Combined with
-// PREVIEW_MAX_HEIGHT this keeps the per-frame preview texture small. iced's
-// layer-shell/wgpu path renders ≤480px previews stably (the Phase 2 spike's
-// 200×200 swatch and the old ≤480 downscale), but ~960×~1380 textures flicker /
-// never composite — so the viewport is bounded to that proven-stable envelope.
-const PREVIEW_WIDTH: u32 = 280;
-const PREVIEW_MAX_HEIGHT: u32 = 480;
 const TOOLBAR_W: f32 = 300.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
@@ -554,10 +548,9 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        preview_viewport_size, CHROME_SPACING, PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH, TOOLBAR_H,
-    };
+    use super::{preview_viewport_size, CHROME_SPACING, TOOLBAR_H};
     use iced::{Rectangle, Size};
+    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
 
     #[test]
     fn preview_viewport_uses_fixed_width_and_bottom_band_height() {

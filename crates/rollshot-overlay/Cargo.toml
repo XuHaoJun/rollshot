@@ -8,6 +8,7 @@ publish = false
 image = { version = "0.25", features = ["png"] }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-core = { path = "../rollshot-core" }
+rollshot-overlay-core = { path = "../rollshot-overlay-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 iced = { version = "0.14", features = ["canvas", "image"] }
