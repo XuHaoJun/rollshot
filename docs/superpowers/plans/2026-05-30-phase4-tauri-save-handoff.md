@@ -36,6 +36,22 @@ Two small, deliberate refinements to the spec's P4.3 / P4.5 wording, made for co
 
 All shell commands are prefixed with `rtk` per the repo convention.
 
+## Plan-review refinements applied
+
+The `plan-eng-review` pass kept the original scope, then applied three
+correctness/test refinements directly to this plan:
+
+- **Native overlay thread failures are explicit:** Task 3 now joins the overlay
+  thread on every outcome path and includes a unit test for a panicking overlay
+  worker, avoiding an unjoined thread plus vague `oneshot` close error.
+- **Shared save helper is directly tested:** Task 6 now creates
+  `src/api/save.test.ts` before `src/api/save.ts`, covering selected path,
+  cancelled dialog, and save failure propagation instead of relying only on the
+  `CaptureOverlay` regression tests.
+- **Hidden-window native failures are visible:** Task 7 now shows a Tauri error
+  dialog before closing when native capture fails, because the Linux host window
+  is intentionally hidden and a DOM-only error message would be silent.
+
 ---
 
 ## Task 1: Add the `rollshot-overlay` dependency to the Tauri app
@@ -208,11 +224,14 @@ Create `crates/rollshot-app/src-tauri/src/native_capture.rs`:
 
 ```rust
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use rollshot_capture::InteractiveLaunchOptions;
-use rollshot_overlay::{run_overlay, OverlayConfig};
+use rollshot_overlay::{run_overlay, CaptureResult, OverlayConfig, OverlayError};
 
 use crate::session::{DoneImageDto, SharedSession};
+
+type OverlayOutcome = Result<Option<CaptureResult>, OverlayError>;
 
 /// Minimum capture fps for the native overlay path. The live stitcher is
 /// throughput-sensitive: in a debug build, lower fps lets fast scrolling outrun
@@ -239,6 +258,36 @@ pub fn uses_native_overlay() -> bool {
     cfg!(target_os = "linux")
 }
 
+async fn wait_for_overlay_thread(
+    handle: JoinHandle<()>,
+    rx: tokio::sync::oneshot::Receiver<OverlayOutcome>,
+) -> Result<OverlayOutcome, String> {
+    let outcome = rx
+        .await
+        .map_err(|_| "native overlay thread ended without a result".to_string());
+
+    let join_result = handle.join();
+    if join_result.is_err() {
+        return Err("native overlay thread panicked".to_string());
+    }
+
+    outcome
+}
+
+fn store_overlay_outcome(
+    session: &SharedSession,
+    outcome: OverlayOutcome,
+) -> Result<Option<DoneImageDto>, String> {
+    match outcome {
+        Ok(Some(result)) => {
+            let done = session.store_capture_result(result.image, result.stats)?;
+            Ok(Some(done))
+        }
+        Ok(None) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 /// Linux save handoff (Phase 4): run the native layer-shell overlay to capture
 /// + stitch, then store the finalized image as the session's final image so the
 /// existing save flow can write it. `run_overlay` blocks its thread for the
@@ -259,28 +308,23 @@ pub async fn run_native_capture(
         let _ = tx.send(run_overlay(config));
     });
 
-    let outcome = rx
-        .await
-        .map_err(|_| "native overlay thread ended without a result".to_string())?;
-
-    // The overlay returned, so the thread is finishing; join it so the host
+    // The overlay returned or the worker failed; join either way so the host
     // never orphans it (roadmap Phase 4 thread-cleanup item).
-    let _ = handle.join();
-
-    match outcome {
-        Ok(Some(result)) => {
-            let done = session.store_capture_result(result.image, result.stats)?;
-            Ok(Some(done))
-        }
-        Ok(None) => Ok(None),
-        Err(err) => Err(err.to_string()),
-    }
+    let outcome = wait_for_overlay_thread(handle, rx).await?;
+    store_overlay_outcome(&session, outcome)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_config, uses_native_overlay};
+    use super::{
+        overlay_config, store_overlay_outcome, uses_native_overlay, wait_for_overlay_thread,
+    };
+    use image::{Rgba, RgbaImage};
     use rollshot_capture::InteractiveLaunchOptions;
+    use rollshot_core::StitchStats;
+    use rollshot_overlay::{CaptureResult, OverlayError};
+
+    use crate::session::SharedSession;
 
     #[test]
     fn overlay_config_floors_fps_at_30() {
@@ -309,6 +353,56 @@ mod tests {
     #[test]
     fn uses_native_overlay_matches_target_os() {
         assert_eq!(uses_native_overlay(), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn store_overlay_outcome_stores_finished_capture() {
+        let session = SharedSession::new();
+        let done = store_overlay_outcome(
+            &session,
+            Ok(Some(CaptureResult {
+                image: RgbaImage::from_pixel(20, 30, Rgba([4, 5, 6, 255])),
+                stats: StitchStats::default(),
+            })),
+        )
+        .expect("store outcome")
+        .expect("finished capture");
+
+        assert_eq!(done.image_width, 20);
+        assert_eq!(done.image_height, 30);
+    }
+
+    #[test]
+    fn store_overlay_outcome_preserves_cancel() {
+        let session = SharedSession::new();
+        let done = store_overlay_outcome(&session, Ok(None)).expect("cancel outcome");
+        assert_eq!(done, None);
+    }
+
+    #[test]
+    fn store_overlay_outcome_maps_overlay_error() {
+        let session = SharedSession::new();
+        let err = store_overlay_outcome(&session, Err(OverlayError::Overlay("boom".to_string())))
+            .expect_err("overlay error");
+        assert!(err.contains("overlay error: boom"), "err = {err}");
+    }
+
+    #[test]
+    fn wait_for_overlay_thread_reports_panic() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<super::OverlayOutcome>();
+        let handle = std::thread::spawn(move || {
+            drop(tx);
+            panic!("overlay panic for test");
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let err = runtime
+            .block_on(wait_for_overlay_thread(handle, rx))
+            .expect_err("panic should be reported");
+
+        assert!(err.contains("panicked"), "err = {err}");
     }
 }
 ```
@@ -344,7 +438,7 @@ In `crates/rollshot-app/src-tauri/src/lib.rs`, add the new commands to `tauri::g
 - [ ] **Step 4: Verify it builds and the module's unit tests pass**
 
 Run: `rtk cargo build -p rollshot-app && rtk cargo test -p rollshot-app native_capture`
-Expected: builds with no warnings; `overlay_config_floors_fps_at_30`, `overlay_config_keeps_higher_fps`, `uses_native_overlay_matches_target_os` PASS.
+Expected: builds with no warnings; the `overlay_config_*`, `uses_native_overlay_matches_target_os`, `store_overlay_outcome_*`, and `wait_for_overlay_thread_reports_panic` tests PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -514,9 +608,79 @@ rtk git commit -m "feat(app): add runNativeCapture and usesNativeOverlay api wra
 
 **Files:**
 - Create: `crates/rollshot-app/src/api/save.ts`
+- Create: `crates/rollshot-app/src/api/save.test.ts`
 - Modify: `crates/rollshot-app/src/components/CaptureOverlay.tsx:1-2,166-183`
 
-- [ ] **Step 1: Create the shared save helper**
+- [ ] **Step 1: Write the failing save-helper tests**
+
+Create `crates/rollshot-app/src/api/save.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const dialog = vi.hoisted(() => ({
+  save: vi.fn(),
+}))
+const capture = vi.hoisted(() => ({
+  saveImage: vi.fn(),
+}))
+
+vi.mock('@tauri-apps/plugin-dialog', () => dialog)
+vi.mock('./capture', () => capture)
+
+describe('promptSaveStitchedPng', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('writes the selected path and reports the saved output', async () => {
+    const { promptSaveStitchedPng } = await import('./save')
+    const onMessage = vi.fn()
+    dialog.save.mockResolvedValueOnce('/tmp/rollshot.png')
+    capture.saveImage.mockResolvedValueOnce({
+      image_width: 100,
+      image_height: 400,
+      output_path: '/tmp/rollshot.png',
+    })
+
+    await promptSaveStitchedPng(onMessage)
+
+    expect(dialog.save).toHaveBeenCalledWith({
+      title: 'Save stitched PNG',
+      defaultPath: 'rollshot.png',
+      filters: [{ name: 'PNG image', extensions: ['png'] }],
+    })
+    expect(capture.saveImage).toHaveBeenCalledWith('/tmp/rollshot.png')
+    expect(onMessage).toHaveBeenCalledWith('Saved /tmp/rollshot.png')
+  })
+
+  it('does not write when the save dialog is cancelled', async () => {
+    const { promptSaveStitchedPng } = await import('./save')
+    const onMessage = vi.fn()
+    dialog.save.mockResolvedValueOnce(null)
+
+    await promptSaveStitchedPng(onMessage)
+
+    expect(capture.saveImage).not.toHaveBeenCalled()
+    expect(onMessage).not.toHaveBeenCalled()
+  })
+
+  it('propagates save failures', async () => {
+    const { promptSaveStitchedPng } = await import('./save')
+    dialog.save.mockResolvedValueOnce('/tmp/rollshot.png')
+    capture.saveImage.mockRejectedValueOnce(new Error('disk full'))
+
+    await expect(promptSaveStitchedPng()).rejects.toThrow('disk full')
+  })
+})
+```
+
+- [ ] **Step 2: Run the save-helper tests to verify they fail**
+
+Run: `rtk pnpm --dir crates/rollshot-app test -- --run src/api/save.test.ts`
+Expected: FAIL — `./save` does not exist.
+
+- [ ] **Step 3: Create the shared save helper**
 
 Create `crates/rollshot-app/src/api/save.ts`:
 
@@ -546,9 +710,14 @@ export async function promptSaveStitchedPng(
 }
 ```
 
-- [ ] **Step 2: Refactor `CaptureOverlay.saveCurrentImage` to use the helper**
+- [ ] **Step 4: Run the save-helper tests to verify they pass**
 
-In `crates/rollshot-app/src/components/CaptureOverlay.tsx`, remove the `save` import from `@tauri-apps/plugin-dialog` (`CaptureOverlay.tsx:2`) and add the helper import alongside the other local imports (near `CaptureOverlay.tsx:20-25`):
+Run: `rtk pnpm --dir crates/rollshot-app test -- --run src/api/save.test.ts`
+Expected: PASS — selected path, cancelled dialog, and save failure propagation are covered.
+
+- [ ] **Step 5: Refactor `CaptureOverlay.saveCurrentImage` to use the helper**
+
+In `crates/rollshot-app/src/components/CaptureOverlay.tsx`, remove the `save` import from `@tauri-apps/plugin-dialog` (`CaptureOverlay.tsx:2`), remove `saveImage` from the `../api/capture` import list, and add the helper import alongside the other local imports (near `CaptureOverlay.tsx:20-25`):
 
 ```ts
 import { promptSaveStitchedPng } from '../api/save'
@@ -571,15 +740,16 @@ Then replace `saveCurrentImage` (`CaptureOverlay.tsx:166-183`) with:
 
 (Behavior is unchanged: the dialog config and `saveImage` call now live in the helper; `setMessage` still receives the saved/`error` message; `closeAfter` still triggers `closeOverlay`.)
 
-- [ ] **Step 3: Run the existing CaptureOverlay tests to verify no regression**
+- [ ] **Step 6: Run the existing CaptureOverlay tests to verify no regression**
 
 Run: `rtk pnpm --dir crates/rollshot-app test -- --run src/components/CaptureOverlay.test.tsx`
 Expected: PASS — the existing tests (`finishes stitching and opens the save dialog on Escape`, `closes after Escape when the save dialog is cancelled`, etc.) still pass because the helper calls the same mocked `save()` + `saveImage()`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-rtk git add crates/rollshot-app/src/api/save.ts crates/rollshot-app/src/components/CaptureOverlay.tsx
+rtk git add crates/rollshot-app/src/api/save.ts crates/rollshot-app/src/api/save.test.ts \
+            crates/rollshot-app/src/components/CaptureOverlay.tsx
 rtk git commit -m "refactor(app): extract shared promptSaveStitchedPng save helper"
 ```
 
@@ -608,12 +778,16 @@ const api = vi.hoisted(() => ({
 const saveApi = vi.hoisted(() => ({
   promptSaveStitchedPng: vi.fn(),
 }))
+const dialog = vi.hoisted(() => ({
+  message: vi.fn(),
+}))
 const win = vi.hoisted(() => ({
   close: vi.fn(),
 }))
 
 vi.mock('../api/capture', () => api)
 vi.mock('../api/save', () => saveApi)
+vi.mock('@tauri-apps/plugin-dialog', () => dialog)
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ close: win.close }),
 }))
@@ -642,6 +816,7 @@ describe('NativeCaptureFlow', () => {
     root = createRoot(container)
     api.launchOptions.mockResolvedValue({ backend: 'auto', fps: 30, show_cursor: false })
     saveApi.promptSaveStitchedPng.mockResolvedValue(undefined)
+    dialog.message.mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -682,7 +857,7 @@ describe('NativeCaptureFlow', () => {
     expect(win.close).toHaveBeenCalledTimes(1)
   })
 
-  it('closes the window when capture fails', async () => {
+  it('shows an error dialog and closes the window when capture fails', async () => {
     api.runNativeCapture.mockRejectedValue(new Error('portal denied'))
 
     await act(async () => {
@@ -691,6 +866,10 @@ describe('NativeCaptureFlow', () => {
     await flush()
 
     expect(saveApi.promptSaveStitchedPng).not.toHaveBeenCalled()
+    expect(dialog.message).toHaveBeenCalledWith('Error: portal denied', {
+      title: 'Rollshot capture failed',
+      kind: 'error',
+    })
     expect(win.close).toHaveBeenCalledTimes(1)
   })
 })
@@ -708,6 +887,7 @@ Create `crates/rollshot-app/src/components/NativeCaptureFlow.tsx`:
 ```tsx
 import { useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { message as showMessage } from '@tauri-apps/plugin-dialog'
 import { launchOptions, runNativeCapture } from '../api/capture'
 import { promptSaveStitchedPng } from '../api/save'
 
@@ -738,7 +918,17 @@ export function NativeCaptureFlow() {
           await promptSaveStitchedPng(setMessage)
         }
       } catch (error) {
-        setMessage(String(error))
+        const errorMessage = String(error)
+        setMessage(errorMessage)
+        try {
+          await showMessage(errorMessage, {
+            title: 'Rollshot capture failed',
+            kind: 'error',
+          })
+        } catch {
+          // The native capture already failed; still close the hidden host
+          // window if the best-effort error dialog cannot be shown.
+        }
       } finally {
         await getCurrentWindow().close()
       }
@@ -982,6 +1172,161 @@ Verify: pressing Esc before confirming a crop exits without a save dialog and le
 - [ ] **Step 5: Record results**
 
 Update the Phase 4 status note in `docs/linux-wayland-layer-shell-roadmap.md` with the runtime outcomes (PASS/FAIL + any blocker). R5/R7 multi-output, R4 fractional scaling, and the live-stitch stall remain the deferred follow-ups named in the spec's Non-Goals.
+
+---
+
+## Plan Review Output
+
+### Step 0: Scope Challenge
+
+- **Goal alignment:** all tasks contribute to the Linux native-overlay
+  capture-to-save handoff. Task 10 is acceptance/documentation, not runtime
+  implementation, but it closes the roadmap feedback loop for behavior that
+  cannot run in CI.
+- **Existing code reused:** the plan reuses `run_overlay`, `save_image`,
+  `SharedSession`, existing `DoneImageDto` / `InteractiveLaunchOptions`, and
+  the current Tauri dialog plugin instead of rebuilding capture or save paths.
+- **Minimum viable subset:** Tasks 1-8 are required for automated end-to-end
+  behavior; Task 9 is required verification; Task 10 can land as a follow-up
+  only if the branch is clearly marked "not runtime-accepted on KDE Wayland".
+- **Complexity check:** 10 tasks, 6 create / 7 modify after review edits, no
+  new top-level crate/module. This is below the stop-and-reduce threshold.
+- **Search check:** Tauri v2 documents async commands as the right place for
+  heavier work and requires all commands in one `generate_handler!`; the dialog
+  plugin supports the planned `save()` options and `message()` error dialog;
+  Tokio guidance still treats blocking waits inside async code as a footgun,
+  so the plan keeps `run_overlay` on a dedicated thread and only joins after
+  the worker has returned or failed.
+- **Completeness check:** direct save-helper tests and native failure dialog
+  coverage were added because they cost little and prevent silent failure.
+- **Distribution check:** no new distributable artifact is introduced. Existing
+  app build commands remain the distribution path.
+
+### What already exists
+
+- `crates/rollshot-overlay::run_overlay(OverlayConfig)` already owns the native
+  Linux layer-shell capture UI and returns `Ok(Some(CaptureResult))`,
+  `Ok(None)`, or `Err`; Task 3 reuses it.
+- `SharedSession::save_image(&Path)` already writes the final PNG and returns
+  `DoneImageDto`; Tasks 2, 3, 6, and 7 reuse that path.
+- `CaptureOverlay` already performs the webview save dialog flow; Task 6
+  extracts that behavior instead of duplicating it.
+- `launchOptions()` and `InteractiveLaunchOptions` already carry backend/fps/
+  cursor settings; Task 3 floors fps only for the native overlay config.
+- `tauri.conf.json` already keeps the app window hidden with `visible:false`;
+  Task 4 preserves that on Linux and only gates non-Linux webview setup.
+
+### NOT in scope
+
+- Multi-output and monitor targeting (R5/R7): still a named follow-up because
+  this plan completes one-display capture-to-save.
+- Fractional scaling fixes (R4): not changed because this plan does not alter
+  coordinate conversion internals.
+- Live-stitch stall tuning beyond the 30 fps floor: deferred because the goal is
+  Tauri handoff, not matcher/canvas performance work.
+- New installer/release workflow: not introduced because this reuses the
+  existing Tauri app artifact.
+- Reworking the webview capture path: out of scope except for extracting the
+  shared save helper.
+
+### Test coverage table
+
+```
+Task / behavior                                           Unit  Integ  E2E / smoke  Manual only
+--------------------------------------------------------  ----  -----  -----------  -----------
+Task 1 / rollshot-overlay dependency resolves             -     yes    -            no
+Task 2 / store_capture_result sets Done image              yes   -      -            no
+Task 2 / stored native result can be saved as PNG          yes   yes    -            no
+Task 3 / native overlay fps floor                          yes   -      -            no
+Task 3 / native overlay capability flag                    yes   -      -            no
+Task 3 / overlay outcome stores/cancels/errors             yes   -      -            no
+Task 3 / overlay worker panic is reported after join       yes   -      -            no
+Task 4 / Linux host-window setup builds and tests pass     -     yes    -            no
+Task 5 / runNativeCapture and usesNativeOverlay wrappers   yes   -      -            no
+Task 6 / promptSaveStitchedPng selected/cancel/error       yes   -      -            no
+Task 6 / CaptureOverlay save behavior is unchanged         yes   -      -            no
+Task 7 / NativeCaptureFlow finish/cancel/error branches    yes   -      -            no
+Task 8 / App native/webview/fallback branch                yes   -      -            no
+Task 9 / workspace Rust + frontend verification gates      -     yes    yes          no
+Task 10 / KDE 6 Wayland layer-shell/save acceptance        -     -      yes          yes
+```
+
+### Failure modes
+
+| Codepath | Realistic failure | Test coverage | Error handling | User-visible result |
+|---|---|---|---|---|
+| `run_native_capture` thread | overlay worker panics before sending | Task 3 / `wait_for_overlay_thread_reports_panic` | `wait_for_overlay_thread` joins and returns `Err("...panicked")` | Task 7 shows error dialog |
+| `run_native_capture` overlay | portal denied / backend error | Task 3 / `store_overlay_outcome_maps_overlay_error` | `store_overlay_outcome` maps `OverlayError` to `Err(String)` | Task 7 shows error dialog |
+| `run_native_capture` cancel | user cancels before finish | Task 3 / `store_overlay_outcome_preserves_cancel`, Task 7 cancel test | `Ok(None)` is preserved | window closes without save dialog |
+| `store_capture_result` | session mutex poisoned | Existing `Result<_, String>` pattern, Task 2 exercises success path | returns `"session lock poisoned"` | Task 7 would show error dialog if surfaced |
+| `promptSaveStitchedPng` | user cancels save dialog | Task 6 / cancelled dialog test | no `save_image` call | no write, flow continues/close per caller |
+| `promptSaveStitchedPng` | disk/path save failure | Task 6 / save failure test | rejection propagates to caller | CaptureOverlay message or NativeCaptureFlow error dialog |
+| `App` backend flag query | IPC command fails | Task 8 / fallback test | fallback to webview path | still captures through existing UI |
+| Hidden Linux host window | save/error dialog may not appear under compositor | Task 10 manual acceptance | manual verification records blocker | explicit PASS/FAIL in roadmap note |
+
+No critical silent gap remains after the Task 7 error-dialog refinement.
+
+### Worktree / subagent parallelization strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| Task 1 | `crates/rollshot-app/src-tauri/` | - |
+| Task 2 | `crates/rollshot-app/src-tauri/src/session.rs` | - |
+| Task 3 | `crates/rollshot-app/src-tauri/src/` | Task 1, Task 2 |
+| Task 4 | `crates/rollshot-app/src-tauri/src/` | Task 3 |
+| Task 5 | `crates/rollshot-app/src/api/` | Task 3 |
+| Task 6 | `crates/rollshot-app/src/api/`, `crates/rollshot-app/src/components/` | Task 5 |
+| Task 7 | `crates/rollshot-app/src/components/` | Task 5, Task 6 |
+| Task 8 | `crates/rollshot-app/src/` | Task 5, Task 7 |
+| Task 9 | workspace root / app | Tasks 1-8 |
+| Task 10 | `docs/` | Task 9 plus KDE runtime access |
+
+Parallel lanes:
+
+- Lane A: Task 1 -> Task 3 -> Task 4 (Rust/Tauri command path).
+- Lane B: Task 2 (session handoff), then merge before Task 3.
+- Lane C: Task 5 -> Task 6 -> Task 7 -> Task 8 (frontend path, after Task 3
+  defines command names but can draft tests in parallel with Lane A).
+- Lane D: Task 10 after Task 9 (manual runtime acceptance).
+
+Execution order: launch Task 1 and Task 2 in parallel; merge both; run Task 3
+and Task 4 sequentially; frontend Tasks 5-8 can proceed after Task 3's command
+contract is stable; Task 9 serializes final verification; Task 10 is manual.
+
+Conflict flags: Tasks 3 and 4 both touch `crates/rollshot-app/src-tauri/src/lib.rs`;
+keep them sequential. Tasks 6 and 7 both touch frontend test mocks around the
+dialog plugin; keep their final integration sequential.
+
+### Completion summary
+
+```
+Plan reviewed:           docs/superpowers/plans/2026-05-30-phase4-tauri-save-handoff.md
+Tasks in plan:           10
+Files Create/Modify:     6 create / 7 modify
+
+- Step 0: Scope Challenge   - accepted as-is; no scope reduction
+- Architecture Review:      2 issues auto-applied (thread failure join, visible error dialog)
+- Plan Structure + Code Q:  1 issue auto-applied (Task 6 TDD/direct helper tests)
+- Test Review:              table produced, 3 gaps closed
+- Performance Review:       1 issue auto-applied (avoid blocking async runtime with run_overlay)
+- NOT in scope:             written
+- What already exists:      written
+- Failure modes:            0 critical gaps after edits
+- Parallelization:          4 lanes, 2 early parallel / later sequential gates
+- Unresolved decisions:     0 (recommended options auto-applied per user request)
+```
+
+Plan is locked in for review by the user. After approval, execute with
+`superpowers:subagent-driven-development` or `superpowers:executing-plans`.
+
+Search sources used in review:
+
+- Tauri v2 "Calling Rust from the Frontend":
+  https://v2.tauri.app/develop/calling-rust/
+- Tauri v2 dialog plugin reference:
+  https://v2.tauri.app/reference/javascript/dialog/
+- Tokio channel guidance:
+  https://tokio.rs/tokio/tutorial/channels
 
 ---
 
