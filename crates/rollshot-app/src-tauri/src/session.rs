@@ -470,11 +470,10 @@ impl SharedSession {
         inner.confirm_region(region)
     }
 
-    pub fn stitch_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
+    pub fn stitch_preview_png(&self) -> Result<Option<Vec<u8>>, String> {
         // The live stitch preview uses the shared fixed grow-then-follow viewport
-        // (consistent with the native overlay), so the caller's max_edge no
-        // longer applies here.
-        let _ = max_edge;
+        // (consistent with the native overlay): a fixed-width strip that grows,
+        // then follows the bottom of the stitch.
         let image = {
             let mut inner = self
                 .inner
@@ -770,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn stitch_preview_png_uses_shared_viewport_and_ignores_max_edge() {
+    fn stitch_preview_png_uses_shared_viewport() {
         let session = SharedSession::new();
         {
             let mut inner = session.inner.lock().expect("session lock");
@@ -790,16 +789,20 @@ mod tests {
         }
 
         let bytes = session
-            .stitch_preview_png(128)
+            .stitch_preview_png()
             .expect("encode stitch preview")
             .expect("preview exists");
         let image = image::load_from_memory(&bytes).expect("decode png");
 
+        // A fixed PREVIEW_WIDTH (not a max-edge downscale) proves the shared
+        // viewport is used.
         assert_eq!(image.width(), PREVIEW_WIDTH);
-        assert_eq!(
-            image.height(),
-            (600 * PREVIEW_WIDTH / 960).min(PREVIEW_MAX_HEIGHT)
-        );
+        // Mirror preview_viewport's float-rounded scaling (not integer division)
+        // so this expectation can't drift from production rounding if the
+        // constants change.
+        let scale = PREVIEW_WIDTH as f32 / 960.0;
+        let expected_height = ((600.0 * scale).round() as u32).min(PREVIEW_MAX_HEIGHT);
+        assert_eq!(image.height(), expected_height);
     }
 
     #[test]

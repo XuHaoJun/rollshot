@@ -96,7 +96,7 @@ export function CaptureOverlay() {
         const nextStatus = await sessionStatus()
         setStatus(nextStatus)
         if (nextStatus.state === 'stitching') {
-          const blob = await getStitchPreview(700)
+          const blob = await getStitchPreview()
           if (blob) {
             const nextUrl = URL.createObjectURL(blob)
             setStitchPreviewUrl((oldUrl) => {
