@@ -17,6 +17,10 @@
 - `rollshot-core` is NOT touched (it stays stitching-only).
 - Only the **live** preview path changes in the app (`stitch_preview_png`); `latest_preview_png` and `final_preview_png` keep their whole-image downscale.
 - Frequent commits — one per task.
+- Every task must leave the workspace buildable. Do not land a workspace member
+  that exports missing modules or requires a later task to compile.
+- Tests come before the implementation they validate unless the task is
+  manifest-only wiring.
 
 ## File Structure
 
@@ -72,13 +76,10 @@ workspace = true
 //! overlay (`rollshot-app`) and the native iced overlay (`rollshot-overlay`):
 //! the live-preview viewport generator and the crop visual design tokens, so
 //! both render from one source of truth. No iced / Tauri / webview deps.
-
-pub mod preview;
-pub mod tokens;
+//!
+//! Modules are introduced by the TDD tasks that create them, so this scaffold
+//! stays buildable on its own.
 ```
-
-(The two modules are added in Tasks 2 and 3; this won't compile until then — do
-Step 3 + Task 2 + Task 3 before building.)
 
 - [ ] **Step 3: Register the workspace member**
 
@@ -95,7 +96,17 @@ members = [
 ]
 ```
 
-(Commit happens at the end of Task 3, once the crate compiles.)
+- [ ] **Step 4: Verify the scaffold builds**
+
+Run: `rtk cargo check -p rollshot-overlay-core`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+rtk git add crates/rollshot-overlay-core Cargo.toml
+rtk git commit -m "chore(overlay-core): scaffold shared overlay crate"
+```
 
 ---
 
@@ -103,8 +114,15 @@ members = [
 
 **Files:**
 - Create: `crates/rollshot-overlay-core/src/preview.rs`
+- Modify: `crates/rollshot-overlay-core/src/lib.rs`
 
 - [ ] **Step 1: Write the failing tests**
+
+In `crates/rollshot-overlay-core/src/lib.rs`, add:
+
+```rust
+pub mod preview;
+```
 
 `crates/rollshot-overlay-core/src/preview.rs`:
 
@@ -173,16 +191,18 @@ pub fn preview_viewport(image: &RgbaImage, width: u32, max_height: u32) -> RgbaI
     let max_height = max_height.max(1);
     let scale = width as f32 / image.width().max(1) as f32;
     let scaled_height = ((image.height() as f32 * scale).round() as u32).max(1);
-    let scaled = if image.width() == width && image.height() == scaled_height {
-        image.clone()
-    } else {
-        image::imageops::resize(
-            image,
-            width,
-            scaled_height,
-            image::imageops::FilterType::Triangle,
-        )
-    };
+    if image.width() == width && image.height() == scaled_height {
+        let out_height = image.height().min(max_height);
+        let src_y = image.height() - out_height;
+        return image::imageops::crop_imm(image, 0, src_y, width, out_height).to_image();
+    }
+
+    let scaled = image::imageops::resize(
+        image,
+        width,
+        scaled_height,
+        image::imageops::FilterType::Triangle,
+    );
     let out_height = scaled.height().min(max_height);
     let src_y = scaled.height() - out_height;
     image::imageops::crop_imm(&scaled, 0, src_y, width, out_height).to_image()
@@ -194,14 +214,28 @@ pub fn preview_viewport(image: &RgbaImage, width: u32, max_height: u32) -> RgbaI
 Run: `rtk cargo test -p rollshot-overlay-core`
 Expected: PASS (2 tests).
 
+- [ ] **Step 5: Commit**
+
+```bash
+rtk git add crates/rollshot-overlay-core/src/lib.rs crates/rollshot-overlay-core/src/preview.rs
+rtk git commit -m "feat(overlay-core): shared grow-then-follow preview viewport"
+```
+
 ---
 
 ## Task 3: `tokens` module (TDD)
 
 **Files:**
 - Create: `crates/rollshot-overlay-core/src/tokens.rs`
+- Modify: `crates/rollshot-overlay-core/src/lib.rs`
 
 - [ ] **Step 1: Write the failing tests**
+
+In `crates/rollshot-overlay-core/src/lib.rs`, add:
+
+```rust
+pub mod tokens;
+```
 
 `crates/rollshot-overlay-core/src/tokens.rs`:
 
@@ -211,6 +245,33 @@ Expected: PASS (2 tests).
 //! `CropCanvas`. The token sync test in `rollshot-app/src-tauri` asserts the CSS
 //! values still match these.
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_css_opaque_is_hex() {
+        assert_eq!(CROP_BORDER.to_css(), "#38bdf8");
+    }
+
+    #[test]
+    fn to_css_translucent_is_rgba() {
+        assert_eq!(CROP_MASK.to_css(), "rgba(0, 0, 0, 0.24)");
+        assert_eq!(CROP_GUIDE.to_css(), "rgba(147, 197, 253, 0.48)");
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `rtk cargo test -p rollshot-overlay-core`
+Expected: FAIL — missing `CROP_BORDER`, `CROP_MASK`, `CROP_GUIDE`, and `to_css`.
+
+- [ ] **Step 3: Implement the token type + consts**
+
+Add above the `tests` module in `crates/rollshot-overlay-core/src/tokens.rs`:
+
+```rust
 /// An sRGB color: 8-bit channels + float alpha — the form both CSS
 /// (`#rrggbb` / `rgba(r,g,b,a)`) and `iced::Color::from_rgba8` can express.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -249,32 +310,15 @@ pub const CROP_DIM: Rgba = Rgba::new(0, 0, 0, 0.22);
 /// Cursor crosshair guides.
 pub const CROP_GUIDE: Rgba = Rgba::new(147, 197, 253, 0.48);
 pub const CROP_GUIDE_WIDTH: f32 = 1.0;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn to_css_opaque_is_hex() {
-        assert_eq!(CROP_BORDER.to_css(), "#38bdf8");
-    }
-
-    #[test]
-    fn to_css_translucent_is_rgba() {
-        assert_eq!(CROP_MASK.to_css(), "rgba(0, 0, 0, 0.24)");
-        assert_eq!(CROP_GUIDE.to_css(), "rgba(147, 197, 253, 0.48)");
-    }
-}
 ```
 
-- [ ] **Step 2: Run to verify it fails, then passes**
+- [ ] **Step 4: Run to verify it passes**
 
 Run: `rtk cargo test -p rollshot-overlay-core`
-Expected: this module's 2 tests + Task 2's 2 tests all PASS (the module already
-contains its implementation). If `to_css` formatting differs, fix the consts/
-format to match the asserted strings.
+Expected: this module's 2 tests + Task 2's 2 tests all PASS. If `to_css`
+formatting differs, fix the consts/format to match the asserted strings.
 
-- [ ] **Step 3: Verify the crate builds clean + no reverse deps**
+- [ ] **Step 5: Verify the crate builds clean + no reverse deps**
 
 Run: `rtk cargo build -p rollshot-overlay-core`
 Expected: compiles.
@@ -285,11 +329,11 @@ Expected: clean.
 Run: `rtk cargo fmt --check`
 Expected: clean.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-rtk git add crates/rollshot-overlay-core Cargo.toml
-rtk git commit -m "feat(overlay-core): shared preview viewport + crop visual tokens"
+rtk git add crates/rollshot-overlay-core/src/lib.rs crates/rollshot-overlay-core/src/tokens.rs
+rtk git commit -m "feat(overlay-core): shared crop visual tokens"
 ```
 
 ---
@@ -386,7 +430,8 @@ to:
 - [ ] **Step 5: Verify build, tests, lints**
 
 Run: `rtk cargo test -p rollshot-overlay`
-Expected: PASS, **8 tests** (5 coords + 1 driver `stitch_stream` + 2 overlay `preview_viewport_size`). The 2 preview-image tests moved to `rollshot-overlay-core`.
+Expected: PASS. The 2 preview-image assertions moved to `rollshot-overlay-core`;
+do not rely on a brittle exact test count.
 
 Run: `rtk cargo clippy -p rollshot-overlay --all-targets -- -D warnings`
 Expected: clean.
@@ -408,10 +453,55 @@ rtk git commit -m "refactor(overlay): use rollshot-overlay-core for preview view
 **Files:**
 - Modify: `crates/rollshot-overlay/src/overlay.rs`
 
-Rendering can't be unit-tested (iced canvas), so this task is build/clippy/fmt +
-manual verification.
+Canvas pixels still need manual verification, but the geometry feeding the draw
+path is unit-tested so edge clipping does not regress silently.
 
-- [ ] **Step 1: Add the tokens import + a color helper**
+- [ ] **Step 1: Write failing crop-mask geometry tests**
+
+In the `#[cfg(test)] mod tests` in `crates/rollshot-overlay/src/overlay.rs`,
+extend the `use super::{...};` line to include `crop_mask_bands` and
+`token_color`; change `use iced::{Rectangle, Size};` to
+`use iced::{Point, Rectangle, Size};`; then add:
+
+```rust
+    #[test]
+    fn crop_mask_bands_clamp_crop_to_canvas_bounds() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        let crop = Rectangle {
+            x: -10.0,
+            y: 10.0,
+            width: 70.0,
+            height: 90.0,
+        };
+
+        let bands = crop_mask_bands(crop, bounds);
+
+        assert_eq!(bands[0], (Point::ORIGIN, Size::new(100.0, 10.0)));
+        assert_eq!(bands[1], (Point::new(0.0, 80.0), Size::new(100.0, 0.0)));
+        assert_eq!(bands[2], (Point::new(0.0, 10.0), Size::new(0.0, 70.0)));
+        assert_eq!(bands[3], (Point::new(60.0, 10.0), Size::new(40.0, 70.0)));
+    }
+
+    #[test]
+    fn token_color_preserves_rgba_channels() {
+        let color = token_color(rollshot_overlay_core::tokens::CROP_MASK);
+
+        assert_eq!(color.r, 0.0);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 0.0);
+        assert!((color.a - 0.24).abs() < f32::EPSILON);
+    }
+```
+
+Run: `rtk cargo test -p rollshot-overlay`
+Expected: FAIL — `crop_mask_bands` and `token_color` do not exist yet.
+
+- [ ] **Step 2: Add the tokens import, color helper, and mask-band helper**
 
 In `crates/rollshot-overlay/src/overlay.rs`, add near the other imports:
 
@@ -425,9 +515,30 @@ and add this free function (e.g. just above `struct CropCanvas`):
 fn token_color(c: tokens::Rgba) -> Color {
     Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
+
+fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Size); 4] {
+    let cx = crop.x.clamp(0.0, bounds.width);
+    let cy = crop.y.clamp(0.0, bounds.height);
+    let right = (crop.x + crop.width).clamp(0.0, bounds.width);
+    let bottom = (crop.y + crop.height).clamp(0.0, bounds.height);
+    let visible_h = (bottom - cy).max(0.0);
+
+    [
+        (Point::ORIGIN, Size::new(bounds.width, cy)),
+        (
+            Point::new(0.0, bottom),
+            Size::new(bounds.width, (bounds.height - bottom).max(0.0)),
+        ),
+        (Point::new(0.0, cy), Size::new(cx, visible_h)),
+        (
+            Point::new(right, cy),
+            Size::new((bounds.width - right).max(0.0), visible_h),
+        ),
+    ]
+}
 ```
 
-- [ ] **Step 2: Replace `CropCanvas::draw`**
+- [ ] **Step 3: Replace `CropCanvas::draw`**
 
 Replace the `fn draw(...)` body inside `impl canvas::Program<Message> for CropCanvas`
 with:
@@ -451,26 +562,11 @@ with:
                     // Dark mask over everything outside the crop (four bands),
                     // matching the app's box-shadow dimming.
                     let mask = token_color(tokens::CROP_MASK);
-                    let cx = crop.x.max(0.0);
-                    let cy = crop.y.max(0.0);
-                    let right = (crop.x + crop.width).min(bounds.width);
-                    let bottom = (crop.y + crop.height).min(bounds.height);
-                    frame.fill_rectangle(Point::ORIGIN, Size::new(bounds.width, cy), mask);
-                    frame.fill_rectangle(
-                        Point::new(0.0, bottom),
-                        Size::new(bounds.width, (bounds.height - bottom).max(0.0)),
-                        mask,
-                    );
-                    frame.fill_rectangle(
-                        Point::new(0.0, cy),
-                        Size::new(cx, crop.height),
-                        mask,
-                    );
-                    frame.fill_rectangle(
-                        Point::new(right, cy),
-                        Size::new((bounds.width - right).max(0.0), crop.height),
-                        mask,
-                    );
+                    for (origin, size) in crop_mask_bands(crop, bounds) {
+                        if size.width > 0.0 && size.height > 0.0 {
+                            frame.fill_rectangle(origin, size, mask);
+                        }
+                    }
 
                     // 1px white halo just outside the border.
                     let bw = tokens::CROP_BORDER_WIDTH;
@@ -511,11 +607,13 @@ with:
     }
 ```
 
-- [ ] **Step 3: Verify build, lints**
+- [ ] **Step 4: Verify build, tests, lints**
+
+Run: `rtk cargo test -p rollshot-overlay`
+Expected: PASS.
 
 Run: `rtk cargo build -p rollshot-overlay`
-Expected: compiles. (If `Color::WHITE` is now unused that's fine — `Color` is
-still used elsewhere, so no unused-import.)
+Expected: compiles.
 
 Run: `rtk cargo clippy -p rollshot-overlay --all-targets -- -D warnings`
 Expected: clean.
@@ -523,14 +621,14 @@ Expected: clean.
 Run: `rtk cargo fmt --check`
 Expected: clean.
 
-- [ ] **Step 4: Manual check (KDE 6, optional now)**
+- [ ] **Step 5: Manual check (KDE 6, optional now)**
 
 Run: `rtk cargo run --release -p rollshot-overlay --bin capture_overlay`
 Expected: during crop selection, everything outside the drag rectangle is dimmed
 and the rectangle has a sky-blue border with a faint white halo + crosshair
 guides — matching the app's selection look.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 rtk git add crates/rollshot-overlay/src/overlay.rs
@@ -553,10 +651,61 @@ In `crates/rollshot-app/src-tauri/Cargo.toml`, under `[dependencies]`, add:
 rollshot-overlay-core = { path = "../../rollshot-overlay-core" }
 ```
 
-- [ ] **Step 2: Add a raw-PNG encode helper**
+- [ ] **Step 2: Write the failing live-preview viewport test**
 
-In `crates/rollshot-app/src-tauri/src/session.rs`, add next to
-`encode_preview_image_png`:
+In `crates/rollshot-app/src-tauri/src/session.rs`, update the test imports:
+
+```rust
+    use super::{
+        encode_preview_png, AppSession, OverlayExclusion, RegionDto, SessionStatus, SharedSession,
+    };
+    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
+```
+
+Then add this test near `latest_preview_png_resizes_large_frame`:
+
+```rust
+    #[test]
+    fn stitch_preview_png_uses_shared_viewport_and_ignores_max_edge() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(make_test_frame(960, 600));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 960,
+                    height: 600,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner
+                .push_stitch_frame(make_test_frame(960, 600))
+                .expect("push frame");
+        }
+
+        let bytes = session
+            .stitch_preview_png(128)
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes).expect("decode png");
+
+        assert_eq!(image.width(), PREVIEW_WIDTH);
+        assert_eq!(image.height(), (600 * PREVIEW_WIDTH / 960).min(PREVIEW_MAX_HEIGHT));
+    }
+```
+
+Run: `rtk cargo test -p rollshot-app stitch_preview_png_uses_shared_viewport_and_ignores_max_edge`
+Expected: FAIL — `stitch_preview_png` still honors the old max-edge downscale
+and returns the wrong preview dimensions.
+
+- [ ] **Step 3: Promote the raw-PNG encode helper**
+
+In `crates/rollshot-app/src-tauri/src/session.rs`, there is already a
+`#[cfg(test)] fn encode_rgba_png(...)` helper below `encode_preview_image_png`.
+Do **not** add a duplicate function. Move that helper next to
+`encode_preview_image_png`, remove `#[cfg(test)]`, and use this error string:
 
 ```rust
 fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
@@ -568,7 +717,7 @@ fn encode_rgba_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
 }
 ```
 
-- [ ] **Step 3: Switch `stitch_preview_png` to the shared viewport**
+- [ ] **Step 4: Switch `stitch_preview_png` to the shared viewport**
 
 Replace the body of `stitch_preview_png` with:
 
@@ -607,11 +756,12 @@ Replace the body of `stitch_preview_png` with:
 signature intact avoids a frontend/Tauri-binding change. `latest_preview_png`
 and `final_preview_png` are unchanged.)
 
-- [ ] **Step 4: Verify build, tests, lints**
+- [ ] **Step 5: Verify build, tests, lints**
 
 Run: `rtk cargo test -p rollshot-app`
-Expected: PASS (existing session tests; `latest_preview_png_resizes_large_frame`
-still green — it tests the unchanged latest path).
+Expected: PASS, including `stitch_preview_png_uses_shared_viewport_and_ignores_max_edge`.
+`latest_preview_png_resizes_large_frame` stays green because it tests the unchanged
+latest-preview path.
 
 Run: `rtk cargo clippy -p rollshot-app --all-targets -- -D warnings`
 Expected: clean.
@@ -619,7 +769,7 @@ Expected: clean.
 Run: `rtk cargo fmt --check`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 rtk git add crates/rollshot-app/src-tauri/Cargo.toml crates/rollshot-app/src-tauri/src/session.rs
@@ -635,7 +785,55 @@ rtk git commit -m "feat(app): live stitch preview uses shared grow-then-follow v
 - Create: `crates/rollshot-app/src-tauri/src/css_token_sync.rs`
 - Modify: `crates/rollshot-app/src-tauri/src/lib.rs`
 
-- [ ] **Step 1: Add the crop token vars to `:root`**
+- [ ] **Step 1: Write the failing sync test**
+
+Create `crates/rollshot-app/src-tauri/src/css_token_sync.rs`:
+
+```rust
+//! Asserts the crop visual tokens in `App.css` match the canonical Rust consts
+//! in `rollshot_overlay_core::tokens`. Drift on either side fails this test.
+
+#[cfg(test)]
+mod tests {
+    use rollshot_overlay_core::tokens;
+
+    const CSS: &str = include_str!("../../src/App.css");
+
+    fn assert_var(name: &str, value: &str) {
+        let needle = format!("{name}: {value};");
+        assert!(
+            CSS.contains(&needle),
+            "App.css :root is missing or drifted from `{needle}` \
+             (rollshot_overlay_core::tokens is the source of truth)"
+        );
+    }
+
+    #[test]
+    fn css_crop_tokens_match_rust_tokens() {
+        assert_var("--crop-border", &tokens::CROP_BORDER.to_css());
+        assert_var("--crop-border-width", &format!("{}px", tokens::CROP_BORDER_WIDTH));
+        assert_var("--crop-border-halo", &tokens::CROP_BORDER_HALO.to_css());
+        assert_var("--crop-mask", &tokens::CROP_MASK.to_css());
+        assert_var("--crop-dim", &tokens::CROP_DIM.to_css());
+        assert_var("--crop-guide", &tokens::CROP_GUIDE.to_css());
+        assert_var("--crop-guide-width", &format!("{}px", tokens::CROP_GUIDE_WIDTH));
+    }
+}
+```
+
+In `crates/rollshot-app/src-tauri/src/lib.rs`, add this line with the other
+top-level `mod` declarations:
+
+```rust
+#[cfg(test)]
+mod css_token_sync;
+```
+
+Run: `rtk cargo test -p rollshot-app css_crop_tokens_match_rust_tokens`
+Expected: FAIL — `App.css` has hard-coded crop values, but not the canonical
+`--crop-*` variables yet.
+
+- [ ] **Step 2: Add the crop token vars to `:root`**
 
 In `crates/rollshot-app/src/App.css`, inside the existing `:root { ... }` block,
 immediately after the `--radius: 0.5rem;` line, insert:
@@ -652,7 +850,7 @@ immediately after the `--radius: 0.5rem;` line, insert:
   --crop-guide-width: 1px;
 ```
 
-- [ ] **Step 2: Point the SelectionLayer rules at the vars**
+- [ ] **Step 3: Point the SelectionLayer rules at the vars**
 
 In the same file, change these rules to consume the vars:
 
@@ -701,50 +899,6 @@ In the same file, change these rules to consume the vars:
     0 0 0 1px var(--crop-border-halo),
     0 0 0 9999px var(--crop-mask);
 }
-```
-
-- [ ] **Step 3: Write the failing sync test**
-
-Create `crates/rollshot-app/src-tauri/src/css_token_sync.rs`:
-
-```rust
-//! Asserts the crop visual tokens in `App.css` match the canonical Rust consts
-//! in `rollshot_overlay_core::tokens`. Drift on either side fails this test.
-
-#[cfg(test)]
-mod tests {
-    use rollshot_overlay_core::tokens;
-
-    const CSS: &str = include_str!("../../src/App.css");
-
-    fn assert_var(name: &str, value: &str) {
-        let needle = format!("{name}: {value};");
-        assert!(
-            CSS.contains(&needle),
-            "App.css :root is missing or drifted from `{needle}` \
-             (rollshot_overlay_core::tokens is the source of truth)"
-        );
-    }
-
-    #[test]
-    fn css_crop_tokens_match_rust_tokens() {
-        assert_var("--crop-border", &tokens::CROP_BORDER.to_css());
-        assert_var("--crop-border-width", &format!("{}px", tokens::CROP_BORDER_WIDTH));
-        assert_var("--crop-border-halo", &tokens::CROP_BORDER_HALO.to_css());
-        assert_var("--crop-mask", &tokens::CROP_MASK.to_css());
-        assert_var("--crop-dim", &tokens::CROP_DIM.to_css());
-        assert_var("--crop-guide", &tokens::CROP_GUIDE.to_css());
-        assert_var("--crop-guide-width", &format!("{}px", tokens::CROP_GUIDE_WIDTH));
-    }
-}
-```
-
-In `crates/rollshot-app/src-tauri/src/lib.rs`, add this line with the other
-top-level `mod` declarations:
-
-```rust
-#[cfg(test)]
-mod css_token_sync;
 ```
 
 - [ ] **Step 4: Run the sync test**
@@ -802,17 +956,6 @@ Expected: all clean.
   KDE 6): crop selection shows the dark mask + sky-blue border + guides —
   matching the app.
 
-- [ ] **Step 4: Mark the spec done**
-
-In `docs/superpowers/specs/2026-05-30-overlay-app-shared-ui-design.md`, append a
-short note under "Scope" that pillars 1 + 2 landed (preview sharing + crop
-tokens) and the crate exists; pillar 3 (geometry fixtures) remains follow-up.
-
-```bash
-rtk git add docs/superpowers/specs/2026-05-30-overlay-app-shared-ui-design.md
-rtk git commit -m "docs(spec): mark shared-overlay pillars 1+2 implemented"
-```
-
 ---
 
 ## Success Criteria
@@ -827,3 +970,150 @@ rtk git commit -m "docs(spec): mark shared-overlay pillars 1+2 implemented"
 - `rollshot-core` untouched; only `stitch_preview_png` changed in the app.
 - Workspace `cargo test` / `clippy -D warnings` / `fmt --check` clean; frontend
   typecheck / test / build clean.
+
+---
+
+## Engineering Review Addendum (auto-applied 2026-05-30)
+
+### Step 0: Scope Challenge
+
+- Goal alignment: all tasks now directly support shared live preview pixels,
+  shared crop tokens, or verification. The previous spec-update step was
+  documentation bookkeeping, not required for the goal, and was removed.
+- Complexity check: 8 tasks, 5 create files, 8 modify files. This does not hit
+  the hard scope stop (>12 net-new files, >2 new top-level modules/crates, or
+  >10 tasks).
+- Minimum viable plan: Tasks 1-7 are the minimum for the goal; Task 8 is the
+  required verification gate. Geometry fixture parity stays deferred.
+- Search check: Cargo workspace membership and workspace dependencies align with
+  the Cargo Book (`https://doc.rust-lang.org/cargo/reference/workspaces.html`);
+  `include_str!` is appropriate for a compile-time CSS drift test because it
+  yields a `&'static str` from a file path relative to the Rust source file
+  (`https://doc.rust-lang.org/stable/std/macro.include_str.html`).
+- Distribution check: no new shipped binary/package is introduced. The new crate
+  is an internal workspace library with `publish = false`; build/publish pipeline
+  changes are not needed.
+
+### Data Flow / Test Diagram
+
+```text
+                         +------------------------+
+                         | rollshot-overlay-core  |
+                         |                        |
+Stitcher::full_image() ->| preview_viewport()     |-> iced Handle (native overlay)
+                         |                        |-> PNG bytes (Tauri app)
+                         | tokens::* consts       |-> iced Color
+                         |                        |-> App.css :root vars
+                         +------------------------+
+                                      |
+                                      v
+                             css_token_sync test
+```
+
+### Test Coverage Table
+
+| Task / behavior | Unit | Integ | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / workspace crate scaffold builds | - | check | - | no |
+| Task 2 / `preview_viewport` grows below cap | yes | - | - | no |
+| Task 2 / `preview_viewport` caps and follows bottom | yes | - | - | no |
+| Task 3 / crop token CSS serialization | yes | - | - | no |
+| Task 4 / overlay preview wrapper delegates to shared viewport | via Task 2 | overlay tests | - | no |
+| Task 5 / crop mask band clipping + token alpha conversion | yes | - | - | no |
+| Task 5 / iced canvas pixels visually match app crop look | - | - | - | yes |
+| Task 6 / app live preview uses shared viewport and ignores `max_edge` | yes | app session | - | no |
+| Task 7 / CSS vars stay in sync with Rust token consts | yes | app crate | - | no |
+| Task 7 / frontend CSS still typechecks/tests/builds | - | frontend checks | build | no |
+| Task 8 / workspace verification | - | workspace | frontend build | optional parity check |
+
+### NOT in Scope
+
+- Geometry fixtures / pillar 3: deferred because the stated goal is preview and
+  crop visual parity, not full placement/drag algorithm parity.
+- Collapsing the webview and native renderers: explicitly deferred by the spec;
+  this plan shares sources of truth without changing renderer strategy.
+- Capture-miss recovery UX: separate issue and not needed for shared preview or
+  crop-token parity.
+- Updating `docs/superpowers/specs/2026-05-30-overlay-app-shared-ui-design.md`:
+  specs are snapshots in this repo; completion should be described in the PR or
+  follow-up plan, not retroactively written into the historical spec.
+- Publishing `rollshot-overlay-core`: internal workspace crate only, `publish =
+  false`, so no package/release task is required.
+
+### What Already Exists
+
+- `crates/rollshot-overlay/src/driver.rs::preview_viewport_handle` already has
+  the grow-then-follow image behavior and tests; Task 2 moves the pure image
+  logic instead of rebuilding the algorithm from scratch.
+- `crates/rollshot-overlay/src/overlay.rs::preview_viewport_size` already owns
+  chrome-band sizing; Task 4 reuses its width/height decisions and only moves the
+  constants.
+- `crates/rollshot-app/src/App.css` already contains the desired hard-coded crop
+  values; Task 7 converts them into CSS variables and adds a sync test.
+- `crates/rollshot-app/src/region/geometry.ts` and its tests already cover
+  source/CSS coordinate conversion; this plan intentionally does not duplicate
+  geometry fixtures yet.
+- `crates/rollshot-app/src/overlay/placement.ts` already chooses app preview
+  placement; this plan changes preview image content, not placement.
+
+### Failure Modes
+
+| New codepath | Production failure | Test coverage | Error handling / user visibility |
+|---|---|---|---|
+| `preview_viewport` resize/crop | wrong bottom rows or dimensions | Task 2 tests | no runtime error; visual preview would be wrong |
+| `preview_viewport` hot path | clone of a tall already-width-matched image each frame | Task 2 implementation avoids full clone before crop | bounded allocation after patch |
+| overlay iced handle wrapper | handle dimensions/pixels drift from shared image | Task 2 + Task 4 overlay tests | no user error; visual preview mismatch |
+| overlay crop canvas | mask bands produce negative/oversized rectangles near screen edges | Task 5 `crop_mask_bands_clamp_crop_to_canvas_bounds` | visual-only; test prevents silent clipping drift |
+| app `stitch_preview_png` | old `max_edge` downscale remains active | Task 6 live-preview test | no explicit error; user sees mismatched preview |
+| app PNG encode | PNG encoder returns error | existing `Result<Vec<u8>, String>` path | Tauri command returns a clear string error |
+| CSS/Rust token sync | CSS value changes without Rust token update, or reverse | Task 7 sync test | test failure names the missing/drifted variable |
+| manual native rendering | iced/wgpu renders differently from CSS despite matching tokens | Task 8 manual parity check | manual finding only; no automatic user-facing error |
+
+Critical gaps after review: none. Remaining manual-only risk is iced canvas pixel
+appearance, which cannot be meaningfully unit-tested without a renderer harness.
+
+### Parallelization Strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| Task 1: Scaffold `rollshot-overlay-core` | root workspace, `crates/rollshot-overlay-core/` | - |
+| Task 2: `preview_viewport` | `crates/rollshot-overlay-core/` | Task 1 |
+| Task 3: `tokens` module | `crates/rollshot-overlay-core/` | Task 1 |
+| Task 4: Wire overlay preview | `crates/rollshot-overlay/` | Tasks 1-2 |
+| Task 5: Overlay crop visuals | `crates/rollshot-overlay/` | Tasks 1, 3-4 |
+| Task 6: Wire app live preview | `crates/rollshot-app/src-tauri/` | Tasks 1-2 |
+| Task 7: App crop tokens + sync test | `crates/rollshot-app/` | Tasks 1, 3, 6 |
+| Task 8: Full verification | workspace, frontend | Tasks 1-7 |
+
+- Workspace-root task: Task 1 modifies root `Cargo.toml`; run it first and merge
+  before parallel work.
+- Lane A: Task 2 -> Task 3 (sequential, both touch `rollshot-overlay-core/src/lib.rs`).
+- Lane B: Task 4 -> Task 5 (sequential, both touch `crates/rollshot-overlay/src/overlay.rs`; starts after Lane A has the needed exports).
+- Lane C: Task 6 -> Task 7 (sequential, both touch `crates/rollshot-app/`; starts after Lane A has the needed exports).
+- Execution order: Task 1, then Lane A. After Lane A, launch Lane B and Lane C in
+  parallel. Run Task 8 after both lanes merge.
+- Conflict flags: Tasks 4 and 5 both edit `overlay.rs`; keep them in one lane.
+  Tasks 6 and 7 both touch the app crate and depend on the app's overlay-core
+  dependency; keep them in one lane.
+
+### Completion Summary
+
+```text
+Plan reviewed:           docs/superpowers/plans/2026-05-30-shared-overlay-ui.md
+Tasks in plan:           8
+Files Create/Modify:     5 create / 8 modify
+
+- Step 0: Scope Challenge   - accepted after removing the spec-update scope creep
+- Architecture Review:        3 issues auto-applied
+- Plan Structure + Code Q:    4 issues auto-applied (granularity / TDD / commits / duplicate helper)
+- Test Review:                table produced, 4 gaps auto-applied
+- Performance Review:         1 issue auto-applied
+- NOT in scope:               written
+- What already exists:        written
+- Failure modes:              0 critical gaps flagged
+- Parallelization:            3 lanes after serial setup, 2 parallel / 1 final verification
+- Unresolved decisions:       0
+```
+
+Plan is locked in — run `superpowers:subagent-driven-development` for the lane
+split above, or `superpowers:executing-plans` for sequential execution.

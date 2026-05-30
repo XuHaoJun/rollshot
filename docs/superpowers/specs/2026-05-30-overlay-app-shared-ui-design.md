@@ -66,14 +66,18 @@ follow-up.
 - **Token sync = manual duplication + a sync test** (chosen over codegen; ~6
   low-churn values). Canonical values live as Rust consts in
   `rollshot-overlay-core::tokens`; App.css mirrors them in a `:root` block via
-  `var()`. A sync test in `rollshot-app/src-tauri` `include_str!`s the sibling
-  `../src/App.css`, parses the token vars, and asserts they equal the Rust
-  consts — fails if either side changes without the other.
+  `var()`. A sync test in `rollshot-app/src-tauri/src/css_token_sync.rs`
+  `include_str!`s `../../src/App.css` and asserts the canonical `--crop-*:
+  value;` strings are present — fails if either side changes without the other.
 - **Crop cursor guides:** ported to the overlay too (for parity); low-cost,
   droppable if it complicates the canvas.
 - **App preview placement-box parity:** deferred to the geometry pillar; the
   immediate work unifies the preview *image content*, not the placement box
   (the app's `overlay/placement.ts` already positions it).
+- **Execution shape:** the plan keeps each task independently buildable and
+  uses red/green tests before behavior changes. The new crate is scaffolded
+  without missing module exports, then `preview` and `tokens` are added in
+  separate TDD tasks.
 
 ## Canonical token values (from current App.css)
 
@@ -90,21 +94,30 @@ follow-up.
 tokens); wire both stacks; the token sync test.
 
 **Out / follow-up:** geometry fixtures (pillar 3); collapsing to one renderer
-(north star); the live-stitch capture-miss recovery UX (separate issue).
+(north star); the live-stitch capture-miss recovery UX (separate issue);
+publishing `rollshot-overlay-core` as a crate (internal workspace library,
+`publish = false`).
 
 **Unchanged:** stitching core, capture, save handoff; the two render stacks stay
 separate.
+
+**Historical note:** this spec is design intent, not an implementation status
+ledger. Completion notes belong in the implementation plan / PR, not as
+retroactive edits to this snapshot.
 
 ## Verification
 
 - `rollshot-overlay-core`: unit tests for `preview_viewport` (grows below the
   cap; bottom-anchored; capped for tall canvas) — moved/adapted from the current
   overlay driver tests.
-- Token sync test green.
-- `rollshot-overlay`: existing tests pass; preview + crop visuals build; clippy +
-  fmt clean.
-- `rollshot-app`: `stitch_preview_png` uses the shared viewport; existing
-  session tests pass; frontend typecheck / test / build.
+- `rollshot-overlay-core`: unit tests for token CSS serialization.
+- `rollshot-overlay`: existing tests pass; preview wrapper uses the shared
+  viewport; crop mask band clipping and token color conversion are unit-tested;
+  preview + crop visuals build; clippy + fmt clean.
+- `rollshot-app`: `stitch_preview_png` has a session test proving it uses the
+  shared viewport and ignores the old `max_edge` downscale; existing session
+  tests pass; frontend typecheck / test / build.
+- Token sync test green and failure message names the drifted `--crop-*` string.
 - Manual: overlay crop shows the dark mask + sky-blue border; app live preview
   grows-then-follows and matches the overlay.
 
