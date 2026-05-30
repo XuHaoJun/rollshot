@@ -2,6 +2,7 @@ mod commands;
 #[cfg(test)]
 mod css_token_sync;
 mod launch;
+mod native_capture;
 mod overlay;
 mod scroll;
 mod session;
@@ -56,6 +57,8 @@ pub fn run() {
             commands::get_stitch_preview,
             commands::get_final_preview,
             commands::overlay_exclusion,
+            native_capture::run_native_capture,
+            native_capture::uses_native_overlay,
             scroll::set_input_passthrough,
         ])
         .run(tauri::generate_context!())
