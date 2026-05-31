@@ -27,7 +27,7 @@ const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
-static PREVIEW_RX: Mutex<Option<iced::futures::channel::mpsc::UnboundedReceiver<image::Handle>>> =
+static PREVIEW_RX: Mutex<Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>> =
     Mutex::new(None);
 static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex::new(None);
 
@@ -44,6 +44,10 @@ pub struct Overlay {
     crop_confirmed: bool,
     preview: Option<image::Handle>,
     window_size: Option<iced::Size>,
+    capture_miss: bool,
+    capture_miss_warn: bool,
+    capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge,
+    capture_miss_message_expires_at: Option<std::time::Instant>,
 }
 
 #[to_layer_message]
@@ -52,7 +56,8 @@ pub enum Message {
     IcedEvent(Event),
     Finish,
     Cancel,
-    NewPreview(image::Handle),
+    LiveEvent(crate::driver::LiveOverlayEvent),
+    Tick,
 }
 
 fn namespace() -> String {
@@ -67,12 +72,16 @@ fn preview_stream() -> iced::Subscription<Message> {
             .take()
             .expect("preview channel already consumed");
 
-        rx.map(Message::NewPreview)
+        rx.map(Message::LiveEvent)
     })
 }
 
 fn subscription(_: &Overlay) -> iced::Subscription<Message> {
-    iced::Subscription::batch([event::listen().map(Message::IcedEvent), preview_stream()])
+    iced::Subscription::batch([
+        event::listen().map(Message::IcedEvent),
+        preview_stream(),
+        iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick),
+    ])
 }
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
@@ -198,8 +207,28 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
             iced::exit()
         }
-        Message::NewPreview(handle) => {
+        Message::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
             state.preview = Some(handle);
+            Task::none()
+        }
+        Message::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
+            state.capture_miss = miss.active;
+            state.capture_miss_edge = miss.edge;
+            if miss.warn {
+                state.capture_miss_warn = true;
+                state.capture_miss_message_expires_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            }
+            Task::none()
+        }
+        Message::Tick => {
+            if state
+                .capture_miss_message_expires_at
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                state.capture_miss_warn = false;
+                state.capture_miss_message_expires_at = None;
+            }
             Task::none()
         }
         _ => Task::none(),
@@ -520,16 +549,55 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         });
         let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
 
-        let chrome: Element<'_, Message> = if let Some(handle) = &state.preview {
-            // The driver builds the handle as a fixed-width, bottom-anchored
-            // viewport that grows up to a cap (driver::preview_viewport_handle),
-            // so rendering it at its natural size makes the preview grow with the
-            // scroll and then follow the bottom once capped.
-            column![toolbar, image(handle.clone())]
-                .spacing(CHROME_SPACING)
+        // R5: toolbar is always first so toolbar_input_rect contract holds.
+        let warning: Option<Element<'_, Message>> = state.capture_miss_warn.then(|| {
+            container(
+                text(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING).size(14),
+            )
+            .padding(8)
+            .style(|_theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    120.0 / 255.0,
+                    53.0 / 255.0,
+                    15.0 / 255.0,
+                    0.94,
+                ))),
+                text_color: Some(Color::from_rgb(
+                    1.0,
+                    251.0 / 255.0,
+                    235.0 / 255.0,
+                )),
+                ..Default::default()
+            })
+            .into()
+        });
+
+        let recovery_marker: Option<Element<'_, Message>> = state.capture_miss.then(|| {
+            text("Scroll back to the captured edge")
+                .size(13)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(Color::from_rgb(
+                        1.0,
+                        251.0 / 255.0,
+                        235.0 / 255.0,
+                    )),
+                })
                 .into()
-        } else {
-            toolbar
+        });
+
+        let chrome: Element<'_, Message> = {
+            let mut col = column![toolbar];
+            col = col.spacing(CHROME_SPACING);
+            if let Some(w) = warning {
+                col = col.push(w);
+            }
+            if let Some(handle) = &state.preview {
+                col = col.push(image(handle.clone()));
+            }
+            if let Some(r) = recovery_marker {
+                col = col.push(r);
+            }
+            col.into()
         };
 
         return match place_outside_crop(crop, window, chrome) {

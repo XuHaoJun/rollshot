@@ -1,5 +1,8 @@
 use rollshot_capture::{crop_frame, CaptureError, FrameStream, Region};
 use rollshot_core::{StitchConfig, Stitcher};
+use rollshot_overlay_core::capture_miss::{
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker,
+};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +16,18 @@ use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, S
 use crate::coords::LogicalRect;
 
 use crate::CaptureResult;
+
+#[derive(Debug, Clone)]
+pub enum LiveOverlayEvent {
+    Preview(ImageHandle),
+    CaptureMiss(CaptureMissState),
+}
+
+/// R4: emit on any active-flag transition (rising OR falling — so the recovery
+/// edge clears the native marker) and on every warn pulse.
+fn should_emit_capture_miss(state: &CaptureMissState, last_active: bool) -> bool {
+    state.warn || state.active != last_active
+}
 
 /// Wrapper that lets us move a `Box<dyn FrameStream>` to the reader thread.
 /// `FrameStream` is not `Send` because the Linux PipeWire backend holds
@@ -96,7 +111,7 @@ pub struct Driver {
     reader: Option<JoinHandle<()>>,
     stitch: Option<JoinHandle<()>>,
     source_size: Size,
-    preview_tx: UnboundedSender<ImageHandle>,
+    preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
 #[allow(dead_code)]
@@ -111,7 +126,7 @@ impl Driver {
         backend: &str,
         fps: u32,
         show_cursor: bool,
-        preview_tx: UnboundedSender<ImageHandle>,
+        preview_tx: UnboundedSender<LiveOverlayEvent>,
     ) -> Result<Self, String> {
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
@@ -190,6 +205,8 @@ impl Driver {
         let preview_tx = self.preview_tx.clone();
         self.stitch = Some(std::thread::spawn(move || {
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
+            let mut capture_miss_tracker = CaptureMissTracker::default();
+            let mut last_capture_miss_active = false;
             while !stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
                 let frame = if seq == last_seq {
@@ -209,14 +226,24 @@ impl Driver {
                         }
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
-                        stitcher.push_frame(cropped.image);
+                        let outcome = stitcher.push_frame(cropped.image);
+                        let capture_miss_state = capture_miss_tracker.update(
+                            progress_signal_from_outcome(&outcome),
+                            Instant::now(),
+                        );
+                        if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
+                            let _ = preview_tx
+                                .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
+                        }
+                        last_capture_miss_active = capture_miss_state.active;
                         if let Some(preview) = stitcher.full_image() {
                             let handle = preview_viewport_handle(
                                 preview,
                                 preview_size.width,
                                 preview_size.height,
                             );
-                            let _ = preview_tx.unbounded_send(handle);
+                            let _ =
+                                preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
                         }
                     }
                 }
@@ -307,9 +334,10 @@ fn preview_viewport_handle(image: &image::RgbaImage, width: u32, max_height: u32
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_stitch_config, stitch_stream};
+    use super::{overlay_stitch_config, should_emit_capture_miss, stitch_stream};
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
+    use rollshot_overlay_core::capture_miss::CaptureMissState;
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -353,5 +381,41 @@ mod tests {
             "stitched height grows past one frame"
         );
         assert!(result.stats.frame_count >= 1);
+    }
+
+    #[test]
+    fn capture_miss_emit_on_rising_edge() {
+        let state = CaptureMissState {
+            active: true,
+            warn: false,
+            ..Default::default()
+        };
+        assert!(should_emit_capture_miss(&state, false));
+    }
+
+    #[test]
+    fn capture_miss_emit_on_clearing_edge() {
+        let state = CaptureMissState::default(); // active=false, warn=false
+        assert!(should_emit_capture_miss(&state, true));
+    }
+
+    #[test]
+    fn capture_miss_emit_skipped_when_steady_active() {
+        let state = CaptureMissState {
+            active: true,
+            warn: false,
+            ..Default::default()
+        };
+        assert!(!should_emit_capture_miss(&state, true));
+    }
+
+    #[test]
+    fn capture_miss_emit_on_warn_pulse_when_active_unchanged() {
+        let state = CaptureMissState {
+            active: true,
+            warn: true,
+            ..Default::default()
+        };
+        assert!(should_emit_capture_miss(&state, true));
     }
 }
