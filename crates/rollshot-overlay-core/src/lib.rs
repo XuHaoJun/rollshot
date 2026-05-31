@@ -6,5 +6,6 @@
 //! Modules are introduced by the TDD tasks that create them, so this scaffold
 //! stays buildable on its own.
 
+pub mod capture_miss;
 pub mod preview;
 pub mod tokens;

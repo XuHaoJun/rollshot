@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 image = { workspace = true }
+serde = { workspace = true }
+rollshot-core = { path = "../rollshot-core" }
 
 [lints]
 workspace = true

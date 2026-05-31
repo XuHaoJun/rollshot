@@ -5582,6 +5582,8 @@ name = "rollshot-overlay-core"
 version = "0.1.0"
 dependencies = [
  "image",
+ "rollshot-core",
+ "serde",
 ]
 
 [[package]]
