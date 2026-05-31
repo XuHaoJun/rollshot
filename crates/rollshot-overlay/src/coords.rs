@@ -23,10 +23,15 @@ pub fn map_crop_to_frame(crop: LogicalRect, overlay_logical: Size, source_size: 
     let scale_x = source_size.width as f32 / overlay_logical.width as f32;
     let scale_y = source_size.height as f32 / overlay_logical.height as f32;
 
-    let x = (crop.x.max(0.0) * scale_x).round() as i64;
-    let y = (crop.y.max(0.0) * scale_y).round() as i64;
-    let w = (crop.width.max(0.0) * scale_x).round() as i64;
-    let h = (crop.height.max(0.0) * scale_y).round() as i64;
+    let left = crop.x.max(0.0);
+    let top = crop.y.max(0.0);
+    let right = (crop.x + crop.width.max(0.0)).max(left);
+    let bottom = (crop.y + crop.height.max(0.0)).max(top);
+
+    let x = (left * scale_x).round() as i64;
+    let y = (top * scale_y).round() as i64;
+    let w = (right * scale_x).round() as i64 - x;
+    let h = (bottom * scale_y).round() as i64 - y;
 
     let sw = source_size.width as i64;
     let sh = source_size.height as i64;
@@ -125,6 +130,30 @@ mod tests {
                 y: 50,
                 width: 200,
                 height: 100
+            }
+        );
+    }
+
+    #[test]
+    fn rounds_bottom_edge_once_for_fractional_crop() {
+        let out = map_crop_to_frame(
+            rect(0.0, 0.4, 10.0, 1.0),
+            Size {
+                width: 1280,
+                height: 720,
+            },
+            Size {
+                width: 1920,
+                height: 1080,
+            },
+        );
+        assert_eq!(
+            out,
+            Region {
+                x: 0,
+                y: 1,
+                width: 15,
+                height: 1
             }
         );
     }
