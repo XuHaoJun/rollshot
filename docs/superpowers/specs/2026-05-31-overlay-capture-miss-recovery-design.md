@@ -292,3 +292,82 @@ macOS/webview-specific:
   change.
 - If a test shows direction-lock recovery is the blocker, keep the core patch
   narrow and document why it does not hide skipped content.
+
+---
+
+## Amendment A1 — Snow-shot Position Spotlight (added 2026-05-31)
+
+This amendment supersedes part of the design above. It is appended (not a
+rewrite of the original decisions) to record a new direction the user approved
+after the capture-miss-recovery branch landed but before it merged to `main`.
+Where this conflicts with sections above, **this amendment wins**.
+
+### Why
+
+The original spec (D5) added an on-preview "captured-edge affordance": a
+`preview-recovery-mask` (webview) and a "Scroll back to the captured edge" text
+marker (native) drawn over the live preview **only on miss**. The user instead
+wants the live preview to match snow-shot's `captuer-edge-mask`: an **always-on
+position indicator** that shows *where the current frame maps within the whole
+long screenshot*, regardless of miss state.
+
+Reference (re-confirmed against
+`learn-projects/snow-shot/.../scrollScreenshotTool/index.tsx`): the
+`captuer-edge-mask` is the always-on indicator — a clear "current screen" window
+with dimmed bands (`rgba(0,0,0,0.32)`) over the rest — updated only on a
+successful capture (`updateImageUrlList`, `:190`/`:341`). On a miss
+(`edge_position === undefined`, `:335-338`) snow-shot does **only** two things:
+shows a throttled `message.warning` toast, and **returns early so the spotlight
+freezes** (stops advancing). It paints **no** extra effect on the spotlight.
+
+### A1.1 — Live preview becomes a whole-canvas spotlight (supersedes D5)
+
+Both platform paths change the live preview from today's "bottom-anchored,
+grow-then-follow capped window" to a **whole-canvas fit + spotlight**:
+
+- The preview shows the **entire** stitched canvas scaled to fit the fixed
+  preview box (not the bottom crop). Change `rollshot-overlay-core::preview`
+  accordingly (or add a sibling fn); keep the output texture within the
+  proven-stable iced envelope (≤ `PREVIEW_WIDTH` × `PREVIEW_MAX_HEIGHT`,
+  i.e. 280×480) — the documented flicker constraint on the
+  `iced_layershell`/wgpu path (`preview.rs`, `overlay.rs:512-514`,
+  `driver.rs` test) still applies and is the reason A1 uses a single squished
+  image, **not** snow-shot's scrollable thumbnail-list.
+- Overlay a clear "current frame" window with dimmed bands
+  (`rgba(0,0,0,~0.32)`) above/below (and left/right for horizontal). The clear
+  window = the latest frame's footprint, anchored at the **captured edge**
+  (`CapturedEdge` from D5's model, which is retained for this purpose).
+- Render with each platform's existing masking primitive — Linux iced
+  `canvas::Frame::fill_rectangle` (already used for the crop mask,
+  `overlay.rs:295`); webview a CSS band layout (the `captuer-edge-mask`
+  pattern). The **shared part stays the geometry model**, not framework
+  rendering (consistent with D5's closing note).
+
+### A1.2 — Miss behavior is snow-shot-exact (supersedes D4's preview part + D5)
+
+On a capture miss:
+
+- **Keep:** the throttled warning toast (webview `capture-miss-toast`; native
+  outside-crop warning container) and all of D1–D4's detection/throttle/clear
+  state machine. This already matches snow-shot's `message.warning`.
+- **Spotlight freezes:** the preview is simply not updated on a missed frame
+  (no new `full_image`/edge applied), so the clear window stops advancing — the
+  miss signal, exactly as snow-shot.
+- **Remove:** the on-preview miss overlays added by D5 —
+  `AdaptiveStitchPreview`'s `preview-recovery-mask` + "Scroll back to the
+  captured edge" `<span>` (webview), and `overlay.rs`'s `recovery_marker` text
+  (native). The `capture_miss` / `capture_miss_edge` fields stay in the status
+  model: they now drive **where the spotlight's clear window sits**, not a
+  separate recovery mask.
+
+### A1.3 — Scope
+
+- **Both platforms** (Linux native overlay + macOS/webview), per AGENTS.md
+  platform-split parity and the shared `preview` core.
+- Relaxes the original Non-Goal "No replacement of Rollshot's current preview
+  pipeline with snow-shot's thumbnail-list architecture": the preview now adopts
+  snow-shot's **spotlight UX**, but still **not** its thumbnail-list data
+  structure — it remains a single fitted stitched image.
+- `processing` indicator (D5) is unaffected (it mirrors snow-shot's `<Spin>`)
+  and stays.
+- D6 (core recovery correctness) is unchanged.
