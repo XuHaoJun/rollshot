@@ -108,6 +108,10 @@ export async function usesNativeOverlay(): Promise<boolean> {
   return await invoke<boolean>('uses_native_overlay')
 }
 
+export async function exitApp(): Promise<void> {
+  await invoke('exit_app')
+}
+
 export async function getStitchPreview(): Promise<Blob | null> {
   const bytes = await invoke<ArrayBuffer>('get_stitch_preview')
   if (bytes.byteLength === 0) {

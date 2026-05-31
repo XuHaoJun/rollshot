@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NativeCaptureFlow } from './NativeCaptureFlow'
 
 const api = vi.hoisted(() => ({
+  exitApp: vi.fn(),
   launchOptions: vi.fn(),
   runNativeCapture: vi.fn(),
 }))
@@ -13,16 +14,10 @@ const saveApi = vi.hoisted(() => ({
 const dialog = vi.hoisted(() => ({
   message: vi.fn(),
 }))
-const win = vi.hoisted(() => ({
-  close: vi.fn(),
-}))
 
 vi.mock('../api/capture', () => api)
 vi.mock('../api/save', () => saveApi)
 vi.mock('@tauri-apps/plugin-dialog', () => dialog)
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: win.close }),
-}))
 
 const reactActGlobal = globalThis as typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT: boolean
@@ -47,7 +42,7 @@ describe('NativeCaptureFlow', () => {
     document.body.append(container)
     root = createRoot(container)
     api.launchOptions.mockResolvedValue({ backend: 'auto', fps: 30, show_cursor: false })
-    saveApi.promptSaveStitchedPng.mockResolvedValue(undefined)
+    saveApi.promptSaveStitchedPng.mockResolvedValue(true)
     dialog.message.mockResolvedValue(undefined)
   })
 
@@ -74,7 +69,30 @@ describe('NativeCaptureFlow', () => {
       show_cursor: false,
     })
     expect(saveApi.promptSaveStitchedPng).toHaveBeenCalledTimes(1)
-    expect(win.close).toHaveBeenCalledTimes(1)
+    expect(api.exitApp).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a save error and retries before closing', async () => {
+    api.runNativeCapture.mockResolvedValue({
+      image_width: 800,
+      image_height: 1200,
+      output_path: null,
+    })
+    saveApi.promptSaveStitchedPng
+      .mockRejectedValueOnce(new Error('disk full'))
+      .mockResolvedValueOnce(true)
+
+    await act(async () => {
+      root.render(<NativeCaptureFlow />)
+    })
+    await flush()
+
+    expect(dialog.message).toHaveBeenCalledWith('Error: disk full', {
+      title: 'Rollshot save failed',
+      kind: 'error',
+    })
+    expect(saveApi.promptSaveStitchedPng).toHaveBeenCalledTimes(2)
+    expect(api.exitApp).toHaveBeenCalledTimes(1)
   })
 
   it('closes without saving when capture is cancelled', async () => {
@@ -86,7 +104,7 @@ describe('NativeCaptureFlow', () => {
     await flush()
 
     expect(saveApi.promptSaveStitchedPng).not.toHaveBeenCalled()
-    expect(win.close).toHaveBeenCalledTimes(1)
+    expect(api.exitApp).toHaveBeenCalledTimes(1)
   })
 
   it('shows an error dialog and closes the window when capture fails', async () => {
@@ -102,6 +120,6 @@ describe('NativeCaptureFlow', () => {
       title: 'Rollshot capture failed',
       kind: 'error',
     })
-    expect(win.close).toHaveBeenCalledTimes(1)
+    expect(api.exitApp).toHaveBeenCalledTimes(1)
   })
 })

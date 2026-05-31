@@ -6,6 +6,11 @@ use rollshot_overlay::{run_overlay, CaptureResult, OverlayConfig, OverlayError};
 
 use crate::session::{DoneImageDto, SharedSession};
 
+#[tauri::command]
+pub fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 type OverlayOutcome = Result<Option<CaptureResult>, OverlayError>;
 
 /// Minimum capture fps for the native overlay path. The live stitcher is

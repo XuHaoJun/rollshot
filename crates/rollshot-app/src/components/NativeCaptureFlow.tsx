@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { message as showMessage } from '@tauri-apps/plugin-dialog'
-import { launchOptions, runNativeCapture } from '../api/capture'
+import { exitApp, launchOptions, runNativeCapture } from '../api/capture'
 import { promptSaveStitchedPng } from '../api/save'
 
 export function NativeCaptureFlow() {
@@ -20,7 +19,23 @@ export function NativeCaptureFlow() {
         const done = await runNativeCapture(options)
         if (done) {
           setMessage(`Stitched ${done.image_width}x${done.image_height}`)
-          await promptSaveStitchedPng(setMessage)
+          let savedOrCancelled = false
+          while (!savedOrCancelled) {
+            try {
+              savedOrCancelled = await promptSaveStitchedPng(setMessage)
+            } catch (saveError) {
+              const saveErrorMessage = String(saveError)
+              setMessage(saveErrorMessage)
+              try {
+                await showMessage(saveErrorMessage, {
+                  title: 'Rollshot save failed',
+                  kind: 'error',
+                })
+              } catch {
+                // Keep the finished image in session and retry the save prompt.
+              }
+            }
+          }
         }
       } catch (error) {
         const errorMessage = String(error)
@@ -35,7 +50,7 @@ export function NativeCaptureFlow() {
           // window if the best-effort error dialog cannot be shown.
         }
       } finally {
-        await getCurrentWindow().close()
+        await exitApp()
       }
     })()
   }, [])

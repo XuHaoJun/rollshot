@@ -25,7 +25,7 @@ describe('promptSaveStitchedPng', () => {
       output_path: '/tmp/rollshot.png',
     })
 
-    await promptSaveStitchedPng(onMessage)
+    const result = await promptSaveStitchedPng(onMessage)
 
     expect(dialog.save).toHaveBeenCalledWith({
       title: 'Save stitched PNG',
@@ -34,6 +34,7 @@ describe('promptSaveStitchedPng', () => {
     })
     expect(capture.saveImage).toHaveBeenCalledWith('/tmp/rollshot.png')
     expect(onMessage).toHaveBeenCalledWith('Saved /tmp/rollshot.png')
+    expect(result).toBe(true)
   })
 
   it('does not write when the save dialog is cancelled', async () => {
@@ -41,10 +42,11 @@ describe('promptSaveStitchedPng', () => {
     const onMessage = vi.fn()
     dialog.save.mockResolvedValueOnce(null)
 
-    await promptSaveStitchedPng(onMessage)
+    const result = await promptSaveStitchedPng(onMessage)
 
     expect(capture.saveImage).not.toHaveBeenCalled()
     expect(onMessage).not.toHaveBeenCalled()
+    expect(result).toBe(false)
   })
 
   it('propagates save failures', async () => {
