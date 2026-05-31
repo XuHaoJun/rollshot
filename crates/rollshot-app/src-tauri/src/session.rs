@@ -14,7 +14,8 @@ use rollshot_capture::{
 use rollshot_core::{StitchConfig, StitchOutcome, StitchStats, Stitcher};
 
 use rollshot_overlay_core::capture_miss::{
-    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CAPTURE_MISS_WARNING,
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CapturedEdge,
+    StitchProgressSignal, CAPTURE_MISS_WARNING,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -110,6 +111,7 @@ pub struct AppSession {
     last_stitch_outcome: Option<String>,
     capture_miss_tracker: CaptureMissTracker,
     capture_miss_state: CaptureMissState,
+    spotlight_edge: CapturedEdge,
     final_image: Option<RgbaImage>,
     output_path: Option<String>,
     error: Option<String>,
@@ -126,6 +128,7 @@ impl Default for AppSession {
             last_stitch_outcome: None,
             capture_miss_tracker: CaptureMissTracker::default(),
             capture_miss_state: CaptureMissState::default(),
+            spotlight_edge: CapturedEdge::Unknown,
             final_image: None,
             output_path: None,
             error: None,
@@ -223,6 +226,7 @@ impl AppSession {
         self.last_stitch_outcome = None;
         self.capture_miss_tracker = CaptureMissTracker::default();
         self.capture_miss_state = CaptureMissState::default();
+        self.spotlight_edge = CapturedEdge::Unknown;
         self.final_image = None;
         self.output_path = None;
         self.error = None;
@@ -239,10 +243,15 @@ impl AppSession {
             .ok_or_else(|| "stitching has not started".to_string())?;
         let cropped = crop_frame(&frame, region).map_err(|err| err.to_string())?;
         let outcome = stitcher.push_frame(cropped.image);
-        self.capture_miss_state = self.capture_miss_tracker.update(
-            progress_signal_from_outcome(&outcome),
-            std::time::Instant::now(),
-        );
+        let signal = progress_signal_from_outcome(&outcome);
+        if let StitchProgressSignal::Accepted { edge } = signal {
+            if edge != CapturedEdge::Unknown {
+                self.spotlight_edge = edge;
+            }
+        }
+        self.capture_miss_state = self
+            .capture_miss_tracker
+            .update(signal, std::time::Instant::now());
         self.last_stitch_outcome = Some(format_stitch_outcome(&outcome));
         self.stitch_stats = stitcher.stats().into();
         Ok(())
@@ -304,6 +313,7 @@ impl AppSession {
         self.last_stitch_outcome = None;
         self.capture_miss_tracker = CaptureMissTracker::default();
         self.capture_miss_state = CaptureMissState::default();
+        self.spotlight_edge = CapturedEdge::Unknown;
         self.final_image = None;
         self.output_path = None;
         self.error = None;
@@ -421,6 +431,7 @@ impl SharedSession {
             inner.error = None;
             inner.capture_miss_tracker = CaptureMissTracker::default();
             inner.capture_miss_state = CaptureMissState::default();
+            inner.spotlight_edge = CapturedEdge::Unknown;
         }
 
         self.start_reader(options, &mut reader);
@@ -533,31 +544,37 @@ impl SharedSession {
     }
 
     pub fn stitch_preview_png(&self) -> Result<Option<Vec<u8>>, String> {
-        // The live stitch preview uses the shared fixed grow-then-follow viewport
-        // (consistent with the native overlay): a fixed-width strip that grows,
-        // then follows the bottom of the stitch.
-        let image = {
+        // The live stitch preview is a whole-canvas position spotlight (snow-shot
+        // captuer-edge-mask parity): the entire stitch fitted into a fixed box
+        // with everything outside the current-frame window dimmed.
+        let (image, region, edge) = {
             let mut inner = self
                 .inner
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
-            inner
+            let region = inner.selected_region;
+            let edge = inner.spotlight_edge;
+            let image = inner
                 .stitcher
                 .as_mut()
                 .and_then(|s| s.full_image())
-                .cloned()
+                .cloned();
+            (image, region, edge)
         };
-        image
-            .as_ref()
-            .map(|image| {
-                let view = rollshot_overlay_core::preview::preview_viewport(
-                    image,
+        match (image, region) {
+            (Some(image), Some(region)) => {
+                let view = rollshot_overlay_core::preview::preview_with_spotlight(
+                    &image,
+                    region.width,
+                    region.height,
+                    edge,
                     rollshot_overlay_core::preview::PREVIEW_WIDTH,
                     rollshot_overlay_core::preview::PREVIEW_MAX_HEIGHT,
                 );
-                encode_rgba_png(&view)
-            })
-            .transpose()
+                Ok(Some(encode_rgba_png(&view)?))
+            }
+            _ => Ok(None),
+        }
     }
 
     pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
@@ -1264,6 +1281,56 @@ mod tests {
             }
             other => panic!("expected stitching status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stitch_preview_png_dims_outside_current_frame_window() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            // White frames, region == full frame (80x80). Several appends grow a
+            // tall canvas so the bottom window is a fraction of the whole.
+            inner.store_frame_for_test(blank_frame(80, 80));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner.push_stitch_frame(scrolling_frame(0)).expect("f0");
+            inner.push_stitch_frame(scrolling_frame(20)).expect("f1");
+            inner.push_stitch_frame(scrolling_frame(40)).expect("f2");
+        }
+
+        let bytes = session
+            .stitch_preview_png()
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes)
+            .expect("decode png")
+            .to_rgba8();
+
+        // The canvas grew past one frame, so the top of the preview is dimmed
+        // (no fully-white row at the very top) while the bottom window stays
+        // brighter. Compare mean luma of the top vs bottom rows.
+        let row_luma = |y: u32| -> f32 {
+            (0..image.width())
+                .map(|x| {
+                    let p = image.get_pixel(x, y).0;
+                    (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0
+                })
+                .sum::<f32>()
+                / image.width() as f32
+        };
+        assert!(
+            row_luma(image.height() - 1) > row_luma(0) + 10.0,
+            "bottom window must be brighter than dimmed top: bottom={}, top={}",
+            row_luma(image.height() - 1),
+            row_luma(0),
+        );
     }
 
     #[test]
