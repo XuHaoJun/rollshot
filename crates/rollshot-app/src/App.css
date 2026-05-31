@@ -238,37 +238,6 @@ button:not(:disabled),
   z-index: 20;
 }
 
-.preview-recovery-mask {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px;
-  background: rgba(15, 23, 42, 0.38);
-  color: #fffbeb;
-  font-size: 12px;
-  line-height: 1.25;
-  text-align: center;
-  pointer-events: none;
-}
-
-.preview-recovery-mask-bottom {
-  align-items: end;
-}
-
-.preview-recovery-mask-top {
-  align-items: start;
-}
-
-.preview-recovery-mask-left {
-  justify-content: start;
-}
-
-.preview-recovery-mask-right {
-  justify-content: end;
-}
-
 .preview-processing-indicator {
   position: absolute;
   right: 8px;

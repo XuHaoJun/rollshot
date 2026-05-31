@@ -303,8 +303,6 @@ export function CaptureOverlay() {
           imageUrl={stitchPreviewUrl}
           status={stats}
           placement={placement}
-          captureMiss={status.state === 'stitching' ? status.capture_miss : false}
-          capturedEdge={status.state === 'stitching' ? status.capture_miss_edge : 'unknown'}
           processing={status.state === 'stitching'}
         />
       ) : null}

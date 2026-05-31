@@ -293,7 +293,7 @@ describe('CaptureOverlay', () => {
     expect(closeSpy).toHaveBeenCalledOnce()
   })
 
-  it('shows capture miss warning and preview affordance while stitching is disconnected', async () => {
+  it('shows capture miss toast (no preview mask) while stitching is disconnected', async () => {
     api.sessionStatus.mockResolvedValue({
       state: 'stitching',
       frame_width: 1000,
@@ -317,7 +317,9 @@ describe('CaptureOverlay', () => {
     expect(container.querySelector('.capture-miss-toast')?.textContent).toContain(
       'Scrolling too fast',
     )
-    expect(container.querySelector('.preview-recovery-mask')).not.toBeNull()
+    // Snow-shot-exact: no mask is painted on the preview; the spotlight just
+    // freezes. The transient toast is the only miss affordance.
+    expect(container.querySelector('.preview-recovery-mask')).toBeNull()
 
     // R3: the toast must auto-dismiss after its 3s window even though the next
     // status poll already flipped capture_miss_warning back to false. This guards
