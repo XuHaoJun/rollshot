@@ -10,12 +10,50 @@
 
 ---
 
+## Engineering Review (applied 2026-05-31)
+
+This plan was reviewed and edited in place. Changes are marked inline with
+`> [eng-review]` callouts. Summary of what changed and why:
+
+- **R1 (DRY):** Shared throttle constant `CAPTURE_MISS_THROTTLE` + `Default`
+  impls for `CaptureMissTracker`/`CaptureMissState`. Removes the `3000` magic
+  number repeated across 4 call sites and the awkward
+  `CaptureMissTracker::new(..).state()` double-construct.
+- **R2 (DRY / architecture):** `captured_edge_from_direction` and
+  `progress_signal_from_outcome` were duplicated byte-for-byte in `session.rs`
+  and `driver.rs`. Moved into `rollshot-overlay-core::capture_miss` (which gains
+  a `rollshot-core` dep — verified acyclic). This is what the Goal's "both
+  convert into the same state model" actually requires.
+- **R3 (correctness, webview):** The single `[status]`-keyed toast effect would
+  clear its own dismiss timer on the next poll (read-clear flips
+  `capture_miss_warning` to false 160 ms later), so the toast would **never
+  auto-dismiss**. Split into a set-effect + an expire-effect keyed on the toast
+  value. Added a "toast disappears after 3 s" assertion that catches it.
+- **R4 (correctness, native — silent failure):** The driver only emitted
+  `CaptureMiss` when `active || warn`, so the **clearing/recovery edge was never
+  sent** and the native "Scroll back…" marker would stay forever after a miss.
+  Now emits on any active-flag change (rising AND falling) plus warn pulses.
+- **R5 (correctness, native):** `toolbar_input_rect` assumes the toolbar sits at
+  the band origin; prepending the warning above it would shift the Stop/Save
+  buttons out of the interactive input region (clicks pass through). Chrome order
+  changed to toolbar-first.
+- **R6 (dependency footgun):** `iced::time::every` needs an async-runtime feature
+  that `rollshot-overlay`'s iced (`["canvas","image"]`) does not enable. Added a
+  Cargo step + a no-new-dependency fallback.
+- **R7 (UX edge):** `last_warning_at` was not reset on `Accepted`, so a fresh
+  miss within 3 s of a successful reconnect was silently throttled. Reset it; new
+  test added.
+
+---
+
 ## File Structure
 
 - Create: `crates/rollshot-overlay-core/src/capture_miss.rs`
-  - Shared `StitchProgressSignal`, `CapturedEdge`, `PreviewRecoveryAffordance`, `CaptureMissState`, and `CaptureMissTracker`.
+  - Shared `StitchProgressSignal`, `CapturedEdge`, `PreviewRecoveryAffordance`, `CaptureMissState`, `CaptureMissTracker`, the `CAPTURE_MISS_THROTTLE` constant, and the shared `captured_edge_from_direction` / `progress_signal_from_outcome` converters (R1, R2).
 - Modify: `crates/rollshot-overlay-core/Cargo.toml`
-  - Add `serde` because `CapturedEdge` is serialized through Tauri status.
+  - Add `serde` (`CapturedEdge` is serialized through Tauri status) and `rollshot-core` (the shared `StitchOutcome` → signal converter lives here; R2). Acyclic: `rollshot-core` has no overlay dep.
+- Modify: `crates/rollshot-overlay/Cargo.toml`
+  - Enable the iced async-runtime feature needed by `iced::time::every`, or take the fallback in Task 5 (R6).
 - Modify: `crates/rollshot-overlay-core/src/lib.rs`
   - Export the new shared module.
 - Modify: `crates/rollshot-core/tests/stitcher.rs`
@@ -52,11 +90,25 @@
 
 Create `crates/rollshot-overlay-core/src/capture_miss.rs` with the API skeleton and these tests:
 
+> **[eng-review R1]** Added `CAPTURE_MISS_THROTTLE` and `Default` impls so the
+> `3000 ms` value lives in exactly one place and call sites use `::default()`.
+> `CaptureMissState::default()` IS the inactive state (all-false + `Unknown`
+> edge), replacing the throwaway-tracker `.state()` construction.
+>
+> **[eng-review R2]** Added the shared `rollshot-core` import + the
+> `captured_edge_from_direction` / `progress_signal_from_outcome` converters here
+> (previously duplicated in `session.rs` and `driver.rs`).
+
 ```rust
 use std::time::{Duration, Instant};
 
+use rollshot_core::{AppendDirection, StitchOutcome};
+
 pub const CAPTURE_MISS_WARNING: &str =
     "Scrolling too fast. Scroll back to the captured edge and try again.";
+
+/// One warning toast at most per this window (R1: single source of truth).
+pub const CAPTURE_MISS_THROTTLE: Duration = Duration::from_millis(3000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StitchProgressSignal {
@@ -65,29 +117,64 @@ pub enum StitchProgressSignal {
     Idle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapturedEdge {
     Top,
     Bottom,
     Left,
     Right,
+    #[default]
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PreviewRecoveryAffordance {
     pub active: bool,
     pub edge: CapturedEdge,
     pub processing: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Default` is the inactive state: not active, not warning, `Unknown` edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CaptureMissState {
     pub active: bool,
     pub warn: bool,
     pub edge: CapturedEdge,
     pub affordance: PreviewRecoveryAffordance,
+}
+
+/// Convert a stitch append direction into the captured edge the user must
+/// scroll back toward. Shared by both capture paths (R2).
+pub fn captured_edge_from_direction(direction: AppendDirection) -> CapturedEdge {
+    match direction {
+        AppendDirection::Top => CapturedEdge::Top,
+        AppendDirection::Bottom => CapturedEdge::Bottom,
+        AppendDirection::Left => CapturedEdge::Left,
+        AppendDirection::Right => CapturedEdge::Right,
+    }
+}
+
+/// Map a `StitchOutcome` to the progress signal that drives the tracker.
+/// Shared by `session.rs` (webview) and `driver.rs` (native) (R2).
+pub fn progress_signal_from_outcome(outcome: &StitchOutcome) -> StitchProgressSignal {
+    match outcome {
+        StitchOutcome::FirstFrame => StitchProgressSignal::Accepted {
+            edge: CapturedEdge::Unknown,
+        },
+        StitchOutcome::Appended { direction, .. } => StitchProgressSignal::Accepted {
+            edge: captured_edge_from_direction(*direction),
+        },
+        StitchOutcome::NoMatch { best_estimate, .. } => StitchProgressSignal::Missed {
+            edge: best_estimate
+                .map(|estimate| captured_edge_from_direction(estimate.direction))
+                .unwrap_or(CapturedEdge::Unknown),
+        },
+        StitchOutcome::AxisChanged { estimate, .. } => StitchProgressSignal::Missed {
+            edge: captured_edge_from_direction(estimate.direction),
+        },
+        StitchOutcome::Duplicate | StitchOutcome::NoProgress { .. } => StitchProgressSignal::Idle,
+    }
 }
 
 #[derive(Debug)]
@@ -96,6 +183,12 @@ pub struct CaptureMissTracker {
     edge: CapturedEdge,
     last_warning_at: Option<Instant>,
     throttle: Duration,
+}
+
+impl Default for CaptureMissTracker {
+    fn default() -> Self {
+        Self::new(CAPTURE_MISS_THROTTLE)
+    }
 }
 
 impl CaptureMissTracker {
@@ -235,6 +328,67 @@ mod tests {
         assert_eq!(state.edge, CapturedEdge::Unknown);
         assert!(!state.affordance.active);
     }
+
+    // R7: a fresh miss right after a successful reconnect must warn again, not
+    // be silently throttled by the pre-recovery `last_warning_at`.
+    #[test]
+    fn miss_after_recovery_warns_immediately() {
+        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
+        let _ = tracker.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Bottom,
+            },
+            t(0),
+        );
+        let _ = tracker.update(
+            StitchProgressSignal::Accepted {
+                edge: CapturedEdge::Bottom,
+            },
+            t(100),
+        );
+
+        let state = tracker.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Bottom,
+            },
+            t(200),
+        );
+
+        assert!(state.active);
+        assert!(state.warn, "miss after recovery must warn within throttle window");
+    }
+
+    // R2: the shared outcome→signal converter, exercised here so both capture
+    // paths inherit the coverage instead of each re-testing the mapping.
+    #[test]
+    fn no_match_outcome_maps_to_missed_signal() {
+        let outcome = StitchOutcome::NoMatch {
+            reason: rollshot_core::NoMatchReason::ReverseDirection,
+            best_estimate: None,
+        };
+        assert_eq!(
+            progress_signal_from_outcome(&outcome),
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_outcome_maps_to_idle_signal() {
+        assert_eq!(
+            progress_signal_from_outcome(&StitchOutcome::Duplicate),
+            StitchProgressSignal::Idle
+        );
+    }
+
+    #[test]
+    fn appended_outcome_maps_accepted_edge_from_direction() {
+        assert_eq!(
+            captured_edge_from_direction(AppendDirection::Bottom),
+            CapturedEdge::Bottom
+        );
+    }
 }
 ```
 
@@ -258,16 +412,10 @@ pub fn update(&mut self, signal: StitchProgressSignal, now: Instant) -> CaptureM
         StitchProgressSignal::Accepted { .. } => {
             self.active = false;
             self.edge = CapturedEdge::Unknown;
-            CaptureMissState {
-                active: false,
-                warn: false,
-                edge: CapturedEdge::Unknown,
-                affordance: PreviewRecoveryAffordance {
-                    active: false,
-                    edge: CapturedEdge::Unknown,
-                    processing: false,
-                },
-            }
+            // R7: forget the last warning time so a miss right after recovery
+            // warns immediately rather than being throttled by the old pulse.
+            self.last_warning_at = None;
+            CaptureMissState::default()
         }
         StitchProgressSignal::Missed { edge } => {
             self.active = true;
@@ -305,14 +453,18 @@ pub mod preview;
 pub mod tokens;
 ```
 
-- [ ] **Step 5: Add serde dependency**
+- [ ] **Step 5: Add serde + rollshot-core dependencies**
 
-Modify `crates/rollshot-overlay-core/Cargo.toml`:
+Modify `crates/rollshot-overlay-core/Cargo.toml` (R2). `serde` carries the
+`derive` feature from the workspace (verified in root `Cargo.toml`), and
+`rollshot-core` hosts `StitchOutcome`/`AppendDirection` for the shared
+converter. This edge is acyclic — `rollshot-core` has no overlay dependency.
 
 ```toml
 [dependencies]
 image = { workspace = true }
 serde = { workspace = true }
+rollshot-core = { path = "../rollshot-core" }
 ```
 
 - [ ] **Step 6: Run the shared-state tests**
@@ -389,6 +541,17 @@ rtk cargo test -p rollshot-core scroll_back_after_reverse_direction_miss_can_rec
 ```
 
 Expected: PASS. If it passes, do not modify `rollshot-core/src/stitcher.rs` for this issue. Continue to Task 3.
+
+> **[eng-review]** This is a characterization/regression test and is expected to
+> pass with no core change: `push_frame` only advances `last_good` on `Appended`,
+> so a `ReverseDirection` `NoMatch` leaves the anchor at y=96, and the y=192
+> reconnect is a normal +96 bottom append — the same anchor-preservation
+> mechanism already proven by `bad_frame_returns_no_match_and_preserves_anchor`.
+> The Step 4 core patch branch is therefore almost certainly dead; keep it gated.
+> Caveat: the `assert_eq!(reason, NoMatchReason::ReverseDirection)` is
+> matcher-behavior-dependent — if the matcher returns a different `NoMatchReason`
+> for the y=32 reverse frame, the test fails on *characterization* (not on
+> recovery), and Step 4's guidance correctly says to leave core untouched.
 
 - [ ] **Step 3: If the diagnostic fails, stop and inspect the actual failure**
 
@@ -574,12 +737,12 @@ already has the required `serde` dependency from Task 1.
 
 - [ ] **Step 4: Store tracker state in `AppSession`**
 
-Add imports:
+Add imports (R2: the converters now come from the shared crate, so no local
+`progress_signal_from_outcome` is defined in `session.rs`):
 
 ```rust
 use rollshot_overlay_core::capture_miss::{
-    CapturedEdge, CaptureMissState, CaptureMissTracker, StitchProgressSignal,
-    CAPTURE_MISS_WARNING,
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CAPTURE_MISS_WARNING,
 };
 ```
 
@@ -590,9 +753,9 @@ capture_miss_tracker: CaptureMissTracker,
 capture_miss_state: CaptureMissState,
 ```
 
-Because `AppSession` currently derives `Default`, implement `Default` manually:
-
-Remove `#[derive(Default)]` from `AppSession`, then add:
+Because `AppSession` currently derives `Default`, implement `Default` manually.
+Remove `#[derive(Default)]` from `AppSession`, then add (R1: use the shared
+`::default()` helpers — no `3000` literal, no throwaway tracker):
 
 ```rust
 impl Default for AppSession {
@@ -604,8 +767,8 @@ impl Default for AppSession {
             stitcher: None,
             stitch_stats: StitchStatsDto::from(StitchStats::default()),
             last_stitch_outcome: None,
-            capture_miss_tracker: CaptureMissTracker::new(Duration::from_millis(3000)),
-            capture_miss_state: CaptureMissTracker::new(Duration::from_millis(3000)).state(),
+            capture_miss_tracker: CaptureMissTracker::default(),
+            capture_miss_state: CaptureMissState::default(),
             final_image: None,
             output_path: None,
             error: None,
@@ -616,38 +779,10 @@ impl Default for AppSession {
 
 - [ ] **Step 5: Convert `StitchOutcome` to shared signals**
 
-Add a local helper in `session.rs`:
-
-```rust
-fn captured_edge_from_direction(direction: rollshot_core::AppendDirection) -> CapturedEdge {
-    match direction {
-        rollshot_core::AppendDirection::Top => CapturedEdge::Top,
-        rollshot_core::AppendDirection::Bottom => CapturedEdge::Bottom,
-        rollshot_core::AppendDirection::Left => CapturedEdge::Left,
-        rollshot_core::AppendDirection::Right => CapturedEdge::Right,
-    }
-}
-
-fn progress_signal_from_outcome(outcome: &StitchOutcome) -> StitchProgressSignal {
-    match outcome {
-        StitchOutcome::FirstFrame => StitchProgressSignal::Accepted {
-            edge: CapturedEdge::Unknown,
-        },
-        StitchOutcome::Appended { direction, .. } => StitchProgressSignal::Accepted {
-            edge: captured_edge_from_direction(*direction),
-        },
-        StitchOutcome::NoMatch { best_estimate, .. } => StitchProgressSignal::Missed {
-            edge: best_estimate
-                .map(|estimate| captured_edge_from_direction(estimate.direction))
-                .unwrap_or(CapturedEdge::Unknown),
-        },
-        StitchOutcome::AxisChanged { estimate, .. } => StitchProgressSignal::Missed {
-            edge: captured_edge_from_direction(estimate.direction),
-        },
-        StitchOutcome::Duplicate | StitchOutcome::NoProgress { .. } => StitchProgressSignal::Idle,
-    }
-}
-```
+> **[eng-review R2]** The previously-duplicated `captured_edge_from_direction`
+> and `progress_signal_from_outcome` now live in
+> `rollshot_overlay_core::capture_miss` and are imported (Step 4). Nothing to
+> define locally here — go straight to wiring the tracker update.
 
 In `push_stitch_frame`, after `let outcome = stitcher.push_frame(cropped.image);`, update the tracker:
 
@@ -668,11 +803,11 @@ capture_miss_edge: self.capture_miss_state.edge,
 capture_miss_message: CAPTURE_MISS_WARNING,
 ```
 
-In `start_stitching()` and `reset_capture_state()`, reset both tracker and state:
+In `start_stitching()` and `reset_capture_state()`, reset both tracker and state (R1):
 
 ```rust
-self.capture_miss_tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-self.capture_miss_state = self.capture_miss_tracker.state();
+self.capture_miss_tracker = CaptureMissTracker::default();
+self.capture_miss_state = CaptureMissState::default();
 ```
 
 - [ ] **Step 7: Clear warning pulses after frontend status polling**
@@ -685,10 +820,21 @@ fn clear_capture_miss_warning(&mut self) {
 }
 ```
 
-Modify `SharedSession::status()`:
+Modify `SharedSession::status()`. The read-clear makes `warn` a one-shot pulse:
+the frontend sees it on exactly one poll, then it is cleared.
+
+> **[eng-review R8]** This is a deliberate side effect in a getter-shaped method.
+> It is safe because `SharedSession::status()` has exactly **one** production
+> consumer — the `session_status` command (`commands.rs`). Document that
+> invariant in a comment so a second poller is never added without revisiting the
+> pulse semantics. The webview toast (Task 4, R3) depends on this one-shot
+> behavior to dismiss correctly.
 
 ```rust
 pub fn status(&self) -> Result<SessionStatus, String> {
+    // NOTE (R8): single consumer only (the `session_status` command). The
+    // capture-miss `warn` flag is a one-shot pulse cleared on read; a second
+    // poller would swallow the pulse before the frontend sees it.
     let mut inner = self
         .inner
         .lock()
@@ -773,6 +919,29 @@ it('shows capture miss warning and preview affordance while stitching is disconn
     'Scrolling too fast',
   )
   expect(container.querySelector('.preview-recovery-mask')).not.toBeNull()
+
+  // R3: the toast must auto-dismiss after its 3s window even though the next
+  // status poll already flipped capture_miss_warning back to false. This guards
+  // against the dismiss timer being torn down by the [status]-keyed effect.
+  api.sessionStatus.mockResolvedValue({
+    state: 'stitching',
+    frame_width: 1000,
+    frame_height: 500,
+    region: { x: 100, y: 50, width: 400, height: 200 },
+    stats: { frame_count: 4, total_width: 400, total_height: 1000, last_append: 100 },
+    last_outcome: 'appended 100px Bottom',
+    capture_miss: false,
+    capture_miss_warning: false,
+    capture_miss_edge: 'unknown',
+    capture_miss_message: 'Scrolling too fast. Scroll back to the captured edge and try again.',
+  } satisfies SessionStatus)
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(320) // two more poll ticks flip warn->false
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000) // dismiss window elapses
+  })
+  expect(container.querySelector('.capture-miss-toast')).toBeNull()
 })
 ```
 
@@ -823,15 +992,28 @@ In `CaptureOverlay.tsx`, add:
 const [captureMissToast, setCaptureMissToast] = useState<string | null>(null)
 ```
 
-Add an effect:
+Add two effects (R3). They must be separate: a single `[status]`-keyed effect
+that both sets the toast and owns the dismiss timer tears its own timer down on
+the very next poll — `capture_miss_warning` is a one-shot pulse (Task 3, R8), so
+the next poll's cleanup runs `clearTimeout` before the 3s elapses and the toast
+never disappears. Keying the expire timer on the toast value instead makes it
+survive subsequent polls.
 
 ```tsx
+// Show the toast when a warning pulse arrives.
 useEffect(() => {
-  if (status.state !== 'stitching' || !status.capture_miss_warning) return
-  setCaptureMissToast(status.capture_miss_message)
+  if (status.state === 'stitching' && status.capture_miss_warning) {
+    setCaptureMissToast(status.capture_miss_message)
+  }
+}, [status])
+
+// Dismiss it ~3s after it was last (re)shown. Keyed on the toast value, NOT on
+// `status`, so an intervening poll that flips warn->false cannot cancel it.
+useEffect(() => {
+  if (!captureMissToast) return
   const timer = window.setTimeout(() => setCaptureMissToast(null), 3000)
   return () => window.clearTimeout(timer)
-}, [status])
+}, [captureMissToast])
 ```
 
 Pass new props:
@@ -946,15 +1128,28 @@ Expected: PASS.
 **Files:**
 - Modify: `crates/rollshot-overlay/src/driver.rs`
 - Modify: `crates/rollshot-overlay/src/overlay.rs`
+- Modify (R6): `crates/rollshot-overlay/Cargo.toml` — add the iced `time`/async-runtime feature for `iced::time::every` (or take the R6 fallback and leave it unchanged).
 
-- [ ] **Step 1: Add the native event type and conversion tests**
+- [ ] **Step 1: Add the native event type and the emit-decision seam**
 
-In `driver.rs`, add imports:
+> **[eng-review R2]** The `StitchOutcome` → signal converters are now shared in
+> `rollshot_overlay_core::capture_miss` — import them, don't redefine. The
+> mapping tests live in Task 1.
+>
+> **[eng-review R4]** The driver previously emitted `CaptureMiss` only when
+> `active || warn`, so the **clearing edge was never sent** and the native
+> "Scroll back…" marker would never disappear after a recovery. The emit
+> decision is extracted into a pure `should_emit_capture_miss` so the
+> rising/falling/steady/warn cases are unit-testable (the threaded `begin_stitch`
+> loop itself is not).
+
+In `driver.rs`, add imports (`StitchOutcome` is new; `AppendDirection` is no
+longer needed locally):
 
 ```rust
-use rollshot_core::{AppendDirection, StitchConfig, StitchOutcome, Stitcher};
+use rollshot_core::{StitchConfig, StitchOutcome, Stitcher};
 use rollshot_overlay_core::capture_miss::{
-    CapturedEdge, CaptureMissState, CaptureMissTracker, StitchProgressSignal,
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker,
 };
 ```
 
@@ -967,33 +1162,11 @@ pub enum LiveOverlayEvent {
     CaptureMiss(CaptureMissState),
 }
 
-fn captured_edge_from_direction(direction: AppendDirection) -> CapturedEdge {
-    match direction {
-        AppendDirection::Top => CapturedEdge::Top,
-        AppendDirection::Bottom => CapturedEdge::Bottom,
-        AppendDirection::Left => CapturedEdge::Left,
-        AppendDirection::Right => CapturedEdge::Right,
-    }
-}
-
-fn progress_signal_from_outcome(outcome: &StitchOutcome) -> StitchProgressSignal {
-    match outcome {
-        StitchOutcome::FirstFrame => StitchProgressSignal::Accepted {
-            edge: CapturedEdge::Unknown,
-        },
-        StitchOutcome::Appended { direction, .. } => StitchProgressSignal::Accepted {
-            edge: captured_edge_from_direction(*direction),
-        },
-        StitchOutcome::NoMatch { best_estimate, .. } => StitchProgressSignal::Missed {
-            edge: best_estimate
-                .map(|estimate| captured_edge_from_direction(estimate.direction))
-                .unwrap_or(CapturedEdge::Unknown),
-        },
-        StitchOutcome::AxisChanged { estimate, .. } => StitchProgressSignal::Missed {
-            edge: captured_edge_from_direction(estimate.direction),
-        },
-        StitchOutcome::Duplicate | StitchOutcome::NoProgress { .. } => StitchProgressSignal::Idle,
-    }
+/// R4: emit on any active-flag transition (rising OR falling — so the recovery
+/// edge clears the native marker) and on every warn pulse. Returns whether this
+/// state is worth sending given the last `active` we emitted.
+fn should_emit_capture_miss(state: &CaptureMissState, last_active: bool) -> bool {
+    state.warn || state.active != last_active
 }
 ```
 
@@ -1001,26 +1174,40 @@ Add tests in `driver.rs`:
 
 ```rust
 #[test]
-fn no_match_outcome_maps_to_missed_signal() {
-    let outcome = StitchOutcome::NoMatch {
-        reason: rollshot_core::NoMatchReason::ReverseDirection,
-        best_estimate: None,
+fn capture_miss_emit_on_rising_edge() {
+    let state = CaptureMissState {
+        active: true,
+        warn: false,
+        ..Default::default()
     };
-
-    assert_eq!(
-        progress_signal_from_outcome(&outcome),
-        StitchProgressSignal::Missed {
-            edge: CapturedEdge::Unknown
-        }
-    );
+    assert!(should_emit_capture_miss(&state, false));
 }
 
 #[test]
-fn duplicate_outcome_maps_to_idle_signal() {
-    assert_eq!(
-        progress_signal_from_outcome(&StitchOutcome::Duplicate),
-        StitchProgressSignal::Idle
-    );
+fn capture_miss_emit_on_clearing_edge() {
+    // R4: recovery must reach the overlay so the marker disappears.
+    let state = CaptureMissState::default(); // active=false, warn=false
+    assert!(should_emit_capture_miss(&state, true));
+}
+
+#[test]
+fn capture_miss_emit_skipped_when_steady_active() {
+    let state = CaptureMissState {
+        active: true,
+        warn: false,
+        ..Default::default()
+    };
+    assert!(!should_emit_capture_miss(&state, true));
+}
+
+#[test]
+fn capture_miss_emit_on_warn_pulse_when_active_unchanged() {
+    let state = CaptureMissState {
+        active: true,
+        warn: true,
+        ..Default::default()
+    };
+    assert!(should_emit_capture_miss(&state, true));
 }
 ```
 
@@ -1029,10 +1216,11 @@ fn duplicate_outcome_maps_to_idle_signal() {
 Run:
 
 ```bash
-rtk cargo test -p rollshot-overlay no_match_outcome_maps_to_missed_signal duplicate_outcome_maps_to_idle_signal -- --nocapture
+rtk cargo test -p rollshot-overlay capture_miss_emit -- --nocapture
 ```
 
-Expected: FAIL until imports/types are wired correctly.
+Expected: FAIL (does not compile) until `should_emit_capture_miss`,
+`LiveOverlayEvent`, and the imports are wired in.
 
 - [ ] **Step 3: Change the driver channel type**
 
@@ -1050,20 +1238,24 @@ preview_tx: UnboundedSender<LiveOverlayEvent>,
 
 Update `start_capture` parameter type the same way.
 
-In `begin_stitch`, create a tracker before the loop:
+In `begin_stitch`, create a tracker and the last-emitted-active flag before the
+loop (R1: `::default()`):
 
 ```rust
-let mut capture_miss_tracker = CaptureMissTracker::new(Duration::from_millis(3000));
+let mut capture_miss_tracker = CaptureMissTracker::default();
+let mut last_capture_miss_active = false;
 ```
 
-After `let outcome = stitcher.push_frame(cropped.image);`, update and emit:
+After `let outcome = stitcher.push_frame(cropped.image);`, update and emit on
+any change or warn pulse (R4):
 
 ```rust
 let capture_miss_state =
     capture_miss_tracker.update(progress_signal_from_outcome(&outcome), Instant::now());
-if capture_miss_state.active || capture_miss_state.warn {
+if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
     let _ = preview_tx.unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
 }
+last_capture_miss_active = capture_miss_state.active;
 ```
 
 When sending preview handles, change:
@@ -1114,6 +1306,24 @@ fn subscription(_: &Overlay) -> iced::Subscription<Message> {
     ])
 }
 ```
+
+> **[eng-review R6]** `rollshot-overlay`'s iced features are `["canvas",
+> "image"]` — that does **not** include the `time`/async-runtime feature
+> `iced::time::every` needs, so this will fail to compile as written. Before
+> relying on the tick, add the feature in `crates/rollshot-overlay/Cargo.toml`:
+>
+> ```toml
+> iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
+> ```
+>
+> Verify it compiles cleanly under `iced_layershell` (Step 6's `cargo test`
+> build is the gate). **Fallback if the timer feature conflicts with
+> `iced_layershell`'s loop:** drop the `Tick`/`every` subscription and clear the
+> warning when the *next* `LiveEvent` arrives carrying `warn == false` (the
+> driver now emits the clearing edge per R4). Tradeoff: if the user stops
+> scrolling entirely the banner lingers until the next event — acceptable
+> because recovery requires scrolling back, which itself produces events. State
+> which path you took in the final notes.
 
 In `update`, handle:
 
@@ -1187,14 +1397,28 @@ let recovery_marker: Option<Element<'_, Message>> = state.capture_miss.then(|| {
 });
 ```
 
-Build the column in this order: warning, toolbar, preview, recovery marker. Keep passing it through `place_outside_crop`.
+Build the column in this order: **toolbar, warning, preview, recovery marker**, then pass it through `place_outside_crop`.
+
+> **[eng-review R5]** The toolbar MUST be the first column element. `toolbar_input_rect`
+> makes only a `TOOLBAR_W × TOOLBAR_H` rect at the band origin interactive
+> (input passthrough). Prepending the warning above the toolbar shifts the
+> Stop/Save buttons down by the warning's height, out of that rect — clicks would
+> pass through to the underlying app and the toolbar would be dead during the
+> warning window. Keeping the toolbar at the band origin preserves the existing
+> `toolbar_input_rect` contract; the warning/marker render below it.
+>
+> Note (layout): the warning + marker add height the preview-size calc does not
+> account for, so on a tight band they can extend past the chosen band. This is
+> cosmetic only — all chrome stays outside the crop via `place_outside_crop`, so
+> it never enters the stitched image. Confirm visually in Task 7 Step 1.
 
 - [ ] **Step 6: Run native overlay tests**
 
-Run:
+Run (this also compiles the iced `time` feature change from R6, surfacing any
+`iced_layershell` conflict before manual acceptance):
 
 ```bash
-rtk cargo test -p rollshot-overlay no_match_outcome_maps_to_missed_signal duplicate_outcome_maps_to_idle_signal -- --nocapture
+rtk cargo test -p rollshot-overlay capture_miss_emit -- --nocapture
 ```
 
 Expected: PASS.
