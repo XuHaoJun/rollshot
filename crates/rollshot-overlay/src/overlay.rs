@@ -595,7 +595,13 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
             layer_settings: LayerShellSettings {
                 anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
                 layer: Layer::Overlay,
-                exclusive_zone: 0,
+                // -1 = extend to all anchored edges, covering the full output
+                // (panels/taskbars included). 0 would let the compositor shrink
+                // us to the work area, but the PipeWire capture is FullSource
+                // (whole monitor), so a shorter overlay inflates scale_y in
+                // map_crop_to_frame and over-captures below the crop (worse
+                // toward the bottom). Must match the capture's coordinate space.
+                exclusive_zone: -1,
                 size: None,
                 margin: (0, 0, 0, 0),
                 keyboard_interactivity: KeyboardInteractivity::Exclusive,
