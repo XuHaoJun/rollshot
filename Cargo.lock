@@ -5511,6 +5511,7 @@ dependencies = [
  "raw-window-handle",
  "rollshot-capture",
  "rollshot-core",
+ "rollshot-overlay",
  "rollshot-overlay-core",
  "serde",
  "serde_json",
