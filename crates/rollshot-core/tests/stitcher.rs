@@ -198,6 +198,47 @@ fn bad_frame_returns_no_match_and_preserves_anchor() {
 }
 
 #[test]
+fn scroll_back_after_reverse_direction_miss_can_reconnect_to_last_good_anchor() {
+    let canvas = make_scroll_canvas(320, 1800);
+    let first = crop_frame(&canvas, 0, 320);
+    let appended = crop_frame(&canvas, 96, 320);
+    let reverse = crop_frame(&canvas, 32, 320);
+    let reconnected = crop_frame(&canvas, 192, 320);
+
+    let mut stitcher = Stitcher::new(StitchConfig::default());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(appended) {
+        StitchOutcome::Appended { direction, .. } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+        }
+        other => panic!("expected initial bottom append, got {other:?}"),
+    }
+
+    match stitcher.push_frame(reverse) {
+        StitchOutcome::NoMatch { reason, .. } => {
+            assert_eq!(reason, NoMatchReason::ReverseDirection);
+        }
+        other => panic!("expected reverse-direction miss, got {other:?}"),
+    }
+
+    let stats_after_miss = stitcher.stats();
+    assert_eq!(stats_after_miss.frame_count, 2);
+
+    match stitcher.push_frame(reconnected) {
+        StitchOutcome::Appended {
+            direction, added, ..
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert!((92..=100).contains(&added), "added = {added}");
+        }
+        other => panic!("expected append after reconnecting to anchor, got {other:?}"),
+    }
+
+    assert_eq!(stitcher.stats().frame_count, 3);
+}
+
+#[test]
 fn sticky_header_frames_still_append_expected_amount() {
     let canvas = make_scroll_canvas(320, 1400);
     let mut first = crop_frame(&canvas, 0, 320);
