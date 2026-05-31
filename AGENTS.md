@@ -56,6 +56,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Branching
 
+- **superpowers spec commit:** when a spec has been reviewed and approved by the user and you are about to commit that spec, branch-first-if-on-`main`: if currently on `main` (the default branch), create a new branch (`git checkout -b <name>`) FIRST, then commit the spec — never commit it directly on `main`. If already on a non-`main` branch, do NOT create a new branch; commit on the current branch. (This is the one moment to enforce; other commits follow the normal harness rules.)
 - New branches: use `git checkout -b <name>` in place.
 - Never set up git worktrees unless explicitly asked.
 
@@ -89,6 +90,35 @@ verifier, stitcher), also capture before/after numbers:
 - `rtk python3 scripts/bench/compare.py bench-results/runs/<scope>/before.jsonl bench-results/runs/<scope>/after.jsonl`
 
 See `docs/bench.md` for the full workflow and metric reference.
+
+### Platform-split capture UI changes
+
+Linux and macOS capture UI paths are intentionally different:
+
+- Linux uses the native Wayland layer-shell overlay (`rollshot-overlay`) and
+  keeps the Tauri host window hidden/unfocused during capture.
+- macOS uses the Tauri/webview overlay path with ScreenCaptureKit (`macos-sck`).
+
+For any change touching capture UI/UX, check both platform paths before editing.
+This includes overlay behavior, crop selection, coordinate mapping, input
+passthrough, focus/window visibility, scroll/Esc controls, stitching live
+preview, final preview, save handoff, capture launch options, backend/region
+semantics, and shared overlay visuals.
+
+Prefer shared code when behavior must match both paths:
+
+- `crates/rollshot-overlay-core` for preview viewport logic and crop visual
+  tokens.
+- `crates/rollshot-app/src-tauri/src/session.rs` for webview capture/session
+  state and save/final-preview behavior.
+- `crates/rollshot-app/src-tauri/src/native_capture.rs` and
+  `crates/rollshot-overlay` for the Linux native overlay handoff and UI.
+- `crates/rollshot-app/src/components/CaptureOverlay.tsx` for the macOS/webview
+  overlay flow and `NativeCaptureFlow.tsx` for the Linux save handoff host flow.
+
+If a change intentionally applies to only one platform, state that explicitly in
+the plan and final response, including the reason, the unchecked counterpart
+path, and any remaining runtime-verification risk.
 
 @RTK.md
 
@@ -174,6 +204,29 @@ In these contexts the "code wins on conflict" rule above does **not** apply
 to the plan being worked on — that plan is the source of truth for the
 duration of the workflow. The plan becomes a frozen snapshot only after the
 workflow completes and the branch lands.
+
+## 11. Spec/Plan Process — Default Flow and Lightweight Escape
+
+The default for creative/implementation work is the full superpowers flow:
+brainstorm → spec → approval → writing-plans → execute. The native superpowers
+skills require this even for tasks that look simple (their HARD-GATE and the
+"This Is Too Simple To Need A Design" anti-pattern), allowing only a *short*
+design — never skipping it.
+
+**Lightweight escape (user-initiated).** This instruction overrides that gate
+(superpowers' own Instruction Priority puts user instructions above skills).
+When the user explicitly says to skip the spec/plan and implement directly
+(e.g. "just do it", "skip the spec", "no plan needed", "直接做"), go straight to
+implementation — no design doc, no plan file.
+
+- You may NOT decide on your own that a task is "too simple" to spec — the skip
+  is the user's call.
+- When you judge a task trivial (e.g. a single-file change with no design
+  choices), you MAY proactively *suggest* skipping the spec/plan and wait for
+  the user's go-ahead — but default to the normal flow until they agree.
+- Skipping the spec/plan does NOT skip engineering discipline: still apply §1
+  (surface assumptions, ask when unclear), §4 (goal-driven / TDD), and §7
+  (verification).
 
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
