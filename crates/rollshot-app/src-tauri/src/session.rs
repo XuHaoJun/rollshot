@@ -13,6 +13,10 @@ use rollshot_capture::{
 };
 use rollshot_core::{StitchConfig, StitchOutcome, StitchStats, Stitcher};
 
+use rollshot_overlay_core::capture_miss::{
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CAPTURE_MISS_WARNING,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SessionStatus {
@@ -28,6 +32,10 @@ pub enum SessionStatus {
         region: RegionDto,
         stats: StitchStatsDto,
         last_outcome: Option<String>,
+        capture_miss: bool,
+        capture_miss_warning: bool,
+        capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge,
+        capture_miss_message: &'static str,
     },
     Done {
         image_width: u32,
@@ -93,7 +101,6 @@ impl From<RegionDto> for Region {
     }
 }
 
-#[derive(Default)]
 pub struct AppSession {
     latest_frame: Option<CapturedFrame>,
     latest_frame_seq: u64,
@@ -101,9 +108,29 @@ pub struct AppSession {
     stitcher: Option<Stitcher>,
     stitch_stats: StitchStatsDto,
     last_stitch_outcome: Option<String>,
+    capture_miss_tracker: CaptureMissTracker,
+    capture_miss_state: CaptureMissState,
     final_image: Option<RgbaImage>,
     output_path: Option<String>,
     error: Option<String>,
+}
+
+impl Default for AppSession {
+    fn default() -> Self {
+        Self {
+            latest_frame: None,
+            latest_frame_seq: 0,
+            selected_region: None,
+            stitcher: None,
+            stitch_stats: StitchStatsDto::from(StitchStats::default()),
+            last_stitch_outcome: None,
+            capture_miss_tracker: CaptureMissTracker::default(),
+            capture_miss_state: CaptureMissState::default(),
+            final_image: None,
+            output_path: None,
+            error: None,
+        }
+    }
 }
 
 impl AppSession {
@@ -138,6 +165,10 @@ impl AppSession {
                 },
                 stats: self.stitch_stats,
                 last_outcome: self.last_stitch_outcome.clone(),
+                capture_miss: self.capture_miss_state.active,
+                capture_miss_warning: self.capture_miss_state.warn,
+                capture_miss_edge: self.capture_miss_state.edge,
+                capture_miss_message: CAPTURE_MISS_WARNING,
             },
             (Some(frame), region) => SessionStatus::Previewing {
                 frame_width: frame.image.width(),
@@ -190,6 +221,8 @@ impl AppSession {
         self.stitcher = Some(Stitcher::new(config));
         self.stitch_stats = StitchStatsDto::from(StitchStats::default());
         self.last_stitch_outcome = None;
+        self.capture_miss_tracker = CaptureMissTracker::default();
+        self.capture_miss_state = CaptureMissState::default();
         self.final_image = None;
         self.output_path = None;
         self.error = None;
@@ -206,6 +239,9 @@ impl AppSession {
             .ok_or_else(|| "stitching has not started".to_string())?;
         let cropped = crop_frame(&frame, region).map_err(|err| err.to_string())?;
         let outcome = stitcher.push_frame(cropped.image);
+        self.capture_miss_state = self
+            .capture_miss_tracker
+            .update(progress_signal_from_outcome(&outcome), std::time::Instant::now());
         self.last_stitch_outcome = Some(format_stitch_outcome(&outcome));
         self.stitch_stats = stitcher.stats().into();
         Ok(())
@@ -265,9 +301,15 @@ impl AppSession {
         self.stitcher = None;
         self.stitch_stats = StitchStatsDto::from(StitchStats::default());
         self.last_stitch_outcome = None;
+        self.capture_miss_tracker = CaptureMissTracker::default();
+        self.capture_miss_state = CaptureMissState::default();
         self.final_image = None;
         self.output_path = None;
         self.error = None;
+    }
+
+    fn clear_capture_miss_warning(&mut self) {
+        self.capture_miss_state.warn = false;
     }
 }
 
@@ -467,11 +509,16 @@ impl SharedSession {
     }
 
     pub fn status(&self) -> Result<SessionStatus, String> {
-        let inner = self
+        // NOTE (R8): single consumer only (the `session_status` command). The
+        // capture-miss `warn` flag is a one-shot pulse cleared on read; a second
+        // poller would swallow the pulse before the frontend sees it.
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
-        Ok(inner.status())
+        let status = inner.status();
+        inner.clear_capture_miss_warning();
+        Ok(status)
     }
 
     pub fn confirm_region(&self, region: RegionDto) -> Result<RegionDto, String> {
@@ -695,6 +742,7 @@ mod tests {
     };
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
+    use rollshot_overlay_core::capture_miss::{CapturedEdge, CAPTURE_MISS_WARNING};
     use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -877,6 +925,14 @@ mod tests {
         let image = image::imageops::crop_imm(&canvas, 0, offset_y, 80, 80).to_image();
         CapturedFrame {
             image,
+            timestamp: SystemTime::UNIX_EPOCH,
+            metadata: FrameMetadata::fake(),
+        }
+    }
+
+    fn blank_frame(width: u32, height: u32) -> CapturedFrame {
+        CapturedFrame {
+            image: RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255])),
             timestamp: SystemTime::UNIX_EPOCH,
             metadata: FrameMetadata::fake(),
         }
@@ -1167,5 +1223,75 @@ mod tests {
             session.overlay_exclusion().expect("overlay exclusion"),
             OverlayExclusion::Unsupported
         );
+    }
+
+    #[test]
+    fn status_reports_capture_miss_after_no_match() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+        session
+            .push_stitch_frame_for_test(blank_frame(80, 80))
+            .expect("miss frame");
+
+        match session.status() {
+            SessionStatus::Stitching {
+                capture_miss,
+                capture_miss_warning,
+                capture_miss_edge,
+                capture_miss_message,
+                ..
+            } => {
+                assert!(capture_miss);
+                assert!(capture_miss_warning);
+                assert_eq!(capture_miss_edge, CapturedEdge::Unknown);
+                assert_eq!(capture_miss_message, CAPTURE_MISS_WARNING);
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepted_frame_clears_capture_miss_status() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+        session
+            .push_stitch_frame_for_test(blank_frame(80, 80))
+            .expect("miss frame");
+        session
+            .push_stitch_frame_for_test(scrolling_frame(8))
+            .expect("recovered frame");
+
+        match session.status() {
+            SessionStatus::Stitching { capture_miss, .. } => {
+                assert!(!capture_miss);
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
     }
 }
