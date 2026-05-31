@@ -45,9 +45,7 @@ pub struct Overlay {
     crop_confirmed: bool,
     preview: Option<image::Handle>,
     window_size: Option<iced::Size>,
-    capture_miss: bool,
     capture_miss_warn: bool,
-    capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge,
     capture_miss_message_expires_at: Option<std::time::Instant>,
 }
 
@@ -213,8 +211,6 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
-            state.capture_miss = miss.active;
-            state.capture_miss_edge = miss.edge;
             if miss.warn {
                 state.capture_miss_warn = true;
                 state.capture_miss_message_expires_at =
@@ -567,15 +563,6 @@ fn view(state: &Overlay) -> Element<'_, Message> {
                 .into()
         });
 
-        let recovery_marker: Option<Element<'_, Message>> = state.capture_miss.then(|| {
-            text("Scroll back to the captured edge")
-                .size(13)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
-                })
-                .into()
-        });
-
         let chrome: Element<'_, Message> = {
             let mut col = column![toolbar];
             col = col.spacing(CHROME_SPACING);
@@ -584,9 +571,6 @@ fn view(state: &Overlay) -> Element<'_, Message> {
             }
             if let Some(handle) = &state.preview {
                 col = col.push(image(handle.clone()));
-            }
-            if let Some(r) = recovery_marker {
-                col = col.push(r);
             }
             col.into()
         };

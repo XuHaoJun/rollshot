@@ -1,7 +1,8 @@
 use rollshot_capture::{crop_frame, CaptureError, FrameStream, Region};
 use rollshot_core::{StitchConfig, Stitcher};
 use rollshot_overlay_core::capture_miss::{
-    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker,
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CapturedEdge,
+    StitchProgressSignal,
 };
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -207,6 +208,7 @@ impl Driver {
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
             let mut capture_miss_tracker = CaptureMissTracker::default();
             let mut last_capture_miss_active = false;
+            let mut spotlight_edge = CapturedEdge::Unknown;
             while !stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
                 let frame = if seq == last_seq {
@@ -227,16 +229,24 @@ impl Driver {
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
                         let outcome = stitcher.push_frame(cropped.image);
-                        let capture_miss_state = capture_miss_tracker
-                            .update(progress_signal_from_outcome(&outcome), Instant::now());
+                        let signal = progress_signal_from_outcome(&outcome);
+                        if let StitchProgressSignal::Accepted { edge } = signal {
+                            if edge != CapturedEdge::Unknown {
+                                spotlight_edge = edge;
+                            }
+                        }
+                        let capture_miss_state =
+                            capture_miss_tracker.update(signal, Instant::now());
                         if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
                             let _ = preview_tx
                                 .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
                         }
                         last_capture_miss_active = capture_miss_state.active;
                         if let Some(preview) = stitcher.full_image() {
-                            let handle = preview_viewport_handle(
+                            let handle = spotlight_handle(
                                 preview,
+                                region,
+                                spotlight_edge,
                                 preview_size.width,
                                 preview_size.height,
                             );
@@ -321,11 +331,25 @@ fn wait_for_source_size(
     }
 }
 
-/// Wrap the shared grow-then-follow preview viewport
-/// (`rollshot_overlay_core::preview::preview_viewport`) as an iced image handle.
+/// Build the whole-canvas position-spotlight preview
+/// (`rollshot_overlay_core::preview::preview_with_spotlight`) as an iced image
+/// handle.
 #[allow(dead_code)]
-fn preview_viewport_handle(image: &image::RgbaImage, width: u32, max_height: u32) -> ImageHandle {
-    let view = rollshot_overlay_core::preview::preview_viewport(image, width, max_height);
+fn spotlight_handle(
+    image: &image::RgbaImage,
+    region: Region,
+    edge: rollshot_overlay_core::capture_miss::CapturedEdge,
+    max_width: u32,
+    max_height: u32,
+) -> ImageHandle {
+    let view = rollshot_overlay_core::preview::preview_with_spotlight(
+        image,
+        region.width,
+        region.height,
+        edge,
+        max_width,
+        max_height,
+    );
     ImageHandle::from_rgba(view.width(), view.height(), view.into_raw())
 }
 
