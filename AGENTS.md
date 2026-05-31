@@ -91,6 +91,35 @@ verifier, stitcher), also capture before/after numbers:
 
 See `docs/bench.md` for the full workflow and metric reference.
 
+### Platform-split capture UI changes
+
+Linux and macOS capture UI paths are intentionally different:
+
+- Linux uses the native Wayland layer-shell overlay (`rollshot-overlay`) and
+  keeps the Tauri host window hidden/unfocused during capture.
+- macOS uses the Tauri/webview overlay path with ScreenCaptureKit (`macos-sck`).
+
+For any change touching capture UI/UX, check both platform paths before editing.
+This includes overlay behavior, crop selection, coordinate mapping, input
+passthrough, focus/window visibility, scroll/Esc controls, stitching live
+preview, final preview, save handoff, capture launch options, backend/region
+semantics, and shared overlay visuals.
+
+Prefer shared code when behavior must match both paths:
+
+- `crates/rollshot-overlay-core` for preview viewport logic and crop visual
+  tokens.
+- `crates/rollshot-app/src-tauri/src/session.rs` for webview capture/session
+  state and save/final-preview behavior.
+- `crates/rollshot-app/src-tauri/src/native_capture.rs` and
+  `crates/rollshot-overlay` for the Linux native overlay handoff and UI.
+- `crates/rollshot-app/src/components/CaptureOverlay.tsx` for the macOS/webview
+  overlay flow and `NativeCaptureFlow.tsx` for the Linux save handoff host flow.
+
+If a change intentionally applies to only one platform, state that explicitly in
+the plan and final response, including the reason, the unchecked counterpart
+path, and any remaining runtime-verification risk.
+
 @RTK.md
 
 ## 8. Project Map
