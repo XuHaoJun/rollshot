@@ -45,6 +45,7 @@ export function CaptureOverlay() {
   )
   const [message, setMessage] = useState('Starting capture')
   const [startupFailed, setStartupFailed] = useState(false)
+  const [captureMissToast, setCaptureMissToast] = useState<string | null>(null)
   const pollInFlightRef = useRef(false)
   const stitchPreviewUrlRef = useRef<string | null>(null)
   const finalPreviewUrlRef = useRef<string | null>(null)
@@ -113,6 +114,21 @@ export function CaptureOverlay() {
 
     return () => window.clearInterval(timer)
   }, [startupFailed])
+
+  // Show the toast when a warning pulse arrives.
+  useEffect(() => {
+    if (status.state === 'stitching' && status.capture_miss_warning) {
+      setCaptureMissToast(status.capture_miss_message)
+    }
+  }, [status])
+
+  // Dismiss it ~3s after it was last (re)shown. Keyed on the toast value, NOT on
+  // `status`, so an intervening poll that flips warn->false cannot cancel it.
+  useEffect(() => {
+    if (!captureMissToast) return
+    const timer = window.setTimeout(() => setCaptureMissToast(null), 3000)
+    return () => window.clearTimeout(timer)
+  }, [captureMissToast])
 
   const onSelect = useCallback(async (region: SourceRegion) => {
     try {
@@ -283,8 +299,16 @@ export function CaptureOverlay() {
         </div>
       ) : null}
       {status.state === 'stitching' ? (
-        <AdaptiveStitchPreview imageUrl={stitchPreviewUrl} status={stats} placement={placement} />
+        <AdaptiveStitchPreview
+          imageUrl={stitchPreviewUrl}
+          status={stats}
+          placement={placement}
+          captureMiss={status.state === 'stitching' ? status.capture_miss : false}
+          capturedEdge={status.state === 'stitching' ? status.capture_miss_edge : 'unknown'}
+          processing={status.state === 'stitching'}
+        />
       ) : null}
+      {captureMissToast ? <div className="capture-miss-toast">{captureMissToast}</div> : null}
       {status.state === 'stitching' || status.state === 'done' || status.state === 'failed' ? (
         <OverlayToolbar
           mode={toolbarMode}

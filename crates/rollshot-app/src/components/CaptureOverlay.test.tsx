@@ -179,6 +179,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
 
     act(() => root.render(<CaptureOverlay />))
@@ -209,6 +213,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
 
     act(() => root.render(<CaptureOverlay />))
@@ -232,6 +240,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
 
     act(() => root.render(<CaptureOverlay />))
@@ -252,6 +264,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
     dialog.save.mockResolvedValue('/tmp/rollshot.png')
 
@@ -277,6 +293,56 @@ describe('CaptureOverlay', () => {
     expect(closeSpy).toHaveBeenCalledOnce()
   })
 
+  it('shows capture miss warning and preview affordance while stitching is disconnected', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'no match: ReverseDirection',
+      capture_miss: true,
+      capture_miss_warning: true,
+      capture_miss_edge: 'bottom',
+      capture_miss_message: 'Scrolling too fast. Scroll back to the captured edge and try again.',
+    } satisfies SessionStatus)
+    api.getStitchPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(container.querySelector('.capture-miss-toast')?.textContent).toContain(
+      'Scrolling too fast',
+    )
+    expect(container.querySelector('.preview-recovery-mask')).not.toBeNull()
+
+    // R3: the toast must auto-dismiss after its 3s window even though the next
+    // status poll already flipped capture_miss_warning back to false. This guards
+    // against the dismiss timer being torn down by the [status]-keyed effect.
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 4, total_width: 400, total_height: 1000, last_append: 100 },
+      last_outcome: 'appended 100px Bottom',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: 'Scrolling too fast. Scroll back to the captured edge and try again.',
+    } satisfies SessionStatus)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(320) // two more poll ticks flip warn->false
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000) // dismiss window elapses
+    })
+    expect(container.querySelector('.capture-miss-toast')).toBeNull()
+  })
+
   it('closes after Escape when the save dialog is cancelled', async () => {
     api.sessionStatus.mockResolvedValue({
       state: 'stitching',
@@ -285,6 +351,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
     dialog.save.mockResolvedValue(null)
 

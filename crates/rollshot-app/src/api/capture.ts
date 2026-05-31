@@ -27,6 +27,8 @@ export type DoneImageDto = {
   output_path: string | null
 }
 
+export type CapturedEdge = 'top' | 'bottom' | 'left' | 'right' | 'unknown'
+
 export type SessionStatus =
   | { state: 'idle' }
   | {
@@ -42,6 +44,10 @@ export type SessionStatus =
       region: RegionDto
       stats: StitchStatsDto
       last_outcome: string | null
+      capture_miss: boolean
+      capture_miss_warning: boolean
+      capture_miss_edge: CapturedEdge
+      capture_miss_message: string
     }
   | {
       state: 'done'
