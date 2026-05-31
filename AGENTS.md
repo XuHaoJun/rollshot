@@ -1,3 +1,7 @@
+# Rollshot
+
+Rollshot is a screenshot and scrolling-capture project with a Rust stitching core, capture backends, a CLI, and a Tauri desktop app. Use this file for agent workflow rules and repo orientation; use `README.md` for user-facing setup, and verify implementation details against code.
+
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
