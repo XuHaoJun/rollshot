@@ -239,9 +239,10 @@ impl AppSession {
             .ok_or_else(|| "stitching has not started".to_string())?;
         let cropped = crop_frame(&frame, region).map_err(|err| err.to_string())?;
         let outcome = stitcher.push_frame(cropped.image);
-        self.capture_miss_state = self
-            .capture_miss_tracker
-            .update(progress_signal_from_outcome(&outcome), std::time::Instant::now());
+        self.capture_miss_state = self.capture_miss_tracker.update(
+            progress_signal_from_outcome(&outcome),
+            std::time::Instant::now(),
+        );
         self.last_stitch_outcome = Some(format_stitch_outcome(&outcome));
         self.stitch_stats = stitcher.stats().into();
         Ok(())
@@ -418,6 +419,8 @@ impl SharedSession {
             inner.final_image = None;
             inner.output_path = None;
             inner.error = None;
+            inner.capture_miss_tracker = CaptureMissTracker::default();
+            inner.capture_miss_state = CaptureMissState::default();
         }
 
         self.start_reader(options, &mut reader);

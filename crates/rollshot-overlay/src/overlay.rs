@@ -27,8 +27,9 @@ const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
-static PREVIEW_RX: Mutex<Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>> =
-    Mutex::new(None);
+static PREVIEW_RX: Mutex<
+    Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>,
+> = Mutex::new(None);
 static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex::new(None);
 
 // Capture starts in `run()` before the overlay surface exists, so the portal
@@ -551,36 +552,26 @@ fn view(state: &Overlay) -> Element<'_, Message> {
 
         // R5: toolbar is always first so toolbar_input_rect contract holds.
         let warning: Option<Element<'_, Message>> = state.capture_miss_warn.then(|| {
-            container(
-                text(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING).size(14),
-            )
-            .padding(8)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    120.0 / 255.0,
-                    53.0 / 255.0,
-                    15.0 / 255.0,
-                    0.94,
-                ))),
-                text_color: Some(Color::from_rgb(
-                    1.0,
-                    251.0 / 255.0,
-                    235.0 / 255.0,
-                )),
-                ..Default::default()
-            })
-            .into()
+            container(text(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING).size(14))
+                .padding(8)
+                .style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        120.0 / 255.0,
+                        53.0 / 255.0,
+                        15.0 / 255.0,
+                        0.94,
+                    ))),
+                    text_color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
+                    ..Default::default()
+                })
+                .into()
         });
 
         let recovery_marker: Option<Element<'_, Message>> = state.capture_miss.then(|| {
             text("Scroll back to the captured edge")
                 .size(13)
                 .style(|_theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(
-                        1.0,
-                        251.0 / 255.0,
-                        235.0 / 255.0,
-                    )),
+                    color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
                 })
                 .into()
         });

@@ -227,10 +227,8 @@ impl Driver {
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
                         let outcome = stitcher.push_frame(cropped.image);
-                        let capture_miss_state = capture_miss_tracker.update(
-                            progress_signal_from_outcome(&outcome),
-                            Instant::now(),
-                        );
+                        let capture_miss_state = capture_miss_tracker
+                            .update(progress_signal_from_outcome(&outcome), Instant::now());
                         if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
                             let _ = preview_tx
                                 .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
@@ -242,8 +240,7 @@ impl Driver {
                                 preview_size.width,
                                 preview_size.height,
                             );
-                            let _ =
-                                preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
+                            let _ = preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
                         }
                     }
                 }
