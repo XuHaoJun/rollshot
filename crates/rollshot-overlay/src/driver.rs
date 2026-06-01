@@ -370,6 +370,7 @@ mod tests {
         viewport_handle,
     };
     use image::{Rgba, RgbaImage};
+    use iced::widget::image::Handle as ImageHandle;
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use rollshot_core::{StitchOutcome, Stitcher};
     use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
@@ -474,9 +475,15 @@ mod tests {
             120,
             180,
         )
-        .expect("handle");
+        .expect("viewport preview for first frame");
 
-        let _ = handle;
+        match handle {
+            ImageHandle::Rgba { width, height, .. } => {
+                assert_eq!(width, 120);
+                assert_eq!(height, 180);
+            }
+            other => panic!("expected Rgba handle, got {other:?}"),
+        }
     }
 
     #[test]
