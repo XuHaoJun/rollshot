@@ -505,8 +505,8 @@ fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_captur
     };
     let width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0) as u32;
     let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
-    // Cap the height so the texture stays in the proven-stable envelope; a tall
-    // side band would otherwise produce a ~280×1380 preview that flickers.
+    // Cap the height so the viewport request size stays in the proven-stable
+    // envelope; a tall side band would otherwise produce a ~280×1380 preview.
     let height = band_height.clamp(1, PREVIEW_MAX_HEIGHT);
 
     rollshot_capture::Size { width, height }
@@ -704,10 +704,10 @@ mod tests {
 
         let viewport = preview_viewport_size(crop, window);
 
-        // A tall side band offers ~1382px of height, but the preview texture is
-        // capped so the per-frame upload stays small enough to render without
-        // flicker on the iced_layershell/wgpu path (the larger 960×~1380
-        // textures flickered / never showed).
+        // A tall side band offers ~1382px of height, but the viewport request
+        // size is capped at PREVIEW_MAX_HEIGHT so the live preview stays
+        // within the proven-stable upload envelope on the iced_layershell/wgpu
+        // path.
         assert_eq!(viewport.width, 200);
         assert_eq!(viewport.height, PREVIEW_MAX_HEIGHT);
     }

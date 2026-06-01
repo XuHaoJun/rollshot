@@ -30,6 +30,13 @@ fn should_emit_capture_miss(state: &CaptureMissState, last_active: bool) -> bool
     state.warn || state.active != last_active
 }
 
+/// Emit a native preview only when the stitcher actually accepted the frame;
+/// a `Missed` (no-match) or `Idle` (duplicate/no-progress) signal should not
+/// re-render — it would just redraw the same viewport.
+fn should_emit_preview(signal: &StitchProgressSignal) -> bool {
+    matches!(signal, StitchProgressSignal::Accepted { .. })
+}
+
 /// Wrapper that lets us move a `Box<dyn FrameStream>` to the reader thread.
 /// `FrameStream` is not `Send` because the Linux PipeWire backend holds
 /// `Rc`-based handles (thread-loop, stream, context, core).
@@ -242,15 +249,17 @@ impl Driver {
                                 .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
                         }
                         last_capture_miss_active = capture_miss_state.active;
-                        if let Some(preview) = stitcher.full_image() {
-                            let handle = spotlight_handle(
-                                preview,
+                        if should_emit_preview(&signal) {
+                            if let Some(handle) = viewport_handle(
+                                &mut stitcher,
                                 region,
                                 spotlight_edge,
                                 preview_size.width,
                                 preview_size.height,
-                            );
-                            let _ = preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
+                            ) {
+                                let _ =
+                                    preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
+                            }
                         }
                     }
                 }
@@ -331,34 +340,39 @@ fn wait_for_source_size(
     }
 }
 
-/// Build the whole-canvas position-spotlight preview
-/// (`rollshot_overlay_core::preview::preview_with_spotlight`) as an iced image
+/// Build the viewport-shaped stitch preview
+/// (`rollshot_overlay_core::preview::viewport_preview`) as an iced image
 /// handle.
-#[allow(dead_code)]
-fn spotlight_handle(
-    image: &image::RgbaImage,
+fn viewport_handle(
+    stitcher: &mut Stitcher,
     region: Region,
     edge: rollshot_overlay_core::capture_miss::CapturedEdge,
     max_width: u32,
     max_height: u32,
-) -> ImageHandle {
-    let view = rollshot_overlay_core::preview::preview_with_spotlight(
-        image,
-        region.width,
-        region.height,
-        edge,
-        max_width,
-        max_height,
-    );
-    ImageHandle::from_rgba(view.width(), view.height(), view.into_raw())
+) -> Option<ImageHandle> {
+    let view = rollshot_overlay_core::preview::viewport_preview(
+        stitcher,
+        rollshot_overlay_core::preview::ViewportPreviewRequest {
+            viewport_width: max_width,
+            viewport_height: max_height,
+            frame_width: region.width,
+            frame_height: region.height,
+            edge,
+        },
+    )?;
+    Some(ImageHandle::from_rgba(view.width, view.height, view.pixels))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_stitch_config, should_emit_capture_miss, stitch_stream};
+    use super::{
+        overlay_stitch_config, should_emit_capture_miss, should_emit_preview, stitch_stream,
+        viewport_handle,
+    };
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
-    use rollshot_overlay_core::capture_miss::CaptureMissState;
+    use rollshot_core::{StitchOutcome, Stitcher};
+    use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -438,5 +452,41 @@ mod tests {
             ..Default::default()
         };
         assert!(should_emit_capture_miss(&state, true));
+    }
+
+    #[test]
+    fn viewport_handle_uses_requested_size() {
+        let mut stitcher = Stitcher::new(overlay_stitch_config());
+        assert_eq!(
+            stitcher.push_frame(scrolling_frame(0).image),
+            StitchOutcome::FirstFrame
+        );
+
+        let handle = viewport_handle(
+            &mut stitcher,
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            },
+            rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
+            120,
+            180,
+        )
+        .expect("handle");
+
+        let _ = handle;
+    }
+
+    #[test]
+    fn native_preview_emits_only_for_accepted_progress() {
+        assert!(should_emit_preview(&StitchProgressSignal::Accepted {
+            edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
+        }));
+        assert!(!should_emit_preview(&StitchProgressSignal::Missed {
+            edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
+        }));
+        assert!(!should_emit_preview(&StitchProgressSignal::Idle));
     }
 }
