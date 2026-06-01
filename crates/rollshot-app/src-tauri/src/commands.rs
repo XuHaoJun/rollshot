@@ -74,8 +74,12 @@ pub fn save_image(
 #[tauri::command]
 pub fn get_stitch_preview(
     session: tauri::State<'_, Arc<SharedSession>>,
+    preview_width: u32,
+    preview_height: u32,
 ) -> Result<Response, String> {
-    let bytes = session.stitch_preview_png()?.unwrap_or_default();
+    let bytes = session
+        .stitch_preview_png(preview_width, preview_height)?
+        .unwrap_or_default();
     Ok(Response::new(bytes))
 }
 

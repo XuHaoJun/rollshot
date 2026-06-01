@@ -118,8 +118,8 @@ export async function exitApp(): Promise<void> {
   await invoke('exit_app')
 }
 
-export async function getStitchPreview(): Promise<Blob | null> {
-  const bytes = await invoke<ArrayBuffer>('get_stitch_preview')
+export async function getStitchPreview(previewWidth: number, previewHeight: number): Promise<Blob | null> {
+  const bytes = await invoke<ArrayBuffer>('get_stitch_preview', { previewWidth, previewHeight })
   if (bytes.byteLength === 0) {
     return null
   }

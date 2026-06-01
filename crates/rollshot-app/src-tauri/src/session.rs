@@ -543,37 +543,43 @@ impl SharedSession {
         inner.confirm_region(region)
     }
 
-    pub fn stitch_preview_png(&self) -> Result<Option<Vec<u8>>, String> {
-        // The live stitch preview is a whole-canvas position spotlight (snow-shot
-        // captuer-edge-mask parity): the entire stitch fitted into a fixed box
-        // with everything outside the current-frame window dimmed.
-        let (image, region, edge) = {
+    pub fn stitch_preview_png(
+        &self,
+        preview_width: u32,
+        preview_height: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let preview = {
             let mut inner = self
                 .inner
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
             let region = inner.selected_region;
             let edge = inner.spotlight_edge;
-            let image = inner
-                .stitcher
-                .as_mut()
-                .and_then(|s| s.full_image())
-                .cloned();
-            (image, region, edge)
+            let preview = match inner.stitcher.as_mut() {
+                Some(stitcher) => region.and_then(|region| {
+                    rollshot_overlay_core::preview::viewport_preview(
+                        stitcher,
+                        rollshot_overlay_core::preview::ViewportPreviewRequest {
+                            viewport_width: preview_width,
+                            viewport_height: preview_height,
+                            frame_width: region.width,
+                            frame_height: region.height,
+                            edge,
+                        },
+                    )
+                }),
+                None => None,
+            };
+            preview
         };
-        match (image, region) {
-            (Some(image), Some(region)) => {
-                let view = rollshot_overlay_core::preview::preview_with_spotlight(
-                    &image,
-                    region.width,
-                    region.height,
-                    edge,
-                    rollshot_overlay_core::preview::PREVIEW_WIDTH,
-                    rollshot_overlay_core::preview::PREVIEW_MAX_HEIGHT,
-                );
-                Ok(Some(encode_rgba_png(&view)?))
+
+        match preview {
+            Some(preview) => {
+                let image = RgbaImage::from_raw(preview.width, preview.height, preview.pixels)
+                    .ok_or_else(|| "invalid viewport preview buffer".to_string())?;
+                Ok(Some(encode_rgba_png(&image)?))
             }
-            _ => Ok(None),
+            None => Ok(None),
         }
     }
 
@@ -882,7 +888,7 @@ mod tests {
         }
 
         let bytes = session
-            .stitch_preview_png()
+            .stitch_preview_png(PREVIEW_WIDTH, PREVIEW_MAX_HEIGHT)
             .expect("encode stitch preview")
             .expect("preview exists");
         let image = image::load_from_memory(&bytes).expect("decode png");
@@ -890,12 +896,11 @@ mod tests {
         // A fixed PREVIEW_WIDTH (not a max-edge downscale) proves the shared
         // viewport is used.
         assert_eq!(image.width(), PREVIEW_WIDTH);
-        // Mirror preview_viewport's float-rounded scaling (not integer division)
-        // so this expectation can't drift from production rounding if the
-        // constants change.
-        let scale = PREVIEW_WIDTH as f32 / 960.0;
-        let expected_height = ((600.0 * scale).round() as u32).min(PREVIEW_MAX_HEIGHT);
-        assert_eq!(image.height(), expected_height);
+        // viewport_preview always returns an image of exactly the requested
+        // viewport size — the canvas is aspect-fit and white-letterboxed into
+        // that box. The full requested height is preserved, even when the
+        // canvas aspect is wider than the viewport.
+        assert_eq!(image.height(), PREVIEW_MAX_HEIGHT);
     }
 
     #[test]
@@ -1284,12 +1289,10 @@ mod tests {
     }
 
     #[test]
-    fn stitch_preview_png_dims_outside_current_frame_window() {
+    fn stitch_preview_png_returns_requested_viewport_size() {
         let session = SharedSession::new();
         {
             let mut inner = session.inner.lock().expect("session lock");
-            // White frames, region == full frame (80x80). Several appends grow a
-            // tall canvas so the bottom window is a fraction of the whole.
             inner.store_frame_for_test(blank_frame(80, 80));
             inner
                 .confirm_region(RegionDto {
@@ -1306,31 +1309,12 @@ mod tests {
         }
 
         let bytes = session
-            .stitch_preview_png()
+            .stitch_preview_png(180, 260)
             .expect("encode stitch preview")
             .expect("preview exists");
-        let image = image::load_from_memory(&bytes)
-            .expect("decode png")
-            .to_rgba8();
+        let image = image::load_from_memory(&bytes).expect("decode png");
 
-        // The canvas grew past one frame, so the top of the preview is dimmed
-        // (no fully-white row at the very top) while the bottom window stays
-        // brighter. Compare mean luma of the top vs bottom rows.
-        let row_luma = |y: u32| -> f32 {
-            (0..image.width())
-                .map(|x| {
-                    let p = image.get_pixel(x, y).0;
-                    (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0
-                })
-                .sum::<f32>()
-                / image.width() as f32
-        };
-        assert!(
-            row_luma(image.height() - 1) > row_luma(0) + 10.0,
-            "bottom window must be brighter than dimmed top: bottom={}, top={}",
-            row_luma(image.height() - 1),
-            row_luma(0),
-        );
+        assert_eq!((image.width(), image.height()), (180, 260));
     }
 
     #[test]
