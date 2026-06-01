@@ -369,8 +369,8 @@ mod tests {
         overlay_stitch_config, should_emit_capture_miss, should_emit_preview, stitch_stream,
         viewport_handle,
     };
-    use image::{Rgba, RgbaImage};
     use iced::widget::image::Handle as ImageHandle;
+    use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use rollshot_core::{StitchOutcome, Stitcher};
     use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
