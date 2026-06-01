@@ -94,6 +94,23 @@ describe('NativeCaptureFlow', () => {
     expect(api.exitApp).toHaveBeenCalledTimes(1)
   })
 
+  it('closes after save dialog is cancelled', async () => {
+    api.runNativeCapture.mockResolvedValue({
+      image_width: 800,
+      image_height: 1200,
+      output_path: null,
+    })
+    saveApi.promptSaveStitchedPng.mockResolvedValue(false)
+
+    await act(async () => {
+      root.render(<NativeCaptureFlow />)
+    })
+    await flush()
+
+    expect(saveApi.promptSaveStitchedPng).toHaveBeenCalledTimes(1)
+    expect(api.exitApp).toHaveBeenCalledTimes(1)
+  })
+
   it('closes without saving when capture is cancelled', async () => {
     api.runNativeCapture.mockResolvedValue(null)
 

@@ -22,7 +22,7 @@ export function NativeCaptureFlow() {
           let savedOrCancelled = false
           while (!savedOrCancelled) {
             try {
-              savedOrCancelled = await promptSaveStitchedPng(setMessage)
+              savedOrCancelled = await promptSaveStitchedPng(setMessage) || true
             } catch (saveError) {
               const saveErrorMessage = String(saveError)
               setMessage(saveErrorMessage)
