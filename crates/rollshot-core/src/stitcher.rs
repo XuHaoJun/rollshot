@@ -358,6 +358,18 @@ impl Stitcher {
         self.canvas.as_mut().map(|c| c.image())
     }
 
+    pub fn canvas_viewport(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<crate::canvas::CanvasViewport> {
+        self.canvas
+            .as_ref()
+            .and_then(|canvas| canvas.viewport(x, y, width, height))
+    }
+
     pub fn stats(&self) -> StitchStats {
         self.stats
     }
