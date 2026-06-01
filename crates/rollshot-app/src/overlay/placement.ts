@@ -14,6 +14,37 @@ export type PreviewSize = {
   height: number
 }
 
+type RegionSize = {
+  width: number
+  height: number
+}
+
+type FitPreviewInput = {
+  region: RegionSize
+  maxPreview: PreviewSize
+}
+
+export function fitPreviewSizeToRegion({ region, maxPreview }: FitPreviewInput): PreviewSize {
+  const maxWidth = Math.max(1, Math.floor(maxPreview.width))
+  const maxHeight = Math.max(1, Math.floor(maxPreview.height))
+  const regionWidth = Math.max(1, region.width)
+  const regionHeight = Math.max(1, region.height)
+  const aspect = regionWidth / regionHeight
+  const maxAspect = maxWidth / maxHeight
+
+  if (aspect >= maxAspect) {
+    return {
+      width: maxWidth,
+      height: Math.max(1, Math.min(maxHeight, Math.round(maxWidth / aspect))),
+    }
+  }
+
+  return {
+    width: Math.max(1, Math.min(maxWidth, Math.round(maxHeight * aspect))),
+    height: maxHeight,
+  }
+}
+
 export type PreviewPlacement =
   | {
       mode: 'image'

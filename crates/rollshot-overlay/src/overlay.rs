@@ -503,13 +503,36 @@ fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_captur
         ),
         None => (PREVIEW_WIDTH as f32, 1.0),
     };
-    let width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0) as u32;
+    let max_width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0);
     let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
-    // Cap the height so the viewport request size stays in the proven-stable
-    // envelope; a tall side band would otherwise produce a ~280×1380 preview.
-    let height = band_height.clamp(1, PREVIEW_MAX_HEIGHT);
+    let max_height = band_height.clamp(1, PREVIEW_MAX_HEIGHT) as f32;
 
-    rollshot_capture::Size { width, height }
+    fit_preview_size_to_crop(crop, max_width, max_height)
+}
+
+fn fit_preview_size_to_crop(
+    crop: Rectangle,
+    max_width: f32,
+    max_height: f32,
+) -> rollshot_capture::Size {
+    let max_width = max_width.floor().max(1.0);
+    let max_height = max_height.floor().max(1.0);
+    let crop_width = crop.width.max(1.0);
+    let crop_height = crop.height.max(1.0);
+    let aspect = crop_width / crop_height;
+    let max_aspect = max_width / max_height;
+
+    if aspect >= max_aspect {
+        rollshot_capture::Size {
+            width: max_width as u32,
+            height: (max_width / aspect).round().clamp(1.0, max_height) as u32,
+        }
+    } else {
+        rollshot_capture::Size {
+            width: (max_height * aspect).round().clamp(1.0, max_width) as u32,
+            height: max_height as u32,
+        }
+    }
 }
 
 fn magenta_toolbar<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
@@ -672,9 +695,9 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_mask_bands, preview_viewport_size, token_color, CHROME_SPACING, TOOLBAR_H};
+    use super::{crop_mask_bands, preview_viewport_size, token_color};
     use iced::{Point, Rectangle, Size};
-    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
+    use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 
     #[test]
     fn preview_viewport_uses_fixed_width_and_bottom_band_height() {
@@ -689,11 +712,11 @@ mod tests {
         let viewport = preview_viewport_size(crop, window);
 
         assert_eq!(viewport.width, PREVIEW_WIDTH);
-        assert_eq!(viewport.height, (440.0 - TOOLBAR_H - CHROME_SPACING) as u32);
+        assert_eq!(viewport.height, 105);
     }
 
     #[test]
-    fn preview_viewport_clamps_width_to_side_band() {
+    fn preview_viewport_clamps_width_to_side_band_and_preserves_aspect() {
         let crop = Rectangle {
             x: 200.0,
             y: 10.0,
@@ -704,12 +727,11 @@ mod tests {
 
         let viewport = preview_viewport_size(crop, window);
 
-        // A tall side band offers ~1382px of height, but the viewport request
-        // size is capped at PREVIEW_MAX_HEIGHT so the live preview stays
-        // within the proven-stable upload envelope on the iced_layershell/wgpu
-        // path.
+        // A side band offers only 200px of width. Match the crop aspect instead
+        // of filling the full vertical band, otherwise the shared preview would
+        // letterbox most of its height.
         assert_eq!(viewport.width, 200);
-        assert_eq!(viewport.height, PREVIEW_MAX_HEIGHT);
+        assert_eq!(viewport.height, 123);
     }
 
     #[test]

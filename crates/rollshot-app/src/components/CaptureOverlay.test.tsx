@@ -314,7 +314,7 @@ describe('CaptureOverlay', () => {
       await vi.advanceTimersByTimeAsync(160)
     })
 
-    expect(api.getStitchPreview).toHaveBeenCalledWith(180, 260)
+    expect(api.getStitchPreview).toHaveBeenCalledWith(180, 90)
     expect(container.querySelector('.capture-miss-toast')?.textContent).toContain(
       'Scrolling too fast',
     )

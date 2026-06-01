@@ -18,12 +18,12 @@ import {
 import { promptSaveStitchedPng } from '../api/save'
 import type { PreviewScale, SourceRegion } from '../region/geometry'
 import { sourceRegionToCssRect } from '../region/geometry'
-import { choosePreviewPlacement } from '../overlay/placement'
+import { choosePreviewPlacement, fitPreviewSizeToRegion } from '../overlay/placement'
 import { AdaptiveStitchPreview } from './AdaptiveStitchPreview'
 import { OverlayToolbar } from './OverlayToolbar'
 import { SelectionLayer } from './SelectionLayer'
 
-const PREVIEW_SIZE = { width: 180, height: 260 }
+const MAX_PREVIEW_SIZE = { width: 180, height: 260 }
 const OVERLAY_CLEAR_DELAY_MS = 17
 
 function waitForOverlayClear() {
@@ -96,7 +96,11 @@ export function CaptureOverlay() {
         const nextStatus = await sessionStatus()
         setStatus(nextStatus)
         if (nextStatus.state === 'stitching') {
-          const blob = await getStitchPreview(PREVIEW_SIZE.width, PREVIEW_SIZE.height)
+          const previewSize = fitPreviewSizeToRegion({
+            region: nextStatus.region,
+            maxPreview: MAX_PREVIEW_SIZE,
+          })
+          const blob = await getStitchPreview(previewSize.width, previewSize.height)
           if (blob) {
             const nextUrl = URL.createObjectURL(blob)
             setStitchPreviewUrl((oldUrl) => {
@@ -255,10 +259,14 @@ export function CaptureOverlay() {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+    const previewSize = fitPreviewSizeToRegion({
+      region: activeRegionRect,
+      maxPreview: MAX_PREVIEW_SIZE,
+    })
     return choosePreviewPlacement({
       bounds,
       region: activeRegionRect,
-      preview: PREVIEW_SIZE,
+      preview: previewSize,
       overlayExclusion: overlayMode,
     })
   }, [activeRegionRect, overlayMode])

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { choosePreviewPlacement, type OverlayExclusion } from './placement'
+import { choosePreviewPlacement, fitPreviewSizeToRegion, type OverlayExclusion } from './placement'
 
 const bounds = { left: 0, top: 0, width: 1000, height: 700 }
 const preview = { width: 180, height: 260 }
@@ -83,4 +83,24 @@ describe('choosePreviewPlacement', () => {
       ).toEqual({ mode: 'status' })
     },
   )
+})
+
+describe('fitPreviewSizeToRegion', () => {
+  it('keeps a wide crop from filling a tall preview box', () => {
+    expect(
+      fitPreviewSizeToRegion({
+        region: { width: 2400, height: 900 },
+        maxPreview: { width: 180, height: 260 },
+      }),
+    ).toEqual({ width: 180, height: 68 })
+  })
+
+  it('reduces width for a tall crop instead of letterboxing horizontally', () => {
+    expect(
+      fitPreviewSizeToRegion({
+        region: { width: 400, height: 1200 },
+        maxPreview: { width: 180, height: 260 },
+      }),
+    ).toEqual({ width: 87, height: 260 })
+  })
 })
