@@ -1,0 +1,5 @@
+{
+  "build": {
+    "features": ["macos-sck"]
+  }
+}
