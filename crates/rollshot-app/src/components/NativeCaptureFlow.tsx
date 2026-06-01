@@ -32,8 +32,10 @@ export function NativeCaptureFlow() {
                   kind: 'error',
                 })
               } catch {
-                // Keep the finished image in session and retry the save prompt.
+                // Error dialog could not be shown; exit the loop to avoid
+                // trapping the user in an unrecoverable retry cycle.
               }
+              break
             }
           }
         }
