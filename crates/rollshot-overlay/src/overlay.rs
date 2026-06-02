@@ -118,7 +118,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         }
         Message::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))) => {
             state.drag_start = None;
-            Task::none()
+            if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
+            {
+                Task::done(Message::Finish)
+            } else {
+                Task::none()
+            }
         }
         Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -604,14 +609,13 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         };
     }
 
-    // Selection phase: drag to pick a crop; toolbar with Finish/Cancel.
+    // Selection phase: drag to pick a crop; toolbar with Cancel.
     let status = match state.crop {
         Some(r) => format!("Crop: {}x{}", r.width as u32, r.height as u32),
         None => "Drag to select crop area".to_string(),
     };
     let toolbar = magenta_toolbar(
         row![
-            button("Finish").on_press(Message::Finish),
             button("Cancel").on_press(Message::Cancel),
             text(status).size(16),
         ]
