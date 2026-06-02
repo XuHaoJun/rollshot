@@ -12,6 +12,17 @@
 
 **Conventions for every command below:** run shell via `rtk proxy <cmd>` so test stdout (`println!`, failure messages) is not filtered. Commit messages end with the `Co-Authored-By` trailer the repo uses. Branch first if on `main`.
 
+> **Execution amendment (2026-06-02, decision (a) reconciliation).** During execution the original Phase-A integration tests were found to contradict decision (a) (verifier is the final gate + majority floor):
+> - `mid_capture_lazy_load_keeps_stitching` was **vacuous** — a single transient placeholder frame is already tolerated by preserve-anchor-on-NoMatch, so it passed on current code without testing anything. **Removed.**
+> - `large_lazy_region_recovered_by_feature_consensus` asserted **stitch-through** of a change covering >40% of the overlap, which the majority floor (≥0.6 tile agreement) **cannot** accept under (a). A >40%-changed overlap is **not stitchable** by design; it is only **escapable via ③ re-anchor** (logged content gap). **Reclassified to Phase D (③).**
+>
+> Net effect on this plan:
+> - **Phase A (A2)** now commits only the two stable **guard** tests (misfire floor `repeated_rows_still_not_falsely_appended` + monotonicity `clean_scroll_unchanged`), both passing every phase. (Done — commit `12b765b`.)
+> - **① localized acceptance** RED→green lives in the **verifier unit tests** (B2/B3) and the existing `reanchor_stale_first_frame.rs` integration test.
+> - **② offset recovery** RED→green is a **unit test** on `feature_candidate_from_features` (C3 below), not an integration stitch-through test.
+> - **③ large/unrecoverable escape** RED→green is the integration test in D1 (white frames mid-capture → stall on current code → re-anchor after Phase D).
+> Where a task's step text below still references the removed tests, the corrected text is used in the actual subagent dispatch.
+
 ---
 
 ## File Structure
