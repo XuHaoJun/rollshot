@@ -298,7 +298,7 @@ describe('CaptureOverlay', () => {
       state: 'stitching',
       frame_width: 1000,
       frame_height: 500,
-      region: { x: 100, y: 50, width: 400, height: 200 },
+      region: { x: 100, y: 50, width: 800, height: 400 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'no match: ReverseDirection',
       capture_miss: true,
@@ -313,8 +313,11 @@ describe('CaptureOverlay', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(160)
     })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
 
-    expect(api.getStitchPreview).toHaveBeenCalledWith(180, 90)
+    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 140)
     expect(container.querySelector('.capture-miss-toast')?.textContent).toContain(
       'Scrolling too fast',
     )

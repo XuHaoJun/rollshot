@@ -19,12 +19,12 @@ import {
 import { promptSaveStitchedPng } from '../api/save'
 import type { PreviewScale, SourceRegion } from '../region/geometry'
 import { sourceRegionToCssRect } from '../region/geometry'
-import { choosePreviewPlacement, fitPreviewSizeToRegion } from '../overlay/placement'
+import { chooseDynamicPreviewPlacement } from '../overlay/placement'
 import { AdaptiveStitchPreview } from './AdaptiveStitchPreview'
 import { OverlayToolbar } from './OverlayToolbar'
 import { SelectionLayer } from './SelectionLayer'
 
-const MAX_PREVIEW_SIZE = { width: 180, height: 260 }
+const PREVIEW_WIDTH = 280
 const OVERLAY_CLEAR_DELAY_MS = 17
 
 let overlayStarted = false
@@ -56,6 +56,7 @@ export function CaptureOverlay() {
   const pollInFlightRef = useRef(false)
   const stitchPreviewUrlRef = useRef<string | null>(null)
   const finalPreviewUrlRef = useRef<string | null>(null)
+  const scaleRef = useRef<PreviewScale | null>(null)
 
   useEffect(() => {
     stitchPreviewUrlRef.current = stitchPreviewUrl
@@ -98,6 +99,33 @@ export function CaptureOverlay() {
       })
   }, [])
 
+  const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
+  const hasCaptureFrame = status.state === 'previewing' || status.state === 'stitching'
+  const sourceWidth = hasCaptureFrame ? status.frame_width : 1
+  const sourceHeight = hasCaptureFrame ? status.frame_height : 1
+  const showSelection = status.state === 'previewing' && !isStartingStitching
+
+  const scale = useMemo<PreviewScale | null>(() => {
+    if (!hasCaptureFrame || !windowOrigin) return null
+    return {
+      scaleX: devicePixelRatio,
+      scaleY: devicePixelRatio,
+      sourceOriginX: windowOrigin.x,
+      sourceOriginY: windowOrigin.y,
+      sourceWidth,
+      sourceHeight,
+    }
+  }, [devicePixelRatio, hasCaptureFrame, sourceHeight, sourceWidth, windowOrigin])
+
+  useEffect(() => {
+    scaleRef.current = scale
+  }, [scale])
+
+  const activeRegionRect = useMemo(() => {
+    if (!activeRegion || !scale) return null
+    return sourceRegionToCssRect(activeRegion, scale)
+  }, [activeRegion, scale])
+
   useEffect(() => {
     if (startupFailed) return
     const timer = window.setInterval(async () => {
@@ -106,18 +134,27 @@ export function CaptureOverlay() {
       try {
         const nextStatus = await sessionStatus()
         setStatus(nextStatus)
-        if (nextStatus.state === 'stitching') {
-          const previewSize = fitPreviewSizeToRegion({
-            region: nextStatus.region,
-            maxPreview: MAX_PREVIEW_SIZE,
+        if (nextStatus.state === 'stitching' && scaleRef.current && nextStatus.region) {
+          const cssRegion = sourceRegionToCssRect(nextStatus.region, scaleRef.current)
+          const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+          const dynamicPlacement = chooseDynamicPreviewPlacement({
+            bounds,
+            region: cssRegion,
+            previewWidth: PREVIEW_WIDTH,
+            overlayExclusion: overlayMode,
           })
-          const blob = await getStitchPreview(previewSize.width, previewSize.height)
-          if (blob) {
-            const nextUrl = URL.createObjectURL(blob)
-            setStitchPreviewUrl((oldUrl) => {
-              if (oldUrl) URL.revokeObjectURL(oldUrl)
-              return nextUrl
-            })
+          if (dynamicPlacement.mode === 'image') {
+            const blob = await getStitchPreview(
+              dynamicPlacement.preview.width,
+              dynamicPlacement.preview.height,
+            )
+            if (blob) {
+              const nextUrl = URL.createObjectURL(blob)
+              setStitchPreviewUrl((oldUrl) => {
+                if (oldUrl) URL.revokeObjectURL(oldUrl)
+                return nextUrl
+              })
+            }
           }
         }
       } catch (error) {
@@ -242,42 +279,15 @@ export function CaptureOverlay() {
     }
   }, [status.state])
 
-  const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
-  const hasCaptureFrame = status.state === 'previewing' || status.state === 'stitching'
-  const sourceWidth = hasCaptureFrame ? status.frame_width : 1
-  const sourceHeight = hasCaptureFrame ? status.frame_height : 1
-  const showSelection = status.state === 'previewing' && !isStartingStitching
-
-  const scale = useMemo<PreviewScale | null>(() => {
-    if (!hasCaptureFrame || !windowOrigin) return null
-    return {
-      scaleX: devicePixelRatio,
-      scaleY: devicePixelRatio,
-      sourceOriginX: windowOrigin.x,
-      sourceOriginY: windowOrigin.y,
-      sourceWidth,
-      sourceHeight,
-    }
-  }, [devicePixelRatio, hasCaptureFrame, sourceHeight, sourceWidth, windowOrigin])
-
-  const activeRegionRect = useMemo(() => {
-    if (!activeRegion || !scale) return null
-    return sourceRegionToCssRect(activeRegion, scale)
-  }, [activeRegion, scale])
-
   const placement = useMemo(() => {
     if (!activeRegionRect) {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-    const previewSize = fitPreviewSizeToRegion({
-      region: activeRegionRect,
-      maxPreview: MAX_PREVIEW_SIZE,
-    })
-    return choosePreviewPlacement({
+    return chooseDynamicPreviewPlacement({
       bounds,
       region: activeRegionRect,
-      preview: previewSize,
+      previewWidth: PREVIEW_WIDTH,
       overlayExclusion: overlayMode,
     })
   }, [activeRegionRect, overlayMode])
