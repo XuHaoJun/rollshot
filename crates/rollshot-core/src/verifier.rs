@@ -68,6 +68,14 @@ impl<'a> PixelOverlapVerifier<'a> {
 
         // Robust tile-vote acceptance: tolerate a localized minority of
         // disagreeing tiles, gated by how strongly the offset is supported.
+        //
+        // Cost note: this is a full-overlap scan reached ONLY on the reject
+        // path (the legacy mean failed above), and `rank_verified_candidates`
+        // calls `verify` once per candidate — so a reject-heavy frame pays a
+        // tile scan for *every* candidate. That is the verifier-stage cost the
+        // `bad_frame` benchmark shows (reject-dominated → large %). Clean
+        // frames whose winning candidate passes the legacy mean return above
+        // and never reach here, so steady-state scrolling is unaffected.
         let agree = tile_agreement(
             prev,
             curr,
@@ -141,6 +149,8 @@ fn downsampled_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, step: u
 
 /// Fraction of `tile_px`×`tile_px` tiles over the overlap whose mean absolute
 /// difference is below `tile_tol`. Partial edge tiles count by their pixels.
+/// Scans every overlap pixel once (O(overlap area)); only invoked on the
+/// verifier reject path — see the cost note in `verify`.
 fn tile_agreement(
     prev: &RgbaImage,
     curr: &RgbaImage,
