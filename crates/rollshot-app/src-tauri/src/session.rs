@@ -557,16 +557,29 @@ impl SharedSession {
             let edge = inner.spotlight_edge;
             let preview = match inner.stitcher.as_mut() {
                 Some(stitcher) => region.and_then(|region| {
-                    rollshot_overlay_core::preview::viewport_preview(
-                        stitcher,
-                        rollshot_overlay_core::preview::ViewportPreviewRequest {
-                            viewport_width: preview_width,
-                            viewport_height: preview_height,
-                            frame_width: region.width,
-                            frame_height: region.height,
-                            edge,
-                        },
-                    )
+                    if matches!(edge, CapturedEdge::Left | CapturedEdge::Right) {
+                        rollshot_overlay_core::preview::viewport_preview(
+                            stitcher,
+                            rollshot_overlay_core::preview::ViewportPreviewRequest {
+                                viewport_width: preview_width,
+                                viewport_height: preview_height,
+                                frame_width: region.width,
+                                frame_height: region.height,
+                                edge,
+                            },
+                        )
+                        .map(|preview| (preview.width, preview.height, preview.pixels))
+                    } else {
+                        rollshot_overlay_core::preview::growing_preview(
+                            stitcher,
+                            rollshot_overlay_core::preview::GrowingPreviewRequest {
+                                fixed_width: preview_width,
+                                max_height: preview_height,
+                                edge,
+                            },
+                        )
+                        .map(|preview| (preview.width, preview.height, preview.pixels))
+                    }
                 }),
                 None => None,
             };
@@ -574,9 +587,9 @@ impl SharedSession {
         };
 
         match preview {
-            Some(preview) => {
-                let image = RgbaImage::from_raw(preview.width, preview.height, preview.pixels)
-                    .ok_or_else(|| "invalid viewport preview buffer".to_string())?;
+            Some((width, height, pixels)) => {
+                let image = RgbaImage::from_raw(width, height, pixels)
+                    .ok_or_else(|| "invalid stitch preview buffer".to_string())?;
                 Ok(Some(encode_rgba_png(&image)?))
             }
             None => Ok(None),
@@ -868,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn stitch_preview_png_uses_shared_viewport() {
+    fn stitch_preview_png_uses_growing_vertical_preview_height() {
         let session = SharedSession::new();
         {
             let mut inner = session.inner.lock().expect("session lock");
@@ -893,14 +906,8 @@ mod tests {
             .expect("preview exists");
         let image = image::load_from_memory(&bytes).expect("decode png");
 
-        // A fixed PREVIEW_WIDTH (not a max-edge downscale) proves the shared
-        // viewport is used.
         assert_eq!(image.width(), PREVIEW_WIDTH);
-        // viewport_preview always returns an image of exactly the requested
-        // viewport size — the canvas is aspect-fit and white-letterboxed into
-        // that box. The full requested height is preserved, even when the
-        // canvas aspect is wider than the viewport.
-        assert_eq!(image.height(), PREVIEW_MAX_HEIGHT);
+        assert_eq!(image.height(), 175);
     }
 
     #[test]
@@ -1306,6 +1313,34 @@ mod tests {
             inner.push_stitch_frame(scrolling_frame(0)).expect("f0");
             inner.push_stitch_frame(scrolling_frame(20)).expect("f1");
             inner.push_stitch_frame(scrolling_frame(40)).expect("f2");
+        }
+
+        let bytes = session
+            .stitch_preview_png(180, 260)
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes).expect("decode png");
+
+        assert_eq!((image.width(), image.height()), (180, 260));
+    }
+
+    #[test]
+    fn horizontal_stitch_preview_keeps_requested_viewport_size() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(blank_frame(80, 80));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner.push_stitch_frame(scrolling_frame(0)).expect("f0");
+            inner.spotlight_edge = CapturedEdge::Right;
         }
 
         let bytes = session
