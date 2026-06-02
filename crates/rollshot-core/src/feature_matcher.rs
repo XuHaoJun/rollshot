@@ -349,14 +349,14 @@ pub(crate) struct FrameFeatures {
     pub descriptors: Vec<[f32; 8]>,
 }
 
-pub(crate) fn extract_frame_features(
-    rgba: &RgbaImage,
-    config: &FastHnswConfig,
-) -> FrameFeatures {
+pub(crate) fn extract_frame_features(rgba: &RgbaImage, config: &FastHnswConfig) -> FrameFeatures {
     let gray = rgba_to_gray(rgba);
     let corners = extract_corners(&gray, config.corner_threshold, config.max_features);
     let (descriptors, kept) = compute_descriptors(&gray, &corners, config.descriptor_patch_size);
-    FrameFeatures { corners: kept, descriptors }
+    FrameFeatures {
+        corners: kept,
+        descriptors,
+    }
 }
 
 /// Routine feature candidate from pre-extracted features (anchor features are
@@ -903,8 +903,8 @@ mod tests {
         let cfg = FastHnswConfig::default();
         let prev = extract_frame_features(&prev_img, &cfg);
         let curr = extract_frame_features(&curr_img, &cfg);
-        let cand = feature_candidate_from_features(&prev, &curr, None, &cfg)
-            .expect("feature candidate");
+        let cand =
+            feature_candidate_from_features(&prev, &curr, None, &cfg).expect("feature candidate");
         assert_eq!(cand.dx, 0);
         assert!((36..=44).contains(&cand.dy), "dy={}", cand.dy);
     }

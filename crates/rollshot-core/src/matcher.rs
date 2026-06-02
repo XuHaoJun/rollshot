@@ -1599,7 +1599,11 @@ mod tests {
         for y in 0..240u32 {
             for x in 0..240u32 {
                 if (x / 5 + y / 7) % 2 == 0 {
-                    img.put_pixel(x, y, Rgba([20, ((x * 7) % 200) as u8, ((y * 11) % 200) as u8, 255]));
+                    img.put_pixel(
+                        x,
+                        y,
+                        Rgba([20, ((x * 7) % 200) as u8, ((y * 11) % 200) as u8, 255]),
+                    );
                 }
             }
         }
