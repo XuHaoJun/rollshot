@@ -1045,6 +1045,7 @@ pub(crate) struct PreparedFrame {
     coarse: OnceLock<Vec<f32>>,
     proj_v: OnceLock<Vec<f32>>,
     proj_h: OnceLock<Vec<f32>>,
+    features: OnceLock<crate::feature_matcher::FrameFeatures>,
 }
 
 impl PreparedFrame {
@@ -1071,6 +1072,7 @@ impl PreparedFrame {
             coarse: OnceLock::new(),
             proj_v: OnceLock::new(),
             proj_h: OnceLock::new(),
+            features: OnceLock::new(),
         }
     }
 
@@ -1106,6 +1108,14 @@ impl PreparedFrame {
                 edge_projection(&self.gray, self.width, self.height, SearchAxis::Horizontal)
             }),
         }
+    }
+
+    #[allow(dead_code)] // used by the routine feature path in C3
+    pub(crate) fn features(&self, config: &crate::types::FastHnswConfig)
+        -> &crate::feature_matcher::FrameFeatures
+    {
+        self.features
+            .get_or_init(|| crate::feature_matcher::extract_frame_features(&self.rgba, config))
     }
 }
 
@@ -1566,6 +1576,24 @@ mod tests {
             prep.projection(SearchAxis::Horizontal),
             edge_projection(&gray, 160, 200, SearchAxis::Horizontal).as_slice()
         );
+    }
+
+    #[test]
+    fn prepared_frame_caches_features() {
+        let mut img = RgbaImage::from_pixel(240, 240, Rgba([240, 240, 240, 255]));
+        for y in 0..240u32 {
+            for x in 0..240u32 {
+                if (x / 5 + y / 7) % 2 == 0 {
+                    img.put_pixel(x, y, Rgba([20, ((x * 7) % 200) as u8, ((y * 11) % 200) as u8, 255]));
+                }
+            }
+        }
+        let pf = PreparedFrame::new(img);
+        let cfg = crate::types::FastHnswConfig::default();
+        let a = pf.features(&cfg).descriptors.len();
+        let b = pf.features(&cfg).descriptors.len();
+        assert_eq!(a, b);
+        assert!(a > 0);
     }
 
     #[test]

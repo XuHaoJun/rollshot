@@ -306,6 +306,24 @@ fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
     (ratio_term * 0.08 + residual_term * 0.04).clamp(0.0, 1.0)
 }
 
+/// Cached FAST corners + 8-D descriptors for one frame (kept corners are
+/// aligned 1:1 with descriptors).
+#[allow(dead_code)] // used by the routine feature path in C3
+pub(crate) struct FrameFeatures {
+    pub corners: Vec<(u32, u32)>,
+    pub descriptors: Vec<[f32; 8]>,
+}
+
+pub(crate) fn extract_frame_features(
+    rgba: &RgbaImage,
+    config: &FastHnswConfig,
+) -> FrameFeatures {
+    let gray = rgba_to_gray(rgba);
+    let corners = extract_corners(&gray, config.corner_threshold, config.max_features);
+    let (descriptors, kept) = compute_descriptors(&gray, &corners, config.descriptor_patch_size);
+    FrameFeatures { corners: kept, descriptors }
+}
+
 pub(crate) fn fast_hnsw_candidates(
     prev: &RgbaImage,
     curr: &RgbaImage,
