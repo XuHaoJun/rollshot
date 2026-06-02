@@ -91,37 +91,75 @@ describe('choosePreviewPlacement', () => {
 })
 
 describe('chooseDynamicPreviewPlacement', () => {
+  it('uses fixed width and a short height when scaled content is short', () => {
+    expect(
+      chooseDynamicPreviewPlacement({
+        bounds: { left: 0, top: 0, width: 1000, height: 900 },
+        region: { left: 100, top: 100, width: 400, height: 300 },
+        previewWidth: 280,
+        content: { width: 400, height: 200 },
+        overlayExclusion: 'unsupported',
+        gap: 12,
+      }),
+    ).toEqual({
+      mode: 'image',
+      side: 'right',
+      rect: { left: 512, top: 100, width: 280, height: 140 },
+      preview: { width: 280, height: 140 },
+    })
+  })
+
+  it('grows height with scaled content and caps at crop height', () => {
+    expect(
+      chooseDynamicPreviewPlacement({
+        bounds: { left: 0, top: 0, width: 1000, height: 900 },
+        region: { left: 100, top: 100, width: 400, height: 300 },
+        previewWidth: 280,
+        content: { width: 400, height: 600 },
+        overlayExclusion: 'unsupported',
+        gap: 12,
+      }),
+    ).toEqual({
+      mode: 'image',
+      side: 'right',
+      rect: { left: 512, top: 100, width: 280, height: 300 },
+      preview: { width: 280, height: 300 },
+    })
+  })
+
   it('caps side preview height to the available band before choosing placement', () => {
     expect(
       chooseDynamicPreviewPlacement({
         bounds: { left: 0, top: 0, width: 1000, height: 700 },
-        region: { left: 100, top: 450, width: 200, height: 300 },
+        region: { left: 100, top: 450, width: 400, height: 300 },
         previewWidth: 280,
+        content: { width: 400, height: 600 },
         overlayExclusion: 'unsupported',
         gap: 12,
       }),
     ).toEqual({
       mode: 'image',
       side: 'right',
-      rect: { left: 312, top: 450, width: 167, height: 250 },
-      preview: { width: 167, height: 250 },
+      rect: { left: 512, top: 450, width: 280, height: 250 },
+      preview: { width: 280, height: 250 },
     })
   })
 
-  it('caps preview height at crop height when the band has extra room', () => {
+  it('uses verified inside placement with growing preview height', () => {
     expect(
       chooseDynamicPreviewPlacement({
-        bounds: { left: 0, top: 0, width: 1000, height: 900 },
-        region: { left: 100, top: 100, width: 200, height: 300 },
+        bounds: { left: 0, top: 0, width: 1000, height: 700 },
+        region: { left: 0, top: 0, width: 1000, height: 700 },
         previewWidth: 280,
-        overlayExclusion: 'unsupported',
+        content: { width: 1000, height: 1400 },
+        overlayExclusion: 'verified',
         gap: 12,
       }),
     ).toEqual({
       mode: 'image',
-      side: 'right',
-      rect: { left: 312, top: 100, width: 200, height: 300 },
-      preview: { width: 200, height: 300 },
+      side: 'inside',
+      rect: { left: 708, top: 12, width: 280, height: 392 },
+      preview: { width: 280, height: 392 },
     })
   })
 })

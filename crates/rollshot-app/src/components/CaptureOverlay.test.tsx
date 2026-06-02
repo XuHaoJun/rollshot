@@ -317,7 +317,7 @@ describe('CaptureOverlay', () => {
       await vi.advanceTimersByTimeAsync(160)
     })
 
-    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 140)
+    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 200)
     expect(container.querySelector('.capture-miss-toast')?.textContent).toContain(
       'Scrolling too fast',
     )
@@ -374,7 +374,7 @@ describe('CaptureOverlay', () => {
       await vi.advanceTimersByTimeAsync(160)
     })
 
-    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 210)
+    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 420)
   })
 
   it('closes after Escape when the save dialog is cancelled', async () => {

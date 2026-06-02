@@ -145,18 +145,43 @@ export function choosePreviewPlacement({
   return { mode: 'status' }
 }
 
+type ContentSize = {
+  width: number
+  height: number
+}
+
 type DynamicPlacementInput = {
   bounds: OverlayRect
   region: OverlayRect
   previewWidth: number
+  content: ContentSize
   overlayExclusion: OverlayExclusion
   gap?: number
+}
+
+function dynamicPreviewSize(input: {
+  content: ContentSize
+  previewWidth: number
+  maxWidth: number
+  maxHeight: number
+  cropHeight: number
+}): PreviewSize {
+  const width = Math.max(1, Math.floor(Math.min(input.previewWidth, input.maxWidth)))
+  const contentWidth = Math.max(1, input.content.width)
+  const contentHeight = Math.max(1, input.content.height)
+  const scaledHeight = Math.max(1, Math.round((contentHeight * width) / contentWidth))
+  const height = Math.max(
+    1,
+    Math.floor(Math.min(scaledHeight, input.cropHeight, input.maxHeight)),
+  )
+  return { width, height }
 }
 
 export function chooseDynamicPreviewPlacement({
   bounds,
   region,
   previewWidth,
+  content,
   overlayExclusion,
   gap = 12,
 }: DynamicPlacementInput): DynamicPreviewPlacement {
@@ -193,14 +218,12 @@ export function chooseDynamicPreviewPlacement({
   ]
 
   for (const { side, availWidth, availHeight } of sides) {
-    const maxPreview: PreviewSize = {
-      width: Math.min(previewWidth, availWidth),
-      height: Math.min(region.height, availHeight),
-    }
-
-    const preview = fitPreviewSizeToRegion({
-      region: { width: region.width, height: region.height },
-      maxPreview,
+    const preview = dynamicPreviewSize({
+      content,
+      previewWidth,
+      maxWidth: availWidth,
+      maxHeight: availHeight,
+      cropHeight: region.height,
     })
 
     let rect: OverlayRect
@@ -243,14 +266,12 @@ export function chooseDynamicPreviewPlacement({
     const insideAvailWidth = region.width - gap * 2
     const insideAvailHeight = region.height - gap * 2
 
-    const maxPreview: PreviewSize = {
-      width: Math.min(previewWidth, insideAvailWidth),
-      height: Math.min(region.height, insideAvailHeight),
-    }
-
-    const preview = fitPreviewSizeToRegion({
-      region: { width: region.width, height: region.height },
-      maxPreview,
+    const preview = dynamicPreviewSize({
+      content,
+      previewWidth,
+      maxWidth: insideAvailWidth,
+      maxHeight: insideAvailHeight,
+      cropHeight: region.height,
     })
 
     return {

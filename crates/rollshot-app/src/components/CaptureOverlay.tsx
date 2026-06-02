@@ -147,6 +147,7 @@ export function CaptureOverlay() {
             bounds,
             region: cssRegion,
             previewWidth: PREVIEW_WIDTH,
+            content: { width: nextStatus.stats.total_width, height: nextStatus.stats.total_height },
             overlayExclusion: overlayModeRef.current,
           })
           if (dynamicPlacement.mode === 'image') {
@@ -290,13 +291,18 @@ export function CaptureOverlay() {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+    const content =
+      status.state === 'stitching'
+        ? { width: status.stats.total_width, height: status.stats.total_height }
+        : { width: activeRegionRect.width, height: activeRegionRect.height }
     return chooseDynamicPreviewPlacement({
       bounds,
       region: activeRegionRect,
       previewWidth: PREVIEW_WIDTH,
+      content,
       overlayExclusion: overlayMode,
     })
-  }, [activeRegionRect, overlayMode])
+  }, [activeRegionRect, overlayMode, status])
 
   const toolbarMode = status.state === 'done' ? 'done' : status.state === 'failed' ? 'failed' : 'stitching'
   const stats =
