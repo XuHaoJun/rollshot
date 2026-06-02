@@ -6,7 +6,11 @@ type AdaptiveStitchPreviewProps = {
   placement: PreviewPlacement
 }
 
-export function AdaptiveStitchPreview({ imageUrl, status, placement }: AdaptiveStitchPreviewProps) {
+export function AdaptiveStitchPreview({
+  imageUrl,
+  status,
+  placement,
+}: AdaptiveStitchPreviewProps) {
   if (placement.mode === 'status' || !imageUrl) {
     return <div className="capture-status">{status}</div>
   }

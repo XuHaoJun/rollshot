@@ -1,0 +1,147 @@
+# Dynamic Preview Height Design
+
+**Date:** 2026-06-02
+**Status:** Draft
+**Scope:** `rollshot-overlay` (Linux), `rollshot-app` (macOS webview)
+
+## Problem
+
+The stitching live preview uses a fixed height cap (`PREVIEW_MAX_HEIGHT = 480`
+on Linux, `MAX_PREVIEW_SIZE.height = 260` on macOS) regardless of available
+screen space. When the crop region is tall and the monitor has room, the
+preview wastes vertical space. When the crop is small, the cap is irrelevant.
+
+Reference: wayscrollshot uses `height = min(preview_image_height, region.h)`
+with a fixed 280px width. The preview grows dynamically with stitched content
+up to the crop region height.
+
+## Design
+
+### Height rule
+
+```
+preview_max_height = min(crop.height, available_band_height)
+```
+
+- `crop.height` = user-selected capture region height (fixed after selection).
+- `available_band_height` = space from the crop edge to the screen edge in the
+  chosen chrome band, minus toolbar and spacing.
+- Remove the `PREVIEW_MAX_HEIGHT = 480` hard cap from the sizing path.
+
+### Width rule
+
+Both platforms use a fixed 280px width, matching wayscrollshot's
+`PREVIEW_MAX_WIDTH` and the existing Linux `PREVIEW_WIDTH`.
+
+- macOS changes from 180px to 280px.
+- Linux stays at 280px.
+
+### Webview placement rule
+
+The webview path must size the preview after measuring each candidate placement
+band, not before. A pre-sized preview can be rejected even when the same preview
+would fit if capped to that band's available height.
+
+```
+for side in [right, left, bottom, top, inside-if-verified]:
+    available = available_space_for(side, crop, bounds)
+    max_preview = {
+        width: min(280, available.width),
+        height: min(crop.height, available.height),
+    }
+    preview = aspect_fit(crop, max_preview)
+    if preview fits side:
+        use this side + preview size
+```
+
+### Content inside the preview box
+
+The `viewport_preview()` function in `rollshot-overlay-core` crops a
+frame-sized window from the stitched canvas and aspect-fits it into the
+requested viewport dimensions. This logic does not change. The preview box
+gets larger; the content inside is still aspect-fit with letterboxing and a
+position indicator.
+
+## Changes by file
+
+### `rollshot-overlay-core/src/preview.rs`
+
+- Keep `PREVIEW_WIDTH = 280` (used by both platforms).
+- Keep `PREVIEW_MAX_HEIGHT = 480` — it is still used by `session.rs` for the
+  `stitch_preview_png` Tauri command (final preview on save), which is a
+  separate code path.
+- No logic changes in `viewport_preview()`.
+
+### `rollshot-overlay/src/overlay.rs` — `preview_viewport_size()`
+
+Replace:
+
+```rust
+let max_height = band_height.clamp(1, PREVIEW_MAX_HEIGHT) as f32;
+```
+
+With:
+
+```rust
+let crop_h = crop.height.max(1.0);
+let max_height = band_height.min(crop_h) as f32;
+```
+
+The `PREVIEW_MAX_HEIGHT` import is removed from this file.
+
+Add a test where crop height is smaller than the available band height so the
+new crop-height cap is observable.
+
+### `rollshot-app/src/components/CaptureOverlay.tsx`
+
+Replace the fixed `MAX_PREVIEW_SIZE`:
+
+```ts
+const MAX_PREVIEW_SIZE = { width: 180, height: 260 }
+```
+
+With placement-aware dynamic sizing:
+
+```ts
+const PREVIEW_WIDTH = 280
+// In the polling loop and placement memo, derive preview size from the same
+// placement-aware helper so the requested PNG dimensions match the displayed
+// preview dimensions.
+```
+
+The polling loop should skip requesting a stitch preview until the current
+source-to-CSS scale is available, then compute the active CSS region for
+`nextStatus.region` and ask the placement helper for the preview size.
+
+### `rollshot-app/src/overlay/placement.ts`
+
+Add a helper that combines candidate placement and preview sizing. Keep
+`fitPreviewSizeToRegion()` as the low-level aspect-fit helper, but stop asking
+callers to pre-size a preview before placement has measured the candidate band.
+
+The existing `choosePreviewPlacement()` can remain for tests or callers that
+already have a fixed preview size.
+
+### `rollshot-app/src/components/NativeCaptureFlow.tsx`
+
+Verified unchanged: this file has no live stitch preview size references.
+
+## Edge cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Crop taller than band (e.g. crop at screen center) | Height = band space. Preview smaller than crop. |
+| Crop shorter than band (e.g. small crop at screen top) | Height = crop height. Preview matches crop. |
+| Crop at screen edge with lots of space below | Height = crop height. Full use of space up to crop. |
+| Very wide crop (e.g. 2560x200) | Aspect-fit makes preview wide and short. Height still capped at crop. |
+| Very tall crop (e.g. 400x1400) | Height = min(1400, band). Width stays 280. Aspect-fit letterboxes. |
+
+## Testing
+
+- Add an `overlay.rs` test where crop height < band height to verify the crop
+  cap applies.
+- Add `placement.test.ts` coverage for a candidate whose full crop-height
+  preview would not fit, but whose band-capped preview does fit.
+- Update `CaptureOverlay.test.tsx` so the existing stitch-preview request
+  assertion expects the new 280px/dynamic dimensions.
+- Manual verification on both platforms with various crop sizes.

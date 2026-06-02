@@ -2,10 +2,11 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionStatus } from '../api/capture'
-import { CaptureOverlay } from './CaptureOverlay'
+import { CaptureOverlay, resetOverlayStartedForTest } from './CaptureOverlay'
 
 const api = vi.hoisted(() => ({
   confirmRegion: vi.fn(),
+  exitApp: vi.fn(),
   getFinalPreview: vi.fn(),
   getStitchPreview: vi.fn(),
   launchOptions: vi.fn(),
@@ -58,16 +59,16 @@ describe('CaptureOverlay', () => {
   let container: HTMLDivElement
   let root: Root
   let rectSpy: ReturnType<typeof vi.spyOn>
-  let closeSpy: ReturnType<typeof vi.spyOn>
   let originalSetPointerCapture: typeof HTMLDivElement.prototype.setPointerCapture | undefined
 
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
+    resetOverlayStartedForTest()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
-    closeSpy = vi.spyOn(window, 'close').mockImplementation(() => undefined)
+    api.exitApp.mockResolvedValue(undefined)
     rectSpy = vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockImplementation(
       () =>
         ({
@@ -118,7 +119,6 @@ describe('CaptureOverlay', () => {
   afterEach(() => {
     act(() => root.unmount())
     container.remove()
-    closeSpy.mockRestore()
     rectSpy.mockRestore()
     if (originalSetPointerCapture) {
       HTMLDivElement.prototype.setPointerCapture = originalSetPointerCapture
@@ -179,6 +179,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
 
     act(() => root.render(<CaptureOverlay />))
@@ -209,6 +213,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
 
     act(() => root.render(<CaptureOverlay />))
@@ -232,6 +240,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
 
     act(() => root.render(<CaptureOverlay />))
@@ -252,6 +264,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
     dialog.save.mockResolvedValue('/tmp/rollshot.png')
 
@@ -274,7 +290,137 @@ describe('CaptureOverlay', () => {
     })
     expect(api.saveImage).toHaveBeenCalledWith('/tmp/rollshot.png')
     expect(api.stopCapture).toHaveBeenCalledOnce()
-    expect(closeSpy).toHaveBeenCalledOnce()
+    expect(api.exitApp).toHaveBeenCalledOnce()
+  })
+
+  it('shows capture miss toast (no preview mask) while stitching is disconnected', async () => {
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 800, height: 400 },
+      stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
+      last_outcome: 'no match: ReverseDirection',
+      capture_miss: true,
+      capture_miss_warning: true,
+      capture_miss_edge: 'bottom',
+      capture_miss_message: 'Scrolling too fast. Scroll back to the captured edge and try again.',
+    } satisfies SessionStatus)
+    api.getStitchPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 200)
+    expect(container.querySelector('.capture-miss-toast')?.textContent).toContain(
+      'Scrolling too fast',
+    )
+    // Snow-shot-exact: no mask is painted on the preview; the spotlight just
+    // freezes. The transient toast is the only miss affordance.
+    expect(container.querySelector('.preview-recovery-mask')).toBeNull()
+
+    // R3: the toast must auto-dismiss after its 3s window even though the next
+    // status poll already flipped capture_miss_warning back to false. This guards
+    // against the dismiss timer being torn down by the [status]-keyed effect.
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 400, height: 200 },
+      stats: { frame_count: 4, total_width: 400, total_height: 1000, last_append: 100 },
+      last_outcome: 'appended 100px Bottom',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: 'Scrolling too fast. Scroll back to the captured edge and try again.',
+    } satisfies SessionStatus)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(320) // two more poll ticks flip warn->false
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000) // dismiss window elapses
+    })
+    expect(container.querySelector('.capture-miss-toast')).toBeNull()
+  })
+
+  it('requests taller stitch previews as vertical stitched content grows', async () => {
+    const firstFrame = {
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 800, height: 400 },
+      stats: { frame_count: 1, total_width: 800, total_height: 400, last_append: 0 },
+      last_outcome: 'first frame',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
+    } satisfies SessionStatus
+    api.sessionStatus
+      .mockResolvedValueOnce(firstFrame)
+      .mockResolvedValueOnce(firstFrame)
+      .mockResolvedValue({
+        state: 'stitching',
+        frame_width: 1000,
+        frame_height: 500,
+        region: { x: 100, y: 50, width: 800, height: 400 },
+        stats: { frame_count: 3, total_width: 800, total_height: 900, last_append: 200 },
+        last_outcome: 'appended 200px Bottom',
+        capture_miss: false,
+        capture_miss_warning: false,
+        capture_miss_edge: 'unknown',
+        capture_miss_message: '',
+      } satisfies SessionStatus)
+    api.getStitchPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(api.getStitchPreview).toHaveBeenNthCalledWith(1, 280, 140)
+    expect(api.getStitchPreview).toHaveBeenNthCalledWith(2, 280, 200)
+  })
+
+  it('requests inside stitch preview dimensions after verified overlay exclusion resolves', async () => {
+    api.overlayExclusion.mockResolvedValue('verified')
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 2048,
+      frame_height: 1536,
+      region: { x: 0, y: 0, width: 2048, height: 1536 },
+      stats: { frame_count: 3, total_width: 2048, total_height: 3072, last_append: 200 },
+      last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
+    } satisfies SessionStatus)
+    api.getStitchPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 420)
   })
 
   it('closes after Escape when the save dialog is cancelled', async () => {
@@ -285,6 +431,10 @@ describe('CaptureOverlay', () => {
       region: { x: 100, y: 50, width: 400, height: 200 },
       stats: { frame_count: 3, total_width: 400, total_height: 900, last_append: 200 },
       last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
     } satisfies SessionStatus)
     dialog.save.mockResolvedValue(null)
 
@@ -302,6 +452,6 @@ describe('CaptureOverlay', () => {
     expect(api.stopStitching).toHaveBeenCalledOnce()
     expect(api.saveImage).not.toHaveBeenCalled()
     expect(api.stopCapture).toHaveBeenCalledOnce()
-    expect(closeSpy).toHaveBeenCalledOnce()
+    expect(api.exitApp).toHaveBeenCalledOnce()
   })
 })

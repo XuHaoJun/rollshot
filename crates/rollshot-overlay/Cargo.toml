@@ -11,7 +11,7 @@ rollshot-core = { path = "../rollshot-core" }
 rollshot-overlay-core = { path = "../rollshot-overlay-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-iced = { version = "0.14", features = ["canvas", "image"] }
+iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 iced_layershell = "0.18"
 
 [lints.rust]

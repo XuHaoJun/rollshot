@@ -1,5 +1,9 @@
 use rollshot_capture::{crop_frame, CaptureError, FrameStream, Region};
 use rollshot_core::{StitchConfig, Stitcher};
+use rollshot_overlay_core::capture_miss::{
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CapturedEdge,
+    StitchProgressSignal,
+};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,8 +15,28 @@ use iced::widget::image::Handle as ImageHandle;
 use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, Size};
 
 use crate::coords::LogicalRect;
+use crate::overlay::PreviewConstraints;
 
 use crate::CaptureResult;
+
+#[derive(Debug, Clone)]
+pub enum LiveOverlayEvent {
+    Preview(ImageHandle),
+    CaptureMiss(CaptureMissState),
+}
+
+/// R4: emit on any active-flag transition (rising OR falling — so the recovery
+/// edge clears the native marker) and on every warn pulse.
+fn should_emit_capture_miss(state: &CaptureMissState, last_active: bool) -> bool {
+    state.warn || state.active != last_active
+}
+
+/// Emit a native preview only when the stitcher actually accepted the frame;
+/// a `Missed` (no-match) or `Idle` (duplicate/no-progress) signal should not
+/// re-render — it would just redraw the same viewport.
+fn should_emit_preview(signal: &StitchProgressSignal) -> bool {
+    matches!(signal, StitchProgressSignal::Accepted { .. })
+}
 
 /// Wrapper that lets us move a `Box<dyn FrameStream>` to the reader thread.
 /// `FrameStream` is not `Send` because the Linux PipeWire backend holds
@@ -96,7 +120,7 @@ pub struct Driver {
     reader: Option<JoinHandle<()>>,
     stitch: Option<JoinHandle<()>>,
     source_size: Size,
-    preview_tx: UnboundedSender<ImageHandle>,
+    preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
 #[allow(dead_code)]
@@ -111,7 +135,7 @@ impl Driver {
         backend: &str,
         fps: u32,
         show_cursor: bool,
-        preview_tx: UnboundedSender<ImageHandle>,
+        preview_tx: UnboundedSender<LiveOverlayEvent>,
     ) -> Result<Self, String> {
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
@@ -178,7 +202,7 @@ impl Driver {
         &mut self,
         crop_logical: LogicalRect,
         overlay_logical: Size,
-        preview_size: Size,
+        preview_constraints: PreviewConstraints,
     ) {
         if self.stitch.is_some() {
             return;
@@ -190,6 +214,9 @@ impl Driver {
         let preview_tx = self.preview_tx.clone();
         self.stitch = Some(std::thread::spawn(move || {
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
+            let mut capture_miss_tracker = CaptureMissTracker::default();
+            let mut last_capture_miss_active = false;
+            let mut spotlight_edge = CapturedEdge::Unknown;
             while !stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
                 let frame = if seq == last_seq {
@@ -209,14 +236,30 @@ impl Driver {
                         }
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
-                        stitcher.push_frame(cropped.image);
-                        if let Some(preview) = stitcher.full_image() {
-                            let handle = preview_viewport_handle(
-                                preview,
-                                preview_size.width,
-                                preview_size.height,
-                            );
-                            let _ = preview_tx.unbounded_send(handle);
+                        let outcome = stitcher.push_frame(cropped.image);
+                        let signal = progress_signal_from_outcome(&outcome);
+                        if let StitchProgressSignal::Accepted { edge } = signal {
+                            if edge != CapturedEdge::Unknown {
+                                spotlight_edge = edge;
+                            }
+                        }
+                        let capture_miss_state =
+                            capture_miss_tracker.update(signal, Instant::now());
+                        if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
+                            let _ = preview_tx
+                                .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
+                        }
+                        last_capture_miss_active = capture_miss_state.active;
+                        if should_emit_preview(&signal) {
+                            if let Some(handle) = preview_handle(
+                                &mut stitcher,
+                                region,
+                                spotlight_edge,
+                                preview_constraints,
+                            ) {
+                                let _ =
+                                    preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
+                            }
                         }
                     }
                 }
@@ -297,19 +340,52 @@ fn wait_for_source_size(
     }
 }
 
-/// Wrap the shared grow-then-follow preview viewport
-/// (`rollshot_overlay_core::preview::preview_viewport`) as an iced image handle.
-#[allow(dead_code)]
-fn preview_viewport_handle(image: &image::RgbaImage, width: u32, max_height: u32) -> ImageHandle {
-    let view = rollshot_overlay_core::preview::preview_viewport(image, width, max_height);
-    ImageHandle::from_rgba(view.width(), view.height(), view.into_raw())
+fn preview_handle(
+    stitcher: &mut Stitcher,
+    region: Region,
+    edge: rollshot_overlay_core::capture_miss::CapturedEdge,
+    constraints: PreviewConstraints,
+) -> Option<ImageHandle> {
+    if matches!(
+        edge,
+        rollshot_overlay_core::capture_miss::CapturedEdge::Left
+            | rollshot_overlay_core::capture_miss::CapturedEdge::Right
+    ) {
+        let view = rollshot_overlay_core::preview::viewport_preview(
+            stitcher,
+            rollshot_overlay_core::preview::ViewportPreviewRequest {
+                viewport_width: constraints.fixed_width,
+                viewport_height: constraints.max_height,
+                frame_width: region.width,
+                frame_height: region.height,
+                edge,
+            },
+        )?;
+        return Some(ImageHandle::from_rgba(view.width, view.height, view.pixels));
+    }
+
+    let view = rollshot_overlay_core::preview::growing_preview(
+        stitcher,
+        rollshot_overlay_core::preview::GrowingPreviewRequest {
+            fixed_width: constraints.fixed_width,
+            max_height: constraints.max_height,
+            edge,
+        },
+    )?;
+    Some(ImageHandle::from_rgba(view.width, view.height, view.pixels))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_stitch_config, stitch_stream};
+    use super::{
+        overlay_stitch_config, preview_handle, should_emit_capture_miss, should_emit_preview,
+        stitch_stream, PreviewConstraints,
+    };
+    use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
+    use rollshot_core::{StitchOutcome, Stitcher};
+    use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -353,5 +429,118 @@ mod tests {
             "stitched height grows past one frame"
         );
         assert!(result.stats.frame_count >= 1);
+    }
+
+    #[test]
+    fn capture_miss_emit_on_rising_edge() {
+        let state = CaptureMissState {
+            active: true,
+            warn: false,
+            ..Default::default()
+        };
+        assert!(should_emit_capture_miss(&state, false));
+    }
+
+    #[test]
+    fn capture_miss_emit_on_clearing_edge() {
+        let state = CaptureMissState::default(); // active=false, warn=false
+        assert!(should_emit_capture_miss(&state, true));
+    }
+
+    #[test]
+    fn capture_miss_emit_skipped_when_steady_active() {
+        let state = CaptureMissState {
+            active: true,
+            warn: false,
+            ..Default::default()
+        };
+        assert!(!should_emit_capture_miss(&state, true));
+    }
+
+    #[test]
+    fn capture_miss_emit_on_warn_pulse_when_active_unchanged() {
+        let state = CaptureMissState {
+            active: true,
+            warn: true,
+            ..Default::default()
+        };
+        assert!(should_emit_capture_miss(&state, true));
+    }
+
+    #[test]
+    fn preview_handle_uses_growing_height_for_vertical_preview() {
+        let mut stitcher = Stitcher::new(overlay_stitch_config());
+        assert_eq!(
+            stitcher.push_frame(scrolling_frame(0).image),
+            StitchOutcome::FirstFrame
+        );
+
+        let handle = preview_handle(
+            &mut stitcher,
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            },
+            rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
+            PreviewConstraints {
+                fixed_width: 120,
+                max_height: 180,
+            },
+        )
+        .expect("growing preview for first frame");
+
+        match handle {
+            ImageHandle::Rgba { width, height, .. } => {
+                assert_eq!(width, 120);
+                assert_eq!(height, 120);
+            }
+            other => panic!("expected Rgba handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preview_handle_keeps_viewport_size_for_horizontal_preview() {
+        let mut stitcher = Stitcher::new(overlay_stitch_config());
+        assert_eq!(
+            stitcher.push_frame(scrolling_frame(0).image),
+            StitchOutcome::FirstFrame
+        );
+
+        let handle = preview_handle(
+            &mut stitcher,
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            },
+            rollshot_overlay_core::capture_miss::CapturedEdge::Right,
+            PreviewConstraints {
+                fixed_width: 120,
+                max_height: 180,
+            },
+        )
+        .expect("viewport preview for first frame");
+
+        match handle {
+            ImageHandle::Rgba { width, height, .. } => {
+                assert_eq!(width, 120);
+                assert_eq!(height, 180);
+            }
+            other => panic!("expected Rgba handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_preview_emits_only_for_accepted_progress() {
+        assert!(should_emit_preview(&StitchProgressSignal::Accepted {
+            edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
+        }));
+        assert!(!should_emit_preview(&StitchProgressSignal::Missed {
+            edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
+        }));
+        assert!(!should_emit_preview(&StitchProgressSignal::Idle));
     }
 }

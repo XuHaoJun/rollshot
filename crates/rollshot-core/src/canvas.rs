@@ -82,6 +82,14 @@ pub struct StripCanvas {
     last_append_copied_bytes: u64,
 }
 
+pub struct CanvasViewport {
+    pub image: RgbaImage,
+    pub total_width: u32,
+    pub total_height: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
 #[derive(Debug, Clone)]
 struct CanvasStrip {
     image: RgbaImage,
@@ -324,6 +332,31 @@ impl StripCanvas {
             y: 0,
         });
     }
+
+    pub fn viewport(&self, x: u32, y: u32, width: u32, height: u32) -> Option<CanvasViewport> {
+        if width == 0 || height == 0 || x >= self.logical_width || y >= self.logical_height {
+            return None;
+        }
+
+        let crop_width = width.min(self.logical_width - x);
+        let crop_height = height.min(self.logical_height - y);
+        if crop_width == 0 || crop_height == 0 {
+            return None;
+        }
+
+        let mut image = RgbaImage::new(crop_width, crop_height);
+        for strip in &self.strips {
+            copy_strip_intersection(&mut image, strip, x, y);
+        }
+
+        Some(CanvasViewport {
+            image,
+            total_width: self.logical_width,
+            total_height: self.logical_height,
+            x,
+            y,
+        })
+    }
 }
 
 fn overlay_copy(dst: &mut RgbaImage, src: &RgbaImage, x: i64, y: i64) {
@@ -350,6 +383,43 @@ fn overlay_copy(dst: &mut RgbaImage, src: &RgbaImage, x: i64, y: i64) {
         let dst_start = ((dy as usize * dst.width() as usize) + copy_x0 as usize) * 4;
         dst.as_mut()[dst_start..dst_start + len]
             .copy_from_slice(&src.as_raw()[src_start..src_start + len]);
+    }
+}
+
+fn copy_strip_intersection(
+    dst: &mut RgbaImage,
+    strip: &CanvasStrip,
+    viewport_x: u32,
+    viewport_y: u32,
+) {
+    let vx0 = viewport_x as i64;
+    let vy0 = viewport_y as i64;
+    let vx1 = vx0 + dst.width() as i64;
+    let vy1 = vy0 + dst.height() as i64;
+    let sx0 = strip.x;
+    let sy0 = strip.y;
+    let sx1 = sx0 + strip.image.width() as i64;
+    let sy1 = sy0 + strip.image.height() as i64;
+
+    let ix0 = vx0.max(sx0);
+    let iy0 = vy0.max(sy0);
+    let ix1 = vx1.min(sx1);
+    let iy1 = vy1.min(sy1);
+    if ix1 <= ix0 || iy1 <= iy0 {
+        return;
+    }
+
+    let copy_width_px = (ix1 - ix0) as usize;
+    let copy_width_bytes = copy_width_px * 4;
+    for y in iy0..iy1 {
+        let src_x = (ix0 - sx0) as usize;
+        let src_y = (y - sy0) as usize;
+        let dst_x = (ix0 - vx0) as usize;
+        let dst_y = (y - vy0) as usize;
+        let src_start = ((src_y * strip.image.width() as usize) + src_x) * 4;
+        let dst_start = ((dst_y * dst.width() as usize) + dst_x) * 4;
+        dst.as_mut()[dst_start..dst_start + copy_width_bytes]
+            .copy_from_slice(&strip.image.as_raw()[src_start..src_start + copy_width_bytes]);
     }
 }
 
@@ -1025,5 +1095,57 @@ mod tests {
             assert_eq!(legacy.width(), strip.width());
             assert_eq!(legacy.height(), strip.height());
         }
+    }
+
+    #[test]
+    fn strip_canvas_viewport_crops_requested_rect() {
+        let mut canvas = StripCanvas::new(patterned(8, 8, 5));
+        let view = canvas.viewport(2, 3, 3, 2).expect("viewport");
+
+        assert_eq!((view.image.width(), view.image.height()), (3, 2));
+        assert_eq!((view.total_width, view.total_height), (8, 8));
+        assert_eq!((view.x, view.y), (2, 3));
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(
+                    view.image.get_pixel(x, y),
+                    canvas.image().get_pixel(x + 2, y + 3)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strip_canvas_viewport_clamps_to_canvas_bounds() {
+        let canvas = StripCanvas::new(patterned(8, 8, 9));
+        let view = canvas.viewport(6, 7, 8, 8).expect("viewport");
+
+        assert_eq!((view.image.width(), view.image.height()), (2, 1));
+        assert_eq!((view.total_width, view.total_height), (8, 8));
+        assert_eq!((view.x, view.y), (6, 7));
+    }
+
+    #[test]
+    fn strip_canvas_viewport_returns_none_for_empty_rect() {
+        let canvas = StripCanvas::new(patterned(8, 8, 11));
+
+        assert!(canvas.viewport(0, 0, 0, 4).is_none());
+        assert!(canvas.viewport(0, 0, 4, 0).is_none());
+        assert!(canvas.viewport(8, 0, 1, 1).is_none());
+        assert!(canvas.viewport(0, 8, 1, 1).is_none());
+    }
+
+    #[test]
+    fn strip_canvas_viewport_does_not_compose_full_canvas() {
+        let mut canvas = StripCanvas::new(patterned(8, 8, 13));
+        canvas
+            .append(AppendDirection::Bottom, &patterned(8, 8, 23), 3)
+            .expect("append");
+        assert!(canvas.composed_cache.is_none());
+
+        let view = canvas.viewport(0, 5, 8, 3).expect("viewport");
+
+        assert_eq!((view.image.width(), view.image.height()), (8, 3));
+        assert!(canvas.composed_cache.is_none());
     }
 }

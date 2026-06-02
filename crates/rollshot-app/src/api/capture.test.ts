@@ -108,4 +108,17 @@ describe('capture api wrappers', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('set_input_passthrough', { enabled: true })
   })
+
+  it('requests stitch preview at the displayed dimensions', async () => {
+    const { getStitchPreview } = await import('./capture')
+    invokeMock.mockResolvedValue(new ArrayBuffer(4))
+
+    const blob = await getStitchPreview(180, 260)
+
+    expect(blob).toBeInstanceOf(Blob)
+    expect(invokeMock).toHaveBeenCalledWith('get_stitch_preview', {
+      previewWidth: 180,
+      previewHeight: 260,
+    })
+  })
 })

@@ -1,7 +1,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { NativeCaptureFlow } from './NativeCaptureFlow'
+import { NativeCaptureFlow, resetCaptureStartedForTest } from './NativeCaptureFlow'
 
 const api = vi.hoisted(() => ({
   exitApp: vi.fn(),
@@ -38,6 +38,7 @@ describe('NativeCaptureFlow', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    resetCaptureStartedForTest()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -72,7 +73,7 @@ describe('NativeCaptureFlow', () => {
     expect(api.exitApp).toHaveBeenCalledTimes(1)
   })
 
-  it('shows a save error and retries before closing', async () => {
+  it('shows a save error and exits without retrying', async () => {
     api.runNativeCapture.mockResolvedValue({
       image_width: 800,
       image_height: 1200,
@@ -80,7 +81,6 @@ describe('NativeCaptureFlow', () => {
     })
     saveApi.promptSaveStitchedPng
       .mockRejectedValueOnce(new Error('disk full'))
-      .mockResolvedValueOnce(true)
 
     await act(async () => {
       root.render(<NativeCaptureFlow />)
@@ -91,7 +91,24 @@ describe('NativeCaptureFlow', () => {
       title: 'Rollshot save failed',
       kind: 'error',
     })
-    expect(saveApi.promptSaveStitchedPng).toHaveBeenCalledTimes(2)
+    expect(saveApi.promptSaveStitchedPng).toHaveBeenCalledTimes(1)
+    expect(api.exitApp).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes after save dialog is cancelled', async () => {
+    api.runNativeCapture.mockResolvedValue({
+      image_width: 800,
+      image_height: 1200,
+      output_path: null,
+    })
+    saveApi.promptSaveStitchedPng.mockResolvedValue(false)
+
+    await act(async () => {
+      root.render(<NativeCaptureFlow />)
+    })
+    await flush()
+
+    expect(saveApi.promptSaveStitchedPng).toHaveBeenCalledTimes(1)
     expect(api.exitApp).toHaveBeenCalledTimes(1)
   })
 

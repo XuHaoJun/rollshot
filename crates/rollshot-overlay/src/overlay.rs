@@ -17,8 +17,14 @@ use crate::driver::Driver;
 use crate::CaptureResult;
 use crate::OverlayConfig;
 use crate::OverlayError;
-use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
+use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreviewConstraints {
+    pub(crate) fixed_width: u32,
+    pub(crate) max_height: u32,
+}
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 const TOOLBAR_W: f32 = 300.0;
@@ -27,8 +33,9 @@ const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
-static PREVIEW_RX: Mutex<Option<iced::futures::channel::mpsc::UnboundedReceiver<image::Handle>>> =
-    Mutex::new(None);
+static PREVIEW_RX: Mutex<
+    Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>,
+> = Mutex::new(None);
 static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex::new(None);
 
 // Capture starts in `run()` before the overlay surface exists, so the portal
@@ -44,6 +51,8 @@ pub struct Overlay {
     crop_confirmed: bool,
     preview: Option<image::Handle>,
     window_size: Option<iced::Size>,
+    capture_miss_warn: bool,
+    capture_miss_message_expires_at: Option<std::time::Instant>,
 }
 
 #[to_layer_message]
@@ -52,7 +61,8 @@ pub enum Message {
     IcedEvent(Event),
     Finish,
     Cancel,
-    NewPreview(image::Handle),
+    LiveEvent(crate::driver::LiveOverlayEvent),
+    Tick,
 }
 
 fn namespace() -> String {
@@ -67,12 +77,16 @@ fn preview_stream() -> iced::Subscription<Message> {
             .take()
             .expect("preview channel already consumed");
 
-        rx.map(Message::NewPreview)
+        rx.map(Message::LiveEvent)
     })
 }
 
 fn subscription(_: &Overlay) -> iced::Subscription<Message> {
-    iced::Subscription::batch([event::listen().map(Message::IcedEvent), preview_stream()])
+    iced::Subscription::batch([
+        event::listen().map(Message::IcedEvent),
+        preview_stream(),
+        iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick),
+    ])
 }
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
@@ -110,7 +124,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         }
         Message::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))) => {
             state.drag_start = None;
-            Task::none()
+            if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
+            {
+                Task::done(Message::Finish)
+            } else {
+                Task::none()
+            }
         }
         Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -173,9 +192,9 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             // Capture is already running (started in `run()` before the overlay
             // appeared, so the picker dialog is long gone). Just map the crop to
             // frame pixels and start stitching live frames from here on.
-            let preview_size = preview_viewport_size(crop, ws);
+            let preview_constraints = preview_constraints(crop, ws);
             if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                driver.begin_stitch(crop_logical, overlay_logical, preview_size);
+                driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
             }
 
             // Keep only the toolbar interactive (plan T6 S3); the crop interior
@@ -198,8 +217,26 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
             iced::exit()
         }
-        Message::NewPreview(handle) => {
+        Message::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
             state.preview = Some(handle);
+            Task::none()
+        }
+        Message::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
+            if miss.warn {
+                state.capture_miss_warn = true;
+                state.capture_miss_message_expires_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            }
+            Task::none()
+        }
+        Message::Tick => {
+            if state
+                .capture_miss_message_expires_at
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                state.capture_miss_warn = false;
+                state.capture_miss_message_expires_at = None;
+            }
             Task::none()
         }
         _ => Task::none(),
@@ -459,11 +496,8 @@ fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, 
     Some((x as i32, y as i32, w as i32, h as i32))
 }
 
-fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_capture::Size {
+fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
     let band = choose_chrome_band(crop, window);
-    // Space actually available from the crop's anchor edge to the screen edge,
-    // matching where `place_outside_crop` pins the chrome (so the capped preview
-    // never overflows past the screen).
     let (available_width, available_height) = match band {
         Some(Band::Top) => ((window.width - crop.x.max(0.0)).max(0.0), crop.y.max(0.0)),
         Some(Band::Bottom) => (
@@ -477,13 +511,15 @@ fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_captur
         ),
         None => (PREVIEW_WIDTH as f32, 1.0),
     };
-    let width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0) as u32;
+    let max_width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0);
     let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
-    // Cap the height so the texture stays in the proven-stable envelope; a tall
-    // side band would otherwise produce a ~280×1380 preview that flickers.
-    let height = band_height.clamp(1, PREVIEW_MAX_HEIGHT);
+    let crop_h = crop.height.max(1.0);
+    let max_height = (band_height as f32).min(crop_h);
 
-    rollshot_capture::Size { width, height }
+    PreviewConstraints {
+        fixed_width: max_width.floor().max(1.0) as u32,
+        max_height: max_height.floor().max(1.0) as u32,
+    }
 }
 
 fn magenta_toolbar<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
@@ -520,16 +556,33 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         });
         let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
 
-        let chrome: Element<'_, Message> = if let Some(handle) = &state.preview {
-            // The driver builds the handle as a fixed-width, bottom-anchored
-            // viewport that grows up to a cap (driver::preview_viewport_handle),
-            // so rendering it at its natural size makes the preview grow with the
-            // scroll and then follow the bottom once capped.
-            column![toolbar, image(handle.clone())]
-                .spacing(CHROME_SPACING)
+        // R5: toolbar is always first so toolbar_input_rect contract holds.
+        let warning: Option<Element<'_, Message>> = state.capture_miss_warn.then(|| {
+            container(text(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING).size(14))
+                .padding(8)
+                .style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        120.0 / 255.0,
+                        53.0 / 255.0,
+                        15.0 / 255.0,
+                        0.94,
+                    ))),
+                    text_color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
+                    ..Default::default()
+                })
                 .into()
-        } else {
-            toolbar
+        });
+
+        let chrome: Element<'_, Message> = {
+            let mut col = column![toolbar];
+            col = col.spacing(CHROME_SPACING);
+            if let Some(w) = warning {
+                col = col.push(w);
+            }
+            if let Some(handle) = &state.preview {
+                col = col.push(image(handle.clone()));
+            }
+            col.into()
         };
 
         return match place_outside_crop(crop, window, chrome) {
@@ -538,14 +591,13 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         };
     }
 
-    // Selection phase: drag to pick a crop; toolbar with Finish/Cancel.
+    // Selection phase: drag to pick a crop; toolbar with Cancel.
     let status = match state.crop {
         Some(r) => format!("Crop: {}x{}", r.width as u32, r.height as u32),
         None => "Drag to select crop area".to_string(),
     };
     let toolbar = magenta_toolbar(
         row![
-            button("Finish").on_press(Message::Finish),
             button("Cancel").on_press(Message::Cancel),
             text(status).size(16),
         ]
@@ -629,12 +681,12 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_mask_bands, preview_viewport_size, token_color, CHROME_SPACING, TOOLBAR_H};
+    use super::{crop_mask_bands, preview_constraints, token_color};
     use iced::{Point, Rectangle, Size};
-    use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
+    use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 
     #[test]
-    fn preview_viewport_uses_fixed_width_and_bottom_band_height() {
+    fn preview_constraints_use_fixed_width_and_bottom_band_height() {
         let crop = Rectangle {
             x: 100.0,
             y: 100.0,
@@ -643,14 +695,14 @@ mod tests {
         };
         let window = Size::new(2560.0, 1440.0);
 
-        let viewport = preview_viewport_size(crop, window);
+        let constraints = preview_constraints(crop, window);
 
-        assert_eq!(viewport.width, PREVIEW_WIDTH);
-        assert_eq!(viewport.height, (440.0 - TOOLBAR_H - CHROME_SPACING) as u32);
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 382);
     }
 
     #[test]
-    fn preview_viewport_clamps_width_to_side_band() {
+    fn preview_constraints_clamp_width_to_side_band() {
         let crop = Rectangle {
             x: 200.0,
             y: 10.0,
@@ -659,14 +711,26 @@ mod tests {
         };
         let window = Size::new(2560.0, 1440.0);
 
-        let viewport = preview_viewport_size(crop, window);
+        let constraints = preview_constraints(crop, window);
 
-        // A tall side band offers ~1382px of height, but the preview texture is
-        // capped so the per-frame upload stays small enough to render without
-        // flicker on the iced_layershell/wgpu path (the larger 960×~1380
-        // textures flickered / never showed).
-        assert_eq!(viewport.width, 200);
-        assert_eq!(viewport.height, PREVIEW_MAX_HEIGHT);
+        assert_eq!(constraints.fixed_width, 200);
+        assert_eq!(constraints.max_height, 1372);
+    }
+
+    #[test]
+    fn preview_constraints_cap_height_at_crop_height() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 600.0,
+        };
+        let window = Size::new(2560.0, 1440.0);
+
+        let constraints = preview_constraints(crop, window);
+
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 600);
     }
 
     #[test]

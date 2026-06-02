@@ -13,6 +13,11 @@ use rollshot_capture::{
 };
 use rollshot_core::{StitchConfig, StitchOutcome, StitchStats, Stitcher};
 
+use rollshot_overlay_core::capture_miss::{
+    progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CapturedEdge,
+    StitchProgressSignal, CAPTURE_MISS_WARNING,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SessionStatus {
@@ -28,6 +33,10 @@ pub enum SessionStatus {
         region: RegionDto,
         stats: StitchStatsDto,
         last_outcome: Option<String>,
+        capture_miss: bool,
+        capture_miss_warning: bool,
+        capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge,
+        capture_miss_message: &'static str,
     },
     Done {
         image_width: u32,
@@ -93,7 +102,6 @@ impl From<RegionDto> for Region {
     }
 }
 
-#[derive(Default)]
 pub struct AppSession {
     latest_frame: Option<CapturedFrame>,
     latest_frame_seq: u64,
@@ -101,9 +109,31 @@ pub struct AppSession {
     stitcher: Option<Stitcher>,
     stitch_stats: StitchStatsDto,
     last_stitch_outcome: Option<String>,
+    capture_miss_tracker: CaptureMissTracker,
+    capture_miss_state: CaptureMissState,
+    spotlight_edge: CapturedEdge,
     final_image: Option<RgbaImage>,
     output_path: Option<String>,
     error: Option<String>,
+}
+
+impl Default for AppSession {
+    fn default() -> Self {
+        Self {
+            latest_frame: None,
+            latest_frame_seq: 0,
+            selected_region: None,
+            stitcher: None,
+            stitch_stats: StitchStatsDto::from(StitchStats::default()),
+            last_stitch_outcome: None,
+            capture_miss_tracker: CaptureMissTracker::default(),
+            capture_miss_state: CaptureMissState::default(),
+            spotlight_edge: CapturedEdge::Unknown,
+            final_image: None,
+            output_path: None,
+            error: None,
+        }
+    }
 }
 
 impl AppSession {
@@ -138,6 +168,10 @@ impl AppSession {
                 },
                 stats: self.stitch_stats,
                 last_outcome: self.last_stitch_outcome.clone(),
+                capture_miss: self.capture_miss_state.active,
+                capture_miss_warning: self.capture_miss_state.warn,
+                capture_miss_edge: self.capture_miss_state.edge,
+                capture_miss_message: CAPTURE_MISS_WARNING,
             },
             (Some(frame), region) => SessionStatus::Previewing {
                 frame_width: frame.image.width(),
@@ -190,6 +224,9 @@ impl AppSession {
         self.stitcher = Some(Stitcher::new(config));
         self.stitch_stats = StitchStatsDto::from(StitchStats::default());
         self.last_stitch_outcome = None;
+        self.capture_miss_tracker = CaptureMissTracker::default();
+        self.capture_miss_state = CaptureMissState::default();
+        self.spotlight_edge = CapturedEdge::Unknown;
         self.final_image = None;
         self.output_path = None;
         self.error = None;
@@ -206,6 +243,15 @@ impl AppSession {
             .ok_or_else(|| "stitching has not started".to_string())?;
         let cropped = crop_frame(&frame, region).map_err(|err| err.to_string())?;
         let outcome = stitcher.push_frame(cropped.image);
+        let signal = progress_signal_from_outcome(&outcome);
+        if let StitchProgressSignal::Accepted { edge } = signal {
+            if edge != CapturedEdge::Unknown {
+                self.spotlight_edge = edge;
+            }
+        }
+        self.capture_miss_state = self
+            .capture_miss_tracker
+            .update(signal, std::time::Instant::now());
         self.last_stitch_outcome = Some(format_stitch_outcome(&outcome));
         self.stitch_stats = stitcher.stats().into();
         Ok(())
@@ -265,9 +311,16 @@ impl AppSession {
         self.stitcher = None;
         self.stitch_stats = StitchStatsDto::from(StitchStats::default());
         self.last_stitch_outcome = None;
+        self.capture_miss_tracker = CaptureMissTracker::default();
+        self.capture_miss_state = CaptureMissState::default();
+        self.spotlight_edge = CapturedEdge::Unknown;
         self.final_image = None;
         self.output_path = None;
         self.error = None;
+    }
+
+    fn clear_capture_miss_warning(&mut self) {
+        self.capture_miss_state.warn = false;
     }
 }
 
@@ -376,6 +429,9 @@ impl SharedSession {
             inner.final_image = None;
             inner.output_path = None;
             inner.error = None;
+            inner.capture_miss_tracker = CaptureMissTracker::default();
+            inner.capture_miss_state = CaptureMissState::default();
+            inner.spotlight_edge = CapturedEdge::Unknown;
         }
 
         self.start_reader(options, &mut reader);
@@ -467,11 +523,16 @@ impl SharedSession {
     }
 
     pub fn status(&self) -> Result<SessionStatus, String> {
-        let inner = self
+        // NOTE (R8): single consumer only (the `session_status` command). The
+        // capture-miss `warn` flag is a one-shot pulse cleared on read; a second
+        // poller would swallow the pulse before the frontend sees it.
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
-        Ok(inner.status())
+        let status = inner.status();
+        inner.clear_capture_miss_warning();
+        Ok(status)
     }
 
     pub fn confirm_region(&self, region: RegionDto) -> Result<RegionDto, String> {
@@ -482,32 +543,57 @@ impl SharedSession {
         inner.confirm_region(region)
     }
 
-    pub fn stitch_preview_png(&self) -> Result<Option<Vec<u8>>, String> {
-        // The live stitch preview uses the shared fixed grow-then-follow viewport
-        // (consistent with the native overlay): a fixed-width strip that grows,
-        // then follows the bottom of the stitch.
-        let image = {
+    pub fn stitch_preview_png(
+        &self,
+        preview_width: u32,
+        preview_height: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let preview = {
             let mut inner = self
                 .inner
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
-            inner
-                .stitcher
-                .as_mut()
-                .and_then(|s| s.full_image())
-                .cloned()
+            let region = inner.selected_region;
+            let edge = inner.spotlight_edge;
+            let preview = match inner.stitcher.as_mut() {
+                Some(stitcher) => region.and_then(|region| {
+                    if matches!(edge, CapturedEdge::Left | CapturedEdge::Right) {
+                        rollshot_overlay_core::preview::viewport_preview(
+                            stitcher,
+                            rollshot_overlay_core::preview::ViewportPreviewRequest {
+                                viewport_width: preview_width,
+                                viewport_height: preview_height,
+                                frame_width: region.width,
+                                frame_height: region.height,
+                                edge,
+                            },
+                        )
+                        .map(|preview| (preview.width, preview.height, preview.pixels))
+                    } else {
+                        rollshot_overlay_core::preview::growing_preview(
+                            stitcher,
+                            rollshot_overlay_core::preview::GrowingPreviewRequest {
+                                fixed_width: preview_width,
+                                max_height: preview_height,
+                                edge,
+                            },
+                        )
+                        .map(|preview| (preview.width, preview.height, preview.pixels))
+                    }
+                }),
+                None => None,
+            };
+            preview
         };
-        image
-            .as_ref()
-            .map(|image| {
-                let view = rollshot_overlay_core::preview::preview_viewport(
-                    image,
-                    rollshot_overlay_core::preview::PREVIEW_WIDTH,
-                    rollshot_overlay_core::preview::PREVIEW_MAX_HEIGHT,
-                );
-                encode_rgba_png(&view)
-            })
-            .transpose()
+
+        match preview {
+            Some((width, height, pixels)) => {
+                let image = RgbaImage::from_raw(width, height, pixels)
+                    .ok_or_else(|| "invalid stitch preview buffer".to_string())?;
+                Ok(Some(encode_rgba_png(&image)?))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn latest_preview_png(&self, max_edge: u32) -> Result<Option<Vec<u8>>, String> {
@@ -695,6 +781,7 @@ mod tests {
     };
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FrameMetadata};
+    use rollshot_overlay_core::capture_miss::{CapturedEdge, CAPTURE_MISS_WARNING};
     use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -794,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn stitch_preview_png_uses_shared_viewport() {
+    fn stitch_preview_png_uses_growing_vertical_preview_height() {
         let session = SharedSession::new();
         {
             let mut inner = session.inner.lock().expect("session lock");
@@ -814,20 +901,13 @@ mod tests {
         }
 
         let bytes = session
-            .stitch_preview_png()
+            .stitch_preview_png(PREVIEW_WIDTH, PREVIEW_MAX_HEIGHT)
             .expect("encode stitch preview")
             .expect("preview exists");
         let image = image::load_from_memory(&bytes).expect("decode png");
 
-        // A fixed PREVIEW_WIDTH (not a max-edge downscale) proves the shared
-        // viewport is used.
         assert_eq!(image.width(), PREVIEW_WIDTH);
-        // Mirror preview_viewport's float-rounded scaling (not integer division)
-        // so this expectation can't drift from production rounding if the
-        // constants change.
-        let scale = PREVIEW_WIDTH as f32 / 960.0;
-        let expected_height = ((600.0 * scale).round() as u32).min(PREVIEW_MAX_HEIGHT);
-        assert_eq!(image.height(), expected_height);
+        assert_eq!(image.height(), 175);
     }
 
     #[test]
@@ -877,6 +957,14 @@ mod tests {
         let image = image::imageops::crop_imm(&canvas, 0, offset_y, 80, 80).to_image();
         CapturedFrame {
             image,
+            timestamp: SystemTime::UNIX_EPOCH,
+            metadata: FrameMetadata::fake(),
+        }
+    }
+
+    fn blank_frame(width: u32, height: u32) -> CapturedFrame {
+        CapturedFrame {
+            image: RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255])),
             timestamp: SystemTime::UNIX_EPOCH,
             metadata: FrameMetadata::fake(),
         }
@@ -1167,5 +1255,132 @@ mod tests {
             session.overlay_exclusion().expect("overlay exclusion"),
             OverlayExclusion::Unsupported
         );
+    }
+
+    #[test]
+    fn status_reports_capture_miss_after_no_match() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+        session
+            .push_stitch_frame_for_test(blank_frame(80, 80))
+            .expect("miss frame");
+
+        match session.status() {
+            SessionStatus::Stitching {
+                capture_miss,
+                capture_miss_warning,
+                capture_miss_edge,
+                capture_miss_message,
+                ..
+            } => {
+                assert!(capture_miss);
+                assert!(capture_miss_warning);
+                assert_eq!(capture_miss_edge, CapturedEdge::Unknown);
+                assert_eq!(capture_miss_message, CAPTURE_MISS_WARNING);
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stitch_preview_png_returns_requested_viewport_size() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(blank_frame(80, 80));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner.push_stitch_frame(scrolling_frame(0)).expect("f0");
+            inner.push_stitch_frame(scrolling_frame(20)).expect("f1");
+            inner.push_stitch_frame(scrolling_frame(40)).expect("f2");
+        }
+
+        let bytes = session
+            .stitch_preview_png(180, 260)
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes).expect("decode png");
+
+        assert_eq!((image.width(), image.height()), (180, 260));
+    }
+
+    #[test]
+    fn horizontal_stitch_preview_keeps_requested_viewport_size() {
+        let session = SharedSession::new();
+        {
+            let mut inner = session.inner.lock().expect("session lock");
+            inner.store_frame_for_test(blank_frame(80, 80));
+            inner
+                .confirm_region(RegionDto {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 80,
+                })
+                .expect("confirm region");
+            inner.start_stitching().expect("start stitching");
+            inner.push_stitch_frame(scrolling_frame(0)).expect("f0");
+            inner.spotlight_edge = CapturedEdge::Right;
+        }
+
+        let bytes = session
+            .stitch_preview_png(180, 260)
+            .expect("encode stitch preview")
+            .expect("preview exists");
+        let image = image::load_from_memory(&bytes).expect("decode png");
+
+        assert_eq!((image.width(), image.height()), (180, 260));
+    }
+
+    #[test]
+    fn accepted_frame_clears_capture_miss_status() {
+        let mut session = AppSession::new();
+        session.store_frame_for_test(scrolling_frame(0));
+        session
+            .confirm_region(RegionDto {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            })
+            .expect("confirm region");
+        session.start_stitching_for_test().expect("start stitching");
+
+        session
+            .push_stitch_frame_for_test(scrolling_frame(0))
+            .expect("first frame");
+        session
+            .push_stitch_frame_for_test(blank_frame(80, 80))
+            .expect("miss frame");
+        session
+            .push_stitch_frame_for_test(scrolling_frame(8))
+            .expect("recovered frame");
+
+        match session.status() {
+            SessionStatus::Stitching { capture_miss, .. } => {
+                assert!(!capture_miss);
+            }
+            other => panic!("expected stitching status, got {other:?}"),
+        }
     }
 }

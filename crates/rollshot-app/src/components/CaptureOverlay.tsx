@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   confirmRegion,
+  exitApp,
   getFinalPreview,
   getStitchPreview,
   launchOptions,
@@ -18,18 +19,39 @@ import {
 import { promptSaveStitchedPng } from '../api/save'
 import type { PreviewScale, SourceRegion } from '../region/geometry'
 import { sourceRegionToCssRect } from '../region/geometry'
-import { choosePreviewPlacement } from '../overlay/placement'
+import { chooseDynamicPreviewPlacement } from '../overlay/placement'
 import { AdaptiveStitchPreview } from './AdaptiveStitchPreview'
 import { OverlayToolbar } from './OverlayToolbar'
 import { SelectionLayer } from './SelectionLayer'
 
-const PREVIEW_SIZE = { width: 180, height: 260 }
+const PREVIEW_WIDTH = 280
 const OVERLAY_CLEAR_DELAY_MS = 17
+
+let overlayStarted = false
+
+export function resetOverlayStartedForTest() {
+  overlayStarted = false
+}
 
 function waitForOverlayClear() {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, OVERLAY_CLEAR_DELAY_MS)
   })
+}
+
+function stitchPreviewContentSize(status: Extract<SessionStatus, { state: 'stitching' }>) {
+  const horizontalGrowth =
+    status.stats.total_width > status.region.width &&
+    status.stats.total_height <= status.region.height
+
+  if (horizontalGrowth) {
+    return { width: status.region.width, height: status.region.height }
+  }
+
+  return {
+    width: Math.max(1, status.stats.total_width),
+    height: Math.max(1, status.stats.total_height),
+  }
 }
 
 export function CaptureOverlay() {
@@ -45,9 +67,12 @@ export function CaptureOverlay() {
   )
   const [message, setMessage] = useState('Starting capture')
   const [startupFailed, setStartupFailed] = useState(false)
+  const [captureMissToast, setCaptureMissToast] = useState<string | null>(null)
   const pollInFlightRef = useRef(false)
   const stitchPreviewUrlRef = useRef<string | null>(null)
   const finalPreviewUrlRef = useRef<string | null>(null)
+  const scaleRef = useRef<PreviewScale | null>(null)
+  const overlayModeRef = useRef<OverlayExclusion>('unknown')
 
   useEffect(() => {
     stitchPreviewUrlRef.current = stitchPreviewUrl
@@ -65,6 +90,10 @@ export function CaptureOverlay() {
   }, [])
 
   useEffect(() => {
+    if (overlayStarted) {
+      return
+    }
+    overlayStarted = true
     const tauriWindow = getCurrentWindow()
     Promise.all([
       launchOptions(),
@@ -73,6 +102,7 @@ export function CaptureOverlay() {
       tauriWindow.scaleFactor(),
     ])
       .then(([loadedOptions, loadedExclusion, outerPosition, scaleFactor]) => {
+        overlayModeRef.current = loadedExclusion
         setOverlayMode(loadedExclusion)
         setWindowOrigin({ x: outerPosition.x, y: outerPosition.y })
         setDevicePixelRatio(scaleFactor)
@@ -86,6 +116,37 @@ export function CaptureOverlay() {
       })
   }, [])
 
+  const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
+  const hasCaptureFrame = status.state === 'previewing' || status.state === 'stitching'
+  const sourceWidth = hasCaptureFrame ? status.frame_width : 1
+  const sourceHeight = hasCaptureFrame ? status.frame_height : 1
+  const showSelection = status.state === 'previewing' && !isStartingStitching
+
+  const scale = useMemo<PreviewScale | null>(() => {
+    if (!hasCaptureFrame || !windowOrigin) return null
+    return {
+      scaleX: devicePixelRatio,
+      scaleY: devicePixelRatio,
+      sourceOriginX: windowOrigin.x,
+      sourceOriginY: windowOrigin.y,
+      sourceWidth,
+      sourceHeight,
+    }
+  }, [devicePixelRatio, hasCaptureFrame, sourceHeight, sourceWidth, windowOrigin])
+
+  useEffect(() => {
+    scaleRef.current = scale
+  }, [scale])
+
+  useEffect(() => {
+    overlayModeRef.current = overlayMode
+  }, [overlayMode])
+
+  const activeRegionRect = useMemo(() => {
+    if (!activeRegion || !scale) return null
+    return sourceRegionToCssRect(activeRegion, scale)
+  }, [activeRegion, scale])
+
   useEffect(() => {
     if (startupFailed) return
     const timer = window.setInterval(async () => {
@@ -94,14 +155,28 @@ export function CaptureOverlay() {
       try {
         const nextStatus = await sessionStatus()
         setStatus(nextStatus)
-        if (nextStatus.state === 'stitching') {
-          const blob = await getStitchPreview()
-          if (blob) {
-            const nextUrl = URL.createObjectURL(blob)
-            setStitchPreviewUrl((oldUrl) => {
-              if (oldUrl) URL.revokeObjectURL(oldUrl)
-              return nextUrl
-            })
+        if (nextStatus.state === 'stitching' && scaleRef.current && nextStatus.region) {
+          const cssRegion = sourceRegionToCssRect(nextStatus.region, scaleRef.current)
+          const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+          const dynamicPlacement = chooseDynamicPreviewPlacement({
+            bounds,
+            region: cssRegion,
+            previewWidth: PREVIEW_WIDTH,
+            content: stitchPreviewContentSize(nextStatus),
+            overlayExclusion: overlayModeRef.current,
+          })
+          if (dynamicPlacement.mode === 'image') {
+            const blob = await getStitchPreview(
+              dynamicPlacement.preview.width,
+              dynamicPlacement.preview.height,
+            )
+            if (blob) {
+              const nextUrl = URL.createObjectURL(blob)
+              setStitchPreviewUrl((oldUrl) => {
+                if (oldUrl) URL.revokeObjectURL(oldUrl)
+                return nextUrl
+              })
+            }
           }
         }
       } catch (error) {
@@ -113,6 +188,21 @@ export function CaptureOverlay() {
 
     return () => window.clearInterval(timer)
   }, [startupFailed])
+
+  // Show the toast when a warning pulse arrives.
+  useEffect(() => {
+    if (status.state === 'stitching' && status.capture_miss_warning) {
+      setCaptureMissToast(status.capture_miss_message)
+    }
+  }, [status])
+
+  // Dismiss it ~3s after it was last (re)shown. Keyed on the toast value, NOT on
+  // `status`, so an intervening poll that flips warn->false cannot cancel it.
+  useEffect(() => {
+    if (!captureMissToast) return
+    const timer = window.setTimeout(() => setCaptureMissToast(null), 3000)
+    return () => window.clearTimeout(timer)
+  }, [captureMissToast])
 
   const onSelect = useCallback(async (region: SourceRegion) => {
     try {
@@ -134,7 +224,7 @@ export function CaptureOverlay() {
       await setInputPassthrough(false)
       await stopCapture()
     } finally {
-      window.close()
+      await exitApp()
     }
   }, [])
 
@@ -211,41 +301,24 @@ export function CaptureOverlay() {
     }
   }, [status.state])
 
-  const activeRegion = selectedRegion ?? (status.state === 'stitching' ? status.region : null)
-  const hasCaptureFrame = status.state === 'previewing' || status.state === 'stitching'
-  const sourceWidth = hasCaptureFrame ? status.frame_width : 1
-  const sourceHeight = hasCaptureFrame ? status.frame_height : 1
-  const showSelection = status.state === 'previewing' && !isStartingStitching
-
-  const scale = useMemo<PreviewScale | null>(() => {
-    if (!hasCaptureFrame || !windowOrigin) return null
-    return {
-      scaleX: devicePixelRatio,
-      scaleY: devicePixelRatio,
-      sourceOriginX: windowOrigin.x,
-      sourceOriginY: windowOrigin.y,
-      sourceWidth,
-      sourceHeight,
-    }
-  }, [devicePixelRatio, hasCaptureFrame, sourceHeight, sourceWidth, windowOrigin])
-
-  const activeRegionRect = useMemo(() => {
-    if (!activeRegion || !scale) return null
-    return sourceRegionToCssRect(activeRegion, scale)
-  }, [activeRegion, scale])
+  const stitchPreviewContent = useMemo(() => {
+    if (status.state !== 'stitching') return null
+    return stitchPreviewContentSize(status)
+  }, [status])
 
   const placement = useMemo(() => {
-    if (!activeRegionRect) {
+    if (!activeRegionRect || !stitchPreviewContent) {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-    return choosePreviewPlacement({
+    return chooseDynamicPreviewPlacement({
       bounds,
       region: activeRegionRect,
-      preview: PREVIEW_SIZE,
+      previewWidth: PREVIEW_WIDTH,
+      content: stitchPreviewContent,
       overlayExclusion: overlayMode,
     })
-  }, [activeRegionRect, overlayMode])
+  }, [activeRegionRect, overlayMode, stitchPreviewContent])
 
   const toolbarMode = status.state === 'done' ? 'done' : status.state === 'failed' ? 'failed' : 'stitching'
   const stats =
@@ -283,7 +356,26 @@ export function CaptureOverlay() {
         </div>
       ) : null}
       {status.state === 'stitching' ? (
-        <AdaptiveStitchPreview imageUrl={stitchPreviewUrl} status={stats} placement={placement} />
+        <AdaptiveStitchPreview
+          imageUrl={stitchPreviewUrl}
+          status={stats}
+          placement={placement}
+        />
+      ) : null}
+      {captureMissToast ? (
+        <div
+          className="capture-miss-toast"
+          style={
+            placement.mode === 'image'
+              ? {
+                  top: `${placement.rect.top - 8}px`,
+                  transform: 'translateX(-50%) translateY(-100%)',
+                }
+              : undefined
+          }
+        >
+          {captureMissToast}
+        </div>
       ) : null}
       {status.state === 'stitching' || status.state === 'done' || status.state === 'failed' ? (
         <OverlayToolbar

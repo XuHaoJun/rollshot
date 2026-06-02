@@ -1,17 +1,22 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { message as showMessage } from '@tauri-apps/plugin-dialog'
 import { exitApp, launchOptions, runNativeCapture } from '../api/capture'
 import { promptSaveStitchedPng } from '../api/save'
 
+let captureStarted = false
+
+export function resetCaptureStartedForTest() {
+  captureStarted = false
+}
+
 export function NativeCaptureFlow() {
   const [message, setMessage] = useState('Starting capture')
-  const startedRef = useRef(false)
 
   useEffect(() => {
-    if (startedRef.current) {
+    if (captureStarted) {
       return
     }
-    startedRef.current = true
+    captureStarted = true
 
     void (async () => {
       try {
@@ -22,7 +27,7 @@ export function NativeCaptureFlow() {
           let savedOrCancelled = false
           while (!savedOrCancelled) {
             try {
-              savedOrCancelled = await promptSaveStitchedPng(setMessage)
+              savedOrCancelled = await promptSaveStitchedPng(setMessage) || true
             } catch (saveError) {
               const saveErrorMessage = String(saveError)
               setMessage(saveErrorMessage)
@@ -32,8 +37,10 @@ export function NativeCaptureFlow() {
                   kind: 'error',
                 })
               } catch {
-                // Keep the finished image in session and retry the save prompt.
+                // Error dialog could not be shown; exit the loop to avoid
+                // trapping the user in an unrecoverable retry cycle.
               }
+              break
             }
           }
         }
