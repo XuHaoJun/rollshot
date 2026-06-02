@@ -39,6 +39,21 @@ function waitForOverlayClear() {
   })
 }
 
+function stitchPreviewContentSize(status: Extract<SessionStatus, { state: 'stitching' }>) {
+  const horizontalGrowth =
+    status.stats.total_width > status.region.width &&
+    status.stats.total_height <= status.region.height
+
+  if (horizontalGrowth) {
+    return { width: status.region.width, height: status.region.height }
+  }
+
+  return {
+    width: Math.max(1, status.stats.total_width),
+    height: Math.max(1, status.stats.total_height),
+  }
+}
+
 export function CaptureOverlay() {
   const [status, setStatus] = useState<SessionStatus>({ state: 'idle' })
   const [overlayMode, setOverlayMode] = useState<OverlayExclusion>('unknown')
@@ -147,7 +162,7 @@ export function CaptureOverlay() {
             bounds,
             region: cssRegion,
             previewWidth: PREVIEW_WIDTH,
-            content: { width: nextStatus.stats.total_width, height: nextStatus.stats.total_height },
+            content: stitchPreviewContentSize(nextStatus),
             overlayExclusion: overlayModeRef.current,
           })
           if (dynamicPlacement.mode === 'image') {
@@ -286,23 +301,24 @@ export function CaptureOverlay() {
     }
   }, [status.state])
 
+  const stitchPreviewContent = useMemo(() => {
+    if (status.state !== 'stitching') return null
+    return stitchPreviewContentSize(status)
+  }, [status])
+
   const placement = useMemo(() => {
-    if (!activeRegionRect) {
+    if (!activeRegionRect || !stitchPreviewContent) {
       return { mode: 'status' } as const
     }
     const bounds = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-    const content =
-      status.state === 'stitching'
-        ? { width: status.stats.total_width, height: status.stats.total_height }
-        : { width: activeRegionRect.width, height: activeRegionRect.height }
     return chooseDynamicPreviewPlacement({
       bounds,
       region: activeRegionRect,
       previewWidth: PREVIEW_WIDTH,
-      content,
+      content: stitchPreviewContent,
       overlayExclusion: overlayMode,
     })
-  }, [activeRegionRect, overlayMode, status])
+  }, [activeRegionRect, overlayMode, stitchPreviewContent])
 
   const toolbarMode = status.state === 'done' ? 'done' : status.state === 'failed' ? 'failed' : 'stitching'
   const stats =

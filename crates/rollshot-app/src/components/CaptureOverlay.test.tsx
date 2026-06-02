@@ -349,6 +349,52 @@ describe('CaptureOverlay', () => {
     expect(container.querySelector('.capture-miss-toast')).toBeNull()
   })
 
+  it('requests taller stitch previews as vertical stitched content grows', async () => {
+    const firstFrame = {
+      state: 'stitching',
+      frame_width: 1000,
+      frame_height: 500,
+      region: { x: 100, y: 50, width: 800, height: 400 },
+      stats: { frame_count: 1, total_width: 800, total_height: 400, last_append: 0 },
+      last_outcome: 'first frame',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
+    } satisfies SessionStatus
+    api.sessionStatus
+      .mockResolvedValueOnce(firstFrame)
+      .mockResolvedValueOnce(firstFrame)
+      .mockResolvedValue({
+        state: 'stitching',
+        frame_width: 1000,
+        frame_height: 500,
+        region: { x: 100, y: 50, width: 800, height: 400 },
+        stats: { frame_count: 3, total_width: 800, total_height: 900, last_append: 200 },
+        last_outcome: 'appended 200px Bottom',
+        capture_miss: false,
+        capture_miss_warning: false,
+        capture_miss_edge: 'unknown',
+        capture_miss_message: '',
+      } satisfies SessionStatus)
+    api.getStitchPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(api.getStitchPreview).toHaveBeenNthCalledWith(1, 280, 140)
+    expect(api.getStitchPreview).toHaveBeenNthCalledWith(2, 280, 200)
+  })
+
   it('requests inside stitch preview dimensions after verified overlay exclusion resolves', async () => {
     api.overlayExclusion.mockResolvedValue('verified')
     api.sessionStatus.mockResolvedValue({
