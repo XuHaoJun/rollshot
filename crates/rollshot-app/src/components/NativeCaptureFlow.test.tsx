@@ -1,7 +1,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { NativeCaptureFlow } from './NativeCaptureFlow'
+import { NativeCaptureFlow, resetCaptureStartedForTest } from './NativeCaptureFlow'
 
 const api = vi.hoisted(() => ({
   exitApp: vi.fn(),
@@ -38,6 +38,7 @@ describe('NativeCaptureFlow', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    resetCaptureStartedForTest()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)

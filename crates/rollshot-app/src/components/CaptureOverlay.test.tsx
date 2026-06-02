@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionStatus } from '../api/capture'
-import { CaptureOverlay } from './CaptureOverlay'
+import { CaptureOverlay, resetOverlayStartedForTest } from './CaptureOverlay'
 
 const api = vi.hoisted(() => ({
   confirmRegion: vi.fn(),
@@ -64,6 +64,7 @@ describe('CaptureOverlay', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
+    resetOverlayStartedForTest()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)

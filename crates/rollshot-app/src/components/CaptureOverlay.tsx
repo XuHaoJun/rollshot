@@ -26,6 +26,12 @@ import { SelectionLayer } from './SelectionLayer'
 const MAX_PREVIEW_SIZE = { width: 180, height: 260 }
 const OVERLAY_CLEAR_DELAY_MS = 17
 
+let overlayStarted = false
+
+export function resetOverlayStartedForTest() {
+  overlayStarted = false
+}
+
 function waitForOverlayClear() {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, OVERLAY_CLEAR_DELAY_MS)
@@ -66,6 +72,10 @@ export function CaptureOverlay() {
   }, [])
 
   useEffect(() => {
+    if (overlayStarted) {
+      return
+    }
+    overlayStarted = true
     const tauriWindow = getCurrentWindow()
     Promise.all([
       launchOptions(),

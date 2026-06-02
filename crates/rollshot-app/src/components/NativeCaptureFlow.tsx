@@ -1,17 +1,22 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { message as showMessage } from '@tauri-apps/plugin-dialog'
 import { exitApp, launchOptions, runNativeCapture } from '../api/capture'
 import { promptSaveStitchedPng } from '../api/save'
 
+let captureStarted = false
+
+export function resetCaptureStartedForTest() {
+  captureStarted = false
+}
+
 export function NativeCaptureFlow() {
   const [message, setMessage] = useState('Starting capture')
-  const startedRef = useRef(false)
 
   useEffect(() => {
-    if (startedRef.current) {
+    if (captureStarted) {
       return
     }
-    startedRef.current = true
+    captureStarted = true
 
     void (async () => {
       try {
