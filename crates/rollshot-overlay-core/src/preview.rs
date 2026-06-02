@@ -1,4 +1,4 @@
-use image::{Rgba, RgbaImage};
+use image::{imageops, Rgba, RgbaImage};
 
 use crate::capture_miss::CapturedEdge;
 
@@ -30,6 +30,62 @@ pub struct ViewportPreview {
     pub viewport_y: u32,
     pub viewport_width_in_canvas: u32,
     pub viewport_height_in_canvas: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrowingPreviewRequest {
+    pub fixed_width: u32,
+    pub max_height: u32,
+    pub edge: CapturedEdge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrowingPreview {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub scaled_full_height: u32,
+    pub total_width: u32,
+    pub total_height: u32,
+}
+
+/// Build a wayscrollshot-style live preview by scaling the full stitched image
+/// to a fixed width, then cropping vertically to the requested height cap.
+pub fn growing_preview(
+    stitcher: &mut rollshot_core::Stitcher,
+    request: GrowingPreviewRequest,
+) -> Option<GrowingPreview> {
+    let full = stitcher.full_image()?;
+    let total_width = full.width().max(1);
+    let total_height = full.height().max(1);
+    let target_width = request.fixed_width.max(1);
+    let max_height = request.max_height.max(1);
+    let scale = target_width as f32 / total_width as f32;
+    let scaled_height = ((total_height as f32 * scale).round() as u32).max(1);
+
+    let resized = imageops::resize(
+        full,
+        target_width,
+        scaled_height,
+        imageops::FilterType::Triangle,
+    );
+    let out_height = scaled_height.min(max_height);
+    let y = if scaled_height <= out_height || matches!(request.edge, CapturedEdge::Top) {
+        0
+    } else {
+        scaled_height - out_height
+    };
+
+    let cropped = imageops::crop_imm(&resized, 0, y, target_width, out_height).to_image();
+
+    Some(GrowingPreview {
+        width: cropped.width(),
+        height: cropped.height(),
+        pixels: cropped.into_raw(),
+        scaled_full_height: scaled_height,
+        total_width,
+        total_height,
+    })
 }
 
 /// Build the viewport preview from the current `Stitcher` state.
@@ -174,7 +230,7 @@ fn draw_position_indicator(
 
 #[cfg(test)]
 mod tests {
-    use super::{viewport_preview, ViewportPreviewRequest};
+    use super::{growing_preview, viewport_preview, GrowingPreviewRequest, ViewportPreviewRequest};
     use crate::capture_miss::CapturedEdge;
 
     fn numbered_rows(width: u32, height: u32) -> image::RgbaImage {
@@ -195,6 +251,98 @@ mod tests {
             }
         }
         image
+    }
+
+    #[test]
+    fn growing_preview_scales_full_image_to_fixed_width() {
+        let mut stitcher = rollshot_core::Stitcher::new(rollshot_core::StitchConfig::default());
+        assert_eq!(
+            stitcher.push_frame(numbered_rows(20, 40)),
+            rollshot_core::StitchOutcome::FirstFrame
+        );
+
+        let preview = growing_preview(
+            &mut stitcher,
+            GrowingPreviewRequest {
+                fixed_width: 10,
+                max_height: 100,
+                edge: CapturedEdge::Bottom,
+            },
+        )
+        .expect("growing preview");
+
+        assert_eq!((preview.width, preview.height), (10, 20));
+        assert_eq!(preview.scaled_full_height, 20);
+        assert_eq!((preview.total_width, preview.total_height), (20, 40));
+    }
+
+    #[test]
+    fn growing_preview_caps_height_and_returns_bottom_slice() {
+        let mut stitcher = rollshot_core::Stitcher::new(rollshot_core::StitchConfig::default());
+        assert_eq!(
+            stitcher.push_frame(numbered_rows(10, 60)),
+            rollshot_core::StitchOutcome::FirstFrame
+        );
+
+        let preview = growing_preview(
+            &mut stitcher,
+            GrowingPreviewRequest {
+                fixed_width: 10,
+                max_height: 20,
+                edge: CapturedEdge::Bottom,
+            },
+        )
+        .expect("growing preview");
+
+        assert_eq!((preview.width, preview.height), (10, 20));
+        assert_eq!(preview.scaled_full_height, 60);
+        assert_eq!(
+            preview.pixels[0], 40,
+            "bottom slice starts at scaled row 40"
+        );
+    }
+
+    #[test]
+    fn growing_preview_top_edge_returns_top_slice() {
+        let mut stitcher = rollshot_core::Stitcher::new(rollshot_core::StitchConfig::default());
+        assert_eq!(
+            stitcher.push_frame(numbered_rows(10, 60)),
+            rollshot_core::StitchOutcome::FirstFrame
+        );
+
+        let preview = growing_preview(
+            &mut stitcher,
+            GrowingPreviewRequest {
+                fixed_width: 10,
+                max_height: 20,
+                edge: CapturedEdge::Top,
+            },
+        )
+        .expect("growing preview");
+
+        assert_eq!((preview.width, preview.height), (10, 20));
+        assert_eq!(preview.pixels[0], 0, "top slice starts at scaled row 0");
+    }
+
+    #[test]
+    fn growing_preview_clamps_zero_requested_size_to_one_pixel() {
+        let mut stitcher = rollshot_core::Stitcher::new(rollshot_core::StitchConfig::default());
+        assert_eq!(
+            stitcher.push_frame(numbered_rows(20, 20)),
+            rollshot_core::StitchOutcome::FirstFrame
+        );
+
+        let preview = growing_preview(
+            &mut stitcher,
+            GrowingPreviewRequest {
+                fixed_width: 0,
+                max_height: 0,
+                edge: CapturedEdge::Bottom,
+            },
+        )
+        .expect("growing preview");
+
+        assert_eq!((preview.width, preview.height), (1, 1));
     }
 
     #[test]
