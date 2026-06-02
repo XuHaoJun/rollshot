@@ -36,6 +36,24 @@ Both platforms use a fixed 280px width, matching wayscrollshot's
 - macOS changes from 180px to 280px.
 - Linux stays at 280px.
 
+### Webview placement rule
+
+The webview path must size the preview after measuring each candidate placement
+band, not before. A pre-sized preview can be rejected even when the same preview
+would fit if capped to that band's available height.
+
+```
+for side in [right, left, bottom, top, inside-if-verified]:
+    available = available_space_for(side, crop, bounds)
+    max_preview = {
+        width: min(280, available.width),
+        height: min(crop.height, available.height),
+    }
+    preview = aspect_fit(crop, max_preview)
+    if preview fits side:
+        use this side + preview size
+```
+
 ### Content inside the preview box
 
 The `viewport_preview()` function in `rollshot-overlay-core` crops a
@@ -71,8 +89,8 @@ let max_height = band_height.min(crop_h) as f32;
 
 The `PREVIEW_MAX_HEIGHT` import is removed from this file.
 
-Update the existing test `preview_viewport_uses_fixed_width_and_bottom_band_height`
-to reflect the new cap (crop height instead of 480).
+Add a test where crop height is smaller than the available band height so the
+new crop-height cap is observable.
 
 ### `rollshot-app/src/components/CaptureOverlay.tsx`
 
@@ -82,27 +100,31 @@ Replace the fixed `MAX_PREVIEW_SIZE`:
 const MAX_PREVIEW_SIZE = { width: 180, height: 260 }
 ```
 
-With a dynamic computation using the region height:
+With placement-aware dynamic sizing:
 
 ```ts
 const PREVIEW_WIDTH = 280
-// In the polling loop, when region is available:
-const maxPreview = { width: PREVIEW_WIDTH, height: nextStatus.region.height }
-const previewSize = fitPreviewSizeToRegion({ region: nextStatus.region, maxPreview })
+// In the polling loop and placement memo, derive preview size from the same
+// placement-aware helper so the requested PNG dimensions match the displayed
+// preview dimensions.
 ```
 
-The `fitPreviewSizeToRegion` function in `placement.ts` already aspect-fits
-correctly and needs no changes. The `choosePreviewPlacement` function already
-tries right/left/bottom/top/inside and picks the best fit — also unchanged.
+The polling loop should skip requesting a stitch preview until the current
+source-to-CSS scale is available, then compute the active CSS region for
+`nextStatus.region` and ask the placement helper for the preview size.
 
 ### `rollshot-app/src/overlay/placement.ts`
 
-No changes. The placement logic already handles arbitrary preview sizes.
+Add a helper that combines candidate placement and preview sizing. Keep
+`fitPreviewSizeToRegion()` as the low-level aspect-fit helper, but stop asking
+callers to pre-size a preview before placement has measured the candidate band.
+
+The existing `choosePreviewPlacement()` can remain for tests or callers that
+already have a fixed preview size.
 
 ### `rollshot-app/src/components/NativeCaptureFlow.tsx`
 
-Check if this file also uses a hardcoded preview size and update to 280px
-width + dynamic height if so.
+Verified unchanged: this file has no live stitch preview size references.
 
 ## Edge cases
 
@@ -116,8 +138,10 @@ width + dynamic height if so.
 
 ## Testing
 
-- Update `preview_viewport_uses_fixed_width_and_bottom_band_height` test in
-  `overlay.rs` to verify height = min(crop.h, band).
-- Add a test where crop height < band height to verify the crop cap applies.
-- Update `placement.test.ts` if the preview size fixture changes.
+- Add an `overlay.rs` test where crop height < band height to verify the crop
+  cap applies.
+- Add `placement.test.ts` coverage for a candidate whose full crop-height
+  preview would not fit, but whose band-capped preview does fit.
+- Update `CaptureOverlay.test.tsx` so the existing stitch-preview request
+  assertion expects the new 280px/dynamic dimensions.
 - Manual verification on both platforms with various crop sizes.
