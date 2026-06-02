@@ -233,3 +233,48 @@ pub fn make_feature_fallback_canvas(width: u32, height: u32) -> RgbaImage {
 
     img
 }
+
+/// A tall page with richly-textured text-like rows everywhere plus one large
+/// product-image block spanning rows `[img_y0, img_y1)`. `image_loaded`
+/// toggles whether that block is the real textured photo or a flat lazy-load
+/// placeholder. Used to reproduce load-once lazy-load mutation between frames.
+pub fn lazy_load_page(
+    width: u32,
+    height: u32,
+    img_y0: u32,
+    img_y1: u32,
+    image_loaded: bool,
+) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([250, 250, 250, 255]));
+    for y in 0..height {
+        if y >= img_y0 && y < img_y1 {
+            continue;
+        }
+        let line = (y / 22) % 4;
+        if line == 0 {
+            for x in 30..width.saturating_sub(30) {
+                if (x / 6 + y / 3) % 2 == 0 {
+                    img.put_pixel(x, y, Rgba([40, 40, 40, 255]));
+                }
+            }
+        } else if line == 1 && y % 22 < 3 {
+            for x in 40..width.saturating_sub(120) {
+                img.put_pixel(x, y, Rgba([70, 90, 160, 255]));
+            }
+        }
+    }
+    for y in img_y0..img_y1.min(height) {
+        for x in 24..width.saturating_sub(24) {
+            let px = if image_loaded {
+                let r = (60 + ((x * 2 + y) % 160)) as u8;
+                let g = (40 + ((x + y * 3) % 180)) as u8;
+                let b = (90 + ((x * 3 + y * 2) % 150)) as u8;
+                Rgba([r, g, b, 255])
+            } else {
+                Rgba([225, 225, 225, 255])
+            };
+            img.put_pixel(x, y, px);
+        }
+    }
+    img
+}
