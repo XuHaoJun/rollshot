@@ -15,6 +15,7 @@ use iced::widget::image::Handle as ImageHandle;
 use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, Size};
 
 use crate::coords::LogicalRect;
+use crate::overlay::PreviewConstraints;
 
 use crate::CaptureResult;
 
@@ -201,7 +202,7 @@ impl Driver {
         &mut self,
         crop_logical: LogicalRect,
         overlay_logical: Size,
-        preview_size: Size,
+        preview_constraints: PreviewConstraints,
     ) {
         if self.stitch.is_some() {
             return;
@@ -250,12 +251,11 @@ impl Driver {
                         }
                         last_capture_miss_active = capture_miss_state.active;
                         if should_emit_preview(&signal) {
-                            if let Some(handle) = viewport_handle(
+                            if let Some(handle) = preview_handle(
                                 &mut stitcher,
                                 region,
                                 spotlight_edge,
-                                preview_size.width,
-                                preview_size.height,
+                                preview_constraints,
                             ) {
                                 let _ =
                                     preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
@@ -340,23 +340,35 @@ fn wait_for_source_size(
     }
 }
 
-/// Build the viewport-shaped stitch preview
-/// (`rollshot_overlay_core::preview::viewport_preview`) as an iced image
-/// handle.
-fn viewport_handle(
+fn preview_handle(
     stitcher: &mut Stitcher,
     region: Region,
     edge: rollshot_overlay_core::capture_miss::CapturedEdge,
-    max_width: u32,
-    max_height: u32,
+    constraints: PreviewConstraints,
 ) -> Option<ImageHandle> {
-    let view = rollshot_overlay_core::preview::viewport_preview(
+    if matches!(
+        edge,
+        rollshot_overlay_core::capture_miss::CapturedEdge::Left
+            | rollshot_overlay_core::capture_miss::CapturedEdge::Right
+    ) {
+        let view = rollshot_overlay_core::preview::viewport_preview(
+            stitcher,
+            rollshot_overlay_core::preview::ViewportPreviewRequest {
+                viewport_width: constraints.fixed_width,
+                viewport_height: constraints.max_height,
+                frame_width: region.width,
+                frame_height: region.height,
+                edge,
+            },
+        )?;
+        return Some(ImageHandle::from_rgba(view.width, view.height, view.pixels));
+    }
+
+    let view = rollshot_overlay_core::preview::growing_preview(
         stitcher,
-        rollshot_overlay_core::preview::ViewportPreviewRequest {
-            viewport_width: max_width,
-            viewport_height: max_height,
-            frame_width: region.width,
-            frame_height: region.height,
+        rollshot_overlay_core::preview::GrowingPreviewRequest {
+            fixed_width: constraints.fixed_width,
+            max_height: constraints.max_height,
             edge,
         },
     )?;
@@ -366,8 +378,8 @@ fn viewport_handle(
 #[cfg(test)]
 mod tests {
     use super::{
-        overlay_stitch_config, should_emit_capture_miss, should_emit_preview, stitch_stream,
-        viewport_handle,
+        overlay_stitch_config, preview_handle, should_emit_capture_miss, should_emit_preview,
+        stitch_stream, PreviewConstraints,
     };
     use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
@@ -456,14 +468,14 @@ mod tests {
     }
 
     #[test]
-    fn viewport_handle_uses_requested_size() {
+    fn preview_handle_uses_growing_height_for_vertical_preview() {
         let mut stitcher = Stitcher::new(overlay_stitch_config());
         assert_eq!(
             stitcher.push_frame(scrolling_frame(0).image),
             StitchOutcome::FirstFrame
         );
 
-        let handle = viewport_handle(
+        let handle = preview_handle(
             &mut stitcher,
             Region {
                 x: 0,
@@ -472,8 +484,43 @@ mod tests {
                 height: 80,
             },
             rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
-            120,
-            180,
+            PreviewConstraints {
+                fixed_width: 120,
+                max_height: 180,
+            },
+        )
+        .expect("growing preview for first frame");
+
+        match handle {
+            ImageHandle::Rgba { width, height, .. } => {
+                assert_eq!(width, 120);
+                assert_eq!(height, 120);
+            }
+            other => panic!("expected Rgba handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preview_handle_keeps_viewport_size_for_horizontal_preview() {
+        let mut stitcher = Stitcher::new(overlay_stitch_config());
+        assert_eq!(
+            stitcher.push_frame(scrolling_frame(0).image),
+            StitchOutcome::FirstFrame
+        );
+
+        let handle = preview_handle(
+            &mut stitcher,
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 80,
+            },
+            rollshot_overlay_core::capture_miss::CapturedEdge::Right,
+            PreviewConstraints {
+                fixed_width: 120,
+                max_height: 180,
+            },
         )
         .expect("viewport preview for first frame");
 

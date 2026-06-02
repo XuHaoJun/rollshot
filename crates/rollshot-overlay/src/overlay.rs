@@ -20,6 +20,12 @@ use crate::OverlayError;
 use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreviewConstraints {
+    pub(crate) fixed_width: u32,
+    pub(crate) max_height: u32,
+}
+
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 const TOOLBAR_W: f32 = 300.0;
 const TOOLBAR_H: f32 = 50.0;
@@ -186,9 +192,9 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             // Capture is already running (started in `run()` before the overlay
             // appeared, so the picker dialog is long gone). Just map the crop to
             // frame pixels and start stitching live frames from here on.
-            let preview_size = preview_viewport_size(crop, ws);
+            let preview_constraints = preview_constraints(crop, ws);
             if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                driver.begin_stitch(crop_logical, overlay_logical, preview_size);
+                driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
             }
 
             // Keep only the toolbar interactive (plan T6 S3); the crop interior
@@ -490,11 +496,8 @@ fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, 
     Some((x as i32, y as i32, w as i32, h as i32))
 }
 
-fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_capture::Size {
+fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
     let band = choose_chrome_band(crop, window);
-    // Space actually available from the crop's anchor edge to the screen edge,
-    // matching where `place_outside_crop` pins the chrome (so the capped preview
-    // never overflows past the screen).
     let (available_width, available_height) = match band {
         Some(Band::Top) => ((window.width - crop.x.max(0.0)).max(0.0), crop.y.max(0.0)),
         Some(Band::Bottom) => (
@@ -513,31 +516,9 @@ fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_captur
     let crop_h = crop.height.max(1.0);
     let max_height = (band_height as f32).min(crop_h);
 
-    fit_preview_size_to_crop(crop, max_width, max_height)
-}
-
-fn fit_preview_size_to_crop(
-    crop: Rectangle,
-    max_width: f32,
-    max_height: f32,
-) -> rollshot_capture::Size {
-    let max_width = max_width.floor().max(1.0);
-    let max_height = max_height.floor().max(1.0);
-    let crop_width = crop.width.max(1.0);
-    let crop_height = crop.height.max(1.0);
-    let aspect = crop_width / crop_height;
-    let max_aspect = max_width / max_height;
-
-    if aspect >= max_aspect {
-        rollshot_capture::Size {
-            width: max_width as u32,
-            height: (max_width / aspect).round().clamp(1.0, max_height) as u32,
-        }
-    } else {
-        rollshot_capture::Size {
-            width: (max_height * aspect).round().clamp(1.0, max_width) as u32,
-            height: max_height as u32,
-        }
+    PreviewConstraints {
+        fixed_width: max_width.floor().max(1.0) as u32,
+        max_height: max_height.floor().max(1.0) as u32,
     }
 }
 
@@ -700,12 +681,12 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_mask_bands, preview_viewport_size, token_color};
+    use super::{crop_mask_bands, preview_constraints, token_color};
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 
     #[test]
-    fn preview_viewport_uses_fixed_width_and_bottom_band_height() {
+    fn preview_constraints_use_fixed_width_and_bottom_band_height() {
         let crop = Rectangle {
             x: 100.0,
             y: 100.0,
@@ -714,14 +695,14 @@ mod tests {
         };
         let window = Size::new(2560.0, 1440.0);
 
-        let viewport = preview_viewport_size(crop, window);
+        let constraints = preview_constraints(crop, window);
 
-        assert_eq!(viewport.width, PREVIEW_WIDTH);
-        assert_eq!(viewport.height, 105);
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 382);
     }
 
     #[test]
-    fn preview_viewport_clamps_width_to_side_band_and_preserves_aspect() {
+    fn preview_constraints_clamp_width_to_side_band() {
         let crop = Rectangle {
             x: 200.0,
             y: 10.0,
@@ -730,17 +711,14 @@ mod tests {
         };
         let window = Size::new(2560.0, 1440.0);
 
-        let viewport = preview_viewport_size(crop, window);
+        let constraints = preview_constraints(crop, window);
 
-        // A side band offers only 200px of width. Match the crop aspect instead
-        // of filling the full vertical band, otherwise the shared preview would
-        // letterbox most of its height.
-        assert_eq!(viewport.width, 200);
-        assert_eq!(viewport.height, 123);
+        assert_eq!(constraints.fixed_width, 200);
+        assert_eq!(constraints.max_height, 1372);
     }
 
     #[test]
-    fn preview_viewport_caps_height_at_crop_height() {
+    fn preview_constraints_cap_height_at_crop_height() {
         let crop = Rectangle {
             x: 100.0,
             y: 100.0,
@@ -749,10 +727,10 @@ mod tests {
         };
         let window = Size::new(2560.0, 1440.0);
 
-        let viewport = preview_viewport_size(crop, window);
+        let constraints = preview_constraints(crop, window);
 
-        assert_eq!(viewport.width, 200);
-        assert_eq!(viewport.height, 600);
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 600);
     }
 
     #[test]
