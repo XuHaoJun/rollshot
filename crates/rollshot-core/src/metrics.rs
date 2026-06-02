@@ -31,6 +31,7 @@ pub struct StitchMetrics {
     pub edge_projection_us: u64,
     pub verifier_us: u64,
     pub fallback_us: u64,
+    pub feature_routine_us: u64,
     pub append_us: u64,
 
     // Algorithmic counters (CPU-independent).

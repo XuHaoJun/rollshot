@@ -248,7 +248,7 @@ pub(crate) fn estimate_motion(
         ) {
             candidates.push(c);
         }
-        metrics.fallback_us += feat_start.elapsed().as_micros() as u64;
+        metrics.feature_routine_us += feat_start.elapsed().as_micros() as u64;
     }
 
     metrics.verifier_candidates += candidates.len();

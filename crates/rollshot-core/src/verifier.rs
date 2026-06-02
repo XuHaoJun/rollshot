@@ -46,13 +46,19 @@ impl<'a> PixelOverlapVerifier<'a> {
         }
 
         let downsample_mad = downsampled_mad(prev, curr, region, self.config.downsample_step);
-        let full_mad = sample_band_mad(prev, curr, region, self.config.sample_band);
+        let downsample_ok =
+            downsample_mad.is_finite() && downsample_mad <= self.config.downsample_max_mad;
+        // Only the full-res band when the cheap gate passed (lazy — the band
+        // scan is wasted when downsample already disagrees).
+        let full_mad = if downsample_ok {
+            sample_band_mad(prev, curr, region, self.config.sample_band)
+        } else {
+            f32::NAN
+        };
 
         // Legacy strict-mean acceptance (preserved exactly → monotonic superset).
-        let legacy_pass = downsample_mad.is_finite()
-            && downsample_mad <= self.config.downsample_max_mad
-            && full_mad.is_finite()
-            && full_mad <= self.config.full_res_max_mad;
+        let legacy_pass =
+            downsample_ok && full_mad.is_finite() && full_mad <= self.config.full_res_max_mad;
         if legacy_pass {
             return VerifierOutcome::Pass {
                 overlap: region,
