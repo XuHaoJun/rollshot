@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { choosePreviewPlacement, fitPreviewSizeToRegion, type OverlayExclusion } from './placement'
+import {
+  chooseDynamicPreviewPlacement,
+  choosePreviewPlacement,
+  fitPreviewSizeToRegion,
+  type OverlayExclusion,
+} from './placement'
 
 const bounds = { left: 0, top: 0, width: 1000, height: 700 }
 const preview = { width: 180, height: 260 }
@@ -85,6 +90,42 @@ describe('choosePreviewPlacement', () => {
   )
 })
 
+describe('chooseDynamicPreviewPlacement', () => {
+  it('caps side preview height to the available band before choosing placement', () => {
+    expect(
+      chooseDynamicPreviewPlacement({
+        bounds: { left: 0, top: 0, width: 1000, height: 700 },
+        region: { left: 100, top: 450, width: 200, height: 300 },
+        previewWidth: 280,
+        overlayExclusion: 'unsupported',
+        gap: 12,
+      }),
+    ).toEqual({
+      mode: 'image',
+      side: 'right',
+      rect: { left: 312, top: 450, width: 167, height: 250 },
+      preview: { width: 167, height: 250 },
+    })
+  })
+
+  it('caps preview height at crop height when the band has extra room', () => {
+    expect(
+      chooseDynamicPreviewPlacement({
+        bounds: { left: 0, top: 0, width: 1000, height: 900 },
+        region: { left: 100, top: 100, width: 200, height: 300 },
+        previewWidth: 280,
+        overlayExclusion: 'unsupported',
+        gap: 12,
+      }),
+    ).toEqual({
+      mode: 'image',
+      side: 'right',
+      rect: { left: 312, top: 100, width: 200, height: 300 },
+      preview: { width: 200, height: 300 },
+    })
+  })
+})
+
 describe('fitPreviewSizeToRegion', () => {
   it('keeps a wide crop from filling a tall preview box', () => {
     expect(
@@ -102,5 +143,23 @@ describe('fitPreviewSizeToRegion', () => {
         maxPreview: { width: 180, height: 260 },
       }),
     ).toEqual({ width: 87, height: 260 })
+  })
+
+  it('sizes a wide crop to max width with 280px dynamic cap', () => {
+    expect(
+      fitPreviewSizeToRegion({
+        region: { width: 2400, height: 900 },
+        maxPreview: { width: 280, height: 900 },
+      }),
+    ).toEqual({ width: 280, height: 105 })
+  })
+
+  it('sizes a tall crop to max width with 280px dynamic cap', () => {
+    expect(
+      fitPreviewSizeToRegion({
+        region: { width: 400, height: 1200 },
+        maxPreview: { width: 280, height: 1200 },
+      }),
+    ).toEqual({ width: 280, height: 840 })
   })
 })

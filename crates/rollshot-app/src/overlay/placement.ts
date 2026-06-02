@@ -53,6 +53,15 @@ export type PreviewPlacement =
     }
   | { mode: 'status' }
 
+export type DynamicPreviewPlacement =
+  | {
+      mode: 'image'
+      side: 'right' | 'left' | 'bottom' | 'top' | 'inside'
+      rect: OverlayRect
+      preview: PreviewSize
+    }
+  | { mode: 'status' }
+
 type PlacementInput = {
   bounds: OverlayRect
   region: OverlayRect
@@ -130,6 +139,134 @@ export function choosePreviewPlacement({
         width: preview.width,
         height: preview.height,
       },
+    }
+  }
+
+  return { mode: 'status' }
+}
+
+type DynamicPlacementInput = {
+  bounds: OverlayRect
+  region: OverlayRect
+  previewWidth: number
+  overlayExclusion: OverlayExclusion
+  gap?: number
+}
+
+export function chooseDynamicPreviewPlacement({
+  bounds,
+  region,
+  previewWidth,
+  overlayExclusion,
+  gap = 12,
+}: DynamicPlacementInput): DynamicPreviewPlacement {
+  const boundsRight = bounds.left + bounds.width
+  const boundsBottom = bounds.top + bounds.height
+  const regionRight = region.left + region.width
+  const regionBottom = region.top + region.height
+
+  const sides: Array<{
+    side: 'right' | 'left' | 'bottom' | 'top'
+    availWidth: number
+    availHeight: number
+  }> = [
+    {
+      side: 'right',
+      availWidth: boundsRight - regionRight - gap,
+      availHeight: boundsBottom - region.top,
+    },
+    {
+      side: 'left',
+      availWidth: region.left - bounds.left - gap,
+      availHeight: boundsBottom - region.top,
+    },
+    {
+      side: 'bottom',
+      availWidth: boundsRight - region.left,
+      availHeight: boundsBottom - regionBottom - gap,
+    },
+    {
+      side: 'top',
+      availWidth: boundsRight - region.left,
+      availHeight: region.top - bounds.top - gap,
+    },
+  ]
+
+  for (const { side, availWidth, availHeight } of sides) {
+    const maxPreview: PreviewSize = {
+      width: Math.min(previewWidth, availWidth),
+      height: Math.min(region.height, availHeight),
+    }
+
+    const preview = fitPreviewSizeToRegion({
+      region: { width: region.width, height: region.height },
+      maxPreview,
+    })
+
+    let rect: OverlayRect
+    if (side === 'right') {
+      rect = {
+        left: regionRight + gap,
+        top: clamp(region.top, bounds.top, boundsBottom - preview.height),
+        width: preview.width,
+        height: preview.height,
+      }
+    } else if (side === 'left') {
+      rect = {
+        left: region.left - preview.width - gap,
+        top: clamp(region.top, bounds.top, boundsBottom - preview.height),
+        width: preview.width,
+        height: preview.height,
+      }
+    } else if (side === 'bottom') {
+      rect = {
+        left: clamp(region.left, bounds.left, boundsRight - preview.width),
+        top: regionBottom + gap,
+        width: preview.width,
+        height: preview.height,
+      }
+    } else {
+      rect = {
+        left: clamp(region.left, bounds.left, boundsRight - preview.width),
+        top: region.top - preview.height - gap,
+        width: preview.width,
+        height: preview.height,
+      }
+    }
+
+    if (fits(bounds, rect)) {
+      return { mode: 'image', side, rect, preview }
+    }
+  }
+
+  if (overlayExclusion === 'verified') {
+    const insideAvailWidth = region.width - gap * 2
+    const insideAvailHeight = region.height - gap * 2
+
+    const maxPreview: PreviewSize = {
+      width: Math.min(previewWidth, insideAvailWidth),
+      height: Math.min(region.height, insideAvailHeight),
+    }
+
+    const preview = fitPreviewSizeToRegion({
+      region: { width: region.width, height: region.height },
+      maxPreview,
+    })
+
+    return {
+      mode: 'image',
+      side: 'inside',
+      rect: {
+        left: clamp(
+          regionRight - preview.width - gap,
+          bounds.left,
+          boundsRight - preview.width,
+        ),
+        top: clamp(region.top + gap, bounds.top, boundsBottom - preview.height),
+        width: preview.width,
+        height: preview.height,
+      },
+      preview,
     }
   }
 
