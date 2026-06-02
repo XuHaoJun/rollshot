@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   confirmRegion,
+  exitApp,
   getFinalPreview,
   getStitchPreview,
   launchOptions,
@@ -164,7 +165,7 @@ export function CaptureOverlay() {
       await setInputPassthrough(false)
       await stopCapture()
     } finally {
-      window.close()
+      await exitApp()
     }
   }, [])
 

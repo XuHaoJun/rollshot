@@ -6,6 +6,7 @@ import { CaptureOverlay, resetOverlayStartedForTest } from './CaptureOverlay'
 
 const api = vi.hoisted(() => ({
   confirmRegion: vi.fn(),
+  exitApp: vi.fn(),
   getFinalPreview: vi.fn(),
   getStitchPreview: vi.fn(),
   launchOptions: vi.fn(),
@@ -58,7 +59,6 @@ describe('CaptureOverlay', () => {
   let container: HTMLDivElement
   let root: Root
   let rectSpy: ReturnType<typeof vi.spyOn>
-  let closeSpy: ReturnType<typeof vi.spyOn>
   let originalSetPointerCapture: typeof HTMLDivElement.prototype.setPointerCapture | undefined
 
   beforeEach(() => {
@@ -68,7 +68,7 @@ describe('CaptureOverlay', () => {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
-    closeSpy = vi.spyOn(window, 'close').mockImplementation(() => undefined)
+    api.exitApp.mockResolvedValue(undefined)
     rectSpy = vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockImplementation(
       () =>
         ({
@@ -119,7 +119,6 @@ describe('CaptureOverlay', () => {
   afterEach(() => {
     act(() => root.unmount())
     container.remove()
-    closeSpy.mockRestore()
     rectSpy.mockRestore()
     if (originalSetPointerCapture) {
       HTMLDivElement.prototype.setPointerCapture = originalSetPointerCapture
@@ -291,7 +290,7 @@ describe('CaptureOverlay', () => {
     })
     expect(api.saveImage).toHaveBeenCalledWith('/tmp/rollshot.png')
     expect(api.stopCapture).toHaveBeenCalledOnce()
-    expect(closeSpy).toHaveBeenCalledOnce()
+    expect(api.exitApp).toHaveBeenCalledOnce()
   })
 
   it('shows capture miss toast (no preview mask) while stitching is disconnected', async () => {
@@ -376,6 +375,6 @@ describe('CaptureOverlay', () => {
     expect(api.stopStitching).toHaveBeenCalledOnce()
     expect(api.saveImage).not.toHaveBeenCalled()
     expect(api.stopCapture).toHaveBeenCalledOnce()
-    expect(closeSpy).toHaveBeenCalledOnce()
+    expect(api.exitApp).toHaveBeenCalledOnce()
   })
 })
