@@ -17,7 +17,7 @@ use crate::driver::Driver;
 use crate::CaptureResult;
 use crate::OverlayConfig;
 use crate::OverlayError;
-use rollshot_overlay_core::preview::{PREVIEW_MAX_HEIGHT, PREVIEW_WIDTH};
+use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
@@ -510,7 +510,8 @@ fn preview_viewport_size(crop: Rectangle, window: iced::Size) -> rollshot_captur
     };
     let max_width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0);
     let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
-    let max_height = band_height.clamp(1, PREVIEW_MAX_HEIGHT) as f32;
+    let crop_h = crop.height.max(1.0);
+    let max_height = (band_height as f32).min(crop_h);
 
     fit_preview_size_to_crop(crop, max_width, max_height)
 }
@@ -736,6 +737,22 @@ mod tests {
         // letterbox most of its height.
         assert_eq!(viewport.width, 200);
         assert_eq!(viewport.height, 123);
+    }
+
+    #[test]
+    fn preview_viewport_caps_height_at_crop_height() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 600.0,
+        };
+        let window = Size::new(2560.0, 1440.0);
+
+        let viewport = preview_viewport_size(crop, window);
+
+        assert_eq!(viewport.width, 200);
+        assert_eq!(viewport.height, 600);
     }
 
     #[test]
