@@ -75,5 +75,8 @@ fn clean_scroll_unchanged() {
             appended += 1;
         }
     }
-    assert!(appended >= 4, "clean scroll regressed: only {appended} appends");
+    assert!(
+        appended >= 4,
+        "clean scroll regressed: only {appended} appends"
+    );
 }
