@@ -306,6 +306,45 @@ fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
     (ratio_term * 0.08 + residual_term * 0.04).clamp(0.0, 1.0)
 }
 
+/// Nearest-descriptor backend over 8-D descriptors. Brute-force today;
+/// an ANN (HNSW) backend can replace it behind this trait without touching
+/// callers. Permanent (no Cargo feature gate) — routine feature matching
+/// depends on it being always present.
+#[allow(dead_code)] // used by the routine feature path in C3
+pub(crate) trait NearestDescriptors {
+    /// Mutual nearest-neighbour matches between `prev` and `curr` descriptors,
+    /// `[curr_idx, prev_idx]`, with the same distance + Lowe-ratio gates.
+    fn match_against(
+        &self,
+        prev: &[[f32; 8]],
+        curr: &[[f32; 8]],
+        distance_threshold: f32,
+        lowe_ratio: f32,
+    ) -> Vec<[usize; 2]>;
+}
+
+#[allow(dead_code)] // used by the routine feature path in C3
+pub(crate) struct BruteForceIndex;
+
+impl BruteForceIndex {
+    #[allow(dead_code)] // used by the routine feature path in C3
+    pub(crate) fn build(_prev: &[[f32; 8]]) -> Self {
+        BruteForceIndex
+    }
+}
+
+impl NearestDescriptors for BruteForceIndex {
+    fn match_against(
+        &self,
+        prev: &[[f32; 8]],
+        curr: &[[f32; 8]],
+        distance_threshold: f32,
+        lowe_ratio: f32,
+    ) -> Vec<[usize; 2]> {
+        linear_knn_match(prev, curr, distance_threshold, lowe_ratio)
+    }
+}
+
 /// Cached FAST corners + 8-D descriptors for one frame (kept corners are
 /// aligned 1:1 with descriptors).
 #[allow(dead_code)] // used by the routine feature path in C3
@@ -816,5 +855,15 @@ mod tests {
             floor <= accept,
             "floor {floor} exceeds accept_confidence {accept}"
         );
+    }
+
+    #[test]
+    fn brute_force_backend_matches_linear_knn() {
+        let a = vec![[0.0f32; 8], [1.0; 8], [5.0; 8]];
+        let b = vec![[5.01f32; 8], [0.02; 8], [1.03; 8]];
+        let direct = linear_knn_match(&a, &b, 0.5, 1.4);
+        let backend = BruteForceIndex::build(&a);
+        let viaindex = backend.match_against(&a, &b, 0.5, 1.4);
+        assert_eq!(direct, viaindex);
     }
 }
