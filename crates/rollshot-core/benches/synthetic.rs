@@ -29,6 +29,11 @@ pub struct SyntheticSpec {
     pub step_jitter_px: u32,
     pub frame_count: usize,
     pub sticky_top_band_height: Option<u32>,
+    /// When set to `(y0, y1)`, frames whose index is in `lazy_load_frames`
+    /// paint a flat placeholder over rows [y0, y1) of the cropped frame,
+    /// simulating a not-yet-loaded image. Other frames show textured content.
+    pub lazy_block: Option<(u32, u32)>,
+    pub lazy_load_frames: &'static [usize],
 }
 
 impl SyntheticSpec {
@@ -79,6 +84,17 @@ impl SyntheticSpec {
 
             if let Some(band_h) = spec.sticky_top_band_height {
                 paint_sticky_band(&mut frame, band_h);
+            }
+            if let Some((y0, y1)) = spec.lazy_block {
+                if spec.lazy_load_frames.contains(&idx) {
+                    let h = frame.height();
+                    let (y0, y1) = (y0.min(h), y1.min(h));
+                    for y in y0..y1 {
+                        for x in 0..frame.width() {
+                            frame.put_pixel(x, y, Rgba([225, 225, 225, 255]));
+                        }
+                    }
+                }
             }
             frame
         })
@@ -166,6 +182,8 @@ pub fn default_specs() -> Vec<SyntheticSpec> {
             step_jitter_px: 0,
             frame_count: 200,
             sticky_top_band_height: None,
+            lazy_block: None,
+            lazy_load_frames: &[],
         },
         SyntheticSpec {
             name: "long_sticky_header".to_string(),
@@ -177,6 +195,8 @@ pub fn default_specs() -> Vec<SyntheticSpec> {
             step_jitter_px: 0,
             frame_count: 200,
             sticky_top_band_height: Some(80),
+            lazy_block: None,
+            lazy_load_frames: &[],
         },
         SyntheticSpec {
             name: "long_vertical_jitter".to_string(),
@@ -188,6 +208,21 @@ pub fn default_specs() -> Vec<SyntheticSpec> {
             step_jitter_px: 2,
             frame_count: 200,
             sticky_top_band_height: None,
+            lazy_block: None,
+            lazy_load_frames: &[],
+        },
+        SyntheticSpec {
+            name: "long_lazy_load".to_string(),
+            canvas_width: 900,
+            canvas_height: 9000,
+            frame_width: 900,
+            frame_height: 700,
+            step_px: 40,
+            step_jitter_px: 0,
+            frame_count: 200,
+            sticky_top_band_height: None,
+            lazy_block: Some((560, 700)),
+            lazy_load_frames: &[5, 20, 60, 120],
         },
     ]
 }
