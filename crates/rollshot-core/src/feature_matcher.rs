@@ -310,7 +310,6 @@ fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
 /// an ANN (HNSW) backend can replace it behind this trait without touching
 /// callers. Permanent (no Cargo feature gate) — routine feature matching
 /// depends on it being always present.
-#[allow(dead_code)] // used by the routine feature path in C3
 pub(crate) trait NearestDescriptors {
     /// Mutual nearest-neighbour matches between `prev` and `curr` descriptors,
     /// `[curr_idx, prev_idx]`, with the same distance + Lowe-ratio gates.
@@ -323,11 +322,9 @@ pub(crate) trait NearestDescriptors {
     ) -> Vec<[usize; 2]>;
 }
 
-#[allow(dead_code)] // used by the routine feature path in C3
 pub(crate) struct BruteForceIndex;
 
 impl BruteForceIndex {
-    #[allow(dead_code)] // used by the routine feature path in C3
     pub(crate) fn build(_prev: &[[f32; 8]]) -> Self {
         BruteForceIndex
     }
@@ -347,7 +344,6 @@ impl NearestDescriptors for BruteForceIndex {
 
 /// Cached FAST corners + 8-D descriptors for one frame (kept corners are
 /// aligned 1:1 with descriptors).
-#[allow(dead_code)] // used by the routine feature path in C3
 pub(crate) struct FrameFeatures {
     pub corners: Vec<(u32, u32)>,
     pub descriptors: Vec<[f32; 8]>,
@@ -361,6 +357,48 @@ pub(crate) fn extract_frame_features(
     let corners = extract_corners(&gray, config.corner_threshold, config.max_features);
     let (descriptors, kept) = compute_descriptors(&gray, &corners, config.descriptor_patch_size);
     FrameFeatures { corners: kept, descriptors }
+}
+
+/// Routine feature candidate from pre-extracted features (anchor features are
+/// cached on PreparedFrame; curr features extracted this frame). Returns None
+/// when gates (min_keypoints / min_raw_matches / min_inliers / second_best)
+/// are not met. Feature matching is a candidate *source*, not the gate; the
+/// PixelOverlapVerifier remains the final gate.
+pub(crate) fn feature_candidate_from_features(
+    prev: &FrameFeatures,
+    curr: &FrameFeatures,
+    locked_axis: Option<ScrollAxis>,
+    config: &FastHnswConfig,
+) -> Option<MotionCandidate> {
+    if !config.enabled
+        || prev.descriptors.len() < config.min_keypoints
+        || curr.descriptors.len() < config.min_keypoints
+    {
+        return None;
+    }
+    let lowe_ratio = 1.4;
+    let backend = BruteForceIndex::build(&prev.descriptors);
+    let matches = backend.match_against(
+        &prev.descriptors,
+        &curr.descriptors,
+        config.distance_threshold,
+        lowe_ratio,
+    );
+    if matches.len() < config.min_raw_matches {
+        return None;
+    }
+    let (dx, dy, inliers, raw, residual_px) =
+        vote_dominant_translation(&prev.corners, &curr.corners, &matches, locked_axis, config)?;
+    let inlier_ratio = inliers as f32 / raw.max(1) as f32;
+    Some(MotionCandidate {
+        dx,
+        dy,
+        method: crate::types::MatchMethod::FastHnsw,
+        score: feature_score(inlier_ratio, residual_px),
+        second_best_score: None,
+        inliers: Some(inliers),
+        raw_matches: Some(raw),
+    })
 }
 
 pub(crate) fn fast_hnsw_candidates(
@@ -855,6 +893,20 @@ mod tests {
             floor <= accept,
             "floor {floor} exceeds accept_confidence {accept}"
         );
+    }
+
+    #[test]
+    fn feature_candidate_finds_vertical_offset() {
+        let canvas = feature_canvas(300, 420);
+        let prev_img = image::imageops::crop_imm(&canvas, 0, 0, 300, 300).to_image();
+        let curr_img = image::imageops::crop_imm(&canvas, 0, 40, 300, 300).to_image();
+        let cfg = FastHnswConfig::default();
+        let prev = extract_frame_features(&prev_img, &cfg);
+        let curr = extract_frame_features(&curr_img, &cfg);
+        let cand = feature_candidate_from_features(&prev, &curr, None, &cfg)
+            .expect("feature candidate");
+        assert_eq!(cand.dx, 0);
+        assert!((36..=44).contains(&cand.dy), "dy={}", cand.dy);
     }
 
     #[test]

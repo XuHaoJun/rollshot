@@ -236,6 +236,21 @@ pub(crate) fn estimate_motion(
     metrics.edge_projection_us = edge_start.elapsed().as_micros() as u64;
     candidates.extend(edge_result);
 
+    if config.fast_hnsw.enabled {
+        let feat_start = std::time::Instant::now();
+        let prev_feats = prev.features(&config.fast_hnsw);
+        let curr_feats = curr.features(&config.fast_hnsw);
+        if let Some(c) = crate::feature_matcher::feature_candidate_from_features(
+            prev_feats,
+            curr_feats,
+            locked_axis,
+            &config.fast_hnsw,
+        ) {
+            candidates.push(c);
+        }
+        metrics.fallback_us += feat_start.elapsed().as_micros() as u64;
+    }
+
     metrics.verifier_candidates += candidates.len();
     if let Some(candidate) = {
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
@@ -1110,10 +1125,10 @@ impl PreparedFrame {
         }
     }
 
-    #[allow(dead_code)] // used by the routine feature path in C3
-    pub(crate) fn features(&self, config: &crate::types::FastHnswConfig)
-        -> &crate::feature_matcher::FrameFeatures
-    {
+    pub(crate) fn features(
+        &self,
+        config: &crate::types::FastHnswConfig,
+    ) -> &crate::feature_matcher::FrameFeatures {
         self.features
             .get_or_init(|| crate::feature_matcher::extract_frame_features(&self.rgba, config))
     }
