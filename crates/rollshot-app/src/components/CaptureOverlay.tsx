@@ -362,7 +362,21 @@ export function CaptureOverlay() {
           placement={placement}
         />
       ) : null}
-      {captureMissToast ? <div className="capture-miss-toast">{captureMissToast}</div> : null}
+      {captureMissToast ? (
+        <div
+          className="capture-miss-toast"
+          style={
+            placement.mode === 'image'
+              ? {
+                  top: `${placement.rect.top - 8}px`,
+                  transform: 'translateX(-50%) translateY(-100%)',
+                }
+              : undefined
+          }
+        >
+          {captureMissToast}
+        </div>
+      ) : null}
       {status.state === 'stitching' || status.state === 'done' || status.state === 'failed' ? (
         <OverlayToolbar
           mode={toolbarMode}
