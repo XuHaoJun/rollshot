@@ -54,27 +54,44 @@ impl Stitcher {
         self.last_metrics.frame_index = self.frame_counter;
         self.frame_counter += 1;
 
-        // While still stuck on the first frame, keep a copy of this frame so a
-        // stale/bad first frame can be replaced instead of blocking the capture
-        // forever. `frame_count == 1` means nothing has been appended yet, so
-        // there is no committed canvas content to lose by re-anchoring.
-        let reanchor_candidate = if self.canvas.is_some() && self.stats.frame_count == 1 {
-            Some(frame.clone())
-        } else {
-            None
-        };
+        // Keep a copy only while at risk of re-anchoring (mid miss-streak), so
+        // clean steady-state frames pay no clone cost. A stale/bad anchor
+        // (e.g. a lazy-load image not yet painted) must not block forever.
+        let reanchor_candidate =
+            if self.canvas.is_some() && self.first_frame_misses + 1 >= REANCHOR_MISS_THRESHOLD {
+                Some(frame.clone())
+            } else {
+                None
+            };
 
         let outcome = self.push_frame_inner(frame);
 
-        if let Some(candidate) = reanchor_candidate {
-            if matches!(outcome, StitchOutcome::NoMatch { .. }) {
+        // Only a genuine content disagreement counts toward the re-anchor floor.
+        // `ReverseDirection` is a deliberate, valid rejection (the user scrolled
+        // back the way they came); the overlapping frame is not a stall, so it
+        // must not erode the monotonic-direction guard by triggering a re-anchor.
+        let counts_as_miss = matches!(
+            outcome,
+            StitchOutcome::NoMatch { reason, .. }
+                if reason != NoMatchReason::ReverseDirection
+        );
+        if counts_as_miss {
+            if self.canvas.is_some() {
                 self.first_frame_misses += 1;
                 if self.first_frame_misses >= REANCHOR_MISS_THRESHOLD {
-                    self.reanchor_to(candidate);
+                    if let Some(candidate) = reanchor_candidate {
+                        if self.stats.frame_count == 1 {
+                            // Stale first frame: nothing committed, rebuild.
+                            self.reanchor_to(candidate);
+                        } else {
+                            // Mid-capture: PRESERVE the committed canvas.
+                            self.reanchor_mid_capture(candidate);
+                        }
+                    }
                 }
-            } else {
-                self.first_frame_misses = 0;
             }
+        } else if self.canvas.is_some() {
+            self.first_frame_misses = 0;
         }
 
         // Snapshot canvas state on every return path so the per-frame record
@@ -435,6 +452,24 @@ impl Stitcher {
         self.last_motion = (0, 0);
         self.locked_axis = None;
         self.locked_direction = None;
+    }
+
+    /// Mid-capture re-anchor: the committed canvas is real content and MUST be
+    /// kept. Only reset the match anchor (`last_good`) to `frame` and clear the
+    /// motion/axis lock so the next frame matches fresh content. A content gap
+    /// is accepted and logged. Last-resort floor beneath the robust verifier
+    /// and feature consensus.
+    fn reanchor_mid_capture(&mut self, frame: RgbaImage) {
+        eprintln!(
+            "rollshot: mid-capture re-anchor after {} consecutive misses; \
+             a content gap may appear at canvas height {}",
+            self.first_frame_misses, self.stats.total_height
+        );
+        self.last_good = Some(PreparedFrame::new(frame));
+        self.last_motion = (0, 0);
+        self.locked_axis = None;
+        self.locked_direction = None;
+        self.first_frame_misses = 0;
     }
 
     fn snapshot_canvas_state(&mut self) {

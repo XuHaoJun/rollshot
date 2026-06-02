@@ -80,3 +80,50 @@ fn clean_scroll_unchanged() {
         "clean scroll regressed: only {appended} appends"
     );
 }
+
+/// ③ floor: an unrecoverable mid-capture disagreement (frames sharing no
+/// overlap with the anchor) must re-anchor (not stall) AND must preserve the
+/// canvas stitched before it.
+#[test]
+fn mid_capture_unrecoverable_reanchors_preserving_canvas() {
+    let canvas = make_scroll_canvas(W, CANVAS_H);
+    let mut s = Stitcher::new(cfg());
+    assert_eq!(
+        s.push_frame(crop_frame(&canvas, 0, FRAME_H)),
+        StitchOutcome::FirstFrame
+    );
+    // Warm up a real mid-capture anchor with committed content.
+    for i in 1..3u32 {
+        let _ = s.push_frame(crop_frame(&canvas, i * STEP, FRAME_H));
+    }
+    let height_before = s.stats().total_height;
+    assert!(
+        height_before > FRAME_H,
+        "precondition: some content stitched"
+    );
+
+    // Frames sharing no overlap with the anchor → repeated NoMatch. Must
+    // re-anchor (not stall) without wiping the canvas.
+    let white = image::RgbaImage::from_pixel(W, FRAME_H, image::Rgba([255, 255, 255, 255]));
+    for _ in 0..4 {
+        let _ = s.push_frame(white.clone());
+    }
+    // After re-anchor, a fresh consistent run must append again.
+    let canvas2 = make_scroll_canvas(W, CANVAS_H);
+    let mut progressed = false;
+    for i in 0..5u32 {
+        if matches!(
+            s.push_frame(crop_frame(&canvas2, i * STEP, FRAME_H)),
+            StitchOutcome::Appended { .. }
+        ) {
+            progressed = true;
+        }
+    }
+    assert!(progressed, "did not recover after mid-capture re-anchor");
+    assert!(
+        s.stats().total_height >= height_before,
+        "mid-capture re-anchor wiped committed canvas: {} < {}",
+        s.stats().total_height,
+        height_before
+    );
+}
