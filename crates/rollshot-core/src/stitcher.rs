@@ -22,7 +22,15 @@ pub struct Stitcher {
     stats: StitchStats,
     last_metrics: StitchMetrics,
     frame_counter: usize,
+    first_frame_misses: u32,
 }
+
+/// Consecutive `NoMatch` results, while still stuck on the first frame, after
+/// which the stitcher discards that frame and re-anchors to the latest one. A
+/// stale/bad first frame (e.g. a lazy-loaded image that had not painted yet
+/// when it was grabbed) otherwise blocks the capture forever, because the
+/// anchor only advances on a successful append.
+const REANCHOR_MISS_THRESHOLD: u32 = 2;
 
 impl Stitcher {
     pub fn new(config: StitchConfig) -> Self {
@@ -36,6 +44,7 @@ impl Stitcher {
             stats: StitchStats::default(),
             last_metrics: StitchMetrics::default(),
             frame_counter: 0,
+            first_frame_misses: 0,
         }
     }
 
@@ -44,7 +53,30 @@ impl Stitcher {
         self.last_metrics = StitchMetrics::default();
         self.last_metrics.frame_index = self.frame_counter;
         self.frame_counter += 1;
+
+        // While still stuck on the first frame, keep a copy of this frame so a
+        // stale/bad first frame can be replaced instead of blocking the capture
+        // forever. `frame_count == 1` means nothing has been appended yet, so
+        // there is no committed canvas content to lose by re-anchoring.
+        let reanchor_candidate = if self.canvas.is_some() && self.stats.frame_count == 1 {
+            Some(frame.clone())
+        } else {
+            None
+        };
+
         let outcome = self.push_frame_inner(frame);
+
+        if let Some(candidate) = reanchor_candidate {
+            if matches!(outcome, StitchOutcome::NoMatch { .. }) {
+                self.first_frame_misses += 1;
+                if self.first_frame_misses >= REANCHOR_MISS_THRESHOLD {
+                    self.reanchor_to(candidate);
+                }
+            } else {
+                self.first_frame_misses = 0;
+            }
+        }
+
         // Snapshot canvas state on every return path so the per-frame record
         // reflects the canvas at the moment this frame was processed, not just
         // for FirstFrame/Appended outcomes.
@@ -391,7 +423,18 @@ impl Stitcher {
         };
         self.last_good = Some(PreparedFrame::new(frame.clone()));
         self.canvas = Some(StripCanvas::new(frame));
+        self.first_frame_misses = 0;
         StitchOutcome::FirstFrame
+    }
+
+    /// Discard the stale first frame and adopt `frame` as a fresh anchor. Only
+    /// reached while still stuck on the first frame (no successful append yet),
+    /// so this resets the match state without losing committed canvas content.
+    fn reanchor_to(&mut self, frame: RgbaImage) {
+        self.accept_first_frame(frame);
+        self.last_motion = (0, 0);
+        self.locked_axis = None;
+        self.locked_direction = None;
     }
 
     fn snapshot_canvas_state(&mut self) {
