@@ -157,6 +157,9 @@ pub struct VerifierConfig {
     /// Side length (px) of tiles for the robust tile-vote acceptance path.
     pub robust_tile_px: u32,
     /// Per-tile mean-MAD threshold (normalized 0..1); a tile "agrees" below it.
+    /// Kept tight so "agree" means near-perfect alignment: a uniform cross-axis
+    /// drift (moderate MAD across every tile) fails to agree, while a contiguous
+    /// lazy-load change leaves the unchanged tiles at MAD≈0 (still agreeing).
     pub robust_tile_tol: f32,
     /// Agreeing-tile fraction required for a weakly-supported offset.
     pub robust_accept_ratio: f32,
@@ -173,7 +176,7 @@ impl Default for VerifierConfig {
             downsample_step: 4,
             sample_band: 160,
             robust_tile_px: 48,
-            robust_tile_tol: 24.0 / 255.0,
+            robust_tile_tol: 10.0 / 255.0,
             robust_accept_ratio: 0.85,
             robust_accept_ratio_floor: 0.6,
         }
