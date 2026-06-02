@@ -322,7 +322,6 @@ export function CaptureOverlay() {
           imageUrl={stitchPreviewUrl}
           status={stats}
           placement={placement}
-          processing={status.state === 'stitching'}
         />
       ) : null}
       {captureMissToast ? <div className="capture-miss-toast">{captureMissToast}</div> : null}

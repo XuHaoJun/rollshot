@@ -4,14 +4,12 @@ type AdaptiveStitchPreviewProps = {
   imageUrl: string | null
   status: string
   placement: PreviewPlacement
-  processing?: boolean
 }
 
 export function AdaptiveStitchPreview({
   imageUrl,
   status,
   placement,
-  processing,
 }: AdaptiveStitchPreviewProps) {
   if (placement.mode === 'status' || !imageUrl) {
     return <div className="capture-status">{status}</div>
@@ -28,7 +26,6 @@ export function AdaptiveStitchPreview({
       }}
     >
       <img src={imageUrl} alt="Stitching preview" draggable={false} />
-      {processing ? <div className="preview-processing-indicator" aria-label="Stitching" /> : null}
     </div>
   )
 }
