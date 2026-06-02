@@ -46,26 +46,77 @@ impl<'a> PixelOverlapVerifier<'a> {
         }
 
         let downsample_mad = downsampled_mad(prev, curr, region, self.config.downsample_step);
-        if !downsample_mad.is_finite() || downsample_mad > self.config.downsample_max_mad {
-            return VerifierOutcome::OverlapDisagreement {
-                downsample_mad,
-                full_mad: f32::NAN,
+        let downsample_ok =
+            downsample_mad.is_finite() && downsample_mad <= self.config.downsample_max_mad;
+        // Only the full-res band when the cheap gate passed (lazy — the band
+        // scan is wasted when downsample already disagrees).
+        let full_mad = if downsample_ok {
+            sample_band_mad(prev, curr, region, self.config.sample_band)
+        } else {
+            f32::NAN
+        };
+
+        // Legacy strict-mean acceptance (preserved exactly → monotonic superset).
+        let legacy_pass =
+            downsample_ok && full_mad.is_finite() && full_mad <= self.config.full_res_max_mad;
+        if legacy_pass {
+            return VerifierOutcome::Pass {
+                overlap: region,
+                score: full_mad.clamp(0.0, 1.0),
             };
         }
 
-        let full_mad = sample_band_mad(prev, curr, region, self.config.sample_band);
-        if !full_mad.is_finite() || full_mad > self.config.full_res_max_mad {
-            return VerifierOutcome::OverlapDisagreement {
-                downsample_mad,
-                full_mad,
+        // Robust tile-vote acceptance: tolerate a localized minority of
+        // disagreeing tiles, gated by how strongly the offset is supported.
+        //
+        // Cost note: this is a full-overlap scan reached ONLY on the reject
+        // path (the legacy mean failed above), and `rank_verified_candidates`
+        // calls `verify` once per candidate — so a reject-heavy frame pays a
+        // tile scan for *every* candidate. That is the verifier-stage cost the
+        // `bad_frame` benchmark shows (reject-dominated → large %). Clean
+        // frames whose winning candidate passes the legacy mean return above
+        // and never reach here, so steady-state scrolling is unaffected.
+        let agree = tile_agreement(
+            prev,
+            curr,
+            region,
+            self.config.robust_tile_px,
+            self.config.robust_tile_tol,
+        );
+        if agree >= required_agreement(candidate, self.config) {
+            let score = if full_mad.is_finite() {
+                full_mad.clamp(0.0, 1.0)
+            } else {
+                1.0 - agree
+            };
+            return VerifierOutcome::Pass {
+                overlap: region,
+                score,
             };
         }
 
-        let score = full_mad.clamp(0.0, 1.0);
-        VerifierOutcome::Pass {
-            overlap: region,
-            score,
+        VerifierOutcome::OverlapDisagreement {
+            downsample_mad,
+            full_mad,
         }
+    }
+}
+
+/// Required agreeing-tile fraction for `candidate`. A strongly-supported offset
+/// (high NCC confidence — low score — or high feature inlier ratio) may drop to
+/// the misfire floor; a weakly-supported offset must meet the strict ratio.
+fn required_agreement(candidate: &MotionCandidate, config: &VerifierConfig) -> f32 {
+    const STRONG_SCORE: f32 = 0.06;
+    const STRONG_INLIER_RATIO: f32 = 0.5;
+    let strong_ncc = candidate.score <= STRONG_SCORE;
+    let strong_feature = matches!(
+        (candidate.inliers, candidate.raw_matches),
+        (Some(i), Some(r)) if r > 0 && (i as f32 / r as f32) >= STRONG_INLIER_RATIO
+    );
+    if strong_ncc || strong_feature {
+        config.robust_accept_ratio_floor
+    } else {
+        config.robust_accept_ratio
     }
 }
 
@@ -94,6 +145,55 @@ fn downsampled_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, step: u
         return f32::INFINITY;
     }
     sum / (count as f32 * 255.0)
+}
+
+/// Fraction of `tile_px`×`tile_px` tiles over the overlap whose mean absolute
+/// difference is below `tile_tol`. Partial edge tiles count by their pixels.
+/// Scans every overlap pixel once (O(overlap area)); only invoked on the
+/// verifier reject path — see the cost note in `verify`.
+fn tile_agreement(
+    prev: &RgbaImage,
+    curr: &RgbaImage,
+    r: OverlapRegion,
+    tile_px: u32,
+    tile_tol: f32,
+) -> f32 {
+    let tile = tile_px.max(1);
+    let mut total_tiles = 0u32;
+    let mut agree_tiles = 0u32;
+    let mut ty = 0u32;
+    while ty < r.height {
+        let th = tile.min(r.height - ty);
+        let mut tx = 0u32;
+        while tx < r.width {
+            let tw = tile.min(r.width - tx);
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
+            for row in 0..th {
+                for col in 0..tw {
+                    let p = pixel_gray(prev, r.prev_x + tx + col, r.prev_y + ty + row);
+                    let c = pixel_gray(curr, r.curr_x + tx + col, r.curr_y + ty + row);
+                    sum += (p - c).abs();
+                    count += 1;
+                }
+            }
+            let mad = if count == 0 {
+                f32::INFINITY
+            } else {
+                sum / (count as f32 * 255.0)
+            };
+            total_tiles += 1;
+            if mad <= tile_tol {
+                agree_tiles += 1;
+            }
+            tx += tile;
+        }
+        ty += tile;
+    }
+    if total_tiles == 0 {
+        return 0.0;
+    }
+    agree_tiles as f32 / total_tiles as f32
 }
 
 fn sample_band_mad(prev: &RgbaImage, curr: &RgbaImage, r: OverlapRegion, sample_band: u32) -> f32 {
@@ -229,5 +329,92 @@ mod tests {
             }
             other => panic!("expected Pass, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tile_agreement_full_on_identical_overlap() {
+        let canvas = textured(160, 320);
+        let prev = crop(&canvas, 0, 0, 160, 160);
+        let curr = crop(&canvas, 0, 40, 160, 160);
+        let r = compute_overlap(160, 160, 160, 160, 0, 40).unwrap();
+        let ratio = tile_agreement(&prev, &curr, r, 32, 24.0 / 255.0);
+        assert!(
+            ratio > 0.99,
+            "identical overlap should fully agree, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn tile_agreement_localized_change_is_majority_agree() {
+        let canvas = textured(160, 320);
+        let prev = crop(&canvas, 0, 0, 160, 160);
+        let mut curr = crop(&canvas, 0, 40, 160, 160);
+        for y in 100..160 {
+            for x in 0..40 {
+                curr.put_pixel(x, y, Rgba([255, 0, 255, 255]));
+            }
+        }
+        let r = compute_overlap(160, 160, 160, 160, 0, 40).unwrap();
+        let ratio = tile_agreement(&prev, &curr, r, 32, 24.0 / 255.0);
+        assert!(
+            (0.6..0.99).contains(&ratio),
+            "expected majority agree, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn tile_agreement_low_on_global_mismatch() {
+        let prev = textured(160, 160);
+        let curr = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
+        let r = compute_overlap(160, 160, 160, 160, 0, 20).unwrap();
+        let ratio = tile_agreement(&prev, &curr, r, 32, 24.0 / 255.0);
+        assert!(
+            ratio < 0.4,
+            "global mismatch should mostly disagree, got {ratio}"
+        );
+    }
+
+    // Paint a localized block onto `curr` large enough that the legacy strict
+    // mean band FAILS (so the tile-vote path is what decides), while leaving a
+    // tile agreement (~0.67) above the misfire floor but below the strict
+    // ratio — so confidence gating is the deciding factor between the two
+    // tests below.
+    fn localized_change_fixture() -> (RgbaImage, RgbaImage) {
+        let canvas = textured(160, 320);
+        let prev = crop(&canvas, 0, 0, 160, 160);
+        let mut curr = crop(&canvas, 0, 40, 160, 160);
+        for y in 64..160 {
+            for x in 0..96 {
+                curr.put_pixel(x, y, Rgba([255, 0, 255, 255]));
+            }
+        }
+        (prev, curr)
+    }
+
+    #[test]
+    fn localized_change_accepted_via_tile_vote_when_confident() {
+        let (prev, curr) = localized_change_fixture();
+        let cfg = VerifierConfig::default();
+        let verifier = PixelOverlapVerifier::new(&cfg, 64);
+        // strong support: low score (≈ high NCC confidence)
+        let mut cand = candidate(0, 40);
+        cand.score = 0.02;
+        match verifier.verify(&prev, &curr, &cand) {
+            VerifierOutcome::Pass { .. } => {}
+            other => panic!("expected tile-vote Pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn localized_change_rejected_when_weakly_supported() {
+        let (prev, curr) = localized_change_fixture();
+        let cfg = VerifierConfig::default();
+        let verifier = PixelOverlapVerifier::new(&cfg, 64);
+        let mut cand = candidate(0, 40);
+        cand.score = 0.5; // weak support → strict accept_ratio applies
+        assert!(matches!(
+            verifier.verify(&prev, &curr, &cand),
+            VerifierOutcome::OverlapDisagreement { .. }
+        ));
     }
 }

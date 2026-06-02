@@ -154,6 +154,18 @@ pub struct VerifierConfig {
     pub downsample_step: u32,
     /// Height (or width, for horizontal motion) of the full-resolution sample band, in pixels.
     pub sample_band: u32,
+    /// Side length (px) of tiles for the robust tile-vote acceptance path.
+    pub robust_tile_px: u32,
+    /// Per-tile mean-MAD threshold (normalized 0..1); a tile "agrees" below it.
+    /// Kept tight so "agree" means near-perfect alignment: a uniform cross-axis
+    /// drift (moderate MAD across every tile) fails to agree, while a contiguous
+    /// lazy-load change leaves the unchanged tiles at MAD≈0 (still agreeing).
+    pub robust_tile_tol: f32,
+    /// Agreeing-tile fraction required for a weakly-supported offset.
+    pub robust_accept_ratio: f32,
+    /// Hard floor on the agreeing-tile fraction for ANY offset (misfire
+    /// defense): a globally-wrong match (most tiles disagree) always fails.
+    pub robust_accept_ratio_floor: f32,
 }
 
 impl Default for VerifierConfig {
@@ -163,6 +175,10 @@ impl Default for VerifierConfig {
             full_res_max_mad: 18.0 / 255.0,
             downsample_step: 4,
             sample_band: 160,
+            robust_tile_px: 48,
+            robust_tile_tol: 10.0 / 255.0,
+            robust_accept_ratio: 0.85,
+            robust_accept_ratio_floor: 0.6,
         }
     }
 }
@@ -272,6 +288,8 @@ mod tests {
         assert_eq!(cfg.axis_ratio_threshold, 1.5);
         assert_eq!(cfg.max_cross_axis_px, 6);
         assert_eq!(cfg.verifier.downsample_step, 4);
+        assert_eq!(cfg.verifier.robust_tile_px, 48);
+        assert_eq!(cfg.verifier.robust_accept_ratio_floor, 0.6);
         assert_eq!(cfg.max_search_ratio, 0.4);
         assert!(cfg.axis_fast_path.enabled);
         assert_eq!(cfg.axis_fast_path.cross_axis_probe_radius, 6);

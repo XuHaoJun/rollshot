@@ -1151,6 +1151,57 @@ fn feature_index_does_not_update_on_no_match() {}
 - HNSW candidate 必須仍通過 PixelOverlapVerifier。
 - default build 可以不開 HNSW feature。
 
+### 8.9 P6 實測結論 — HNSW 否決，P6 改為「lazy-load 正確性修復 + ANN-ready seam」
+
+> 2026-06-02。完整設計見
+> `docs/superpowers/specs/2026-06-02-p6-lazy-load-robust-stitching-design.md`；
+> 實作在 branch `spec/p6-lazy-load-robust-stitching`。
+
+P6 最終**沒有採用 HNSW**。起點其實是一個正確性 bug：crop 第一張 frame 下緣是
+lazy-load 佔位圖時，往下捲永遠 `NoMatch`（scroll too fast）、卡在第一張——因為嚴格
+verifier 否決了「幾何正確但重疊區內容變了」的位移，而 anchor 只在成功 append 時前進。
+順著這條線把 P6 重新定位成「魯棒性修復 + 把 feature 路徑變成可換 ANN 後端的介面」。
+
+**實際交付：**
+
+- **① Robust verifier**：`PixelOverlapVerifier` 接受條件改為
+  `legacy strict-mean ∨ confidence-gated tile-vote`（monotonic superset，乾淨內容仍走
+  舊 mean 路徑 → 輸出 byte-identical）。tile-vote 容忍重疊區**局部**變動（lazy-load 圖
+  是少數 tile），但有 majority floor + 緊 tile tol（10/255）——**全域錯位 / 小幅 uniform
+  cross-axis drift 仍被擋掉**（這條在實作時抓到並修正：放寬後一度讓 10px uniform drift
+  漏接，靠收緊 tile tol 解決）。
+- **③ Mid-capture re-anchor**：連續「內容不一致」NoMatch 後重新錨定到最新一幀，但
+  **保留已縫好的 canvas**（first-frame 路徑才重建）。`ReverseDirection` 不計入 miss
+  streak——它是刻意的有效拒絕，維持 §1.2 單向 invariant。這是對 §1.2「NoMatch 不更新
+  anchor」的**有界、有記錄**例外（last-resort floor，會 log content gap）。
+- **② Routine feature**：feature 比對改成**每幀**候選來源（不只 last-resort），錨點
+  descriptor 以 `PreparedFrame` 的 `OnceLock` 快取重用（§8.2 edge-index reuse 的精神），
+  後端藏在 `NearestDescriptors` trait 後。後端 = **brute-force linear KNN**（rayon +
+  `wide` SIMD），仍經 verifier 把關（decision (a)，§8.8 原則維持）。
+
+**HNSW（hora 0.1.1）實測後否決（bench-gate）：**
+
+- **速度**：N=1200、8-D descriptor、release、每次 mutual match —— brute-force 822µs vs
+  hora HNSW（prev index 已預建）**35,278µs/call ≈ 慢 ~43×**，外加 ~15ms 冷建索引。原因：
+  我們的 brute-force 是 rayon+SIMD 已 sub-ms，而 mutual match 的 reverse 方向每幀要重建
+  curr index（snow-shot 是單向 forward-only + 重用 edge index 才划算）。HNSW 的漸進優勢
+  要到更大 N 才出現。
+- **正確性**：hora 0.1.1 HNSW 有 recall 缺陷（greedy 上層下降用錯節點量距離，
+  `hnsw_idx.rs:413`），`search` 會漏掉真正最近鄰，連在易分離資料上都無法與 brute-force
+  對齊；調 `ef_search`/`n_neighbor` 都救不回。又慢又不準。
+- **依賴**：hora 會帶進 `nalgebra`/`rand`/`num`/`bincode` 重依賴。
+- **結論**：已 **revert hora**。brute-force 維持唯一後端；`NearestDescriptors` trait seam
+  保留，待 N 真的變大（4K frame / 更多特徵）再評估維護中的 ANN crate（`instant-distance`
+  / `hnsw_rs`）。因此 §8.5「用 hora、`feature = hnsw-fallback` default off」的建議**已被
+  實測推翻**；§8.8「ANN candidate 必須通過 PixelOverlapVerifier」原則仍成立。
+
+**順帶結論（給後續效能工作）**：routine feature 在實機尺寸（900×700）量到的 ~+6.5%
+total p50 主要來自 descriptor **抽取**（FAST corners + 8-D descriptor），**不是** KNN
+搜尋——所以 HNSW 本來也救不到這 6.5%。要再壓這塊，方向是抽取本身（SIMD / 降取樣 /
+P9 Y-plane），而非 ANN。小 frame（<320px 的 golden fixture）相對成本更高，但非真實
+擷取尺寸；若未來在意，可把 routine feature 改成「只在 verifier disagreement 時觸發」
+（borderline-only，spec §7）。
+
 ---
 
 ## 9. P7 — Sub-pixel NCC Peak Fit

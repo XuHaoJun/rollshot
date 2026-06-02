@@ -306,6 +306,101 @@ fn feature_score(inlier_ratio: f32, residual_px: f32) -> f32 {
     (ratio_term * 0.08 + residual_term * 0.04).clamp(0.0, 1.0)
 }
 
+/// Nearest-descriptor backend over 8-D descriptors. Brute-force today;
+/// an ANN (HNSW) backend can replace it behind this trait without touching
+/// callers. Permanent (no Cargo feature gate) — routine feature matching
+/// depends on it being always present.
+pub(crate) trait NearestDescriptors {
+    /// Mutual nearest-neighbour matches between `prev` and `curr` descriptors,
+    /// `[curr_idx, prev_idx]`, with the same distance + Lowe-ratio gates.
+    fn match_against(
+        &self,
+        prev: &[[f32; 8]],
+        curr: &[[f32; 8]],
+        distance_threshold: f32,
+        lowe_ratio: f32,
+    ) -> Vec<[usize; 2]>;
+}
+
+pub(crate) struct BruteForceIndex;
+
+impl BruteForceIndex {
+    pub(crate) fn build(_prev: &[[f32; 8]]) -> Self {
+        BruteForceIndex
+    }
+}
+
+impl NearestDescriptors for BruteForceIndex {
+    fn match_against(
+        &self,
+        prev: &[[f32; 8]],
+        curr: &[[f32; 8]],
+        distance_threshold: f32,
+        lowe_ratio: f32,
+    ) -> Vec<[usize; 2]> {
+        linear_knn_match(prev, curr, distance_threshold, lowe_ratio)
+    }
+}
+
+/// Cached FAST corners + 8-D descriptors for one frame (kept corners are
+/// aligned 1:1 with descriptors).
+pub(crate) struct FrameFeatures {
+    pub corners: Vec<(u32, u32)>,
+    pub descriptors: Vec<[f32; 8]>,
+}
+
+pub(crate) fn extract_frame_features(rgba: &RgbaImage, config: &FastHnswConfig) -> FrameFeatures {
+    let gray = rgba_to_gray(rgba);
+    let corners = extract_corners(&gray, config.corner_threshold, config.max_features);
+    let (descriptors, kept) = compute_descriptors(&gray, &corners, config.descriptor_patch_size);
+    FrameFeatures {
+        corners: kept,
+        descriptors,
+    }
+}
+
+/// Routine feature candidate from pre-extracted features (anchor features are
+/// cached on PreparedFrame; curr features extracted this frame). Returns None
+/// when gates (min_keypoints / min_raw_matches / min_inliers / second_best)
+/// are not met. Feature matching is a candidate *source*, not the gate; the
+/// PixelOverlapVerifier remains the final gate.
+pub(crate) fn feature_candidate_from_features(
+    prev: &FrameFeatures,
+    curr: &FrameFeatures,
+    locked_axis: Option<ScrollAxis>,
+    config: &FastHnswConfig,
+) -> Option<MotionCandidate> {
+    if !config.enabled
+        || prev.descriptors.len() < config.min_keypoints
+        || curr.descriptors.len() < config.min_keypoints
+    {
+        return None;
+    }
+    let lowe_ratio = 1.4;
+    let backend = BruteForceIndex::build(&prev.descriptors);
+    let matches = backend.match_against(
+        &prev.descriptors,
+        &curr.descriptors,
+        config.distance_threshold,
+        lowe_ratio,
+    );
+    if matches.len() < config.min_raw_matches {
+        return None;
+    }
+    let (dx, dy, inliers, raw, residual_px) =
+        vote_dominant_translation(&prev.corners, &curr.corners, &matches, locked_axis, config)?;
+    let inlier_ratio = inliers as f32 / raw.max(1) as f32;
+    Some(MotionCandidate {
+        dx,
+        dy,
+        method: crate::types::MatchMethod::FastHnsw,
+        score: feature_score(inlier_ratio, residual_px),
+        second_best_score: None,
+        inliers: Some(inliers),
+        raw_matches: Some(raw),
+    })
+}
+
 pub(crate) fn fast_hnsw_candidates(
     prev: &RgbaImage,
     curr: &RgbaImage,
@@ -798,5 +893,29 @@ mod tests {
             floor <= accept,
             "floor {floor} exceeds accept_confidence {accept}"
         );
+    }
+
+    #[test]
+    fn feature_candidate_finds_vertical_offset() {
+        let canvas = feature_canvas(300, 420);
+        let prev_img = image::imageops::crop_imm(&canvas, 0, 0, 300, 300).to_image();
+        let curr_img = image::imageops::crop_imm(&canvas, 0, 40, 300, 300).to_image();
+        let cfg = FastHnswConfig::default();
+        let prev = extract_frame_features(&prev_img, &cfg);
+        let curr = extract_frame_features(&curr_img, &cfg);
+        let cand =
+            feature_candidate_from_features(&prev, &curr, None, &cfg).expect("feature candidate");
+        assert_eq!(cand.dx, 0);
+        assert!((36..=44).contains(&cand.dy), "dy={}", cand.dy);
+    }
+
+    #[test]
+    fn brute_force_backend_matches_linear_knn() {
+        let a = vec![[0.0f32; 8], [1.0; 8], [5.0; 8]];
+        let b = vec![[5.01f32; 8], [0.02; 8], [1.03; 8]];
+        let direct = linear_knn_match(&a, &b, 0.5, 1.4);
+        let backend = BruteForceIndex::build(&a);
+        let viaindex = backend.match_against(&a, &b, 0.5, 1.4);
+        assert_eq!(direct, viaindex);
     }
 }

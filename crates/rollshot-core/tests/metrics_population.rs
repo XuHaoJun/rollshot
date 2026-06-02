@@ -182,6 +182,7 @@ fn stage_sum_covers_at_least_80_percent_of_total() {
         + m.edge_projection_us
         + m.verifier_us
         + m.fallback_us
+        + m.feature_routine_us
         + m.append_us;
 
     assert!(
