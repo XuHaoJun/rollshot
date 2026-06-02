@@ -349,6 +349,34 @@ describe('CaptureOverlay', () => {
     expect(container.querySelector('.capture-miss-toast')).toBeNull()
   })
 
+  it('requests inside stitch preview dimensions after verified overlay exclusion resolves', async () => {
+    api.overlayExclusion.mockResolvedValue('verified')
+    api.sessionStatus.mockResolvedValue({
+      state: 'stitching',
+      frame_width: 2048,
+      frame_height: 1536,
+      region: { x: 0, y: 0, width: 2048, height: 1536 },
+      stats: { frame_count: 3, total_width: 2048, total_height: 3072, last_append: 200 },
+      last_outcome: 'appended',
+      capture_miss: false,
+      capture_miss_warning: false,
+      capture_miss_edge: 'unknown',
+      capture_miss_message: '',
+    } satisfies SessionStatus)
+    api.getStitchPreview.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+
+    act(() => root.render(<CaptureOverlay />))
+    await flush()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160)
+    })
+
+    expect(api.getStitchPreview).toHaveBeenCalledWith(280, 210)
+  })
+
   it('closes after Escape when the save dialog is cancelled', async () => {
     api.sessionStatus.mockResolvedValue({
       state: 'stitching',

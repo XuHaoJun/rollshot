@@ -57,6 +57,7 @@ export function CaptureOverlay() {
   const stitchPreviewUrlRef = useRef<string | null>(null)
   const finalPreviewUrlRef = useRef<string | null>(null)
   const scaleRef = useRef<PreviewScale | null>(null)
+  const overlayModeRef = useRef<OverlayExclusion>('unknown')
 
   useEffect(() => {
     stitchPreviewUrlRef.current = stitchPreviewUrl
@@ -86,6 +87,7 @@ export function CaptureOverlay() {
       tauriWindow.scaleFactor(),
     ])
       .then(([loadedOptions, loadedExclusion, outerPosition, scaleFactor]) => {
+        overlayModeRef.current = loadedExclusion
         setOverlayMode(loadedExclusion)
         setWindowOrigin({ x: outerPosition.x, y: outerPosition.y })
         setDevicePixelRatio(scaleFactor)
@@ -121,6 +123,10 @@ export function CaptureOverlay() {
     scaleRef.current = scale
   }, [scale])
 
+  useEffect(() => {
+    overlayModeRef.current = overlayMode
+  }, [overlayMode])
+
   const activeRegionRect = useMemo(() => {
     if (!activeRegion || !scale) return null
     return sourceRegionToCssRect(activeRegion, scale)
@@ -141,7 +147,7 @@ export function CaptureOverlay() {
             bounds,
             region: cssRegion,
             previewWidth: PREVIEW_WIDTH,
-            overlayExclusion: overlayMode,
+            overlayExclusion: overlayModeRef.current,
           })
           if (dynamicPlacement.mode === 'image') {
             const blob = await getStitchPreview(
