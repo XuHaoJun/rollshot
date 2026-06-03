@@ -21,7 +21,7 @@ pub use linux::LinuxPortalBackend;
 pub use macos::MacosScreenCaptureKitBackend;
 pub use types::{
     CaptureOptions, CaptureProbe, CapturedFrame, FrameMetadata, InteractiveLaunchOptions,
-    PixelFormat, Region, RegionMode, Size,
+    OverlayMode, PixelFormat, Region, RegionMode, Size,
 };
 
 #[cfg(all(test, target_os = "linux"))]

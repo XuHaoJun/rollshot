@@ -42,6 +42,7 @@ fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
         backend: args.backend.clone(),
         fps: args.fps,
         show_cursor: args.show_cursor,
+        overlay_mode: rollshot_capture::OverlayMode::Auto,
     }
 }
 

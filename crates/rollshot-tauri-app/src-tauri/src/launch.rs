@@ -14,11 +14,9 @@ where
     let _program = args.next();
 
     let Some(flag) = args.next() else {
-        return Ok(LaunchMode::Capture(InteractiveLaunchOptions {
-            backend: "auto".to_string(),
-            fps: 5,
-            show_cursor: false,
-        }));
+        return Ok(LaunchMode::Capture(
+            InteractiveLaunchOptions::default_capture(),
+        ));
     };
 
     if flag != "--capture" {
@@ -58,6 +56,7 @@ mod tests {
                 assert_eq!(options.backend, "linux-portal");
                 assert_eq!(options.fps, 7);
                 assert!(options.show_cursor);
+                assert_eq!(options.overlay_mode, rollshot_capture::OverlayMode::Auto);
             }
         }
     }
@@ -70,6 +69,22 @@ mod tests {
                 assert_eq!(options.backend, "auto");
                 assert_eq!(options.fps, 5);
                 assert!(!options.show_cursor);
+            }
+        }
+    }
+
+    #[test]
+    fn parses_overlay_mode() {
+        let mode = parse_launch_args([
+            "rollshot-tauri-app",
+            "--capture",
+            r#"{"backend":"macos-sck","fps":30,"show_cursor":false,"overlay_mode":"iced"}"#,
+        ])
+        .expect("parse launch args");
+
+        match mode {
+            LaunchMode::Capture(options) => {
+                assert_eq!(options.overlay_mode, rollshot_capture::OverlayMode::Iced);
             }
         }
     }

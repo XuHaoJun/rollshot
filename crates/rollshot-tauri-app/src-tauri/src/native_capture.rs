@@ -112,6 +112,7 @@ mod tests {
             backend: "linux-portal".to_string(),
             fps: 5,
             show_cursor: true,
+            overlay_mode: rollshot_capture::OverlayMode::Auto,
         });
         assert_eq!(config.backend, "linux-portal");
         assert_eq!(config.fps, 30);
@@ -124,6 +125,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 60,
             show_cursor: false,
+            overlay_mode: rollshot_capture::OverlayMode::Auto,
         });
         assert_eq!(config.fps, 60);
         assert_eq!(config.backend, "auto");

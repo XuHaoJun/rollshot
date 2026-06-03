@@ -28,11 +28,33 @@ impl Default for CaptureOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayMode {
+    #[default]
+    Auto,
+    Tauri,
+    Iced,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InteractiveLaunchOptions {
     pub backend: String,
     pub fps: u32,
     pub show_cursor: bool,
+    #[serde(default)]
+    pub overlay_mode: OverlayMode,
+}
+
+impl InteractiveLaunchOptions {
+    pub fn default_capture() -> Self {
+        Self {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+            overlay_mode: OverlayMode::Auto,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +128,7 @@ pub enum PixelFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::InteractiveLaunchOptions;
+    use super::{InteractiveLaunchOptions, OverlayMode};
 
     #[test]
     fn interactive_launch_options_round_trip_json() {
@@ -114,6 +136,7 @@ mod tests {
             backend: "linux-portal".to_string(),
             fps: 7,
             show_cursor: true,
+            overlay_mode: OverlayMode::Iced,
         };
 
         let json = serde_json::to_string(&options).expect("serialize launch options");
@@ -125,5 +148,14 @@ mod tests {
         let decoded: InteractiveLaunchOptions =
             serde_json::from_str(&json).expect("deserialize launch options");
         assert_eq!(decoded, options);
+    }
+
+    #[test]
+    fn interactive_launch_options_default_overlay_mode_for_old_json() {
+        let decoded: InteractiveLaunchOptions =
+            serde_json::from_str(r#"{"backend":"auto","fps":5,"show_cursor":false}"#)
+                .expect("deserialize old launch options");
+
+        assert_eq!(decoded.overlay_mode, OverlayMode::Auto);
     }
 }

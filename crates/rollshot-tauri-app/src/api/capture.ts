@@ -1,10 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { SourceRegion } from '../region/geometry'
 
+export type OverlayMode = 'auto' | 'tauri' | 'iced'
+
 export type InteractiveLaunchOptions = {
   backend: string
   fps: number
   show_cursor: boolean
+  overlay_mode: OverlayMode
 }
 
 export type RegionDto = {
