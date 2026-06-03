@@ -56,8 +56,6 @@ mod driver;
 mod linux_runner;
 #[cfg(target_os = "macos")]
 mod macos_runner;
-#[cfg(target_os = "macos")]
-mod macos_window;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.

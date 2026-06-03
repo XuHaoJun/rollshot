@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use iced::futures::StreamExt;
-use iced::{event, window, Event, Task};
+use iced::{event, window, Task};
 
 use crate::app::{self, OverlayEffect, OverlayMessage, OverlayState};
 use crate::coords::LogicalRect;
@@ -18,7 +18,6 @@ static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 #[derive(Debug, Clone)]
 enum Message {
     Overlay(OverlayMessage),
-    WindowPatched(Result<(), String>),
 }
 
 fn preview_stream() -> iced::Subscription<Message> {
@@ -42,79 +41,58 @@ fn subscription(_: &OverlayState) -> iced::Subscription<Message> {
 }
 
 fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
-    match message {
-        Message::WindowPatched(Ok(())) => Task::none(),
-        Message::WindowPatched(Err(err)) => {
-            eprintln!("macOS window patch failed: {err}");
+    let Message::Overlay(msg) = message;
+    let effect = app::update(state, msg);
+    match effect {
+        OverlayEffect::None => Task::none(),
+        OverlayEffect::BeginStitch => {
+            let crop = state.crop.unwrap();
+            let ws = match state.window_size {
+                Some(ws) => ws,
+                None => {
+                    *RESULT_SLOT.lock().unwrap() =
+                        Some(Err("overlay surface size unknown".to_string()));
+                    return iced::exit();
+                }
+            };
+            let crop_logical = LogicalRect {
+                x: crop.x,
+                y: crop.y,
+                width: crop.width,
+                height: crop.height,
+            };
+            let overlay_logical = rollshot_capture::Size {
+                width: ws.width as u32,
+                height: ws.height as u32,
+            };
+            let preview_constraints = app::preview_constraints(crop, ws);
+            if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
+                driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
+            }
             Task::none()
         }
-        Message::Overlay(msg) => {
-            // Intercept Window::Opened to apply macOS-specific AppKit patch.
-            let patch_task = if let OverlayMessage::IcedEvent(Event::Window(
-                window::Event::Opened { .. },
-            )) = &msg
-            {
-                window::run(window::Id::default(), |w| {
-                    Message::WindowPatched(crate::macos_window::apply_overlay_window_patch(w))
-                })
-            } else {
-                Task::none()
+        OverlayEffect::Finish => {
+            let driver = DRIVER_SLOT.lock().unwrap().take();
+            let outcome = match driver {
+                Some(driver) => driver.finalize().map(Some),
+                None => Ok(None),
             };
-            let effect = app::update(state, msg);
-            let effect_task = match effect {
-                OverlayEffect::None => Task::none(),
-                OverlayEffect::BeginStitch => {
-                    let crop = state.crop.unwrap();
-                    let ws = match state.window_size {
-                        Some(ws) => ws,
-                        None => {
-                            *RESULT_SLOT.lock().unwrap() =
-                                Some(Err("overlay surface size unknown".to_string()));
-                            return iced::exit();
-                        }
-                    };
-                    let crop_logical = LogicalRect {
-                        x: crop.x,
-                        y: crop.y,
-                        width: crop.width,
-                        height: crop.height,
-                    };
-                    let overlay_logical = rollshot_capture::Size {
-                        width: ws.width as u32,
-                        height: ws.height as u32,
-                    };
-                    let preview_constraints = app::preview_constraints(crop, ws);
-                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                        driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
-                    }
-                    // iced 0.14 creates a single main window; Id::default() is
-                    // always the correct id for enable_mouse_passthrough.
-                    window::enable_mouse_passthrough(window::Id::default())
-                        .map(|_| Message::Overlay(OverlayMessage::Tick))
-                }
-                OverlayEffect::Finish => {
-                    let driver = DRIVER_SLOT.lock().unwrap().take();
-                    let outcome = match driver {
-                        Some(driver) => driver.finalize().map(Some),
-                        None => Ok(None),
-                    };
-                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
-                    return iced::exit();
-                }
-                OverlayEffect::Cancel => {
-                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
-                        driver.cancel();
-                    }
-                    *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
-                    return iced::exit();
-                }
-                OverlayEffect::EnablePassthrough | OverlayEffect::DisablePassthrough => {
-                    Task::none()
-                }
-            };
-            Task::batch([patch_task, effect_task])
+            *RESULT_SLOT.lock().unwrap() = Some(outcome);
+            iced::exit()
         }
+        OverlayEffect::Cancel => {
+            if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+                driver.cancel();
+            }
+            *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
+            iced::exit()
+        }
+        OverlayEffect::EnablePassthrough | OverlayEffect::DisablePassthrough => Task::none(),
     }
+}
+
+fn theme(_: &OverlayState) -> iced::Theme {
+    iced::Theme::Dark
 }
 
 fn view(state: &OverlayState) -> iced::Element<'_, Message> {
@@ -146,7 +124,7 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
     let run_result = iced::application(OverlayState::default, update, view)
         .window(settings)
         .subscription(subscription)
-        .theme(|_| iced::Theme::Dark)
+        .theme(theme)
         .style(app::style)
         .run();
 
