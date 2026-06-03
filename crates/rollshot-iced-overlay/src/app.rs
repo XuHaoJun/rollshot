@@ -10,6 +10,7 @@ static SHARED_PREVIEW_RX: Mutex<
 > = Mutex::new(None);
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
+#[allow(dead_code)]
 const TOOLBAR_W: f32 = 300.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
@@ -280,6 +281,7 @@ pub(crate) fn place_outside_crop<'a>(
 /// logical px. Plan T6 S3: only the toolbar stays interactive during capture;
 /// the crop interior + everything else passes through so the user can scroll the
 /// target. Clamped to the band, so it never enters the crop (spec P3.4).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn toolbar_input_rect(
     crop: Rectangle,
     window: iced::Size,
