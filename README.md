@@ -14,6 +14,14 @@ PipeWire support.
 - `crates/rollshot-cli`: command-line interface
 - `crates/rollshot-tauri-app`: Tauri v2 interactive capture app with live preview
 
+### Desktop app crates during iced migration
+
+- `rollshot-app` is the iced product app.
+- `rollshot-tauri-app` is the retained Tauri/React app used as the macOS overlay
+  reference and fallback during validation.
+- `rollshot-iced-overlay` is the iced overlay renderer used by Linux today and
+  by the opt-in macOS iced overlay path as it lands.
+
 ## Local Development
 
 Install Rust 1.85 or newer with `rustup`.
