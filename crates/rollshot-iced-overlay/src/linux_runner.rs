@@ -1,4 +1,4 @@
-use iced::{event, keyboard, mouse, window, Event, Point, Task};
+use iced::{event, Task};
 use iced_layershell::actions::ActionCallback;
 use iced_layershell::build_pattern::application;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
@@ -9,7 +9,7 @@ use iced_layershell::Settings;
 use iced::futures::StreamExt;
 use std::sync::Mutex;
 
-use crate::app::{self, OverlayMessage, OverlayState as Overlay};
+use crate::app::{self, OverlayState as Overlay};
 use crate::coords::LogicalRect;
 use crate::driver::Driver;
 use crate::CaptureResult;
@@ -24,17 +24,14 @@ static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex
 // Capture starts in `run()` before the overlay surface exists, so the portal
 // screen-share picker dialog appears + dismisses on a clean desktop and never
 // lands in a captured frame. The live Driver is stashed here for the update fn
-// to drive: `begin_stitch` on Finish, `finalize`/`cancel` on Esc.
+// to drive: `begin_stitch` on BeginStitch effect, `finalize`/`cancel` on
+// Finish/Cancel effects.
 static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
-pub enum Message {
-    IcedEvent(Event),
-    Finish,
-    Cancel,
-    LiveEvent(crate::driver::LiveOverlayEvent),
-    Tick,
+pub(crate) enum Message {
+    Overlay(app::OverlayMessage),
 }
 
 fn namespace() -> String {
@@ -49,166 +46,87 @@ fn preview_stream() -> iced::Subscription<Message> {
             .take()
             .expect("preview channel already consumed");
 
-        rx.map(Message::LiveEvent)
+        rx.map(|e| Message::Overlay(app::OverlayMessage::LiveEvent(e)))
     })
 }
 
 fn subscription(_: &Overlay) -> iced::Subscription<Message> {
     iced::Subscription::batch([
-        event::listen().map(Message::IcedEvent),
+        event::listen().map(|e| Message::Overlay(app::OverlayMessage::IcedEvent(e))),
         preview_stream(),
-        iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick),
+        iced::time::every(std::time::Duration::from_millis(250))
+            .map(|_| Message::Overlay(app::OverlayMessage::Tick)),
     ])
 }
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
-        Message::IcedEvent(Event::Window(window::Event::Opened { size, .. })) => {
-            state.window_size = Some(size);
-            Task::none()
-        }
-        Message::IcedEvent(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)))
-            if !state.crop_confirmed =>
-        {
-            state.drag_start = Some(Point::ORIGIN);
-            state.crop = None;
-            Task::none()
-        }
-        Message::IcedEvent(Event::Mouse(mouse::Event::CursorMoved { position })) => {
-            if let Some(start) = state.drag_start {
-                if start == Point::ORIGIN && state.crop.is_none() {
-                    state.drag_start = Some(position);
-                }
-                if let Some(start) = state.drag_start {
-                    let x = start.x.min(position.x);
-                    let y = start.y.min(position.y);
-                    let w = (position.x - start.x).abs();
-                    let h = (position.y - start.y).abs();
-                    state.crop = Some(iced::Rectangle {
-                        x,
-                        y,
-                        width: w,
-                        height: h,
-                    });
-                }
-            }
-            Task::none()
-        }
-        Message::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))) => {
-            state.drag_start = None;
-            if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
-            {
-                Task::done(Message::Finish)
-            } else {
-                Task::none()
-            }
-        }
-        Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
-            key: keyboard::Key::Named(keyboard::key::Named::Escape),
-            ..
-        })) => {
-            let driver = DRIVER_SLOT.lock().unwrap().take();
-            let outcome = match (state.crop_confirmed, driver) {
-                (true, Some(driver)) => driver.finalize().map(Some),
-                (false, Some(driver)) => {
-                    driver.cancel();
-                    Ok(None)
-                }
-                (_, None) => Ok(None),
-            };
-            *RESULT_SLOT.lock().unwrap() = Some(outcome);
-            iced::exit()
-        }
-        Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
-            key: keyboard::Key::Named(keyboard::key::Named::Enter),
-            ..
-        })) if !state.crop_confirmed && state.crop.is_some() => Task::done(Message::Finish),
-        Message::Finish => {
-            if state.crop_confirmed {
-                return Task::none();
-            }
-            let crop = match state.crop {
-                Some(c) if c.width >= 1.0 && c.height >= 1.0 => c,
-                _ => return Task::none(),
-            };
-            let ws = match state.window_size {
-                Some(ws) => ws,
-                None => {
-                    *RESULT_SLOT.lock().unwrap() = Some(Err(
-                        "overlay surface size unknown (no Window::Opened event)".to_string(),
-                    ));
-                    return iced::exit();
-                }
-            };
-
-            state.crop_confirmed = true;
-
-            let crop_logical = LogicalRect {
-                x: crop.x,
-                y: crop.y,
-                width: crop.width,
-                height: crop.height,
-            };
-            let overlay_logical = rollshot_capture::Size {
-                width: ws.width as u32,
-                height: ws.height as u32,
-            };
-
-            let preview_constraints = app::preview_constraints(crop, ws);
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
-            }
-
-            let input_rect = app::toolbar_input_rect(crop, ws);
-            Task::done(Message::SetInputRegion(ActionCallback::new(
-                move |region| {
-                    if let Some((x, y, w, h)) = input_rect {
-                        region.add(x, y, w, h);
+        Message::Overlay(msg) => {
+            let effect = app::update(state, msg);
+            match effect {
+                app::OverlayEffect::None => Task::none(),
+                app::OverlayEffect::BeginStitch => {
+                    let crop = state.crop.unwrap();
+                    let ws = match state.window_size {
+                        Some(ws) => ws,
+                        None => {
+                            *RESULT_SLOT.lock().unwrap() = Some(Err(
+                                "overlay surface size unknown (no Window::Opened event)"
+                                    .to_string(),
+                            ));
+                            return iced::exit();
+                        }
+                    };
+                    let crop_logical = LogicalRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    let overlay_logical = rollshot_capture::Size {
+                        width: ws.width as u32,
+                        height: ws.height as u32,
+                    };
+                    let preview_constraints = app::preview_constraints(crop, ws);
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
+                        driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                },
-            )))
-        }
-        Message::Cancel => {
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
-                driver.cancel();
+                    let input_rect = app::toolbar_input_rect(crop, ws);
+                    Task::done(Message::SetInputRegion(ActionCallback::new(
+                        move |region| {
+                            if let Some((x, y, w, h)) = input_rect {
+                                region.add(x, y, w, h);
+                            }
+                        },
+                    )))
+                }
+                app::OverlayEffect::Finish => {
+                    let driver = DRIVER_SLOT.lock().unwrap().take();
+                    let outcome = match driver {
+                        Some(driver) => driver.finalize().map(Some),
+                        None => Ok(None),
+                    };
+                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    iced::exit()
+                }
+                app::OverlayEffect::Cancel => {
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+                        driver.cancel();
+                    }
+                    *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
+                    iced::exit()
+                }
+                app::OverlayEffect::EnablePassthrough | app::OverlayEffect::DisablePassthrough => {
+                    Task::none()
+                }
             }
-            *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
-            iced::exit()
-        }
-        Message::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
-            state.preview = Some(handle);
-            Task::none()
-        }
-        Message::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
-            if miss.warn {
-                state.capture_miss_warn = true;
-                state.capture_miss_message_expires_at =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-            }
-            Task::none()
-        }
-        Message::Tick => {
-            if state
-                .capture_miss_message_expires_at
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-            {
-                state.capture_miss_warn = false;
-                state.capture_miss_message_expires_at = None;
-            }
-            Task::none()
         }
         _ => Task::none(),
     }
 }
 
 fn view(state: &Overlay) -> iced::Element<'_, Message> {
-    crate::app::view(state).map(|msg| match msg {
-        OverlayMessage::IcedEvent(e) => Message::IcedEvent(e),
-        OverlayMessage::Finish => Message::Finish,
-        OverlayMessage::Cancel => Message::Cancel,
-        OverlayMessage::LiveEvent(e) => Message::LiveEvent(e),
-        OverlayMessage::Tick => Message::Tick,
-    })
+    crate::app::view(state).map(Message::Overlay)
 }
 
 pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {

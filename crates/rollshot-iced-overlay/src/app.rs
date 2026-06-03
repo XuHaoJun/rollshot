@@ -525,7 +525,7 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
         OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Enter),
             ..
-        })) if !state.crop_confirmed && state.crop.is_some() => {
+        })) if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0) => {
             state.crop_confirmed = true;
             OverlayEffect::BeginStitch
         }
