@@ -3,6 +3,7 @@ target/
 .DS_Store
 .idea/
 .vscode/
+.superpowers/
 # Added by code-review-graph
 .code-review-graph/
 crates/rollshot-app/node_modules/
