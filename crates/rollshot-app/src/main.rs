@@ -18,7 +18,7 @@ fn main() {
         OverlayRunner::Iced => run_iced_capture(options),
         OverlayRunner::Tauri => {
             eprintln!(
-                "selected overlay mode requires rollshot-tauri-app during the validation period"
+                "selected overlay mode resolves to the retained Tauri overlay; run rollshot-tauri-app or pass overlay_mode=\"iced\" for the iced validation path"
             );
             std::process::exit(2);
         }
