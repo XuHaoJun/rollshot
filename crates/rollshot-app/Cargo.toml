@@ -1,0 +1,24 @@
+[package]
+name = "rollshot-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rollshot-app"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio"] }
+rollshot-capture = { path = "../rollshot-capture" }
+rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
+serde_json = { workspace = true }
+
+[features]
+default = []
+macos-sck = ["rollshot-capture/macos-sck"]
+
+[lints]
+workspace = true
