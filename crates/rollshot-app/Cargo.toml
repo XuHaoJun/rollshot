@@ -18,7 +18,10 @@ serde_json = { workspace = true }
 
 [features]
 default = []
-macos-sck = ["rollshot-capture/macos-sck"]
+macos-sck = [
+  "rollshot-capture/macos-sck",
+  "rollshot-iced-overlay/macos-sck",
+]
 
 [lints]
 workspace = true
