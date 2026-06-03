@@ -2,12 +2,14 @@ use iced::widget::image;
 use iced::{Point, Rectangle, Size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) struct PreviewConstraints {
     pub(crate) fixed_width: u32,
     pub(crate) max_height: u32,
 }
 
 #[derive(Default)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) struct OverlayState {
     pub(crate) drag_start: Option<Point>,
     pub(crate) crop: Option<Rectangle>,
