@@ -12,7 +12,7 @@ PipeWire support.
 - `crates/rollshot-core`: platform-independent stitching concepts
 - `crates/rollshot-capture`: capture traits and frame metadata
 - `crates/rollshot-cli`: command-line interface
-- `crates/rollshot-app`: Tauri v2 interactive capture app with live preview
+- `crates/rollshot-tauri-app`: Tauri v2 interactive capture app with live preview
 
 ## Local Development
 
@@ -31,7 +31,7 @@ before building.
 
 ### Tauri App
 
-The `rollshot-app` crate is a Tauri v2 app that needs WebKit, GTK, and X11
+The `rollshot-tauri-app` crate is a Tauri v2 app that needs WebKit, GTK, and X11
 development headers on Linux. On macOS it needs Xcode (or Xcode Command Line
 Tools) but no extra packages.
 
@@ -43,7 +43,7 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev \
 ```
 
 These packages are not needed for the CLI (`rollshot-cli`) or capture library
-(`rollshot-capture`). They are only required when building `rollshot-app`.
+(`rollshot-capture`). They are only required when building `rollshot-tauri-app`.
 
 ### Build & Test
 
@@ -125,7 +125,7 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
 - [ ] `mkdir -p target/test-artifacts`.
 - [ ] `cargo run -p rollshot-cli -- stitch-folder crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames --output target/test-artifacts/stitch-folder.png` writes a PNG.
-- [ ] `cargo check -p rollshot-app` passes (requires Tauri Linux deps on Linux, Xcode on macOS).
+- [ ] `cargo check -p rollshot-tauri-app` passes (requires Tauri Linux deps on Linux, Xcode on macOS).
 
 ## Manual Testing: Linux Wayland Portal Capture
 

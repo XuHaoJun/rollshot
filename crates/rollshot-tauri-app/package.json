@@ -1,5 +1,5 @@
 {
-  "name": "rollshot-app",
+  "name": "rollshot-tauri-app",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -17,7 +17,7 @@
     "tauri:build": "tauri build",
     "tauri:check": "tauri build --debug --no-bundle",
     "tauri:release": "tauri build --no-bundle",
-    "tauri:release:run": "tauri build --no-bundle && ../../target/release/rollshot-app"
+    "tauri:release:run": "tauri build --no-bundle && ../../target/release/rollshot-tauri-app"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",

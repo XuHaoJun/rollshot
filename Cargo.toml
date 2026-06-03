@@ -3,7 +3,7 @@ members = [
     "crates/rollshot-core",
     "crates/rollshot-capture",
     "crates/rollshot-cli",
-    "crates/rollshot-app/src-tauri",
+    "crates/rollshot-tauri-app/src-tauri",
     "crates/rollshot-overlay",
     "crates/rollshot-overlay-core",
 ]

@@ -1065,8 +1065,10 @@ mod tests {
 
     #[test]
     fn save_image_writes_final_png() {
-        let tempdir =
-            std::env::temp_dir().join(format!("rollshot-app-save-image-{}", std::process::id()));
+        let tempdir = std::env::temp_dir().join(format!(
+            "rollshot-tauri-app-save-image-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&tempdir).expect("create tempdir");
         let output = tempdir.join("stitched.png");
 

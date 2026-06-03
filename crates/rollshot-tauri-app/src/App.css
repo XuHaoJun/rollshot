@@ -49,7 +49,7 @@
   --ring: oklch(0.708 0 0);
   --radius: 0.5rem;
   /* Crop overlay tokens — kept in sync with rollshot_overlay_core::tokens by the
-     sync test in crates/rollshot-app/src-tauri/src/css_token_sync.rs. */
+     sync test in crates/rollshot-tauri-app/src-tauri/src/css_token_sync.rs. */
   --crop-border: #38bdf8;
   --crop-border-width: 2px;
   --crop-border-halo: rgba(255, 255, 255, 0.72);

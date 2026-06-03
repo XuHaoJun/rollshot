@@ -25,19 +25,19 @@ jobs:
         with:
           node-version: 24.15.0
           cache: pnpm
-          cache-dependency-path: crates/rollshot-app/pnpm-lock.yaml
+          cache-dependency-path: crates/rollshot-tauri-app/pnpm-lock.yaml
 
       - name: Install frontend dependencies
-        run: pnpm --dir crates/rollshot-app install --frozen-lockfile
+        run: pnpm --dir crates/rollshot-tauri-app install --frozen-lockfile
 
       - name: Test frontend
-        run: pnpm --dir crates/rollshot-app test
+        run: pnpm --dir crates/rollshot-tauri-app test
 
       - name: Typecheck frontend
-        run: pnpm --dir crates/rollshot-app typecheck
+        run: pnpm --dir crates/rollshot-tauri-app typecheck
 
       - name: Build frontend
-        run: pnpm --dir crates/rollshot-app build
+        run: pnpm --dir crates/rollshot-tauri-app build
 
   test:
     name: Test (${{ matrix.os }})
@@ -77,4 +77,4 @@ jobs:
         run: |
           cargo check -p rollshot-capture --all-targets --no-default-features --features macos-sck
           cargo check -p rollshot-cli --all-targets --no-default-features --features macos-sck
-          cargo check -p rollshot-app --all-targets --no-default-features --features macos-sck
+          cargo check -p rollshot-tauri-app --all-targets --no-default-features --features macos-sck

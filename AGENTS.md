@@ -75,12 +75,12 @@ For Rust changes, prefer:
 - `rtk cargo fmt --check`
 - `rtk cargo clippy --workspace --all-targets -- -D warnings` when risk justifies it
 
-For frontend changes under `crates/rollshot-app`, prefer:
-- `rtk pnpm --dir crates/rollshot-app run typecheck`
-- `rtk pnpm --dir crates/rollshot-app test`
-- `rtk pnpm --dir crates/rollshot-app run build`
+For frontend changes under `crates/rollshot-tauri-app`, prefer:
+- `rtk pnpm --dir crates/rollshot-tauri-app run typecheck`
+- `rtk pnpm --dir crates/rollshot-tauri-app test`
+- `rtk pnpm --dir crates/rollshot-tauri-app run build`
 
-When already in `crates/rollshot-app/` (check with `pwd`):
+When already in `crates/rollshot-tauri-app/` (check with `pwd`):
 - `rtk pnpm run typecheck`
 - `rtk pnpm test`
 - `rtk pnpm run build`
@@ -113,11 +113,11 @@ Prefer shared code when behavior must match both paths:
 
 - `crates/rollshot-overlay-core` for preview viewport logic and crop visual
   tokens.
-- `crates/rollshot-app/src-tauri/src/session.rs` for webview capture/session
+- `crates/rollshot-tauri-app/src-tauri/src/session.rs` for webview capture/session
   state and save/final-preview behavior.
-- `crates/rollshot-app/src-tauri/src/native_capture.rs` and
+- `crates/rollshot-tauri-app/src-tauri/src/native_capture.rs` and
   `crates/rollshot-overlay` for the Linux native overlay handoff and UI.
-- `crates/rollshot-app/src/components/CaptureOverlay.tsx` for the macOS/webview
+- `crates/rollshot-tauri-app/src/components/CaptureOverlay.tsx` for the macOS/webview
   overlay flow and `NativeCaptureFlow.tsx` for the Linux save handoff host flow.
 
 If a change intentionally applies to only one platform, state that explicitly in
@@ -140,9 +140,9 @@ behavior against code before relying on them.
   `scap`.
 - `crates/rollshot-cli`: command-line entry points. `src/args.rs` is the source
   of truth for subcommands and flags; `cmd_*` modules hold behavior.
-- `crates/rollshot-app`: Tauri v2 interactive capture app. Frontend code lives
-  under `crates/rollshot-app/src`; Rust/Tauri commands live under
-  `crates/rollshot-app/src-tauri/src`.
+- `crates/rollshot-tauri-app`: Tauri v2 interactive capture app. Frontend code lives
+  under `crates/rollshot-tauri-app/src`; Rust/Tauri commands live under
+  `crates/rollshot-tauri-app/src-tauri/src`.
 - `scripts/bench`: benchmark JSONL summarization and before/after comparison.
 - `README.md`: user-facing setup and manual testing notes. Treat command
   examples as documentation to verify against code, not as implementation
@@ -163,7 +163,7 @@ learn-projects results when needed.
 | `rust-cv` | rust-cv/cv | Computer Vision library in Rust. Reference for image stitching, feature detection, and geometric transforms used in `rollshot-core`. |
 | `scap` | zed-industries/scap | Screen capture library by Zed Industries. `rollshot-capture` is built as a scap-compatible crate; the macOS backend uses scap. Directly relevant to `rollshot-capture`. |
 | `snow-shot` | mg-chao/snow-shot | Same category: screenshot/long-screenshot software. Reference for screenshot workflows, UI patterns. |
-| `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-app`. |
+| `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-tauri-app`. |
 | `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
 ## 10. docs/ — Snapshots, Not Source of Truth
