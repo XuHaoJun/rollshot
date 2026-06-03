@@ -48,9 +48,9 @@ impl std::error::Error for OverlayError {}
 // TODO: uncomment these mod declarations as Tasks 3–7 land each module.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod coords;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod driver;
 #[cfg(target_os = "linux")]
 mod linux_runner;
