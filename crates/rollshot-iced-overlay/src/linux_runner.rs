@@ -12,6 +12,7 @@ use iced_layershell::Settings;
 use iced::futures::StreamExt;
 use std::sync::Mutex;
 
+use crate::app::{OverlayState as Overlay, PreviewConstraints};
 use crate::coords::LogicalRect;
 use crate::driver::Driver;
 use crate::CaptureResult;
@@ -19,12 +20,6 @@ use crate::OverlayConfig;
 use crate::OverlayError;
 use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PreviewConstraints {
-    pub(crate) fixed_width: u32,
-    pub(crate) max_height: u32,
-}
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 const TOOLBAR_W: f32 = 300.0;
@@ -43,17 +38,6 @@ static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex
 // lands in a captured frame. The live Driver is stashed here for the update fn
 // to drive: `begin_stitch` on Finish, `finalize`/`cancel` on Esc.
 static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
-
-#[derive(Default)]
-pub struct Overlay {
-    drag_start: Option<Point>,
-    crop: Option<Rectangle>,
-    crop_confirmed: bool,
-    preview: Option<image::Handle>,
-    window_size: Option<iced::Size>,
-    capture_miss_warn: bool,
-    capture_miss_message_expires_at: Option<std::time::Instant>,
-}
 
 #[to_layer_message]
 #[derive(Debug, Clone)]

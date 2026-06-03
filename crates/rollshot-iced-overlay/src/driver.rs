@@ -14,8 +14,8 @@ use iced::futures::channel::mpsc::UnboundedSender;
 use iced::widget::image::Handle as ImageHandle;
 use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, Size};
 
+use crate::app::PreviewConstraints;
 use crate::coords::LogicalRect;
-use crate::overlay::PreviewConstraints;
 
 use crate::CaptureResult;
 

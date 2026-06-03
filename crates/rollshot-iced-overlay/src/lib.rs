@@ -46,19 +46,21 @@ impl std::fmt::Display for OverlayError {
 impl std::error::Error for OverlayError {}
 
 // TODO: uncomment these mod declarations as Tasks 3–7 land each module.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod app;
 #[cfg(target_os = "linux")]
 mod coords;
 #[cfg(target_os = "linux")]
 mod driver;
 #[cfg(target_os = "linux")]
-mod overlay;
+mod linux_runner;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
 pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     #[cfg(target_os = "linux")]
     {
-        overlay::run(config)
+        linux_runner::run(config)
     }
     #[cfg(not(target_os = "linux"))]
     {
