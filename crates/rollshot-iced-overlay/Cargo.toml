@@ -14,5 +14,12 @@ rollshot-overlay-core = { path = "../rollshot-overlay-core" }
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 iced_layershell = "0.18"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+raw-window-handle = "0.6"
+
 [lints.rust]
 unsafe_code = "deny"

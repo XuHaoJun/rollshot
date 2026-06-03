@@ -54,6 +54,10 @@ mod coords;
 mod driver;
 #[cfg(target_os = "linux")]
 mod linux_runner;
+#[cfg(target_os = "macos")]
+mod macos_runner;
+#[cfg(target_os = "macos")]
+mod macos_window;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
@@ -62,7 +66,11 @@ pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, Overl
     {
         linux_runner::run(config)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_runner::run(config)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = config;
         Err(OverlayError::Unsupported)
