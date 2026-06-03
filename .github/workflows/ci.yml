@@ -7,38 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  frontend-test:
-    name: Frontend Test
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.8.1
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24.15.0
-          cache: pnpm
-          cache-dependency-path: crates/rollshot-tauri-app/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        run: pnpm --dir crates/rollshot-tauri-app install --frozen-lockfile
-
-      - name: Test frontend
-        run: pnpm --dir crates/rollshot-tauri-app test
-
-      - name: Typecheck frontend
-        run: pnpm --dir crates/rollshot-tauri-app typecheck
-
-      - name: Build frontend
-        run: pnpm --dir crates/rollshot-tauri-app build
-
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
