@@ -68,9 +68,8 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     let ws = match state.window_size {
                         Some(ws) => ws,
                         None => {
-                            *RESULT_SLOT.lock().unwrap() = Some(Err(
-                                "overlay surface size unknown".to_string(),
-                            ));
+                            *RESULT_SLOT.lock().unwrap() =
+                                Some(Err("overlay surface size unknown".to_string()));
                             return iced::exit();
                         }
                     };
@@ -129,13 +128,8 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
     *DRIVER_SLOT.lock().unwrap() = None;
     *RESULT_SLOT.lock().unwrap() = None;
 
-    let driver = Driver::start_capture(
-        &config.backend,
-        config.fps,
-        config.show_cursor,
-        preview_tx,
-    )
-    .map_err(OverlayError::Capture)?;
+    let driver = Driver::start_capture(&config.backend, config.fps, config.show_cursor, preview_tx)
+        .map_err(OverlayError::Capture)?;
     let source_size = driver.source_size();
     *DRIVER_SLOT.lock().unwrap() = Some(driver);
 

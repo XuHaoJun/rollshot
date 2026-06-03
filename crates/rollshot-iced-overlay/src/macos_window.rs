@@ -1,15 +1,11 @@
 use iced::window;
 
-pub(crate) fn apply_overlay_window_patch(
-    handle: &dyn window::Window,
-) -> Result<(), String> {
+pub(crate) fn apply_overlay_window_patch(handle: &dyn window::Window) -> Result<(), String> {
     apply_overlay_window_patch_impl(handle)
 }
 
 #[allow(unsafe_code)]
-fn apply_overlay_window_patch_impl(
-    handle: &dyn window::Window,
-) -> Result<(), String> {
+fn apply_overlay_window_patch_impl(handle: &dyn window::Window) -> Result<(), String> {
     use iced::window::raw_window_handle::RawWindowHandle;
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
@@ -29,8 +25,7 @@ fn apply_overlay_window_patch_impl(
 
     let view = appkit.ns_view.as_ptr() as *mut NSView;
     let view = unsafe {
-        Retained::retain(view)
-            .ok_or_else(|| "failed to retain iced NSView".to_string())?
+        Retained::retain(view).ok_or_else(|| "failed to retain iced NSView".to_string())?
     };
 
     let ns_window = view
