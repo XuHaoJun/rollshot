@@ -1,6 +1,9 @@
-//! Native Linux Wayland capture overlay (Phase 3). Linux-only behavior; the
-//! crate compiles to a stub on other targets so `cargo build --workspace`
-//! works everywhere.
+//! Iced capture overlay renderer.
+//!
+//! Linux currently uses the iced/layer-shell runner. macOS and Windows compile
+//! to an unsupported result until their normal-window runners land. The crate is
+//! named for the renderer framework so it can coexist with the retained Tauri
+//! overlay during validation.
 
 use image::RgbaImage;
 use rollshot_core::StitchStats;

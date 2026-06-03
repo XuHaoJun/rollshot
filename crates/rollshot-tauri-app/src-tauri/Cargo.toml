@@ -18,7 +18,7 @@ image = { workspace = true }
 rollshot-capture = { path = "../../rollshot-capture" }
 rollshot-core = { path = "../../rollshot-core" }
 rollshot-overlay-core = { path = "../../rollshot-overlay-core" }
-rollshot-overlay = { path = "../../rollshot-overlay" }
+rollshot-iced-overlay = { path = "../../rollshot-iced-overlay" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 raw-window-handle = "0.6"

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use rollshot_capture::InteractiveLaunchOptions;
-use rollshot_overlay::{run_overlay, CaptureResult, OverlayConfig, OverlayError};
+use rollshot_iced_overlay::{run_overlay, CaptureResult, OverlayConfig, OverlayError};
 
 use crate::session::{DoneImageDto, SharedSession};
 
@@ -102,7 +102,7 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use rollshot_capture::InteractiveLaunchOptions;
     use rollshot_core::StitchStats;
-    use rollshot_overlay::{CaptureResult, OverlayError};
+    use rollshot_iced_overlay::{CaptureResult, OverlayError};
 
     use crate::session::SharedSession;
 

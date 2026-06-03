@@ -5547,7 +5547,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rollshot-overlay"
+name = "rollshot-iced-overlay"
 version = "0.1.0"
 dependencies = [
  "iced",
@@ -5575,7 +5575,7 @@ dependencies = [
  "raw-window-handle",
  "rollshot-capture",
  "rollshot-core",
- "rollshot-overlay",
+ "rollshot-iced-overlay",
  "rollshot-overlay-core",
  "serde",
  "serde_json",

@@ -66,7 +66,7 @@ pub enum Message {
 }
 
 fn namespace() -> String {
-    "rollshot-overlay".to_string()
+    "rollshot-iced-overlay".to_string()
 }
 
 fn preview_stream() -> iced::Subscription<Message> {
