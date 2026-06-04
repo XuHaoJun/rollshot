@@ -167,6 +167,9 @@ impl Driver {
                         Err(CaptureError::EndOfStream) => break,
                         Err(CaptureError::Timeout { .. }) => continue,
                         Err(err) => {
+                            if !should_record_reader_error(&stop) {
+                                break;
+                            }
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -317,6 +320,10 @@ impl Driver {
     }
 }
 
+fn should_record_reader_error(stop: &AtomicBool) -> bool {
+    !stop.load(Ordering::Relaxed)
+}
+
 /// Block until the reader stores the first frame, returning its `source_size`
 /// (falling back to the frame's pixel dimensions if metadata omits it).
 #[allow(dead_code)]
@@ -394,6 +401,7 @@ mod tests {
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use rollshot_core::{StitchOutcome, Stitcher};
     use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -550,5 +558,21 @@ mod tests {
             edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
         }));
         assert!(!should_emit_preview(&StitchProgressSignal::Idle));
+    }
+
+    #[test]
+    fn reader_error_after_stop_is_shutdown_noise() {
+        let stop = AtomicBool::new(true);
+
+        assert!(!super::should_record_reader_error(&stop));
+    }
+
+    #[test]
+    fn reader_error_before_stop_is_fatal() {
+        let stop = AtomicBool::new(false);
+
+        assert!(super::should_record_reader_error(&stop));
+        stop.store(true, Ordering::Relaxed);
+        assert!(!super::should_record_reader_error(&stop));
     }
 }
