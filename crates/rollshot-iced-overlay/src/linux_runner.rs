@@ -91,12 +91,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                    let input_rect = app::toolbar_input_rect(crop, ws);
+                    let Some((x, y, w, h)) = app::toolbar_input_rect(crop, ws) else {
+                        return Task::none();
+                    };
                     Task::done(Message::SetInputRegion(ActionCallback::new(
                         move |region| {
-                            if let Some((x, y, w, h)) = input_rect {
-                                region.add(x, y, w, h);
-                            }
+                            region.add(x, y, w, h);
                         },
                     )))
                 }

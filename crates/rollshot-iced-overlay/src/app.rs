@@ -290,6 +290,10 @@ pub(crate) fn toolbar_input_rect(
     crop: Rectangle,
     window: iced::Size,
 ) -> Option<(i32, i32, i32, i32)> {
+    if window.width <= 0.0 || window.height <= 0.0 {
+        return None;
+    }
+
     let band = choose_chrome_band(crop, window)?;
     let (x, y, w, h) = match band {
         Band::Top => (
@@ -323,6 +327,10 @@ pub(crate) fn toolbar_input_rect(
             )
         }
     };
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+
     Some((x as i32, y as i32, w as i32, h as i32))
 }
 
@@ -596,7 +604,10 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_mask_bands, preview_constraints, token_color, OverlayMessage, OverlayState};
+    use super::{
+        crop_mask_bands, preview_constraints, token_color, toolbar_input_rect, OverlayMessage,
+        OverlayState,
+    };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 
@@ -669,6 +680,18 @@ mod tests {
         assert_eq!(bands[1], (Point::new(0.0, 80.0), Size::new(100.0, 0.0)));
         assert_eq!(bands[2], (Point::new(0.0, 10.0), Size::new(0.0, 70.0)));
         assert_eq!(bands[3], (Point::new(60.0, 10.0), Size::new(40.0, 70.0)));
+    }
+
+    #[test]
+    fn toolbar_input_rect_rejects_zero_window_size() {
+        let crop = Rectangle {
+            x: 10.0,
+            y: 80.0,
+            width: 100.0,
+            height: 100.0,
+        };
+
+        assert_eq!(toolbar_input_rect(crop, Size::new(0.0, 0.0)), None);
     }
 
     #[test]
