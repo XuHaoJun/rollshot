@@ -61,16 +61,14 @@ impl BackendKind {
                 }
             }
             BackendKind::MacosScreenCaptureKit => {
-                #[cfg(all(target_os = "macos", feature = "macos-sck"))]
+                #[cfg(target_os = "macos")]
                 {
                     Ok(Box::new(crate::macos::MacosScreenCaptureKitBackend::new()))
                 }
-                #[cfg(not(all(target_os = "macos", feature = "macos-sck")))]
+                #[cfg(not(target_os = "macos"))]
                 {
                     Err(CaptureError::Unsupported {
-                        message:
-                            "macos-sck backend requires a macOS host built with the macos-sck feature"
-                                .to_string(),
+                        message: "macos-sck backend requires a macOS host".to_string(),
                     })
                 }
             }
@@ -94,16 +92,7 @@ pub fn default_backend() -> BackendKind {
 /// the OS / session decision matrix without mutating process-global env vars.
 pub fn default_backend_for(os: &str, session_type: Option<&str>) -> BackendKind {
     match os {
-        "macos" => {
-            #[cfg(feature = "macos-sck")]
-            {
-                BackendKind::MacosScreenCaptureKit
-            }
-            #[cfg(not(feature = "macos-sck"))]
-            {
-                BackendKind::Unsupported
-            }
-        }
+        "macos" => BackendKind::MacosScreenCaptureKit,
         "linux" => match session_type {
             Some("wayland") => BackendKind::LinuxPortalPipeWire,
             _ => BackendKind::Unsupported,
@@ -159,15 +148,13 @@ mod tests {
 
     #[test]
     fn default_backend_for_decision_matrix() {
-        let expected_macos_backend = if cfg!(feature = "macos-sck") {
+        assert_eq!(
+            default_backend_for("macos", None),
             BackendKind::MacosScreenCaptureKit
-        } else {
-            BackendKind::Unsupported
-        };
-        assert_eq!(default_backend_for("macos", None), expected_macos_backend);
+        );
         assert_eq!(
             default_backend_for("macos", Some("wayland")),
-            expected_macos_backend
+            BackendKind::MacosScreenCaptureKit
         );
         assert_eq!(
             default_backend_for("linux", Some("wayland")),
