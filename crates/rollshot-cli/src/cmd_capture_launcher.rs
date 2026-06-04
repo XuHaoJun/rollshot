@@ -127,7 +127,7 @@ fn resolve_app_binary_from_env_and_exe(
     if let Some(path) = env_path {
         if path.is_empty() {
             return Err(CliError::new(
-                format!("{APP_ENV} is set but empty; expected path to rollshot-tauri-app"),
+                format!("{APP_ENV} is set but empty; expected path to rollshot-app"),
                 1,
             ));
         }
@@ -156,10 +156,9 @@ fn resolve_app_binary_from_env_and_exe(
     let app_path = bin_dir.join(default_app_binary_name());
     if !app_path.exists() {
         let hint = if is_cargo_target_dir(bin_dir) {
-            "hint: the GUI app must be built separately with the Tauri toolchain:\n  \
-             pnpm --dir crates/rollshot-tauri-app install\n  \
-             pnpm --dir crates/rollshot-tauri-app run tauri build --debug\n\
-             or use --headless to skip the GUI"
+            "hint: the GUI app must be built separately:\n  \
+ cargo build -p rollshot-app\n\
+ or use --headless to skip the GUI"
         } else {
             "hint: reinstall rollshot or set ROLLSHOT_APP to the GUI binary path"
         };
@@ -181,12 +180,12 @@ fn is_cargo_target_dir(dir: &Path) -> bool {
 
 #[cfg(windows)]
 fn default_app_binary_name() -> &'static str {
-    "rollshot-tauri-app.exe"
+    "rollshot-app.exe"
 }
 
 #[cfg(not(windows))]
 fn default_app_binary_name() -> &'static str {
-    "rollshot-tauri-app"
+    "rollshot-app"
 }
 
 fn status_label(status: ExitStatus) -> String {
@@ -290,7 +289,7 @@ mod tests {
 
     #[test]
     fn resolve_app_binary_env_missing_file() {
-        let env_path = PathBuf::from("/no/such/rollshot-tauri-app");
+        let env_path = PathBuf::from("/no/such/rollshot-app");
         let err = resolve_app_binary_from_env_and_exe(
             Some(OsString::from(env_path.as_os_str())),
             Path::new("target/debug/rollshot"),
@@ -308,8 +307,13 @@ mod tests {
                 .expect_err("sibling missing in dev");
 
         assert!(err.message.contains("not found"), "{}", err.message);
-        assert!(err.message.contains("tauri"), "{}", err.message);
+        assert!(
+            err.message.contains("cargo build -p rollshot-app"),
+            "{}",
+            err.message
+        );
         assert!(err.message.contains("--headless"), "{}", err.message);
+        assert!(!err.message.contains("tauri"), "{}", err.message);
     }
 
     #[test]
