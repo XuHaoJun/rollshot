@@ -102,10 +102,10 @@ Linux and macOS capture UI paths are intentionally different:
 - Linux uses the native iced Wayland layer-shell overlay
   (`rollshot-iced-overlay`). When launched through `rollshot-tauri-app`, the
   Tauri host window stays hidden/unfocused during capture.
-- macOS defaults to the Tauri/webview overlay path in `rollshot-tauri-app` with
-  ScreenCaptureKit (`macos-sck`). The iced macOS path is currently scaffolded
-  behind explicit `rollshot-app` / `rollshot-iced-overlay` selection and returns
-  an unsupported/not-wired error until the runner is implemented.
+- macOS uses the iced overlay path through `rollshot-app` /
+  `rollshot-iced-overlay` with ScreenCaptureKit (`macos-sck`) as the
+  platform-default capture backend. `rollshot-tauri-app` is deprecated and
+  retained temporarily as legacy/reference code during iced validation.
 
 For any change touching capture UI/UX, check both platform paths before editing.
 This includes overlay behavior, crop selection, coordinate mapping, input
@@ -117,12 +117,14 @@ Prefer shared code when behavior must match both paths:
 
 - `crates/rollshot-overlay-core` for preview viewport logic and crop visual
   tokens.
-- `crates/rollshot-tauri-app/src-tauri/src/session.rs` for webview capture/session
-  state and save/final-preview behavior.
-- `crates/rollshot-tauri-app/src-tauri/src/native_capture.rs` and
-  `crates/rollshot-iced-overlay` for the Linux native overlay handoff and UI.
-- `crates/rollshot-tauri-app/src/components/CaptureOverlay.tsx` for the macOS/webview
-  overlay flow and `NativeCaptureFlow.tsx` for the Linux save handoff host flow.
+- `crates/rollshot-iced-overlay` for the active Linux and macOS iced overlay
+  runners and UI.
+- `crates/rollshot-app/src/main.rs` for the active iced product app launch and
+  save handoff.
+- `crates/rollshot-tauri-app/src-tauri/src/session.rs`,
+  `crates/rollshot-tauri-app/src-tauri/src/native_capture.rs`,
+  `crates/rollshot-tauri-app/src/components/CaptureOverlay.tsx`, and
+  `NativeCaptureFlow.tsx` for deprecated Tauri reference behavior only.
 
 If a change intentionally applies to only one platform, state that explicitly in
 the plan and final response, including the reason, the unchecked counterpart
