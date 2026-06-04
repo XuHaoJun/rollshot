@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use iced::futures::StreamExt;
-use iced::{event, window, Task};
+use iced::{event, window, Event, Task};
 
 use crate::app::{self, OverlayEffect, OverlayMessage, OverlayState};
 use crate::coords::LogicalRect;
@@ -18,6 +18,9 @@ static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 #[derive(Debug, Clone)]
 enum Message {
     Overlay(OverlayMessage),
+    WindowPatched(Result<(), String>),
+    PassthroughEnabled,
+    PassthroughDisabledThenExit,
 }
 
 fn preview_stream() -> iced::Subscription<Message> {
@@ -33,61 +36,140 @@ fn preview_stream() -> iced::Subscription<Message> {
 
 fn subscription(_: &OverlayState) -> iced::Subscription<Message> {
     iced::Subscription::batch([
-        event::listen().map(|e| Message::Overlay(OverlayMessage::IcedEvent(e))),
+        event::listen_with(overlay_event_message),
         preview_stream(),
         iced::time::every(Duration::from_millis(250))
             .map(|_| Message::Overlay(OverlayMessage::Tick)),
     ])
 }
 
+fn overlay_event_message(
+    event: Event,
+    status: event::Status,
+    window_id: window::Id,
+) -> Option<Message> {
+    match event {
+        Event::Window(window::Event::Opened { size, .. }) => {
+            Some(Message::Overlay(OverlayMessage::WindowOpened {
+                id: window_id,
+                size,
+            }))
+        }
+        event if status == event::Status::Ignored => {
+            Some(Message::Overlay(OverlayMessage::IcedEvent(event)))
+        }
+        _ => None,
+    }
+}
+
 fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
-    let Message::Overlay(msg) = message;
-    let effect = app::update(state, msg);
-    match effect {
-        OverlayEffect::None => Task::none(),
-        OverlayEffect::BeginStitch => {
-            let crop = state.crop.unwrap();
-            let ws = match state.window_size {
-                Some(ws) => ws,
-                None => {
-                    *RESULT_SLOT.lock().unwrap() =
-                        Some(Err("overlay surface size unknown".to_string()));
-                    return iced::exit();
+    match message {
+        Message::Overlay(msg) => {
+            let opened_window_id = match &msg {
+                OverlayMessage::WindowOpened { id, .. } => Some(*id),
+                _ => None,
+            };
+            let effect = app::update(state, msg);
+            if let Some(id) = opened_window_id {
+                return window::run(id, crate::macos_window::apply_overlay_window_patch)
+                    .map(Message::WindowPatched);
+            }
+
+            match effect {
+                OverlayEffect::None => Task::none(),
+                OverlayEffect::BeginStitch => {
+                    let crop = state.crop.unwrap();
+                    let ws = match state.window_size {
+                        Some(ws) => ws,
+                        None => {
+                            *RESULT_SLOT.lock().unwrap() =
+                                Some(Err("overlay surface size unknown".to_string()));
+                            return iced::exit();
+                        }
+                    };
+                    let window_id = match state.window_id {
+                        Some(id) => id,
+                        None => {
+                            *RESULT_SLOT.lock().unwrap() =
+                                Some(Err("overlay window id unknown".to_string()));
+                            return iced::exit();
+                        }
+                    };
+                    let crop_logical = LogicalRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    let overlay_logical = rollshot_capture::Size {
+                        width: ws.width as u32,
+                        height: ws.height as u32,
+                    };
+                    let preview_constraints = app::preview_constraints(crop, ws);
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
+                        driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
+                    }
+                    window::enable_mouse_passthrough(window_id).map(|_| Message::PassthroughEnabled)
                 }
-            };
-            let crop_logical = LogicalRect {
-                x: crop.x,
-                y: crop.y,
-                width: crop.width,
-                height: crop.height,
-            };
-            let overlay_logical = rollshot_capture::Size {
-                width: ws.width as u32,
-                height: ws.height as u32,
-            };
-            let preview_constraints = app::preview_constraints(crop, ws);
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
+                OverlayEffect::Finish => {
+                    let should_disable_passthrough = state.mouse_passthrough_active;
+                    let window_id = state.window_id;
+                    let driver = DRIVER_SLOT.lock().unwrap().take();
+                    let outcome = match driver {
+                        Some(driver) => driver.finalize().map(Some),
+                        None => Ok(None),
+                    };
+                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    if should_disable_passthrough {
+                        if let Some(id) = window_id {
+                            return window::disable_mouse_passthrough(id)
+                                .map(|_| Message::PassthroughDisabledThenExit);
+                        }
+                    }
+                    iced::exit()
+                }
+                OverlayEffect::Cancel => {
+                    let should_disable_passthrough = state.mouse_passthrough_active;
+                    let window_id = state.window_id;
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+                        driver.cancel();
+                    }
+                    *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
+                    if should_disable_passthrough {
+                        if let Some(id) = window_id {
+                            return window::disable_mouse_passthrough(id)
+                                .map(|_| Message::PassthroughDisabledThenExit);
+                        }
+                    }
+                    iced::exit()
+                }
+                OverlayEffect::EnablePassthrough => match state.window_id {
+                    Some(id) => {
+                        window::enable_mouse_passthrough(id).map(|_| Message::PassthroughEnabled)
+                    }
+                    None => Task::none(),
+                },
+                OverlayEffect::DisablePassthrough => match state.window_id {
+                    Some(id) => window::disable_mouse_passthrough(id)
+                        .map(|_| Message::PassthroughDisabledThenExit),
+                    None => Task::none(),
+                },
+            }
+        }
+        Message::WindowPatched(result) => {
+            if let Err(err) = result {
+                eprintln!("failed to patch macOS iced overlay window: {err}");
             }
             Task::none()
         }
-        OverlayEffect::Finish => {
-            let driver = DRIVER_SLOT.lock().unwrap().take();
-            let outcome = match driver {
-                Some(driver) => driver.finalize().map(Some),
-                None => Ok(None),
-            };
-            *RESULT_SLOT.lock().unwrap() = Some(outcome);
+        Message::PassthroughEnabled => {
+            state.mouse_passthrough_active = true;
+            Task::none()
+        }
+        Message::PassthroughDisabledThenExit => {
+            state.mouse_passthrough_active = false;
             iced::exit()
         }
-        OverlayEffect::Cancel => {
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
-                driver.cancel();
-            }
-            *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
-            iced::exit()
-        }
-        OverlayEffect::EnablePassthrough | OverlayEffect::DisablePassthrough => Task::none(),
     }
 }
 

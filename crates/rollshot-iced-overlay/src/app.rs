@@ -32,6 +32,7 @@ pub(crate) enum OverlayEffect {
 #[allow(dead_code)]
 pub(crate) enum OverlayMessage {
     IcedEvent(iced::Event),
+    WindowOpened { id: window::Id, size: Size },
     Finish,
     Cancel,
     LiveEvent(crate::driver::LiveOverlayEvent),
@@ -52,6 +53,9 @@ pub(crate) struct OverlayState {
     pub(crate) crop: Option<Rectangle>,
     pub(crate) crop_confirmed: bool,
     pub(crate) preview: Option<image::Handle>,
+    pub(crate) window_id: Option<window::Id>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) mouse_passthrough_active: bool,
     pub(crate) window_size: Option<Size>,
     pub(crate) capture_miss_warn: bool,
     pub(crate) capture_miss_message_expires_at: Option<std::time::Instant>,
@@ -471,6 +475,11 @@ pub(crate) fn preview_stream(
 #[allow(dead_code)]
 pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> OverlayEffect {
     match message {
+        OverlayMessage::WindowOpened { id, size } => {
+            state.window_id = Some(id);
+            state.window_size = Some(size);
+            OverlayEffect::None
+        }
         OverlayMessage::IcedEvent(Event::Window(window::Event::Opened { size, .. })) => {
             state.window_size = Some(size);
             OverlayEffect::None
@@ -678,5 +687,18 @@ mod tests {
         let effect = super::update(&mut state, OverlayMessage::Finish);
         assert_eq!(effect, super::OverlayEffect::None);
         assert!(state.warning().is_some());
+    }
+
+    #[test]
+    fn window_opened_records_window_id_and_size() {
+        let mut state = OverlayState::default();
+        let id = iced::window::Id::unique();
+        let size = Size::new(1440.0, 900.0);
+
+        let effect = super::update(&mut state, OverlayMessage::WindowOpened { id, size });
+
+        assert_eq!(effect, super::OverlayEffect::None);
+        assert_eq!(state.window_id, Some(id));
+        assert_eq!(state.window_size, Some(size));
     }
 }
