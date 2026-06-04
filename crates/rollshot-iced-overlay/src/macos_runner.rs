@@ -193,8 +193,22 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
     let source_size = driver.source_size();
     *DRIVER_SLOT.lock().unwrap() = Some(driver);
 
+    // iced window sizes are logical points but `source_size` is physical
+    // pixels; on a Retina display creating the window at `source_size` makes it
+    // `scale`× oversized and collapses `map_crop_to_frame`'s scale ratio to 1.0
+    // (the crop then captures only the top-left fraction of the selection).
+    // Size the window at the logical screen size so it covers the display 1:1
+    // and the crop maps at the true device scale.
+    let scale = crate::macos_window::main_screen_scale_factor()
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    let window_size = iced::Size::new(
+        source_size.width as f32 / scale as f32,
+        source_size.height as f32 / scale as f32,
+    );
+
     let settings = window::Settings {
-        size: iced::Size::new(source_size.width as f32, source_size.height as f32),
+        size: window_size,
         position: window::Position::Specific(iced::Point::ORIGIN),
         decorations: false,
         transparent: true,
