@@ -2,10 +2,10 @@
 
 `rollshot` is a Rust rewrite of the long screenshot workflow described in
 `rollshot_mvp_design.md`. The project has a platform-independent stitching
-core, fixture-backed capture tests, and a feature-gated macOS
-ScreenCaptureKit backend built through a `scap`-compatible crate. The Linux
-Wayland portal backend is available on systems with ScreenCast portal and
-PipeWire support.
+core, fixture-backed capture tests, and a macOS ScreenCaptureKit backend
+(platform-default on macOS) built through a `scap`-compatible crate. The
+Linux Wayland portal backend is available on systems with ScreenCast portal
+and PipeWire support.
 
 ## Workspace
 
