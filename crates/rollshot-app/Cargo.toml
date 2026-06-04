@@ -17,7 +17,7 @@ iced = { version = "0.14", features = ["tokio"] }
 # AppKit backend on macOS and the gtk3 backend on Linux (already required by the
 # Tauri host); the async-only xdg-portal backend can't back the blocking call.
 image = { workspace = true }
-rfd = "0.16"
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 serde_json = { workspace = true }
