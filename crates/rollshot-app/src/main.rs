@@ -1,9 +1,7 @@
 mod launch;
-mod overlay_selection;
 mod save;
 
 use launch::LaunchMode;
-use overlay_selection::{resolve_overlay_runner, OverlayRunner};
 
 fn main() {
     let launch_mode = match launch::parse_launch_args(std::env::args()) {
@@ -16,15 +14,7 @@ fn main() {
 
     match launch_mode {
         LaunchMode::Capture(options) => {
-            match resolve_overlay_runner(std::env::consts::OS, options.overlay_mode) {
-                OverlayRunner::Iced => run_iced_capture(options),
-                OverlayRunner::Tauri => {
-                    eprintln!(
-                        "selected overlay mode resolves to the retained Tauri overlay; run rollshot-tauri-app or pass overlay_mode=\"iced\" for the iced validation path"
-                    );
-                    std::process::exit(2);
-                }
-            }
+            run_iced_capture(options);
         }
         LaunchMode::SaveDialogTemp(path) => {
             if let Err(err) = run_save_dialog_helper(&path) {
