@@ -109,7 +109,8 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                    window::enable_mouse_passthrough(window_id).map(|_| Message::PassthroughEnabled)
+                    window::enable_mouse_passthrough(window_id)
+                        .chain(Task::done(Message::PassthroughEnabled))
                 }
                 OverlayEffect::Finish => {
                     let should_disable_passthrough = state.mouse_passthrough_active;
@@ -123,7 +124,7 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     if should_disable_passthrough {
                         if let Some(id) = window_id {
                             return window::disable_mouse_passthrough(id)
-                                .map(|_| Message::PassthroughDisabledThenExit);
+                                .chain(Task::done(Message::PassthroughDisabledThenExit));
                         }
                     }
                     iced::exit()
@@ -138,20 +139,19 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     if should_disable_passthrough {
                         if let Some(id) = window_id {
                             return window::disable_mouse_passthrough(id)
-                                .map(|_| Message::PassthroughDisabledThenExit);
+                                .chain(Task::done(Message::PassthroughDisabledThenExit));
                         }
                     }
                     iced::exit()
                 }
                 OverlayEffect::EnablePassthrough => match state.window_id {
-                    Some(id) => {
-                        window::enable_mouse_passthrough(id).map(|_| Message::PassthroughEnabled)
-                    }
+                    Some(id) => window::enable_mouse_passthrough(id)
+                        .chain(Task::done(Message::PassthroughEnabled)),
                     None => Task::none(),
                 },
                 OverlayEffect::DisablePassthrough => match state.window_id {
                     Some(id) => window::disable_mouse_passthrough(id)
-                        .map(|_| Message::PassthroughDisabledThenExit),
+                        .chain(Task::done(Message::PassthroughDisabledThenExit)),
                     None => Task::none(),
                 },
             }
