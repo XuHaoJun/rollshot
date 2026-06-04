@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", feature = "macos-sck")))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use rollshot_capture::CaptureBackend;
 use rollshot_capture::{default_backend, CaptureProbe};
 use serde::Serialize;
@@ -69,7 +69,7 @@ fn build_report() -> ProbeReport {
         let backend = rollshot_capture::LinuxPortalBackend::new();
         backends.push(backend.probe().into());
     }
-    #[cfg(all(target_os = "macos", feature = "macos-sck"))]
+    #[cfg(target_os = "macos")]
     {
         let backend = rollshot_capture::MacosScreenCaptureKitBackend::new();
         backends.push(backend.probe().into());

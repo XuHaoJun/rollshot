@@ -27,10 +27,6 @@ tauri-plugin-dialog = "2"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
-[features]
-default = []
-macos-sck = ["rollshot-capture/macos-sck"]
-
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 

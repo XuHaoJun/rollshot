@@ -22,12 +22,5 @@ rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 serde_json = { workspace = true }
 
-[features]
-default = []
-macos-sck = [
-  "rollshot-capture/macos-sck",
-  "rollshot-iced-overlay/macos-sck",
-]
-
 [lints]
 workspace = true

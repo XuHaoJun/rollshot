@@ -21,9 +21,5 @@ objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 raw-window-handle = "0.6"
 
-[features]
-default = []
-macos-sck = ["rollshot-capture/macos-sck"]
-
 [lints.rust]
 unsafe_code = "deny"
