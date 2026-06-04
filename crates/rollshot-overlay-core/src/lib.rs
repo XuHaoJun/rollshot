@@ -1,5 +1,5 @@
 //! Platform-independent overlay UI logic shared between the Tauri webview
-//! overlay (`rollshot-app`) and the native iced overlay (`rollshot-overlay`):
+//! overlay (`rollshot-tauri-app`) and the native iced overlay (`rollshot-iced-overlay`):
 //! the live-preview viewport generator and the crop visual design tokens, so
 //! both render from one source of truth. No iced / Tauri / webview deps.
 //!

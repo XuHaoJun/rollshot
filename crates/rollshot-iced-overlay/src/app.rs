@@ -1,249 +1,75 @@
-use iced::widget::{button, canvas, column, container, image, row, text, Space};
-use iced::{
-    event, keyboard, mouse, window, Color, Element, Event, Length, Point, Rectangle, Size, Task,
-};
-use iced_layershell::actions::ActionCallback;
-use iced_layershell::build_pattern::application;
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
-use iced_layershell::settings::{LayerShellSettings, StartMode};
-use iced_layershell::to_layer_message;
-use iced_layershell::Settings;
-
 use iced::futures::StreamExt;
-use std::sync::Mutex;
-
-use crate::coords::LogicalRect;
-use crate::driver::Driver;
-use crate::CaptureResult;
-use crate::OverlayConfig;
-use crate::OverlayError;
+use iced::widget::{button, canvas, column, container, image, row, text, Space};
+use iced::{keyboard, mouse, window, Color, Element, Event, Length, Point, Rectangle, Size};
 use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
+use std::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PreviewConstraints {
-    pub(crate) fixed_width: u32,
-    pub(crate) max_height: u32,
-}
+static SHARED_PREVIEW_RX: Mutex<
+    Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>,
+> = Mutex::new(None);
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
+#[allow(dead_code)]
 const TOOLBAR_W: f32 = 300.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
-static PREVIEW_RX: Mutex<
-    Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>,
-> = Mutex::new(None);
-static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex::new(None);
-
-// Capture starts in `run()` before the overlay surface exists, so the portal
-// screen-share picker dialog appears + dismisses on a clean desktop and never
-// lands in a captured frame. The live Driver is stashed here for the update fn
-// to drive: `begin_stitch` on Finish, `finalize`/`cancel` on Esc.
-static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
-
-#[derive(Default)]
-pub struct Overlay {
-    drag_start: Option<Point>,
-    crop: Option<Rectangle>,
-    crop_confirmed: bool,
-    preview: Option<image::Handle>,
-    window_size: Option<iced::Size>,
-    capture_miss_warn: bool,
-    capture_miss_message_expires_at: Option<std::time::Instant>,
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum OverlayEffect {
+    None,
+    BeginStitch,
+    Finish,
+    Cancel,
+    EnablePassthrough,
+    DisablePassthrough,
 }
 
-#[to_layer_message]
 #[derive(Debug, Clone)]
-pub enum Message {
-    IcedEvent(Event),
+#[allow(dead_code)]
+pub(crate) enum OverlayMessage {
+    IcedEvent(iced::Event),
+    WindowOpened { id: window::Id, size: Size },
     Finish,
     Cancel,
     LiveEvent(crate::driver::LiveOverlayEvent),
     Tick,
 }
 
-fn namespace() -> String {
-    "rollshot-overlay".to_string()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) struct PreviewConstraints {
+    pub(crate) fixed_width: u32,
+    pub(crate) max_height: u32,
 }
 
-fn preview_stream() -> iced::Subscription<Message> {
-    iced::Subscription::run(|| {
-        let rx = PREVIEW_RX
-            .lock()
-            .unwrap()
-            .take()
-            .expect("preview channel already consumed");
-
-        rx.map(Message::LiveEvent)
-    })
+#[derive(Default)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) struct OverlayState {
+    pub(crate) drag_start: Option<Point>,
+    pub(crate) crop: Option<Rectangle>,
+    pub(crate) crop_confirmed: bool,
+    pub(crate) preview: Option<image::Handle>,
+    pub(crate) window_id: Option<window::Id>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) mouse_passthrough_active: bool,
+    pub(crate) window_size: Option<Size>,
+    pub(crate) capture_miss_warn: bool,
+    pub(crate) capture_miss_message_expires_at: Option<std::time::Instant>,
 }
 
-fn subscription(_: &Overlay) -> iced::Subscription<Message> {
-    iced::Subscription::batch([
-        event::listen().map(Message::IcedEvent),
-        preview_stream(),
-        iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick),
-    ])
-}
-
-fn update(state: &mut Overlay, message: Message) -> Task<Message> {
-    match message {
-        Message::IcedEvent(Event::Window(window::Event::Opened { size, .. })) => {
-            state.window_size = Some(size);
-            Task::none()
-        }
-        Message::IcedEvent(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)))
-            if !state.crop_confirmed =>
-        {
-            state.drag_start = Some(Point::ORIGIN);
-            state.crop = None;
-            Task::none()
-        }
-        Message::IcedEvent(Event::Mouse(mouse::Event::CursorMoved { position })) => {
-            if let Some(start) = state.drag_start {
-                if start == Point::ORIGIN && state.crop.is_none() {
-                    state.drag_start = Some(position);
-                }
-                if let Some(start) = state.drag_start {
-                    let x = start.x.min(position.x);
-                    let y = start.y.min(position.y);
-                    let w = (position.x - start.x).abs();
-                    let h = (position.y - start.y).abs();
-                    state.crop = Some(Rectangle {
-                        x,
-                        y,
-                        width: w,
-                        height: h,
-                    });
-                }
-            }
-            Task::none()
-        }
-        Message::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))) => {
-            state.drag_start = None;
-            if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
-            {
-                Task::done(Message::Finish)
-            } else {
-                Task::none()
-            }
-        }
-        Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
-            key: keyboard::Key::Named(keyboard::key::Named::Escape),
-            ..
-        })) => {
-            let driver = DRIVER_SLOT.lock().unwrap().take();
-            let outcome = match (state.crop_confirmed, driver) {
-                // Capturing: stop the threads and produce the finalized result.
-                (true, Some(driver)) => driver.finalize().map(Some),
-                // Esc before a crop was confirmed: cancel + tear down capture.
-                (false, Some(driver)) => {
-                    driver.cancel();
-                    Ok(None)
-                }
-                (_, None) => Ok(None),
-            };
-            *RESULT_SLOT.lock().unwrap() = Some(outcome);
-            iced::exit()
-        }
-        Message::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
-            key: keyboard::Key::Named(keyboard::key::Named::Enter),
-            ..
-        })) if !state.crop_confirmed && state.crop.is_some() => Task::done(Message::Finish),
-        Message::Finish => {
-            // Ignore duplicate Finish (e.g. double-click / repeated Enter): the
-            // crop is already confirmed and stitching has begun.
-            if state.crop_confirmed {
-                return Task::none();
-            }
-            // Require a non-empty crop; otherwise keep selecting.
-            let crop = match state.crop {
-                Some(c) if c.width >= 1.0 && c.height >= 1.0 => c,
-                _ => return Task::none(),
-            };
-            // Require a known surface size — it is the denominator of the
-            // crop->frame scale, so a missing one would silently mis-scale.
-            let ws = match state.window_size {
-                Some(ws) => ws,
-                None => {
-                    *RESULT_SLOT.lock().unwrap() = Some(Err(
-                        "overlay surface size unknown (no Window::Opened event)".to_string(),
-                    ));
-                    return iced::exit();
-                }
-            };
-
-            state.crop_confirmed = true;
-
-            let crop_logical = LogicalRect {
-                x: crop.x,
-                y: crop.y,
-                width: crop.width,
-                height: crop.height,
-            };
-            let overlay_logical = rollshot_capture::Size {
-                width: ws.width as u32,
-                height: ws.height as u32,
-            };
-
-            // Capture is already running (started in `run()` before the overlay
-            // appeared, so the picker dialog is long gone). Just map the crop to
-            // frame pixels and start stitching live frames from here on.
-            let preview_constraints = preview_constraints(crop, ws);
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
-                driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
-            }
-
-            // Keep only the toolbar interactive (plan T6 S3); the crop interior
-            // + everything else passes through so the user can scroll the
-            // target. The toolbar sits in the chrome band outside the crop, so
-            // this never overlaps the crop region (spec P3.4).
-            let input_rect = toolbar_input_rect(crop, ws);
-            Task::done(Message::SetInputRegion(ActionCallback::new(
-                move |region| {
-                    if let Some((x, y, w, h)) = input_rect {
-                        region.add(x, y, w, h);
-                    }
-                },
-            )))
-        }
-        Message::Cancel => {
-            if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
-                driver.cancel();
-            }
-            *RESULT_SLOT.lock().unwrap() = Some(Ok(None));
-            iced::exit()
-        }
-        Message::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
-            state.preview = Some(handle);
-            Task::none()
-        }
-        Message::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
-            if miss.warn {
-                state.capture_miss_warn = true;
-                state.capture_miss_message_expires_at =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-            }
-            Task::none()
-        }
-        Message::Tick => {
-            if state
-                .capture_miss_message_expires_at
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-            {
-                state.capture_miss_warn = false;
-                state.capture_miss_message_expires_at = None;
-            }
-            Task::none()
-        }
-        _ => Task::none(),
+impl OverlayState {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn warning(&self) -> Option<&str> {
+        self.capture_miss_warn
+            .then_some(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING)
     }
 }
 
-fn token_color(c: tokens::Rgba) -> Color {
+pub(crate) fn token_color(c: tokens::Rgba) -> Color {
     Color::from_rgba(
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
@@ -252,7 +78,7 @@ fn token_color(c: tokens::Rgba) -> Color {
     )
 }
 
-fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Size); 4] {
+pub(crate) fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Size); 4] {
     let cx = crop.x.clamp(0.0, bounds.width);
     let cy = crop.y.clamp(0.0, bounds.height);
     let right = (crop.x + crop.width).clamp(0.0, bounds.width);
@@ -273,12 +99,12 @@ fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Size); 4] {
     ]
 }
 
-struct CropCanvas {
+pub(crate) struct CropCanvas {
     crop: Option<Rectangle>,
     confirmed: bool,
 }
 
-impl canvas::Program<Message> for CropCanvas {
+impl canvas::Program<OverlayMessage> for CropCanvas {
     type State = ();
 
     fn draw(
@@ -353,7 +179,7 @@ impl canvas::Program<Message> for CropCanvas {
     }
 }
 
-enum Band {
+pub(crate) enum Band {
     Top,
     Bottom,
     Left,
@@ -364,7 +190,7 @@ enum Band {
 /// (the portal grabs the whole monitor, this overlay surface included). Pick the
 /// largest band of screen *outside* the crop rectangle big enough to host chrome
 /// (spec P3.4); `None` if the crop leaves no usable room.
-fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<Band> {
+pub(crate) fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<Band> {
     let top = crop.y.max(0.0);
     let bottom = (window.height - (crop.y + crop.height)).max(0.0);
     let left = crop.x.max(0.0);
@@ -385,18 +211,18 @@ fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<Band> {
 /// Lay out `chrome` in the chosen band so it never overlaps the crop interior
 /// (which stays transparent + scroll-through during capture, spec P3.4); `None`
 /// if no band has room (caller hides the chrome).
-fn place_outside_crop<'a>(
+pub(crate) fn place_outside_crop<'a>(
     crop: Rectangle,
     window: iced::Size,
-    chrome: Element<'a, Message>,
-) -> Option<Element<'a, Message>> {
+    chrome: Element<'a, OverlayMessage>,
+) -> Option<Element<'a, OverlayMessage>> {
     let band = choose_chrome_band(crop, window)?;
     // Anchor the chrome to the crop's near edge so it hugs the crop like a
     // connected popover, on whichever side `choose_chrome_band` found room.
     let crop_x = crop.x.max(0.0);
     let crop_y = crop.y.max(0.0);
 
-    let placed: Element<'a, Message> = match band {
+    let placed: Element<'a, OverlayMessage> = match band {
         // Directly below the crop, left edge aligned to the crop; grows down.
         Band::Bottom => column![
             Space::new()
@@ -459,7 +285,15 @@ fn place_outside_crop<'a>(
 /// logical px. Plan T6 S3: only the toolbar stays interactive during capture;
 /// the crop interior + everything else passes through so the user can scroll the
 /// target. Clamped to the band, so it never enters the crop (spec P3.4).
-fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, i32, i32)> {
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn toolbar_input_rect(
+    crop: Rectangle,
+    window: iced::Size,
+) -> Option<(i32, i32, i32, i32)> {
+    if window.width <= 0.0 || window.height <= 0.0 {
+        return None;
+    }
+
     let band = choose_chrome_band(crop, window)?;
     let (x, y, w, h) = match band {
         Band::Top => (
@@ -493,10 +327,14 @@ fn toolbar_input_rect(crop: Rectangle, window: iced::Size) -> Option<(i32, i32, 
             )
         }
     };
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+
     Some((x as i32, y as i32, w as i32, h as i32))
 }
 
-fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
+pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
     let band = choose_chrome_band(crop, window);
     let (available_width, available_height) = match band {
         Some(Band::Top) => ((window.width - crop.x.max(0.0)).max(0.0), crop.y.max(0.0)),
@@ -522,7 +360,9 @@ fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraint
     }
 }
 
-fn magenta_toolbar<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+pub(crate) fn magenta_toolbar<'a>(
+    content: Element<'a, OverlayMessage>,
+) -> Element<'a, OverlayMessage> {
     container(content)
         .padding(8)
         .style(|_theme| container::Style {
@@ -532,7 +372,7 @@ fn magenta_toolbar<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
         .into()
 }
 
-fn view(state: &Overlay) -> Element<'_, Message> {
+pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     let canvas_widget = canvas(CropCanvas {
         crop: state.crop,
         confirmed: state.crop_confirmed,
@@ -557,7 +397,7 @@ fn view(state: &Overlay) -> Element<'_, Message> {
         let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
 
         // R5: toolbar is always first so toolbar_input_rect contract holds.
-        let warning: Option<Element<'_, Message>> = state.capture_miss_warn.then(|| {
+        let warning: Option<Element<'_, OverlayMessage>> = state.capture_miss_warn.then(|| {
             container(text(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING).size(14))
                 .padding(8)
                 .style(|_theme| container::Style {
@@ -573,7 +413,7 @@ fn view(state: &Overlay) -> Element<'_, Message> {
                 .into()
         });
 
-        let chrome: Element<'_, Message> = {
+        let chrome: Element<'_, OverlayMessage> = {
             let mut col = column![toolbar];
             col = col.spacing(CHROME_SPACING);
             if let Some(w) = warning {
@@ -598,7 +438,7 @@ fn view(state: &Overlay) -> Element<'_, Message> {
     };
     let toolbar = magenta_toolbar(
         row![
-            button("Cancel").on_press(Message::Cancel),
+            button("Cancel").on_press(OverlayMessage::Cancel),
             text(status).size(16),
         ]
         .spacing(12)
@@ -618,70 +458,156 @@ fn view(state: &Overlay) -> Element<'_, Message> {
     .into()
 }
 
-fn style(_state: &Overlay, theme: &iced::Theme) -> iced::theme::Style {
+pub(crate) fn style(_state: &OverlayState, theme: &iced::Theme) -> iced::theme::Style {
     iced::theme::Style {
         background_color: Color::TRANSPARENT,
         text_color: theme.palette().text,
     }
 }
 
-pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
-    let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+#[allow(dead_code)]
+pub(crate) fn preview_stream(
+    rx: iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>,
+) -> iced::Subscription<OverlayMessage> {
+    *SHARED_PREVIEW_RX.lock().unwrap() = Some(rx);
+    iced::Subscription::run(|| {
+        SHARED_PREVIEW_RX
+            .lock()
+            .unwrap()
+            .take()
+            .expect("preview channel already consumed")
+            .map(OverlayMessage::LiveEvent)
+    })
+}
 
-    *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
-    *DRIVER_SLOT.lock().unwrap() = None;
-    *RESULT_SLOT.lock().unwrap() = None;
-
-    // Start capture BEFORE building the overlay: the portal screen-share picker
-    // then appears (and dismisses) on a clean desktop, so it is never composited
-    // into a captured frame. Blocks until the user clicks Share and the first
-    // frame arrives.
-    let driver = Driver::start_capture(&config.backend, config.fps, config.show_cursor, preview_tx)
-        .map_err(OverlayError::Capture)?;
-    *DRIVER_SLOT.lock().unwrap() = Some(driver);
-
-    let run_result = application(Overlay::default, namespace, update, view)
-        .style(style)
-        .subscription(subscription)
-        .settings(Settings {
-            layer_settings: LayerShellSettings {
-                anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
-                layer: Layer::Overlay,
-                // -1 = extend to all anchored edges, covering the full output
-                // (panels/taskbars included). 0 would let the compositor shrink
-                // us to the work area, but the PipeWire capture is FullSource
-                // (whole monitor), so a shorter overlay inflates scale_y in
-                // map_crop_to_frame and over-captures below the crop (worse
-                // toward the bottom). Must match the capture's coordinate space.
-                exclusive_zone: -1,
-                size: None,
-                margin: (0, 0, 0, 0),
-                keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                start_mode: StartMode::Active,
-                events_transparent: false,
-            },
-            ..Default::default()
-        })
-        .run();
-
-    // Safety net: if the loop exited without finalize/cancel taking the driver,
-    // tear capture down so the PipeWire stream + reader thread don't leak.
-    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
-        driver.cancel();
-    }
-
-    run_result.map_err(|e| OverlayError::Overlay(e.to_string()))?;
-
-    // After the iced app exits cleanly, read the result slot.
-    match RESULT_SLOT.lock().unwrap().take().unwrap_or(Ok(None)) {
-        Ok(opt) => Ok(opt),
-        Err(e) => Err(OverlayError::Capture(e)),
+#[allow(dead_code)]
+pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> OverlayEffect {
+    match message {
+        OverlayMessage::WindowOpened { id, size } => {
+            state.window_id = Some(id);
+            state.window_size = Some(size);
+            OverlayEffect::None
+        }
+        OverlayMessage::IcedEvent(Event::Window(window::Event::Opened { size, .. })) => {
+            state.window_size = Some(size);
+            OverlayEffect::None
+        }
+        OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))) if !state.crop_confirmed => {
+            state.drag_start = Some(Point::ORIGIN);
+            state.crop = None;
+            OverlayEffect::None
+        }
+        OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::CursorMoved { position })) => {
+            if let Some(start) = state.drag_start {
+                if start == Point::ORIGIN && state.crop.is_none() {
+                    state.drag_start = Some(position);
+                }
+                if let Some(start) = state.drag_start {
+                    let x = start.x.min(position.x);
+                    let y = start.y.min(position.y);
+                    let w = (position.x - start.x).abs();
+                    let h = (position.y - start.y).abs();
+                    state.crop = Some(Rectangle {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                    });
+                }
+            }
+            OverlayEffect::None
+        }
+        OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        ))) => {
+            state.drag_start = None;
+            if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
+            {
+                state.crop_confirmed = true;
+                OverlayEffect::BeginStitch
+            } else {
+                OverlayEffect::None
+            }
+        }
+        OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        })) => {
+            if state.crop_confirmed {
+                OverlayEffect::Finish
+            } else {
+                OverlayEffect::Cancel
+            }
+        }
+        OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Enter),
+            ..
+        })) if !state.crop_confirmed
+            && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0) =>
+        {
+            state.crop_confirmed = true;
+            OverlayEffect::BeginStitch
+        }
+        OverlayMessage::Finish => {
+            // Ignore duplicate Finish (e.g. double-click / repeated Enter): the
+            // crop is already confirmed and stitching has begun.
+            if state.crop_confirmed {
+                return OverlayEffect::None;
+            }
+            // Require a non-empty crop; otherwise keep selecting.
+            if !state
+                .crop
+                .is_some_and(|c| c.width >= 1.0 && c.height >= 1.0)
+            {
+                state.capture_miss_warn = true;
+                state.capture_miss_message_expires_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                return OverlayEffect::None;
+            }
+            // Surface-size validation belongs to the platform runner (the
+            // Linux runner checks this before calling begin_stitch).
+            state.crop_confirmed = true;
+            // Input-region passthrough (plan T6 S3) is handled by the platform
+            // runner after transitioning to the confirmed phase. The toolbar
+            // sits in the chrome band outside the crop, so it never overlaps
+            // the crop region (spec P3.4).
+            OverlayEffect::BeginStitch
+        }
+        OverlayMessage::Cancel => OverlayEffect::Cancel,
+        OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
+            state.preview = Some(handle);
+            OverlayEffect::None
+        }
+        OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
+            if miss.warn {
+                state.capture_miss_warn = true;
+                state.capture_miss_message_expires_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            }
+            OverlayEffect::None
+        }
+        OverlayMessage::Tick => {
+            if state
+                .capture_miss_message_expires_at
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                state.capture_miss_warn = false;
+                state.capture_miss_message_expires_at = None;
+            }
+            OverlayEffect::None
+        }
+        _ => OverlayEffect::None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_mask_bands, preview_constraints, token_color};
+    use super::{
+        crop_mask_bands, preview_constraints, token_color, toolbar_input_rect, OverlayMessage,
+        OverlayState,
+    };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 
@@ -757,6 +683,18 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_input_rect_rejects_zero_window_size() {
+        let crop = Rectangle {
+            x: 10.0,
+            y: 80.0,
+            width: 100.0,
+            height: 100.0,
+        };
+
+        assert_eq!(toolbar_input_rect(crop, Size::new(0.0, 0.0)), None);
+    }
+
+    #[test]
     fn token_color_preserves_rgba_channels() {
         let color = token_color(rollshot_overlay_core::tokens::CROP_MASK);
 
@@ -764,5 +702,26 @@ mod tests {
         assert_eq!(color.g, 0.0);
         assert_eq!(color.b, 0.0);
         assert!((color.a - 0.24).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn finish_without_crop_requests_warning_not_effect() {
+        let mut state = OverlayState::default();
+        let effect = super::update(&mut state, OverlayMessage::Finish);
+        assert_eq!(effect, super::OverlayEffect::None);
+        assert!(state.warning().is_some());
+    }
+
+    #[test]
+    fn window_opened_records_window_id_and_size() {
+        let mut state = OverlayState::default();
+        let id = iced::window::Id::unique();
+        let size = Size::new(1440.0, 900.0);
+
+        let effect = super::update(&mut state, OverlayMessage::WindowOpened { id, size });
+
+        assert_eq!(effect, super::OverlayEffect::None);
+        assert_eq!(state.window_id, Some(id));
+        assert_eq!(state.window_size, Some(size));
     }
 }

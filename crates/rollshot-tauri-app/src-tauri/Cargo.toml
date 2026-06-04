@@ -1,5 +1,5 @@
 [package]
-name = "rollshot-app"
+name = "rollshot-tauri-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "rollshot-app"
+name = "rollshot-tauri-app"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -18,7 +18,7 @@ image = { workspace = true }
 rollshot-capture = { path = "../../rollshot-capture" }
 rollshot-core = { path = "../../rollshot-core" }
 rollshot-overlay-core = { path = "../../rollshot-overlay-core" }
-rollshot-overlay = { path = "../../rollshot-overlay" }
+rollshot-iced-overlay = { path = "../../rollshot-iced-overlay" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 raw-window-handle = "0.6"
@@ -26,10 +26,6 @@ tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 thiserror = { workspace = true }
 tokio = { workspace = true }
-
-[features]
-default = []
-macos-sck = ["rollshot-capture/macos-sck"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

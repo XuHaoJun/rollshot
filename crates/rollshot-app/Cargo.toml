@@ -1,0 +1,26 @@
+[package]
+name = "rollshot-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rollshot-app"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio"] }
+# Standalone save flow: native save dialog (rfd, the same crate
+# tauri-plugin-dialog wraps) + PNG write. rfd's blocking FileDialog uses the
+# AppKit backend on macOS and the gtk3 backend on Linux (already required by the
+# Tauri host); the async-only xdg-portal backend can't back the blocking call.
+image = { workspace = true }
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
+rollshot-capture = { path = "../rollshot-capture" }
+rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

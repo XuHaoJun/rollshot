@@ -1,6 +1,6 @@
 //! Crop selection visual design tokens. Canonical source of truth, mirrored in
-//! `crates/rollshot-app/src/App.css` `:root` and consumed by the iced overlay's
-//! `CropCanvas`. The token sync test in `rollshot-app/src-tauri` asserts the CSS
+//! `crates/rollshot-tauri-app/src/App.css` `:root` and consumed by the iced overlay's
+//! `CropCanvas`. The token sync test in `rollshot-tauri-app/src-tauri` asserts the CSS
 //! values still match these.
 
 /// An sRGB color: 8-bit channels + float alpha — the form both CSS

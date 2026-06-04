@@ -108,7 +108,7 @@ fn capture_interactive_forwards_app_failure() {
 fn write_fake_app(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = dir.join("fake-rollshot-app");
+    let path = dir.join("fake-rollshot-tauri-app");
     std::fs::write(
         &path,
         "#!/bin/sh\nprintf launched > \"$ROLLSHOT_FAKE_APP_MARKER\"\nexit 0\n",
@@ -124,7 +124,7 @@ fn write_fake_app(dir: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn write_fake_app(dir: &Path) -> PathBuf {
-    let path = dir.join("fake-rollshot-app.cmd");
+    let path = dir.join("fake-rollshot-tauri-app.cmd");
     std::fs::write(
         &path,
         "@echo off\r\n<nul set /p=launched > \"%ROLLSHOT_FAKE_APP_MARKER%\"\r\nexit /B 0\r\n",
@@ -137,7 +137,7 @@ fn write_fake_app(dir: &Path) -> PathBuf {
 fn write_failing_fake_app(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = dir.join("fake-rollshot-app-fail");
+    let path = dir.join("fake-rollshot-tauri-app-fail");
     std::fs::write(&path, "#!/bin/sh\nexit 1\n").expect("write failing fake app");
     let mut permissions = std::fs::metadata(&path)
         .expect("fake app metadata")
@@ -149,7 +149,7 @@ fn write_failing_fake_app(dir: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn write_failing_fake_app(dir: &Path) -> PathBuf {
-    let path = dir.join("fake-rollshot-app-fail.cmd");
+    let path = dir.join("fake-rollshot-tauri-app-fail.cmd");
     std::fs::write(&path, "@echo off\r\nexit /B 1\r\n").expect("write failing fake app");
     path
 }

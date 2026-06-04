@@ -58,7 +58,7 @@ fn macos_sck_backend_on_linux_exits_with_unsupported_code() {
 }
 
 #[test]
-#[cfg(all(target_os = "macos", feature = "macos-sck"))]
+#[cfg(target_os = "macos")]
 fn macos_sck_backend_rejects_portal_region_without_starting_capture() {
     let tempdir = temp_dir("macos-sck");
     let out = tempdir.join("out.png");
@@ -106,7 +106,7 @@ fn backend_auto_exits_with_host_appropriate_code() {
     }
     let output = command_output(&mut command);
 
-    let expected_code = if cfg!(all(target_os = "macos", feature = "macos-sck")) {
+    let expected_code = if cfg!(target_os = "macos") {
         // Hosted macOS CI must not start ScreenCaptureKit. `auto` still
         // resolves to macos-sck, and `portal` fails during argument validation
         // before backend startup.

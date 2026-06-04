@@ -7,7 +7,7 @@ pub mod types;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(all(target_os = "macos", feature = "macos-sck"))]
+#[cfg(target_os = "macos")]
 pub mod macos;
 
 pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
@@ -17,11 +17,11 @@ pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPortalBackend;
-#[cfg(all(target_os = "macos", feature = "macos-sck"))]
+#[cfg(target_os = "macos")]
 pub use macos::MacosScreenCaptureKitBackend;
 pub use types::{
     CaptureOptions, CaptureProbe, CapturedFrame, FrameMetadata, InteractiveLaunchOptions,
-    PixelFormat, Region, RegionMode, Size,
+    OverlayMode, PixelFormat, Region, RegionMode, Size,
 };
 
 #[cfg(all(test, target_os = "linux"))]

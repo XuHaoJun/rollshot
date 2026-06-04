@@ -14,7 +14,7 @@ here; an implementation plan is a separate, later step.
 ## 1. TL;DR
 
 Rollshot is **already ~50% migrated to iced**. The Linux capture overlay
-(`rollshot-overlay`) is a production iced + `iced_layershell` application — it carries
+(`rollshot-iced-overlay`) is a production iced + `iced_layershell` application — it carries
 all of the recent overlay/stitch-preview hardening (PRs #25–#28). The remaining
 non-iced UI is the **macOS overlay**, which is React-in-a-Tauri-webview. The two
 renderers already share their brain (`rollshot-overlay-core`, framework-neutral).
@@ -53,7 +53,7 @@ settings, and system tray — and for the future Windows target.
 
 ### Linux capture path — **already iced**
 
-- `rollshot-overlay` (`Cargo.toml`): `iced = "0.14"` (features `canvas`, `image`,
+- `rollshot-iced-overlay` (`Cargo.toml`): `iced = "0.14"` (features `canvas`, `image`,
   `tokio`) + `iced_layershell = "0.18"`, Linux-gated.
 - `overlay.rs` (~768 LoC) is built on `iced_layershell::build_pattern::application`,
   `to_layer_message`, `LayerShellSettings` (anchored full-screen `Layer::Overlay`,
@@ -80,7 +80,7 @@ settings, and system tray — and for the future Windows target.
                          rollshot-overlay-core   (one source of truth: viewport, crop tokens, capture-miss)
                           /                    \
    Linux: iced renderer  <                      >  macOS: React renderer
-   (rollshot-overlay,                              (CaptureOverlay.tsx + placement.ts,
+   (rollshot-iced-overlay,                          (CaptureOverlay.tsx + placement.ts,
     iced + iced_layershell)                         orchestrated by Tauri session.rs)
 ```
 
@@ -179,7 +179,7 @@ per platform.
 tested reimplementation of the macOS capture/stitch state machine. `driver.rs`'s own
 comments say so: *"matches the Tauri app default, session.rs:188-190"* (`driver.rs:67`)
 and *"Mirrors the crop+push+finalize of session.rs:199-212,214-231"* (`driver.rs:76`).
-`session.rs` (`SharedSession`/`AppSession`) and `rollshot-overlay/driver.rs` (`Driver`)
+`session.rs` (`SharedSession`/`AppSession`) and `rollshot-iced-overlay/driver.rs` (`Driver`)
 are two implementations of the same pipeline; only the **transport** differs:
 
 | | macOS (`session.rs`) | Linux (`driver.rs`) |
@@ -334,7 +334,7 @@ Rationale, in priority order:
 2. **An iced editor reuses the overlay's existing canvas muscle.** The hard editor
    interactions already exist on iced canvas/wgpu in the overlay: rubber-band
    selection, handle drag/resize, coordinate mapping, live image rendering
-   (`rollshot-overlay/coords.rs`, `overlay.rs`, plus `rollshot-overlay-core`). An
+   (`rollshot-iced-overlay/coords.rs`, `linux_runner.rs`, plus `rollshot-overlay-core`). An
    annotation editor is those primitives + annotation objects (arrow/rect/text/mosaic)
    + undo/redo. iced shares them directly; a React editor would re-derive the
    interaction logic in TS and share nothing with the iced overlay — maximizing the
@@ -371,7 +371,7 @@ future Windows), so for these goals iced is the correct call.
 1. **Spike (de-risk):** a throwaway macOS iced window proving transparency +
    always-on-top + input passthrough + wgpu live-preview streaming, driven by
    `rollshot-overlay-core`. Confirms §8 #1 and the §7 window behavior before committing.
-2. **macOS overlay port:** refactor `rollshot-overlay`'s view/update to be
+2. **macOS overlay port:** refactor `rollshot-iced-overlay`'s view/update to be
    runner-agnostic; add a macOS runner (transparent iced window + Cocoa patch) and move
    macOS capture orchestration out of `session.rs` into the iced flow. Reach
    overlay/stitch/save parity with Linux.

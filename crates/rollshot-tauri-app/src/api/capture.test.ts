@@ -45,10 +45,10 @@ describe('capture api wrappers', () => {
     })
 
     await expect(
-      runNativeCapture({ backend: 'auto', fps: 30, show_cursor: false }),
+      runNativeCapture({ backend: 'auto', fps: 30, show_cursor: false, overlay_mode: 'auto' }),
     ).resolves.toEqual({ image_width: 800, image_height: 1200, output_path: null })
     expect(invokeMock).toHaveBeenCalledWith('run_native_capture', {
-      options: { backend: 'auto', fps: 30, show_cursor: false },
+      options: { backend: 'auto', fps: 30, show_cursor: false, overlay_mode: 'auto' },
     })
   })
 
@@ -57,7 +57,7 @@ describe('capture api wrappers', () => {
     invokeMock.mockResolvedValueOnce(null)
 
     await expect(
-      runNativeCapture({ backend: 'auto', fps: 30, show_cursor: false }),
+      runNativeCapture({ backend: 'auto', fps: 30, show_cursor: false, overlay_mode: 'auto' }),
     ).resolves.toBeNull()
   })
 

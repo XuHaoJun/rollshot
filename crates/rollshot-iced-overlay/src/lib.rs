@@ -1,6 +1,9 @@
-//! Native Linux Wayland capture overlay (Phase 3). Linux-only behavior; the
-//! crate compiles to a stub on other targets so `cargo build --workspace`
-//! works everywhere.
+//! Iced capture overlay renderer.
+//!
+//! Linux currently uses the iced/layer-shell runner. macOS and Windows compile
+//! to an unsupported result until their normal-window runners land. The crate is
+//! named for the renderer framework so it can coexist with the retained Tauri
+//! overlay during validation.
 
 use image::RgbaImage;
 use rollshot_core::StitchStats;
@@ -43,21 +46,31 @@ impl std::fmt::Display for OverlayError {
 impl std::error::Error for OverlayError {}
 
 // TODO: uncomment these mod declarations as Tasks 3–7 land each module.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod app;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod coords;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod driver;
 #[cfg(target_os = "linux")]
-mod overlay;
+mod linux_runner;
+#[cfg(target_os = "macos")]
+mod macos_runner;
+#[cfg(target_os = "macos")]
+mod macos_window;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
 pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     #[cfg(target_os = "linux")]
     {
-        overlay::run(config)
+        linux_runner::run(config)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_runner::run(config)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = config;
         Err(OverlayError::Unsupported)

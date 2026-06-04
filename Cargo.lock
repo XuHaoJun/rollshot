@@ -5508,20 +5508,12 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 name = "rollshot-app"
 version = "0.1.0"
 dependencies = [
+ "iced",
  "image",
- "raw-window-handle",
+ "rfd",
  "rollshot-capture",
- "rollshot-core",
- "rollshot-overlay",
- "rollshot-overlay-core",
- "serde",
+ "rollshot-iced-overlay",
  "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "thiserror 1.0.69",
- "tokio",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5567,12 +5559,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "rollshot-overlay"
+name = "rollshot-iced-overlay"
 version = "0.1.0"
 dependencies = [
  "iced",
  "iced_layershell",
  "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "raw-window-handle",
  "rollshot-capture",
  "rollshot-core",
  "rollshot-overlay-core",
@@ -5585,6 +5581,26 @@ dependencies = [
  "image",
  "rollshot-core",
  "serde",
+]
+
+[[package]]
+name = "rollshot-tauri-app"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "raw-window-handle",
+ "rollshot-capture",
+ "rollshot-core",
+ "rollshot-iced-overlay",
+ "rollshot-overlay-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "thiserror 1.0.69",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

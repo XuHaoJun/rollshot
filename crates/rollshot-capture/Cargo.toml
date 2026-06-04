@@ -15,10 +15,6 @@ thiserror = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 
-[features]
-default = []
-macos-sck = ["dep:scap"]
-
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { workspace = true }
 nix = { workspace = true }
@@ -26,7 +22,7 @@ pipewire = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-scap = { workspace = true, optional = true }
+scap = { workspace = true }
 
 [lints.rust]
 unsafe_code = "deny"

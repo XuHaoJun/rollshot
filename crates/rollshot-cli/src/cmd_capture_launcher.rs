@@ -42,6 +42,7 @@ fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
         backend: args.backend.clone(),
         fps: args.fps,
         show_cursor: args.show_cursor,
+        overlay_mode: rollshot_capture::OverlayMode::Auto,
     }
 }
 
@@ -155,10 +156,9 @@ fn resolve_app_binary_from_env_and_exe(
     let app_path = bin_dir.join(default_app_binary_name());
     if !app_path.exists() {
         let hint = if is_cargo_target_dir(bin_dir) {
-            "hint: the GUI app must be built separately with the Tauri toolchain:\n  \
-             pnpm --dir crates/rollshot-app install\n  \
-             pnpm --dir crates/rollshot-app run tauri build --debug\n\
-             or use --headless to skip the GUI"
+            "hint: the GUI app must be built separately:\n  \
+ cargo build -p rollshot-app\n\
+ or use --headless to skip the GUI"
         } else {
             "hint: reinstall rollshot or set ROLLSHOT_APP to the GUI binary path"
         };
@@ -307,8 +307,13 @@ mod tests {
                 .expect_err("sibling missing in dev");
 
         assert!(err.message.contains("not found"), "{}", err.message);
-        assert!(err.message.contains("tauri"), "{}", err.message);
+        assert!(
+            err.message.contains("cargo build -p rollshot-app"),
+            "{}",
+            err.message
+        );
         assert!(err.message.contains("--headless"), "{}", err.message);
+        assert!(!err.message.contains("tauri"), "{}", err.message);
     }
 
     #[test]
@@ -318,6 +323,6 @@ mod tests {
 
         assert!(err.message.contains("not found"), "{}", err.message);
         assert!(err.message.contains("ROLLSHOT_APP"), "{}", err.message);
-        assert!(!err.message.contains("tauri"), "{}", err.message);
+        assert!(!err.message.contains("Tauri toolchain"), "{}", err.message);
     }
 }

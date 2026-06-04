@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use rollshot_capture::InteractiveLaunchOptions;
-use rollshot_overlay::{run_overlay, CaptureResult, OverlayConfig, OverlayError};
+use rollshot_iced_overlay::{run_overlay, CaptureResult, OverlayConfig, OverlayError};
 
 use crate::session::{DoneImageDto, SharedSession};
 
@@ -102,7 +102,7 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use rollshot_capture::InteractiveLaunchOptions;
     use rollshot_core::StitchStats;
-    use rollshot_overlay::{CaptureResult, OverlayError};
+    use rollshot_iced_overlay::{CaptureResult, OverlayError};
 
     use crate::session::SharedSession;
 
@@ -112,6 +112,7 @@ mod tests {
             backend: "linux-portal".to_string(),
             fps: 5,
             show_cursor: true,
+            overlay_mode: rollshot_capture::OverlayMode::Auto,
         });
         assert_eq!(config.backend, "linux-portal");
         assert_eq!(config.fps, 30);
@@ -124,6 +125,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 60,
             show_cursor: false,
+            overlay_mode: rollshot_capture::OverlayMode::Auto,
         });
         assert_eq!(config.fps, 60);
         assert_eq!(config.backend, "auto");

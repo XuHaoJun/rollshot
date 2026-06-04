@@ -3,10 +3,11 @@ target/
 .DS_Store
 .idea/
 .vscode/
+.superpowers/
 # Added by code-review-graph
 .code-review-graph/
-crates/rollshot-app/node_modules/
-crates/rollshot-app/dist/
+crates/rollshot-tauri-app/node_modules/
+crates/rollshot-tauri-app/dist/
 __pycache__/
 
 # Local benchmark artifacts. Accepted compare reports live under

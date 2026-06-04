@@ -1,4 +1,4 @@
-#![cfg(all(target_os = "macos", feature = "macos-sck"))]
+#![cfg(target_os = "macos")]
 
 use std::path::Path;
 

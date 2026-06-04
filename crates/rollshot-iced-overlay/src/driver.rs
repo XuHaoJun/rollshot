@@ -14,8 +14,8 @@ use iced::futures::channel::mpsc::UnboundedSender;
 use iced::widget::image::Handle as ImageHandle;
 use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, Size};
 
+use crate::app::PreviewConstraints;
 use crate::coords::LogicalRect;
-use crate::overlay::PreviewConstraints;
 
 use crate::CaptureResult;
 
@@ -42,18 +42,12 @@ fn should_emit_preview(signal: &StitchProgressSignal) -> bool {
 /// `FrameStream` is not `Send` because the Linux PipeWire backend holds
 /// `Rc`-based handles (thread-loop, stream, context, core).
 struct SendStream(Box<dyn FrameStream>);
-// SAFETY: the stream is *moved* wholesale onto the reader thread and is never
-// touched from any other thread afterwards, so the non-atomic `Rc` refcounts
-// inside the PipeWire handles are never mutated concurrently — there is no
-// cross-thread aliasing, only a one-time ownership transfer.
-// - next_frame() reads only the shared FrameQueue (Arc<Mutex<VecDeque>> +
-//   Condvar), which is Send+Sync (pipewire.rs: LinuxPortalFrameStream).
-// - Drop also runs on the reader thread: PipeWireConnection::drop calls
-//   thread_loop.stop() + stream.disconnect(). PipeWire allows stopping a
-//   thread-loop / disconnecting a stream from a thread other than the loop's
-//   own internal pthread, and PortalSession teardown dispatches its D-Bus
-//   close to a separate thread (portal.rs Drop). Since this thread is the sole
-//   remaining owner, the Rc drops resolve here with no concurrent access.
+// SAFETY: the frame stream is moved exactly once into one reader thread and is
+// never accessed from the creating thread afterward. All cancellation happens
+// through `AtomicBool` plus thread-join boundaries, so there is no concurrent
+// access to the stream's internals — regardless of whether the backend uses
+// `Rc`-based handles (Linux/PipeWire) or other non-`Send` primitives. The sole
+// owner lives and drops on the reader thread.
 #[allow(unsafe_code)]
 unsafe impl Send for SendStream {}
 
@@ -120,6 +114,7 @@ pub struct Driver {
     reader: Option<JoinHandle<()>>,
     stitch: Option<JoinHandle<()>>,
     source_size: Size,
+    overlay_logical: Size,
     preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
@@ -172,6 +167,9 @@ impl Driver {
                         Err(CaptureError::EndOfStream) => break,
                         Err(CaptureError::Timeout { .. }) => continue,
                         Err(err) => {
+                            if !should_record_reader_error(&stop) {
+                                break;
+                            }
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -190,6 +188,10 @@ impl Driver {
             reader: Some(reader),
             stitch: None,
             source_size,
+            overlay_logical: Size {
+                width: 0,
+                height: 0,
+            },
             preview_tx,
         })
     }
@@ -207,6 +209,7 @@ impl Driver {
         if self.stitch.is_some() {
             return;
         }
+        self.overlay_logical = overlay_logical;
         let region =
             crate::coords::map_crop_to_frame(crop_logical, overlay_logical, self.source_size);
         let shared = Arc::clone(&self.shared);
@@ -268,6 +271,14 @@ impl Driver {
         }));
     }
 
+    pub(crate) fn source_size(&self) -> Size {
+        self.source_size
+    }
+
+    pub(crate) fn overlay_size(&self) -> Size {
+        self.overlay_logical
+    }
+
     /// Signal both threads to stop and join them.
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -307,6 +318,10 @@ impl Driver {
             stats: stitcher.stats(),
         })
     }
+}
+
+fn should_record_reader_error(stop: &AtomicBool) -> bool {
+    !stop.load(Ordering::Relaxed)
 }
 
 /// Block until the reader stores the first frame, returning its `source_size`
@@ -386,6 +401,7 @@ mod tests {
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use rollshot_core::{StitchOutcome, Stitcher};
     use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::SystemTime;
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
@@ -542,5 +558,21 @@ mod tests {
             edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom,
         }));
         assert!(!should_emit_preview(&StitchProgressSignal::Idle));
+    }
+
+    #[test]
+    fn reader_error_after_stop_is_shutdown_noise() {
+        let stop = AtomicBool::new(true);
+
+        assert!(!super::should_record_reader_error(&stop));
+    }
+
+    #[test]
+    fn reader_error_before_stop_is_fatal() {
+        let stop = AtomicBool::new(false);
+
+        assert!(super::should_record_reader_error(&stop));
+        stop.store(true, Ordering::Relaxed);
+        assert!(!super::should_record_reader_error(&stop));
     }
 }
