@@ -4,8 +4,7 @@ use image::{ImageFormat, RgbaImage};
 
 /// Open a native "Save stitched PNG" dialog, mirroring the Tauri app's
 /// `promptSaveStitchedPng` (default name `rollshot.png`, PNG filter). Returns
-/// `None` when the user cancels. Runs on the main thread after the iced event
-/// loop has exited, so the modal panel has the run loop to itself.
+/// `None` when the user cancels.
 pub fn prompt_save_path() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Save stitched PNG")

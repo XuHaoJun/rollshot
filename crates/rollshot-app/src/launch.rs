@@ -1,8 +1,11 @@
+use std::path::PathBuf;
+
 use rollshot_capture::InteractiveLaunchOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
+    SaveDialogTemp(PathBuf),
 }
 
 pub fn parse_launch_args<I, S>(args: I) -> Result<LaunchMode, String>
@@ -18,6 +21,18 @@ where
             InteractiveLaunchOptions::default_capture(),
         ));
     };
+
+    if flag == "--save-dialog-temp" {
+        let Some(path) = args.next() else {
+            return Err("--save-dialog-temp requires a PNG path".to_string());
+        };
+        if let Some(extra) = args.next() {
+            return Err(format!(
+                "unexpected argument after save-dialog-temp path: '{extra}'"
+            ));
+        }
+        return Ok(LaunchMode::SaveDialogTemp(PathBuf::from(path)));
+    }
 
     if flag != "--capture" {
         return Err(format!("unknown rollshot-app argument '{flag}'"));
@@ -53,6 +68,7 @@ mod tests {
                 assert!(!options.show_cursor);
                 assert_eq!(options.overlay_mode, OverlayMode::Auto);
             }
+            LaunchMode::SaveDialogTemp(_) => panic!("expected capture mode"),
         }
     }
 
@@ -69,6 +85,20 @@ mod tests {
             LaunchMode::Capture(options) => {
                 assert_eq!(options.overlay_mode, OverlayMode::Iced);
             }
+            LaunchMode::SaveDialogTemp(_) => panic!("expected capture mode"),
+        }
+    }
+
+    #[test]
+    fn parses_save_dialog_temp_mode() {
+        let mode = parse_launch_args(["rollshot-app", "--save-dialog-temp", "/tmp/rollshot.png"])
+            .expect("parse launch args");
+
+        match mode {
+            LaunchMode::SaveDialogTemp(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/rollshot.png"))
+            }
+            LaunchMode::Capture(_) => panic!("expected save dialog mode"),
         }
     }
 

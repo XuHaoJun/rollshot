@@ -14,14 +14,23 @@ fn main() {
         }
     };
 
-    let LaunchMode::Capture(options) = launch_mode;
-    match resolve_overlay_runner(std::env::consts::OS, options.overlay_mode) {
-        OverlayRunner::Iced => run_iced_capture(options),
-        OverlayRunner::Tauri => {
-            eprintln!(
-                "selected overlay mode resolves to the retained Tauri overlay; run rollshot-tauri-app or pass overlay_mode=\"iced\" for the iced validation path"
-            );
-            std::process::exit(2);
+    match launch_mode {
+        LaunchMode::Capture(options) => {
+            match resolve_overlay_runner(std::env::consts::OS, options.overlay_mode) {
+                OverlayRunner::Iced => run_iced_capture(options),
+                OverlayRunner::Tauri => {
+                    eprintln!(
+                        "selected overlay mode resolves to the retained Tauri overlay; run rollshot-tauri-app or pass overlay_mode=\"iced\" for the iced validation path"
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+        LaunchMode::SaveDialogTemp(path) => {
+            if let Err(err) = run_save_dialog_helper(&path) {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -45,22 +54,60 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
     }
 }
 
-/// Prompt for a destination with a native save dialog (Option A) and write the
-/// stitched PNG, mirroring the Tauri app's Esc → save-prompt flow. Runs on the
-/// main thread after the iced event loop has exited, on both macOS and Linux.
+/// Save after the stitched result exists. The save dialog runs in a helper
+/// process so AppKit/rfd does not share state with the completed iced/winit
+/// event loop.
 fn handle_capture_result(result: rollshot_iced_overlay::CaptureResult) {
-    match save::prompt_save_path() {
-        Some(path) => match save::write_png(&result.image, &path) {
-            Ok(()) => println!("saved {}", path.display()),
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
-        },
-        None => println!(
-            "save cancelled ({}x{} captured, not written)",
-            result.image.width(),
-            result.image.height()
-        ),
+    if let Err(err) = save_result_via_helper(&result) {
+        eprintln!("{err}");
+        std::process::exit(1);
     }
+}
+
+fn save_result_via_helper(result: &rollshot_iced_overlay::CaptureResult) -> Result<(), String> {
+    let temp_path = temp_capture_path();
+    let save_result = save::write_png(&result.image, &temp_path).and_then(|()| {
+        let exe = std::env::current_exe()
+            .map_err(|err| format!("failed to resolve rollshot-app executable: {err}"))?;
+        let status = std::process::Command::new(exe)
+            .arg("--save-dialog-temp")
+            .arg(&temp_path)
+            .status()
+            .map_err(|err| format!("failed to launch save dialog helper: {err}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("save dialog helper exited with status {status}"))
+        }
+    });
+    std::fs::remove_file(&temp_path).ok();
+    save_result
+}
+
+fn run_save_dialog_helper(source: &std::path::Path) -> Result<(), String> {
+    match save::prompt_save_path() {
+        Some(destination) => {
+            std::fs::copy(source, &destination).map_err(|err| {
+                format!(
+                    "failed to write PNG to {} from {}: {err}",
+                    destination.display(),
+                    source.display()
+                )
+            })?;
+            println!("saved {}", destination.display());
+        }
+        None => println!("save cancelled (capture not written)"),
+    }
+    Ok(())
+}
+
+fn temp_capture_path() -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "rollshot-capture-{}-{unique}.png",
+        std::process::id()
+    ))
 }
