@@ -117,8 +117,6 @@ Prefer shared code when behavior must match both paths:
 
 - `crates/rollshot-overlay-core` for preview viewport logic and crop visual
   tokens.
-- `crates/rollshot-app/src/overlay_selection.rs` for the new iced product app's
-  overlay selector and validation-period fallback behavior.
 - `crates/rollshot-tauri-app/src-tauri/src/session.rs` for webview capture/session
   state and save/final-preview behavior.
 - `crates/rollshot-tauri-app/src-tauri/src/native_capture.rs` and
