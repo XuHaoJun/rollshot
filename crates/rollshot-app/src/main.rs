@@ -1,5 +1,6 @@
 mod launch;
 mod overlay_selection;
+mod save;
 
 use launch::LaunchMode;
 use overlay_selection::{resolve_overlay_runner, OverlayRunner};
@@ -33,14 +34,7 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
     };
 
     match rollshot_iced_overlay::run_overlay(config) {
-        Ok(Some(result)) => {
-            println!(
-                "captured {}x{} ({} frames)",
-                result.image.width(),
-                result.image.height(),
-                result.stats.frame_count
-            );
-        }
+        Ok(Some(result)) => handle_capture_result(result),
         Ok(None) => {
             println!("capture cancelled");
         }
@@ -48,5 +42,25 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
             eprintln!("{err}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Prompt for a destination with a native save dialog (Option A) and write the
+/// stitched PNG, mirroring the Tauri app's Esc → save-prompt flow. Runs on the
+/// main thread after the iced event loop has exited, on both macOS and Linux.
+fn handle_capture_result(result: rollshot_iced_overlay::CaptureResult) {
+    match save::prompt_save_path() {
+        Some(path) => match save::write_png(&result.image, &path) {
+            Ok(()) => println!("saved {}", path.display()),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        },
+        None => println!(
+            "save cancelled ({}x{} captured, not written)",
+            result.image.width(),
+            result.image.height()
+        ),
     }
 }
