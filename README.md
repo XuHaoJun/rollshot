@@ -12,15 +12,16 @@ PipeWire support.
 - `crates/rollshot-core`: platform-independent stitching concepts
 - `crates/rollshot-capture`: capture traits and frame metadata
 - `crates/rollshot-cli`: command-line interface
-- `crates/rollshot-tauri-app`: Tauri v2 interactive capture app with live preview
+- `crates/rollshot-app`: iced interactive capture app
+- `crates/rollshot-tauri-app`: deprecated Tauri v2 app retained temporarily as
+  legacy/reference code during the iced migration
 
 ### Desktop app crates during iced migration
 
-- `rollshot-app` is the iced product app.
-- `rollshot-tauri-app` is the retained Tauri/React app used as the macOS overlay
-  reference and fallback during validation.
-- `rollshot-iced-overlay` is the iced overlay renderer used by Linux today and
-  by the opt-in macOS iced overlay path as it lands.
+- `rollshot-app` is the active iced product app for interactive capture.
+- `rollshot-tauri-app` is deprecated and retained temporarily as legacy/reference
+  code. It is no longer the default product launch path.
+- `rollshot-iced-overlay` is the iced overlay renderer used by the active app.
 
 ## Local Development
 
@@ -43,6 +44,9 @@ The `rollshot-tauri-app` crate is a Tauri v2 app that needs WebKit, GTK, and X11
 development headers on Linux. On macOS it needs Xcode (or Xcode Command Line
 Tools) but no extra packages.
 
+This crate is deprecated and retained temporarily for reference during the iced
+migration.
+
 On Debian/Ubuntu:
 
 ```bash
@@ -51,7 +55,7 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev \
 ```
 
 These packages are not needed for the CLI (`rollshot-cli`) or capture library
-(`rollshot-capture`). They are only required when building `rollshot-tauri-app`.
+(`rollshot-capture`). They are only required to build the deprecated Tauri crate.
 
 ### Build & Test
 
@@ -182,11 +186,11 @@ validating a release on macOS:
   `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
 - [ ] Main display is visible and unlocked.
 - [ ] `mkdir -p target/test-artifacts` creates the artifact directory.
-- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- probe --json` reports `macos-sck`.
-- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli --no-default-features --features macos-sck -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --dump-frames target/test-artifacts/macos_frames --output target/test-artifacts/macos_region_stitched.png` writes frame dumps.
-- [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --no-default-features --features macos-sck --test macos_sck_smoke -- --ignored --nocapture` passes.
+- [ ] `cargo run -p rollshot-cli -- probe --json` reports `macos-sck`.
+- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
+- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --dump-frames target/test-artifacts/macos_frames --output target/test-artifacts/macos_region_stitched.png` writes frame dumps.
+- [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture` passes.
 - [ ] `target/test-artifacts/macos_sck_first_frame.png` exists and is visually plausible.
 
 If permission was just granted, restart the terminal before rerunning the
