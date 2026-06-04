@@ -19,3 +19,6 @@
 [submodule "learn-projects/exwlshelleventloop"]
 	path = learn-projects/exwlshelleventloop
 	url = https://github.com/waycrate/exwlshelleventloop.git
+[submodule "learn-projects/flameshot"]
+	path = learn-projects/flameshot
+	url = https://github.com/flameshot-org/flameshot.git
