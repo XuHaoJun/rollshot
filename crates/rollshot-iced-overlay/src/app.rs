@@ -34,6 +34,7 @@ pub(crate) enum OverlayMessage {
     IcedEvent(iced::Event),
     WindowOpened { id: window::Id, size: Size },
     Finish,
+    FinishCapture,
     Cancel,
     LiveEvent(crate::driver::LiveOverlayEvent),
     Tick,
@@ -550,6 +551,13 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
             state.crop_confirmed = true;
             OverlayEffect::BeginStitch
         }
+        OverlayMessage::FinishCapture => {
+            if state.crop_confirmed {
+                OverlayEffect::Finish
+            } else {
+                OverlayEffect::None
+            }
+        }
         OverlayMessage::Finish => {
             // Ignore duplicate Finish (e.g. double-click / repeated Enter): the
             // crop is already confirmed and stitching has begun.
@@ -723,5 +731,45 @@ mod tests {
         assert_eq!(effect, super::OverlayEffect::None);
         assert_eq!(state.window_id, Some(id));
         assert_eq!(state.window_size, Some(size));
+    }
+
+    #[test]
+    fn finish_capture_control_finishes_after_crop_is_confirmed() {
+        let mut state = OverlayState {
+            crop: Some(Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 120.0,
+                height: 80.0,
+            }),
+            crop_confirmed: true,
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(&mut state, OverlayMessage::FinishCapture);
+
+        assert_eq!(effect, super::OverlayEffect::Finish);
+    }
+
+    #[test]
+    fn selection_finish_still_validates_empty_crop() {
+        let mut state = OverlayState::default();
+
+        let effect = super::update(&mut state, OverlayMessage::Finish);
+
+        assert_eq!(effect, super::OverlayEffect::None);
+        assert!(state.warning().is_some());
+    }
+
+    #[test]
+    fn finish_capture_without_confirmed_crop_returns_none() {
+        let mut state = OverlayState {
+            crop_confirmed: false,
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(&mut state, OverlayMessage::FinishCapture);
+
+        assert_eq!(effect, super::OverlayEffect::None);
     }
 }
