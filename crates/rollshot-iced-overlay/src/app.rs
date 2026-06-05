@@ -17,6 +17,12 @@ const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
+const CAPTURE_STATUS_TEXT: &str = "Capturing - scroll the target";
+#[allow(dead_code)]
+const FOCUS_PAUSED_TEXT: &str = "Shortcuts paused - click Rollshot controls to restore Esc";
+const FINISH_LABEL: &str = "Finish";
+const CANCEL_LABEL: &str = "Cancel";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum OverlayEffect {
@@ -373,6 +379,19 @@ pub(crate) fn magenta_toolbar<'a>(
         .into()
 }
 
+pub(crate) fn capture_control_strip<'a>() -> Element<'a, OverlayMessage> {
+    magenta_toolbar(
+        row![
+            text(CAPTURE_STATUS_TEXT).size(16),
+            button(FINISH_LABEL).on_press(OverlayMessage::FinishCapture),
+            button(CANCEL_LABEL).on_press(OverlayMessage::Cancel),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    )
+}
+
 pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     let canvas_widget = canvas(CropCanvas {
         crop: state.crop,
@@ -384,11 +403,7 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     if state.crop_confirmed {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
-        let toolbar = magenta_toolbar(
-            text("Capturing — scroll the target, Esc to finish")
-                .size(16)
-                .into(),
-        );
+        let toolbar = capture_control_strip();
         let crop = state.crop.unwrap_or(Rectangle {
             x: 0.0,
             y: 0.0,
@@ -771,5 +786,16 @@ mod tests {
         let effect = super::update(&mut state, OverlayMessage::FinishCapture);
 
         assert_eq!(effect, super::OverlayEffect::None);
+    }
+
+    #[test]
+    fn capture_control_copy_matches_spec() {
+        assert_eq!(super::CAPTURE_STATUS_TEXT, "Capturing - scroll the target");
+        assert_eq!(
+            super::FOCUS_PAUSED_TEXT,
+            "Shortcuts paused - click Rollshot controls to restore Esc"
+        );
+        assert_eq!(super::FINISH_LABEL, "Finish");
+        assert_eq!(super::CANCEL_LABEL, "Cancel");
     }
 }
