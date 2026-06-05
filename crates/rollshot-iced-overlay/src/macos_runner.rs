@@ -226,7 +226,7 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
     }
 }
 
-fn theme(_: &MacOverlayState) -> iced::Theme {
+fn theme(_: &MacOverlayState, _: window::Id) -> iced::Theme {
     iced::Theme::Dark
 }
 
