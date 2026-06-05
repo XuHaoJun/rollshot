@@ -303,34 +303,42 @@ pub(crate) fn toolbar_input_rect(
 
     let band = choose_chrome_band(crop, window)?;
     let (x, y, w, h) = match band {
-        Band::Top => (
-            0.0,
-            0.0,
-            TOOLBAR_W.min(window.width),
-            TOOLBAR_H.min(crop.y.max(0.0)),
-        ),
+        Band::Top => {
+            let available_h = crop.y.max(0.0).min(window.height);
+            let h = TOOLBAR_H.min(available_h);
+            let x = crop.x.max(0.0).min(window.width);
+            let y = (available_h - h).max(0.0);
+            (x, y, TOOLBAR_W.min((window.width - x).max(0.0)), h)
+        }
         Band::Bottom => {
-            let by = crop.y + crop.height;
+            let by = (crop.y + crop.height).clamp(0.0, window.height);
+            let x = crop.x.max(0.0).min(window.width);
             (
-                0.0,
+                x,
                 by,
-                TOOLBAR_W.min(window.width),
+                TOOLBAR_W.min((window.width - x).max(0.0)),
                 TOOLBAR_H.min((window.height - by).max(0.0)),
             )
         }
-        Band::Left => (
-            0.0,
-            0.0,
-            TOOLBAR_W.min(crop.x.max(0.0)),
-            TOOLBAR_H.min(window.height),
-        ),
+        Band::Left => {
+            let available_w = crop.x.max(0.0).min(window.width);
+            let w = TOOLBAR_W.min(available_w);
+            let y = crop.y.max(0.0).min(window.height);
+            (
+                (available_w - w).max(0.0),
+                y,
+                w,
+                TOOLBAR_H.min((window.height - y).max(0.0)),
+            )
+        }
         Band::Right => {
-            let bx = crop.x + crop.width;
+            let bx = (crop.x + crop.width).clamp(0.0, window.width);
+            let y = crop.y.max(0.0).min(window.height);
             (
                 bx,
-                0.0,
+                y,
                 TOOLBAR_W.min((window.width - bx).max(0.0)),
-                TOOLBAR_H.min(window.height),
+                TOOLBAR_H.min((window.height - y).max(0.0)),
             )
         }
     };
@@ -731,6 +739,66 @@ mod tests {
 
         assert_eq!(rect.2, 360);
         assert!(rect.3 > 0);
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_bottom_band_toolbar() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 100.0,
+            width: 720.0,
+            height: 200.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (40, 300, 360, 50));
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_top_band_toolbar() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 300.0,
+            width: 720.0,
+            height: 260.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (40, 250, 360, 50));
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_left_band_toolbar() {
+        let crop = Rectangle {
+            x: 400.0,
+            y: 250.0,
+            width: 360.0,
+            height: 250.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (40, 250, 360, 50));
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_right_band_toolbar() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 250.0,
+            width: 200.0,
+            height: 250.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (240, 250, 360, 50));
     }
 
     #[test]

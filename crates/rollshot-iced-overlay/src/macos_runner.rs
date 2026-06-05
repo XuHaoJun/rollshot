@@ -2,7 +2,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use iced::futures::StreamExt;
-use iced::{event, window, Event, Task};
+use iced::widget::container;
+use iced::{event, window, Element, Event, Length, Point, Size, Task};
 
 use crate::app::{self, OverlayEffect, OverlayMessage, OverlayState};
 use crate::coords::LogicalRect;
@@ -18,9 +19,19 @@ static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 #[derive(Debug, Clone)]
 enum Message {
     Overlay(OverlayMessage),
+    WindowOpened { id: window::Id, size: Size },
+    OverlayWindowReady(window::Id),
+    ControlsWindowReady(window::Id),
     WindowPatched(Result<(), String>),
     PassthroughEnabled,
     PassthroughDisabledThenExit,
+}
+
+#[derive(Default)]
+struct MacOverlayState {
+    overlay: OverlayState,
+    overlay_window: Option<window::Id>,
+    controls_window: Option<window::Id>,
 }
 
 fn preview_stream() -> iced::Subscription<Message> {
@@ -34,7 +45,7 @@ fn preview_stream() -> iced::Subscription<Message> {
     })
 }
 
-fn subscription(_: &OverlayState) -> iced::Subscription<Message> {
+fn subscription(_: &MacOverlayState) -> iced::Subscription<Message> {
     iced::Subscription::batch([
         event::listen_with(overlay_event_message),
         preview_stream(),
@@ -49,12 +60,10 @@ fn overlay_event_message(
     window_id: window::Id,
 ) -> Option<Message> {
     match event {
-        Event::Window(window::Event::Opened { size, .. }) => {
-            Some(Message::Overlay(OverlayMessage::WindowOpened {
-                id: window_id,
-                size,
-            }))
-        }
+        Event::Window(window::Event::Opened { size, .. }) => Some(Message::WindowOpened {
+            id: window_id,
+            size,
+        }),
         event if status == event::Status::Ignored => {
             Some(Message::Overlay(OverlayMessage::IcedEvent(event)))
         }
@@ -62,24 +71,57 @@ fn overlay_event_message(
     }
 }
 
-fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
-    match message {
-        Message::Overlay(msg) => {
-            let opened_window_id = match &msg {
-                OverlayMessage::WindowOpened { id, .. } => Some(*id),
-                _ => None,
-            };
-            let effect = app::update(state, msg);
-            if let Some(id) = opened_window_id {
-                return window::run(id, crate::macos_window::apply_overlay_window_patch)
-                    .map(Message::WindowPatched);
-            }
+fn controls_window_settings(x: i32, y: i32, w: i32, h: i32) -> window::Settings {
+    window::Settings {
+        size: Size::new(w.max(1) as f32, h.max(1) as f32),
+        position: window::Position::Specific(Point::new(x.max(0) as f32, y.max(0) as f32)),
+        decorations: false,
+        transparent: true,
+        level: window::Level::AlwaysOnTop,
+        resizable: false,
+        ..window::Settings::default()
+    }
+}
 
+fn boot(settings: window::Settings) -> (MacOverlayState, Task<Message>) {
+    let (overlay_window, open_overlay) = window::open(settings);
+    (
+        MacOverlayState {
+            overlay_window: Some(overlay_window),
+            ..MacOverlayState::default()
+        },
+        open_overlay.map(Message::OverlayWindowReady),
+    )
+}
+
+fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
+    match message {
+        Message::WindowOpened { id, size } => {
+            let patch = window::run(id, crate::macos_window::apply_overlay_window_patch)
+                .map(Message::WindowPatched);
+            if Some(id) == state.overlay_window {
+                app::update(
+                    &mut state.overlay,
+                    OverlayMessage::WindowOpened { id, size },
+                );
+            }
+            patch
+        }
+        Message::OverlayWindowReady(id) => {
+            state.overlay_window = Some(id);
+            Task::none()
+        }
+        Message::ControlsWindowReady(id) => {
+            state.controls_window = Some(id);
+            Task::none()
+        }
+        Message::Overlay(msg) => {
+            let effect = app::update(&mut state.overlay, msg);
             match effect {
                 OverlayEffect::None => Task::none(),
                 OverlayEffect::BeginStitch => {
-                    let crop = state.crop.unwrap();
-                    let ws = match state.window_size {
+                    let crop = state.overlay.crop.unwrap();
+                    let ws = match state.overlay.window_size {
                         Some(ws) => ws,
                         None => {
                             *RESULT_SLOT.lock().unwrap() =
@@ -87,7 +129,7 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                             return iced::exit();
                         }
                     };
-                    let window_id = match state.window_id {
+                    let window_id = match state.overlay.window_id {
                         Some(id) => id,
                         None => {
                             *RESULT_SLOT.lock().unwrap() =
@@ -109,12 +151,23 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                    window::enable_mouse_passthrough(window_id)
-                        .chain(Task::done(Message::PassthroughEnabled))
+                    let passthrough = window::enable_mouse_passthrough(window_id)
+                        .chain(Task::done(Message::PassthroughEnabled));
+                    let controls = app::toolbar_input_rect(crop, ws).map(|(x, y, w, h)| {
+                        let (controls_window, open_controls) =
+                            window::open(controls_window_settings(x, y, w, h));
+                        state.controls_window = Some(controls_window);
+                        open_controls.map(Message::ControlsWindowReady)
+                    });
+
+                    match controls {
+                        Some(open_controls) => Task::batch([open_controls, passthrough]),
+                        None => passthrough,
+                    }
                 }
                 OverlayEffect::Finish => {
-                    let should_disable_passthrough = state.mouse_passthrough_active;
-                    let window_id = state.window_id;
+                    let should_disable_passthrough = state.overlay.mouse_passthrough_active;
+                    let window_id = state.overlay.window_id;
                     let driver = DRIVER_SLOT.lock().unwrap().take();
                     let outcome = match driver {
                         Some(driver) => driver.finalize().map(Some),
@@ -130,8 +183,8 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     iced::exit()
                 }
                 OverlayEffect::Cancel => {
-                    let should_disable_passthrough = state.mouse_passthrough_active;
-                    let window_id = state.window_id;
+                    let should_disable_passthrough = state.overlay.mouse_passthrough_active;
+                    let window_id = state.overlay.window_id;
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
                         driver.cancel();
                     }
@@ -144,12 +197,12 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
                     }
                     iced::exit()
                 }
-                OverlayEffect::EnablePassthrough => match state.window_id {
+                OverlayEffect::EnablePassthrough => match state.overlay.window_id {
                     Some(id) => window::enable_mouse_passthrough(id)
                         .chain(Task::done(Message::PassthroughEnabled)),
                     None => Task::none(),
                 },
-                OverlayEffect::DisablePassthrough => match state.window_id {
+                OverlayEffect::DisablePassthrough => match state.overlay.window_id {
                     Some(id) => window::disable_mouse_passthrough(id)
                         .chain(Task::done(Message::PassthroughDisabledThenExit)),
                     None => Task::none(),
@@ -163,22 +216,33 @@ fn update(state: &mut OverlayState, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::PassthroughEnabled => {
-            state.mouse_passthrough_active = true;
+            state.overlay.mouse_passthrough_active = true;
             Task::none()
         }
         Message::PassthroughDisabledThenExit => {
-            state.mouse_passthrough_active = false;
+            state.overlay.mouse_passthrough_active = false;
             iced::exit()
         }
     }
 }
 
-fn theme(_: &OverlayState) -> iced::Theme {
+fn theme(_: &MacOverlayState) -> iced::Theme {
     iced::Theme::Dark
 }
 
-fn view(state: &OverlayState) -> iced::Element<'_, Message> {
-    crate::app::view(state).map(Message::Overlay)
+fn style(state: &MacOverlayState, theme: &iced::Theme) -> iced::theme::Style {
+    app::style(&state.overlay, theme)
+}
+
+fn view(state: &MacOverlayState, window: window::Id) -> Element<'_, Message> {
+    if Some(window) == state.controls_window {
+        return container(app::capture_control_strip().map(Message::Overlay))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
+
+    crate::app::view(&state.overlay).map(Message::Overlay)
 }
 
 pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
@@ -217,11 +281,10 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
         ..window::Settings::default()
     };
 
-    let run_result = iced::application(OverlayState::default, update, view)
-        .window(settings)
+    let run_result = iced::daemon(move || boot(settings.clone()), update, view)
         .subscription(subscription)
         .theme(theme)
-        .style(app::style)
+        .style(style)
         .run();
 
     // Safety net: if the loop exited without finalize/cancel taking the driver,
