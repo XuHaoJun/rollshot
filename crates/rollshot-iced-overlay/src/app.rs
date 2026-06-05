@@ -11,7 +11,7 @@ static SHARED_PREVIEW_RX: Mutex<
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 #[allow(dead_code)]
-const TOOLBAR_W: f32 = 300.0;
+const TOOLBAR_W: f32 = 360.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
@@ -715,6 +715,22 @@ mod tests {
         };
 
         assert_eq!(toolbar_input_rect(crop, Size::new(0.0, 0.0)), None);
+    }
+
+    #[test]
+    fn toolbar_input_rect_uses_control_strip_width() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect.2, 360);
+        assert!(rect.3 > 0);
     }
 
     #[test]
