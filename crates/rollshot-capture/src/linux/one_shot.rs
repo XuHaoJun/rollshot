@@ -181,7 +181,10 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
             .build()
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("tokio runtime: {e}")))?;
 
-        let result: Result<zbus::zvariant::OwnedValue, CaptureError> = rt.block_on(async {
+        let result: Result<
+            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+            CaptureError,
+        > = rt.block_on(async {
             let connection = tokio::time::timeout(KWIN_DBUS_TIMEOUT, zbus::Connection::session())
                 .await
                 .map_err(|_| CaptureError::Timeout {
@@ -252,32 +255,23 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
             .join()
             .map_err(|_| CaptureError::Backend(anyhow::anyhow!("reader thread panicked")))??;
 
-        let metadata: zbus::zvariant::OwnedValue = result?;
-
-        // Parse metadata - the reply body is a Dict
-        let metadata_value: zbus::zvariant::Value = metadata.into();
-        let metadata_map: &zbus::zvariant::Dict = match &metadata_value {
-            zbus::zvariant::Value::Dict(d) => d,
-            _ => {
-                return Err(CaptureError::Mapping {
-                    message: "KWin reply is not a dict".to_string(),
-                });
-            }
-        };
+        // KWin's CaptureActiveScreen returns the metadata as a bare a{sv}
+        // vardict body (not a variant-wrapped dict).
+        let metadata_map = result?;
 
         // Extract metadata fields
-        let type_str = extract_string(metadata_map, "type")?;
+        let type_str = extract_string(&metadata_map, "type")?;
         if type_str != "raw" {
             return Err(CaptureError::Mapping {
                 message: format!("KWin returned unsupported type: {type_str}"),
             });
         }
 
-        let width = extract_u32(metadata_map, "width")?;
-        let height = extract_u32(metadata_map, "height")?;
-        let format = extract_u32(metadata_map, "format")?;
-        let scale = extract_f64(metadata_map, "scale")?;
-        let screen = extract_string(metadata_map, "screen")?;
+        let width = extract_u32(&metadata_map, "width")?;
+        let height = extract_u32(&metadata_map, "height")?;
+        let format = extract_u32(&metadata_map, "format")?;
+        let scale = extract_f64(&metadata_map, "scale")?;
+        let screen = extract_string(&metadata_map, "screen")?;
 
         // Validate byte count
         let expected_bytes = (width as u64)
@@ -311,18 +305,16 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
 }
 
 #[cfg(not(test))]
-fn extract_string(dict: &zbus::zvariant::Dict, key: &str) -> Result<String, CaptureError> {
-    use zbus::zvariant::Value;
-    let value = dict
-        .get(&key)
-        .map_err(|e| CaptureError::Mapping {
-            message: format!("failed to get '{key}' from KWin metadata: {e}"),
-        })?
-        .ok_or_else(|| CaptureError::Mapping {
-            message: format!("KWin metadata missing '{key}'"),
-        })?;
+type KwinMetadata = std::collections::HashMap<String, zbus::zvariant::OwnedValue>;
 
-    match value {
+#[cfg(not(test))]
+fn extract_string(map: &KwinMetadata, key: &str) -> Result<String, CaptureError> {
+    use zbus::zvariant::Value;
+    let value = map.get(key).ok_or_else(|| CaptureError::Mapping {
+        message: format!("KWin metadata missing '{key}'"),
+    })?;
+
+    match &**value {
         Value::Str(s) => Ok(s.to_string()),
         _ => Err(CaptureError::Mapping {
             message: format!("KWin metadata '{key}' is not a string"),
@@ -331,22 +323,17 @@ fn extract_string(dict: &zbus::zvariant::Dict, key: &str) -> Result<String, Capt
 }
 
 #[cfg(not(test))]
-fn extract_u32(dict: &zbus::zvariant::Dict, key: &str) -> Result<u32, CaptureError> {
+fn extract_u32(map: &KwinMetadata, key: &str) -> Result<u32, CaptureError> {
     use zbus::zvariant::Value;
-    let value = dict
-        .get(&key)
-        .map_err(|e| CaptureError::Mapping {
-            message: format!("failed to get '{key}' from KWin metadata: {e}"),
-        })?
-        .ok_or_else(|| CaptureError::Mapping {
-            message: format!("KWin metadata missing '{key}'"),
-        })?;
+    let value = map.get(key).ok_or_else(|| CaptureError::Mapping {
+        message: format!("KWin metadata missing '{key}'"),
+    })?;
 
-    match value {
-        Value::U32(v) => Ok(v),
+    match &**value {
+        Value::U32(v) => Ok(*v),
         Value::I32(v) => {
-            if v >= 0 {
-                Ok(v as u32)
+            if *v >= 0 {
+                Ok(*v as u32)
             } else {
                 Err(CaptureError::Mapping {
                     message: format!("KWin metadata '{key}' is negative: {v}"),
@@ -360,21 +347,16 @@ fn extract_u32(dict: &zbus::zvariant::Dict, key: &str) -> Result<u32, CaptureErr
 }
 
 #[cfg(not(test))]
-fn extract_f64(dict: &zbus::zvariant::Dict, key: &str) -> Result<f64, CaptureError> {
+fn extract_f64(map: &KwinMetadata, key: &str) -> Result<f64, CaptureError> {
     use zbus::zvariant::Value;
-    let value = dict
-        .get(&key)
-        .map_err(|e| CaptureError::Mapping {
-            message: format!("failed to get '{key}' from KWin metadata: {e}"),
-        })?
-        .ok_or_else(|| CaptureError::Mapping {
-            message: format!("KWin metadata missing '{key}'"),
-        })?;
+    let value = map.get(key).ok_or_else(|| CaptureError::Mapping {
+        message: format!("KWin metadata missing '{key}'"),
+    })?;
 
-    match value {
-        Value::F64(v) => Ok(v),
-        Value::I32(v) => Ok(v as f64),
-        Value::U32(v) => Ok(v as f64),
+    match &**value {
+        Value::F64(v) => Ok(*v),
+        Value::I32(v) => Ok(*v as f64),
+        Value::U32(v) => Ok(*v as f64),
         _ => Err(CaptureError::Mapping {
             message: format!("KWin metadata '{key}' is not a number"),
         }),

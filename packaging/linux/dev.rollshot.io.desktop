@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Rollshot
-Exec=rollshot-app
+Exec=/usr/bin/rollshot-app
 Icon=dev.rollshot.io
 Terminal=false
 Categories=Graphics;Utility;

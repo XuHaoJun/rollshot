@@ -177,29 +177,37 @@ picker must be clicked. Hosted CI must not run it.
 
 ### KDE Normal Screenshot Permission
 
-KDE Plasma requires a desktop entry that declares the restricted KWin
-`ScreenShot2` DBus interface. The file
-`packaging/linux/dev.rollshot.io.desktop` contains this declaration. Without
-it installed, KWin denies the screenshot request with a permission error.
+KDE Plasma restricts the KWin `ScreenShot2` DBus interface. KWin authorizes a
+caller by reading `/proc/<pid>/exe`, then searching installed desktop entries
+for one whose `Exec` first token canonicalizes to that exact executable path
+and declares `X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2`. There
+is **no `PATH` lookup** — the `Exec` path must be the absolute path of the
+running binary. Without a matching entry, KWin returns
+`org.kde.KWin.ScreenShot2.Error.NoAuthorized`.
 
-**User install** (no root required):
+`packaging/linux/dev.rollshot.io.desktop` declares the interface with
+`Exec=/usr/bin/rollshot-app`.
+
+**System install** (binary path matches `Exec`):
 
 ```bash
-install -Dm644 packaging/linux/dev.rollshot.io.desktop \
-  ~/.local/share/applications/dev.rollshot.io.desktop
-```
-
-**System install**:
-
-```bash
+sudo install -Dm755 target/release/rollshot-app /usr/bin/rollshot-app
 sudo install -Dm644 packaging/linux/dev.rollshot.io.desktop \
   /usr/share/applications/dev.rollshot.io.desktop
 ```
 
-After installing the desktop entry, the launched binary must match the `Exec`
-identity (`rollshot-app`). Running a development binary directly (e.g.
-`cargo run`) may receive an explicit permission error from KWin because the
-binary path does not match the registered desktop entry.
+**Local/dev install** (no root): install the binary under `~/.local/bin` and
+rewrite `Exec` to that absolute path so it matches `/proc/<pid>/exe`:
+
+```bash
+install -Dm755 target/release/rollshot-app ~/.local/bin/rollshot-app
+sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" \
+  packaging/linux/dev.rollshot.io.desktop \
+  > ~/.local/share/applications/dev.rollshot.io.desktop
+```
+
+Either way, launch the **installed** binary (the one whose path matches `Exec`),
+not a `cargo run` / `target/...` build, or KWin denies the request.
 
 #### `initial_mode` JSON
 
