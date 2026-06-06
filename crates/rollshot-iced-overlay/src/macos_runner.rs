@@ -388,34 +388,35 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
 
     *CAPTURE_MODE.lock().unwrap() = Some(config.initial_mode);
 
-    let (source_size, scale) = match &resource {
+    let (source_size, scale, display_id) = match &resource {
         CaptureResource::Streaming(driver) => {
             let source_size = driver.source_size();
-            *DRIVER_SLOT.lock().unwrap() = Some(
-                match resource {
-                    CaptureResource::Streaming(d) => d,
-                    _ => unreachable!(),
-                }
-            );
             let scale = crate::macos_window::main_screen_scale_factor()
                 .filter(|s| *s > 0.0)
                 .unwrap_or(1.0);
-            (source_size, scale)
+            (source_size, scale, None)
         }
         CaptureResource::OneShot(capture) => {
             let target = capture.target_display();
             let source_size = target.physical_size;
             let scale = target.physical_size.width as f64
                 / target.logical_region.width.max(1) as f64;
-            *ONE_SHOT_SLOT.lock().unwrap() = Some(
-                match resource {
-                    CaptureResource::OneShot(c) => c,
-                    _ => unreachable!(),
-                }
-            );
-            (source_size, scale)
+            let did = target
+                .output_name
+                .as_deref()
+                .and_then(|s| s.parse::<u32>().ok());
+            (source_size, scale, did)
         }
     };
+
+    match resource {
+        CaptureResource::Streaming(d) => {
+            *DRIVER_SLOT.lock().unwrap() = Some(d);
+        }
+        CaptureResource::OneShot(c) => {
+            *ONE_SHOT_SLOT.lock().unwrap() = Some(c);
+        }
+    }
 
     // iced window sizes are logical points but `source_size` is physical
     // pixels; on a Retina display creating the window at `source_size` makes it
@@ -428,9 +429,22 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
         source_size.height as f32 / scale as f32,
     );
 
+    let window_origin = match config.initial_mode {
+        CaptureMode::Screenshot => {
+            if let Some(did) = display_id {
+                let geom = crate::macos_window::display_screen_geometry(did)
+                    .map_err(OverlayError::Capture)?;
+                iced::Point::new(geom.logical_origin.0 as f32, geom.logical_origin.1 as f32)
+            } else {
+                iced::Point::ORIGIN
+            }
+        }
+        CaptureMode::Scrolling => iced::Point::ORIGIN,
+    };
+
     let settings = window::Settings {
         size: window_size,
-        position: window::Position::Specific(iced::Point::ORIGIN),
+        position: window::Position::Specific(window_origin),
         decorations: false,
         transparent: true,
         level: window::Level::AlwaysOnTop,
