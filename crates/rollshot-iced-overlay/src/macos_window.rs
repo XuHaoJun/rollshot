@@ -15,6 +15,7 @@ pub(crate) struct ScreenGeometry {
 /// matching `target_display_id` and return its geometry.
 ///
 /// Returns `None` if no screen matches the target ID.
+#[cfg(test)]
 pub(crate) fn resolve_display_screen(
     target_display_id: u32,
     screens: &[(u32, ScreenGeometry)],
