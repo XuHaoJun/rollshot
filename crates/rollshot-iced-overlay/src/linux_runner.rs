@@ -281,6 +281,21 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
         None => return Ok(None),
     };
 
+    // Defense-in-depth: reject KWin captures that somehow succeeded without an
+    // output name.  The backend should already enforce this, but the runner
+    // must not silently downgrade to StartMode::Active.
+    if let CaptureResource::OneShot(ref capture) = resource {
+        if capture.target_display().output_name.is_none() {
+            let kind = rollshot_capture::OneShotBackendKind::from_environment("auto")
+                .map_err(|e| OverlayError::Capture(e.to_string()))?;
+            if kind == rollshot_capture::OneShotBackendKind::LinuxKwin {
+                return Err(OverlayError::Capture(
+                    "KWin capture missing output name".to_string(),
+                ));
+            }
+        }
+    }
+
     *CAPTURE_MODE.lock().unwrap() = Some(config.initial_mode);
 
     let start_mode = match &resource {
