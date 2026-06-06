@@ -20,6 +20,7 @@ ashpd = { workspace = true }
 nix = { workspace = true }
 pipewire = { workspace = true }
 tokio = { workspace = true }
+zbus = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 scap = { workspace = true }

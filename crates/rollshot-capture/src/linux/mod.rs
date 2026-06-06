@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+mod kwin_screenshot;
+mod one_shot;
 mod pipewire;
 mod pixel;
 mod portal;
