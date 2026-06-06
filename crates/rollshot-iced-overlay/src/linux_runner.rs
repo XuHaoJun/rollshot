@@ -392,6 +392,7 @@ mod tests {
         .expect("test capture")
     }
 
+    #[allow(clippy::type_complexity)]
     fn fake_streaming_factory(
         streaming_count: &'static AtomicUsize,
     ) -> Box<

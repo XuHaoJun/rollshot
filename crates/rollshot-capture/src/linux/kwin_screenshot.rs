@@ -88,10 +88,7 @@ pub fn kwin_raw_to_rgba(capture: &KwinRawCapture) -> Result<RgbaImage, CaptureEr
 
     let format = QtImageFormat::from_qt_value(capture.qimage_format).ok_or_else(|| {
         CaptureError::Mapping {
-            message: format!(
-                "unsupported Qt image format: {}",
-                capture.qimage_format
-            ),
+            message: format!("unsupported Qt image format: {}", capture.qimage_format),
         }
     })?;
 
@@ -352,7 +349,10 @@ mod tests {
         };
         match kwin_raw_to_rgba(&capture) {
             Err(CaptureError::Mapping { message }) => {
-                assert!(message.contains("unsupported Qt image format"), "msg: {message}");
+                assert!(
+                    message.contains("unsupported Qt image format"),
+                    "msg: {message}"
+                );
             }
             other => panic!("expected Mapping error, got {other:?}"),
         }

@@ -399,8 +399,8 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
         CaptureResource::OneShot(capture) => {
             let target = capture.target_display();
             let source_size = target.physical_size;
-            let scale = target.physical_size.width as f64
-                / target.logical_region.width.max(1) as f64;
+            let scale =
+                target.physical_size.width as f64 / target.logical_region.width.max(1) as f64;
             let did = target
                 .output_name
                 .as_deref()

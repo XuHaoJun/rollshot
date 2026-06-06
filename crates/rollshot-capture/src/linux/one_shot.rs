@@ -18,10 +18,7 @@ impl<C: KwinScreenshotClient> LinuxKwinOneShotBackend<C> {
         Self { client }
     }
 
-    pub fn capture_once(
-        &mut self,
-        show_cursor: bool,
-    ) -> Result<OneShotCapture, CaptureError> {
+    pub fn capture_once(&mut self, show_cursor: bool) -> Result<OneShotCapture, CaptureError> {
         let raw = self.client.capture_active_screen(show_cursor)?;
 
         let screen_name = if raw.screen_name.is_empty() {
@@ -56,10 +53,7 @@ impl<C: KwinScreenshotClient> LinuxKwinOneShotBackend<C> {
                 width: logical_width,
                 height: logical_height,
             },
-            physical_size: Size {
-                width,
-                height,
-            },
+            physical_size: Size { width, height },
         };
 
         OneShotCapture::new(rgba, target)
@@ -107,22 +101,27 @@ impl Default for KwinScreenshotDBusClient {
 
 #[cfg(not(test))]
 impl KwinScreenshotClient for KwinScreenshotDBusClient {
-    fn capture_active_screen(
-        &self,
-        include_cursor: bool,
-    ) -> Result<KwinRawCapture, CaptureError> {
+    fn capture_active_screen(&self, include_cursor: bool) -> Result<KwinRawCapture, CaptureError> {
         use std::os::fd::AsFd;
 
         // Create a CLOEXEC pipe
-        let (read_fd, write_fd) = nix::unistd::pipe().map_err(|e| {
-            CaptureError::Backend(anyhow::anyhow!("pipe2() failed: {e}"))
-        })?;
+        let (read_fd, write_fd) = nix::unistd::pipe()
+            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("pipe2() failed: {e}")))?;
 
         // Build DBus options map
         let mut options = std::collections::HashMap::new();
-        options.insert("include-cursor".to_string(), zbus::zvariant::Value::Bool(include_cursor));
-        options.insert("native-resolution".to_string(), zbus::zvariant::Value::Bool(true));
-        options.insert("include-shadow".to_string(), zbus::zvariant::Value::Bool(false));
+        options.insert(
+            "include-cursor".to_string(),
+            zbus::zvariant::Value::Bool(include_cursor),
+        );
+        options.insert(
+            "native-resolution".to_string(),
+            zbus::zvariant::Value::Bool(true),
+        );
+        options.insert(
+            "include-shadow".to_string(),
+            zbus::zvariant::Value::Bool(false),
+        );
 
         // Spawn a bounded reader thread before making the DBus request.
         // This prevents a full pipe from deadlocking KWin.
@@ -144,10 +143,8 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
                 }
 
                 // Use nix::poll to check if data is available
-                let mut poll_fd = nix::poll::PollFd::new(
-                    reader.as_fd(),
-                    nix::poll::PollFlags::POLLIN,
-                );
+                let mut poll_fd =
+                    nix::poll::PollFd::new(reader.as_fd(), nix::poll::PollFlags::POLLIN);
                 let poll_timeout = (remaining.as_millis() as u16).min(100);
                 match nix::poll::poll(std::slice::from_mut(&mut poll_fd), poll_timeout) {
                     Ok(0) => continue, // timeout, try again
@@ -163,10 +160,7 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
                         bytes.extend_from_slice(&buf[..n]);
                         if bytes.len() > max_bytes {
                             return Err(CaptureError::Mapping {
-                                message: format!(
-                                    "KWin pipe data exceeds {} byte limit",
-                                    max_bytes
-                                ),
+                                message: format!("KWin pipe data exceeds {} byte limit", max_bytes),
                             });
                         }
                     }
@@ -188,32 +182,34 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("tokio runtime: {e}")))?;
 
         let result: Result<zbus::zvariant::OwnedValue, CaptureError> = rt.block_on(async {
-            let connection = tokio::time::timeout(
-                KWIN_DBUS_TIMEOUT,
-                zbus::Connection::session(),
-            )
-            .await
-            .map_err(|_| CaptureError::Timeout {
-                message: "KWin DBus connection timed out after 5s".to_string(),
-            })?
-            .map_err(|e| {
-                if e.to_string().contains("org.freedesktop.DBus.Error.ServiceUnknown") {
-                    CaptureError::Unsupported {
-                        message: "KWin ScreenShot2 service not available".to_string(),
+            let connection = tokio::time::timeout(KWIN_DBUS_TIMEOUT, zbus::Connection::session())
+                .await
+                .map_err(|_| CaptureError::Timeout {
+                    message: "KWin DBus connection timed out after 5s".to_string(),
+                })?
+                .map_err(|e| {
+                    if e.to_string()
+                        .contains("org.freedesktop.DBus.Error.ServiceUnknown")
+                    {
+                        CaptureError::Unsupported {
+                            message: "KWin ScreenShot2 service not available".to_string(),
+                        }
+                    } else if e
+                        .to_string()
+                        .contains("org.freedesktop.DBus.Error.AccessDenied")
+                    {
+                        CaptureError::PermissionDenied {
+                            message: format!("KWin DBus access denied: {e}"),
+                        }
+                    } else {
+                        CaptureError::Backend(anyhow::anyhow!("KWin DBus connection: {e}"))
                     }
-                } else if e.to_string().contains("org.freedesktop.DBus.Error.AccessDenied") {
-                    CaptureError::PermissionDenied {
-                        message: format!("KWin DBus access denied: {e}"),
-                    }
-                } else {
-                    CaptureError::Backend(anyhow::anyhow!("KWin DBus connection: {e}"))
-                }
-            })?;
+                })?;
 
             // Pass the write FD through zbus
-            let write_fd_clone = write_fd.try_clone().map_err(|e| {
-                CaptureError::Backend(anyhow::anyhow!("clone write fd: {e}"))
-            })?;
+            let write_fd_clone = write_fd
+                .try_clone()
+                .map_err(|e| CaptureError::Backend(anyhow::anyhow!("clone write fd: {e}")))?;
 
             let result = tokio::time::timeout(
                 KWIN_DBUS_TIMEOUT,
@@ -242,9 +238,10 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
                 }
             })?;
 
-            result.body().deserialize().map_err(|e| {
-                CaptureError::Backend(anyhow::anyhow!("deserialize KWin reply: {e}"))
-            })
+            result
+                .body()
+                .deserialize()
+                .map_err(|e| CaptureError::Backend(anyhow::anyhow!("deserialize KWin reply: {e}")))
         });
 
         // Close the write end so the reader can detect EOF
@@ -314,10 +311,7 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
 }
 
 #[cfg(not(test))]
-fn extract_string(
-    dict: &zbus::zvariant::Dict,
-    key: &str,
-) -> Result<String, CaptureError> {
+fn extract_string(dict: &zbus::zvariant::Dict, key: &str) -> Result<String, CaptureError> {
     use zbus::zvariant::Value;
     let value = dict
         .get(&key)
@@ -337,10 +331,7 @@ fn extract_string(
 }
 
 #[cfg(not(test))]
-fn extract_u32(
-    dict: &zbus::zvariant::Dict,
-    key: &str,
-) -> Result<u32, CaptureError> {
+fn extract_u32(dict: &zbus::zvariant::Dict, key: &str) -> Result<u32, CaptureError> {
     use zbus::zvariant::Value;
     let value = dict
         .get(&key)
@@ -369,10 +360,7 @@ fn extract_u32(
 }
 
 #[cfg(not(test))]
-fn extract_f64(
-    dict: &zbus::zvariant::Dict,
-    key: &str,
-) -> Result<f64, CaptureError> {
+fn extract_f64(dict: &zbus::zvariant::Dict, key: &str) -> Result<f64, CaptureError> {
     use zbus::zvariant::Value;
     let value = dict
         .get(&key)
@@ -446,7 +434,10 @@ mod tests {
         let result = backend.capture_once(false);
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         let capture = result.unwrap();
-        assert_eq!(capture.target_display().output_name.as_deref(), Some("eDP-1"));
+        assert_eq!(
+            capture.target_display().output_name.as_deref(),
+            Some("eDP-1")
+        );
         assert_eq!(capture.image().width(), 1);
         assert_eq!(capture.image().height(), 1);
     }
@@ -482,10 +473,7 @@ mod tests {
         let mut backend = LinuxKwinOneShotBackend::new(client);
         match backend.capture_once(false) {
             Err(CaptureError::PermissionDenied { message }) => {
-                assert!(
-                    message.contains("PermissionDenied"),
-                    "msg: {message}"
-                );
+                assert!(message.contains("PermissionDenied"), "msg: {message}");
             }
             other => panic!("expected PermissionDenied, got {other:?}"),
         }
@@ -548,7 +536,10 @@ mod tests {
         let mut backend = LinuxKwinOneShotBackend::new(client);
         match backend.capture_once(false) {
             Err(CaptureError::Mapping { message }) => {
-                assert!(message.contains("unsupported Qt image format"), "msg: {message}");
+                assert!(
+                    message.contains("unsupported Qt image format"),
+                    "msg: {message}"
+                );
             }
             other => panic!("expected Mapping error, got {other:?}"),
         }

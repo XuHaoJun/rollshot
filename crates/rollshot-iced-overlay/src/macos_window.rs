@@ -67,9 +67,7 @@ pub(crate) fn display_screen_geometry(target_display_id: u32) -> Result<ScreenGe
 
 /// Extract the `NSScreenNumber` from an `NSDeviceDescription` dictionary.
 #[cfg(target_os = "macos")]
-fn get_screen_number_from_description(
-    desc: &objc2_app_kit::NSDeviceDescription,
-) -> Option<u32> {
+fn get_screen_number_from_description(desc: &objc2_app_kit::NSDeviceDescription) -> Option<u32> {
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSString;
 
@@ -145,7 +143,14 @@ fn apply_overlay_window_patch_impl(handle: &dyn window::Window) -> Result<(), St
 mod tests {
     use super::*;
 
-    fn screen(display_id: u32, x: f64, y: f64, w: f64, h: f64, scale: f64) -> (u32, ScreenGeometry) {
+    fn screen(
+        display_id: u32,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        scale: f64,
+    ) -> (u32, ScreenGeometry) {
         (
             display_id,
             ScreenGeometry {
