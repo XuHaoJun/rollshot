@@ -1,5 +1,5 @@
 use crate::error::CaptureError;
-use crate::one_shot::{DisplayTarget, OneShotCapture, OneShotCaptureBackend};
+use crate::one_shot::{DisplayTarget, OneShotCapture};
 use crate::types::{Region, Size};
 
 use super::kwin_screenshot::{kwin_raw_to_rgba, KwinRawCapture, KwinScreenshotClient};
@@ -67,7 +67,7 @@ impl<C: KwinScreenshotClient> LinuxKwinOneShotBackend<C> {
 }
 
 #[cfg(not(test))]
-impl OneShotCaptureBackend for LinuxKwinOneShotBackend<KwinScreenshotDBusClient> {
+impl crate::one_shot::OneShotCaptureBackend for LinuxKwinOneShotBackend<KwinScreenshotDBusClient> {
     fn capture_once(&mut self, show_cursor: bool) -> Result<OneShotCapture, CaptureError> {
         self.capture_once(show_cursor)
     }
@@ -95,6 +95,13 @@ pub struct KwinScreenshotDBusClient;
 impl KwinScreenshotDBusClient {
     pub fn new() -> Self {
         Self
+    }
+}
+
+#[cfg(not(test))]
+impl Default for KwinScreenshotDBusClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -251,11 +258,7 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
         let metadata: zbus::zvariant::OwnedValue = result?;
 
         // Parse metadata - the reply body is a Dict
-        let metadata_value: zbus::zvariant::Value = metadata.try_into().map_err(|e| {
-            CaptureError::Mapping {
-                message: format!("KWin reply is not a value: {e}"),
-            }
-        })?;
+        let metadata_value: zbus::zvariant::Value = metadata.into();
         let metadata_map: &zbus::zvariant::Dict = match &metadata_value {
             zbus::zvariant::Value::Dict(d) => d,
             _ => {
