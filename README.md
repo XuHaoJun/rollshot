@@ -209,6 +209,20 @@ sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" \
 Either way, launch the **installed** binary (the one whose path matches `Exec`),
 not a `cargo run` / `target/...` build, or KWin denies the request.
 
+**One-shot dev run.** This single command builds the release binary, installs
+it to `~/.local/bin`, registers a desktop entry whose `Exec` points at that
+absolute path, refreshes the desktop database, then launches the installed
+binary in screenshot mode — copy-paste it from the repo root to capture on KDE:
+
+```bash
+cargo build --release -p rollshot-app \
+  && install -Dm755 target/release/rollshot-app ~/.local/bin/rollshot-app \
+  && sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" packaging/linux/dev.rollshot.io.desktop \
+       > ~/.local/share/applications/dev.rollshot.io.desktop \
+  && update-desktop-database ~/.local/share/applications 2>/dev/null; \
+  ~/.local/bin/rollshot-app --capture '{"backend":"auto","fps":30,"show_cursor":false,"initial_mode":"screenshot"}'
+```
+
 #### `initial_mode` JSON
 
 Interactive launch options accept an `initial_mode` field to choose between
