@@ -29,5 +29,5 @@ pub use types::{
     InteractiveLaunchOptions, OverlayMode, PixelFormat, Region, RegionMode, Size,
 };
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
