@@ -17,6 +17,8 @@ pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
 #[cfg(target_os = "linux")]
+pub use linux::one_shot::LinuxKwinOneShotBackend;
+#[cfg(target_os = "linux")]
 pub use linux::LinuxPortalBackend;
 #[cfg(target_os = "macos")]
 pub use macos::MacosScreenCaptureKitBackend;

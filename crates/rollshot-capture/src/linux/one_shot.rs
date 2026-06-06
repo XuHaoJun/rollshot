@@ -1,5 +1,5 @@
 use crate::error::CaptureError;
-use crate::one_shot::{DisplayTarget, OneShotCapture};
+use crate::one_shot::{DisplayTarget, OneShotCapture, OneShotCaptureBackend};
 use crate::types::{Region, Size};
 
 use super::kwin_screenshot::{kwin_raw_to_rgba, KwinRawCapture, KwinScreenshotClient};
@@ -63,6 +63,13 @@ impl<C: KwinScreenshotClient> LinuxKwinOneShotBackend<C> {
         };
 
         OneShotCapture::new(rgba, target)
+    }
+}
+
+#[cfg(not(test))]
+impl OneShotCaptureBackend for LinuxKwinOneShotBackend<KwinScreenshotDBusClient> {
+    fn capture_once(&mut self, show_cursor: bool) -> Result<OneShotCapture, CaptureError> {
+        self.capture_once(show_cursor)
     }
 }
 
