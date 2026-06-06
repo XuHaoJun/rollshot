@@ -37,6 +37,14 @@ pub enum OverlayMode {
     Iced,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureMode {
+    #[default]
+    Scrolling,
+    Screenshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InteractiveLaunchOptions {
     pub backend: String,
@@ -44,6 +52,8 @@ pub struct InteractiveLaunchOptions {
     pub show_cursor: bool,
     #[serde(default)]
     pub overlay_mode: OverlayMode,
+    #[serde(default)]
+    pub initial_mode: CaptureMode,
 }
 
 impl InteractiveLaunchOptions {
@@ -53,6 +63,7 @@ impl InteractiveLaunchOptions {
             fps: 5,
             show_cursor: false,
             overlay_mode: OverlayMode::Auto,
+            initial_mode: CaptureMode::Scrolling,
         }
     }
 }
@@ -128,7 +139,7 @@ pub enum PixelFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{InteractiveLaunchOptions, OverlayMode};
+    use super::{CaptureMode, InteractiveLaunchOptions, OverlayMode};
 
     #[test]
     fn interactive_launch_options_round_trip_json() {
@@ -137,11 +148,16 @@ mod tests {
             fps: 7,
             show_cursor: true,
             overlay_mode: OverlayMode::Iced,
+            initial_mode: CaptureMode::Screenshot,
         };
 
         let json = serde_json::to_string(&options).expect("serialize launch options");
         assert!(
             json.contains("\"backend\":\"linux-portal\""),
+            "json = {json}"
+        );
+        assert!(
+            json.contains("\"initial_mode\":\"screenshot\""),
             "json = {json}"
         );
 
@@ -157,5 +173,21 @@ mod tests {
                 .expect("deserialize old launch options");
 
         assert_eq!(decoded.overlay_mode, OverlayMode::Auto);
+    }
+
+    #[test]
+    fn interactive_launch_options_default_initial_mode_for_old_json() {
+        let decoded: InteractiveLaunchOptions = serde_json::from_str(
+            r#"{"backend":"auto","fps":5,"show_cursor":false,"overlay_mode":"iced"}"#,
+        )
+        .expect("old payload");
+        assert_eq!(decoded.initial_mode, CaptureMode::Scrolling);
+    }
+
+    #[test]
+    fn fps_change_does_not_affect_initial_mode() {
+        let mut opts = InteractiveLaunchOptions::default_capture();
+        opts.fps = 60;
+        assert_eq!(opts.initial_mode, CaptureMode::Scrolling);
     }
 }

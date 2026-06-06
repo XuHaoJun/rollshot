@@ -27,6 +27,7 @@ fn overlay_config(options: &InteractiveLaunchOptions) -> OverlayConfig {
         backend: options.backend.clone(),
         fps: options.fps.max(NATIVE_OVERLAY_MIN_FPS),
         show_cursor: options.show_cursor,
+        initial_mode: options.initial_mode,
     }
 }
 
@@ -113,10 +114,15 @@ mod tests {
             fps: 5,
             show_cursor: true,
             overlay_mode: rollshot_capture::OverlayMode::Auto,
+            initial_mode: rollshot_capture::CaptureMode::Scrolling,
         });
         assert_eq!(config.backend, "linux-portal");
         assert_eq!(config.fps, 30);
         assert!(config.show_cursor);
+        assert_eq!(
+            config.initial_mode,
+            rollshot_capture::CaptureMode::Scrolling
+        );
     }
 
     #[test]
@@ -126,10 +132,15 @@ mod tests {
             fps: 60,
             show_cursor: false,
             overlay_mode: rollshot_capture::OverlayMode::Auto,
+            initial_mode: rollshot_capture::CaptureMode::Screenshot,
         });
         assert_eq!(config.fps, 60);
         assert_eq!(config.backend, "auto");
         assert!(!config.show_cursor);
+        assert_eq!(
+            config.initial_mode,
+            rollshot_capture::CaptureMode::Screenshot
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub struct OverlayConfig {
     pub backend: String,
     pub fps: u32,
     pub show_cursor: bool,
+    pub initial_mode: rollshot_capture::CaptureMode,
 }
 
 #[derive(Debug)]
