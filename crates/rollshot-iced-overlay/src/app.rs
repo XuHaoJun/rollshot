@@ -11,11 +11,17 @@ static SHARED_PREVIEW_RX: Mutex<
 
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 #[allow(dead_code)]
-const TOOLBAR_W: f32 = 300.0;
+const TOOLBAR_W: f32 = 360.0;
 const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
+
+const CAPTURE_STATUS_TEXT: &str = "Capturing - scroll the target";
+#[allow(dead_code)]
+const FOCUS_PAUSED_TEXT: &str = "Shortcuts paused - click Rollshot controls to restore Esc";
+const FINISH_LABEL: &str = "Finish";
+const CANCEL_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
@@ -34,6 +40,7 @@ pub(crate) enum OverlayMessage {
     IcedEvent(iced::Event),
     WindowOpened { id: window::Id, size: Size },
     Finish,
+    FinishCapture,
     Cancel,
     LiveEvent(crate::driver::LiveOverlayEvent),
     Tick,
@@ -179,6 +186,7 @@ impl canvas::Program<OverlayMessage> for CropCanvas {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Band {
     Top,
     Bottom,
@@ -195,6 +203,15 @@ pub(crate) fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<
     let bottom = (window.height - (crop.y + crop.height)).max(0.0);
     let left = crop.x.max(0.0);
     let right = (window.width - (crop.x + crop.width)).max(0.0);
+
+    let preferred_side = [(Band::Right, right), (Band::Left, left)]
+        .into_iter()
+        .filter(|&(_, width)| width >= TOOLBAR_W)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(band, _)| band);
+    if preferred_side.is_some() {
+        return preferred_side;
+    }
 
     [
         (Band::Bottom, bottom, window.width * bottom),
@@ -285,7 +302,7 @@ pub(crate) fn place_outside_crop<'a>(
 /// logical px. Plan T6 S3: only the toolbar stays interactive during capture;
 /// the crop interior + everything else passes through so the user can scroll the
 /// target. Clamped to the band, so it never enters the crop (spec P3.4).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn toolbar_input_rect(
     crop: Rectangle,
     window: iced::Size,
@@ -296,34 +313,42 @@ pub(crate) fn toolbar_input_rect(
 
     let band = choose_chrome_band(crop, window)?;
     let (x, y, w, h) = match band {
-        Band::Top => (
-            0.0,
-            0.0,
-            TOOLBAR_W.min(window.width),
-            TOOLBAR_H.min(crop.y.max(0.0)),
-        ),
+        Band::Top => {
+            let available_h = crop.y.max(0.0).min(window.height);
+            let h = TOOLBAR_H.min(available_h);
+            let x = crop.x.max(0.0).min(window.width);
+            let y = (available_h - h).max(0.0);
+            (x, y, TOOLBAR_W.min((window.width - x).max(0.0)), h)
+        }
         Band::Bottom => {
-            let by = crop.y + crop.height;
+            let by = (crop.y + crop.height).clamp(0.0, window.height);
+            let x = crop.x.max(0.0).min(window.width);
             (
-                0.0,
+                x,
                 by,
-                TOOLBAR_W.min(window.width),
+                TOOLBAR_W.min((window.width - x).max(0.0)),
                 TOOLBAR_H.min((window.height - by).max(0.0)),
             )
         }
-        Band::Left => (
-            0.0,
-            0.0,
-            TOOLBAR_W.min(crop.x.max(0.0)),
-            TOOLBAR_H.min(window.height),
-        ),
+        Band::Left => {
+            let available_w = crop.x.max(0.0).min(window.width);
+            let w = TOOLBAR_W.min(available_w);
+            let y = crop.y.max(0.0).min(window.height);
+            (
+                (available_w - w).max(0.0),
+                y,
+                w,
+                TOOLBAR_H.min((window.height - y).max(0.0)),
+            )
+        }
         Band::Right => {
-            let bx = crop.x + crop.width;
+            let bx = (crop.x + crop.width).clamp(0.0, window.width);
+            let y = crop.y.max(0.0).min(window.height);
             (
                 bx,
-                0.0,
+                y,
                 TOOLBAR_W.min((window.width - bx).max(0.0)),
-                TOOLBAR_H.min(window.height),
+                TOOLBAR_H.min((window.height - y).max(0.0)),
             )
         }
     };
@@ -332,6 +357,34 @@ pub(crate) fn toolbar_input_rect(
     }
 
     Some((x as i32, y as i32, w as i32, h as i32))
+}
+
+/// The full outside-crop band containing the capture chrome. Linux keeps this
+/// band interactive because the live preview changes the chrome's final layout,
+/// while the selected crop remains pointer-pass-through.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn capture_chrome_input_rect(
+    crop: Rectangle,
+    window: iced::Size,
+) -> Option<(i32, i32, i32, i32)> {
+    if window.width <= 0.0 || window.height <= 0.0 {
+        return None;
+    }
+
+    let (x, y, w, h) = match choose_chrome_band(crop, window)? {
+        Band::Top => (0.0, 0.0, window.width, crop.y.clamp(0.0, window.height)),
+        Band::Bottom => {
+            let y = (crop.y + crop.height).clamp(0.0, window.height);
+            (0.0, y, window.width, window.height - y)
+        }
+        Band::Left => (0.0, 0.0, crop.x.clamp(0.0, window.width), window.height),
+        Band::Right => {
+            let x = (crop.x + crop.width).clamp(0.0, window.width);
+            (x, 0.0, window.width - x, window.height)
+        }
+    };
+
+    (w > 0.0 && h > 0.0).then_some((x as i32, y as i32, w as i32, h as i32))
 }
 
 pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
@@ -372,6 +425,19 @@ pub(crate) fn magenta_toolbar<'a>(
         .into()
 }
 
+pub(crate) fn capture_control_strip<'a>() -> Element<'a, OverlayMessage> {
+    magenta_toolbar(
+        row![
+            text(CAPTURE_STATUS_TEXT).size(16),
+            button(FINISH_LABEL).on_press(OverlayMessage::FinishCapture),
+            button(CANCEL_LABEL).on_press(OverlayMessage::Cancel),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    )
+}
+
 pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     let canvas_widget = canvas(CropCanvas {
         crop: state.crop,
@@ -383,11 +449,7 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     if state.crop_confirmed {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
-        let toolbar = magenta_toolbar(
-            text("Capturing — scroll the target, Esc to finish")
-                .size(16)
-                .into(),
-        );
+        let toolbar = capture_control_strip();
         let crop = state.crop.unwrap_or(Rectangle {
             x: 0.0,
             y: 0.0,
@@ -550,6 +612,13 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
             state.crop_confirmed = true;
             OverlayEffect::BeginStitch
         }
+        OverlayMessage::FinishCapture => {
+            if state.crop_confirmed {
+                OverlayEffect::Finish
+            } else {
+                OverlayEffect::None
+            }
+        }
         OverlayMessage::Finish => {
             // Ignore duplicate Finish (e.g. double-click / repeated Enter): the
             // crop is already confirmed and stitching has begun.
@@ -605,8 +674,8 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
 #[cfg(test)]
 mod tests {
     use super::{
-        crop_mask_bands, preview_constraints, token_color, toolbar_input_rect, OverlayMessage,
-        OverlayState,
+        capture_chrome_input_rect, choose_chrome_band, crop_mask_bands, preview_constraints,
+        token_color, toolbar_input_rect, Band, OverlayMessage, OverlayState,
     };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
@@ -660,6 +729,45 @@ mod tests {
     }
 
     #[test]
+    fn choose_chrome_band_prefers_side_that_fits_controls() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 700.0,
+            height: 200.0,
+        };
+        let window = Size::new(1200.0, 1000.0);
+
+        assert_eq!(choose_chrome_band(crop, window), Some(Band::Right));
+    }
+
+    #[test]
+    fn choose_chrome_band_uses_larger_side_when_both_fit_controls() {
+        let crop = Rectangle {
+            x: 400.0,
+            y: 100.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let window = Size::new(1200.0, 1000.0);
+
+        assert_eq!(choose_chrome_band(crop, window), Some(Band::Right));
+    }
+
+    #[test]
+    fn choose_chrome_band_falls_back_to_largest_band_when_sides_are_too_narrow() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 200.0,
+            width: 500.0,
+            height: 100.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        assert_eq!(choose_chrome_band(crop, window), Some(Band::Bottom));
+    }
+
+    #[test]
     fn crop_mask_bands_clamp_crop_to_canvas_bounds() {
         let bounds = Rectangle {
             x: 0.0,
@@ -695,6 +803,114 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_input_rect_uses_control_strip_width() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect.2, 360);
+        assert!(rect.3 > 0);
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_bottom_band_toolbar() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 100.0,
+            width: 720.0,
+            height: 200.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (40, 300, 360, 50));
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_top_band_toolbar() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 300.0,
+            width: 720.0,
+            height: 260.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (40, 250, 360, 50));
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_left_band_toolbar() {
+        let crop = Rectangle {
+            x: 400.0,
+            y: 250.0,
+            width: 360.0,
+            height: 250.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (40, 250, 360, 50));
+    }
+
+    #[test]
+    fn toolbar_input_rect_aligns_with_right_band_toolbar() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 250.0,
+            width: 200.0,
+            height: 250.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
+
+        assert_eq!(rect, (240, 250, 360, 50));
+    }
+
+    #[test]
+    fn capture_chrome_input_rect_covers_top_band_without_crop() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 300.0,
+            width: 720.0,
+            height: 260.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        assert_eq!(
+            capture_chrome_input_rect(crop, window),
+            Some((0, 0, 800, 300))
+        );
+    }
+
+    #[test]
+    fn capture_chrome_input_rect_covers_bottom_band_without_crop() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 100.0,
+            width: 720.0,
+            height: 200.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        assert_eq!(
+            capture_chrome_input_rect(crop, window),
+            Some((0, 300, 800, 300))
+        );
+    }
+
+    #[test]
     fn token_color_preserves_rgba_channels() {
         let color = token_color(rollshot_overlay_core::tokens::CROP_MASK);
 
@@ -723,5 +939,56 @@ mod tests {
         assert_eq!(effect, super::OverlayEffect::None);
         assert_eq!(state.window_id, Some(id));
         assert_eq!(state.window_size, Some(size));
+    }
+
+    #[test]
+    fn finish_capture_control_finishes_after_crop_is_confirmed() {
+        let mut state = OverlayState {
+            crop: Some(Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 120.0,
+                height: 80.0,
+            }),
+            crop_confirmed: true,
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(&mut state, OverlayMessage::FinishCapture);
+
+        assert_eq!(effect, super::OverlayEffect::Finish);
+    }
+
+    #[test]
+    fn selection_finish_still_validates_empty_crop() {
+        let mut state = OverlayState::default();
+
+        let effect = super::update(&mut state, OverlayMessage::Finish);
+
+        assert_eq!(effect, super::OverlayEffect::None);
+        assert!(state.warning().is_some());
+    }
+
+    #[test]
+    fn finish_capture_without_confirmed_crop_returns_none() {
+        let mut state = OverlayState {
+            crop_confirmed: false,
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(&mut state, OverlayMessage::FinishCapture);
+
+        assert_eq!(effect, super::OverlayEffect::None);
+    }
+
+    #[test]
+    fn capture_control_copy_matches_spec() {
+        assert_eq!(super::CAPTURE_STATUS_TEXT, "Capturing - scroll the target");
+        assert_eq!(
+            super::FOCUS_PAUSED_TEXT,
+            "Shortcuts paused - click Rollshot controls to restore Esc"
+        );
+        assert_eq!(super::FINISH_LABEL, "Finish");
+        assert_eq!(super::CANCEL_LABEL, "Cancel");
     }
 }

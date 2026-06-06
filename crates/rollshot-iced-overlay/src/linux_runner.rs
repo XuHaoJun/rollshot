@@ -91,14 +91,19 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                    let Some((x, y, w, h)) = app::toolbar_input_rect(crop, ws) else {
+                    let Some((x, y, w, h)) = app::capture_chrome_input_rect(crop, ws) else {
                         return Task::none();
                     };
-                    Task::done(Message::SetInputRegion(ActionCallback::new(
-                        move |region| {
-                            region.add(x, y, w, h);
-                        },
-                    )))
+                    Task::batch([
+                        Task::done(Message::KeyboardInteractivityChange(
+                            KeyboardInteractivity::OnDemand,
+                        )),
+                        Task::done(Message::SetInputRegion(ActionCallback::new(
+                            move |region| {
+                                region.add(x, y, w, h);
+                            },
+                        ))),
+                    ])
                 }
                 app::OverlayEffect::Finish => {
                     let driver = DRIVER_SLOT.lock().unwrap().take();

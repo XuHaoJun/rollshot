@@ -60,8 +60,9 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Branching
 
-- **superpowers spec commit:** when a spec has been reviewed and approved by the user and you are about to commit that spec, branch-first-if-on-`main`: if currently on `main` (the default branch), create a new branch (`git checkout -b <name>`) FIRST, then commit the spec — never commit it directly on `main`. If already on a non-`main` branch, do NOT create a new branch; commit on the current branch. (This is the one moment to enforce; other commits follow the normal harness rules.)
-- New branches: use `git checkout -b <name>` in place.
+- **Branch naming:** use conventional prefixes — `feat/<description>` (new feature), `fix/<description>` (bug fix), `hotfix/<description>` (urgent fix), `perf/<description>` (performance optimization), or `docs/<description>` (pure investigation/research with no code changes). Never use `spec/` or `specs/` — specs are committed to the feature branch, not a separate branch. The branch name should describe the nature of the work (e.g. `feat/scroll-capture`, `perf/matcher-overlap`, `docs/wayland-portal-research`).
+- **superpowers spec commit:** when a spec has been reviewed and approved by the user and you are about to commit that spec, branch-first-if-on-`main`: if currently on `main` (the default branch), create a new branch (`git checkout -b <prefix>/<name>`) FIRST, then commit the spec — never commit it directly on `main`. If already on a non-`main` branch, do NOT create a new branch; commit on the current branch. (This is the one moment to enforce; other commits follow the normal harness rules.)
+- New branches: use `git checkout -b <prefix>/<name>` in place.
 - Never set up git worktrees unless explicitly asked.
 
 ## 6. Shell Commands
