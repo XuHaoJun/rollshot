@@ -26,14 +26,13 @@ impl std::fmt::Debug for CaptureResource {
     }
 }
 
-#[allow(clippy::type_complexity)]
+type StreamingFactory = dyn Fn(
+    &OverlayConfig,
+    iced::futures::channel::mpsc::UnboundedSender<LiveOverlayEvent>,
+) -> Result<Driver, String>;
+
 pub(crate) struct ResourceFactories {
-    pub streaming: Box<
-        dyn Fn(
-            &OverlayConfig,
-            iced::futures::channel::mpsc::UnboundedSender<LiveOverlayEvent>,
-        ) -> Result<Driver, String>,
-    >,
+    pub streaming: Box<StreamingFactory>,
     pub one_shot: Box<
         dyn Fn(bool) -> Result<rollshot_capture::OneShotCapture, rollshot_capture::CaptureError>,
     >,
@@ -516,14 +515,7 @@ mod tests {
         .expect("test capture")
     }
 
-    fn fake_streaming_factory(
-        streaming_count: &'static AtomicUsize,
-    ) -> Box<
-        dyn Fn(
-            &OverlayConfig,
-            iced::futures::channel::mpsc::UnboundedSender<crate::driver::LiveOverlayEvent>,
-        ) -> Result<Driver, String>,
-    > {
+    fn fake_streaming_factory(streaming_count: &'static AtomicUsize) -> Box<StreamingFactory> {
         Box::new(move |_config, _preview_tx| {
             streaming_count.fetch_add(1, Ordering::SeqCst);
             Err("fake streaming driver".to_string())
