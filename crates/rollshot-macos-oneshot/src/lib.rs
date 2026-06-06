@@ -237,9 +237,8 @@ mod macos_impl {
     fn get_cursor_location() -> Result<(f64, f64), MacosOneShotError> {
         use objc2_core_graphics::CGEvent;
 
-        let event = CGEvent::new(None).ok_or_else(|| {
-            MacosOneShotError::Capture("Failed to create CGEvent".to_string())
-        })?;
+        let event = CGEvent::new(None)
+            .ok_or_else(|| MacosOneShotError::Capture("Failed to create CGEvent".to_string()))?;
         let point = CGEvent::location(Some(&event));
         Ok((point.x, point.y))
     }
