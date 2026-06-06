@@ -315,6 +315,7 @@ mod tests {
 
     // ── from_environment env-var integration tests ──
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn from_environment_selects_portal_for_gnome_wayland() {
         let _guard = crate::ENV_MUTEX.lock().unwrap();
