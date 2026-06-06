@@ -49,18 +49,18 @@ pub enum MacosOneShotError {
 }
 
 /// Maximum pixel count (40 megapixels) for safety ceiling.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 const MAX_PIXELS: u64 = 40_000_000;
 
 /// Callback timeout for SCScreenshotManager (30 seconds).
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolve a callback result with timeout.
 ///
 /// This pure helper waits for a callback result channel with a bounded timeout.
 /// It is separated from unsafe code for testability.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 fn resolve_callback_with_timeout<T, E>(
     rx: &std::sync::mpsc::Receiver<Result<T, E>>,
     timeout: std::time::Duration,
@@ -83,7 +83,7 @@ where
 /// Validate dimensions against the 40-megapixel ceiling.
 ///
 /// Returns the pixel count if valid, or an error if dimensions are zero or exceed the limit.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 fn checked_dimensions(width: u32, height: u32) -> Result<u64, MacosOneShotError> {
     if width == 0 || height == 0 {
         return Err(MacosOneShotError::Capture(format!(
@@ -105,7 +105,7 @@ fn checked_dimensions(width: u32, height: u32) -> Result<u64, MacosOneShotError>
 ///
 /// `bytes_per_row` may be larger than `width * 4` due to CGImage row alignment.
 /// Each row is copied respecting its stride, then converted to tightly packed RGBA.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 fn bgra_padded_to_rgba(
     bgra: &[u8],
     width: u32,
@@ -279,7 +279,7 @@ mod macos_impl {
     ) -> Result<(i32, i32, u32, u32), MacosOneShotError> {
         use objc2_core_graphics::CGDisplayBounds;
 
-        let bounds = CGDisplayBounds(display_id.into());
+        let bounds = CGDisplayBounds(display_id);
         Ok((
             bounds.origin.x as i32,
             bounds.origin.y as i32,
