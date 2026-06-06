@@ -29,7 +29,7 @@ pub trait OneShotCaptureBackend {
     fn capture_once(&mut self, show_cursor: bool) -> Result<OneShotCapture, CaptureError>;
 }
 
-fn is_kde(desktop: Option<&str>) -> bool {
+pub(crate) fn is_kde(desktop: Option<&str>) -> bool {
     desktop
         .unwrap_or_default()
         .split(':')
