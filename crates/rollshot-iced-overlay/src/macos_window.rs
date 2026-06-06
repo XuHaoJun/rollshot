@@ -35,10 +35,10 @@ pub(crate) fn display_screen_geometry(target_display_id: u32) -> Result<ScreenGe
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
 
-    let _mtm = MainThreadMarker::new()
+    let mtm = MainThreadMarker::new()
         .ok_or_else(|| "NSScreen queries must run on the main thread".to_string())?;
 
-    let screens = NSScreen::screens(None);
+    let screens = NSScreen::screens(mtm);
     for screen in screens.iter() {
         let desc = screen.deviceDescription();
         // NSScreenNumber is stored as an NSNumber in the device description.
@@ -67,15 +67,17 @@ pub(crate) fn display_screen_geometry(target_display_id: u32) -> Result<ScreenGe
 
 /// Extract the `NSScreenNumber` from an `NSDeviceDescription` dictionary.
 #[cfg(target_os = "macos")]
-fn get_screen_number_from_description(desc: &objc2_app_kit::NSDeviceDescription) -> Option<u32> {
-    use objc2::runtime::AnyObject;
-    use objc2_foundation::NSString;
+fn get_screen_number_from_description(
+    desc: &objc2_foundation::NSDictionary<
+        objc2_app_kit::NSDeviceDescriptionKey,
+        objc2::runtime::AnyObject,
+    >,
+) -> Option<u32> {
+    use objc2_foundation::{NSNumber, NSString};
 
     let key = NSString::from_str("NSScreenNumber");
     let value = desc.objectForKey(&key)?;
-    // NSNumber bridged to AnyObject — use integerValue then cast.
-    let int_val: i64 = unsafe { msg_send![&*value, integerValue] };
-    Some(int_val as u32)
+    value.downcast_ref::<NSNumber>().map(NSNumber::as_u32)
 }
 
 /// The backing scale factor of the main display (e.g. 2.0 on Retina).

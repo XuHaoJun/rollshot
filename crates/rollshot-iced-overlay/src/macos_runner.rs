@@ -99,8 +99,10 @@ fn preview_stream() -> iced::Subscription<Message> {
     iced::Subscription::run(|| {
         let rx = PREVIEW_RX.lock().unwrap().take();
         match rx {
-            Some(rx) => rx.map(|e| Message::Overlay(OverlayMessage::LiveEvent(e))),
-            None => iced::futures::stream::pending(),
+            Some(rx) => rx
+                .map(|e| Message::Overlay(OverlayMessage::LiveEvent(e)))
+                .boxed(),
+            None => iced::futures::stream::pending().boxed(),
         }
     })
 }
