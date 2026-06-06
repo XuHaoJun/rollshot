@@ -3,6 +3,7 @@ pub mod crop;
 pub mod error;
 pub mod fake;
 pub mod fixture;
+pub mod one_shot;
 pub mod types;
 
 #[cfg(target_os = "linux")]
@@ -19,6 +20,10 @@ pub use fixture::{FixtureBackend, FixtureFrameStream};
 pub use linux::LinuxPortalBackend;
 #[cfg(target_os = "macos")]
 pub use macos::MacosScreenCaptureKitBackend;
+pub use one_shot::{
+    one_shot_backend_for, validate_surface_mapping, DisplayTarget, OneShotBackendKind,
+    OneShotCapture, OneShotCaptureBackend, MAX_ONE_SHOT_PIXELS,
+};
 pub use types::{
     CaptureMode, CaptureOptions, CaptureProbe, CapturedFrame, FrameMetadata,
     InteractiveLaunchOptions, OverlayMode, PixelFormat, Region, RegionMode, Size,
