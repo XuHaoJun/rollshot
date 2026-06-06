@@ -268,29 +268,32 @@ mod tests {
 
     #[test]
     fn from_environment_rejects_streaming_backend_linux_portal() {
-        let err = one_shot_backend_for_flag("linux-portal").expect_err("should reject");
+        let _guard = crate::ENV_MUTEX.lock().unwrap();
+        let err =
+            OneShotBackendKind::from_environment("linux-portal").expect_err("should reject");
         assert!(matches!(err, CaptureError::InvalidConfig { .. }));
         assert!(err.to_string().contains("linux-portal"));
     }
 
     #[test]
     fn from_environment_rejects_streaming_backend_macos_sck() {
-        let err = one_shot_backend_for_flag("macos-sck").expect_err("should reject");
+        let _guard = crate::ENV_MUTEX.lock().unwrap();
+        let err = OneShotBackendKind::from_environment("macos-sck").expect_err("should reject");
         assert!(matches!(err, CaptureError::InvalidConfig { .. }));
         assert!(err.to_string().contains("macos-sck"));
     }
 
-    fn one_shot_backend_for_flag(flag: &str) -> Result<OneShotBackendKind, CaptureError> {
-        if flag != "auto" {
-            return Err(CaptureError::InvalidConfig {
-                message: format!("screenshot mode only accepts 'auto' backend, got '{flag}'"),
-            });
-        }
-        Ok(one_shot_backend_for(
-            "linux",
-            Some("wayland"),
-            Some("GNOME"),
-        ))
+    // ── from_environment env-var integration tests ──
+
+    #[test]
+    fn from_environment_selects_portal_for_gnome_wayland() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap();
+        std::env::set_var("XDG_SESSION_TYPE", "wayland");
+        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+        let result = OneShotBackendKind::from_environment("auto");
+        std::env::remove_var("XDG_SESSION_TYPE");
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        assert_eq!(result.unwrap(), OneShotBackendKind::LinuxPortal);
     }
 
     // ── OneShotCapture::new validation tests ──
@@ -475,8 +478,8 @@ mod tests {
 
     #[test]
     fn pixel_count_exact_boundary() {
-        // sqrt(40_000_000) ≈ 6324.555... use 6324x6325 = 39,998,700
-        let result = checked_pixel_count(6324, 6325);
+        // 5000 × 8000 = 40,000,000 exactly at the limit
+        let result = checked_pixel_count(5000, 8000);
         assert!(result.is_ok());
     }
 
