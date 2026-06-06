@@ -76,6 +76,33 @@ impl OneShotBackendKind {
             desktop.as_deref(),
         ))
     }
+
+    #[cfg(not(test))]
+    pub fn capture_once(self, show_cursor: bool) -> Result<OneShotCapture, CaptureError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            OneShotBackendKind::LinuxKwin => {
+                let mut backend = crate::LinuxKwinOneShotBackend::new(
+                    crate::linux::one_shot::KwinScreenshotDBusClient::new(),
+                );
+                backend.capture_once(show_cursor)
+            }
+            #[cfg(target_os = "linux")]
+            OneShotBackendKind::LinuxPortal => {
+                let backend = crate::linux::portal_screenshot::PortalScreenshotBackend::new(
+                    crate::linux::portal_screenshot::AshpdScreenshotClient::new(),
+                );
+                backend.capture_once(show_cursor)
+            }
+            #[cfg(target_os = "macos")]
+            OneShotBackendKind::MacosScreenshotManager => Err(CaptureError::Unsupported {
+                message: "macOS one-shot capture not yet wired through iced overlay".to_string(),
+            }),
+            _ => Err(CaptureError::Unsupported {
+                message: format!("no one-shot capture backend available for {self:?}"),
+            }),
+        }
+    }
 }
 
 fn checked_pixel_count(width: u32, height: u32) -> Result<u64, CaptureError> {
@@ -269,8 +296,7 @@ mod tests {
     #[test]
     fn from_environment_rejects_streaming_backend_linux_portal() {
         let _guard = crate::ENV_MUTEX.lock().unwrap();
-        let err =
-            OneShotBackendKind::from_environment("linux-portal").expect_err("should reject");
+        let err = OneShotBackendKind::from_environment("linux-portal").expect_err("should reject");
         assert!(matches!(err, CaptureError::InvalidConfig { .. }));
         assert!(err.to_string().contains("linux-portal"));
     }
