@@ -175,6 +175,56 @@ Manual checks:
 The smoke test requires a live human-driven desktop session because the portal
 picker must be clicked. Hosted CI must not run it.
 
+### KDE Normal Screenshot Permission
+
+KDE Plasma requires a desktop entry that declares the restricted KWin
+`ScreenShot2` DBus interface. The file
+`packaging/linux/dev.rollshot.io.desktop` contains this declaration. Without
+it installed, KWin denies the screenshot request with a permission error.
+
+**User install** (no root required):
+
+```bash
+install -Dm644 packaging/linux/dev.rollshot.io.desktop \
+  ~/.local/share/applications/dev.rollshot.io.desktop
+```
+
+**System install**:
+
+```bash
+sudo install -Dm644 packaging/linux/dev.rollshot.io.desktop \
+  /usr/share/applications/dev.rollshot.io.desktop
+```
+
+After installing the desktop entry, the launched binary must match the `Exec`
+identity (`rollshot-app`). Running a development binary directly (e.g.
+`cargo run`) may receive an explicit permission error from KWin because the
+binary path does not match the registered desktop entry.
+
+#### `initial_mode` JSON
+
+Interactive launch options accept an `initial_mode` field to choose between
+scrolling capture and single-screenshot mode:
+
+```json
+{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"scrolling"}
+{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"screenshot"}
+```
+
+The default is `"scrolling"` when the field is omitted.
+
+#### Non-KDE portal screenshot limitations
+
+On non-KDE desktops, rollshot uses the freedesktop Screenshot portal. This
+mode has two restrictions:
+
+- **Single-output only.** The portal may return a multi-monitor composite image.
+  Rollshot rejects composites that do not match the overlay surface dimensions,
+  so only provable single-output results are accepted.
+- **No cursor inclusion.** The Screenshot portal has no cursor-inclusion option.
+  Passing `show_cursor = true` returns an `Unsupported` error. Use
+  `show_cursor = false` (the default).
+
 ## Manual Testing: macOS ScreenCaptureKit Capture
 
 Use this checklist after changing the macOS `macos-sck` backend or before
