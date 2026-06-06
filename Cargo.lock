@@ -5540,6 +5540,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "url",
  "zbus 4.4.0",
  "zed-scap",
 ]

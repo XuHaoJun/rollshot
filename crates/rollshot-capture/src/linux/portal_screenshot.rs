@@ -50,14 +50,13 @@ impl<C: PortalScreenshotClient> PortalScreenshotBackend<C> {
         let response = self.client.request_screenshot()?;
         let uri = &response.uri;
 
-        if !uri.starts_with("file://") {
-            return Err(CaptureError::Mapping {
-                message: format!("portal returned non-file URI: {uri}"),
-            });
-        }
-
-        let path = uri.strip_prefix("file://").unwrap();
-        let img = load_portal_image(path)?;
+        let parsed = url::Url::parse(uri).map_err(|e| CaptureError::Mapping {
+            message: format!("invalid URI from portal: {e}"),
+        })?;
+        let path = parsed.to_file_path().map_err(|_| CaptureError::Mapping {
+            message: format!("portal URI is not a file path: {uri}"),
+        })?;
+        let img = load_portal_image(&path)?;
 
         let width = img.width();
         let height = img.height();
@@ -78,14 +77,17 @@ impl<C: PortalScreenshotClient> PortalScreenshotBackend<C> {
 }
 
 /// Load and decode a PNG from a local file path with decoding limits.
-fn load_portal_image(path: &str) -> Result<image::RgbaImage, CaptureError> {
+fn load_portal_image(path: &std::path::Path) -> Result<image::RgbaImage, CaptureError> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|e| CaptureError::Mapping {
-            message: format!("failed to open portal screenshot at {path}: {e}"),
+            message: format!(
+                "failed to open portal screenshot at {}: {e}",
+                path.display()
+            ),
         })?
         .with_guessed_format()
         .map_err(|e| CaptureError::Mapping {
-            message: format!("failed to guess image format at {path}: {e}"),
+            message: format!("failed to guess image format at {}: {e}", path.display()),
         })?;
 
     // Reject oversized images before unbounded decompression.
@@ -236,6 +238,26 @@ mod tests {
         let backend = PortalScreenshotBackend::new(client);
         let result = backend.capture_once(false);
         let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let capture = result.unwrap();
+        assert_eq!(capture.image().width(), 10);
+        assert_eq!(capture.image().height(), 10);
+    }
+
+    #[test]
+    fn percent_encoded_uri_loads_png() {
+        let dir = std::env::temp_dir().join("rollshot portal test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test screenshot.png");
+        write_test_png(&path, 10, 10);
+
+        let uri = "file:///tmp/rollshot%20portal%20test/test%20screenshot.png".to_string();
+        let client = FakeScreenshotClient::returning_uri(&uri);
+        let backend = PortalScreenshotBackend::new(client);
+        let result = backend.capture_once(false);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         let capture = result.unwrap();
@@ -436,7 +458,7 @@ mod tests {
         match backend.capture_once(false) {
             Err(CaptureError::Mapping { message }) => {
                 assert!(
-                    message.contains("non-file URI"),
+                    message.contains("portal URI is not a file path"),
                     "unexpected message: {message}"
                 );
             }

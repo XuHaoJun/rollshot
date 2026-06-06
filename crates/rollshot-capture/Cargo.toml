@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { workspace = true }
 nix = { workspace = true }
+url = { workspace = true }
 pipewire = { workspace = true }
 tokio = { workspace = true }
 zbus = { workspace = true }
