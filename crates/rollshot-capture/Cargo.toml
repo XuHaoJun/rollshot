@@ -25,6 +25,7 @@ zbus = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 scap = { workspace = true }
+rollshot-macos-oneshot = { path = "../rollshot-macos-oneshot" }
 
 [lints.rust]
 unsafe_code = "deny"
