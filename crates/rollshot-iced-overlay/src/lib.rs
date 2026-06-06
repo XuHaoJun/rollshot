@@ -13,7 +13,7 @@ use rollshot_core::StitchStats;
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub image: RgbaImage,
-    pub stats: StitchStats,
+    pub stats: Option<StitchStats>,
 }
 
 /// Inputs for a capture session.
@@ -59,6 +59,8 @@ mod linux_runner;
 mod macos_runner;
 #[cfg(target_os = "macos")]
 mod macos_window;
+pub mod screenshot;
+pub mod session;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.

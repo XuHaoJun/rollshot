@@ -61,7 +61,8 @@ fn store_overlay_outcome(
 ) -> Result<Option<DoneImageDto>, String> {
     match outcome {
         Ok(Some(result)) => {
-            let done = session.store_capture_result(result.image, result.stats)?;
+            let done =
+                session.store_capture_result(result.image, result.stats.unwrap_or_default())?;
             Ok(Some(done))
         }
         Ok(None) => Ok(None),
@@ -155,7 +156,7 @@ mod tests {
             &session,
             Ok(Some(CaptureResult {
                 image: RgbaImage::from_pixel(20, 30, Rgba([4, 5, 6, 255])),
-                stats: StitchStats::default(),
+                stats: Some(StitchStats::default()),
             })),
         )
         .expect("store outcome")

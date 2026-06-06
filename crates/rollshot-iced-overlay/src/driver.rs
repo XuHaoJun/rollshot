@@ -93,7 +93,7 @@ pub fn stitch_stream(
         .clone();
     Ok(CaptureResult {
         image,
-        stats: stitcher.stats(),
+        stats: Some(stitcher.stats()),
     })
 }
 
@@ -315,7 +315,7 @@ impl Driver {
             .clone();
         Ok(CaptureResult {
             image,
-            stats: stitcher.stats(),
+            stats: Some(stitcher.stats()),
         })
     }
 }
@@ -444,7 +444,7 @@ mod tests {
             result.image.height() >= 60,
             "stitched height grows past one frame"
         );
-        assert!(result.stats.frame_count >= 1);
+        assert!(result.stats.unwrap().frame_count >= 1);
     }
 
     #[test]

@@ -36,12 +36,17 @@ fn main() {
         Ok(Some(result)) => {
             let out = "capture_overlay_result.png";
             match result.image.save(out) {
-                Ok(()) => println!(
-                    "saved {out}: {}x{} ({} frames)",
-                    result.image.width(),
-                    result.image.height(),
-                    result.stats.frame_count
-                ),
+                Ok(()) => {
+                    print!(
+                        "saved {out}: {}x{}",
+                        result.image.width(),
+                        result.image.height()
+                    );
+                    if let Some(stats) = result.stats {
+                        print!(" ({} frames)", stats.frame_count);
+                    }
+                    println!();
+                }
                 Err(e) => eprintln!("failed to save {out}: {e}"),
             }
         }
