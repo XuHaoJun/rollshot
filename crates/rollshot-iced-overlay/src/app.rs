@@ -186,6 +186,7 @@ impl canvas::Program<OverlayMessage> for CropCanvas {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Band {
     Top,
     Bottom,
@@ -202,6 +203,15 @@ pub(crate) fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<
     let bottom = (window.height - (crop.y + crop.height)).max(0.0);
     let left = crop.x.max(0.0);
     let right = (window.width - (crop.x + crop.width)).max(0.0);
+
+    let preferred_side = [(Band::Right, right), (Band::Left, left)]
+        .into_iter()
+        .filter(|&(_, width)| width >= TOOLBAR_W)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(band, _)| band);
+    if preferred_side.is_some() {
+        return preferred_side;
+    }
 
     [
         (Band::Bottom, bottom, window.width * bottom),
@@ -664,8 +674,8 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_chrome_input_rect, crop_mask_bands, preview_constraints, token_color,
-        toolbar_input_rect, OverlayMessage, OverlayState,
+        capture_chrome_input_rect, choose_chrome_band, crop_mask_bands, preview_constraints,
+        token_color, toolbar_input_rect, Band, OverlayMessage, OverlayState,
     };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
@@ -716,6 +726,45 @@ mod tests {
 
         assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
         assert_eq!(constraints.max_height, 600);
+    }
+
+    #[test]
+    fn choose_chrome_band_prefers_side_that_fits_controls() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 100.0,
+            width: 700.0,
+            height: 200.0,
+        };
+        let window = Size::new(1200.0, 1000.0);
+
+        assert_eq!(choose_chrome_band(crop, window), Some(Band::Right));
+    }
+
+    #[test]
+    fn choose_chrome_band_uses_larger_side_when_both_fit_controls() {
+        let crop = Rectangle {
+            x: 400.0,
+            y: 100.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let window = Size::new(1200.0, 1000.0);
+
+        assert_eq!(choose_chrome_band(crop, window), Some(Band::Right));
+    }
+
+    #[test]
+    fn choose_chrome_band_falls_back_to_largest_band_when_sides_are_too_narrow() {
+        let crop = Rectangle {
+            x: 100.0,
+            y: 200.0,
+            width: 500.0,
+            height: 100.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        assert_eq!(choose_chrome_band(crop, window), Some(Band::Bottom));
     }
 
     #[test]
