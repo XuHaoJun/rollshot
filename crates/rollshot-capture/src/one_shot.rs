@@ -95,9 +95,13 @@ impl OneShotBackendKind {
                 backend.capture_once(show_cursor)
             }
             #[cfg(target_os = "macos")]
-            OneShotBackendKind::MacosScreenshotManager => Err(CaptureError::Unsupported {
-                message: "macOS one-shot capture not yet wired through iced overlay".to_string(),
-            }),
+            OneShotBackendKind::MacosScreenshotManager => {
+                let _ = show_cursor;
+                Err(CaptureError::Unsupported {
+                    message: "macOS one-shot capture not yet wired through iced overlay"
+                        .to_string(),
+                })
+            }
             _ => Err(CaptureError::Unsupported {
                 message: format!("no one-shot capture backend available for {self:?}"),
             }),
