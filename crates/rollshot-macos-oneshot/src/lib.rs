@@ -222,11 +222,9 @@ mod macos_impl {
     fn check_permission() -> Result<(), MacosOneShotError> {
         use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 
-        // SAFETY: CGPreflightScreenCaptureAccess and CGRequestScreenCaptureAccess are
-        // public CoreGraphics APIs. They return bool and have no ownership implications.
-        let has_access = unsafe { CGPreflightScreenCaptureAccess() };
+        let has_access = CGPreflightScreenCaptureAccess();
         if !has_access {
-            let requested = unsafe { CGRequestScreenCaptureAccess() };
+            let requested = CGRequestScreenCaptureAccess();
             if !requested {
                 return Err(MacosOneShotError::PermissionDenied(
                     "Screen Recording permission denied. Please grant access in System Settings > Privacy & Security > Screen Recording, then restart the application.".to_string()
@@ -239,21 +237,16 @@ mod macos_impl {
     fn get_cursor_location() -> Result<(f64, f64), MacosOneShotError> {
         use objc2_core_graphics::CGEvent;
 
-        // SAFETY: CGEventCreate returns a valid event object. CGEventGetLocation returns
-        // a CGPoint by value. The event is released by the autorelease pool or manually.
-        unsafe {
-            let null_source: *mut objc2_core_graphics::CGEventSource = std::ptr::null_mut();
-            let event = CGEvent::create(null_source).map_err(|e| {
-                MacosOneShotError::Capture(format!("Failed to create CGEvent: {e:?}"))
-            })?;
-            let point = event.location();
-            Ok((point.x, point.y))
-        }
+        let event = CGEvent::new(None).ok_or_else(|| {
+            MacosOneShotError::Capture("Failed to create CGEvent".to_string())
+        })?;
+        let point = CGEvent::location(Some(&event));
+        Ok((point.x, point.y))
     }
 
     fn find_display_under_cursor(
-        cursor_x: f64,
-        cursor_y: f64,
+        _cursor_x: f64,
+        _cursor_y: f64,
     ) -> Result<(*mut objc2::runtime::AnyObject, u32), MacosOneShotError> {
         // This would use SCShareableContent to get displays and find the one
         // containing the cursor. For now, this is a placeholder that would be
@@ -287,17 +280,13 @@ mod macos_impl {
     ) -> Result<(i32, i32, u32, u32), MacosOneShotError> {
         use objc2_core_graphics::CGDisplayBounds;
 
-        // SAFETY: CGDisplayBounds returns a CGRect by value for a valid display ID.
-        // The returned struct is owned by the caller.
-        unsafe {
-            let bounds = CGDisplayBounds(display_id.into());
-            Ok((
-                bounds.origin.x as i32,
-                bounds.origin.y as i32,
-                bounds.size.width as u32,
-                bounds.size.height as u32,
-            ))
-        }
+        let bounds = CGDisplayBounds(display_id.into());
+        Ok((
+            bounds.origin.x as i32,
+            bounds.origin.y as i32,
+            bounds.size.width as u32,
+            bounds.size.height as u32,
+        ))
     }
 }
 

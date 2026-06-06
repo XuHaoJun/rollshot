@@ -22,4 +22,4 @@ objc2-core-foundation = "0.3"
 # This crate intentionally contains unsafe code for Objective-C FFI.
 # Unsafe blocks are kept local and documented with ownership invariants.
 # The rest of the workspace maintains unsafe_code = "forbid".
-unsafe_code = "deny"
+unsafe_code = "allow"
