@@ -292,7 +292,7 @@ pub(crate) fn place_outside_crop<'a>(
 /// logical px. Plan T6 S3: only the toolbar stays interactive during capture;
 /// the crop interior + everything else passes through so the user can scroll the
 /// target. Clamped to the band, so it never enters the crop (spec P3.4).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn toolbar_input_rect(
     crop: Rectangle,
     window: iced::Size,
@@ -347,6 +347,34 @@ pub(crate) fn toolbar_input_rect(
     }
 
     Some((x as i32, y as i32, w as i32, h as i32))
+}
+
+/// The full outside-crop band containing the capture chrome. Linux keeps this
+/// band interactive because the live preview changes the chrome's final layout,
+/// while the selected crop remains pointer-pass-through.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn capture_chrome_input_rect(
+    crop: Rectangle,
+    window: iced::Size,
+) -> Option<(i32, i32, i32, i32)> {
+    if window.width <= 0.0 || window.height <= 0.0 {
+        return None;
+    }
+
+    let (x, y, w, h) = match choose_chrome_band(crop, window)? {
+        Band::Top => (0.0, 0.0, window.width, crop.y.clamp(0.0, window.height)),
+        Band::Bottom => {
+            let y = (crop.y + crop.height).clamp(0.0, window.height);
+            (0.0, y, window.width, window.height - y)
+        }
+        Band::Left => (0.0, 0.0, crop.x.clamp(0.0, window.width), window.height),
+        Band::Right => {
+            let x = (crop.x + crop.width).clamp(0.0, window.width);
+            (x, 0.0, window.width - x, window.height)
+        }
+    };
+
+    (w > 0.0 && h > 0.0).then_some((x as i32, y as i32, w as i32, h as i32))
 }
 
 pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
@@ -636,8 +664,8 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
 #[cfg(test)]
 mod tests {
     use super::{
-        crop_mask_bands, preview_constraints, token_color, toolbar_input_rect, OverlayMessage,
-        OverlayState,
+        capture_chrome_input_rect, crop_mask_bands, preview_constraints, token_color,
+        toolbar_input_rect, OverlayMessage, OverlayState,
     };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
@@ -799,6 +827,38 @@ mod tests {
         let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
 
         assert_eq!(rect, (240, 250, 360, 50));
+    }
+
+    #[test]
+    fn capture_chrome_input_rect_covers_top_band_without_crop() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 300.0,
+            width: 720.0,
+            height: 260.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        assert_eq!(
+            capture_chrome_input_rect(crop, window),
+            Some((0, 0, 800, 300))
+        );
+    }
+
+    #[test]
+    fn capture_chrome_input_rect_covers_bottom_band_without_crop() {
+        let crop = Rectangle {
+            x: 40.0,
+            y: 100.0,
+            width: 720.0,
+            height: 200.0,
+        };
+        let window = Size::new(800.0, 600.0);
+
+        assert_eq!(
+            capture_chrome_input_rect(crop, window),
+            Some((0, 300, 800, 300))
+        );
     }
 
     #[test]
