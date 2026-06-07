@@ -89,13 +89,17 @@ impl WorkspaceState {
 
     pub fn activate_mode(&mut self, mode: CaptureMode) -> WorkspaceEffect {
         self.active_mode = mode;
-        self.phase = WorkspacePhase::Selecting;
-        self.crop_valid = false;
+        self.phase = if self.crop_valid {
+            WorkspacePhase::Selected
+        } else {
+            WorkspacePhase::Selecting
+        };
         WorkspaceEffect::ActivateMode(mode)
     }
 
     pub fn begin_scrolling(&mut self) {
         self.phase = WorkspacePhase::ScrollingCapture;
+        self.auto_hide.accepted_frame(std::time::Instant::now());
     }
 
     pub fn finish_scrolling(&mut self, output: Option<OutputAction>) -> WorkspaceEffect {
@@ -138,9 +142,13 @@ pub struct ActivityAutoHide {
 
 impl ActivityAutoHide {
     pub fn new(idle_duration: std::time::Duration) -> Self {
+        Self::new_at(idle_duration, std::time::Instant::now())
+    }
+
+    pub fn new_at(idle_duration: std::time::Duration, now: std::time::Instant) -> Self {
         Self {
             idle_duration,
-            last_activity: None,
+            last_activity: Some(now),
             interacting: false,
         }
     }
@@ -149,7 +157,6 @@ impl ActivityAutoHide {
         self.last_activity = Some(now);
     }
 
-    #[allow(dead_code)]
     pub fn set_interacting(&mut self, interacting: bool) {
         self.interacting = interacting;
     }
@@ -162,6 +169,12 @@ impl ActivityAutoHide {
             Some(last) => now.duration_since(last) >= self.idle_duration,
             None => false,
         }
+    }
+}
+
+impl From<CropRect> for rollshot_overlay_core::chrome_placement::Rect {
+    fn from(value: CropRect) -> Self {
+        Self::new(value.x, value.y, value.width, value.height)
     }
 }
 
@@ -206,6 +219,15 @@ mod tests {
     }
 
     #[test]
+    fn no_accepted_activity_reveals_auto_hide_after_idle_deadline() {
+        let now = Instant::now();
+        let visibility = ActivityAutoHide::new_at(Duration::from_millis(500), now);
+
+        assert!(!visibility.visible(now + Duration::from_millis(499)));
+        assert!(visibility.visible(now + Duration::from_millis(500)));
+    }
+
+    #[test]
     fn switching_modes_requests_new_workflow_resources() {
         let mut state = WorkspaceState::new(CaptureMode::Screenshot);
         state.set_crop(valid_crop());
@@ -214,6 +236,7 @@ mod tests {
             state.activate_mode(CaptureMode::Scrolling),
             WorkspaceEffect::ActivateMode(CaptureMode::Scrolling)
         );
+        assert_eq!(state.phase(), WorkspacePhase::Selected);
     }
 
     #[test]

@@ -169,6 +169,33 @@ fn validate_screenshot_surface_or_exit(state: &Overlay) -> Option<Task<Message>>
     }
 }
 
+fn perform_output_action(
+    state: &mut Overlay,
+    action: crate::workspace::OutputAction,
+) -> Task<Message> {
+    let result_guard = RESULT_SLOT.lock().unwrap();
+    let result = match result_guard.as_ref() {
+        Some(Ok(Some(result))) => result,
+        _ => {
+            state.transient_error = Some("No result available".to_string());
+            return Task::none();
+        }
+    };
+    let mut output_service = crate::output::ArboardOutput::new();
+    let outcome = crate::output::perform_output(&mut output_service, action, &result.image);
+    drop(result_guard);
+    match crate::output::outcome_to_phase_decision(&outcome, state.workspace.phase()) {
+        crate::output::WorkspaceTransition::Exit => iced::exit(),
+        crate::output::WorkspaceTransition::StayInResultReview
+        | crate::output::WorkspaceTransition::EnterResultReview => {
+            if let crate::output::OutputOutcome::Error(err) = outcome {
+                state.transient_error = Some(err);
+            }
+            Task::none()
+        }
+    }
+}
+
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Overlay(msg) => {
@@ -178,7 +205,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     iced::window::Event::Opened { .. }
                 )) | app::OverlayMessage::WindowOpened { .. }
             );
-            let (effect, region_mode) = app::update(state, msg);
+            let (effect, _region_mode) = app::update(state, msg);
             if opened {
                 if let Some(exit) = validate_screenshot_surface_or_exit(state) {
                     return exit;
@@ -196,7 +223,6 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             return Task::none();
                         }
                     };
-                    state.workspace.begin_scrolling();
                     let crop_logical = LogicalRect {
                         x: crop.x,
                         y: crop.y,
@@ -300,7 +326,24 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         Ok(Some(resource)) => {
                             *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
                             match resource {
-                                CaptureResource::Streaming(driver) => {
+                                CaptureResource::Streaming(mut driver) => {
+                                    if let (Some(crop), Some(ws)) = (state.crop, state.window_size)
+                                    {
+                                        state.workspace.begin_scrolling();
+                                        driver.begin_stitch(
+                                            LogicalRect {
+                                                x: crop.x,
+                                                y: crop.y,
+                                                width: crop.width,
+                                                height: crop.height,
+                                            },
+                                            rollshot_capture::Size {
+                                                width: ws.width as u32,
+                                                height: ws.height as u32,
+                                            },
+                                            app::preview_constraints(crop, ws),
+                                        );
+                                    }
                                     *DRIVER_SLOT.lock().unwrap() = Some(driver);
                                 }
                                 CaptureResource::OneShot(capture) => {
@@ -326,36 +369,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         }
                     }
                 }
-                app::OverlayEffect::PerformOutput(action) => {
-                    let result_guard = RESULT_SLOT.lock().unwrap();
-                    let result = match result_guard.as_ref() {
-                        Some(Ok(Some(result))) => result,
-                        _ => {
-                            state.transient_error = Some("No result available".to_string());
-                            return Task::none();
-                        }
-                    };
-                    let img = &result.image;
-                    let mut output_service = crate::output::ArboardOutput::new();
-                    let outcome = crate::output::perform_output(&mut output_service, action, img);
-                    drop(result_guard);
-                    match crate::output::outcome_to_phase_decision(
-                        &outcome,
-                        state.workspace.phase(),
-                    ) {
-                        crate::output::WorkspaceTransition::Exit => iced::exit(),
-                        crate::output::WorkspaceTransition::StayInResultReview => {
-                            if let crate::output::OutputOutcome::Error(ref e) = outcome {
-                                state.transient_error = Some(e.clone());
-                            } else if outcome == crate::output::OutputOutcome::Cancelled {
-                                state.transient_error = Some("Save cancelled".to_string());
-                            }
-                            Task::none()
-                        }
-                        crate::output::WorkspaceTransition::EnterResultReview => Task::none(),
-                    }
-                }
-                app::OverlayEffect::PrepareScreenshot => {
+                app::OverlayEffect::PerformOutput(action) => perform_output_action(state, action),
+                app::OverlayEffect::PrepareScreenshot(output) => {
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
@@ -396,17 +411,21 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             state.result_size = Some(size);
                             state.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
+                            output.map_or_else(Task::none, |action| {
+                                perform_output_action(state, action)
+                            })
                         }
                         Ok(None) => {
                             state.transient_error = Some("No capture available".to_string());
+                            Task::none()
                         }
                         Err(e) => {
                             state.transient_error = Some(e);
+                            Task::none()
                         }
                     }
-                    Task::none()
                 }
-                app::OverlayEffect::FinalizeScrolling => {
+                app::OverlayEffect::FinalizeScrolling(output) => {
                     let driver = DRIVER_SLOT.lock().unwrap().take();
                     let outcome = match driver {
                         Some(driver) => driver.finalize(),
@@ -423,19 +442,21 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             state.result_size = Some(size);
                             state.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
+                            output.map_or_else(Task::none, |action| {
+                                perform_output_action(state, action)
+                            })
                         }
                         Err(e) => {
                             state.transient_error = Some(e);
                             state.workspace.revert_to_scrolling();
-                            return Task::none();
+                            Task::none()
                         }
                     }
-                    Task::none()
                 }
             };
 
             // Apply input region based on workspace phase.
-            let input_task = match region_mode {
+            let input_task = match input_mode_for(state.workspace.phase()) {
                 app::InputRegionMode::None => Task::none(),
                 app::InputRegionMode::FullOverlay => {
                     let ws = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
@@ -451,31 +472,19 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     ])
                 }
                 app::InputRegionMode::ToolbarOnly => {
-                    let crop = state.crop.unwrap_or(iced::Rectangle {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 0.0,
-                        height: 0.0,
-                    });
-                    let ws = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
-                    if let Some((x, y, w, h)) = input_region_for(&WorkspaceInput {
-                        workspace: &state.workspace,
-                        crop: Some(crop),
-                        window_size: Some(ws),
-                    }) {
-                        Task::batch([
-                            Task::done(Message::KeyboardInteractivityChange(
-                                KeyboardInteractivity::OnDemand,
-                            )),
-                            Task::done(Message::SetInputRegion(ActionCallback::new(
-                                move |region| {
-                                    region.add(x, y, w, h);
-                                },
-                            ))),
-                        ])
-                    } else {
-                        Task::none()
-                    }
+                    let region = input_region_for(state);
+                    Task::batch([
+                        Task::done(Message::KeyboardInteractivityChange(
+                            KeyboardInteractivity::OnDemand,
+                        )),
+                        Task::done(Message::SetInputRegion(ActionCallback::new(
+                            move |input_region| {
+                                if let Some((x, y, w, h)) = region {
+                                    input_region.add(x, y, w, h);
+                                }
+                            },
+                        ))),
+                    ])
                 }
             };
 
@@ -489,35 +498,28 @@ fn view(state: &Overlay) -> iced::Element<'_, Message> {
     crate::app::view(state).map(Message::Overlay)
 }
 
-pub(crate) struct WorkspaceInput<'a> {
-    pub workspace: &'a crate::workspace::WorkspaceState,
-    pub crop: Option<iced::Rectangle>,
-    pub window_size: Option<iced::Size>,
-}
-
-fn input_region_for(input: &WorkspaceInput<'_>) -> Option<(i32, i32, i32, i32)> {
+fn input_region_for(state: &Overlay) -> Option<(i32, i32, i32, i32)> {
     use crate::workspace::WorkspacePhase;
-    if input.workspace.phase() != WorkspacePhase::ScrollingCapture {
-        return None;
-    }
-    if !input
-        .workspace
-        .auto_hide()
-        .visible(std::time::Instant::now())
+    if state.workspace.phase() != WorkspacePhase::ScrollingCapture
+        || !app::toolbar_is_visible(state)
     {
         return None;
     }
-    let crop = input.crop?;
-    let ws = input.window_size?;
-    app::toolbar_input_rect(crop, ws)
+    let rect = app::toolbar_rect_for(state)?;
+    Some((
+        rect.x as i32,
+        rect.y as i32,
+        rect.width as i32,
+        rect.height as i32,
+    ))
 }
 
 #[allow(dead_code)]
 fn input_mode_for(phase: crate::workspace::WorkspacePhase) -> app::InputRegionMode {
     use crate::workspace::WorkspacePhase;
     match phase {
-        WorkspacePhase::ResultReview => app::InputRegionMode::FullOverlay,
-        _ => app::InputRegionMode::None,
+        WorkspacePhase::ScrollingCapture => app::InputRegionMode::ToolbarOnly,
+        _ => app::InputRegionMode::FullOverlay,
     }
 }
 
@@ -996,7 +998,7 @@ mod tests {
     use crate::workspace::{CropRect, WorkspacePhase, WorkspaceState};
     use iced::Rectangle;
 
-    fn scrolling_workspace() -> (WorkspaceState, Rectangle, iced::Size) {
+    fn scrolling_workspace() -> Overlay {
         let mut ws = WorkspaceState::new(CaptureMode::Scrolling);
         let crop = Rectangle {
             x: 10.0,
@@ -1013,67 +1015,79 @@ mod tests {
         }));
         ws.complete_selection();
         ws.begin_scrolling();
-        (ws, crop, window_size)
+        Overlay {
+            workspace: ws,
+            crop: Some(crop),
+            window_size: Some(window_size),
+            ..Overlay::default()
+        }
     }
 
-    fn workspace_with_visible_toolbar(
-        expected: (i32, i32, i32, i32),
-    ) -> (WorkspaceState, Rectangle, iced::Size) {
-        let (mut ws, crop, window_size) = scrolling_workspace();
-        ws.auto_hide_mut()
+    fn workspace_with_visible_toolbar() -> Overlay {
+        let mut state = scrolling_workspace();
+        state
+            .workspace
+            .auto_hide_mut()
             .accepted_frame(std::time::Instant::now() - std::time::Duration::from_millis(600));
-        let _ = expected;
-        (ws, crop, window_size)
+        state
     }
 
-    fn workspace_with_hidden_auto_hide() -> WorkspaceState {
-        let mut ws = WorkspaceState::new(CaptureMode::Scrolling);
-        ws.set_crop(Some(CropRect {
-            x: 10.0,
-            y: 20.0,
-            width: 260.0,
-            height: 200.0,
+    fn workspace_with_hidden_auto_hide() -> Overlay {
+        let mut state = scrolling_workspace();
+        let crop = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        state.crop = Some(crop);
+        state.workspace.set_crop(Some(CropRect {
+            x: crop.x,
+            y: crop.y,
+            width: crop.width,
+            height: crop.height,
         }));
-        ws.complete_selection();
-        ws.begin_scrolling();
-        ws
+        state.workspace.begin_scrolling();
+        state
     }
 
     #[test]
     fn scrolling_input_region_only_contains_visible_toolbar() {
-        let (ws, crop, window_size) = workspace_with_visible_toolbar((10, 20, 260, 48));
-        let input = WorkspaceInput {
-            workspace: &ws,
-            crop: Some(crop),
-            window_size: Some(window_size),
-        };
-        let region = input_region_for(&input);
-        let expected = app::toolbar_input_rect(crop, window_size);
-        assert_eq!(region, expected);
+        let state = workspace_with_visible_toolbar();
+        let rect = app::toolbar_rect_for(&state).expect("toolbar rect");
+        assert_eq!(
+            input_region_for(&state),
+            Some((
+                rect.x as i32,
+                rect.y as i32,
+                rect.width as i32,
+                rect.height as i32
+            ))
+        );
     }
 
     #[test]
     fn hidden_auto_hide_toolbar_has_no_input_region() {
-        let ws = workspace_with_hidden_auto_hide();
-        let crop = Rectangle {
-            x: 10.0,
-            y: 20.0,
-            width: 260.0,
-            height: 200.0,
-        };
-        let window_size = iced::Size::new(800.0, 600.0);
-        let input = WorkspaceInput {
-            workspace: &ws,
-            crop: Some(crop),
-            window_size: Some(window_size),
-        };
-        assert_eq!(input_region_for(&input), None);
+        let state = workspace_with_hidden_auto_hide();
+        assert_eq!(input_region_for(&state), None);
     }
 
     #[test]
     fn result_review_accepts_input_across_crop_and_toolbar() {
         assert_eq!(
             input_mode_for(WorkspacePhase::ResultReview),
+            app::InputRegionMode::FullOverlay
+        );
+    }
+
+    #[test]
+    fn scrolling_uses_toolbar_only_input_and_selected_uses_full_overlay() {
+        assert_eq!(
+            input_mode_for(WorkspacePhase::ScrollingCapture),
+            app::InputRegionMode::ToolbarOnly
+        );
+        assert_eq!(
+            input_mode_for(WorkspacePhase::Selected),
             app::InputRegionMode::FullOverlay
         );
     }

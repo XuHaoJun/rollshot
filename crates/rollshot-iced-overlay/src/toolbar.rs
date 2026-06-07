@@ -24,7 +24,7 @@ pub enum ToolbarMessage {
     DragEnd,
 }
 
-pub const TOOLBAR_WIDTH: f32 = 260.0;
+pub const TOOLBAR_WIDTH: f32 = 360.0;
 pub const TOOLBAR_HEIGHT: f32 = 48.0;
 
 pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
@@ -37,12 +37,16 @@ pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
         WorkspacePhase::Selected => vec![
             ToolbarAction::ScreenshotMode,
             ToolbarAction::ScrollingMode,
+            ToolbarAction::Save,
+            ToolbarAction::Copy,
             ToolbarAction::Cancel,
         ],
         WorkspacePhase::ScrollingCapture => vec![
             ToolbarAction::ScreenshotMode,
             ToolbarAction::ScrollingMode,
             ToolbarAction::Finish,
+            ToolbarAction::Save,
+            ToolbarAction::Copy,
             ToolbarAction::Cancel,
         ],
         WorkspacePhase::ResultReview => vec![
@@ -137,9 +141,9 @@ pub fn render_toolbar<'a, Message>(
     phase: WorkspacePhase,
     active_mode: CaptureMode,
     on_action: impl Fn(ToolbarAction) -> Message + 'a,
-    _on_drag_start: impl Fn(Point) -> Message + 'a,
-    _on_drag_move: impl Fn(Point) -> Message + 'a,
-    _on_drag_end: Message,
+    on_drag_start: Message,
+    on_drag_move: impl Fn(Point) -> Message + 'a,
+    on_drag_end: Message,
 ) -> Element<'a, Message>
 where
     Message: Clone + 'a,
@@ -166,20 +170,24 @@ where
         toolbar_row = toolbar_row.push(tooltip_btn);
     }
 
-    let drag_handle = container(text("⋮⋮").size(14))
-        .padding(8)
-        .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.1, 0.1, 0.1, 0.8,
-            ))),
-            text_color: Some(iced::Color::from_rgba(0.6, 0.6, 0.6, 1.0)),
-            border: iced::Border {
-                color: iced::Color::from_rgba(0.3, 0.3, 0.3, 1.0),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
-        });
+    let drag_handle =
+        iced::widget::mouse_area(container(text("⋮⋮").size(14)).padding(8).style(|_theme| {
+            container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.1, 0.1, 0.1, 0.8,
+                ))),
+                text_color: Some(iced::Color::from_rgba(0.6, 0.6, 0.6, 1.0)),
+                border: iced::Border {
+                    color: iced::Color::from_rgba(0.3, 0.3, 0.3, 1.0),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
+        }))
+        .on_press(on_drag_start)
+        .on_move(on_drag_move)
+        .on_release(on_drag_end);
 
     container(
         row![drag_handle, toolbar_row]
@@ -214,6 +222,15 @@ mod tests {
     }
 
     #[test]
+    fn selected_and_scrolling_toolbars_include_output_actions() {
+        for phase in [WorkspacePhase::Selected, WorkspacePhase::ScrollingCapture] {
+            let actions = actions_for(phase);
+            assert!(actions.contains(&ToolbarAction::Save));
+            assert!(actions.contains(&ToolbarAction::Copy));
+        }
+    }
+
+    #[test]
     fn result_review_toolbar_only_contains_output_and_close_actions() {
         assert_eq!(
             actions_for(WorkspacePhase::ResultReview),
@@ -228,12 +245,12 @@ mod tests {
     #[test]
     fn drag_is_clamped_to_viewport_bounds() {
         let clamped = finish_drag(
-            Rect::new(990.0, 790.0, 260.0, 48.0),
+            Rect::new(990.0, 790.0, TOOLBAR_WIDTH, TOOLBAR_HEIGHT),
             Rect::new(0.0, 0.0, 1000.0, 800.0),
         );
-        assert_eq!(clamped.x, 740.0);
+        assert_eq!(clamped.x, 640.0);
         assert_eq!(clamped.y, 752.0);
-        assert_eq!(clamped.width, 260.0);
-        assert_eq!(clamped.height, 48.0);
+        assert_eq!(clamped.width, TOOLBAR_WIDTH);
+        assert_eq!(clamped.height, TOOLBAR_HEIGHT);
     }
 }
