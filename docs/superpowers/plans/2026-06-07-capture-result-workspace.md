@@ -571,6 +571,14 @@ do not add a general-purpose drag abstraction.
 
 - [ ] **Step 4: Replace the current single chrome stack**
 
+**Behavior change:** the toolbar is NO LONGER stacked above the live preview by
+default. The old single-column layout (`column![toolbar, …, preview]` placed in
+one band, `app.rs:487-497`) always put the toolbar above the preview. After this
+task they are placed independently — toolbar and preview go to different bands
+whenever space permits. Toolbar-above-preview survives ONLY as the constrained
+`Combined` fallback (when a single band must host both), per the spec's combined
+orientation rules.
+
 In `app::view`:
 
 - measure known toolbar/preview requirement constants;
