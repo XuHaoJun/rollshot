@@ -1,7 +1,6 @@
 #![cfg(target_os = "macos")]
 
-#[cfg(test)]
-mod one_shot;
+pub mod one_shot;
 mod options;
 mod pixel;
 

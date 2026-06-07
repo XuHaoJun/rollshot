@@ -87,8 +87,9 @@ static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex
 // Finish/Cancel effects.
 static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 
-// One-shot capture for screenshot mode. The update fn reads this on FinishScreenshot
-// to crop and return the frozen image.
+// One-shot capture for screenshot mode. The update fn reads this on the Finish
+// effect (emitted immediately on a valid screenshot release) to crop and return
+// the frozen image.
 static ONE_SHOT_SLOT: Mutex<Option<rollshot_capture::OneShotCapture>> = Mutex::new(None);
 
 // Active capture mode, set at startup by `acquire_resource`.
@@ -130,10 +131,57 @@ fn subscription(_: &Overlay) -> iced::Subscription<Message> {
     iced::Subscription::batch(subs)
 }
 
+/// After the layer surface opens, validate that a screenshot one-shot image is a
+/// provable single-output match for the active surface (spec: non-KDE portal and
+/// KWin captures must map to exactly the opened output). On mismatch — e.g. a
+/// multi-monitor portal composite, or a layer surface that opened on a different
+/// output than KWin captured — record an explicit mapping error and exit instead
+/// of cropping against the wrong geometry. Returns `Some(exit_task)` on failure.
+fn validate_screenshot_surface_or_exit(state: &Overlay) -> Option<Task<Message>> {
+    if *CAPTURE_MODE.lock().unwrap() != Some(CaptureMode::Screenshot) {
+        return None;
+    }
+    let ws = state.window_size?;
+    let target = {
+        let guard = ONE_SHOT_SLOT.lock().unwrap();
+        guard.as_ref()?.target_display().clone()
+    };
+
+    let overlay_logical = rollshot_capture::Size {
+        width: ws.width as u32,
+        height: ws.height as u32,
+    };
+    // The capture's own physical/logical ratio is its scale: KWin reports it, and
+    // the portal sets logical == physical (scale 1.0). Validating the physical
+    // image against the opened surface's logical size at that scale rejects both
+    // composites and wrong-output surfaces, while accepting an exact single
+    // output (HiDPI portal images, whose scale the portal cannot prove, are
+    // rejected as ambiguous — matching the spec's provable-single-output gate).
+    let scale = target.physical_size.width as f64 / target.logical_region.width.max(1) as f64;
+    match rollshot_capture::validate_surface_mapping(target.physical_size, overlay_logical, scale) {
+        Ok(()) => None,
+        Err(e) => {
+            *RESULT_SLOT.lock().unwrap() = Some(Err(e.to_string()));
+            Some(iced::exit())
+        }
+    }
+}
+
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Overlay(msg) => {
+            let opened = matches!(
+                &msg,
+                app::OverlayMessage::IcedEvent(iced::Event::Window(
+                    iced::window::Event::Opened { .. }
+                )) | app::OverlayMessage::WindowOpened { .. }
+            );
             let effect = app::update(state, msg);
+            if opened {
+                if let Some(exit) = validate_screenshot_surface_or_exit(state) {
+                    return exit;
+                }
+            }
             match effect {
                 app::OverlayEffect::None => Task::none(),
                 app::OverlayEffect::BeginStitch => {
@@ -298,6 +346,22 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
     *CAPTURE_MODE.lock().unwrap() = Some(config.initial_mode);
 
+    // Build the frozen background handle once (screenshot mode only). This is the
+    // single full-image copy in the two-buffer render model; `view()` clones only
+    // the cheap handle per redraw.
+    let frozen_handle = match &resource {
+        CaptureResource::OneShot(capture) => {
+            let img = capture.image();
+            Some(iced::widget::image::Handle::from_rgba(
+                img.width(),
+                img.height(),
+                img.as_raw().clone(),
+            ))
+        }
+        CaptureResource::Streaming(_) => None,
+    };
+    let mode = config.initial_mode;
+
     let start_mode = match &resource {
         CaptureResource::OneShot(capture) => {
             match capture.target_display().output_name.as_deref() {
@@ -317,23 +381,32 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
         }
     }
 
-    let run_result = application(Overlay::default, namespace, update, view)
-        .style(app::style)
-        .subscription(subscription)
-        .settings(Settings {
-            layer_settings: LayerShellSettings {
-                anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
-                layer: Layer::Overlay,
-                exclusive_zone: -1,
-                size: None,
-                margin: (0, 0, 0, 0),
-                keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                start_mode,
-                events_transparent: false,
-            },
-            ..Default::default()
-        })
-        .run();
+    let run_result = application(
+        move || Overlay {
+            mode,
+            frozen: frozen_handle.clone(),
+            ..Overlay::default()
+        },
+        namespace,
+        update,
+        view,
+    )
+    .style(app::style)
+    .subscription(subscription)
+    .settings(Settings {
+        layer_settings: LayerShellSettings {
+            anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+            layer: Layer::Overlay,
+            exclusive_zone: -1,
+            size: None,
+            margin: (0, 0, 0, 0),
+            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+            start_mode,
+            events_transparent: false,
+        },
+        ..Default::default()
+    })
+    .run();
 
     // Safety net: if the loop exited without finalize/cancel taking the driver,
     // tear capture down so the PipeWire stream + reader thread don't leak.
@@ -600,6 +673,94 @@ mod tests {
             .unwrap();
 
         assert!(matches!(result, CaptureResource::OneShot(_)));
+    }
+
+    fn one_shot_capture(
+        physical: (u32, u32),
+        logical: (u32, u32),
+    ) -> rollshot_capture::OneShotCapture {
+        let img = RgbaImage::new(physical.0, physical.1);
+        rollshot_capture::OneShotCapture::new(
+            img,
+            DisplayTarget {
+                output_name: None,
+                logical_region: Region {
+                    x: 0,
+                    y: 0,
+                    width: logical.0,
+                    height: logical.1,
+                },
+                physical_size: Size {
+                    width: physical.0,
+                    height: physical.1,
+                },
+            },
+        )
+        .expect("test capture")
+    }
+
+    fn clear_screenshot_globals() {
+        *CAPTURE_MODE.lock().unwrap() = None;
+        *ONE_SHOT_SLOT.lock().unwrap() = None;
+        *RESULT_SLOT.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn screenshot_surface_validation_accepts_exact_single_output() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Screenshot);
+        *RESULT_SLOT.lock().unwrap() = None;
+        // 1x portal image: physical == logical, overlay surface matches exactly.
+        *ONE_SHOT_SLOT.lock().unwrap() = Some(one_shot_capture((200, 100), (200, 100)));
+
+        let state = Overlay {
+            window_size: Some(iced::Size::new(200.0, 100.0)),
+            ..Overlay::default()
+        };
+
+        let exit = validate_screenshot_surface_or_exit(&state);
+        assert!(exit.is_none(), "exact single output must pass");
+        assert!(RESULT_SLOT.lock().unwrap().is_none());
+        clear_screenshot_globals();
+    }
+
+    #[test]
+    fn screenshot_surface_validation_rejects_multi_output_composite() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Screenshot);
+        *RESULT_SLOT.lock().unwrap() = None;
+        // Portal returned a two-output composite (400x100), but the layer surface
+        // opened on a single 200x100 output.
+        *ONE_SHOT_SLOT.lock().unwrap() = Some(one_shot_capture((400, 100), (400, 100)));
+
+        let state = Overlay {
+            window_size: Some(iced::Size::new(200.0, 100.0)),
+            ..Overlay::default()
+        };
+
+        let exit = validate_screenshot_surface_or_exit(&state);
+        assert!(exit.is_some(), "composite image must be rejected");
+        assert!(
+            RESULT_SLOT.lock().unwrap().as_ref().unwrap().is_err(),
+            "composite rejection must record a mapping error"
+        );
+        clear_screenshot_globals();
+    }
+
+    #[test]
+    fn surface_validation_skipped_in_scrolling_mode() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Scrolling);
+        *RESULT_SLOT.lock().unwrap() = None;
+        *ONE_SHOT_SLOT.lock().unwrap() = None;
+
+        let state = Overlay {
+            window_size: Some(iced::Size::new(200.0, 100.0)),
+            ..Overlay::default()
+        };
+
+        assert!(validate_screenshot_surface_or_exit(&state).is_none());
+        clear_screenshot_globals();
     }
 
     #[test]

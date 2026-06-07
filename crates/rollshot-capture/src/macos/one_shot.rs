@@ -78,6 +78,32 @@ impl<C: MacosOneShotClient> MacosOneShotBackend<C> {
     }
 }
 
+/// Production client backed by the unsafe-isolation crate.
+#[cfg(not(test))]
+struct RealMacosOneShotClient;
+
+#[cfg(not(test))]
+impl MacosOneShotClient for RealMacosOneShotClient {
+    fn capture_display_under_cursor(
+        &self,
+        show_cursor: bool,
+    ) -> Result<rollshot_macos_oneshot::CapturedDisplay, CaptureError> {
+        rollshot_macos_oneshot::capture_display_under_cursor(show_cursor)
+            .map_err(map_isolation_error)
+    }
+}
+
+/// Capture the display under the pointer through `SCScreenshotManager`, returning
+/// a validated `OneShotCapture`. This is the macOS screenshot one-shot entry
+/// point dispatched from `OneShotBackendKind::capture_once`. No streaming /
+/// `SCStream` fallback occurs: a missing permission, unsupported OS, timeout, or
+/// capture failure surfaces as the corresponding `CaptureError`.
+#[cfg(not(test))]
+pub fn capture_once(show_cursor: bool) -> Result<OneShotCapture, CaptureError> {
+    let mut backend = MacosOneShotBackend::new(RealMacosOneShotClient);
+    backend.capture_once(show_cursor)
+}
+
 /// Map `rollshot_macos_oneshot::MacosOneShotError` to `CaptureError`.
 fn map_isolation_error(err: rollshot_macos_oneshot::MacosOneShotError) -> CaptureError {
     match err {

@@ -159,6 +159,34 @@ fn boot(settings: window::Settings) -> (MacOverlayState, Task<Message>) {
     )
 }
 
+/// After the overlay window opens, validate that a screenshot one-shot image is a
+/// provable single-output match for the resolved display (mirrors the Linux
+/// runner gate). On mismatch, record an explicit mapping error and exit instead
+/// of cropping against the wrong geometry. Returns `Some(exit_task)` on failure.
+fn validate_screenshot_surface_or_exit(state: &OverlayState) -> Option<Task<Message>> {
+    if *CAPTURE_MODE.lock().unwrap() != Some(CaptureMode::Screenshot) {
+        return None;
+    }
+    let ws = state.window_size?;
+    let target = {
+        let guard = ONE_SHOT_SLOT.lock().unwrap();
+        guard.as_ref()?.target_display().clone()
+    };
+
+    let overlay_logical = rollshot_capture::Size {
+        width: ws.width as u32,
+        height: ws.height as u32,
+    };
+    let scale = target.physical_size.width as f64 / target.logical_region.width.max(1) as f64;
+    match rollshot_capture::validate_surface_mapping(target.physical_size, overlay_logical, scale) {
+        Ok(()) => None,
+        Err(e) => {
+            *RESULT_SLOT.lock().unwrap() = Some(Err(e.to_string()));
+            Some(iced::exit())
+        }
+    }
+}
+
 fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
     match message {
         Message::WindowOpened { id, size } => {
@@ -169,6 +197,9 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                     &mut state.overlay,
                     OverlayMessage::WindowOpened { id, size },
                 );
+                if let Some(exit) = validate_screenshot_surface_or_exit(&state.overlay) {
+                    return exit;
+                }
             }
             patch
         }
@@ -410,6 +441,22 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
         }
     };
 
+    // Build the frozen background handle once (screenshot mode only). This is the
+    // single full-image copy in the two-buffer render model; `view()` clones only
+    // the cheap handle per redraw.
+    let frozen_handle = match &resource {
+        CaptureResource::OneShot(capture) => {
+            let img = capture.image();
+            Some(iced::widget::image::Handle::from_rgba(
+                img.width(),
+                img.height(),
+                img.as_raw().clone(),
+            ))
+        }
+        CaptureResource::Streaming(_) => None,
+    };
+    let mode = config.initial_mode;
+
     match resource {
         CaptureResource::Streaming(d) => {
             *DRIVER_SLOT.lock().unwrap() = Some(d);
@@ -453,11 +500,20 @@ pub(crate) fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, Overla
         ..window::Settings::default()
     };
 
-    let run_result = iced::daemon(move || boot(settings.clone()), update, view)
-        .subscription(subscription)
-        .theme(theme)
-        .style(style)
-        .run();
+    let run_result = iced::daemon(
+        move || {
+            let (mut state, task) = boot(settings.clone());
+            state.overlay.mode = mode;
+            state.overlay.frozen = frozen_handle.clone();
+            (state, task)
+        },
+        update,
+        view,
+    )
+    .subscription(subscription)
+    .theme(theme)
+    .style(style)
+    .run();
 
     // Safety net: if the loop exited without finalize/cancel taking the driver,
     // tear capture down so the stream + reader thread don't leak.

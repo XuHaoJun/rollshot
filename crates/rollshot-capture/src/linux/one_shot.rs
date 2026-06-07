@@ -104,8 +104,10 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
     fn capture_active_screen(&self, include_cursor: bool) -> Result<KwinRawCapture, CaptureError> {
         use std::os::fd::AsFd;
 
-        // Create a CLOEXEC pipe
-        let (read_fd, write_fd) = nix::unistd::pipe()
+        // Create a CLOEXEC pipe so the read/write ends never leak into an
+        // unrelated fork+exec while we wait on KWin. KWin receives the write end
+        // via DBus FD-passing (which dups), so CLOEXEC does not affect it.
+        let (read_fd, write_fd) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("pipe2() failed: {e}")))?;
 
         // Build DBus options map
