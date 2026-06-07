@@ -86,7 +86,6 @@ enum ControlsWindowAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PassthroughAction {
-    Enable,
     Disable,
     Noop,
 }
@@ -551,11 +550,6 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
             };
 
             let passthrough_task = match passthrough {
-                PassthroughAction::Enable => match state.overlay.window_id {
-                    Some(id) => window::enable_mouse_passthrough(id)
-                        .chain(Task::done(Message::PassthroughEnabled)),
-                    None => Task::none(),
-                },
                 PassthroughAction::Disable => match state.overlay.window_id {
                     Some(id) => window::disable_mouse_passthrough(id)
                         .chain(Task::done(Message::PassthroughDisabledThenExit)),
