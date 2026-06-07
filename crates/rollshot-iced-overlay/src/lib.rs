@@ -46,6 +46,7 @@ impl std::fmt::Display for OverlayError {
 
 impl std::error::Error for OverlayError {}
 
+mod toolbar;
 mod workspace;
 
 // TODO: uncomment these mod declarations as Tasks 3–7 land each module.

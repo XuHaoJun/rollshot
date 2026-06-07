@@ -4,6 +4,7 @@ use iced::{
     keyboard, mouse, window, Color, ContentFit, Element, Event, Length, Point, Rectangle, Size,
 };
 use rollshot_capture::CaptureMode;
+use rollshot_overlay_core::chrome_placement::{self, ChromePlacement, ChromeRequirements, Rect};
 use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
 use std::sync::Mutex;
@@ -51,6 +52,10 @@ pub(crate) enum OverlayMessage {
     LiveEvent(crate::driver::LiveOverlayEvent),
     Tick,
     ActivateMode(CaptureMode),
+    ToolbarAction(crate::toolbar::ToolbarAction),
+    DragStart(Point),
+    DragMove(Point),
+    DragEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +83,9 @@ pub(crate) struct OverlayState {
     /// Frozen one-shot background, present only in screenshot mode. Built once by
     /// the platform runner; `view()` clones the cheap handle, never the pixels.
     pub(crate) frozen: Option<image::Handle>,
+    /// Toolbar drag state
+    pub(crate) toolbar_drag_start: Option<Point>,
+    pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
 }
 
 impl Default for OverlayState {
@@ -94,6 +102,8 @@ impl Default for OverlayState {
             capture_miss_message_expires_at: None,
             mode: CaptureMode::Scrolling,
             frozen: None,
+            toolbar_drag_start: None,
+            toolbar_position: crate::workspace::ToolbarPosition::Automatic,
         }
     }
 }
@@ -264,79 +274,6 @@ pub(crate) fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<
     .map(|(band, _, _)| band)
 }
 
-/// Lay out `chrome` in the chosen band so it never overlaps the crop interior
-/// (which stays transparent + scroll-through during capture, spec P3.4); `None`
-/// if no band has room (caller hides the chrome).
-pub(crate) fn place_outside_crop<'a>(
-    crop: Rectangle,
-    window: iced::Size,
-    chrome: Element<'a, OverlayMessage>,
-) -> Option<Element<'a, OverlayMessage>> {
-    let band = choose_chrome_band(crop, window)?;
-    // Anchor the chrome to the crop's near edge so it hugs the crop like a
-    // connected popover, on whichever side `choose_chrome_band` found room.
-    let crop_x = crop.x.max(0.0);
-    let crop_y = crop.y.max(0.0);
-
-    let placed: Element<'a, OverlayMessage> = match band {
-        // Directly below the crop, left edge aligned to the crop; grows down.
-        Band::Bottom => column![
-            Space::new()
-                .width(Length::Fill)
-                .height(Length::Fixed(crop.y + crop.height)),
-            row![
-                Space::new()
-                    .width(Length::Fixed(crop_x))
-                    .height(Length::Shrink),
-                chrome,
-            ],
-        ]
-        .into(),
-        // Directly above the crop, bottom-anchored to the crop's top; grows up.
-        Band::Top => column![
-            container(row![
-                Space::new()
-                    .width(Length::Fixed(crop_x))
-                    .height(Length::Shrink),
-                chrome,
-            ])
-            .width(Length::Fill)
-            .height(Length::Fixed(crop_y))
-            .align_y(iced::Alignment::End),
-            Space::new().width(Length::Fill).height(Length::Fill),
-        ]
-        .into(),
-        // Left of the crop, right edge aligned to the crop's left; top aligned.
-        Band::Left => row![
-            container(column![
-                Space::new()
-                    .width(Length::Shrink)
-                    .height(Length::Fixed(crop_y)),
-                chrome,
-            ])
-            .width(Length::Fixed(crop_x))
-            .height(Length::Fill)
-            .align_x(iced::Alignment::End),
-            Space::new().width(Length::Fill).height(Length::Fill),
-        ]
-        .into(),
-        // Right of the crop, left edge aligned to the crop's right; top aligned.
-        Band::Right => row![
-            Space::new()
-                .width(Length::Fixed(crop.x + crop.width))
-                .height(Length::Fill),
-            column![
-                Space::new()
-                    .width(Length::Shrink)
-                    .height(Length::Fixed(crop_y)),
-                chrome,
-            ],
-        ]
-        .into(),
-    };
-    Some(placed)
-}
-
 /// The toolbar's interactive rect within the chosen chrome band, in surface-
 /// logical px. Plan T6 S3: only the toolbar stays interactive during capture;
 /// the crop interior + everything else passes through so the user can scroll the
@@ -452,31 +389,6 @@ pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> Previe
     }
 }
 
-pub(crate) fn magenta_toolbar<'a>(
-    content: Element<'a, OverlayMessage>,
-) -> Element<'a, OverlayMessage> {
-    container(content)
-        .padding(8)
-        .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(SENTINEL_MAGENTA)),
-            ..Default::default()
-        })
-        .into()
-}
-
-pub(crate) fn capture_control_strip<'a>() -> Element<'a, OverlayMessage> {
-    magenta_toolbar(
-        row![
-            text(CAPTURE_STATUS_TEXT).size(16),
-            button(FINISH_LABEL).on_press(OverlayMessage::FinishCapture),
-            button(CANCEL_LABEL).on_press(OverlayMessage::Cancel),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::Center)
-        .into(),
-    )
-}
-
 pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     let canvas_widget = canvas(CropCanvas::from_state(state))
         .width(Length::Fill)
@@ -485,7 +397,6 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     if state.workspace.phase() != crate::workspace::WorkspacePhase::Selecting {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
-        let toolbar = capture_control_strip();
         let crop = state.crop.unwrap_or(Rectangle {
             x: 0.0,
             y: 0.0,
@@ -494,7 +405,34 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         });
         let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
 
-        // R5: toolbar is always first so toolbar_input_rect contract holds.
+        let toolbar = crate::toolbar::render_toolbar(
+            state.workspace.phase(),
+            state.mode,
+            OverlayMessage::ToolbarAction,
+            OverlayMessage::DragStart,
+            OverlayMessage::DragMove,
+            OverlayMessage::DragEnd,
+        );
+
+        let preview_size = state
+            .preview
+            .as_ref()
+            .map(|_| chrome_placement::Size::new(crate::toolbar::TOOLBAR_WIDTH, 100.0));
+
+        let chrome_req = ChromeRequirements {
+            toolbar: chrome_placement::Size::new(
+                crate::toolbar::TOOLBAR_WIDTH,
+                crate::toolbar::TOOLBAR_HEIGHT,
+            ),
+            preview: preview_size,
+            margin: 8.0,
+            spacing: CHROME_SPACING,
+        };
+
+        let viewport = Rect::new(0.0, 0.0, window.width, window.height);
+        let crop_rect = Rect::new(crop.x, crop.y, crop.width, crop.height);
+        let placement = chrome_placement::place_chrome(viewport, crop_rect, chrome_req);
+
         let warning: Option<Element<'_, OverlayMessage>> = state.capture_miss_warn.then(|| {
             container(text(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING).size(14))
                 .padding(8)
@@ -511,22 +449,68 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
                 .into()
         });
 
-        let chrome: Element<'_, OverlayMessage> = {
-            let mut col = column![toolbar];
-            col = col.spacing(CHROME_SPACING);
-            if let Some(w) = warning {
-                col = col.push(w);
+        let toolbar_rect = placement.toolbar_rect();
+        let chrome_visible = match placement {
+            chrome_placement::ChromePlacement::ActivityAutoHide { .. } => {
+                state.workspace.auto_hide().visible(std::time::Instant::now())
             }
-            if let Some(handle) = &state.preview {
-                col = col.push(image(handle.clone()));
-            }
-            col.into()
+            _ => true,
         };
 
-        return match place_outside_crop(crop, window, chrome) {
-            Some(placed) => iced::widget::stack![canvas_widget, placed].into(),
-            None => canvas_widget.into(),
-        };
+        let toolbar_layer = container(toolbar)
+            .width(Length::Fixed(toolbar_rect.width))
+            .height(Length::Fixed(toolbar_rect.height))
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center);
+
+        let mut chrome_stack = iced::widget::stack![canvas_widget];
+
+        if chrome_visible {
+            chrome_stack = chrome_stack.push(
+                container(toolbar_layer)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::Start)
+                    .align_y(iced::Alignment::Start)
+                    .padding(iced::Padding {
+                        left: toolbar_rect.x,
+                        top: toolbar_rect.y,
+                        right: 0.0,
+                        bottom: 0.0,
+                    }),
+            );
+
+            if let Some(w) = warning {
+                chrome_stack = chrome_stack.push(
+                    container(w)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::End)
+                        .padding(16),
+                );
+            }
+
+            if let Some(handle) = &state.preview {
+                if let Some(preview_rect) = placement.preview_rect() {
+                    chrome_stack = chrome_stack.push(
+                        container(image(handle.clone()))
+                            .width(Length::Fixed(preview_rect.width))
+                            .height(Length::Fixed(preview_rect.height))
+                            .align_x(iced::Alignment::Start)
+                            .align_y(iced::Alignment::Start)
+                            .padding(iced::Padding {
+                                left: preview_rect.x,
+                                top: preview_rect.y,
+                                right: 0.0,
+                                bottom: 0.0,
+                            }),
+                    );
+                }
+            }
+        }
+
+        return chrome_stack.into();
     }
 
     // Selection phase: drag to pick a crop; toolbar with Cancel.
@@ -534,14 +518,13 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         Some(r) => format!("Crop: {}x{}", r.width as u32, r.height as u32),
         None => "Drag to select crop area".to_string(),
     };
-    let toolbar = magenta_toolbar(
-        row![
-            button("Cancel").on_press(OverlayMessage::Cancel),
-            text(status).size(16),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::Center)
-        .into(),
+    let toolbar = crate::toolbar::render_toolbar(
+        state.workspace.phase(),
+        state.mode,
+        OverlayMessage::ToolbarAction,
+        OverlayMessage::DragStart,
+        OverlayMessage::DragMove,
+        OverlayMessage::DragEnd,
     );
 
     let toolbar_layer = container(toolbar)
@@ -768,6 +751,58 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
                 state.capture_miss_warn = false;
                 state.capture_miss_message_expires_at = None;
             }
+            OverlayEffect::None
+        }
+        OverlayMessage::ToolbarAction(action) => match action {
+            crate::toolbar::ToolbarAction::ScreenshotMode => {
+                state.mode = CaptureMode::Screenshot;
+                state.workspace.activate_mode(CaptureMode::Screenshot);
+                OverlayEffect::ActivateMode(CaptureMode::Screenshot)
+            }
+            crate::toolbar::ToolbarAction::ScrollingMode => {
+                state.mode = CaptureMode::Scrolling;
+                state.workspace.activate_mode(CaptureMode::Scrolling);
+                OverlayEffect::ActivateMode(CaptureMode::Scrolling)
+            }
+            crate::toolbar::ToolbarAction::Finish => match state.workspace.phase() {
+                WorkspacePhase::ScrollingCapture => {
+                    state.workspace.finish_scrolling(None);
+                    OverlayEffect::FinalizeScrolling
+                }
+                _ => OverlayEffect::None,
+            },
+            crate::toolbar::ToolbarAction::Save => OverlayEffect::None,
+            crate::toolbar::ToolbarAction::Copy => OverlayEffect::None,
+            crate::toolbar::ToolbarAction::Cancel => {
+                state.workspace.cancel();
+                OverlayEffect::Cancel
+            }
+            crate::toolbar::ToolbarAction::Close => {
+                state.workspace.cancel();
+                OverlayEffect::Cancel
+            }
+        },
+        OverlayMessage::DragStart(point) => {
+            state.toolbar_drag_start = Some(point);
+            OverlayEffect::None
+        }
+        OverlayMessage::DragMove(point) => {
+            if let Some(start) = state.toolbar_drag_start {
+                let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
+                let viewport = Rect::new(0.0, 0.0, window.width, window.height);
+                let toolbar_rect = Rect::new(
+                    point.x - crate::toolbar::TOOLBAR_WIDTH / 2.0,
+                    point.y - crate::toolbar::TOOLBAR_HEIGHT / 2.0,
+                    crate::toolbar::TOOLBAR_WIDTH,
+                    crate::toolbar::TOOLBAR_HEIGHT,
+                );
+                let clamped = crate::toolbar::finish_drag(toolbar_rect, viewport);
+                state.toolbar_position = crate::workspace::ToolbarPosition::Manual(clamped);
+            }
+            OverlayEffect::None
+        }
+        OverlayMessage::DragEnd => {
+            state.toolbar_drag_start = None;
             OverlayEffect::None
         }
         _ => OverlayEffect::None,
