@@ -295,67 +295,6 @@ pub(crate) fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<
     .map(|(band, _, _)| band)
 }
 
-/// The toolbar's interactive rect within the chosen chrome band, in surface-
-/// logical px. Plan T6 S3: only the toolbar stays interactive during capture;
-/// the crop interior + everything else passes through so the user can scroll the
-/// target. Clamped to the band, so it never enters the crop (spec P3.4).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn toolbar_input_rect(
-    crop: Rectangle,
-    window: iced::Size,
-) -> Option<(i32, i32, i32, i32)> {
-    if window.width <= 0.0 || window.height <= 0.0 {
-        return None;
-    }
-
-    let band = choose_chrome_band(crop, window)?;
-    let (x, y, w, h) = match band {
-        Band::Top => {
-            let available_h = crop.y.max(0.0).min(window.height);
-            let h = TOOLBAR_H.min(available_h);
-            let x = crop.x.max(0.0).min(window.width);
-            let y = (available_h - h).max(0.0);
-            (x, y, TOOLBAR_W.min((window.width - x).max(0.0)), h)
-        }
-        Band::Bottom => {
-            let by = (crop.y + crop.height).clamp(0.0, window.height);
-            let x = crop.x.max(0.0).min(window.width);
-            (
-                x,
-                by,
-                TOOLBAR_W.min((window.width - x).max(0.0)),
-                TOOLBAR_H.min((window.height - by).max(0.0)),
-            )
-        }
-        Band::Left => {
-            let available_w = crop.x.max(0.0).min(window.width);
-            let w = TOOLBAR_W.min(available_w);
-            let y = crop.y.max(0.0).min(window.height);
-            (
-                (available_w - w).max(0.0),
-                y,
-                w,
-                TOOLBAR_H.min((window.height - y).max(0.0)),
-            )
-        }
-        Band::Right => {
-            let bx = (crop.x + crop.width).clamp(0.0, window.width);
-            let y = crop.y.max(0.0).min(window.height);
-            (
-                bx,
-                y,
-                TOOLBAR_W.min((window.width - bx).max(0.0)),
-                TOOLBAR_H.min((window.height - y).max(0.0)),
-            )
-        }
-    };
-    if w <= 0.0 || h <= 0.0 {
-        return None;
-    }
-
-    Some((x as i32, y as i32, w as i32, h as i32))
-}
-
 pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
     let band = choose_chrome_band(crop, window);
     let (available_width, available_height) = match band {
@@ -1053,8 +992,8 @@ pub(crate) fn update(
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_chrome_band, crop_mask_bands, preview_constraints, token_color, toolbar_input_rect,
-        Band, OverlayMessage, OverlayState,
+        choose_chrome_band, crop_mask_bands, preview_constraints, token_color, Band,
+        OverlayMessage, OverlayState,
     };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
@@ -1167,94 +1106,6 @@ mod tests {
         assert_eq!(bands[1], (Point::new(0.0, 80.0), Size::new(100.0, 0.0)));
         assert_eq!(bands[2], (Point::new(0.0, 10.0), Size::new(0.0, 70.0)));
         assert_eq!(bands[3], (Point::new(60.0, 10.0), Size::new(40.0, 70.0)));
-    }
-
-    #[test]
-    fn toolbar_input_rect_rejects_zero_window_size() {
-        let crop = Rectangle {
-            x: 10.0,
-            y: 80.0,
-            width: 100.0,
-            height: 100.0,
-        };
-
-        assert_eq!(toolbar_input_rect(crop, Size::new(0.0, 0.0)), None);
-    }
-
-    #[test]
-    fn toolbar_input_rect_uses_control_strip_width() {
-        let crop = Rectangle {
-            x: 100.0,
-            y: 100.0,
-            width: 200.0,
-            height: 200.0,
-        };
-        let window = Size::new(800.0, 600.0);
-
-        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
-
-        assert_eq!(rect.2, 360);
-        assert!(rect.3 > 0);
-    }
-
-    #[test]
-    fn toolbar_input_rect_aligns_with_bottom_band_toolbar() {
-        let crop = Rectangle {
-            x: 40.0,
-            y: 100.0,
-            width: 720.0,
-            height: 200.0,
-        };
-        let window = Size::new(800.0, 600.0);
-
-        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
-
-        assert_eq!(rect, (40, 300, 360, 50));
-    }
-
-    #[test]
-    fn toolbar_input_rect_aligns_with_top_band_toolbar() {
-        let crop = Rectangle {
-            x: 40.0,
-            y: 300.0,
-            width: 720.0,
-            height: 260.0,
-        };
-        let window = Size::new(800.0, 600.0);
-
-        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
-
-        assert_eq!(rect, (40, 250, 360, 50));
-    }
-
-    #[test]
-    fn toolbar_input_rect_aligns_with_left_band_toolbar() {
-        let crop = Rectangle {
-            x: 400.0,
-            y: 250.0,
-            width: 360.0,
-            height: 250.0,
-        };
-        let window = Size::new(800.0, 600.0);
-
-        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
-
-        assert_eq!(rect, (40, 250, 360, 50));
-    }
-
-    #[test]
-    fn toolbar_input_rect_aligns_with_right_band_toolbar() {
-        let crop = Rectangle {
-            x: 40.0,
-            y: 250.0,
-            width: 200.0,
-            height: 250.0,
-        };
-        let window = Size::new(800.0, 600.0);
-
-        let rect = toolbar_input_rect(crop, window).expect("toolbar input rect");
-
-        assert_eq!(rect, (240, 250, 360, 50));
     }
 
     #[test]
