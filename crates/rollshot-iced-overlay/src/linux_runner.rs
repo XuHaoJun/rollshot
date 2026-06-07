@@ -117,12 +117,14 @@ fn preview_stream() -> iced::Subscription<Message> {
     })
 }
 
-fn subscription(_: &Overlay) -> iced::Subscription<Message> {
-    let mode = *CAPTURE_MODE.lock().unwrap();
+fn subscription(state: &Overlay) -> iced::Subscription<Message> {
+    use crate::workspace::WorkspacePhase;
     let mut subs =
         vec![event::listen().map(|e| Message::Overlay(app::OverlayMessage::IcedEvent(e)))];
-    if mode == Some(CaptureMode::Scrolling) {
-        subs.push(preview_stream());
+    if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
+        if PREVIEW_RX.lock().unwrap().is_some() {
+            subs.push(preview_stream());
+        }
         subs.push(
             iced::time::every(std::time::Duration::from_millis(250))
                 .map(|_| Message::Overlay(app::OverlayMessage::Tick)),
@@ -176,26 +178,25 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     iced::window::Event::Opened { .. }
                 )) | app::OverlayMessage::WindowOpened { .. }
             );
-            let effect = app::update(state, msg);
+            let (effect, region_mode) = app::update(state, msg);
             if opened {
                 if let Some(exit) = validate_screenshot_surface_or_exit(state) {
                     return exit;
                 }
             }
-            match effect {
+            let task = match effect {
                 app::OverlayEffect::None => Task::none(),
                 app::OverlayEffect::BeginStitch => {
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
                         None => {
-                            *RESULT_SLOT.lock().unwrap() = Some(Err(
-                                "overlay surface size unknown (no Window::Opened event)"
-                                    .to_string(),
-                            ));
-                            return iced::exit();
+                            state.transient_error =
+                                Some("overlay surface size unknown".to_string());
+                            return Task::none();
                         }
                     };
+                    state.workspace.begin_scrolling();
                     let crop_logical = LogicalRect {
                         x: crop.x,
                         y: crop.y,
@@ -210,19 +211,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                    let Some((x, y, w, h)) = app::capture_chrome_input_rect(crop, ws) else {
-                        return Task::none();
-                    };
-                    Task::batch([
-                        Task::done(Message::KeyboardInteractivityChange(
-                            KeyboardInteractivity::OnDemand,
-                        )),
-                        Task::done(Message::SetInputRegion(ActionCallback::new(
-                            move |region| {
-                                region.add(x, y, w, h);
-                            },
-                        ))),
-                    ])
+                    Task::none()
                 }
                 app::OverlayEffect::Finish => {
                     let mode = *CAPTURE_MODE.lock().unwrap();
@@ -281,18 +270,99 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 app::OverlayEffect::EnablePassthrough | app::OverlayEffect::DisablePassthrough => {
                     Task::none()
                 }
-                app::OverlayEffect::ActivateMode(_) => Task::none(),
-                app::OverlayEffect::PerformOutput(_action) => Task::none(),
+                app::OverlayEffect::ActivateMode(new_mode) => {
+                    // Stop/discard current workflow.
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+                        driver.cancel();
+                    }
+                    ONE_SHOT_SLOT.lock().unwrap().take();
+                    *PREVIEW_RX.lock().unwrap() = None;
+
+                    let config = OverlayConfig {
+                        backend: "auto".to_string(),
+                        fps: 5,
+                        show_cursor: false,
+                        initial_mode: new_mode,
+                    };
+                    #[cfg(not(test))]
+                    let factories = real_factories();
+                    #[cfg(test)]
+                    let factories = ResourceFactories {
+                        streaming: Box::new(|_cfg, _preview_tx| Err("test mode".to_string())),
+                        one_shot: Box::new(|_| {
+                            Err(rollshot_capture::CaptureError::Unsupported {
+                                message: "test mode".to_string(),
+                            })
+                        }),
+                    };
+
+                    match acquire_resource(new_mode, &config, &factories) {
+                        Ok(Some(resource)) => {
+                            *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
+                            match resource {
+                                CaptureResource::Streaming(driver) => {
+                                    *DRIVER_SLOT.lock().unwrap() = Some(driver);
+                                }
+                                CaptureResource::OneShot(capture) => {
+                                    let img = capture.image();
+                                    state.frozen = Some(iced::widget::image::Handle::from_rgba(
+                                        img.width(),
+                                        img.height(),
+                                        img.as_raw().clone(),
+                                    ));
+                                    *ONE_SHOT_SLOT.lock().unwrap() = Some(capture);
+                                }
+                            }
+                            Task::none()
+                        }
+                        Ok(None) => {
+                            // User cancelled portal picker.
+                            state.transient_error = Some("Capture cancelled".to_string());
+                            Task::none()
+                        }
+                        Err(e) => {
+                            state.transient_error = Some(format!("Capture failed: {e}"));
+                            Task::none()
+                        }
+                    }
+                }
+                app::OverlayEffect::PerformOutput(action) => {
+                    let result_guard = RESULT_SLOT.lock().unwrap();
+                    let result = match result_guard.as_ref() {
+                        Some(Ok(Some(result))) => result,
+                        _ => {
+                            state.transient_error = Some("No result available".to_string());
+                            return Task::none();
+                        }
+                    };
+                    let img = &result.image;
+                    let mut output_service = crate::output::ArboardOutput::new();
+                    let outcome = crate::output::perform_output(&mut output_service, action, img);
+                    drop(result_guard);
+                    match crate::output::outcome_to_phase_decision(
+                        &outcome,
+                        state.workspace.phase(),
+                    ) {
+                        crate::output::WorkspaceTransition::Exit => iced::exit(),
+                        crate::output::WorkspaceTransition::StayInResultReview => {
+                            if let crate::output::OutputOutcome::Error(ref e) = outcome {
+                                state.transient_error = Some(e.clone());
+                            } else if outcome == crate::output::OutputOutcome::Cancelled {
+                                state.transient_error = Some("Save cancelled".to_string());
+                            }
+                            Task::none()
+                        }
+                        crate::output::WorkspaceTransition::EnterResultReview => Task::none(),
+                    }
+                }
                 app::OverlayEffect::PrepareScreenshot => {
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
                         None => {
-                            *RESULT_SLOT.lock().unwrap() = Some(Err(
-                                "overlay surface size unknown (no Window::Opened event)"
-                                    .to_string(),
-                            ));
-                            return iced::exit();
+                            state.transient_error =
+                                Some("overlay surface size unknown".to_string());
+                            return Task::none();
                         }
                     };
                     let crop_logical = LogicalRect {
@@ -315,19 +385,102 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         .map(Some),
                         None => Ok(None),
                     };
-                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
-                    iced::exit()
+                    match outcome {
+                        Ok(Some(result)) => {
+                            let handle = crate::result_review::build_result_handle(&result.image);
+                            let size = iced::Size::new(
+                                result.image.width() as f32,
+                                result.image.height() as f32,
+                            );
+                            state.result_handle = Some(handle);
+                            state.result_size = Some(size);
+                            *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
+                        }
+                        Ok(None) => {
+                            state.transient_error = Some("No capture available".to_string());
+                        }
+                        Err(e) => {
+                            state.transient_error = Some(e);
+                        }
+                    }
+                    Task::none()
                 }
                 app::OverlayEffect::FinalizeScrolling => {
                     let driver = DRIVER_SLOT.lock().unwrap().take();
                     let outcome = match driver {
-                        Some(driver) => driver.finalize().map(Some),
-                        None => Ok(None),
+                        Some(driver) => driver.finalize(),
+                        None => Err("No driver available".to_string()),
                     };
-                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
-                    iced::exit()
+                    match outcome {
+                        Ok(result) => {
+                            let handle = crate::result_review::build_result_handle(&result.image);
+                            let size = iced::Size::new(
+                                result.image.width() as f32,
+                                result.image.height() as f32,
+                            );
+                            state.result_handle = Some(handle);
+                            state.result_size = Some(size);
+                            *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
+                        }
+                        Err(e) => {
+                            if e == "stitcher produced no output" {
+                                state.transient_error = Some(e);
+                                return Task::none();
+                            }
+                            state.transient_error = Some(e);
+                            return Task::none();
+                        }
+                    }
+                    Task::none()
                 }
-            }
+            };
+
+            // Apply input region based on workspace phase.
+            let input_task = match region_mode {
+                app::InputRegionMode::None => Task::none(),
+                app::InputRegionMode::FullOverlay => {
+                    let ws = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
+                    Task::batch([
+                        Task::done(Message::KeyboardInteractivityChange(
+                            KeyboardInteractivity::OnDemand,
+                        )),
+                        Task::done(Message::SetInputRegion(ActionCallback::new(
+                            move |region| {
+                                region.add(0, 0, ws.width as i32, ws.height as i32);
+                            },
+                        ))),
+                    ])
+                }
+                app::InputRegionMode::ToolbarOnly => {
+                    let crop = state.crop.unwrap_or(iced::Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    });
+                    let ws = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
+                    if let Some((x, y, w, h)) = input_region_for(&WorkspaceInput {
+                        workspace: &state.workspace,
+                        crop: Some(crop),
+                        window_size: Some(ws),
+                    }) {
+                        Task::batch([
+                            Task::done(Message::KeyboardInteractivityChange(
+                                KeyboardInteractivity::OnDemand,
+                            )),
+                            Task::done(Message::SetInputRegion(ActionCallback::new(
+                                move |region| {
+                                    region.add(x, y, w, h);
+                                },
+                            ))),
+                        ])
+                    } else {
+                        Task::none()
+                    }
+                }
+            };
+
+            Task::batch([task, input_task])
         }
         _ => Task::none(),
     }
@@ -335,6 +488,37 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
 
 fn view(state: &Overlay) -> iced::Element<'_, Message> {
     crate::app::view(state).map(Message::Overlay)
+}
+
+pub(crate) struct WorkspaceInput<'a> {
+    pub workspace: &'a crate::workspace::WorkspaceState,
+    pub crop: Option<iced::Rectangle>,
+    pub window_size: Option<iced::Size>,
+}
+
+fn input_region_for(input: &WorkspaceInput<'_>) -> Option<(i32, i32, i32, i32)> {
+    use crate::workspace::WorkspacePhase;
+    if input.workspace.phase() != WorkspacePhase::ScrollingCapture {
+        return None;
+    }
+    if !input
+        .workspace
+        .auto_hide()
+        .visible(std::time::Instant::now())
+    {
+        return None;
+    }
+    let crop = input.crop?;
+    let ws = input.window_size?;
+    app::toolbar_input_rect(crop, ws)
+}
+
+fn input_mode_for(phase: crate::workspace::WorkspacePhase) -> app::InputRegionMode {
+    use crate::workspace::WorkspacePhase;
+    match phase {
+        WorkspacePhase::ResultReview => app::InputRegionMode::FullOverlay,
+        _ => app::InputRegionMode::None,
+    }
 }
 
 #[cfg(not(test))]
@@ -807,6 +991,91 @@ mod tests {
 
         assert!(validate_screenshot_surface_or_exit(&state).is_none());
         clear_screenshot_globals();
+    }
+
+    use crate::workspace::{CropRect, WorkspacePhase, WorkspaceState};
+    use iced::Rectangle;
+
+    fn scrolling_workspace() -> (WorkspaceState, Rectangle, iced::Size) {
+        let mut ws = WorkspaceState::new(CaptureMode::Scrolling);
+        let crop = Rectangle {
+            x: 10.0,
+            y: 20.0,
+            width: 260.0,
+            height: 200.0,
+        };
+        let window_size = iced::Size::new(800.0, 600.0);
+        ws.set_crop(Some(CropRect {
+            x: crop.x,
+            y: crop.y,
+            width: crop.width,
+            height: crop.height,
+        }));
+        ws.complete_selection();
+        ws.begin_scrolling();
+        (ws, crop, window_size)
+    }
+
+    fn workspace_with_visible_toolbar(
+        expected: (i32, i32, i32, i32),
+    ) -> (WorkspaceState, Rectangle, iced::Size) {
+        let (mut ws, crop, window_size) = scrolling_workspace();
+        ws.auto_hide_mut()
+            .accepted_frame(std::time::Instant::now() - std::time::Duration::from_millis(600));
+        let _ = expected;
+        (ws, crop, window_size)
+    }
+
+    fn workspace_with_hidden_auto_hide() -> WorkspaceState {
+        let mut ws = WorkspaceState::new(CaptureMode::Scrolling);
+        ws.set_crop(Some(CropRect {
+            x: 10.0,
+            y: 20.0,
+            width: 260.0,
+            height: 200.0,
+        }));
+        ws.complete_selection();
+        ws.begin_scrolling();
+        ws
+    }
+
+    #[test]
+    fn scrolling_input_region_only_contains_visible_toolbar() {
+        let (ws, crop, window_size) = workspace_with_visible_toolbar((10, 20, 260, 48));
+        let input = WorkspaceInput {
+            workspace: &ws,
+            crop: Some(crop),
+            window_size: Some(window_size),
+        };
+        let region = input_region_for(&input);
+        let expected = app::toolbar_input_rect(crop, window_size);
+        assert_eq!(region, expected);
+    }
+
+    #[test]
+    fn hidden_auto_hide_toolbar_has_no_input_region() {
+        let ws = workspace_with_hidden_auto_hide();
+        let crop = Rectangle {
+            x: 10.0,
+            y: 20.0,
+            width: 260.0,
+            height: 200.0,
+        };
+        let window_size = iced::Size::new(800.0, 600.0);
+        let input = WorkspaceInput {
+            workspace: &ws,
+            crop: Some(crop),
+            window_size: Some(window_size),
+        };
+        assert_eq!(input_region_for(&input), None);
+    }
+
+    #[test]
+    fn result_review_accepts_input_across_crop_and_toolbar() {
+        assert_eq!(
+            input_mode_for(WorkspacePhase::ResultReview),
+            app::InputRegionMode::FullOverlay
+        );
     }
 
     #[test]
