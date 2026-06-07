@@ -348,6 +348,7 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                             );
                             state.overlay.result_handle = Some(handle);
                             state.overlay.result_size = Some(size);
+                            state.overlay.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
                         }
                         Ok(None) => {
@@ -375,10 +376,12 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                             );
                             state.overlay.result_handle = Some(handle);
                             state.overlay.result_size = Some(size);
+                            state.overlay.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
                         }
                         Err(e) => {
                             state.overlay.transient_error = Some(e);
+                            state.overlay.workspace.revert_to_scrolling();
                             return Task::none();
                         }
                     }
@@ -626,7 +629,15 @@ fn style(state: &MacOverlayState, theme: &iced::Theme) -> iced::theme::Style {
 
 fn view(state: &MacOverlayState, window: window::Id) -> Element<'_, Message> {
     if Some(window) == state.controls_window {
-        return container(app::capture_control_strip().map(Message::Overlay))
+        let toolbar = crate::toolbar::render_toolbar(
+            state.overlay.workspace.phase(),
+            state.overlay.mode,
+            |action| Message::Overlay(app::OverlayMessage::ToolbarAction(action)),
+            |point| Message::Overlay(app::OverlayMessage::DragStart(point)),
+            |point| Message::Overlay(app::OverlayMessage::DragMove(point)),
+            Message::Overlay(app::OverlayMessage::DragEnd),
+        );
+        return container(toolbar)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();

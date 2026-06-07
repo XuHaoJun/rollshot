@@ -99,8 +99,15 @@ impl WorkspaceState {
     }
 
     pub fn finish_scrolling(&mut self, output: Option<OutputAction>) -> WorkspaceEffect {
-        self.phase = WorkspacePhase::ResultReview;
         WorkspaceEffect::FinalizeScrolling { output }
+    }
+
+    pub fn enter_result_review(&mut self) {
+        self.phase = WorkspacePhase::ResultReview;
+    }
+
+    pub fn revert_to_scrolling(&mut self) {
+        self.phase = WorkspacePhase::ScrollingCapture;
     }
 
     pub fn prepare_screenshot(&mut self, output: Option<OutputAction>) -> WorkspaceEffect {
@@ -229,6 +236,8 @@ mod tests {
             state.finish_scrolling(None),
             WorkspaceEffect::FinalizeScrolling { output: None }
         );
+        assert_eq!(state.phase(), WorkspacePhase::ScrollingCapture);
+        state.enter_result_review();
         assert_eq!(state.phase(), WorkspacePhase::ResultReview);
     }
 }

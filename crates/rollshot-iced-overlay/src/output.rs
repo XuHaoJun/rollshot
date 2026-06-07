@@ -48,8 +48,21 @@ impl ArboardOutput {
 }
 
 impl OutputService for ArboardOutput {
-    fn save_as(&mut self, _image: &RgbaImage) -> Result<SaveOutcome, String> {
-        Err("async save not implemented here".to_string())
+    fn save_as(&mut self, image: &RgbaImage) -> Result<SaveOutcome, String> {
+        let path = rfd::FileDialog::new()
+            .set_title("Save stitched PNG")
+            .set_file_name("rollshot.png")
+            .add_filter("PNG image", &["png"])
+            .save_file();
+        match path {
+            Some(path) => {
+                image
+                    .save_with_format(&path, image::ImageFormat::Png)
+                    .map_err(|e| format!("failed to write PNG: {e}"))?;
+                Ok(SaveOutcome::Saved(path))
+            }
+            None => Ok(SaveOutcome::Cancelled),
+        }
     }
 
     fn copy(&mut self, image: &RgbaImage) -> Result<(), String> {

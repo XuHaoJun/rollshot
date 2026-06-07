@@ -394,6 +394,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             );
                             state.result_handle = Some(handle);
                             state.result_size = Some(size);
+                            state.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
                         }
                         Ok(None) => {
@@ -420,14 +421,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             );
                             state.result_handle = Some(handle);
                             state.result_size = Some(size);
+                            state.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
                         }
                         Err(e) => {
-                            if e == "stitcher produced no output" {
-                                state.transient_error = Some(e);
-                                return Task::none();
-                            }
                             state.transient_error = Some(e);
+                            state.workspace.revert_to_scrolling();
                             return Task::none();
                         }
                     }
