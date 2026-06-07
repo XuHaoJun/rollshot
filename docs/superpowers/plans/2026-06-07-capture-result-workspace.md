@@ -10,6 +10,78 @@
 
 ---
 
+## Engineering Review Addendum (2026-06-07)
+
+Cross-cutting risks and shared diagrams surfaced during plan review. Resolve the
+risks inside the tasks they reference; do not let them stay implicit.
+
+### Workspace state machine
+
+```
+            valid release / Enter
+ Selecting ───────────────────────▶ Selected ◀──────────────┐
+     ▲                               │  │  │                 │ screenshot mode
+     │ empty selection               │  │  │ Save/Copy       │ (stop+discard
+     └───────────────────────────────┘  │  ▼                 │  scroll result)
+                                         │  prepare screenshot│
+                          scrolling mode │      ▼             │
+                          [streaming     │   PerformOutput    │
+                           driver +      ▼                    │
+                           portal]   ScrollingCapture ────────┘
+                                         │  │  │
+                              Finish     │  │  │ Save/Copy (finalize first)
+                                  ┌──────┘  │  ▼
+                                  ▼         │  PerformOutput
+                             ResultReview ◀─┘
+                                  │ Save/Copy
+                                  ▼
+                             PerformOutput
+                                  │
+              ┌───────────────────┴───────────────────┐
+        success │                                cancel / failure │
+              ▼                                              ▼
+            exit (workspace closes)                 back to ResultReview
+                                                     (+ transient error)
+
+ Esc / Cancel / Close  ─────────────────────────────────────▶ exit
+```
+
+### Chrome placement decision tree (Task 1)
+
+```
+place_chrome(viewport, crop, req{toolbar, preview?, margin, spacing}):
+  outside bands = {Bottom, Top, Left, Right} rects around crop
+  toolbar_band  = first of [Bottom, Top, Left, Right] whose band fits `toolbar`
+  if no band fits toolbar ............................ ActivityAutoHide{over-crop}
+  if req.preview is None ............................. Separate{toolbar_band, None}
+  pref = largest-area band ≠ toolbar_band that fits preview
+  if pref exists ..................................... Separate{toolbar_band, pref}
+  elif toolbar_band fits BOTH without overlap ........ Separate (same band, stacked)
+  elif exactly one band can host chrome .............. Combined{band}
+  else ............................................... ActivityAutoHide
+```
+
+### Risks to resolve during execution
+
+- **R-A: Save dialog inside the live iced loop (Task 5).** The current app runs
+  `rfd` in a *separate helper process* (`rollshot-app/src/main.rs`) precisely
+  because a synchronous native dialog conflicts with the iced/winit run loop
+  (deadlock / no-show on macOS, frozen overlay everywhere). Do NOT lock a
+  synchronous `OutputService::save_as`. Spike `rfd::AsyncFileDialog` driven by an
+  `iced::Task` first; fall back to retaining the helper-process for *save* if the
+  async path misbehaves on macOS.
+- **R-B: On-demand scrolling acquisition re-runs the portal picker (Tasks 6/7).**
+  `Driver::start_capture` runs the Wayland portal handshake and blocks up to 5s.
+  Today capture starts *before* the overlay exists so the screen-share picker is
+  never self-captured. Acquiring a streaming driver from the toolbar while the
+  fullscreen overlay is up means the picker reappears over the overlay and the
+  first frames may capture it. Accept and document this, or scope the switch as
+  "re-runs portal selection." It must not be silent.
+- **R-C: Subscription reactivity (Tasks 6/7).** `subscription()` gates the preview
+  stream + tick on the static `CAPTURE_MODE`. Mid-session mode switches must move
+  the mode into observable `WorkspaceState`, re-key the subscription off it, and
+  register a fresh `PREVIEW_RX` on scrolling activation.
+
 ## File Structure
 
 ### Create
@@ -314,6 +386,14 @@ Add `ToolbarPosition::{Automatic, Manual(Rectangle)}` and
 `ActivityAutoHide`. Make selection changes clear manual placement. Keep image
 pixels out of this module; it owns state transitions, not capture resources.
 
+Relationship to `OverlayState` (review S4): embed `WorkspaceState` inside the
+existing `OverlayState` rather than replacing it. `OverlayState` keeps the
+render-side fields (`crop`, `preview`/handles, `frozen`, `window_size`);
+`WorkspaceState` owns phase, active `CaptureMode`, `ToolbarPosition`,
+`ChromePlacement`, and `ActivityAutoHide`. The active mode must live here (not in
+the runner's `CAPTURE_MODE` static) so the subscription can re-key off it on a
+mid-session switch (review R-C).
+
 - [ ] **Step 4: Replace `crop_confirmed` decisions with workspace phase checks**
 
 Update `OverlayState`, messages, and `update` so:
@@ -370,8 +450,12 @@ fn accepted_signal_emits_activity_even_when_preview_is_unavailable() {
 
 #[test]
 fn missed_signal_does_not_emit_accepted_activity() {
+    // NOTE: `StitchProgressSignal::Missed` carries `{ edge: CapturedEdge }`
+    // (see rollshot-overlay-core/src/capture_miss.rs) — there is no `reason`
+    // field and no `NoMatchReason::NoReliableCandidate` variant. Match the real
+    // shape so this compiles.
     assert!(!should_emit_accepted_activity(&StitchProgressSignal::Missed {
-        reason: NoMatchReason::NoReliableCandidate
+        edge: CapturedEdge::Unknown
     }));
 }
 ```
@@ -494,8 +578,14 @@ In `app::view`:
 - render toolbar and preview in their separate or combined rectangles;
 - render activity-auto-hide chrome over the crop only when visible;
 - render capture-miss messages as non-reserving floating messages;
-- remove `choose_chrome_band`, `place_outside_crop`, `toolbar_input_rect`,
-  `capture_chrome_input_rect`, and the magenta toolbar.
+- remove only what `app::view` owns: `choose_chrome_band`, `place_outside_crop`,
+  and the magenta toolbar.
+
+Do NOT delete `toolbar_input_rect` or `capture_chrome_input_rect` in this task:
+`linux_runner.rs` (`capture_chrome_input_rect`) and `macos_runner.rs`
+(`toolbar_input_rect`) still call them, so removing them here would break the
+crate build. Their call sites are replaced in Tasks 6 and 7; delete the
+functions there once unused.
 
 Use one toolbar widget instance per view. Combined layout must not duplicate it.
 
@@ -585,6 +675,11 @@ Normal images aspect-fit initially. Vertical long images fit width; horizontal
 long images fit height. Keep the original `RgbaImage` in overlay state and use
 an iced image handle only for rendering.
 
+Memory note (review P1): the full-res `RgbaImage` plus its iced `Handle` is two
+copies of a potentially large image (a long scroll can be ~100 MB). Build the
+`Handle` once when entering Result Review and reuse the cheap clone per redraw —
+do not rebuild it each `view()`. No hard cap in v1 (zoom/minimap are deferred).
+
 - [ ] **Step 5: Implement Save and Copy services**
 
 Add:
@@ -601,19 +696,70 @@ pub enum SaveOutcome {
 }
 ```
 
-Production `save_as` uses `rfd::FileDialog` and writes PNG. Production `copy`
-uses `arboard::Clipboard::set_image` with full-resolution RGBA bytes. Keep
-errors as strings for transient overlay messages.
+Production `copy` uses `arboard::Clipboard::set_image` with full-resolution RGBA
+bytes. Keep errors as strings for transient overlay messages.
+
+**Caveat (review R-P2):** `arboard` is a new workspace dependency. On Wayland it
+forks a `wl-clipboard` server that retains ownership after exit (good). On X11
+the clipboard is cleared when the process exits unless a clipboard manager runs;
+since the overlay exits immediately after a successful Copy, X11 sessions may see
+an empty clipboard. Rollshot is Wayland-first on Linux, so this is acceptable for
+v1 — note it in the Task 9 manual checklist.
+
+**Save must not block the iced loop (review R-A — do this before writing
+`save_as`).** The current app runs `rfd` in a *separate helper process*
+(`rollshot-app/src/main.rs`) specifically because a synchronous native Save
+dialog conflicts with a running iced/winit event loop (on macOS the modal can
+fail to present or deadlock; everywhere it freezes the overlay). The synchronous
+`save_as` signature above is therefore the production-unsafe path.
+
+Spike first, then pick one:
+
+1. **Preferred:** `rfd::AsyncFileDialog` returned as a future and driven by an
+   `iced::Task` in the runner, so the loop stays live. The trait then exposes the
+   future (or the runner owns the async call directly) rather than a blocking
+   `save_as`. The PNG write still happens via the synchronous `write_png` helper
+   once a path resolves.
+2. **Fallback:** retain the helper-process for *save* on macOS only, keeping the
+   blocking `save_as` for Linux where it is known to work post-loop.
+
+Keep the *tested* surface (`perform_output` + `FakeOutput`) synchronous and pure;
+only the production dialog invocation needs the async/`Task` treatment. Record the
+chosen approach in the implementation report.
 
 - [ ] **Step 6: Connect output outcomes to workspace transitions**
 
+Make the outcome→phase decision a pure `WorkspaceState`/`output` function that
+returns a `WorkspaceEffect` (review S3): the platform runner stays a thin
+translator and the transitions below are unit-tested here rather than only
+manually in Tasks 6/7. The riskiest spec rules (cancel/fail stay in Result
+Review) must have automated coverage.
+
 - `Finish` finalizes into Result Review.
+- `Finish` with no usable stitched result (`finalize` returns `Err`, e.g.
+  "stitcher produced no output") stays in Scrolling Capture and shows a transient
+  error — it must NOT exit (spec lines 419-420).
 - `Save`/`Copy` during Scrolling Capture finalize first, then output.
 - `Save`/`Copy` during Selected prepare the normal screenshot first, then
   output.
 - Save cancellation enters or remains in Result Review.
 - Output failure enters or remains in Result Review and shows a transient error.
 - Successful output exits.
+
+Add tests asserting each transition via the pure decision function with a
+`FakeOutput` (saved / cancelled / failed) and a fake finalize result
+(some-image / empty):
+
+```rust
+#[test]
+fn save_cancel_returns_to_result_review() { /* OutputOutcome::Cancelled -> ResultReview */ }
+#[test]
+fn output_failure_stays_in_result_review_with_error() { /* Err -> ResultReview + transient */ }
+#[test]
+fn successful_output_exits() { /* Saved/Copied -> exit effect */ }
+#[test]
+fn finish_with_empty_stitch_stays_in_scrolling_capture() { /* Err -> ScrollingCapture + error */ }
+```
 
 - [ ] **Step 7: Run tests**
 
@@ -677,6 +823,16 @@ Update Linux effect handling:
 - when activating scrolling, stop/discard the current workflow, acquire a fresh
   streaming driver through the existing factory, then begin stitching for the
   existing crop;
+  - **Portal re-handshake (review R-B):** `Driver::start_capture` runs the
+    Wayland portal picker and blocks up to 5s. Acquiring it from the toolbar
+    while the overlay is already up means the screen-share picker reappears over
+    the overlay and early frames may capture it. This task accepts that
+    behavior; document it as a known limitation in the implementation report.
+    Do not silently swallow it.
+  - **Subscription re-key (review R-C):** `subscription()` gates the preview
+    stream + tick on the active mode. Drive it from `WorkspaceState`'s mode (not
+    only the `CAPTURE_MODE` static) and register a fresh `PREVIEW_RX` on
+    scrolling activation so the live preview reconnects after a switch.
 - when activating screenshot, cancel the streaming driver, acquire a fresh
   one-shot capture through the existing factory, rebuild the frozen image
   handle, and keep the existing crop;
@@ -686,7 +842,15 @@ Update Linux effect handling:
 - crop the one-shot image and store it on `PrepareScreenshot`;
 - execute output and exit only on successful Save/Copy or Cancel/Close;
 - restore full overlay interaction in Result Review;
-- recalculate input region after placement or auto-hide visibility changes.
+- recalculate input region after placement or auto-hide visibility changes;
+- **during an active toolbar drag (review P3):** widen the layer-shell input
+  region to the full overlay so pointer move/release events keep arriving as the
+  toolbar leaves its resting rect; re-clamp to the visible-toolbar rect on
+  release. A per-frame input region matching only the resting rect would drop the
+  drag mid-gesture.
+
+Also delete `app::capture_chrome_input_rect` here once this runner no longer
+calls it (deferred from Task 4, review S1).
 
 Do not write `RESULT_SLOT` for intermediate Result Review transitions.
 
@@ -767,6 +931,15 @@ Use the existing macOS resource factories for on-demand activation:
 - screenshot activation acquires a fresh one-shot ScreenCaptureKit image and
   rebuilds the frozen handle;
 - activation errors remain in the workspace and do not exit the app.
+
+Apply the same subscription re-key as Linux (review R-C): drive the preview
+stream off `WorkspaceState`'s mode and register a fresh `PREVIEW_RX` on scrolling
+activation. The ScreenCaptureKit permission prompt is the macOS analogue of R-B —
+if a fresh `Driver` triggers it mid-session, document the behavior rather than
+hiding it.
+
+Delete `app::toolbar_input_rect` here once this runner no longer calls it
+(deferred from Task 4, review S1).
 
 - [ ] **Step 4: Verify macOS compilation and tests**
 
@@ -895,9 +1068,15 @@ Verify:
 6. Full-screen scrolling hides chrome during accepted activity and reveals it
    after `500ms` idle.
 7. Finish enters Result Review.
-8. Save cancellation remains in Result Review.
-9. Copy writes a full-resolution image.
+8. Save cancellation remains in Result Review (and the Save dialog did not freeze
+   the overlay — review R-A).
+9. Copy writes a full-resolution image. On X11, confirm the clipboard survives
+   overlay exit or note the manager dependency (review P2); Wayland is the
+   primary path.
 10. Close exits without output.
+11. Switching to scrolling mode mid-session: confirm the portal/screen-share
+    picker behavior and whether early frames capture it (review R-B); record the
+    observed behavior.
 
 - [ ] **Step 4: Perform macOS runtime verification**
 
