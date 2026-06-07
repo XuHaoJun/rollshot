@@ -2,17 +2,23 @@ mod launch;
 
 use launch::LaunchMode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+mod save;
+
+#[derive(Debug, Clone)]
 pub enum PostOverlayAction {
     ExitSuccess,
     ExitCancelled,
+    SaveAs(rollshot_iced_overlay::CaptureResult),
 }
 
 pub fn post_overlay_action(
     result: Result<Option<rollshot_iced_overlay::CaptureResult>, String>,
 ) -> PostOverlayAction {
     match result {
-        Ok(Some(_)) => PostOverlayAction::ExitSuccess,
+        Ok(Some(cr)) => match cr.post_overlay_request {
+            rollshot_iced_overlay::PostOverlayRequest::SaveAs => PostOverlayAction::SaveAs(cr),
+            rollshot_iced_overlay::PostOverlayRequest::None => PostOverlayAction::ExitSuccess,
+        },
         Ok(None) => PostOverlayAction::ExitCancelled,
         Err(err) => {
             eprintln!("{err}");
@@ -49,6 +55,12 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
     match post_overlay_action(result.map_err(|e| e.to_string())) {
         PostOverlayAction::ExitSuccess => println!("capture complete"),
         PostOverlayAction::ExitCancelled => println!("capture cancelled"),
+        PostOverlayAction::SaveAs(cr) => {
+            if let Err(e) = save::save_as(&cr.image) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -56,28 +68,43 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
 mod tests {
     use super::*;
 
-    fn capture_result() -> rollshot_iced_overlay::CaptureResult {
+    fn capture_result_with_request(
+        request: rollshot_iced_overlay::PostOverlayRequest,
+    ) -> rollshot_iced_overlay::CaptureResult {
         rollshot_iced_overlay::CaptureResult {
             image: image::RgbaImage::new(1, 1),
             stats: None,
-            post_overlay_request: rollshot_iced_overlay::PostOverlayRequest::None,
+            post_overlay_request: request,
         }
+    }
+
+    fn capture_result() -> rollshot_iced_overlay::CaptureResult {
+        capture_result_with_request(rollshot_iced_overlay::PostOverlayRequest::None)
     }
 
     #[test]
     fn completed_overlay_does_not_open_another_save_dialog() {
-        assert_eq!(
+        assert!(matches!(
             post_overlay_action(Ok(Some(capture_result()))),
             PostOverlayAction::ExitSuccess
-        );
+        ));
     }
 
     #[test]
     fn cancelled_overlay_exits_successfully() {
-        assert_eq!(
+        assert!(matches!(
             post_overlay_action(Ok(None)),
             PostOverlayAction::ExitCancelled
-        );
+        ));
+    }
+
+    #[test]
+    fn save_as_request_maps_to_save_as_action() {
+        let cr = capture_result_with_request(rollshot_iced_overlay::PostOverlayRequest::SaveAs);
+        assert!(matches!(
+            post_overlay_action(Ok(Some(cr))),
+            PostOverlayAction::SaveAs(_)
+        ));
     }
 
     #[test]

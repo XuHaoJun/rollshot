@@ -5696,6 +5696,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "image",
+ "rfd 0.15.4",
  "rollshot-capture",
  "rollshot-iced-overlay",
  "serde_json",
