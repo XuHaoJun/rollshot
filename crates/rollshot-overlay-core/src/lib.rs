@@ -7,5 +7,6 @@
 //! stays buildable on its own.
 
 pub mod capture_miss;
+pub mod chrome_placement;
 pub mod preview;
 pub mod tokens;
