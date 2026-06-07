@@ -34,7 +34,7 @@ const CANCEL_LABEL: &str = "Cancel";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputRegionMode {
     None,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[allow(dead_code)]
     FullOverlay,
     ToolbarOnly,
 }

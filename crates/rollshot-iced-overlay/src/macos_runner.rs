@@ -86,6 +86,7 @@ enum ControlsWindowAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PassthroughAction {
+    #[allow(dead_code)]
     Enable,
     Disable,
     Noop,
