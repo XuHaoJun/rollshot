@@ -281,6 +281,51 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 app::OverlayEffect::EnablePassthrough | app::OverlayEffect::DisablePassthrough => {
                     Task::none()
                 }
+                app::OverlayEffect::ActivateMode(_) => Task::none(),
+                app::OverlayEffect::PrepareScreenshot => {
+                    let crop = state.crop.unwrap();
+                    let ws = match state.window_size {
+                        Some(ws) => ws,
+                        None => {
+                            *RESULT_SLOT.lock().unwrap() = Some(Err(
+                                "overlay surface size unknown (no Window::Opened event)"
+                                    .to_string(),
+                            ));
+                            return iced::exit();
+                        }
+                    };
+                    let crop_logical = LogicalRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    let overlay_logical = rollshot_capture::Size {
+                        width: ws.width as u32,
+                        height: ws.height as u32,
+                    };
+                    let capture = ONE_SHOT_SLOT.lock().unwrap().take();
+                    let outcome = match capture {
+                        Some(cap) => crate::screenshot::finish_screenshot(
+                            &cap,
+                            crop_logical,
+                            overlay_logical,
+                        )
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    iced::exit()
+                }
+                app::OverlayEffect::FinalizeScrolling => {
+                    let driver = DRIVER_SLOT.lock().unwrap().take();
+                    let outcome = match driver {
+                        Some(driver) => driver.finalize().map(Some),
+                        None => Ok(None),
+                    };
+                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    iced::exit()
+                }
             }
         }
         _ => Task::none(),

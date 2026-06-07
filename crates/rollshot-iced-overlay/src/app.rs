@@ -35,6 +35,9 @@ pub(crate) enum OverlayEffect {
     Cancel,
     EnablePassthrough,
     DisablePassthrough,
+    ActivateMode(CaptureMode),
+    PrepareScreenshot,
+    FinalizeScrolling,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +50,7 @@ pub(crate) enum OverlayMessage {
     Cancel,
     LiveEvent(crate::driver::LiveOverlayEvent),
     Tick,
+    ActivateMode(CaptureMode),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,12 +60,11 @@ pub(crate) struct PreviewConstraints {
     pub(crate) max_height: u32,
 }
 
-#[derive(Default)]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) struct OverlayState {
     pub(crate) drag_start: Option<Point>,
     pub(crate) crop: Option<Rectangle>,
-    pub(crate) crop_confirmed: bool,
+    pub(crate) workspace: crate::workspace::WorkspaceState,
     pub(crate) preview: Option<image::Handle>,
     pub(crate) window_id: Option<window::Id>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -75,6 +78,24 @@ pub(crate) struct OverlayState {
     /// Frozen one-shot background, present only in screenshot mode. Built once by
     /// the platform runner; `view()` clones the cheap handle, never the pixels.
     pub(crate) frozen: Option<image::Handle>,
+}
+
+impl Default for OverlayState {
+    fn default() -> Self {
+        Self {
+            drag_start: None,
+            crop: None,
+            workspace: crate::workspace::WorkspaceState::new(CaptureMode::Scrolling),
+            preview: None,
+            window_id: None,
+            mouse_passthrough_active: false,
+            window_size: None,
+            capture_miss_warn: false,
+            capture_miss_message_expires_at: None,
+            mode: CaptureMode::Scrolling,
+            frozen: None,
+        }
+    }
 }
 
 impl OverlayState {
@@ -118,6 +139,15 @@ pub(crate) fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Si
 pub(crate) struct CropCanvas {
     crop: Option<Rectangle>,
     confirmed: bool,
+}
+
+impl CropCanvas {
+    fn from_state(state: &OverlayState) -> Self {
+        Self {
+            crop: state.crop,
+            confirmed: state.workspace.phase() != crate::workspace::WorkspacePhase::Selecting,
+        }
+    }
 }
 
 impl canvas::Program<OverlayMessage> for CropCanvas {
@@ -448,14 +478,11 @@ pub(crate) fn capture_control_strip<'a>() -> Element<'a, OverlayMessage> {
 }
 
 pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
-    let canvas_widget = canvas(CropCanvas {
-        crop: state.crop,
-        confirmed: state.crop_confirmed,
-    })
-    .width(Length::Fill)
-    .height(Length::Fill);
+    let canvas_widget = canvas(CropCanvas::from_state(state))
+        .width(Length::Fill)
+        .height(Length::Fill);
 
-    if state.crop_confirmed {
+    if state.workspace.phase() != crate::workspace::WorkspacePhase::Selecting {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
         let toolbar = capture_control_strip();
@@ -566,6 +593,8 @@ pub(crate) fn preview_stream(
 
 #[allow(dead_code)]
 pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> OverlayEffect {
+    use crate::workspace::WorkspacePhase;
+
     match message {
         OverlayMessage::WindowOpened { id, size } => {
             state.window_id = Some(id);
@@ -578,7 +607,7 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
         }
         OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::ButtonPressed(
             mouse::Button::Left,
-        ))) if !state.crop_confirmed => {
+        ))) if state.workspace.phase() == WorkspacePhase::Selecting => {
             state.drag_start = Some(Point::ORIGIN);
             state.crop = None;
             OverlayEffect::None
@@ -607,17 +636,21 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
             mouse::Button::Left,
         ))) => {
             state.drag_start = None;
-            if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
+            if state.workspace.phase() == WorkspacePhase::Selecting
+                && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
             {
+                let crop = state.crop.unwrap();
+                let crop_rect = crate::workspace::CropRect {
+                    x: crop.x,
+                    y: crop.y,
+                    width: crop.width,
+                    height: crop.height,
+                };
+                state.workspace.set_crop(Some(crop_rect));
+                state.workspace.complete_selection();
                 match state.mode {
-                    // Screenshot: a valid release crops the frozen image and
-                    // exits immediately (spec step 5). Do not enter the
-                    // scrolling capture phase.
-                    CaptureMode::Screenshot => OverlayEffect::Finish,
-                    CaptureMode::Scrolling => {
-                        state.crop_confirmed = true;
-                        OverlayEffect::BeginStitch
-                    }
+                    CaptureMode::Screenshot => OverlayEffect::PrepareScreenshot,
+                    CaptureMode::Scrolling => OverlayEffect::BeginStitch,
                 }
             } else {
                 OverlayEffect::None
@@ -627,57 +660,88 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
             ..
         })) => {
-            if state.crop_confirmed {
-                OverlayEffect::Finish
-            } else {
-                OverlayEffect::Cancel
-            }
+            state.workspace.cancel();
+            OverlayEffect::Cancel
         }
         OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Enter),
             ..
-        })) if !state.crop_confirmed
+        })) if state.workspace.phase() == WorkspacePhase::Selecting
             && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0) =>
         {
+            let crop = state.crop.unwrap();
+            let crop_rect = crate::workspace::CropRect {
+                x: crop.x,
+                y: crop.y,
+                width: crop.width,
+                height: crop.height,
+            };
+            state.workspace.set_crop(Some(crop_rect));
+            state.workspace.complete_selection();
             match state.mode {
-                CaptureMode::Screenshot => OverlayEffect::Finish,
-                CaptureMode::Scrolling => {
-                    state.crop_confirmed = true;
-                    OverlayEffect::BeginStitch
-                }
+                CaptureMode::Screenshot => OverlayEffect::PrepareScreenshot,
+                CaptureMode::Scrolling => OverlayEffect::BeginStitch,
             }
         }
         OverlayMessage::FinishCapture => {
-            if state.crop_confirmed {
-                OverlayEffect::Finish
+            if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
+                state.workspace.finish_scrolling(None);
+                OverlayEffect::FinalizeScrolling
             } else {
                 OverlayEffect::None
             }
         }
         OverlayMessage::Finish => {
-            // Ignore duplicate Finish (e.g. double-click / repeated Enter): the
-            // crop is already confirmed and stitching has begun.
-            if state.crop_confirmed {
-                return OverlayEffect::None;
+            match state.workspace.phase() {
+                WorkspacePhase::ScrollingCapture => {
+                    state.workspace.finish_scrolling(None);
+                    return OverlayEffect::FinalizeScrolling;
+                }
+                WorkspacePhase::Selected => {
+                    if state.mode == CaptureMode::Screenshot {
+                        state.workspace.prepare_screenshot(None);
+                        return OverlayEffect::PrepareScreenshot;
+                    }
+                    // Scrolling in Selected: the runner calls begin_scrolling.
+                    return OverlayEffect::None;
+                }
+                WorkspacePhase::Selecting => {
+                    // Require a non-empty crop; otherwise keep selecting.
+                    if !state
+                        .crop
+                        .is_some_and(|c| c.width >= 1.0 && c.height >= 1.0)
+                    {
+                        state.capture_miss_warn = true;
+                        state.capture_miss_message_expires_at =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                        return OverlayEffect::None;
+                    }
+                    let crop = state.crop.unwrap();
+                    let crop_rect = crate::workspace::CropRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    state.workspace.set_crop(Some(crop_rect));
+                    state.workspace.complete_selection();
+                    match state.mode {
+                        CaptureMode::Screenshot => {
+                            state.workspace.prepare_screenshot(None);
+                            OverlayEffect::PrepareScreenshot
+                        }
+                        CaptureMode::Scrolling => OverlayEffect::BeginStitch,
+                    }
+                }
+                WorkspacePhase::ResultReview => OverlayEffect::None,
             }
-            // Require a non-empty crop; otherwise keep selecting.
-            if !state
-                .crop
-                .is_some_and(|c| c.width >= 1.0 && c.height >= 1.0)
-            {
-                state.capture_miss_warn = true;
-                state.capture_miss_message_expires_at =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-                return OverlayEffect::None;
-            }
-            // Surface-size validation belongs to the platform runner (the
-            // Linux runner checks this before calling begin_stitch).
-            state.crop_confirmed = true;
-            // Input-region passthrough (plan T6 S3) is handled by the platform
-            // runner after transitioning to the confirmed phase. The toolbar
-            // sits in the chrome band outside the crop, so it never overlaps
-            // the crop region (spec P3.4).
-            OverlayEffect::BeginStitch
+        }
+        OverlayMessage::ActivateMode(mode) => {
+            state.mode = mode;
+            state.workspace.activate_mode(mode);
+            state.crop = None;
+            state.drag_start = None;
+            OverlayEffect::ActivateMode(mode)
         }
         OverlayMessage::Cancel => OverlayEffect::Cancel,
         OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
@@ -977,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_capture_control_finishes_after_crop_is_confirmed() {
+    fn finish_capture_control_finalizes_scrolling_capture() {
         let mut state = OverlayState {
             crop: Some(Rectangle {
                 x: 10.0,
@@ -985,13 +1049,13 @@ mod tests {
                 width: 120.0,
                 height: 80.0,
             }),
-            crop_confirmed: true,
             ..OverlayState::default()
         };
+        state.workspace.begin_scrolling();
 
         let effect = super::update(&mut state, OverlayMessage::FinishCapture);
 
-        assert_eq!(effect, super::OverlayEffect::Finish);
+        assert_eq!(effect, super::OverlayEffect::FinalizeScrolling);
     }
 
     #[test]
@@ -1006,6 +1070,7 @@ mod tests {
 
     #[test]
     fn screenshot_release_finishes_immediately_without_confirming() {
+        use crate::workspace::WorkspacePhase;
         use iced::{mouse, Event};
         let mut state = OverlayState {
             mode: rollshot_capture::CaptureMode::Screenshot,
@@ -1025,15 +1090,17 @@ mod tests {
             ))),
         );
 
-        assert_eq!(effect, super::OverlayEffect::Finish);
-        assert!(
-            !state.crop_confirmed,
-            "screenshot release must not enter the scrolling capture phase"
+        assert_eq!(effect, super::OverlayEffect::PrepareScreenshot);
+        assert_eq!(
+            state.workspace.phase(),
+            WorkspacePhase::Selected,
+            "screenshot release must enter Selected, not ScrollingCapture"
         );
     }
 
     #[test]
     fn scrolling_release_begins_stitch_and_confirms() {
+        use crate::workspace::WorkspacePhase;
         use iced::{mouse, Event};
         let mut state = OverlayState {
             crop: Some(Rectangle {
@@ -1053,11 +1120,12 @@ mod tests {
         );
 
         assert_eq!(effect, super::OverlayEffect::BeginStitch);
-        assert!(state.crop_confirmed);
+        assert_eq!(state.workspace.phase(), WorkspacePhase::Selected);
     }
 
     #[test]
     fn screenshot_empty_release_stays_in_selection() {
+        use crate::workspace::WorkspacePhase;
         use iced::{mouse, Event};
         let mut state = OverlayState {
             mode: rollshot_capture::CaptureMode::Screenshot,
@@ -1073,15 +1141,12 @@ mod tests {
         );
 
         assert_eq!(effect, super::OverlayEffect::None);
-        assert!(!state.crop_confirmed);
+        assert_eq!(state.workspace.phase(), WorkspacePhase::Selecting);
     }
 
     #[test]
     fn finish_capture_without_confirmed_crop_returns_none() {
-        let mut state = OverlayState {
-            crop_confirmed: false,
-            ..OverlayState::default()
-        };
+        let mut state = OverlayState::default();
 
         let effect = super::update(&mut state, OverlayMessage::FinishCapture);
 

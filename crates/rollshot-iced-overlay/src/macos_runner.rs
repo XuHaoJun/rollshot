@@ -342,6 +342,57 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                         .chain(Task::done(Message::PassthroughDisabledThenExit)),
                     None => Task::none(),
                 },
+                OverlayEffect::ActivateMode(_) => Task::none(),
+                OverlayEffect::PrepareScreenshot => {
+                    let crop = state.overlay.crop.unwrap();
+                    let ws = match state.overlay.window_size {
+                        Some(ws) => ws,
+                        None => {
+                            *RESULT_SLOT.lock().unwrap() =
+                                Some(Err("overlay surface size unknown".to_string()));
+                            return iced::exit();
+                        }
+                    };
+                    let crop_logical = LogicalRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    let overlay_logical = rollshot_capture::Size {
+                        width: ws.width as u32,
+                        height: ws.height as u32,
+                    };
+                    let capture = ONE_SHOT_SLOT.lock().unwrap().take();
+                    let outcome = match capture {
+                        Some(cap) => crate::screenshot::finish_screenshot(
+                            &cap,
+                            crop_logical,
+                            overlay_logical,
+                        )
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    iced::exit()
+                }
+                OverlayEffect::FinalizeScrolling => {
+                    let should_disable_passthrough = state.overlay.mouse_passthrough_active;
+                    let window_id = state.overlay.window_id;
+                    let driver = DRIVER_SLOT.lock().unwrap().take();
+                    let outcome = match driver {
+                        Some(driver) => driver.finalize().map(Some),
+                        None => Ok(None),
+                    };
+                    *RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    if should_disable_passthrough {
+                        if let Some(id) = window_id {
+                            return window::disable_mouse_passthrough(id)
+                                .chain(Task::done(Message::PassthroughDisabledThenExit));
+                        }
+                    }
+                    iced::exit()
+                }
             }
         }
         Message::WindowPatched(result) => {
