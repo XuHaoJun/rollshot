@@ -169,6 +169,23 @@ fn validate_screenshot_surface_or_exit(state: &Overlay) -> Option<Task<Message>>
     }
 }
 
+/// Decision for how to handle an output action on Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinuxOutputDecision {
+    /// Save: set `post_overlay_request` and exit the overlay; the caller
+    /// opens the native Save As dialog after the overlay closes.
+    ExitForSaveAs,
+    /// Copy: handle inside the overlay via `perform_output_action`.
+    PerformInOverlay,
+}
+
+pub(crate) fn linux_output_decision(action: crate::workspace::OutputAction) -> LinuxOutputDecision {
+    match action {
+        crate::workspace::OutputAction::Save => LinuxOutputDecision::ExitForSaveAs,
+        crate::workspace::OutputAction::Copy => LinuxOutputDecision::PerformInOverlay,
+    }
+}
+
 fn perform_output_action(
     state: &mut Overlay,
     action: crate::workspace::OutputAction,
@@ -369,7 +386,22 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         }
                     }
                 }
-                app::OverlayEffect::PerformOutput(action) => perform_output_action(state, action),
+                app::OverlayEffect::PerformOutput(action) => match linux_output_decision(action) {
+                    LinuxOutputDecision::ExitForSaveAs => {
+                        let mut guard = RESULT_SLOT.lock().unwrap();
+                        match guard.as_mut() {
+                            Some(Ok(Some(result))) => {
+                                result.post_overlay_request = crate::PostOverlayRequest::SaveAs;
+                                iced::exit()
+                            }
+                            _ => {
+                                state.transient_error = Some("No result available".to_string());
+                                Task::none()
+                            }
+                        }
+                    }
+                    LinuxOutputDecision::PerformInOverlay => perform_output_action(state, action),
+                },
                 app::OverlayEffect::PrepareScreenshot(output) => {
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
@@ -412,7 +444,19 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             state.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
                             output.map_or_else(Task::none, |action| {
-                                perform_output_action(state, action)
+                                match linux_output_decision(action) {
+                                    LinuxOutputDecision::ExitForSaveAs => {
+                                        let mut guard = RESULT_SLOT.lock().unwrap();
+                                        if let Some(Ok(Some(r))) = guard.as_mut() {
+                                            r.post_overlay_request =
+                                                crate::PostOverlayRequest::SaveAs;
+                                        }
+                                        iced::exit()
+                                    }
+                                    LinuxOutputDecision::PerformInOverlay => {
+                                        perform_output_action(state, action)
+                                    }
+                                }
                             })
                         }
                         Ok(None) => {
@@ -443,7 +487,19 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             state.workspace.enter_result_review();
                             *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
                             output.map_or_else(Task::none, |action| {
-                                perform_output_action(state, action)
+                                match linux_output_decision(action) {
+                                    LinuxOutputDecision::ExitForSaveAs => {
+                                        let mut guard = RESULT_SLOT.lock().unwrap();
+                                        if let Some(Ok(Some(r))) = guard.as_mut() {
+                                            r.post_overlay_request =
+                                                crate::PostOverlayRequest::SaveAs;
+                                        }
+                                        iced::exit()
+                                    }
+                                    LinuxOutputDecision::PerformInOverlay => {
+                                        perform_output_action(state, action)
+                                    }
+                                }
                             })
                         }
                         Err(e) => {
@@ -1108,6 +1164,24 @@ mod tests {
         assert!(
             PREVIEW_RX.lock().unwrap().is_none(),
             "screenshot mode should not set up preview channel"
+        );
+    }
+
+    use crate::workspace::OutputAction;
+
+    #[test]
+    fn save_returns_exit_for_save_as() {
+        assert_eq!(
+            linux_output_decision(OutputAction::Save),
+            LinuxOutputDecision::ExitForSaveAs,
+        );
+    }
+
+    #[test]
+    fn copy_returns_perform_in_overlay() {
+        assert_eq!(
+            linux_output_decision(OutputAction::Copy),
+            LinuxOutputDecision::PerformInOverlay,
         );
     }
 }
