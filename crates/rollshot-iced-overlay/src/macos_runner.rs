@@ -77,7 +77,7 @@ static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 static ONE_SHOT_SLOT: Mutex<Option<rollshot_capture::OneShotCapture>> = Mutex::new(None);
 static CAPTURE_MODE: Mutex<Option<CaptureMode>> = Mutex::new(None);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum ControlsWindowAction {
     Open(LogicalRect),
     Close,
@@ -102,7 +102,7 @@ fn controls_window_action(
     }
 }
 
-fn passthrough_action(old_phase: WorkspacePhase, new_phase: WorkspacePhase) -> PassthroughAction {
+fn passthrough_action(_old_phase: WorkspacePhase, new_phase: WorkspacePhase) -> PassthroughAction {
     if new_phase == WorkspacePhase::ResultReview {
         PassthroughAction::Disable
     } else {
@@ -576,7 +576,7 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                         );
                         if let Some(id) = state.controls_window {
                             Task::batch([
-                                window::move_to(id, x, y),
+                                window::move_to(id, Point::new(x as f32, y as f32)),
                                 window::resize(id, Size::new(w.max(1) as f32, h.max(1) as f32)),
                             ])
                         } else {
