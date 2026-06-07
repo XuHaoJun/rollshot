@@ -21,6 +21,7 @@ use crate::CaptureResult;
 
 #[derive(Debug, Clone)]
 pub enum LiveOverlayEvent {
+    AcceptedActivity(Instant),
     Preview(ImageHandle),
     CaptureMiss(CaptureMissState),
 }
@@ -35,6 +36,10 @@ fn should_emit_capture_miss(state: &CaptureMissState, last_active: bool) -> bool
 /// a `Missed` (no-match) or `Idle` (duplicate/no-progress) signal should not
 /// re-render — it would just redraw the same viewport.
 fn should_emit_preview(signal: &StitchProgressSignal) -> bool {
+    matches!(signal, StitchProgressSignal::Accepted { .. })
+}
+
+fn should_emit_accepted_activity(signal: &StitchProgressSignal) -> bool {
     matches!(signal, StitchProgressSignal::Accepted { .. })
 }
 
@@ -253,6 +258,10 @@ impl Driver {
                                 .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
                         }
                         last_capture_miss_active = capture_miss_state.active;
+                        if should_emit_accepted_activity(&signal) {
+                            let _ = preview_tx
+                                .unbounded_send(LiveOverlayEvent::AcceptedActivity(Instant::now()));
+                        }
                         if should_emit_preview(&signal) {
                             if let Some(handle) = preview_handle(
                                 &mut stitcher,
@@ -393,8 +402,8 @@ fn preview_handle(
 #[cfg(test)]
 mod tests {
     use super::{
-        overlay_stitch_config, preview_handle, should_emit_capture_miss, should_emit_preview,
-        stitch_stream, PreviewConstraints,
+        overlay_stitch_config, preview_handle, should_emit_accepted_activity,
+        should_emit_capture_miss, should_emit_preview, stitch_stream, PreviewConstraints,
     };
     use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
@@ -574,5 +583,45 @@ mod tests {
         assert!(super::should_record_reader_error(&stop));
         stop.store(true, Ordering::Relaxed);
         assert!(!super::should_record_reader_error(&stop));
+    }
+
+    #[test]
+    fn accepted_signal_emits_activity_even_when_preview_is_unavailable() {
+        assert_eq!(
+            live_events_for_signal(
+                StitchProgressSignal::Accepted {
+                    edge: rollshot_overlay_core::capture_miss::CapturedEdge::Bottom
+                },
+                false
+            ),
+            vec![LiveEventKind::AcceptedActivity]
+        );
+    }
+
+    #[test]
+    fn missed_signal_does_not_emit_accepted_activity() {
+        assert!(!should_emit_accepted_activity(
+            &StitchProgressSignal::Missed {
+                edge: rollshot_overlay_core::capture_miss::CapturedEdge::Unknown
+            }
+        ));
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum LiveEventKind {
+        AcceptedActivity,
+        Preview,
+        CaptureMiss,
+    }
+
+    fn live_events_for_signal(
+        signal: StitchProgressSignal,
+        _preview_available: bool,
+    ) -> Vec<LiveEventKind> {
+        let mut events = Vec::new();
+        if super::should_emit_accepted_activity(&signal) {
+            events.push(LiveEventKind::AcceptedActivity);
+        }
+        events
     }
 }

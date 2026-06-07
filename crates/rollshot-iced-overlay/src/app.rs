@@ -744,6 +744,10 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
             OverlayEffect::ActivateMode(mode)
         }
         OverlayMessage::Cancel => OverlayEffect::Cancel,
+        OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::AcceptedActivity(instant)) => {
+            state.workspace.auto_hide_mut().accepted_frame(instant);
+            OverlayEffect::None
+        }
         OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::Preview(handle)) => {
             state.preview = Some(handle);
             OverlayEffect::None
