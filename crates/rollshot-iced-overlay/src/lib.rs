@@ -46,6 +46,8 @@ impl std::fmt::Display for OverlayError {
 
 impl std::error::Error for OverlayError {}
 
+mod output;
+mod result_review;
 mod toolbar;
 mod workspace;
 

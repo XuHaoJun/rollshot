@@ -282,6 +282,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     Task::none()
                 }
                 app::OverlayEffect::ActivateMode(_) => Task::none(),
+                app::OverlayEffect::PerformOutput(_action) => Task::none(),
                 app::OverlayEffect::PrepareScreenshot => {
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {

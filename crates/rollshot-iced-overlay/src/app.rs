@@ -39,6 +39,7 @@ pub(crate) enum OverlayEffect {
     ActivateMode(CaptureMode),
     PrepareScreenshot,
     FinalizeScrolling,
+    PerformOutput(crate::workspace::OutputAction),
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,11 @@ pub(crate) struct OverlayState {
     /// Toolbar drag state
     pub(crate) toolbar_drag_start: Option<Point>,
     pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
+    /// Full-resolution result image for Result Review. The Handle is built once
+    /// when entering Result Review and reused per redraw.
+    pub(crate) result_handle: Option<image::Handle>,
+    pub(crate) result_size: Option<Size>,
+    pub(crate) transient_error: Option<String>,
 }
 
 impl Default for OverlayState {
@@ -104,6 +110,9 @@ impl Default for OverlayState {
             frozen: None,
             toolbar_drag_start: None,
             toolbar_position: crate::workspace::ToolbarPosition::Automatic,
+            result_handle: None,
+            result_size: None,
+            transient_error: None,
         }
     }
 }
@@ -394,6 +403,72 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         .width(Length::Fill)
         .height(Length::Fill);
 
+    if state.workspace.phase() == crate::workspace::WorkspacePhase::ResultReview {
+        let toolbar = crate::toolbar::render_toolbar(
+            state.workspace.phase(),
+            state.mode,
+            OverlayMessage::ToolbarAction,
+            OverlayMessage::DragStart,
+            OverlayMessage::DragMove,
+            OverlayMessage::DragEnd,
+        );
+
+        if let Some(handle) = &state.result_handle {
+            let result_size = state.result_size.unwrap_or(iced::Size::new(1.0, 1.0));
+            let viewport = state.window_size.unwrap_or(iced::Size::new(800.0, 600.0));
+            let layout = crate::result_review::review_layout(result_size, viewport);
+            let result_view = crate::result_review::view_result_review(handle, &layout);
+
+            let error: Option<Element<'_, OverlayMessage>> =
+                state.transient_error.as_ref().map(|msg| {
+                    container(text(msg).size(14))
+                        .padding(8)
+                        .style(|_theme| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgba(
+                                120.0 / 255.0,
+                                53.0 / 255.0,
+                                15.0 / 255.0,
+                                0.94,
+                            ))),
+                            text_color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
+                            ..Default::default()
+                        })
+                        .into()
+                });
+
+            let mut stack = iced::widget::stack![result_view];
+
+            stack = stack.push(
+                container(toolbar)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::Center)
+                    .align_y(iced::Alignment::End)
+                    .padding(16),
+            );
+
+            if let Some(err) = error {
+                stack = stack.push(
+                    container(err)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::Start)
+                        .padding(16),
+                );
+            }
+
+            return stack.into();
+        }
+
+        return container(toolbar)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center)
+            .into();
+    }
+
     if state.workspace.phase() != crate::workspace::WorkspacePhase::Selecting {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
@@ -451,9 +526,10 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
 
         let toolbar_rect = placement.toolbar_rect();
         let chrome_visible = match placement {
-            chrome_placement::ChromePlacement::ActivityAutoHide { .. } => {
-                state.workspace.auto_hide().visible(std::time::Instant::now())
-            }
+            chrome_placement::ChromePlacement::ActivityAutoHide { .. } => state
+                .workspace
+                .auto_hide()
+                .visible(std::time::Instant::now()),
             _ => true,
         };
 
@@ -771,8 +847,40 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
                 }
                 _ => OverlayEffect::None,
             },
-            crate::toolbar::ToolbarAction::Save => OverlayEffect::None,
-            crate::toolbar::ToolbarAction::Copy => OverlayEffect::None,
+            crate::toolbar::ToolbarAction::Save => {
+                if state.workspace.phase() == WorkspacePhase::ResultReview {
+                    OverlayEffect::PerformOutput(crate::workspace::OutputAction::Save)
+                } else if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
+                    state
+                        .workspace
+                        .finish_scrolling(Some(crate::workspace::OutputAction::Save));
+                    OverlayEffect::FinalizeScrolling
+                } else if state.workspace.phase() == WorkspacePhase::Selected {
+                    state
+                        .workspace
+                        .prepare_screenshot(Some(crate::workspace::OutputAction::Save));
+                    OverlayEffect::PrepareScreenshot
+                } else {
+                    OverlayEffect::None
+                }
+            }
+            crate::toolbar::ToolbarAction::Copy => {
+                if state.workspace.phase() == WorkspacePhase::ResultReview {
+                    OverlayEffect::PerformOutput(crate::workspace::OutputAction::Copy)
+                } else if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
+                    state
+                        .workspace
+                        .finish_scrolling(Some(crate::workspace::OutputAction::Copy));
+                    OverlayEffect::FinalizeScrolling
+                } else if state.workspace.phase() == WorkspacePhase::Selected {
+                    state
+                        .workspace
+                        .prepare_screenshot(Some(crate::workspace::OutputAction::Copy));
+                    OverlayEffect::PrepareScreenshot
+                } else {
+                    OverlayEffect::None
+                }
+            }
             crate::toolbar::ToolbarAction::Cancel => {
                 state.workspace.cancel();
                 OverlayEffect::Cancel
