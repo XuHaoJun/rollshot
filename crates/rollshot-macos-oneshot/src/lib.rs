@@ -49,18 +49,18 @@ pub enum MacosOneShotError {
 }
 
 /// Maximum pixel count (40 megapixels) for safety ceiling.
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 const MAX_PIXELS: u64 = 40_000_000;
 
 /// Callback timeout for SCScreenshotManager (30 seconds).
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolve a callback result with timeout.
 ///
 /// This pure helper waits for a callback result channel with a bounded timeout.
 /// It is separated from unsafe code for testability.
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 fn resolve_callback_with_timeout<T, E>(
     rx: &std::sync::mpsc::Receiver<Result<T, E>>,
     timeout: std::time::Duration,
@@ -83,7 +83,7 @@ where
 /// Validate dimensions against the 40-megapixel ceiling.
 ///
 /// Returns the pixel count if valid, or an error if dimensions are zero or exceed the limit.
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 fn checked_dimensions(width: u32, height: u32) -> Result<u64, MacosOneShotError> {
     if width == 0 || height == 0 {
         return Err(MacosOneShotError::Capture(format!(
@@ -105,7 +105,7 @@ fn checked_dimensions(width: u32, height: u32) -> Result<u64, MacosOneShotError>
 ///
 /// `bytes_per_row` may be larger than `width * 4` due to CGImage row alignment.
 /// Each row is copied respecting its stride, then converted to tightly packed RGBA.
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 fn bgra_padded_to_rgba(
     bgra: &[u8],
     width: u32,
@@ -147,6 +147,45 @@ fn bgra_padded_to_rgba(
     Ok(rgba)
 }
 
+/// Logical frame of a display in Core Graphics global coordinates (points,
+/// top-left origin, y increasing downward) plus its display id.
+///
+/// Used to resolve which display the pointer is over. Kept as a pure value type
+/// so selection is testable without ScreenCaptureKit.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy)]
+struct DisplayFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    display_id: u32,
+}
+
+/// Return the id of the first display whose frame contains the pointer.
+///
+/// The cursor point and display frames share Core Graphics global coordinates,
+/// so a plain half-open point-in-rect test (`[x, x+w) × [y, y+h)`) selects the
+/// correct display, including displays with negative origins positioned to the
+/// left of or above the primary. Returns `None` when no display contains the
+/// point (e.g. a transient off-screen coordinate).
+#[cfg(any(target_os = "macos", test))]
+fn display_id_containing_point(
+    cursor_x: f64,
+    cursor_y: f64,
+    displays: &[DisplayFrame],
+) -> Option<u32> {
+    displays
+        .iter()
+        .find(|d| {
+            cursor_x >= d.x
+                && cursor_x < d.x + d.width
+                && cursor_y >= d.y
+                && cursor_y < d.y + d.height
+        })
+        .map(|d| d.display_id)
+}
+
 // ── macOS implementation ──
 
 #[cfg(target_os = "macos")]
@@ -171,11 +210,11 @@ mod macos_impl {
         // 3. Get current pointer location
         let (cursor_x, cursor_y) = get_cursor_location()?;
 
-        // 4. Get shareable content and find display under cursor
-        let (display, display_id) = find_display_under_cursor(cursor_x, cursor_y)?;
+        // 4. Get shareable content and find the display under the cursor
+        let display_id = find_display_under_cursor(cursor_x, cursor_y)?;
 
-        // 5. Create filter and configuration, then capture
-        let (width, height, rgba) = capture_with_screenshot_manager(display, show_cursor)?;
+        // 5. Create filter and configuration on that display, then capture
+        let (width, height, rgba) = capture_with_screenshot_manager(display_id, show_cursor)?;
 
         // 6. Compute logical geometry
         let (logical_x, logical_y, logical_width, logical_height) =
@@ -243,33 +282,263 @@ mod macos_impl {
         Ok((point.x, point.y))
     }
 
-    fn find_display_under_cursor(
-        _cursor_x: f64,
-        _cursor_y: f64,
-    ) -> Result<(*mut objc2::runtime::AnyObject, u32), MacosOneShotError> {
-        // This would use SCShareableContent to get displays and find the one
-        // containing the cursor. For now, this is a placeholder that would be
-        // filled in with actual ScreenCaptureKit calls.
-        //
-        // The actual implementation would:
-        // 1. Call SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        // 2. Iterate displays to find one whose frame contains (cursor_x, cursor_y)
-        // 3. Return the SCDisplay and its displayID
+    /// Resolve the `CGDirectDisplayID` of the display under the pointer.
+    ///
+    /// `SCShareableContent` is fetched through an asynchronous completion
+    /// handler that ScreenCaptureKit invokes on an internal queue. The handler
+    /// extracts only plain `Copy` data (display frames and ids) and sends the
+    /// chosen id back through a channel, so no Objective-C object crosses the
+    /// thread boundary. The pointer falls back to the primary display only when
+    /// it is not over any display.
+    fn find_display_under_cursor(cursor_x: f64, cursor_y: f64) -> Result<u32, MacosOneShotError> {
+        use block2::RcBlock;
+        use objc2_foundation::NSError;
+        use objc2_screen_capture_kit::SCShareableContent;
 
-        // Placeholder - actual implementation requires ScreenCaptureKit async calls
-        Err(MacosOneShotError::Capture(
-            "ScreenCaptureKit implementation not yet complete".to_string(),
-        ))
+        let (tx, rx) = std::sync::mpsc::channel::<Result<u32, MacosOneShotError>>();
+
+        let handler = RcBlock::new(
+            move |content: *mut SCShareableContent, error: *mut NSError| {
+                let result = (|| {
+                    if !error.is_null() {
+                        // SAFETY: a non-null NSError pointer from the callback is a
+                        // valid, retained object for the duration of this call.
+                        let msg = unsafe { (*error).localizedDescription() }.to_string();
+                        return Err(MacosOneShotError::Capture(format!(
+                            "SCShareableContent error: {msg}"
+                        )));
+                    }
+                    // SAFETY: when error is null, content is a valid SCShareableContent
+                    // for the duration of the callback.
+                    let content = unsafe { content.as_ref() }.ok_or_else(|| {
+                        MacosOneShotError::Capture(
+                            "SCShareableContent returned neither content nor error".to_string(),
+                        )
+                    })?;
+                    // SAFETY: displays() returns a retained array of valid SCDisplay.
+                    let displays = unsafe { content.displays() };
+                    let count = displays.count();
+                    if count == 0 {
+                        return Err(MacosOneShotError::Capture(
+                            "no displays available for capture".to_string(),
+                        ));
+                    }
+                    let mut frames = Vec::with_capacity(count);
+                    for i in 0..count {
+                        let display = displays.objectAtIndex(i);
+                        // SAFETY: frame()/displayID() read scalar properties of a
+                        // valid SCDisplay; CGRect is returned by value.
+                        let frame = unsafe { display.frame() };
+                        let id = unsafe { display.displayID() };
+                        frames.push(DisplayFrame {
+                            x: frame.origin.x,
+                            y: frame.origin.y,
+                            width: frame.size.width,
+                            height: frame.size.height,
+                            display_id: id,
+                        });
+                    }
+                    Ok(display_id_containing_point(cursor_x, cursor_y, &frames)
+                        .unwrap_or(frames[0].display_id))
+                })();
+                let _ = tx.send(result);
+            },
+        );
+
+        // SAFETY: dispatched as a class method with a block whose signature
+        // matches the declared completion handler. The call is asynchronous; the
+        // bounded channel wait below turns it into a synchronous result.
+        unsafe {
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                false, true, &handler,
+            );
+        }
+
+        resolve_callback_with_timeout(&rx, CALLBACK_TIMEOUT)
     }
 
+    /// Capture the given display through `SCScreenshotManager` and return its
+    /// physical dimensions and tightly packed RGBA pixels.
+    ///
+    /// Shareable content is fetched again (a cheap call) so the live `SCDisplay`
+    /// stays on the callback thread; an `SCContentFilter` and configuration are
+    /// built there and the capture is started. The screenshot completion handler
+    /// extracts the `CGImage` bytes into an owned `Vec<u8>` before sending them
+    /// back, so no Core Graphics or ScreenCaptureKit object crosses the channel.
     fn capture_with_screenshot_manager(
-        _display: *mut objc2::runtime::AnyObject,
-        _show_cursor: bool,
+        display_id: u32,
+        show_cursor: bool,
     ) -> Result<(u32, u32, Vec<u8>), MacosOneShotError> {
-        // Placeholder for actual SCScreenshotManager capture
-        Err(MacosOneShotError::Capture(
-            "SCScreenshotManager capture not yet implemented".to_string(),
-        ))
+        use block2::RcBlock;
+        use objc2::rc::Retained;
+        use objc2::AllocAnyThread;
+        use objc2_core_graphics::{
+            CGDataProvider, CGDisplayCopyDisplayMode, CGDisplayMode, CGImage,
+        };
+        use objc2_foundation::{NSArray, NSError};
+        use objc2_screen_capture_kit::{
+            SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
+            SCWindow,
+        };
+
+        // Request the display's native (backing) pixel resolution so the capture
+        // is not downscaled to point size on Retina displays.
+        let mode = CGDisplayCopyDisplayMode(display_id).ok_or_else(|| {
+            MacosOneShotError::Capture(format!(
+                "failed to get current display mode for display {display_id}"
+            ))
+        })?;
+        let px_width = CGDisplayMode::pixel_width(Some(&mode));
+        let px_height = CGDisplayMode::pixel_height(Some(&mode));
+        // Enforce the shared ceiling before allocating any capture buffers.
+        checked_dimensions(px_width as u32, px_height as u32)?;
+
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(u32, u32, Vec<u8>), MacosOneShotError>>();
+
+        let content_handler = RcBlock::new(
+            move |content: *mut SCShareableContent, error: *mut NSError| {
+                let tx = tx.clone();
+                let prepared = (|| -> Result<
+                    (Retained<SCContentFilter>, Retained<SCStreamConfiguration>),
+                    MacosOneShotError,
+                > {
+                    if !error.is_null() {
+                        // SAFETY: non-null NSError is valid during the callback.
+                        let msg = unsafe { (*error).localizedDescription() }.to_string();
+                        return Err(MacosOneShotError::Capture(format!(
+                            "SCShareableContent error: {msg}"
+                        )));
+                    }
+                    // SAFETY: content is valid when error is null.
+                    let content = unsafe { content.as_ref() }.ok_or_else(|| {
+                        MacosOneShotError::Capture(
+                            "SCShareableContent returned neither content nor error".to_string(),
+                        )
+                    })?;
+                    // SAFETY: displays() returns a retained array of valid SCDisplay.
+                    let displays = unsafe { content.displays() };
+                    let count = displays.count();
+                    let mut chosen = None;
+                    for i in 0..count {
+                        let display = displays.objectAtIndex(i);
+                        // SAFETY: displayID() reads a scalar property.
+                        if unsafe { display.displayID() } == display_id {
+                            chosen = Some(display);
+                            break;
+                        }
+                    }
+                    let display = chosen.ok_or_else(|| {
+                        MacosOneShotError::Capture(format!(
+                            "display {display_id} disappeared before capture"
+                        ))
+                    })?;
+
+                    let excluded = NSArray::<SCWindow>::new();
+                    // SAFETY: initWithDisplay:excludingWindows: takes a freshly
+                    // allocated SCContentFilter, a valid SCDisplay, and a valid
+                    // (empty) NSArray; it returns an owned, initialized filter.
+                    let filter = unsafe {
+                        SCContentFilter::initWithDisplay_excludingWindows(
+                            SCContentFilter::alloc(),
+                            &display,
+                            &excluded,
+                        )
+                    };
+                    // SAFETY: new() returns an owned configuration; the setters
+                    // assign scalar properties on it.
+                    let config = unsafe {
+                        let config = SCStreamConfiguration::new();
+                        config.setWidth(px_width);
+                        config.setHeight(px_height);
+                        config.setShowsCursor(show_cursor);
+                        // kCVPixelFormatType_32BGRA ('BGRA'); matches the BGRA →
+                        // RGBA row conversion applied to the returned CGImage.
+                        config.setPixelFormat(0x42475241);
+                        config
+                    };
+                    Ok((filter, config))
+                })();
+
+                let (filter, config) = match prepared {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
+                };
+
+                let tx_image = tx.clone();
+                let image_handler =
+                    RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+                        let result = (|| {
+                            if !error.is_null() {
+                                // SAFETY: non-null NSError is valid during the callback.
+                                let msg = unsafe { (*error).localizedDescription() }.to_string();
+                                return Err(MacosOneShotError::Capture(format!(
+                                    "SCScreenshotManager error: {msg}"
+                                )));
+                            }
+                            // SAFETY: image is valid when error is null.
+                            let image = unsafe { image.as_ref() }.ok_or_else(|| {
+                                MacosOneShotError::Capture(
+                                    "SCScreenshotManager returned neither image nor error"
+                                        .to_string(),
+                                )
+                            })?;
+                            let width = CGImage::width(Some(image)) as u32;
+                            let height = CGImage::height(Some(image)) as u32;
+                            let bytes_per_row = CGImage::bytes_per_row(Some(image));
+                            checked_dimensions(width, height)?;
+                            let provider =
+                                CGImage::data_provider(Some(image)).ok_or_else(|| {
+                                    MacosOneShotError::Capture(
+                                        "captured CGImage has no data provider".to_string(),
+                                    )
+                                })?;
+                            let data = CGDataProvider::data(Some(&provider)).ok_or_else(|| {
+                                MacosOneShotError::Capture(
+                                    "failed to copy captured CGImage pixel data".to_string(),
+                                )
+                            })?;
+                            let len = data.length() as usize;
+                            let ptr = data.byte_ptr();
+                            if ptr.is_null() || len == 0 {
+                                return Err(MacosOneShotError::Capture(
+                                    "captured CGImage pixel data is empty".to_string(),
+                                ));
+                            }
+                            // SAFETY: ptr/len describe the bytes of the CFData we own
+                            // for the lifetime of `data`; the slice is fully consumed
+                            // by bgra_padded_to_rgba before `data` is dropped.
+                            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                            let rgba = bgra_padded_to_rgba(bytes, width, height, bytes_per_row)?;
+                            Ok((width, height, rgba))
+                        })();
+                        let _ = tx_image.send(result);
+                    });
+
+                // SAFETY: class method dispatched with a valid filter, config, and a
+                // block matching the declared completion-handler signature. The
+                // handler is escaping; ScreenCaptureKit copies it, so dropping the
+                // local RcBlock after this call is correct.
+                unsafe {
+                    SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                        &filter,
+                        &config,
+                        Some(&image_handler),
+                    );
+                }
+            },
+        );
+
+        // SAFETY: dispatched as a class method with a correctly-typed block.
+        unsafe {
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                false, true, &content_handler,
+            );
+        }
+
+        resolve_callback_with_timeout(&rx, CALLBACK_TIMEOUT)
     }
 
     fn get_logical_geometry(
@@ -498,6 +767,77 @@ mod tests {
         assert!(matches!(result, Err(MacosOneShotError::Timeout(_))));
     }
 
+    // ── Cursor → display selection tests ──
+
+    #[test]
+    fn point_inside_single_display_selects_it() {
+        let displays = [DisplayFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+            display_id: 7,
+        }];
+        assert_eq!(
+            display_id_containing_point(100.0, 200.0, &displays),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn point_in_negative_origin_secondary_display_selects_it() {
+        // A secondary display placed to the left of / above the primary has a
+        // negative origin. The cursor over it must resolve to that display.
+        let displays = [
+            DisplayFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+                display_id: 1,
+            },
+            DisplayFrame {
+                x: -2560.0,
+                y: -300.0,
+                width: 2560.0,
+                height: 1440.0,
+                display_id: 2,
+            },
+        ];
+        assert_eq!(
+            display_id_containing_point(-1000.0, -100.0, &displays),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn point_outside_all_displays_returns_none() {
+        let displays = [DisplayFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            display_id: 3,
+        }];
+        assert_eq!(display_id_containing_point(5000.0, 5000.0, &displays), None);
+    }
+
+    #[test]
+    fn point_on_right_or_bottom_edge_is_excluded() {
+        // Half-open rect: [x, x+w) × [y, y+h). The far edges belong to the
+        // neighbouring display, never this one.
+        let displays = [DisplayFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            display_id: 4,
+        }];
+        assert_eq!(display_id_containing_point(800.0, 300.0, &displays), None);
+        assert_eq!(display_id_containing_point(400.0, 600.0, &displays), None);
+        assert_eq!(display_id_containing_point(0.0, 0.0, &displays), Some(4));
+    }
+
     // ── Non-macOS stub test ──
 
     #[cfg(not(target_os = "macos"))]
@@ -510,5 +850,42 @@ mod tests {
             }
             other => panic!("expected Unsupported error, got {other:?}"),
         }
+    }
+
+    // ── Live capture smoke check ──
+    //
+    // Ignored by default: requires Screen Recording (TCC) permission and a live
+    // display, so it cannot run in CI. Run manually with:
+    //   cargo test -p rollshot-macos-oneshot live_capture -- --ignored --nocapture
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires Screen Recording permission and a live display"]
+    fn live_capture_under_cursor_smoke() {
+        let capture = capture_display_under_cursor(false).expect("capture should succeed");
+        assert!(
+            capture.width > 0 && capture.height > 0,
+            "physical dimensions must be non-zero: {}x{}",
+            capture.width,
+            capture.height
+        );
+        assert_eq!(
+            capture.rgba.len(),
+            capture.width as usize * capture.height as usize * 4,
+            "RGBA buffer must match physical dimensions",
+        );
+        assert!(
+            capture.rgba.iter().any(|&b| b != 0),
+            "a real screen capture must not be entirely zero",
+        );
+        eprintln!(
+            "captured {}x{} px (logical {}x{} at {},{}) display {}",
+            capture.width,
+            capture.height,
+            capture.logical_width,
+            capture.logical_height,
+            capture.logical_x,
+            capture.logical_y,
+            capture.display_id,
+        );
     }
 }
