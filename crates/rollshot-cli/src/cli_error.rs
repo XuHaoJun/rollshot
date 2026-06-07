@@ -64,6 +64,9 @@ impl CliError {
                 CliError::new(format!("frame timeout: {message}"), 1)
             }
             CaptureError::Backend(err) => CliError::new(format!("{err:#}"), 1),
+            CaptureError::Mapping { message } => {
+                CliError::new(format!("mapping error: {message}"), 1)
+            }
         }
     }
 }

@@ -13,7 +13,7 @@ use rollshot_core::StitchStats;
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub image: RgbaImage,
-    pub stats: StitchStats,
+    pub stats: Option<StitchStats>,
 }
 
 /// Inputs for a capture session.
@@ -23,6 +23,7 @@ pub struct OverlayConfig {
     pub backend: String,
     pub fps: u32,
     pub show_cursor: bool,
+    pub initial_mode: rollshot_capture::CaptureMode,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ mod linux_runner;
 mod macos_runner;
 #[cfg(target_os = "macos")]
 mod macos_window;
+pub mod screenshot;
 
 /// Run the capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.

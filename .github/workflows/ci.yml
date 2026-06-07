@@ -80,3 +80,4 @@ jobs:
           cargo check -p rollshot-tauri-app --all-targets
           cargo check -p rollshot-iced-overlay --all-targets
           cargo check -p rollshot-app --all-targets
+          cargo check -p rollshot-macos-oneshot --all-targets

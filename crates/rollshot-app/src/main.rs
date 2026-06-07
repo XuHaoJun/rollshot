@@ -30,6 +30,7 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
         backend: options.backend,
         fps: options.fps,
         show_cursor: options.show_cursor,
+        initial_mode: options.initial_mode,
     };
 
     match rollshot_iced_overlay::run_overlay(config) {

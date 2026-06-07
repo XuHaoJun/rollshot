@@ -1,8 +1,11 @@
 #![cfg(target_os = "linux")]
 
+pub mod kwin_screenshot;
+pub mod one_shot;
 mod pipewire;
 mod pixel;
 mod portal;
+pub(crate) mod portal_screenshot;
 
 use crate::backend::{CaptureBackend, FrameStream};
 use crate::error::CaptureError;

@@ -56,7 +56,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{parse_launch_args, LaunchMode};
-    use rollshot_capture::OverlayMode;
+    use rollshot_capture::{CaptureMode, OverlayMode};
 
     #[test]
     fn no_args_uses_defaults() {
@@ -67,6 +67,7 @@ mod tests {
                 assert_eq!(options.fps, 5);
                 assert!(!options.show_cursor);
                 assert_eq!(options.overlay_mode, OverlayMode::Auto);
+                assert_eq!(options.initial_mode, CaptureMode::Scrolling);
             }
             LaunchMode::SaveDialogTemp(_) => panic!("expected capture mode"),
         }

@@ -21,6 +21,9 @@ pub enum CaptureError {
     #[error("invalid configuration: {message}")]
     InvalidConfig { message: String },
 
+    #[error("mapping failure: {message}")]
+    Mapping { message: String },
+
     #[error(transparent)]
     Backend(#[from] anyhow::Error),
 }

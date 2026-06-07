@@ -1,6 +1,9 @@
 use iced::futures::StreamExt;
 use iced::widget::{button, canvas, column, container, image, row, text, Space};
-use iced::{keyboard, mouse, window, Color, Element, Event, Length, Point, Rectangle, Size};
+use iced::{
+    keyboard, mouse, window, Color, ContentFit, Element, Event, Length, Point, Rectangle, Size,
+};
+use rollshot_capture::CaptureMode;
 use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
 use std::sync::Mutex;
@@ -66,6 +69,12 @@ pub(crate) struct OverlayState {
     pub(crate) window_size: Option<Size>,
     pub(crate) capture_miss_warn: bool,
     pub(crate) capture_miss_message_expires_at: Option<std::time::Instant>,
+    /// Active workflow. Screenshot mode finishes immediately on a valid release;
+    /// scrolling mode confirms the crop and begins streaming/stitching.
+    pub(crate) mode: CaptureMode,
+    /// Frozen one-shot background, present only in screenshot mode. Built once by
+    /// the platform runner; `view()` clones the cheap handle, never the pixels.
+    pub(crate) frozen: Option<image::Handle>,
 }
 
 impl OverlayState {
@@ -508,16 +517,29 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         .into(),
     );
 
-    iced::widget::stack![
-        canvas_widget,
-        container(toolbar)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Alignment::Start)
-            .align_y(iced::Alignment::Start)
-            .padding(16),
-    ]
-    .into()
+    let toolbar_layer = container(toolbar)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Start)
+        .align_y(iced::Alignment::Start)
+        .padding(16);
+
+    // Screenshot mode draws the frozen capture as the background, with the dim
+    // mask, crosshair guides, and selection border (the canvas) composited above
+    // it (spec steps 2-3). Scrolling mode has no frozen image; the canvas sits on
+    // the transparent layer surface so the live target shows through.
+    match &state.frozen {
+        Some(handle) => iced::widget::stack![
+            image(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(ContentFit::Fill),
+            canvas_widget,
+            toolbar_layer,
+        ]
+        .into(),
+        None => iced::widget::stack![canvas_widget, toolbar_layer].into(),
+    }
 }
 
 pub(crate) fn style(_state: &OverlayState, theme: &iced::Theme) -> iced::theme::Style {
@@ -587,8 +609,16 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
             state.drag_start = None;
             if !state.crop_confirmed && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0)
             {
-                state.crop_confirmed = true;
-                OverlayEffect::BeginStitch
+                match state.mode {
+                    // Screenshot: a valid release crops the frozen image and
+                    // exits immediately (spec step 5). Do not enter the
+                    // scrolling capture phase.
+                    CaptureMode::Screenshot => OverlayEffect::Finish,
+                    CaptureMode::Scrolling => {
+                        state.crop_confirmed = true;
+                        OverlayEffect::BeginStitch
+                    }
+                }
             } else {
                 OverlayEffect::None
             }
@@ -609,8 +639,13 @@ pub(crate) fn update(state: &mut OverlayState, message: OverlayMessage) -> Overl
         })) if !state.crop_confirmed
             && state.crop.is_some_and(|c| c.width > 0.0 && c.height > 0.0) =>
         {
-            state.crop_confirmed = true;
-            OverlayEffect::BeginStitch
+            match state.mode {
+                CaptureMode::Screenshot => OverlayEffect::Finish,
+                CaptureMode::Scrolling => {
+                    state.crop_confirmed = true;
+                    OverlayEffect::BeginStitch
+                }
+            }
         }
         OverlayMessage::FinishCapture => {
             if state.crop_confirmed {
@@ -967,6 +1002,78 @@ mod tests {
 
         assert_eq!(effect, super::OverlayEffect::None);
         assert!(state.warning().is_some());
+    }
+
+    #[test]
+    fn screenshot_release_finishes_immediately_without_confirming() {
+        use iced::{mouse, Event};
+        let mut state = OverlayState {
+            mode: rollshot_capture::CaptureMode::Screenshot,
+            crop: Some(Rectangle {
+                x: 10.0,
+                y: 10.0,
+                width: 50.0,
+                height: 40.0,
+            }),
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(
+            &mut state,
+            OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))),
+        );
+
+        assert_eq!(effect, super::OverlayEffect::Finish);
+        assert!(
+            !state.crop_confirmed,
+            "screenshot release must not enter the scrolling capture phase"
+        );
+    }
+
+    #[test]
+    fn scrolling_release_begins_stitch_and_confirms() {
+        use iced::{mouse, Event};
+        let mut state = OverlayState {
+            crop: Some(Rectangle {
+                x: 10.0,
+                y: 10.0,
+                width: 50.0,
+                height: 40.0,
+            }),
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(
+            &mut state,
+            OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))),
+        );
+
+        assert_eq!(effect, super::OverlayEffect::BeginStitch);
+        assert!(state.crop_confirmed);
+    }
+
+    #[test]
+    fn screenshot_empty_release_stays_in_selection() {
+        use iced::{mouse, Event};
+        let mut state = OverlayState {
+            mode: rollshot_capture::CaptureMode::Screenshot,
+            crop: None,
+            ..OverlayState::default()
+        };
+
+        let effect = super::update(
+            &mut state,
+            OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))),
+        );
+
+        assert_eq!(effect, super::OverlayEffect::None);
+        assert!(!state.crop_confirmed);
     }
 
     #[test]

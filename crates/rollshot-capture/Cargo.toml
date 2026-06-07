@@ -18,11 +18,14 @@ serde_json = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { workspace = true }
 nix = { workspace = true }
+url = { workspace = true }
 pipewire = { workspace = true }
 tokio = { workspace = true }
+zbus = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 scap = { workspace = true }
+rollshot-macos-oneshot = { path = "../rollshot-macos-oneshot" }
 
 [lints.rust]
 unsafe_code = "deny"

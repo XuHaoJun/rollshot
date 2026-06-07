@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rollshot
+Exec=/usr/bin/rollshot-app
+Icon=dev.rollshot.io
+Terminal=false
+Categories=Graphics;Utility;
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

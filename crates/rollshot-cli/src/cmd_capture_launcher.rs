@@ -43,6 +43,7 @@ fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
         fps: args.fps,
         show_cursor: args.show_cursor,
         overlay_mode: rollshot_capture::OverlayMode::Auto,
+        initial_mode: rollshot_capture::CaptureMode::Scrolling,
     }
 }
 
