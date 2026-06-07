@@ -99,6 +99,7 @@ pub fn stitch_stream(
     Ok(CaptureResult {
         image,
         stats: Some(stitcher.stats()),
+        post_overlay_request: crate::PostOverlayRequest::None,
     })
 }
 
@@ -325,6 +326,7 @@ impl Driver {
         Ok(CaptureResult {
             image,
             stats: Some(stitcher.stats()),
+            post_overlay_request: crate::PostOverlayRequest::None,
         })
     }
 }
@@ -454,6 +456,23 @@ mod tests {
             "stitched height grows past one frame"
         );
         assert!(result.stats.unwrap().frame_count >= 1);
+    }
+
+    #[test]
+    fn stitch_stream_defaults_to_no_post_overlay_request() {
+        let frames = vec![scrolling_frame(0), scrolling_frame(8)];
+        let stream = Box::new(FakeFrameStream::new(frames));
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 60,
+        };
+
+        let result = stitch_stream(stream, region, overlay_stitch_config())
+            .expect("stitch produced a result");
+
+        assert_eq!(result.post_overlay_request, crate::PostOverlayRequest::None);
     }
 
     #[test]

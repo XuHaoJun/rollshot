@@ -8,12 +8,23 @@
 use image::RgbaImage;
 use rollshot_core::StitchStats;
 
+/// Post-overlay action the caller should perform after the overlay closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PostOverlayRequest {
+    /// No further action — the caller decides what to do with the result.
+    #[default]
+    None,
+    /// Open a native Save As dialog for the captured image.
+    SaveAs,
+}
+
 /// The finalized capture handed back to the caller (Tauri in Phase 4).
 /// Named generically per architecture spec D5 — not "save PNG only".
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub image: RgbaImage,
     pub stats: Option<StitchStats>,
+    pub post_overlay_request: PostOverlayRequest,
 }
 
 /// Inputs for a capture session.

@@ -60,6 +60,7 @@ mod tests {
         rollshot_iced_overlay::CaptureResult {
             image: image::RgbaImage::new(1, 1),
             stats: None,
+            post_overlay_request: rollshot_iced_overlay::PostOverlayRequest::None,
         }
     }
 
