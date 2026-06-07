@@ -513,6 +513,7 @@ fn input_region_for(input: &WorkspaceInput<'_>) -> Option<(i32, i32, i32, i32)> 
     app::toolbar_input_rect(crop, ws)
 }
 
+#[allow(dead_code)]
 fn input_mode_for(phase: crate::workspace::WorkspacePhase) -> app::InputRegionMode {
     use crate::workspace::WorkspacePhase;
     match phase {

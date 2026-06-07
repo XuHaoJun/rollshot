@@ -608,6 +608,7 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
+    #[allow(dead_code)]
     enum LiveEventKind {
         AcceptedActivity,
         Preview,

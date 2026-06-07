@@ -16,6 +16,7 @@ pub enum ToolbarAction {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ToolbarMessage {
     Action(ToolbarAction),
     DragStart(Point),
@@ -95,11 +96,11 @@ fn action_style_fn(
     action: ToolbarAction,
     active_mode: CaptureMode,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    let is_active = match (action, active_mode) {
-        (ToolbarAction::ScreenshotMode, CaptureMode::Screenshot) => true,
-        (ToolbarAction::ScrollingMode, CaptureMode::Scrolling) => true,
-        _ => false,
-    };
+    let is_active = matches!(
+        (action, active_mode),
+        (ToolbarAction::ScreenshotMode, CaptureMode::Screenshot)
+            | (ToolbarAction::ScrollingMode, CaptureMode::Scrolling)
+    );
 
     move |_theme, _status| {
         if is_active {
@@ -136,9 +137,9 @@ pub fn render_toolbar<'a, Message>(
     phase: WorkspacePhase,
     active_mode: CaptureMode,
     on_action: impl Fn(ToolbarAction) -> Message + 'a,
-    on_drag_start: impl Fn(Point) -> Message + 'a,
-    on_drag_move: impl Fn(Point) -> Message + 'a,
-    on_drag_end: Message,
+    _on_drag_start: impl Fn(Point) -> Message + 'a,
+    _on_drag_move: impl Fn(Point) -> Message + 'a,
+    _on_drag_end: Message,
 ) -> Element<'a, Message>
 where
     Message: Clone + 'a,
@@ -203,7 +204,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{CropRect, WorkspacePhase};
+    use crate::workspace::WorkspacePhase;
     use rollshot_overlay_core::chrome_placement::Rect;
 
     #[test]

@@ -15,6 +15,7 @@ pub enum OutputAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum WorkspaceEffect {
     None,
     ActivateMode(CaptureMode),
@@ -63,10 +64,12 @@ impl WorkspaceState {
         self.phase
     }
 
+    #[allow(dead_code)]
     pub fn active_mode(&self) -> CaptureMode {
         self.active_mode
     }
 
+    #[allow(dead_code)]
     pub fn toolbar_position(&self) -> ToolbarPosition {
         self.toolbar_position
     }
@@ -139,6 +142,7 @@ impl ActivityAutoHide {
         self.last_activity = Some(now);
     }
 
+    #[allow(dead_code)]
     pub fn set_interacting(&mut self, interacting: bool) {
         self.interacting = interacting;
     }

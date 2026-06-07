@@ -1,10 +1,10 @@
 use iced::futures::StreamExt;
-use iced::widget::{button, canvas, column, container, image, row, text, Space};
+use iced::widget::{canvas, container, image, text};
 use iced::{
     keyboard, mouse, window, Color, ContentFit, Element, Event, Length, Point, Rectangle, Size,
 };
 use rollshot_capture::CaptureMode;
-use rollshot_overlay_core::chrome_placement::{self, ChromePlacement, ChromeRequirements, Rect};
+use rollshot_overlay_core::chrome_placement::{self, ChromeRequirements, Rect};
 use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 use rollshot_overlay_core::tokens;
 use std::sync::Mutex;
@@ -13,6 +13,7 @@ static SHARED_PREVIEW_RX: Mutex<
     Option<iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>>,
 > = Mutex::new(None);
 
+#[allow(dead_code)]
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
 #[allow(dead_code)]
 const TOOLBAR_W: f32 = 360.0;
@@ -21,10 +22,13 @@ const CHROME_SPACING: f32 = 8.0;
 /// Smallest band (px) around the crop that is worth placing chrome in (R3).
 const MIN_CHROME_BAND: f32 = 64.0;
 
+#[allow(dead_code)]
 const CAPTURE_STATUS_TEXT: &str = "Capturing - scroll the target";
 #[allow(dead_code)]
 const FOCUS_PAUSED_TEXT: &str = "Shortcuts paused - click Rollshot controls to restore Esc";
+#[allow(dead_code)]
 const FINISH_LABEL: &str = "Finish";
+#[allow(dead_code)]
 const CANCEL_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -569,10 +573,6 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
     }
 
     // Selection phase: drag to pick a crop; toolbar with Cancel.
-    let status = match state.crop {
-        Some(r) => format!("Crop: {}x{}", r.width as u32, r.height as u32),
-        None => "Drag to select crop area".to_string(),
-    };
     let toolbar = crate::toolbar::render_toolbar(
         state.workspace.phase(),
         state.mode,
@@ -896,7 +896,7 @@ pub(crate) fn update(
             (OverlayEffect::None, InputRegionMode::None)
         }
         OverlayMessage::DragMove(point) => {
-            if let Some(start) = state.toolbar_drag_start {
+            if state.toolbar_drag_start.is_some() {
                 let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
                 let viewport = Rect::new(0.0, 0.0, window.width, window.height);
                 let toolbar_rect = Rect::new(

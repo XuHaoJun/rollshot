@@ -2,6 +2,7 @@ use image::RgbaImage;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SaveOutcome {
     Saved(PathBuf),
     Cancelled,

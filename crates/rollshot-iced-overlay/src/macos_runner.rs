@@ -341,8 +341,7 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                     };
                     match outcome {
                         Ok(Some(result)) => {
-                            let handle =
-                                crate::result_review::build_result_handle(&result.image);
+                            let handle = crate::result_review::build_result_handle(&result.image);
                             let size = iced::Size::new(
                                 result.image.width() as f32,
                                 result.image.height() as f32,
@@ -369,8 +368,7 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                     };
                     match outcome {
                         Ok(result) => {
-                            let handle =
-                                crate::result_review::build_result_handle(&result.image);
+                            let handle = crate::result_review::build_result_handle(&result.image);
                             let size = iced::Size::new(
                                 result.image.width() as f32,
                                 result.image.height() as f32,
@@ -391,15 +389,13 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                     let result = match result_guard.as_ref() {
                         Some(Ok(Some(result))) => result,
                         _ => {
-                            state.overlay.transient_error =
-                                Some("No result available".to_string());
+                            state.overlay.transient_error = Some("No result available".to_string());
                             return Task::none();
                         }
                     };
                     let img = &result.image;
                     let mut output_service = crate::output::ArboardOutput::new();
-                    let outcome =
-                        crate::output::perform_output(&mut output_service, action, img);
+                    let outcome = crate::output::perform_output(&mut output_service, action, img);
                     drop(result_guard);
                     match crate::output::outcome_to_phase_decision(
                         &outcome,
@@ -410,8 +406,7 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                             if let crate::output::OutputOutcome::Error(ref e) = outcome {
                                 state.overlay.transient_error = Some(e.clone());
                             } else if outcome == crate::output::OutputOutcome::Cancelled {
-                                state.overlay.transient_error =
-                                    Some("Save cancelled".to_string());
+                                state.overlay.transient_error = Some("Save cancelled".to_string());
                             }
                             Task::none()
                         }
@@ -464,13 +459,11 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                             Task::none()
                         }
                         Ok(None) => {
-                            state.overlay.transient_error =
-                                Some("Capture cancelled".to_string());
+                            state.overlay.transient_error = Some("Capture cancelled".to_string());
                             Task::none()
                         }
                         Err(e) => {
-                            state.overlay.transient_error =
-                                Some(format!("Capture failed: {e}"));
+                            state.overlay.transient_error = Some(format!("Capture failed: {e}"));
                             Task::none()
                         }
                     }
@@ -572,8 +565,12 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                 ControlsWindowAction::Open(rect) => {
                     if Some(rect) != state.controls_rect {
                         state.controls_rect = Some(rect);
-                        let (x, y, w, h) =
-                            (rect.x as i32, rect.y as i32, rect.width as i32, rect.height as i32);
+                        let (x, y, w, h) = (
+                            rect.x as i32,
+                            rect.y as i32,
+                            rect.width as i32,
+                            rect.height as i32,
+                        );
                         if let Some(id) = state.controls_window {
                             Task::batch([
                                 window::move_to(id, x, y),
@@ -972,13 +969,19 @@ mod tests {
 
     #[test]
     fn controls_window_noop_when_both_none() {
-        assert_eq!(controls_window_action(None, None), ControlsWindowAction::Noop);
+        assert_eq!(
+            controls_window_action(None, None),
+            ControlsWindowAction::Noop
+        );
     }
 
     #[test]
     fn result_review_disables_passthrough() {
         assert_eq!(
-            passthrough_action(WorkspacePhase::ScrollingCapture, WorkspacePhase::ResultReview),
+            passthrough_action(
+                WorkspacePhase::ScrollingCapture,
+                WorkspacePhase::ResultReview
+            ),
             PassthroughAction::Disable
         );
     }
