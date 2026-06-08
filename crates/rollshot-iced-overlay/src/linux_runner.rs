@@ -1149,6 +1149,46 @@ mod tests {
     }
 
     #[test]
+    fn linux_update_routes_cursor_drag_to_toolbar_without_translation() {
+        use crate::workspace::{CropRect, ToolbarPosition};
+        use iced::{mouse, Event, Point};
+
+        // Selected phase uses a full-overlay input region, so the surface
+        // receives cursor motion across its whole extent during a drag. Pin the
+        // toolbar to a known rect so `toolbar_rect_for` is deterministic.
+        let start = CropRect {
+            x: 100.0,
+            y: 100.0,
+            width: crate::toolbar::TOOLBAR_WIDTH,
+            height: crate::toolbar::TOOLBAR_HEIGHT,
+        };
+        let mut state = Overlay {
+            window_size: Some(iced::Size::new(800.0, 600.0)),
+            toolbar_position: ToolbarPosition::Manual(start),
+            cursor_position: Some(Point::new(110.0, 110.0)),
+            ..Overlay::default()
+        };
+
+        // Grab the toolbar 10px in from its top-left, then move the cursor. The
+        // Linux runner forwards the raw `CursorMoved` to `app::update` untouched,
+        // so the toolbar must track the cursor (cursor - grab), not snap to 0,0.
+        let _ = update(&mut state, Message::Overlay(app::OverlayMessage::DragStart));
+        let _ = update(
+            &mut state,
+            Message::Overlay(app::OverlayMessage::IcedEvent(Event::Mouse(
+                mouse::Event::CursorMoved {
+                    position: Point::new(300.0, 250.0),
+                },
+            ))),
+        );
+
+        match state.toolbar_position {
+            ToolbarPosition::Manual(rect) => assert_eq!((rect.x, rect.y), (290.0, 240.0)),
+            other => panic!("expected manual toolbar position, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn screenshot_mode_does_not_consume_preview_receiver() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let config = test_config();
