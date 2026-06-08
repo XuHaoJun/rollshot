@@ -66,8 +66,7 @@ pub(crate) enum OverlayMessage {
     Tick,
     ActivateMode(CaptureMode),
     ToolbarAction(crate::toolbar::ToolbarAction),
-    DragStart(Point),
-    DragMove(Point),
+    DragStart,
     DragEnd,
 }
 
@@ -96,8 +95,12 @@ pub(crate) struct OverlayState {
     /// Frozen one-shot background, present only in screenshot mode. Built once by
     /// the platform runner; `view()` clones the cheap handle, never the pixels.
     pub(crate) frozen: Option<image::Handle>,
-    /// Toolbar drag state
-    pub(crate) toolbar_drag_start: Option<Point>,
+    /// Last known window-relative cursor position, tracked from `CursorMoved`.
+    pub(crate) cursor_position: Option<Point>,
+    /// Toolbar drag state. `Some(offset)` while a drag is active, where `offset`
+    /// is the cursor position relative to the toolbar's top-left at grab time, so
+    /// the grabbed point stays under the cursor as the toolbar moves.
+    pub(crate) toolbar_drag_grab: Option<iced::Vector>,
     pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
     /// Full-resolution result image for Result Review. The Handle is built once
     /// when entering Result Review and reused per redraw.
@@ -120,7 +123,8 @@ impl Default for OverlayState {
             capture_miss_message_expires_at: None,
             mode: CaptureMode::Scrolling,
             frozen: None,
-            toolbar_drag_start: None,
+            cursor_position: None,
+            toolbar_drag_grab: None,
             toolbar_position: crate::workspace::ToolbarPosition::Automatic,
             result_handle: None,
             result_size: None,
@@ -382,8 +386,7 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
             state.workspace.phase(),
             state.mode,
             OverlayMessage::ToolbarAction,
-            OverlayMessage::DragStart(Point::ORIGIN),
-            OverlayMessage::DragMove,
+            OverlayMessage::DragStart,
             OverlayMessage::DragEnd,
         );
 
@@ -496,8 +499,7 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
             state.workspace.phase(),
             state.mode,
             OverlayMessage::ToolbarAction,
-            OverlayMessage::DragStart(Point::ORIGIN),
-            OverlayMessage::DragMove,
+            OverlayMessage::DragStart,
             OverlayMessage::DragEnd,
         );
 
@@ -608,8 +610,7 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         state.workspace.phase(),
         state.mode,
         OverlayMessage::ToolbarAction,
-        OverlayMessage::DragStart(Point::ORIGIN),
-        OverlayMessage::DragMove,
+        OverlayMessage::DragStart,
         OverlayMessage::DragEnd,
     );
 
@@ -686,6 +687,19 @@ pub(crate) fn update(
             (OverlayEffect::None, InputRegionMode::None)
         }
         OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::CursorMoved { position })) => {
+            state.cursor_position = Some(position);
+            if let Some(grab) = state.toolbar_drag_grab {
+                let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
+                let viewport = Rect::new(0.0, 0.0, window.width, window.height);
+                let toolbar_rect = Rect::new(
+                    position.x - grab.x,
+                    position.y - grab.y,
+                    crate::toolbar::TOOLBAR_WIDTH,
+                    crate::toolbar::TOOLBAR_HEIGHT,
+                );
+                let clamped = crate::toolbar::finish_drag(toolbar_rect, viewport);
+                state.toolbar_position = crate::workspace::ToolbarPosition::Manual(clamped);
+            }
             if let Some(start) = state.drag_start {
                 if start == Point::ORIGIN && state.crop.is_none() {
                     state.drag_start = Some(position);
@@ -960,28 +974,24 @@ pub(crate) fn update(
                 (OverlayEffect::Cancel, InputRegionMode::None)
             }
         },
-        OverlayMessage::DragStart(point) => {
-            state.toolbar_drag_start = Some(point);
+        OverlayMessage::DragStart => {
+            // Anchor the drag to where the cursor grabbed the toolbar so the
+            // grabbed point stays under the cursor; movement is applied in the
+            // `CursorMoved` handler using the latest window-relative cursor.
+            if let (Some(cursor), Some(toolbar)) = (state.cursor_position, toolbar_rect_for(state))
+            {
+                state.toolbar_drag_grab = Some(iced::Vector::new(
+                    cursor.x - toolbar.x,
+                    cursor.y - toolbar.y,
+                ));
+            } else {
+                state.toolbar_drag_grab = Some(iced::Vector::new(0.0, 0.0));
+            }
             state.workspace.auto_hide_mut().set_interacting(true);
             (OverlayEffect::None, InputRegionMode::None)
         }
-        OverlayMessage::DragMove(point) => {
-            if state.toolbar_drag_start.is_some() {
-                let window = state.window_size.unwrap_or(iced::Size::new(0.0, 0.0));
-                let viewport = Rect::new(0.0, 0.0, window.width, window.height);
-                let toolbar_rect = Rect::new(
-                    point.x - crate::toolbar::TOOLBAR_WIDTH / 2.0,
-                    point.y - crate::toolbar::TOOLBAR_HEIGHT / 2.0,
-                    crate::toolbar::TOOLBAR_WIDTH,
-                    crate::toolbar::TOOLBAR_HEIGHT,
-                );
-                let clamped = crate::toolbar::finish_drag(toolbar_rect, viewport);
-                state.toolbar_position = crate::workspace::ToolbarPosition::Manual(clamped);
-            }
-            (OverlayEffect::None, InputRegionMode::None)
-        }
         OverlayMessage::DragEnd => {
-            state.toolbar_drag_start = None;
+            state.toolbar_drag_grab = None;
             state.workspace.auto_hide_mut().set_interacting(false);
             (OverlayEffect::None, InputRegionMode::None)
         }
@@ -1296,6 +1306,40 @@ mod tests {
         };
 
         assert_eq!(super::toolbar_rect_for(&state), Some(manual.into()));
+    }
+
+    #[test]
+    fn toolbar_drag_follows_cursor_with_grab_offset() {
+        use iced::{mouse, Event};
+        let start = crate::workspace::CropRect {
+            x: 100.0,
+            y: 100.0,
+            width: crate::toolbar::TOOLBAR_WIDTH,
+            height: crate::toolbar::TOOLBAR_HEIGHT,
+        };
+        let mut state = OverlayState {
+            window_size: Some(Size::new(800.0, 600.0)),
+            toolbar_position: crate::workspace::ToolbarPosition::Manual(start),
+            cursor_position: Some(Point::new(110.0, 110.0)),
+            ..OverlayState::default()
+        };
+
+        // Grab the toolbar 10px in from its top-left, then move the cursor.
+        super::update(&mut state, OverlayMessage::DragStart);
+        super::update(
+            &mut state,
+            OverlayMessage::IcedEvent(Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(300.0, 250.0),
+            })),
+        );
+
+        match state.toolbar_position {
+            crate::workspace::ToolbarPosition::Manual(rect) => {
+                assert_eq!(rect.x, 290.0);
+                assert_eq!(rect.y, 240.0);
+            }
+            other => panic!("expected manual toolbar position, got {other:?}"),
+        }
     }
 
     #[test]

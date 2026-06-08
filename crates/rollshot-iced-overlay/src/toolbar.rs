@@ -142,7 +142,6 @@ pub fn render_toolbar<'a, Message>(
     active_mode: CaptureMode,
     on_action: impl Fn(ToolbarAction) -> Message + 'a,
     on_drag_start: Message,
-    on_drag_move: impl Fn(Point) -> Message + 'a,
     on_drag_end: Message,
 ) -> Element<'a, Message>
 where
@@ -186,7 +185,6 @@ where
             }
         }))
         .on_press(on_drag_start)
-        .on_move(on_drag_move)
         .on_release(on_drag_end);
 
     container(

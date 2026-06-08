@@ -134,9 +134,16 @@ fn controls_message_to_overlay(
     controls: Option<LogicalRect>,
 ) -> OverlayMessage {
     match (message, controls) {
-        (OverlayMessage::DragMove(point), Some(rect)) => {
-            OverlayMessage::DragMove(Point::new(point.x + rect.x, point.y + rect.y))
-        }
+        // The controls window hosts the toolbar in a separate, toolbar-sized
+        // window during scrolling capture. Cursor positions it emits are
+        // relative to that window, so offset them into overlay space to keep
+        // toolbar drag positioning consistent with the single-window phases.
+        (
+            OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved { position })),
+            Some(rect),
+        ) => OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: Point::new(position.x + rect.x, position.y + rect.y),
+        })),
         (message, _) => message,
     }
 }
@@ -671,8 +678,7 @@ fn view(state: &MacOverlayState, window: window::Id) -> Element<'_, Message> {
             state.overlay.workspace.phase(),
             state.overlay.mode,
             |action| Message::Overlay(app::OverlayMessage::ToolbarAction(action)),
-            Message::Overlay(app::OverlayMessage::DragStart(Point::ORIGIN)),
-            |point| Message::Overlay(app::OverlayMessage::DragMove(point)),
+            Message::Overlay(app::OverlayMessage::DragStart),
             Message::Overlay(app::OverlayMessage::DragEnd),
         );
         return container(toolbar)
@@ -1044,15 +1050,19 @@ mod tests {
     }
 
     #[test]
-    fn controls_drag_coordinates_are_mapped_to_overlay() {
+    fn controls_cursor_coordinates_are_mapped_to_overlay() {
         let message = controls_message_to_overlay(
-            OverlayMessage::DragMove(Point::new(10.0, 15.0)),
+            OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
+                position: Point::new(10.0, 15.0),
+            })),
             Some(rect(100.0, 200.0, 360.0, 48.0)),
         );
 
         match message {
-            OverlayMessage::DragMove(point) => assert_eq!(point, Point::new(110.0, 215.0)),
-            _ => panic!("expected drag move"),
+            OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
+                position,
+            })) => assert_eq!(position, Point::new(110.0, 215.0)),
+            _ => panic!("expected cursor moved"),
         }
     }
 }
