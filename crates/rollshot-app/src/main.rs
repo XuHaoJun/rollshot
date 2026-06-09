@@ -2,6 +2,7 @@ mod launch;
 
 use launch::LaunchMode;
 
+mod result_workspace;
 mod save;
 mod storage;
 
