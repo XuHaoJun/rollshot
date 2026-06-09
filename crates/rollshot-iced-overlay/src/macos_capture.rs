@@ -302,6 +302,40 @@ impl Component {
         }
     }
 
+    /// Resolve the logical overlay window size and origin from the acquired
+    /// capture resource. The host (`rollshot-app`'s product daemon) calls this to
+    /// size/position the overlay window before `boot`. The display-origin lookup
+    /// (`display_screen_geometry`) lives here so the host need not reach into the
+    /// crate-private `macos_window` module.
+    ///
+    /// iced window sizes are logical points but `source_size` is physical pixels;
+    /// the returned size is `source_size / scale` so the window covers the
+    /// display 1:1 and the crop maps at the true device scale.
+    pub fn overlay_window_layout(&self) -> Result<(iced::Size, iced::Point), OverlayError> {
+        let geom = self.window_geometry();
+        let scale = geom.scale;
+        let source_size = geom.source_size;
+        let window_size = iced::Size::new(
+            source_size.width as f32 / scale as f32,
+            source_size.height as f32 / scale as f32,
+        );
+        let window_origin = match self.capture_mode {
+            Some(CaptureMode::Screenshot) => match geom.display_id {
+                Some(did) => {
+                    let display_geom = crate::macos_window::display_screen_geometry(did)
+                        .map_err(OverlayError::Capture)?;
+                    iced::Point::new(
+                        display_geom.logical_origin.0 as f32,
+                        display_geom.logical_origin.1 as f32,
+                    )
+                }
+                None => iced::Point::ORIGIN,
+            },
+            _ => iced::Point::ORIGIN,
+        };
+        Ok((window_size, window_origin))
+    }
+
     /// Record the overlay window the host opened. The window patch is applied
     /// later, when the `Opened` event arrives through `subscription` -> `update`
     /// (matching the original runner), so no boot task is needed here.

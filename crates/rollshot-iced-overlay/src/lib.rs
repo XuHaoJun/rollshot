@@ -28,7 +28,9 @@ pub struct OverlayConfig {
 
 #[derive(Debug)]
 pub enum OverlayError {
-    /// Returned on non-Linux targets.
+    /// Returned by the blocking `run_overlay` on non-Linux targets: the blocking
+    /// overlay runner is Linux-only. The active macOS path is the embedded
+    /// [`macos_capture::Component`] hosted by `rollshot-app`'s product daemon.
     Unsupported,
     Capture(String),
     Overlay(String),
@@ -37,7 +39,10 @@ pub enum OverlayError {
 impl std::fmt::Display for OverlayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OverlayError::Unsupported => write!(f, "overlay is only supported on Linux"),
+            OverlayError::Unsupported => write!(
+                f,
+                "the blocking overlay runner is Linux-only; the active macOS path is the embedded capture component hosted by rollshot-app"
+            ),
             OverlayError::Capture(m) => write!(f, "capture error: {m}"),
             OverlayError::Overlay(m) => write!(f, "overlay error: {m}"),
         }
@@ -61,23 +66,22 @@ mod linux_runner;
 #[cfg(target_os = "macos")]
 pub mod macos_capture;
 #[cfg(target_os = "macos")]
-mod macos_runner;
-#[cfg(target_os = "macos")]
 mod macos_window;
 pub mod screenshot;
 
-/// Run the capture overlay, blocking the calling thread until the user
+/// Run the blocking capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
+///
+/// This blocking runner is Linux-only. On macOS the active path is the embedded
+/// [`macos_capture::Component`] hosted by `rollshot-app`'s single-process
+/// product daemon (it owns the event loop and the post-capture flow), so there
+/// is no blocking macOS runner here.
 pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     #[cfg(target_os = "linux")]
     {
         linux_runner::run(config)
     }
-    #[cfg(target_os = "macos")]
-    {
-        macos_runner::run(config)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = config;
         Err(OverlayError::Unsupported)

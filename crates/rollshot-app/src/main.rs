@@ -2,30 +2,14 @@ mod launch;
 
 use launch::LaunchMode;
 
+// Registered on every target so the portable thumbnail timer + interaction
+// helpers compile and unit-test on Linux. Only its `view` is macOS-gated.
+#[cfg(target_os = "macos")]
+mod macos_product;
+mod macos_thumbnail;
 mod post_capture;
 mod result_workspace;
 mod storage;
-
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone)]
-pub enum PostOverlayAction {
-    ExitSuccess,
-    ExitCancelled,
-}
-
-#[cfg(target_os = "macos")]
-pub fn post_overlay_action(
-    result: Result<Option<rollshot_iced_overlay::CaptureResult>, String>,
-) -> PostOverlayAction {
-    match result {
-        Ok(Some(_cr)) => PostOverlayAction::ExitSuccess,
-        Ok(None) => PostOverlayAction::ExitCancelled,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-    }
-}
 
 fn main() {
     let launch_mode = match launch::parse_launch_args(std::env::args()) {
@@ -61,10 +45,9 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
 
     #[cfg(target_os = "macos")]
     {
-        let result = rollshot_iced_overlay::run_overlay(config);
-        match post_overlay_action(result.map_err(|e| e.to_string())) {
-            PostOverlayAction::ExitSuccess => println!("capture complete"),
-            PostOverlayAction::ExitCancelled => println!("capture cancelled"),
+        if let Err(e) = run_product_capture(config) {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
     }
 
@@ -88,6 +71,13 @@ fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(
     }
 }
 
+/// macOS: route capture into the single-process product daemon, which owns the
+/// whole capture → thumbnail / Result Workspace flow in one event loop.
+#[cfg(target_os = "macos")]
+fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String> {
+    macos_product::run(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,33 +88,5 @@ mod tests {
             launch::parse_launch_args(["rollshot-app", "--save-dialog-temp", "/tmp/a.png"])
                 .is_err()
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    mod macos_tests {
-        use super::*;
-
-        fn capture_result() -> rollshot_iced_overlay::CaptureResult {
-            rollshot_iced_overlay::CaptureResult {
-                image: image::RgbaImage::new(1, 1),
-                stats: None,
-            }
-        }
-
-        #[test]
-        fn completed_overlay_exits_with_success() {
-            assert!(matches!(
-                post_overlay_action(Ok(Some(capture_result()))),
-                PostOverlayAction::ExitSuccess
-            ));
-        }
-
-        #[test]
-        fn cancelled_overlay_exits_successfully() {
-            assert!(matches!(
-                post_overlay_action(Ok(None)),
-                PostOverlayAction::ExitCancelled
-            ));
-        }
     }
 }
