@@ -21,8 +21,18 @@ rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 serde_json = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+raw-window-handle = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
 
-[lints]
-workspace = true
+# Narrowed from the workspace `forbid(unsafe_code)`: the AppKit native-drag
+# bridge in `macos_native_drag.rs` is an audited unsafe boundary (mirrors
+# rollshot-iced-overlay), so this package uses `deny` with explicit
+# `#[allow(unsafe_code)]` on the bridge functions instead of a global forbid.
+[lints.rust]
+unsafe_code = "deny"

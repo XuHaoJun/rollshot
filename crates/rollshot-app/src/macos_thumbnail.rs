@@ -40,7 +40,7 @@ pub enum ThumbnailAction {
     /// Click within the drag threshold: open the saved Result Workspace.
     OpenWorkspace,
     /// Press dragged past the threshold (or a drag was already started): hand
-    /// off to the native AppKit drag (Task 9). For now a placeholder no-op.
+    /// off to the native AppKit file drag.
     StartNativeDrag,
     /// Keep the thumbnail open (e.g. hover begins, drag continues).
     KeepOpen,
@@ -108,9 +108,9 @@ pub struct ThumbnailState {
     /// Pointer position where the current press began, if any.
     pub press_origin: Option<Point>,
     pub dragging: bool,
-    /// Shared status flag the native AppKit drag (Task 9) will publish into.
-    // TODO(task-9): read by the AppKit native file drag bridge
-    #[allow(dead_code)]
+    /// Shared status flag the native AppKit drag publishes its terminal result
+    /// into; the host tick polls it to close (success) or restart the countdown
+    /// (cancel). `None` until a drag begins.
     pub native_drag_status: Option<Arc<AtomicU8>>,
 }
 

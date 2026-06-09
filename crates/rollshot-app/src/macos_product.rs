@@ -24,6 +24,8 @@
 //! thumbnail timer/interaction logic in [`crate::macos_thumbnail`] is tested on
 //! all hosts.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use iced::{window, Element, Point, Size, Task};
@@ -33,6 +35,7 @@ use rollshot_capture::CaptureMode;
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
 
+use crate::macos_native_drag::{self, NativeDragResult};
 use crate::macos_thumbnail::{self, release_action, ThumbnailAction, ThumbnailState};
 use crate::post_capture::{select_presentation, Presentation};
 use crate::result_workspace::{self, ResultDocument, ResultWorkspace};
@@ -59,6 +62,12 @@ pub enum Message {
     ThumbnailTick(Instant),
     /// The thumbnail window finished opening.
     ThumbnailWindowReady(window::Id),
+    /// The thumbnail window was patched (Ok) or the patch failed (Err) — a patch
+    /// failure is treated as thumbnail-creation failure: print + exit.
+    ThumbnailWindowPatched(Result<(), String>),
+    /// The native AppKit drag was kicked off (Ok) or failed to start (Err) — a
+    /// failure restarts the countdown rather than exiting.
+    NativeDragStarted(Result<(), String>),
     /// The workspace window finished opening.
     WorkspaceWindowReady(window::Id),
 }
@@ -189,16 +198,25 @@ fn overlay_window_settings(window_size: iced::Size, window_origin: Point) -> win
     }
 }
 
-/// Compact floating window settings for the saved-capture thumbnail.
-fn thumbnail_window_settings() -> window::Settings {
-    window::Settings {
-        size: Size::new(220.0, 180.0),
+/// Logical size of the compact saved-capture thumbnail card.
+const THUMBNAIL_SIZE: Size = Size::new(220.0, 180.0);
+/// Margin (logical points) between the thumbnail and the active screen edge.
+const THUMBNAIL_MARGIN: f32 = 24.0;
+
+/// Compact floating window settings for the saved-capture thumbnail, placed in
+/// the lower-right of the screen currently under the pointer.
+fn thumbnail_window_settings() -> Result<window::Settings, String> {
+    let origin =
+        macos_native_drag::active_screen_thumbnail_origin(THUMBNAIL_SIZE, THUMBNAIL_MARGIN)?;
+    Ok(window::Settings {
+        size: THUMBNAIL_SIZE,
+        position: window::Position::Specific(origin),
         decorations: false,
         transparent: true,
         level: window::Level::AlwaysOnTop,
         resizable: false,
         ..window::Settings::default()
-    }
+    })
 }
 
 fn workspace_window_settings() -> window::Settings {
@@ -268,11 +286,8 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             }
             match action {
                 ThumbnailAction::OpenWorkspace => open_thumbnail_workspace(product),
-                // TODO(task-9): hand off to the native AppKit drag. For now the
-                // thumbnail simply stays open; no objc2 drag is started here.
-                ThumbnailAction::StartNativeDrag
-                | ThumbnailAction::KeepOpen
-                | ThumbnailAction::Close => Task::none(),
+                ThumbnailAction::StartNativeDrag => start_native_drag(product),
+                ThumbnailAction::KeepOpen | ThumbnailAction::Close => Task::none(),
             }
         }
         Message::ThumbnailHoverChanged(hovering) => {
@@ -282,6 +297,26 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ThumbnailTick(now) => {
+            // A finished native drag wins over the countdown: success closes the
+            // thumbnail and exits; cancel/failure clears `dragging` and restarts
+            // the 8s countdown. Only advance the timer when no drag completed.
+            match poll_native_drag(product) {
+                Some(NativeDragResult::Succeeded) => return iced::exit(),
+                Some(NativeDragResult::Cancelled) => {
+                    if let Phase::Thumbnail(state) = &mut product.phase {
+                        state.dragging = false;
+                        state.native_drag_status = None;
+                        state.timer.set_dragging(false, now);
+                        state.timer = crate::macos_thumbnail::ThumbnailTimer::new(
+                            now,
+                            crate::macos_thumbnail::THUMBNAIL_TIMEOUT,
+                        );
+                    }
+                    return Task::none();
+                }
+                // Pending or not in a drag: fall through to the countdown.
+                Some(NativeDragResult::Pending) | None => {}
+            }
             let expired =
                 matches!(&mut product.phase, Phase::Thumbnail(state) if state.timer.tick(now));
             if expired {
@@ -292,6 +327,37 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
         }
         Message::ThumbnailWindowReady(id) => {
             product.thumbnail_window = Some(id);
+            // Patch the floating thumbnail window before it accepts interaction.
+            window::run(id, |window| {
+                macos_native_drag::patch_thumbnail_window(window)
+            })
+            .map(Message::ThumbnailWindowPatched)
+        }
+        Message::ThumbnailWindowPatched(result) => {
+            // A patch failure means the floating chrome is unusable. The durable
+            // saved file remains (spec §13), so surface the error and exit.
+            if let Err(error) = result {
+                eprintln!("{error}");
+                return iced::exit();
+            }
+            Task::none()
+        }
+        Message::NativeDragStarted(result) => {
+            // The drag could not start (e.g. no left-mouse event). Clear the
+            // drag intent and restart the countdown so the thumbnail stays
+            // usable; the saved file is durable regardless.
+            if let Err(error) = result {
+                eprintln!("{error}");
+                if let Phase::Thumbnail(state) = &mut product.phase {
+                    let now = Instant::now();
+                    state.dragging = false;
+                    state.native_drag_status = None;
+                    state.timer = crate::macos_thumbnail::ThumbnailTimer::new(
+                        now,
+                        crate::macos_thumbnail::THUMBNAIL_TIMEOUT,
+                    );
+                }
+            }
             Task::none()
         }
         Message::WorkspaceWindowReady(id) => {
@@ -324,9 +390,21 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
 
     let open_task = match &product.phase {
         Phase::Thumbnail(_) => {
-            let (id, open) = window::open(thumbnail_window_settings());
-            product.thumbnail_window = Some(id);
-            open.map(Message::ThumbnailWindowReady)
+            // Origin lookup / window creation failure is thumbnail-creation
+            // failure: the durable saved file remains (spec §13), so surface
+            // the error and exit rather than open an unplaced window.
+            match thumbnail_window_settings() {
+                Ok(settings) => {
+                    let (id, open) = window::open(settings);
+                    product.thumbnail_window = Some(id);
+                    open.map(Message::ThumbnailWindowReady)
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    close_tasks.push(iced::exit());
+                    return Task::batch(close_tasks);
+                }
+            }
         }
         Phase::Workspace(_) => {
             let (id, open) = window::open(workspace_window_settings());
@@ -354,6 +432,45 @@ fn open_thumbnail_workspace(product: &mut MacosProduct) -> Task<Message> {
         tasks.push(open.map(Message::WorkspaceWindowReady));
     }
     Task::batch(tasks)
+}
+
+/// Begin the native AppKit file drag from the thumbnail window: mark the timer
+/// paused, publish a shared status atomic the host tick polls, and run the
+/// AppKit bridge against the thumbnail's raw window handle.
+fn start_native_drag(product: &mut MacosProduct) -> Task<Message> {
+    let Phase::Thumbnail(state) = &mut product.phase else {
+        return Task::none();
+    };
+    let Some(window_id) = product.thumbnail_window else {
+        return Task::none();
+    };
+
+    let now = Instant::now();
+    state.dragging = true;
+    state.timer.set_dragging(true, now);
+
+    let status = Arc::new(AtomicU8::new(NativeDragResult::Pending as u8));
+    state.native_drag_status = Some(Arc::clone(&status));
+    let saved_path = state.saved_path.clone();
+
+    window::run(window_id, move |window| {
+        macos_native_drag::begin_file_drag(window, &saved_path, status)
+    })
+    .map(Message::NativeDragStarted)
+}
+
+/// Read the shared native-drag status atomic, if a drag is in flight. Returns
+/// `None` when not in the thumbnail phase or no drag has been started.
+fn poll_native_drag(product: &MacosProduct) -> Option<NativeDragResult> {
+    let Phase::Thumbnail(state) = &product.phase else {
+        return None;
+    };
+    let status = state.native_drag_status.as_ref()?;
+    Some(match status.load(Ordering::SeqCst) {
+        x if x == NativeDragResult::Succeeded as u8 => NativeDragResult::Succeeded,
+        x if x == NativeDragResult::Cancelled as u8 => NativeDragResult::Cancelled,
+        _ => NativeDragResult::Pending,
+    })
 }
 
 fn view(product: &MacosProduct, window: window::Id) -> Element<'_, Message> {
@@ -541,7 +658,8 @@ mod tests {
         // Move well past the drag threshold before releasing.
         product.thumbnail_cursor = Point::new(40.0, 0.0);
         let _ = update(&mut product, Message::ThumbnailReleased);
-        // Native drag is a Task-9 placeholder; the thumbnail stays open.
+        // A native drag hands off to AppKit without leaving the thumbnail
+        // phase; the thumbnail window stays open while the drag is in flight.
         assert!(matches!(product.phase, Phase::Thumbnail(_)));
     }
 }

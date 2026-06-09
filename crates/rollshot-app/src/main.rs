@@ -6,6 +6,9 @@ use launch::LaunchMode;
 // helpers compile and unit-test on Linux. Only its `view` is macOS-gated.
 #[cfg(target_os = "macos")]
 mod macos_product;
+// Registered on every target so the pure drag placement/result helpers compile
+// and unit-test on Linux; the AppKit bridge inside it is macOS-gated.
+mod macos_native_drag;
 mod macos_thumbnail;
 mod post_capture;
 mod result_workspace;
