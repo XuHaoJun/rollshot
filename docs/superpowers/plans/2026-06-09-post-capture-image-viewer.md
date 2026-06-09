@@ -4,7 +4,7 @@
 
 **Goal:** Move completed captures out of the capture overlay, auto-save every successful capture, open a full Result Workspace on Linux or auto-save failure, and show a draggable floating thumbnail before the Result Workspace on macOS.
 
-**Architecture:** `rollshot-iced-overlay` becomes capture-only and returns a plain `CaptureResult` as soon as capture finishes. `rollshot-app` owns a post-capture pipeline that auto-saves first, selects the platform presentation, and then runs either the Linux Result Workspace or a macOS post-capture child process. The macOS child owns one iced daemon that transitions from floating thumbnail to Result Workspace without recreating winit's event loop; the Result Workspace keeps document state, system actions, and pure viewport geometry in focused reusable modules, while a narrow AppKit bridge performs native file drag.
+**Architecture:** `rollshot-iced-overlay` becomes capture-only. Linux keeps its blocking layer-shell runner and returns a plain `CaptureResult`; macOS exposes an embeddable capture component that reports completion to a single product daemon owned by `rollshot-app`. That one macOS daemon transitions through capture overlay, floating thumbnail, and Result Workspace windows without recreating winit's event loop; the Result Workspace keeps document state, system actions, and pure viewport geometry in focused reusable modules, while a narrow AppKit bridge performs native file drag.
 
 **Tech Stack:** Rust 2021, iced 0.14, `image`, `rfd`, `arboard`, `chrono`, `dirs`, macOS `objc2`/AppKit, existing Rollshot capture and overlay crates.
 
@@ -14,8 +14,8 @@
 
 - Treat Linux `XDG_DESKTOP_DIR` as the value from `${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs`, expanding only `$HOME` and `${HOME}`. Use `~/Pictures` when that value is absent, malformed, relative, or points to a missing directory. Do not create either directory.
 - Use local wall-clock time for `Rollshot YYYY-MM-DD at HH.MM.SS.png`.
-- The pinned winit 0.30 backend rejects a second event loop in one process with `EventLoopError::RecreationAttempt`. Linux may start its one ordinary iced Result Workspace after the layer-shell overlay exits. macOS must launch a transient `rollshot-app` post-capture child and wait for it; the child uses one iced daemon for thumbnail and Result Workspace. This is the plan's only intentional deviation from the design's single-process statement.
-- For macOS auto-save success, the child losslessly reloads the saved PNG. For macOS auto-save failure, the parent encodes the captured image as PNG and writes it to the child's stdin; no temporary file is created, and the parent waits for the child.
+- The pinned winit 0.30 backend rejects a second event loop in one process with `EventLoopError::RecreationAttempt`. Linux may start its one ordinary iced Result Workspace after the layer-shell overlay exits. macOS therefore uses one long-lived iced daemon in `rollshot-app`; capture, thumbnail, and Result Workspace are phases/windows inside that daemon.
+- The macOS daemon retains the completed `RgbaImage` in memory while auto-save and post-capture UI run. No image serialization, temporary transfer file, child process, or IPC is used.
 - The viewer image handle is built once from its `RgbaImage`.
 - Use `rfd::AsyncFileDialog` for Result Workspace Save As so the native dialog is not opened synchronously inside iced's event loop.
 - Implement unsaved-close confirmation as an iced modal containing the exact prompt `Discard unsaved capture?`; both the toolbar Close action and `window::Event::CloseRequested` route to the same state transition.
@@ -23,45 +23,37 @@
 - Keep the AppKit bridge inside `rollshot-app`. Change that package's unsafe lint from inherited `forbid` to package-local `deny`, and use one explicitly annotated `#[allow(unsafe_code)]` bridge function/module, matching the existing `rollshot-iced-overlay/src/macos_window.rs` pattern.
 - Do not modify `crates/rollshot-tauri-app`.
 
-## Engineering Constraint Requiring Approval
+## macOS Ownership Boundary
 
-The approved design says one `rollshot-app` process owns capture and all
-post-capture UI. The current macOS overlay already consumes the process's only
-winit event loop, and pinned winit 0.30 rejects another with
-`EventLoopError::RecreationAttempt`. Keeping exactly one process would require a
-larger redesign that moves the macOS capture overlay and post-capture host into
-one shared daemon, crossing the current `rollshot-app` /
-`rollshot-iced-overlay` ownership boundary.
+The current `rollshot-iced-overlay::macos_runner` owns and terminates an iced
+daemon. The long-term architecture moves daemon ownership to `rollshot-app`.
+`rollshot-iced-overlay` keeps capture-specific state, rendering, resource
+acquisition, passthrough, and controls-window behavior behind an embeddable
+`macos_capture` component API. It does not know about auto-save, thumbnails,
+Result Workspace, or product process lifetime.
 
-This plan instead uses one transient macOS post-capture child and makes the
-capture process wait for it. The child is per-capture, has no shared state, and
-owns one daemon for thumbnail/workspace transitions. Execution should not begin
-until this explicit process-model deviation is approved.
+`rollshot-app::macos_product` owns the product-level phase machine and maps
+capture-component completion into auto-save and post-capture presentation. This
+preserves the approved one-process-per-capture model and removes the need for
+IPC.
 
 ## Post-Capture Flow
 
 ```text
-run_overlay
-  |
-  +-- Ok(None) ------------------------------> exit success
-  |
-  +-- Err(error) ----------------------------> print error, exit failure
-  |
-  +-- Ok(Some(CaptureResult))
-          |
-          v
-      auto_save(image)
-          |
-          +-- Err(error), Linux -------------> unsaved Result Workspace
-          |
-          +-- Ok(path), Linux ---------------> saved Result Workspace
-          |
-          +-- Err(error), macOS -------------> child stdin PNG -> one-daemon unsaved Result Workspace
-          |
-          +-- Ok(path), macOS ---------------> child loads PNG -> one-daemon floating thumbnail
-                                                                          |
-                                                                          +-- click -> saved Result Workspace
-                                                                          +-- timeout/native drag success -> exit
+Linux:
+run_overlay -> CaptureResult -> auto_save
+  +-- error -> unsaved Result Workspace
+  +-- saved -> saved Result Workspace
+
+macOS single rollshot-app daemon:
+Capture(MacCaptureComponent)
+  +-- cancelled -> exit
+  +-- failed -> existing capture error behavior
+  +-- completed CaptureResult -> auto_save
+       +-- error -> Workspace(unsaved image + inline error)
+       +-- saved -> Thumbnail(saved image + path)
+            +-- click -> Workspace(saved image + path)
+            +-- timeout/native drag success -> exit
 ```
 
 ## File Structure
@@ -71,9 +63,7 @@ run_overlay
 - `crates/rollshot-app/src/storage.rs`
   - Desktop-directory resolution, timestamped unique path generation, and PNG writing.
 - `crates/rollshot-app/src/post_capture.rs`
-  - Platform presentation policy and orchestration after `run_overlay`.
-- `crates/rollshot-app/src/post_capture_ipc.rs`
-  - macOS post-capture child launch, saved-path arguments, unsaved PNG stdin transfer, waiting, and exit-status propagation.
+  - Pure platform presentation policy after capture completion.
 - `crates/rollshot-app/src/result_workspace/mod.rs`
   - Result document, workspace state, iced messages/update/view, close routing, and runner.
 - `crates/rollshot-app/src/result_workspace/actions.rs`
@@ -82,17 +72,17 @@ run_overlay
   - Pure zoom, centering, overflow, clamping, and pointer-anchor geometry.
 - `crates/rollshot-app/src/macos_thumbnail.rs`
   - macOS floating-thumbnail state, presentation, timeout, hover, click, and drag-request handling.
-- `crates/rollshot-app/src/macos_post_capture.rs`
-  - macOS-only single iced daemon that owns thumbnail/workspace windows and transitions without recreating the event loop.
+- `crates/rollshot-app/src/macos_product.rs`
+  - macOS-only single iced daemon and product phase machine spanning capture, thumbnail, and Result Workspace.
 - `crates/rollshot-app/src/macos_native_drag.rs`
   - macOS-only AppKit window patch, file-drag source, active-screen placement, and native drag completion bridge.
+- `crates/rollshot-iced-overlay/src/macos_capture.rs`
+  - Embeddable macOS capture component extracted from the current daemon-owning runner: capture state, messages, update/view/subscription, window ownership, and completion effects.
 
 ### Modify
 
 - `crates/rollshot-app/src/main.rs`
-  - Replace post-overlay Save As handoff with the post-capture pipeline.
-- `crates/rollshot-app/src/launch.rs`
-  - Parse internal saved and unsaved macOS post-capture child launch modes.
+  - Dispatch Linux to the blocking overlay/post-capture pipeline and macOS to the single product daemon.
 - `crates/rollshot-app/src/save.rs`
   - Delete after storage and Result Workspace actions replace it.
 - `crates/rollshot-app/Cargo.toml`
@@ -108,7 +98,7 @@ run_overlay
 - `crates/rollshot-iced-overlay/src/linux_runner.rs`
   - Store the completed result and exit immediately after screenshot or scrolling finalization.
 - `crates/rollshot-iced-overlay/src/macos_runner.rs`
-  - Store the completed result, disable passthrough when needed, and exit immediately.
+  - Reduce to a temporary compatibility daemon around `macos_capture`, then delete when `rollshot-app` takes daemon ownership.
 - `crates/rollshot-iced-overlay/src/screenshot.rs`
   - Construct the simplified `CaptureResult`.
 - `crates/rollshot-iced-overlay/src/driver.rs`
@@ -900,18 +890,16 @@ rtk git add crates/rollshot-app/src/result_workspace crates/rollshot-app/Cargo.t
 rtk git commit -m "feat(app): add independent result workspace"
 ```
 
-## Task 6: Add Post-Capture Policy, Linux Flow, And macOS Child Handoff
+## Task 6: Add Shared Post-Capture Policy And Linux Flow
 
 **Files:**
 - Create: `crates/rollshot-app/src/post_capture.rs`
-- Create: `crates/rollshot-app/src/post_capture_ipc.rs`
 - Modify: `crates/rollshot-app/src/main.rs`
-- Modify: `crates/rollshot-app/src/launch.rs`
+- Delete: `crates/rollshot-app/src/save.rs`
 - Test: `crates/rollshot-app/src/post_capture.rs`
-- Test: `crates/rollshot-app/src/post_capture_ipc.rs`
 - Test: `crates/rollshot-app/src/main.rs`
 
-- [ ] **Step 1: Write failing policy, cancellation, and child-mode tests**
+- [ ] **Step 1: Write failing policy and Linux-flow tests**
 
 Add:
 
@@ -945,27 +933,11 @@ fn platform_policy_selects_the_required_presentations() {
 }
 
 #[test]
-fn cancelled_capture_has_no_post_capture_presentation() {
+fn cancelled_linux_capture_has_no_post_capture_presentation() {
     assert!(matches!(
         capture_completion(None),
         CaptureCompletion::Cancelled
     ));
-}
-
-#[test]
-fn internal_child_modes_parse() {
-    assert_eq!(
-        launch::parse_launch_args(["rollshot-app", "--post-capture-saved", "/tmp/a.png"])
-            .unwrap(),
-        LaunchMode::PostCaptureSaved(PathBuf::from("/tmp/a.png"))
-    );
-    assert_eq!(
-        launch::parse_launch_args(["rollshot-app", "--post-capture-unsaved", "disk full"])
-            .unwrap(),
-        LaunchMode::PostCaptureUnsaved {
-            error: "disk full".to_string(),
-        }
-    );
 }
 ```
 
@@ -975,12 +947,11 @@ Run:
 
 ```bash
 rtk cargo test -p rollshot-app post_capture
-rtk cargo test -p rollshot-app launch
 ```
 
-Expected: FAIL because the policy, child handoff, and internal launch modes do not exist.
+Expected: FAIL because the shared policy and Linux flow do not exist.
 
-- [ ] **Step 3: Implement platform policy and Linux orchestration**
+- [ ] **Step 3: Implement the pure policy and Linux orchestration**
 
 Implement:
 
@@ -999,85 +970,46 @@ pub fn select_presentation(
     auto_save: Result<PathBuf, String>,
 ) -> Presentation;
 
-pub fn handle_capture(result: rollshot_iced_overlay::CaptureResult) -> Result<(), String> {
-    let platform = Platform::current()?;
-    let auto_save = storage::auto_save(&result.image, platform);
-    match select_presentation(platform, auto_save) {
+#[cfg(target_os = "linux")]
+pub fn handle_linux_capture(result: rollshot_iced_overlay::CaptureResult) -> Result<(), String> {
+    match select_presentation(Platform::Linux, storage::auto_save(&result.image, Platform::Linux)) {
         Presentation::LinuxSavedWorkspace(path) => {
             result_workspace::run(ResultDocument::saved(result.image, path), None)
         }
         Presentation::LinuxUnsavedWorkspace(error) => {
             result_workspace::run(ResultDocument::unsaved(result.image), Some(error))
         }
-        Presentation::MacosSavedThumbnail(path) => post_capture_ipc::run_saved_child(&path),
-        Presentation::MacosUnsavedWorkspace(error) => {
-            post_capture_ipc::run_unsaved_child(&result.image, &error)
-        }
+        _ => unreachable!("Linux policy returned a macOS presentation"),
     }
 }
 ```
 
-On non-macOS builds, child-handoff functions return an explicit unsupported error if called.
+The macOS product daemon added in Task 8 calls the same `select_presentation`
+function after its embedded capture component reports completion.
 
-- [ ] **Step 4: Implement the macOS child IPC**
-
-Expose:
-
-```rust
-pub fn run_saved_child(path: &Path) -> Result<(), String>;
-pub fn run_unsaved_child(image: &RgbaImage, error: &str) -> Result<(), String>;
-pub fn read_unsaved_png(reader: impl Read) -> Result<RgbaImage, String>;
-```
-
-`run_saved_child` launches `std::env::current_exe()` with
-`--post-capture-saved <path>` and waits for its status.
-
-`run_unsaved_child` launches `std::env::current_exe()` with
-`--post-capture-unsaved <error>`, pipes stdin, encodes the image as PNG into the
-pipe, closes stdin, and waits. Treat spawn, encode, pipe, and non-zero child
-status failures as application errors. Add a round-trip test that encodes a
-small RGBA image into a byte vector and proves `read_unsaved_png` restores its
-dimensions and pixels.
-
-- [ ] **Step 5: Add internal launch modes and replace the old main handoff**
-
-Extend `LaunchMode`:
-
-```rust
-pub enum LaunchMode {
-    Capture(InteractiveLaunchOptions),
-    PostCaptureSaved(PathBuf),
-    PostCaptureUnsaved { error: String },
-}
-```
+- [ ] **Step 4: Route Linux through the blocking runner**
 
 Use:
 
 ```rust
-fn run_iced_capture(options: InteractiveLaunchOptions) -> Result<(), String> {
-    let config = rollshot_iced_overlay::OverlayConfig {
-        backend: options.backend,
-        fps: options.fps,
-        show_cursor: options.show_cursor,
-        initial_mode: options.initial_mode,
-    };
-
+#[cfg(target_os = "linux")]
+fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String> {
     match post_capture::capture_completion(
         rollshot_iced_overlay::run_overlay(config).map_err(|e| e.to_string())?,
     ) {
-        post_capture::CaptureCompletion::Present(result) => post_capture::handle_capture(result),
+        post_capture::CaptureCompletion::Present(result) => {
+            post_capture::handle_linux_capture(result)
+        }
         post_capture::CaptureCompletion::Cancelled => Ok(()),
     }
 }
 ```
 
-Route `PostCaptureSaved` and `PostCaptureUnsaved` to the macOS one-daemon host
-added in Task 7. Before that host lands, those internal modes return
-`"macOS post-capture child requires the one-daemon host"` so this task remains
-compilable and testable. Delete the old `PostOverlayAction::SaveAs`,
+Keep the current macOS `run_overlay` dispatch temporarily until Task 8 replaces
+it with `macos_product::run`. Delete the old `PostOverlayAction::SaveAs`,
 `post_overlay_request` fixtures, and `save.rs`.
 
-- [ ] **Step 6: Run app and overlay integration tests**
+- [ ] **Step 5: Run app and overlay integration tests**
 
 Run:
 
@@ -1086,30 +1018,217 @@ rtk cargo test -p rollshot-app
 rtk cargo test -p rollshot-iced-overlay
 ```
 
-Expected: PASS, with Linux selecting a local Result Workspace and macOS
-selecting a blocking child handoff that can transfer an unsaved PNG without a
-temporary file.
+Expected: PASS, with Linux success selecting a saved Result Workspace and
+auto-save failure preserving an unsaved in-memory document.
+
+- [ ] **Step 6: Commit**
+
+```bash
+rtk git add crates/rollshot-app
+rtk git commit -m "feat(app): add shared post-capture policy"
+```
+
+## Task 7: Extract An Embeddable macOS Capture Component
+
+**Files:**
+- Create: `crates/rollshot-iced-overlay/src/macos_capture.rs`
+- Modify: `crates/rollshot-iced-overlay/src/lib.rs`
+- Modify: `crates/rollshot-iced-overlay/src/app.rs`
+- Modify: `crates/rollshot-iced-overlay/src/driver.rs`
+- Modify: `crates/rollshot-iced-overlay/src/screenshot.rs`
+- Modify: `crates/rollshot-iced-overlay/src/macos_window.rs`
+- Modify: `crates/rollshot-iced-overlay/src/macos_runner.rs`
+- Test: `crates/rollshot-iced-overlay/src/macos_capture.rs`
+
+- [ ] **Step 1: Write failing macOS component lifecycle tests**
+
+Add macOS-gated lifecycle tests around capture completion and window ownership:
+
+```rust
+#[test]
+fn finish_screenshot_reports_completed_result_without_exiting_host() {
+    let mut component = capture_component_with_one_shot();
+    let effect = component.apply_overlay_effect(OverlayEffect::FinishScreenshot);
+    assert!(matches!(effect, HostEffect::Completed(CaptureResult { .. })));
+}
+
+#[test]
+fn finish_scrolling_disables_passthrough_before_reporting_completion() {
+    let mut component = capture_component_with_active_passthrough();
+    let effect = component.apply_overlay_effect(OverlayEffect::FinishScrolling);
+    assert!(matches!(effect, HostEffect::Task(_)));
+    assert!(component.has_pending_completion());
+    assert!(matches!(
+        component.update(Message(InternalMessage::PassthroughDisabled)),
+        HostEffect::Completed(_)
+    ));
+}
+
+#[test]
+fn cancel_reports_cancelled_without_owning_process_exit() {
+    let mut component = capture_component();
+    assert!(matches!(
+        component.apply_overlay_effect(OverlayEffect::Cancel),
+        HostEffect::Cancelled
+    ));
+}
+
+#[test]
+fn component_identifies_only_its_capture_windows() {
+    let component = capture_component_with_windows();
+    assert!(component.owns_window(component.overlay_window().unwrap()));
+    assert!(component.owns_window(component.controls_window().unwrap()));
+    assert!(!component.owns_window(iced::window::Id::unique()));
+}
+```
+
+- [ ] **Step 2: Run tests on macOS to verify they fail**
+
+On macOS, run:
+
+```bash
+rtk cargo test -p rollshot-iced-overlay macos_capture
+```
+
+Expected: FAIL because the embeddable component and host effects do not exist.
+
+- [ ] **Step 3: Define the component boundary**
+
+Expose a macOS-only module from `rollshot-iced-overlay`:
+
+```rust
+#[cfg(target_os = "macos")]
+pub mod macos_capture;
+```
+
+Define:
+
+```rust
+pub struct Component {
+    overlay: crate::app::OverlayState,
+    overlay_window: Option<iced::window::Id>,
+    controls_window: Option<iced::window::Id>,
+    controls_rect: Option<crate::coords::LogicalRect>,
+    driver: Option<crate::driver::Driver>,
+    one_shot: Option<rollshot_capture::OneShotCapture>,
+    preview_rx: Option<
+        iced::futures::channel::mpsc::UnboundedReceiver<crate::driver::LiveOverlayEvent>,
+    >,
+}
+
+#[derive(Debug, Clone)]
+pub struct Message(InternalMessage);
+
+#[derive(Debug, Clone)]
+enum InternalMessage {
+    Overlay(crate::app::OverlayMessage),
+    WindowOpened { id: iced::window::Id, size: iced::Size },
+    OverlayWindowReady(iced::window::Id),
+    ControlsWindowReady(iced::window::Id),
+    WindowPatched(Result<(), String>),
+    PassthroughEnabled,
+    PassthroughDisabled,
+}
+
+pub enum HostEffect {
+    None,
+    Task(iced::Task<Message>),
+    Completed(CaptureResult),
+    Cancelled,
+    Fatal(String),
+}
+```
+
+Expose `Component::new`, `owns_window`, `update`, `apply_overlay_effect`, `view`,
+`subscription`, `theme`, `style`, `overlay_window`, and `controls_window`.
+The product host treats `macos_capture::Message` as opaque and only maps it back
+into `Component::update`. Its private `InternalMessage` may reuse existing
+overlay/driver types without exposing them across the crate boundary.
+Keep capture resources inside `Component`; remove the current macOS runner's
+global `RESULT_SLOT`, `DRIVER_SLOT`, `ONE_SHOT_SLOT`, `PREVIEW_RX`, and
+`CAPTURE_MODE`.
+
+- [ ] **Step 4: Move capture behavior out of the daemon-owning runner**
+
+Move the current `macos_runner` resource acquisition, screenshot mapping
+validation, overlay/controls window setup, passthrough handling, capture update,
+view, and subscription logic into `Component`.
+
+Replace calls to `iced::exit()` with a `HostEffect`:
+
+```rust
+match finalized_capture {
+    Ok(result) if component.mouse_passthrough_active() => {
+        component.set_pending_completion(result);
+        HostEffect::Task(component.disable_passthrough_task())
+    }
+    Ok(result) => HostEffect::Completed(result),
+    Err(error) => HostEffect::Fatal(error),
+}
+```
+
+Capture finalization errors that currently remain inline continue to update the
+component and return `HostEffect::None`. `Fatal` is reserved for errors where
+the existing runner would terminate.
+
+- [ ] **Step 5: Reduce the standalone macOS runner to a temporary adapter**
+
+Keep `run_overlay` behavior working during the migration by reducing
+`macos_runner.rs` to a thin daemon host around `macos_capture::Component`.
+It may map `Completed` into its existing result slot and exit, but it must not
+retain duplicate capture state, driver resources, or capture-specific update
+logic. Mark it as a temporary compatibility path that Task 8 deletes after
+`rollshot-app` owns the product daemon.
+
+This keeps every intermediate commit buildable and preserves the existing
+macOS capture path until the long-lived product daemon is ready.
+
+- [ ] **Step 6: Run component and overlay verification**
+
+Run:
+
+```bash
+rtk cargo test -p rollshot-iced-overlay
+rtk cargo fmt --check
+```
+
+Expected: PASS on the current platform. The macOS-only component tests are
+cfg-gated on other platforms and therefore require a macOS verification run.
+
+On macOS, additionally run:
+
+```bash
+rtk cargo test -p rollshot-iced-overlay macos_capture
+rtk cargo check -p rollshot-iced-overlay
+```
+
+Expected: PASS with the component implementation compiled and the standalone
+runner reduced to a thin compatibility adapter.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-rtk git add crates/rollshot-app
-rtk git commit -m "feat(app): add post-capture policy and child handoff"
+rtk git add crates/rollshot-iced-overlay
+rtk git commit -m "refactor(overlay): expose embeddable macos capture"
 ```
 
-## Task 7: Build The One-Daemon macOS Thumbnail And Workspace Host
+## Task 8: Build The Single-Process macOS Product Daemon
 
 **Files:**
 - Create: `crates/rollshot-app/src/macos_thumbnail.rs`
-- Create: `crates/rollshot-app/src/macos_post_capture.rs`
+- Create: `crates/rollshot-app/src/macos_product.rs`
 - Modify: `crates/rollshot-app/src/main.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/mod.rs`
+- Modify: `crates/rollshot-iced-overlay/src/lib.rs`
+- Delete: `crates/rollshot-iced-overlay/src/macos_runner.rs`
 - Test: `crates/rollshot-app/src/macos_thumbnail.rs`
-- Test: `crates/rollshot-app/src/macos_post_capture.rs`
+- Test: `crates/rollshot-app/src/macos_product.rs`
 
-- [ ] **Step 1: Write failing thumbnail and host-transition tests**
+- [ ] **Step 1: Write failing thumbnail and product-phase tests**
 
-Keep timer, interaction, and phase decisions pure:
+Register `macos_thumbnail` on every target so its timer and interaction helpers
+remain portable and testable. Keep `macos_product` macOS-only because it embeds
+the macOS capture component. Add:
 
 ```rust
 #[test]
@@ -1131,39 +1250,47 @@ fn hover_and_drag_pause_timeout() {
 }
 
 #[test]
-fn release_below_drag_threshold_opens_workspace() {
-    assert_eq!(
-        release_action(Point::new(10.0, 10.0), Point::new(12.0, 12.0), false),
-        ThumbnailAction::OpenWorkspace
-    );
+fn completed_capture_auto_save_success_enters_thumbnail() {
+    let mut product = product_in_capture_phase();
+    product.apply_capture_completion(image(), Ok(PathBuf::from("/tmp/a.png")));
+    assert!(matches!(product.phase, Phase::Thumbnail(_)));
 }
 
 #[test]
-fn saved_input_starts_in_thumbnail_and_click_transitions_to_workspace() {
-    let mut state = MacPostCapture::from_saved(document());
-    assert!(matches!(state.phase, Phase::Thumbnail(_)));
-    state.open_workspace();
-    assert!(matches!(state.phase, Phase::Workspace(_)));
+fn completed_capture_auto_save_failure_enters_unsaved_workspace() {
+    let mut product = product_in_capture_phase();
+    product.apply_capture_completion(image(), Err("disk full".to_string()));
+    assert!(matches!(product.phase, Phase::Workspace(_)));
+    assert_eq!(product.workspace().unwrap().message_text(), Some("disk full".to_string()));
 }
 
 #[test]
-fn unsaved_input_starts_in_workspace_with_error() {
-    let state = MacPostCapture::from_unsaved(image(), "disk full".to_string());
-    assert!(matches!(state.phase, Phase::Workspace(_)));
-    assert_eq!(state.workspace().unwrap().message_text(), Some("disk full".to_string()));
+fn thumbnail_click_enters_saved_workspace_without_reloading_image() {
+    let image = image();
+    let pixels = image.as_raw().clone();
+    let mut product = product_in_thumbnail_phase(image, PathBuf::from("/tmp/a.png"));
+    product.open_workspace();
+    assert_eq!(product.workspace().unwrap().document.source_image.as_raw(), &pixels);
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run:
+On the current platform, run:
 
 ```bash
 rtk cargo test -p rollshot-app macos_thumbnail
-rtk cargo test -p rollshot-app macos_post_capture
 ```
 
-Expected: FAIL because the thumbnail component and one-daemon host do not exist.
+Expected: FAIL because the portable thumbnail state does not exist.
+
+On macOS, also run:
+
+```bash
+rtk cargo test -p rollshot-app macos_product
+```
+
+Expected: FAIL because the product daemon does not exist.
 
 - [ ] **Step 3: Implement thumbnail state and view**
 
@@ -1205,97 +1332,137 @@ pub struct ThumbnailState {
 }
 
 pub fn release_action(start: Point, end: Point, drag_started: bool) -> ThumbnailAction;
+pub fn view(state: &ThumbnailState) -> iced::Element<'_, Message>;
 ```
 
 Render a compact card with the image preview, `Saved`, and `Drag or click`.
 Mouse enter/leave pauses/resumes the timer. A release without drag requests the
-workspace; timeout requests host exit.
+workspace; timeout requests product exit.
 
-- [ ] **Step 4: Implement the single iced daemon host**
+- [ ] **Step 4: Implement the product phase machine**
 
 Use:
 
 ```rust
 pub enum Phase {
+    Capture(rollshot_iced_overlay::macos_capture::Component),
     Thumbnail(ThumbnailState),
     Workspace(result_workspace::ResultWorkspace),
 }
 
-pub struct MacPostCapture {
-    document: Option<ResultDocument>,
+pub struct MacosProduct {
     phase: Phase,
+    document: Option<ResultDocument>,
     thumbnail_window: Option<iced::window::Id>,
     workspace_window: Option<iced::window::Id>,
 }
 
-impl MacPostCapture {
-    pub fn from_saved(document: ResultDocument) -> Self;
-    pub fn from_unsaved(image: RgbaImage, error: String) -> Self;
+impl MacosProduct {
+    pub fn new(config: rollshot_iced_overlay::OverlayConfig) -> Result<(Self, iced::Task<Message>), String>;
+    pub fn apply_capture_completion(&mut self, image: RgbaImage, auto_save: Result<PathBuf, String>);
     pub fn open_workspace(&mut self);
     pub fn workspace(&self) -> Option<&result_workspace::ResultWorkspace>;
 }
 
-pub fn run_saved(path: &Path) -> Result<(), String>;
-pub fn run_unsaved(image: RgbaImage, error: String) -> Result<(), String>;
+pub fn run(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String>;
 ```
 
-`run_saved` losslessly loads the saved PNG and starts with a thumbnail.
-`run_unsaved` starts directly with a Result Workspace. Both call one
-`iced::daemon` runner. The host opens a frameless, transparent, always-on-top,
-non-resizable thumbnail at a deterministic centered position in this task; Task
-8 replaces that origin with the active display's lower-right position. On click
-it closes that window and opens one decorated Result Workspace window in the
-same daemon. On timeout, native drag success, or final workspace close, it
-closes all windows and returns `iced::exit()`.
+`run` starts exactly one `iced::daemon`. `MacosProduct::new` embeds
+`macos_capture::Component` and opens its overlay window. The product update/view
+and subscription functions delegate messages for capture-owned windows to the
+capture component, thumbnail messages to `macos_thumbnail`, and workspace
+messages to the reusable Result Workspace APIs.
 
-Map the reusable Result Workspace messages, update tasks, view, subscriptions,
-and close behavior into the host instead of calling `result_workspace::run`.
+- [ ] **Step 5: Transition capture completion without leaving the daemon**
 
-- [ ] **Step 5: Route internal child launch modes to the host**
+Map capture host effects:
+
+```rust
+match capture.update(message) {
+    HostEffect::Task(task) => task.map(Message::Capture),
+    HostEffect::Completed(result) => {
+        state.complete_capture(result);
+        state.open_post_capture_window()
+    }
+    HostEffect::Cancelled => iced::exit(),
+    HostEffect::Fatal(error) => {
+        eprintln!("{error}");
+        iced::exit()
+    }
+    HostEffect::None => iced::Task::none(),
+}
+```
+
+`complete_capture` closes all capture-owned windows, keeps the completed
+`RgbaImage` in memory, calls `storage::auto_save`, and applies
+`post_capture::select_presentation(Platform::Macos, ...)`:
+
+- `MacosSavedThumbnail(path)` creates a saved `ResultDocument` and opens the thumbnail.
+- `MacosUnsavedWorkspace(error)` creates an unsaved `ResultDocument` and opens the Result Workspace with the inline error.
+
+Thumbnail click closes the thumbnail window and opens the saved Result
+Workspace using the same in-memory document. Timeout exits the daemon.
+
+- [ ] **Step 6: Route macOS launch to the single product daemon**
 
 In `main`:
 
 ```rust
-LaunchMode::PostCaptureSaved(path) => macos_post_capture::run_saved(&path),
-LaunchMode::PostCaptureUnsaved { error } => {
-    let image = post_capture_ipc::read_unsaved_png(std::io::stdin().lock())?;
-    macos_post_capture::run_unsaved(image, error)
+#[cfg(target_os = "macos")]
+fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String> {
+    macos_product::run(config)
 }
 ```
 
-On non-macOS targets, these arms return an explicit unsupported error. If the
-saved child cannot load its durable PNG or create the thumbnail, print the
-error and exit; do not reinterpret it as an unsaved capture.
+Delete the temporary `rollshot-iced-overlay::macos_runner` adapter and remove
+the macOS branch from blocking `run_overlay`. Update
+`OverlayError::Unsupported` to state that the blocking overlay runner is
+Linux-only; the active macOS path is the embedded component hosted by
+`rollshot-app`.
 
-- [ ] **Step 6: Run lifecycle and host tests**
+There are no internal child launch modes, image transfer formats, or process
+handoffs. The CLI remains blocked because the original `rollshot-app` process
+does not exit until the product daemon exits.
+
+- [ ] **Step 7: Run product-daemon verification**
 
 Run:
 
 ```bash
 rtk cargo test -p rollshot-app macos_thumbnail
-rtk cargo test -p rollshot-app macos_post_capture
+rtk cargo test -p rollshot-app macos_product
 rtk cargo test -p rollshot-app
+rtk cargo test -p rollshot-iced-overlay
+rtk cargo fmt --check
 ```
 
-Expected: PASS on Linux using pure lifecycle/phase tests; the actual daemon
-runner remains macOS-gated.
+Expected: PASS on the current platform. The macOS product-daemon tests are
+cfg-gated on other platforms and therefore require a macOS verification run.
 
-Register `macos_thumbnail` and the pure phase model on every target so their
-tests run on Linux. Gate AppKit calls and the actual daemon runner to macOS.
-
-- [ ] **Step 7: Commit**
+On macOS, additionally run:
 
 ```bash
-rtk git add crates/rollshot-app/src/macos_thumbnail.rs crates/rollshot-app/src/macos_post_capture.rs crates/rollshot-app/src/main.rs crates/rollshot-app/src/result_workspace
-rtk git commit -m "feat(app): add one-daemon macos post-capture host"
+rtk cargo test -p rollshot-app macos_thumbnail
+rtk cargo test -p rollshot-app macos_product
+rtk cargo check -p rollshot-app
 ```
 
-## Task 8: Add The AppKit Native File Drag Bridge
+Expected: PASS with the product daemon owning capture-to-post-capture
+transitions without a second event loop.
+
+- [ ] **Step 8: Commit**
+
+```bash
+rtk git add crates/rollshot-app/src/macos_thumbnail.rs crates/rollshot-app/src/macos_product.rs crates/rollshot-app/src/main.rs crates/rollshot-app/src/result_workspace crates/rollshot-iced-overlay/src/lib.rs crates/rollshot-iced-overlay/src/macos_runner.rs
+rtk git commit -m "feat(app): add single-process macos product daemon"
+```
+
+## Task 9: Add The AppKit Native File Drag Bridge
 
 **Files:**
 - Create: `crates/rollshot-app/src/macos_native_drag.rs`
 - Modify: `crates/rollshot-app/src/macos_thumbnail.rs`
-- Modify: `crates/rollshot-app/src/macos_post_capture.rs`
+- Modify: `crates/rollshot-app/src/macos_product.rs`
 - Modify: `crates/rollshot-app/src/main.rs`
 - Modify: `crates/rollshot-app/Cargo.toml`
 - Modify: `Cargo.lock`
@@ -1377,11 +1544,12 @@ pub fn patch_thumbnail_window(handle: &dyn iced::window::Window) -> Result<(), S
 
 Use `NSEvent::mouseLocation()` and `NSScreen::screens(MainThreadMarker)` to find the screen containing the pointer, then place the card at the lower-right with a 24-point margin. Patch the iced `NSWindow` to remove shadow/title behavior as needed, join all spaces, remain always-on-top, and accept mouse events.
 
-Replace Task 7's centered thumbnail origin with
+Replace Task 8's centered thumbnail origin with
 `active_screen_thumbnail_origin`. After the thumbnail window opens, call
 `iced::window::run(id, patch_thumbnail_window)` before accepting interactions.
 Treat origin lookup, window creation, or patch failure as thumbnail creation
-failure so the durable saved file remains and the child exits with an error.
+failure so the durable saved file remains and the product daemon exits with an
+error.
 
 - [ ] **Step 5: Implement the native drag source**
 
@@ -1431,7 +1599,7 @@ state.native_drag_status = Some(Arc::clone(&status));
 return iced::window::run(window_id, move |window| {
     macos_native_drag::begin_file_drag(window, &saved_path, status)
 })
-.map(macos_post_capture::Message::NativeDragStarted);
+.map(macos_product::Message::NativeDragStarted);
 ```
 
 On host tick, poll the atomic status. Success closes the thumbnail and exits the
@@ -1461,11 +1629,11 @@ Expected: PASS with the AppKit bridge compiled.
 - [ ] **Step 8: Commit**
 
 ```bash
-rtk git add crates/rollshot-app/src/macos_native_drag.rs crates/rollshot-app/src/macos_thumbnail.rs crates/rollshot-app/src/macos_post_capture.rs crates/rollshot-app/src/main.rs crates/rollshot-app/Cargo.toml Cargo.lock
+rtk git add crates/rollshot-app/src/macos_native_drag.rs crates/rollshot-app/src/macos_thumbnail.rs crates/rollshot-app/src/macos_product.rs crates/rollshot-app/src/main.rs crates/rollshot-app/Cargo.toml Cargo.lock
 rtk git commit -m "feat(app): add macos native thumbnail drag"
 ```
 
-## Task 9: Verify End-To-End Behavior And Repository Health
+## Task 10: Verify End-To-End Behavior And Repository Health
 
 **Files:**
 - Verify only
@@ -1528,6 +1696,6 @@ Verify:
 5. Click without dragging closes the thumbnail and opens a saved Result Workspace.
 6. Forced auto-save failure skips the thumbnail and opens an unsaved Result Workspace.
 7. Cmd-wheel zoom and Cmd-W unsaved-close confirmation work.
-8. The original capture process waits while the transient post-capture child is open, so the CLI remains blocked.
-9. Thumbnail-to-workspace transition stays inside one child daemon and does not produce `EventLoop can't be recreated`.
-10. Concurrent captures create independent child daemons/thumbnails with no shared queue or coordination.
+8. The original `rollshot-app` process remains open through capture, thumbnail, and Result Workspace, so the CLI remains blocked.
+9. Capture-to-thumbnail and thumbnail-to-workspace transitions stay inside one daemon and do not produce `EventLoop can't be recreated`.
+10. Concurrent captures create independent `rollshot-app` processes/thumbnails with no shared queue or coordination.
