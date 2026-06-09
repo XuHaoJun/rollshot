@@ -15,7 +15,11 @@ pub fn finish_screenshot(
         capture.target_display().physical_size,
     );
     let image = crop_image(capture.image(), region).map_err(|e| e.to_string())?;
-    Ok(CaptureResult { image, stats: None })
+    Ok(CaptureResult {
+        image,
+        stats: None,
+        post_overlay_request: crate::PostOverlayRequest::None,
+    })
 }
 
 #[cfg(test)]
@@ -69,6 +73,25 @@ mod tests {
         assert!(result.stats.is_none());
         assert_eq!(result.image.width(), 50);
         assert_eq!(result.image.height(), 50);
+    }
+
+    #[test]
+    fn finish_screenshot_defaults_to_no_post_overlay_request() {
+        let capture = test_capture();
+        let crop = LogicalRect {
+            x: 10.0,
+            y: 10.0,
+            width: 50.0,
+            height: 50.0,
+        };
+        let overlay_logical = Size {
+            width: 200,
+            height: 200,
+        };
+
+        let result = finish_screenshot(&capture, crop, overlay_logical).expect("screenshot ok");
+
+        assert_eq!(result.post_overlay_request, crate::PostOverlayRequest::None);
     }
 
     #[test]

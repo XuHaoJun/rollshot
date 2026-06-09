@@ -8,6 +8,7 @@ use iced::{event, window, Element, Event, Length, Point, Size, Task};
 use crate::app::{self, OverlayEffect, OverlayMessage, OverlayState};
 use crate::coords::LogicalRect;
 use crate::driver::{Driver, LiveOverlayEvent};
+use crate::workspace::WorkspacePhase;
 use crate::{CaptureResult, OverlayConfig, OverlayError};
 
 use rollshot_capture::CaptureMode;
@@ -76,6 +77,77 @@ static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 static ONE_SHOT_SLOT: Mutex<Option<rollshot_capture::OneShotCapture>> = Mutex::new(None);
 static CAPTURE_MODE: Mutex<Option<CaptureMode>> = Mutex::new(None);
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ControlsWindowAction {
+    Open(LogicalRect),
+    Close,
+    Noop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassthroughAction {
+    #[allow(dead_code)]
+    Enable,
+    Disable,
+    Noop,
+}
+
+fn controls_window_action(
+    current: Option<LogicalRect>,
+    visible: Option<LogicalRect>,
+) -> ControlsWindowAction {
+    match (current, visible) {
+        (_, Some(rect)) => ControlsWindowAction::Open(rect),
+        (Some(_), None) => ControlsWindowAction::Close,
+        _ => ControlsWindowAction::Noop,
+    }
+}
+
+fn passthrough_action(old_phase: WorkspacePhase, new_phase: WorkspacePhase) -> PassthroughAction {
+    match (old_phase, new_phase) {
+        (_, WorkspacePhase::ScrollingCapture) if old_phase != WorkspacePhase::ScrollingCapture => {
+            PassthroughAction::Enable
+        }
+        (WorkspacePhase::ScrollingCapture, _) => PassthroughAction::Disable,
+        _ => PassthroughAction::Noop,
+    }
+}
+
+fn visible_toolbar_rect(state: &MacOverlayState) -> Option<LogicalRect> {
+    if state.overlay.workspace.phase() != WorkspacePhase::ScrollingCapture {
+        return None;
+    }
+    if !app::toolbar_is_visible(&state.overlay) {
+        return None;
+    }
+    let rect = app::toolbar_rect_for(&state.overlay)?;
+    Some(LogicalRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    })
+}
+
+fn controls_message_to_overlay(
+    message: OverlayMessage,
+    controls: Option<LogicalRect>,
+) -> OverlayMessage {
+    match (message, controls) {
+        // The controls window hosts the toolbar in a separate, toolbar-sized
+        // window during scrolling capture. Cursor positions it emits are
+        // relative to that window, so offset them into overlay space to keep
+        // toolbar drag positioning consistent with the single-window phases.
+        (
+            OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved { position })),
+            Some(rect),
+        ) => OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: Point::new(position.x + rect.x, position.y + rect.y),
+        })),
+        (message, _) => message,
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Overlay(OverlayMessage),
@@ -84,6 +156,7 @@ enum Message {
     ControlsWindowReady(window::Id),
     WindowPatched(Result<(), String>),
     PassthroughEnabled,
+    PassthroughDisabled,
     PassthroughDisabledThenExit,
 }
 
@@ -92,6 +165,7 @@ struct MacOverlayState {
     overlay: OverlayState,
     overlay_window: Option<window::Id>,
     controls_window: Option<window::Id>,
+    controls_rect: Option<LogicalRect>,
 }
 
 fn preview_stream() -> iced::Subscription<Message> {
@@ -106,11 +180,13 @@ fn preview_stream() -> iced::Subscription<Message> {
     })
 }
 
-fn subscription(_: &MacOverlayState) -> iced::Subscription<Message> {
-    let mode = *CAPTURE_MODE.lock().unwrap();
+fn subscription(state: &MacOverlayState) -> iced::Subscription<Message> {
+    use crate::workspace::WorkspacePhase;
     let mut subs = vec![event::listen_with(overlay_event_message)];
-    if mode == Some(CaptureMode::Scrolling) {
-        subs.push(preview_stream());
+    if state.overlay.workspace.phase() == WorkspacePhase::ScrollingCapture {
+        if PREVIEW_RX.lock().unwrap().is_some() {
+            subs.push(preview_stream());
+        }
         subs.push(
             iced::time::every(Duration::from_millis(250))
                 .map(|_| Message::Overlay(OverlayMessage::Tick)),
@@ -187,6 +263,33 @@ fn validate_screenshot_surface_or_exit(state: &OverlayState) -> Option<Task<Mess
     }
 }
 
+fn perform_output_action(
+    state: &mut OverlayState,
+    action: crate::workspace::OutputAction,
+) -> Task<Message> {
+    let result_guard = RESULT_SLOT.lock().unwrap();
+    let result = match result_guard.as_ref() {
+        Some(Ok(Some(result))) => result,
+        _ => {
+            state.transient_error = Some("No result available".to_string());
+            return Task::none();
+        }
+    };
+    let mut output_service = crate::output::ArboardOutput::new();
+    let outcome = crate::output::perform_output(&mut output_service, action, &result.image);
+    drop(result_guard);
+    match crate::output::outcome_to_phase_decision(&outcome, state.workspace.phase()) {
+        crate::output::WorkspaceTransition::Exit => iced::exit(),
+        crate::output::WorkspaceTransition::StayInResultReview
+        | crate::output::WorkspaceTransition::EnterResultReview => {
+            if let crate::output::OutputOutcome::Error(err) = outcome {
+                state.transient_error = Some(err);
+            }
+            Task::none()
+        }
+    }
+}
+
 fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
     match message {
         Message::WindowOpened { id, size } => {
@@ -212,29 +315,20 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Overlay(msg) => {
-            let effect = app::update(&mut state.overlay, msg);
-            match effect {
+            let old_phase = state.overlay.workspace.phase();
+            let msg = controls_message_to_overlay(msg, state.controls_rect);
+            let (effect, _region_mode) = app::update(&mut state.overlay, msg);
+
+            let task = match effect {
                 OverlayEffect::None => Task::none(),
                 OverlayEffect::BeginStitch => {
-                    let mode = *CAPTURE_MODE.lock().unwrap();
-                    if mode != Some(CaptureMode::Scrolling) {
-                        return Task::none();
-                    }
                     let crop = state.overlay.crop.unwrap();
                     let ws = match state.overlay.window_size {
                         Some(ws) => ws,
                         None => {
-                            *RESULT_SLOT.lock().unwrap() =
-                                Some(Err("overlay surface size unknown".to_string()));
-                            return iced::exit();
-                        }
-                    };
-                    let window_id = match state.overlay.window_id {
-                        Some(id) => id,
-                        None => {
-                            *RESULT_SLOT.lock().unwrap() =
-                                Some(Err("overlay window id unknown".to_string()));
-                            return iced::exit();
+                            state.overlay.transient_error =
+                                Some("overlay surface size unknown".to_string());
+                            return Task::none();
                         }
                     };
                     let crop_logical = LogicalRect {
@@ -251,18 +345,166 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                     }
-                    let passthrough = window::enable_mouse_passthrough(window_id)
-                        .chain(Task::done(Message::PassthroughEnabled));
-                    let controls = app::toolbar_input_rect(crop, ws).map(|(x, y, w, h)| {
-                        let (controls_window, open_controls) =
-                            window::open(controls_window_settings(x, y, w, h));
-                        state.controls_window = Some(controls_window);
-                        open_controls.map(Message::ControlsWindowReady)
-                    });
+                    Task::none()
+                }
+                OverlayEffect::PrepareScreenshot(output) => {
+                    let crop = state.overlay.crop.unwrap();
+                    let ws = match state.overlay.window_size {
+                        Some(ws) => ws,
+                        None => {
+                            state.overlay.transient_error =
+                                Some("overlay surface size unknown".to_string());
+                            return Task::none();
+                        }
+                    };
+                    let crop_logical = LogicalRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    let overlay_logical = rollshot_capture::Size {
+                        width: ws.width as u32,
+                        height: ws.height as u32,
+                    };
+                    let capture = ONE_SHOT_SLOT.lock().unwrap().take();
+                    let outcome = match capture {
+                        Some(cap) => crate::screenshot::finish_screenshot(
+                            &cap,
+                            crop_logical,
+                            overlay_logical,
+                        )
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                    match outcome {
+                        Ok(Some(result)) => {
+                            let handle = crate::result_review::build_result_handle(&result.image);
+                            let size = iced::Size::new(
+                                result.image.width() as f32,
+                                result.image.height() as f32,
+                            );
+                            state.overlay.result_handle = Some(handle);
+                            state.overlay.result_size = Some(size);
+                            state.overlay.workspace.enter_result_review();
+                            *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
+                            output.map_or_else(Task::none, |action| {
+                                perform_output_action(&mut state.overlay, action)
+                            })
+                        }
+                        Ok(None) => {
+                            state.overlay.transient_error =
+                                Some("No capture available".to_string());
+                            Task::none()
+                        }
+                        Err(e) => {
+                            state.overlay.transient_error = Some(e);
+                            Task::none()
+                        }
+                    }
+                }
+                OverlayEffect::FinalizeScrolling(output) => {
+                    let driver = DRIVER_SLOT.lock().unwrap().take();
+                    let outcome = match driver {
+                        Some(driver) => driver.finalize(),
+                        None => Err("No driver available".to_string()),
+                    };
+                    match outcome {
+                        Ok(result) => {
+                            let handle = crate::result_review::build_result_handle(&result.image);
+                            let size = iced::Size::new(
+                                result.image.width() as f32,
+                                result.image.height() as f32,
+                            );
+                            state.overlay.result_handle = Some(handle);
+                            state.overlay.result_size = Some(size);
+                            state.overlay.workspace.enter_result_review();
+                            *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
+                            output.map_or_else(Task::none, |action| {
+                                perform_output_action(&mut state.overlay, action)
+                            })
+                        }
+                        Err(e) => {
+                            state.overlay.transient_error = Some(e);
+                            state.overlay.workspace.revert_to_scrolling();
+                            Task::none()
+                        }
+                    }
+                }
+                OverlayEffect::PerformOutput(action) => {
+                    perform_output_action(&mut state.overlay, action)
+                }
+                OverlayEffect::ActivateMode(new_mode) => {
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+                        driver.cancel();
+                    }
+                    ONE_SHOT_SLOT.lock().unwrap().take();
+                    *PREVIEW_RX.lock().unwrap() = None;
 
-                    match controls {
-                        Some(open_controls) => Task::batch([open_controls, passthrough]),
-                        None => passthrough,
+                    let config = OverlayConfig {
+                        backend: "auto".to_string(),
+                        fps: 5,
+                        show_cursor: false,
+                        initial_mode: new_mode,
+                    };
+                    #[cfg(not(test))]
+                    let factories = real_factories();
+                    #[cfg(test)]
+                    let factories = ResourceFactories {
+                        streaming: Box::new(|_cfg, _preview_tx| Err("test mode".to_string())),
+                        one_shot: Box::new(|_| {
+                            Err(rollshot_capture::CaptureError::Unsupported {
+                                message: "test mode".to_string(),
+                            })
+                        }),
+                    };
+
+                    match acquire_resource(new_mode, &config, &factories) {
+                        Ok(Some(resource)) => {
+                            *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
+                            match resource {
+                                CaptureResource::Streaming(mut driver) => {
+                                    if let (Some(crop), Some(ws)) =
+                                        (state.overlay.crop, state.overlay.window_size)
+                                    {
+                                        state.overlay.workspace.begin_scrolling();
+                                        driver.begin_stitch(
+                                            LogicalRect {
+                                                x: crop.x,
+                                                y: crop.y,
+                                                width: crop.width,
+                                                height: crop.height,
+                                            },
+                                            rollshot_capture::Size {
+                                                width: ws.width as u32,
+                                                height: ws.height as u32,
+                                            },
+                                            app::preview_constraints(crop, ws),
+                                        );
+                                    }
+                                    *DRIVER_SLOT.lock().unwrap() = Some(driver);
+                                }
+                                CaptureResource::OneShot(capture) => {
+                                    let img = capture.image();
+                                    state.overlay.frozen =
+                                        Some(iced::widget::image::Handle::from_rgba(
+                                            img.width(),
+                                            img.height(),
+                                            img.as_raw().clone(),
+                                        ));
+                                    *ONE_SHOT_SLOT.lock().unwrap() = Some(capture);
+                                }
+                            }
+                            Task::none()
+                        }
+                        Ok(None) => {
+                            state.overlay.transient_error = Some("Capture cancelled".to_string());
+                            Task::none()
+                        }
+                        Err(e) => {
+                            state.overlay.transient_error = Some(format!("Capture failed: {e}"));
+                            Task::none()
+                        }
                     }
                 }
                 OverlayEffect::Finish => {
@@ -342,7 +584,64 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
                         .chain(Task::done(Message::PassthroughDisabledThenExit)),
                     None => Task::none(),
                 },
-            }
+            };
+
+            let new_phase = state.overlay.workspace.phase();
+            let passthrough = passthrough_action(old_phase, new_phase);
+            let visible_rect = visible_toolbar_rect(state);
+            let controls = controls_window_action(state.controls_rect, visible_rect);
+
+            let passthrough_task = match passthrough {
+                PassthroughAction::Enable => match state.overlay.window_id {
+                    Some(id) => window::enable_mouse_passthrough(id)
+                        .chain(Task::done(Message::PassthroughEnabled)),
+                    None => Task::none(),
+                },
+                PassthroughAction::Disable => match state.overlay.window_id {
+                    Some(id) => window::disable_mouse_passthrough(id)
+                        .chain(Task::done(Message::PassthroughDisabled)),
+                    None => Task::none(),
+                },
+                PassthroughAction::Noop => Task::none(),
+            };
+
+            let controls_task = match controls {
+                ControlsWindowAction::Open(rect) => {
+                    if Some(rect) != state.controls_rect {
+                        state.controls_rect = Some(rect);
+                        let (x, y, w, h) = (
+                            rect.x as i32,
+                            rect.y as i32,
+                            rect.width as i32,
+                            rect.height as i32,
+                        );
+                        if let Some(id) = state.controls_window {
+                            Task::batch([
+                                window::move_to(id, Point::new(x as f32, y as f32)),
+                                window::resize(id, Size::new(w.max(1) as f32, h.max(1) as f32)),
+                            ])
+                        } else {
+                            let (controls_window, open_controls) =
+                                window::open(controls_window_settings(x, y, w, h));
+                            state.controls_window = Some(controls_window);
+                            open_controls.map(Message::ControlsWindowReady)
+                        }
+                    } else {
+                        Task::none()
+                    }
+                }
+                ControlsWindowAction::Close => {
+                    if let Some(id) = state.controls_window.take() {
+                        state.controls_rect = None;
+                        window::close(id)
+                    } else {
+                        Task::none()
+                    }
+                }
+                ControlsWindowAction::Noop => Task::none(),
+            };
+
+            Task::batch([task, passthrough_task, controls_task])
         }
         Message::WindowPatched(result) => {
             if let Err(err) = result {
@@ -352,6 +651,10 @@ fn update(state: &mut MacOverlayState, message: Message) -> Task<Message> {
         }
         Message::PassthroughEnabled => {
             state.overlay.mouse_passthrough_active = true;
+            Task::none()
+        }
+        Message::PassthroughDisabled => {
+            state.overlay.mouse_passthrough_active = false;
             Task::none()
         }
         Message::PassthroughDisabledThenExit => {
@@ -371,7 +674,14 @@ fn style(state: &MacOverlayState, theme: &iced::Theme) -> iced::theme::Style {
 
 fn view(state: &MacOverlayState, window: window::Id) -> Element<'_, Message> {
     if Some(window) == state.controls_window {
-        return container(app::capture_control_strip().map(Message::Overlay))
+        let toolbar = crate::toolbar::render_toolbar(
+            state.overlay.workspace.phase(),
+            state.overlay.mode,
+            |action| Message::Overlay(app::OverlayMessage::ToolbarAction(action)),
+            Message::Overlay(app::OverlayMessage::DragStart),
+            Message::Overlay(app::OverlayMessage::DragEnd),
+        );
+        return container(toolbar)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
@@ -541,6 +851,15 @@ mod tests {
 
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> LogicalRect {
+        LogicalRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     fn test_config() -> OverlayConfig {
         OverlayConfig {
             backend: "auto".to_string(),
@@ -685,5 +1004,65 @@ mod tests {
             PREVIEW_RX.lock().unwrap().is_none(),
             "screenshot mode should not set up preview channel"
         );
+    }
+
+    #[test]
+    fn controls_window_tracks_visible_toolbar_rect() {
+        assert_eq!(
+            controls_window_action(None, Some(rect(20.0, 30.0, 260.0, 48.0))),
+            ControlsWindowAction::Open(rect(20.0, 30.0, 260.0, 48.0))
+        );
+    }
+
+    #[test]
+    fn controls_window_closes_while_auto_hide_is_hidden() {
+        assert_eq!(
+            controls_window_action(Some(rect(20.0, 30.0, 260.0, 48.0)), None),
+            ControlsWindowAction::Close
+        );
+    }
+
+    #[test]
+    fn controls_window_noop_when_both_none() {
+        assert_eq!(
+            controls_window_action(None, None),
+            ControlsWindowAction::Noop
+        );
+    }
+
+    #[test]
+    fn result_review_disables_passthrough() {
+        assert_eq!(
+            passthrough_action(
+                WorkspacePhase::ScrollingCapture,
+                WorkspacePhase::ResultReview
+            ),
+            PassthroughAction::Disable
+        );
+    }
+
+    #[test]
+    fn scrolling_capture_enables_passthrough() {
+        assert_eq!(
+            passthrough_action(WorkspacePhase::Selecting, WorkspacePhase::ScrollingCapture),
+            PassthroughAction::Enable
+        );
+    }
+
+    #[test]
+    fn controls_cursor_coordinates_are_mapped_to_overlay() {
+        let message = controls_message_to_overlay(
+            OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
+                position: Point::new(10.0, 15.0),
+            })),
+            Some(rect(100.0, 200.0, 360.0, 48.0)),
+        );
+
+        match message {
+            OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
+                position,
+            })) => assert_eq!(position, Point::new(110.0, 215.0)),
+            _ => panic!("expected cursor moved"),
+        }
     }
 }

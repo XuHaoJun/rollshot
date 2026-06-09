@@ -157,6 +157,7 @@ mod tests {
             Ok(Some(CaptureResult {
                 image: RgbaImage::from_pixel(20, 30, Rgba([4, 5, 6, 255])),
                 stats: Some(StitchStats::default()),
+                post_overlay_request: rollshot_iced_overlay::PostOverlayRequest::None,
             })),
         )
         .expect("store outcome")
