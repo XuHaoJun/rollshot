@@ -174,7 +174,7 @@ impl ResultWorkspace {
 
     // Used by the macOS product daemon (Task 8); no Linux caller, so it stays
     // dead-code-allowed only off macOS to keep Linux clippy clean.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn message_text(&self) -> Option<String> {
         self.message.as_ref().map(|m| m.text().to_owned())
     }

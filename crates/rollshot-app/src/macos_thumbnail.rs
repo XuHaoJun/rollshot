@@ -36,6 +36,7 @@ pub const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The interaction outcome of releasing a press on the thumbnail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ThumbnailAction {
     /// Click within the drag threshold: open the saved Result Workspace.
     OpenWorkspace,

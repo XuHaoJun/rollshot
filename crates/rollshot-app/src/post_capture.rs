@@ -15,12 +15,14 @@ pub enum Presentation {
 }
 
 /// Whether a capture session produced a result or was cancelled.
+#[allow(dead_code)]
 pub enum CaptureCompletion {
     Present(rollshot_iced_overlay::CaptureResult),
     Cancelled,
 }
 
 /// Convert the raw overlay return into a `CaptureCompletion`.
+#[allow(dead_code)]
 pub fn capture_completion(
     result: Option<rollshot_iced_overlay::CaptureResult>,
 ) -> CaptureCompletion {

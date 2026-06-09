@@ -74,6 +74,7 @@ pub enum Message {
 }
 
 /// The current phase of the product daemon.
+#[allow(clippy::large_enum_variant)]
 pub enum Phase {
     Capture(Component),
     Thumbnail(ThumbnailState),
@@ -153,6 +154,7 @@ impl MacosProduct {
         }
     }
 
+    #[allow(dead_code)]
     pub fn workspace(&self) -> Option<&ResultWorkspace> {
         match &self.phase {
             Phase::Workspace(ws) => Some(ws),
