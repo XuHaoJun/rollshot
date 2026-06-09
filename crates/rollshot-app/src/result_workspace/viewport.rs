@@ -1,6 +1,3 @@
-// Public API consumed by later tasks; allow dead_code until the call sites land.
-#![allow(dead_code)]
-
 use iced::{Point, Size, Vector};
 
 // ---------------------------------------------------------------------------
@@ -164,6 +161,29 @@ pub fn step_zoom(mode: ZoomMode, dir: ZoomDirection) -> ZoomMode {
     };
 
     ZoomMode::Custom(new_pct.clamp(25, 400))
+}
+
+/// Default fallback for the device max 2D texture dimension. Long screenshots
+/// whose width or height exceed this would upload as a single GPU texture that
+/// the device cannot allocate, rendering blank (spec §9.6). When neither axis
+/// exceeds the threshold, no downscale is needed.
+pub const DEFAULT_MAX_TEXTURE_DIM: u32 = 8192;
+
+/// Decide the scale applied to the *display* copy of the source image so both
+/// dimensions fit under `max_texture_dim`.
+///
+/// Returns `1.0` when both `image` dimensions are at or under the threshold,
+/// otherwise the largest scale `<= 1.0` that brings both axes under it. This is
+/// a display-only concern: the status bar and zoom math always use the original
+/// dimensions, and Copy / Save As always use the full-resolution source.
+pub fn display_downscale_scale(image: Size, max_texture_dim: u32) -> f32 {
+    let max_dim = max_texture_dim as f32;
+    let longest = image.width.max(image.height);
+    if longest <= max_dim {
+        1.0
+    } else {
+        max_dim / longest
+    }
 }
 
 /// Clamp a scroll offset so each axis stays within [0, max_scroll].
@@ -382,6 +402,32 @@ mod tests {
         let max = Vector::new(300.0, 500.0);
         let offset = Vector::new(150.0, 250.0);
         assert_eq!(clamp_scroll(offset, max), offset);
+    }
+
+    // -- display downscale (spec §9.6 / §14.1) -------------------------------
+
+    #[test]
+    fn display_downscale_is_identity_at_or_under_threshold() {
+        // Both dims under the ceiling.
+        assert_eq!(
+            display_downscale_scale(Size::new(4000.0, 3000.0), 8192),
+            1.0
+        );
+        // Exactly at the ceiling on the long axis.
+        assert_eq!(
+            display_downscale_scale(Size::new(8192.0, 1000.0), 8192),
+            1.0
+        );
+    }
+
+    #[test]
+    fn display_downscale_fits_oversized_long_axis_under_ceiling() {
+        // Tall capture: height far exceeds the texture ceiling.
+        let scale = display_downscale_scale(Size::new(1000.0, 20000.0), 8192);
+        assert!(scale < 1.0);
+        // Scaled long axis must land at (or just under) the ceiling.
+        assert!((20000.0 * scale - 8192.0).abs() < 1e-3);
+        assert!(1000.0 * scale <= 8192.0);
     }
 
     // -- geometry_for overflow -----------------------------------------------

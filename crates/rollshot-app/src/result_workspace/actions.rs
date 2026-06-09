@@ -1,6 +1,3 @@
-// Public API consumed by later tasks; allow dead_code until the call sites land.
-#![allow(dead_code)]
-
 use image::RgbaImage;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
