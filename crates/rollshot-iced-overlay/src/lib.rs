@@ -59,6 +59,8 @@ mod driver;
 #[cfg(target_os = "linux")]
 mod linux_runner;
 #[cfg(target_os = "macos")]
+pub mod macos_capture;
+#[cfg(target_os = "macos")]
 mod macos_runner;
 #[cfg(target_os = "macos")]
 mod macos_window;
