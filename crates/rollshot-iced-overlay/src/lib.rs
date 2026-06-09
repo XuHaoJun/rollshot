@@ -54,7 +54,6 @@ impl std::error::Error for OverlayError {}
 mod toolbar;
 mod workspace;
 
-// TODO: uncomment these mod declarations as Tasks 3–7 land each module.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

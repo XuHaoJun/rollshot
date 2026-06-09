@@ -1,4 +1,6 @@
-// Public API consumed by later tasks; allow dead_code until the call sites land.
+// `write_png` and `unique_capture_path` have only test callers on Linux; the
+// rest of this module is wired into the capture flows. Allow dead_code so those
+// platform-internal helpers don't trip `-D warnings`.
 #![allow(dead_code)]
 
 use image::RgbaImage;
