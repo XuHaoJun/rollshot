@@ -31,6 +31,7 @@ use std::time::Instant;
 use iced::{window, Element, Point, Size, Task};
 use image::RgbaImage;
 
+#[cfg(test)]
 use rollshot_capture::CaptureMode;
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
@@ -317,8 +318,11 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 // Pending or not in a drag: fall through to the countdown.
                 Some(NativeDragResult::Pending) | None => {}
             }
-            let expired =
-                matches!(&mut product.phase, Phase::Thumbnail(state) if state.timer.tick(now));
+            let expired = if let Phase::Thumbnail(state) = &mut product.phase {
+                state.timer.tick(now)
+            } else {
+                false
+            };
             if expired {
                 iced::exit()
             } else {

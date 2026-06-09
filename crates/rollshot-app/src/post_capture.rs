@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::storage::{self, Platform};
+use crate::storage::Platform;
 
 #[cfg(target_os = "linux")]
 use crate::result_workspace::{run as run_workspace, ResultDocument};
@@ -45,7 +45,7 @@ pub fn select_presentation(platform: Platform, auto_save: Result<PathBuf, String
 pub fn handle_linux_capture(result: rollshot_iced_overlay::CaptureResult) -> Result<(), String> {
     match select_presentation(
         Platform::Linux,
-        storage::auto_save(&result.image, Platform::Linux),
+        crate::storage::auto_save(&result.image, Platform::Linux),
     ) {
         Presentation::LinuxSavedWorkspace(path) => {
             run_workspace(ResultDocument::saved(result.image, path), None)
