@@ -2,24 +2,22 @@ mod launch;
 
 use launch::LaunchMode;
 
+mod post_capture;
 mod result_workspace;
-mod save;
 mod storage;
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 pub enum PostOverlayAction {
     ExitSuccess,
     ExitCancelled,
-    SaveAs(rollshot_iced_overlay::CaptureResult),
 }
 
+#[cfg(target_os = "macos")]
 pub fn post_overlay_action(
     result: Result<Option<rollshot_iced_overlay::CaptureResult>, String>,
 ) -> PostOverlayAction {
     match result {
-        // The overlay is now capture-only and never requests a post-overlay save
-        // dialog; a completed capture always means success. Task 6 removes the
-        // remaining PostOverlayRequest/SaveAs plumbing.
         Ok(Some(_cr)) => PostOverlayAction::ExitSuccess,
         Ok(None) => PostOverlayAction::ExitCancelled,
         Err(err) => {
@@ -53,16 +51,40 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
         initial_mode: options.initial_mode,
     };
 
-    let result = rollshot_iced_overlay::run_overlay(config);
-    match post_overlay_action(result.map_err(|e| e.to_string())) {
-        PostOverlayAction::ExitSuccess => println!("capture complete"),
-        PostOverlayAction::ExitCancelled => println!("capture cancelled"),
-        PostOverlayAction::SaveAs(cr) => {
-            if let Err(e) = save::save_as(&cr.image) {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = run_product_capture(config) {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let result = rollshot_iced_overlay::run_overlay(config);
+        match post_overlay_action(result.map_err(|e| e.to_string())) {
+            PostOverlayAction::ExitSuccess => println!("capture complete"),
+            PostOverlayAction::ExitCancelled => println!("capture cancelled"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = config;
+        eprintln!("unsupported platform");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String> {
+    match post_capture::capture_completion(
+        rollshot_iced_overlay::run_overlay(config).map_err(|e| e.to_string())?,
+    ) {
+        post_capture::CaptureCompletion::Present(result) => {
+            post_capture::handle_linux_capture(result)
+        }
+        post_capture::CaptureCompletion::Cancelled => Ok(()),
     }
 }
 
@@ -70,34 +92,39 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
 mod tests {
     use super::*;
 
-    fn capture_result() -> rollshot_iced_overlay::CaptureResult {
-        rollshot_iced_overlay::CaptureResult {
-            image: image::RgbaImage::new(1, 1),
-            stats: None,
-        }
-    }
-
-    #[test]
-    fn completed_overlay_does_not_open_another_save_dialog() {
-        assert!(matches!(
-            post_overlay_action(Ok(Some(capture_result()))),
-            PostOverlayAction::ExitSuccess
-        ));
-    }
-
-    #[test]
-    fn cancelled_overlay_exits_successfully() {
-        assert!(matches!(
-            post_overlay_action(Ok(None)),
-            PostOverlayAction::ExitCancelled
-        ));
-    }
-
     #[test]
     fn save_dialog_temp_mode_is_no_longer_accepted() {
         assert!(
             launch::parse_launch_args(["rollshot-app", "--save-dialog-temp", "/tmp/a.png"])
                 .is_err()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos_tests {
+        use super::*;
+
+        fn capture_result() -> rollshot_iced_overlay::CaptureResult {
+            rollshot_iced_overlay::CaptureResult {
+                image: image::RgbaImage::new(1, 1),
+                stats: None,
+            }
+        }
+
+        #[test]
+        fn completed_overlay_exits_with_success() {
+            assert!(matches!(
+                post_overlay_action(Ok(Some(capture_result()))),
+                PostOverlayAction::ExitSuccess
+            ));
+        }
+
+        #[test]
+        fn cancelled_overlay_exits_successfully() {
+            assert!(matches!(
+                post_overlay_action(Ok(None)),
+                PostOverlayAction::ExitCancelled
+            ));
+        }
     }
 }

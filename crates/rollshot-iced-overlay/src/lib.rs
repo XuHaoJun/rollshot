@@ -8,19 +8,6 @@
 use image::RgbaImage;
 use rollshot_core::StitchStats;
 
-/// Post-overlay action the caller should perform after the overlay closes.
-///
-/// Retained only for `rollshot-app` compatibility during the migration; the
-/// overlay no longer produces it. Task 6 removes the remaining caller plumbing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PostOverlayRequest {
-    /// No further action — the caller decides what to do with the result.
-    #[default]
-    None,
-    /// Open a native Save As dialog for the captured image.
-    SaveAs,
-}
-
 /// The finalized capture handed back to the caller. The overlay is capture-only:
 /// it selects a region, captures/stitches, and returns the image plus stats.
 #[derive(Debug, Clone)]

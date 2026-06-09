@@ -1,8 +1,3 @@
-// The Result Workspace window (update/view/subscription/run + helpers) is wired
-// into the binary in Task 6; until then the runner root is uncalled, which makes
-// the whole reachable graph read as dead. Keep the scaffold allow until launch.
-#![allow(dead_code)]
-
 pub mod actions;
 pub mod viewport;
 
@@ -177,6 +172,8 @@ impl ResultWorkspace {
         }
     }
 
+    // Used by macOS thumbnail path (Task 8); no Linux caller yet.
+    #[allow(dead_code)]
     pub fn message_text(&self) -> Option<String> {
         self.message.as_ref().map(|m| m.text().to_owned())
     }
