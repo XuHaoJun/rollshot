@@ -4,9 +4,10 @@
 //! result helpers compile and unit-test on Linux):
 //!
 //! - PORTABLE (compiled + tested on all targets): [`ScreenFrame`],
-//!   [`thumbnail_origin`], [`NativeDragResult`], and [`drag_result`]. These hold
-//!   no AppKit types — the geometry types come from `iced`, a dependency on all
-//!   targets. The Linux tests exercise exactly these pieces.
+//!   [`active_screen_thumbnail_origin_in_main_space`], [`NativeDragResult`], and
+//!   [`drag_result`]. These hold no AppKit types — the geometry types come from
+//!   `iced`, a dependency on all targets. The Linux tests exercise exactly these
+//!   pieces.
 //! - macOS-ONLY: [`active_screen_thumbnail_origin`], [`patch_thumbnail_window`],
 //!   and [`begin_file_drag`] reach into AppKit (`NSScreen`, `NSWindow`,
 //!   `NSView`, the drag session). All `unsafe` is confined to a single audited
@@ -60,20 +61,25 @@ impl ScreenFrame {
 }
 
 /// PURE: lower-right placement of a `size`-sized card within `frame`, returned in
-/// a TOP-LEFT coordinate frame (origin = the card's top-left corner, Y growing
-/// downward from the frame's top edge). This matches the convention winit/iced
-/// `Position::Specific` expects, so the result can be fed straight through after
-/// `active_screen_thumbnail_origin` maps the active NSScreen frame into the
-/// winit/main-display top-left space.
+/// the MAIN DISPLAY's TOP-LEFT coordinate space (origin = the main display's
+/// top-left corner, Y growing downward). This is the coordinate space that
+/// winit/iced `Position::Specific` consumes, because winit flips the Y against
+/// `main_display_height` regardless of which screen the window is actually on.
 ///
 /// `x = frame.x + frame.width - size.width - margin` (right-inset; no X flip,
 /// both spaces share a left origin)
-/// `y = frame.y + frame.height - size.height - margin` (the card's top edge,
-/// measured downward, so the card sits `margin` above the frame's bottom)
-pub fn thumbnail_origin(frame: ScreenFrame, size: Size, margin: f32) -> Point {
+/// `y = main_display_height - frame.y - size.height - margin` (card top edge,
+/// measured downward from the main display top, so the card sits `margin`
+/// above the frame's bottom on any display)
+pub fn active_screen_thumbnail_origin_in_main_space(
+    frame: ScreenFrame,
+    main_display_height: f32,
+    size: Size,
+    margin: f32,
+) -> Point {
     Point::new(
         frame.x + frame.width - size.width - margin,
-        frame.y + frame.height - size.height - margin,
+        main_display_height - frame.y - size.height - margin,
     )
 }
 
@@ -163,29 +169,11 @@ fn active_screen_thumbnail_origin_impl(size: Size, margin: f32) -> Result<Point,
     let frame =
         chosen.ok_or_else(|| "no NSScreen available for thumbnail placement".to_string())?;
 
-    // COORDINATE CONVERSION (the Y-flip).
-    //
-    // `frame` is in NSScreen's BOTTOM-LEFT space (Y grows up, primary screen at
-    // origin). iced/winit `Position::Specific` is TOP-LEFT: winit computes
-    // `cocoa_y = main_display_height - window_height - position.y`, i.e. it treats
-    // the passed `y` as the window's TOP edge measured DOWNWARD from the top of
-    // the MAIN display (`CGMainDisplayID`) — NOT the active screen.
-    //
-    // `thumbnail_origin` already returns a lower-right placement expressed in a
-    // top-left frame (`y = frame.y + frame.height - size.height - margin`). For
-    // the PRIMARY/MAIN display the frame origin is (0, 0) and its height equals
-    // the main display height, so `thumbnail_origin` directly yields the correct
-    // top-left Y measured from the top of the main display → the card lands in
-    // the true lower-right.
-    //
-    // MULTI-DISPLAY LIMITATION (MVP): for a SECONDARY display, winit still flips
-    // against the main display height, and the active screen's top edge is offset
-    // from the main display's top by `main_height - (frame.y + frame.height)`.
-    // We do not yet apply that offset here, so the card may be mispositioned on
-    // secondary displays. Handling this correctly requires the main display
-    // height (via `CGMainDisplayID`/`NSScreen::mainScreen`) and is deferred to a
-    // follow-up. The primary display — the common case — is correct today.
-    Ok(thumbnail_origin(frame, size, margin))
+    let main_screen = NSScreen::mainScreen(mtm)
+        .ok_or_else(|| "NSScreen::mainScreen unavailable for thumbnail placement".to_string())?;
+    let main_height = main_screen.frame().size.height as f32;
+
+    Ok(active_screen_thumbnail_origin_in_main_space(frame, main_height, size, margin))
 }
 
 #[cfg(target_os = "macos")]
@@ -390,34 +378,70 @@ use drag_source::DragSource;
 mod tests {
     use super::*;
 
-    // -- PORTABLE thumbnail_origin tests (run on Linux) ----------------------
+    // -- PORTABLE active_screen_thumbnail_origin_in_main_space tests (run on Linux)
 
     #[test]
-    fn lower_right_origin_uses_screen_frame_and_margin() {
-        // Top-left frame: x = -1440 + 1440 - 280 - 24 = -304;
-        // y = 0 + 900 - 220 - 24 = 656 (card top edge, margin above the bottom).
+    fn active_screen_origin_on_primary_display() {
         assert_eq!(
-            thumbnail_origin(
-                ScreenFrame::new(-1440.0, 0.0, 1440.0, 900.0),
-                Size::new(280.0, 220.0),
-                24.0
+            active_screen_thumbnail_origin_in_main_space(
+                ScreenFrame::new(0.0, 0.0, 1920.0, 1080.0),
+                1080.0,
+                Size::new(300.0, 200.0),
+                16.0,
             ),
-            Point::new(-304.0, 656.0)
+            Point::new(1604.0, 864.0)
         );
     }
 
     #[test]
-    fn lower_right_origin_on_primary_display() {
-        // Primary display at origin (0,0), 1920x1080, 300x200 card, 16pt margin.
-        // Top-left winit frame: x = 0 + 1920 - 300 - 16 = 1604;
-        // y = 0 + 1080 - 200 - 16 = 864 (card top edge, 16pt above the bottom).
+    fn active_screen_origin_on_secondary_display_left_of_primary() {
         assert_eq!(
-            thumbnail_origin(
-                ScreenFrame::new(0.0, 0.0, 1920.0, 1080.0),
-                Size::new(300.0, 200.0),
-                16.0
+            active_screen_thumbnail_origin_in_main_space(
+                ScreenFrame::new(-1440.0, 0.0, 1440.0, 900.0),
+                1080.0,
+                Size::new(280.0, 220.0),
+                24.0,
             ),
-            Point::new(1604.0, 864.0)
+            Point::new(-304.0, 836.0)
+        );
+    }
+
+    #[test]
+    fn active_screen_origin_on_secondary_display_right_of_primary() {
+        assert_eq!(
+            active_screen_thumbnail_origin_in_main_space(
+                ScreenFrame::new(1920.0, 0.0, 1600.0, 900.0),
+                1080.0,
+                Size::new(300.0, 200.0),
+                16.0,
+            ),
+            Point::new(3204.0, 864.0)
+        );
+    }
+
+    #[test]
+    fn active_screen_origin_on_secondary_display_above_primary() {
+        assert_eq!(
+            active_screen_thumbnail_origin_in_main_space(
+                ScreenFrame::new(0.0, 1080.0, 1920.0, 1200.0),
+                1080.0,
+                Size::new(300.0, 200.0),
+                16.0,
+            ),
+            Point::new(1604.0, -216.0)
+        );
+    }
+
+    #[test]
+    fn active_screen_origin_on_secondary_display_below_primary() {
+        assert_eq!(
+            active_screen_thumbnail_origin_in_main_space(
+                ScreenFrame::new(0.0, -900.0, 1600.0, 900.0),
+                1080.0,
+                Size::new(300.0, 200.0),
+                16.0,
+            ),
+            Point::new(1284.0, 1764.0)
         );
     }
 
