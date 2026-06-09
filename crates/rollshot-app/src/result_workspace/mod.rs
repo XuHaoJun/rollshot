@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod actions;
+pub mod viewport;
 
 use iced::widget::image::Handle as ImageHandle;
 use image::RgbaImage;
