@@ -42,6 +42,11 @@ use crate::post_capture::{select_presentation, Presentation};
 use crate::result_workspace::{self, ResultDocument, ResultWorkspace};
 use crate::storage::{self, Platform};
 
+/// Estimated canvas area for the workspace window (1100×760 minus chrome),
+/// so fit-mode zoom produces a visible scale before the scrollable reports its
+/// real bounds. A pixel or two of inaccuracy is harmless.
+const INITIAL_WORKSPACE_VIEWPORT: Size = Size::new(1084.0, 650.0);
+
 /// Messages handled by the product daemon. Capture/workspace variants forward to
 /// their owners; the remaining variants drive the thumbnail phase and host-side
 /// window-open resolutions.
@@ -137,7 +142,8 @@ impl MacosProduct {
             }
             Presentation::MacosUnsavedWorkspace(error) => {
                 self.document = None;
-                let workspace = ResultWorkspace::new(ResultDocument::unsaved(image), Some(error));
+                let workspace = ResultWorkspace::new(ResultDocument::unsaved(image), Some(error))
+                    .with_initial_viewport(INITIAL_WORKSPACE_VIEWPORT);
                 self.phase = Phase::Workspace(workspace);
             }
             // Linux policy never reaches the macOS daemon.
@@ -151,7 +157,10 @@ impl MacosProduct {
     /// thumbnail click never reloads the image. No-op if no saved document.
     pub fn open_workspace(&mut self) {
         if let Some(document) = self.document.take() {
-            self.phase = Phase::Workspace(ResultWorkspace::new(document, None));
+            self.phase = Phase::Workspace(
+                ResultWorkspace::new(document, None)
+                    .with_initial_viewport(INITIAL_WORKSPACE_VIEWPORT),
+            );
         }
     }
 

@@ -179,6 +179,16 @@ impl ResultWorkspace {
         self.message.as_ref().map(|m| m.text().to_owned())
     }
 
+    /// Seed the viewport bounds with the expected canvas size (window minus chrome).
+    ///
+    /// Prevents the initial fit-mode render from computing a degenerate scale
+    /// before the scrollable has reported its real bounds. A pixel or two of
+    /// inaccuracy is harmless — the scrollable corrects it on the next frame.
+    pub fn with_initial_viewport(mut self, bounds: Size) -> Self {
+        self.viewport_bounds = bounds;
+        self
+    }
+
     /// Reveal is only meaningful once the capture has a saved path on disk.
     pub fn can_reveal(&self) -> bool {
         self.document.saved_path.is_some()
@@ -707,13 +717,21 @@ pub fn run(document: ResultDocument, initial_error: Option<String>) -> Result<()
 
     let boot_data = Arc::new(Mutex::new(Some((document, initial_error))));
 
+    // Estimated canvas area: window (1100×760) minus padding (16×16),
+    // toolbar (~35), status bar (~35), and column spacing (3 × 8).
+    // A pixel or two of inaccuracy is fine — the scrollable corrects it.
+    const INITIAL_VIEWPORT: Size = Size::new(1084.0, 650.0);
+
     let boot = move || {
         let (document, initial_error) = boot_data
             .lock()
             .unwrap()
             .take()
             .expect("result workspace boot data already consumed");
-        (ResultWorkspace::new(document, initial_error), Task::none())
+        (
+            ResultWorkspace::new(document, initial_error).with_initial_viewport(INITIAL_VIEWPORT),
+            Task::none(),
+        )
     };
 
     iced::application(boot, update, view)
