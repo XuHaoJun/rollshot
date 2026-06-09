@@ -126,11 +126,12 @@ impl MacosProduct {
     ) {
         match select_presentation(Platform::Macos, auto_save) {
             Presentation::MacosSavedThumbnail(path) => {
-                let handle = iced::widget::image::Handle::from_rgba(
-                    image.width(),
-                    image.height(),
-                    image.as_raw().clone(),
+                let source_size = Size::new(image.width() as f32, image.height() as f32);
+                let scale = crate::result_workspace::viewport::display_downscale_scale(
+                    source_size,
+                    crate::result_workspace::viewport::DEFAULT_MAX_TEXTURE_DIM,
                 );
+                let handle = crate::result_workspace::build_display_handle(&image, scale);
                 self.document = Some(ResultDocument::saved(image, path.clone()));
                 self.phase = Phase::Thumbnail(ThumbnailState::new(handle, path, Instant::now()));
             }
@@ -615,6 +616,33 @@ mod tests {
         product.apply_capture_completion(image(), Ok(PathBuf::from("/tmp/cap.png")));
         assert!(matches!(product.phase, Phase::Thumbnail(_)));
         assert!(product.document.is_some());
+    }
+
+    #[test]
+    fn completed_oversized_capture_downscales_thumbnail_handle_only() {
+        let image = RgbaImage::from_pixel(100, 9000, image::Rgba([10, 20, 30, 255]));
+        let mut product = product_in_capture_phase();
+
+        product.apply_capture_completion(image, Ok(PathBuf::from("/tmp/cap.png")));
+
+        let Phase::Thumbnail(state) = &product.phase else {
+            panic!("expected thumbnail phase");
+        };
+        let (width, height) = match state.image_handle.clone() {
+            iced::widget::image::Handle::Rgba { width, height, .. } => (width, height),
+            _ => panic!("expected rgba thumbnail handle"),
+        };
+        assert!(width <= crate::result_workspace::viewport::DEFAULT_MAX_TEXTURE_DIM);
+        assert!(height <= crate::result_workspace::viewport::DEFAULT_MAX_TEXTURE_DIM);
+        assert_eq!(
+            product
+                .document
+                .as_ref()
+                .expect("saved document")
+                .source_image
+                .dimensions(),
+            (100, 9000)
+        );
     }
 
     #[test]

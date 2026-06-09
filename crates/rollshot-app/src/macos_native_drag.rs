@@ -173,7 +173,12 @@ fn active_screen_thumbnail_origin_impl(size: Size, margin: f32) -> Result<Point,
         .ok_or_else(|| "NSScreen::mainScreen unavailable for thumbnail placement".to_string())?;
     let main_height = main_screen.frame().size.height as f32;
 
-    Ok(active_screen_thumbnail_origin_in_main_space(frame, main_height, size, margin))
+    Ok(active_screen_thumbnail_origin_in_main_space(
+        frame,
+        main_height,
+        size,
+        margin,
+    ))
 }
 
 #[cfg(target_os = "macos")]

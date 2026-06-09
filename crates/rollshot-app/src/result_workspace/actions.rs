@@ -42,7 +42,9 @@ pub fn write_save_as(image: &RgbaImage, path: &Path) -> Result<PathBuf, String> 
 /// Open the directory containing `path` in the platform file manager.
 ///
 /// - macOS: `open -R <path>` (reveals the file itself in Finder).
-/// - Linux: `xdg-open <parent>` (opens the containing directory).
+/// - Linux: prefers the freedesktop `org.freedesktop.FileManager1` D-Bus
+///   `ShowItems` method (which selects the file); falls back to `xdg-open
+///   <parent>` (opens the containing directory).
 pub fn reveal(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -51,26 +53,106 @@ pub fn reveal(path: &Path) -> Result<(), String> {
             .arg(path)
             .spawn()
             .map_err(|e| format!("open -R failed: {e}"))?;
+        return Ok(());
     }
 
     #[cfg(target_os = "linux")]
     {
-        // MVP: open the containing folder without selecting the file. Spec §11.3
-        // prefers the freedesktop `org.freedesktop.FileManager1` D-Bus `ShowItems`
-        // method (which selects the file) with this `xdg-open` as the fallback.
-        // TODO(§11.3): add the D-Bus `ShowItems` tier before this branch ships.
-        let parent = path.parent().unwrap_or(path);
-        std::process::Command::new("xdg-open")
-            .arg(parent)
-            .spawn()
-            .map_err(|e| format!("xdg-open failed: {e}"))?;
+        reveal_with_fallback(
+            || reveal_with_file_manager1(path),
+            || reveal_with_xdg_open(path),
+        )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = path;
-        return Err("reveal is not supported on this platform".to_string());
+        Err("reveal is not supported on this platform".to_string())
+    }
+}
+
+/// Try `primary`; if it fails, try `fallback` and combine both error messages.
+fn reveal_with_fallback(
+    primary: impl FnOnce() -> Result<(), String>,
+    fallback: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match primary() {
+        Ok(()) => Ok(()),
+        Err(primary_error) => fallback().map_err(|fallback_error| {
+            format!("{primary_error}; fallback failed: {fallback_error}")
+        }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reveal_with_file_manager1(path: &Path) -> Result<(), String> {
+    let uri = url::Url::from_file_path(path)
+        .map_err(|_| format!("cannot convert path to file URI: {}", path.display()))?
+        .to_string();
+    let connection =
+        zbus::blocking::Connection::session().map_err(|e| format!("D-Bus session failed: {e}"))?;
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.FileManager1",
+        "/org/freedesktop/FileManager1",
+        "org.freedesktop.FileManager1",
+    )
+    .map_err(|e| format!("FileManager1 proxy failed: {e}"))?;
+    proxy
+        .call::<_, _, ()>("ShowItems", &(vec![uri], ""))
+        .map_err(|e| format!("FileManager1 ShowItems failed: {e}"))
+}
+
+#[cfg(target_os = "linux")]
+fn reveal_with_xdg_open(path: &Path) -> Result<(), String> {
+    let parent = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open")
+        .arg(parent)
+        .spawn()
+        .map_err(|e| format!("xdg-open failed: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reveal_with_fallback_skips_fallback_after_primary_success() {
+        let mut fallback_called = false;
+        let result = reveal_with_fallback(
+            || Ok(()),
+            || {
+                fallback_called = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert!(!fallback_called);
     }
 
-    Ok(())
+    #[test]
+    fn reveal_with_fallback_runs_fallback_after_primary_failure() {
+        let mut fallback_called = false;
+        let result = reveal_with_fallback(
+            || Err("D-Bus unavailable".to_string()),
+            || {
+                fallback_called = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert!(fallback_called);
+    }
+
+    #[test]
+    fn reveal_with_fallback_reports_both_failures() {
+        let result = reveal_with_fallback(
+            || Err("D-Bus unavailable".to_string()),
+            || Err("xdg-open unavailable".to_string()),
+        )
+        .expect_err("both operations failed");
+        assert!(result.contains("D-Bus unavailable"));
+        assert!(result.contains("xdg-open unavailable"));
+    }
 }

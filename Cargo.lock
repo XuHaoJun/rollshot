@@ -5710,6 +5710,8 @@ dependencies = [
  "rollshot-iced-overlay",
  "serde_json",
  "tempfile",
+ "url",
+ "zbus 4.4.0",
 ]
 
 [[package]]

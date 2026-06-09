@@ -227,7 +227,7 @@ impl ResultWorkspace {
 
 /// Build an iced image handle from the source, downscaling when `scale < 1.0`
 /// (spec §9.6). `scale == 1.0` uses the full-resolution pixels directly.
-fn build_display_handle(source: &RgbaImage, scale: f32) -> ImageHandle {
+pub(crate) fn build_display_handle(source: &RgbaImage, scale: f32) -> ImageHandle {
     if scale >= 1.0 {
         return ImageHandle::from_rgba(source.width(), source.height(), source.as_raw().clone());
     }

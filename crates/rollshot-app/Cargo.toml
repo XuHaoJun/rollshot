@@ -27,6 +27,10 @@ objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 raw-window-handle = "0.6"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+url = { workspace = true }
+zbus = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 
