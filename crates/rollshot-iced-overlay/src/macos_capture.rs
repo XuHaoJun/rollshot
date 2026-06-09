@@ -826,7 +826,7 @@ impl Component {
     /// effects). Mirrors `update_overlay`'s effect handling without an
     /// `OverlayMessage` round-trip.
     #[cfg(test)]
-    pub fn apply_overlay_effect(&mut self, effect: OverlayEffect) -> HostEffect {
+    pub(crate) fn apply_overlay_effect(&mut self, effect: OverlayEffect) -> HostEffect {
         let old_phase = self.overlay.workspace.phase();
         match self.apply_effect(effect) {
             EffectOutcome::Terminal(host) => host,
