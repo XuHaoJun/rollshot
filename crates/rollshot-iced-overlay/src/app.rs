@@ -44,14 +44,12 @@ pub(crate) enum InputRegionMode {
 pub(crate) enum OverlayEffect {
     None,
     BeginStitch,
-    Finish,
+    FinishScrolling,
+    FinishScreenshot,
     Cancel,
     EnablePassthrough,
     DisablePassthrough,
     ActivateMode(CaptureMode),
-    PrepareScreenshot(Option<crate::workspace::OutputAction>),
-    FinalizeScrolling(Option<crate::workspace::OutputAction>),
-    PerformOutput(crate::workspace::OutputAction),
 }
 
 #[derive(Debug, Clone)]
@@ -102,10 +100,6 @@ pub(crate) struct OverlayState {
     /// the grabbed point stays under the cursor as the toolbar moves.
     pub(crate) toolbar_drag_grab: Option<iced::Vector>,
     pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
-    /// Full-resolution result image for Result Review. The Handle is built once
-    /// when entering Result Review and reused per redraw.
-    pub(crate) result_handle: Option<image::Handle>,
-    pub(crate) result_size: Option<Size>,
     pub(crate) transient_error: Option<String>,
 }
 
@@ -126,8 +120,6 @@ impl Default for OverlayState {
             cursor_position: None,
             toolbar_drag_grab: None,
             toolbar_position: crate::workspace::ToolbarPosition::Automatic,
-            result_handle: None,
-            result_size: None,
             transient_error: None,
         }
     }
@@ -381,109 +373,6 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         .width(Length::Fill)
         .height(Length::Fill);
 
-    if state.workspace.phase() == crate::workspace::WorkspacePhase::ResultReview {
-        let toolbar = crate::toolbar::render_toolbar(
-            state.workspace.phase(),
-            state.mode,
-            OverlayMessage::ToolbarAction,
-            OverlayMessage::DragStart,
-            OverlayMessage::DragEnd,
-        );
-
-        if let Some(handle) = &state.result_handle {
-            let result_size = state.result_size.unwrap_or(iced::Size::new(1.0, 1.0));
-            let crop = state.crop.unwrap_or(Rectangle {
-                x: 0.0,
-                y: 0.0,
-                width: state.window_size.map_or(800.0, |size| size.width),
-                height: state.window_size.map_or(600.0, |size| size.height),
-            });
-            let layout = crate::result_review::review_layout(
-                result_size,
-                Size::new(crop.width, crop.height),
-            );
-            let result_view = crate::result_review::view_result_review(handle, &layout);
-
-            let error: Option<Element<'_, OverlayMessage>> =
-                state.transient_error.as_ref().map(|msg| {
-                    container(text(msg).size(14))
-                        .padding(8)
-                        .style(|_theme| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgba(
-                                120.0 / 255.0,
-                                53.0 / 255.0,
-                                15.0 / 255.0,
-                                0.94,
-                            ))),
-                            text_color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
-                            ..Default::default()
-                        })
-                        .into()
-                });
-
-            let mut stack = iced::widget::stack![container(
-                container(result_view)
-                    .width(Length::Fixed(crop.width))
-                    .height(Length::Fixed(crop.height)),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding {
-                left: crop.x,
-                top: crop.y,
-                right: 0.0,
-                bottom: 0.0,
-            })];
-
-            if let Some(toolbar_rect) = toolbar_rect_for(state) {
-                stack = stack.push(
-                    container(
-                        container(toolbar)
-                            .width(Length::Fixed(toolbar_rect.width))
-                            .height(Length::Fixed(toolbar_rect.height)),
-                    )
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(iced::Padding {
-                        left: toolbar_rect.x,
-                        top: toolbar_rect.y,
-                        right: 0.0,
-                        bottom: 0.0,
-                    }),
-                );
-            } else {
-                stack = stack.push(
-                    container(toolbar)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(iced::Alignment::Center)
-                        .align_y(iced::Alignment::End)
-                        .padding(16),
-                );
-            }
-
-            if let Some(err) = error {
-                stack = stack.push(
-                    container(err)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(iced::Alignment::Center)
-                        .align_y(iced::Alignment::Start)
-                        .padding(16),
-                );
-            }
-
-            return stack.into();
-        }
-
-        return container(toolbar)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Alignment::Center)
-            .align_y(iced::Alignment::Center)
-            .into();
-    }
-
     if state.workspace.phase() != crate::workspace::WorkspacePhase::Selecting {
         // Capture phase: the base layer (canvas) draws nothing, keeping the
         // crop interior transparent. Chrome goes strictly outside the crop.
@@ -736,7 +625,10 @@ pub(crate) fn update(
                 state.workspace.set_crop(Some(crop_rect));
                 state.workspace.complete_selection();
                 let effect = match state.mode {
-                    CaptureMode::Screenshot => OverlayEffect::PrepareScreenshot(None),
+                    CaptureMode::Screenshot => {
+                        state.workspace.finish_screenshot();
+                        OverlayEffect::FinishScreenshot
+                    }
                     CaptureMode::Scrolling => {
                         state.workspace.begin_scrolling();
                         OverlayEffect::BeginStitch
@@ -770,7 +662,10 @@ pub(crate) fn update(
             state.workspace.set_crop(Some(crop_rect));
             state.workspace.complete_selection();
             let effect = match state.mode {
-                CaptureMode::Screenshot => OverlayEffect::PrepareScreenshot(None),
+                CaptureMode::Screenshot => {
+                    state.workspace.finish_screenshot();
+                    OverlayEffect::FinishScreenshot
+                }
                 CaptureMode::Scrolling => {
                     state.workspace.begin_scrolling();
                     OverlayEffect::BeginStitch
@@ -780,11 +675,8 @@ pub(crate) fn update(
         }
         OverlayMessage::FinishCapture => {
             if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
-                state.workspace.finish_scrolling(None);
-                (
-                    OverlayEffect::FinalizeScrolling(None),
-                    InputRegionMode::None,
-                )
+                state.workspace.finish_scrolling();
+                (OverlayEffect::FinishScrolling, InputRegionMode::None)
             } else {
                 (OverlayEffect::None, InputRegionMode::None)
             }
@@ -792,19 +684,13 @@ pub(crate) fn update(
         OverlayMessage::Finish => {
             match state.workspace.phase() {
                 WorkspacePhase::ScrollingCapture => {
-                    state.workspace.finish_scrolling(None);
-                    (
-                        OverlayEffect::FinalizeScrolling(None),
-                        InputRegionMode::None,
-                    )
+                    state.workspace.finish_scrolling();
+                    (OverlayEffect::FinishScrolling, InputRegionMode::None)
                 }
                 WorkspacePhase::Selected => {
                     if state.mode == CaptureMode::Screenshot {
-                        state.workspace.prepare_screenshot(None);
-                        return (
-                            OverlayEffect::PrepareScreenshot(None),
-                            InputRegionMode::None,
-                        );
+                        state.workspace.finish_screenshot();
+                        return (OverlayEffect::FinishScreenshot, InputRegionMode::None);
                     }
                     // Scrolling in Selected: the runner calls begin_scrolling.
                     (OverlayEffect::None, InputRegionMode::None)
@@ -831,14 +717,13 @@ pub(crate) fn update(
                     state.workspace.complete_selection();
                     let effect = match state.mode {
                         CaptureMode::Screenshot => {
-                            state.workspace.prepare_screenshot(None);
-                            OverlayEffect::PrepareScreenshot(None)
+                            state.workspace.finish_screenshot();
+                            OverlayEffect::FinishScreenshot
                         }
                         CaptureMode::Scrolling => OverlayEffect::BeginStitch,
                     };
                     (effect, InputRegionMode::None)
                 }
-                WorkspacePhase::ResultReview => (OverlayEffect::None, InputRegionMode::None),
             }
         }
         OverlayMessage::ActivateMode(mode) => {
@@ -897,79 +782,16 @@ pub(crate) fn update(
             }
             crate::toolbar::ToolbarAction::Finish => match state.workspace.phase() {
                 WorkspacePhase::ScrollingCapture => {
-                    state.workspace.finish_scrolling(None);
-                    (
-                        OverlayEffect::FinalizeScrolling(None),
-                        InputRegionMode::None,
-                    )
+                    state.workspace.finish_scrolling();
+                    (OverlayEffect::FinishScrolling, InputRegionMode::None)
+                }
+                WorkspacePhase::Selected if state.mode == CaptureMode::Screenshot => {
+                    state.workspace.finish_screenshot();
+                    (OverlayEffect::FinishScreenshot, InputRegionMode::None)
                 }
                 _ => (OverlayEffect::None, InputRegionMode::None),
             },
-            crate::toolbar::ToolbarAction::Save => {
-                if state.workspace.phase() == WorkspacePhase::ResultReview {
-                    (
-                        OverlayEffect::PerformOutput(crate::workspace::OutputAction::Save),
-                        InputRegionMode::None,
-                    )
-                } else if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
-                    state
-                        .workspace
-                        .finish_scrolling(Some(crate::workspace::OutputAction::Save));
-                    (
-                        OverlayEffect::FinalizeScrolling(Some(
-                            crate::workspace::OutputAction::Save,
-                        )),
-                        InputRegionMode::None,
-                    )
-                } else if state.workspace.phase() == WorkspacePhase::Selected {
-                    state
-                        .workspace
-                        .prepare_screenshot(Some(crate::workspace::OutputAction::Save));
-                    (
-                        OverlayEffect::PrepareScreenshot(Some(
-                            crate::workspace::OutputAction::Save,
-                        )),
-                        InputRegionMode::None,
-                    )
-                } else {
-                    (OverlayEffect::None, InputRegionMode::None)
-                }
-            }
-            crate::toolbar::ToolbarAction::Copy => {
-                if state.workspace.phase() == WorkspacePhase::ResultReview {
-                    (
-                        OverlayEffect::PerformOutput(crate::workspace::OutputAction::Copy),
-                        InputRegionMode::None,
-                    )
-                } else if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
-                    state
-                        .workspace
-                        .finish_scrolling(Some(crate::workspace::OutputAction::Copy));
-                    (
-                        OverlayEffect::FinalizeScrolling(Some(
-                            crate::workspace::OutputAction::Copy,
-                        )),
-                        InputRegionMode::None,
-                    )
-                } else if state.workspace.phase() == WorkspacePhase::Selected {
-                    state
-                        .workspace
-                        .prepare_screenshot(Some(crate::workspace::OutputAction::Copy));
-                    (
-                        OverlayEffect::PrepareScreenshot(Some(
-                            crate::workspace::OutputAction::Copy,
-                        )),
-                        InputRegionMode::None,
-                    )
-                } else {
-                    (OverlayEffect::None, InputRegionMode::None)
-                }
-            }
             crate::toolbar::ToolbarAction::Cancel => {
-                state.workspace.cancel();
-                (OverlayEffect::Cancel, InputRegionMode::None)
-            }
-            crate::toolbar::ToolbarAction::Close => {
                 state.workspace.cancel();
                 (OverlayEffect::Cancel, InputRegionMode::None)
             }
@@ -1165,7 +987,7 @@ mod tests {
 
         let (effect, _region) = super::update(&mut state, OverlayMessage::FinishCapture);
 
-        assert_eq!(effect, super::OverlayEffect::FinalizeScrolling(None));
+        assert_eq!(effect, super::OverlayEffect::FinishScrolling);
     }
 
     #[test]
@@ -1179,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_release_prepares_result_review_without_exiting() {
+    fn screenshot_release_requests_immediate_finalization() {
         use crate::workspace::WorkspacePhase;
         use iced::{mouse, Event};
         let mut state = OverlayState {
@@ -1200,11 +1022,11 @@ mod tests {
             ))),
         );
 
-        assert_eq!(effect, super::OverlayEffect::PrepareScreenshot(None));
+        assert_eq!(effect, super::OverlayEffect::FinishScreenshot);
         assert_eq!(
             state.workspace.phase(),
             WorkspacePhase::Selected,
-            "screenshot release must enter Selected, not ScrollingCapture"
+            "screenshot release confirms the crop then finalizes immediately"
         );
     }
 
@@ -1269,20 +1091,28 @@ mod tests {
     }
 
     #[test]
-    fn direct_output_actions_are_carried_through_finalization() {
-        use crate::workspace::OutputAction;
+    fn scrolling_finish_requests_finalization() {
         let mut state = OverlayState::default();
         state.workspace.begin_scrolling();
 
         let (effect, _) = super::update(
             &mut state,
-            OverlayMessage::ToolbarAction(crate::toolbar::ToolbarAction::Copy),
+            OverlayMessage::ToolbarAction(crate::toolbar::ToolbarAction::Finish),
         );
 
-        assert_eq!(
-            effect,
-            super::OverlayEffect::FinalizeScrolling(Some(OutputAction::Copy))
-        );
+        assert_eq!(effect, super::OverlayEffect::FinishScrolling);
+    }
+
+    #[test]
+    fn capture_result_constructs_from_image_and_stats_only() {
+        // The capture-only result is just the stitched image plus optional
+        // stats; there is no post-overlay request field after Task 1.
+        let result = crate::CaptureResult {
+            image: image::RgbaImage::new(4, 7),
+            stats: None,
+        };
+        assert!(result.stats.is_none());
+        assert_eq!(result.image.dimensions(), (4, 7));
     }
 
     #[test]

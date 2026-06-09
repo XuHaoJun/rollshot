@@ -15,10 +15,10 @@ pub fn post_overlay_action(
     result: Result<Option<rollshot_iced_overlay::CaptureResult>, String>,
 ) -> PostOverlayAction {
     match result {
-        Ok(Some(cr)) => match cr.post_overlay_request {
-            rollshot_iced_overlay::PostOverlayRequest::SaveAs => PostOverlayAction::SaveAs(cr),
-            rollshot_iced_overlay::PostOverlayRequest::None => PostOverlayAction::ExitSuccess,
-        },
+        // The overlay is now capture-only and never requests a post-overlay save
+        // dialog; a completed capture always means success. Task 6 removes the
+        // remaining PostOverlayRequest/SaveAs plumbing.
+        Ok(Some(_cr)) => PostOverlayAction::ExitSuccess,
         Ok(None) => PostOverlayAction::ExitCancelled,
         Err(err) => {
             eprintln!("{err}");
@@ -68,18 +68,11 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
 mod tests {
     use super::*;
 
-    fn capture_result_with_request(
-        request: rollshot_iced_overlay::PostOverlayRequest,
-    ) -> rollshot_iced_overlay::CaptureResult {
+    fn capture_result() -> rollshot_iced_overlay::CaptureResult {
         rollshot_iced_overlay::CaptureResult {
             image: image::RgbaImage::new(1, 1),
             stats: None,
-            post_overlay_request: request,
         }
-    }
-
-    fn capture_result() -> rollshot_iced_overlay::CaptureResult {
-        capture_result_with_request(rollshot_iced_overlay::PostOverlayRequest::None)
     }
 
     #[test]
@@ -95,15 +88,6 @@ mod tests {
         assert!(matches!(
             post_overlay_action(Ok(None)),
             PostOverlayAction::ExitCancelled
-        ));
-    }
-
-    #[test]
-    fn save_as_request_maps_to_save_as_action() {
-        let cr = capture_result_with_request(rollshot_iced_overlay::PostOverlayRequest::SaveAs);
-        assert!(matches!(
-            post_overlay_action(Ok(Some(cr))),
-            PostOverlayAction::SaveAs(_)
         ));
     }
 

@@ -84,12 +84,12 @@ static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex
 // screen-share picker dialog appears + dismisses on a clean desktop and never
 // lands in a captured frame. The live Driver is stashed here for the update fn
 // to drive: `begin_stitch` on BeginStitch effect, `finalize`/`cancel` on
-// Finish/Cancel effects.
+// FinishScrolling/Cancel effects.
 static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 
-// One-shot capture for screenshot mode. The update fn reads this on the Finish
-// effect (emitted immediately on a valid screenshot release) to crop and return
-// the frozen image.
+// One-shot capture for screenshot mode. The update fn reads this on the
+// FinishScreenshot effect (emitted immediately on a valid screenshot release) to
+// crop and return the frozen image.
 static ONE_SHOT_SLOT: Mutex<Option<rollshot_capture::OneShotCapture>> = Mutex::new(None);
 
 // Active capture mode, set at startup by `acquire_resource`.
@@ -169,50 +169,6 @@ fn validate_screenshot_surface_or_exit(state: &Overlay) -> Option<Task<Message>>
     }
 }
 
-/// Decision for how to handle an output action on Linux.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LinuxOutputDecision {
-    /// Save: set `post_overlay_request` and exit the overlay; the caller
-    /// opens the native Save As dialog after the overlay closes.
-    ExitForSaveAs,
-    /// Copy: handle inside the overlay via `perform_output_action`.
-    PerformInOverlay,
-}
-
-pub(crate) fn linux_output_decision(action: crate::workspace::OutputAction) -> LinuxOutputDecision {
-    match action {
-        crate::workspace::OutputAction::Save => LinuxOutputDecision::ExitForSaveAs,
-        crate::workspace::OutputAction::Copy => LinuxOutputDecision::PerformInOverlay,
-    }
-}
-
-fn perform_output_action(
-    state: &mut Overlay,
-    action: crate::workspace::OutputAction,
-) -> Task<Message> {
-    let result_guard = RESULT_SLOT.lock().unwrap();
-    let result = match result_guard.as_ref() {
-        Some(Ok(Some(result))) => result,
-        _ => {
-            state.transient_error = Some("No result available".to_string());
-            return Task::none();
-        }
-    };
-    let mut output_service = crate::output::ArboardOutput::new();
-    let outcome = crate::output::perform_output(&mut output_service, action, &result.image);
-    drop(result_guard);
-    match crate::output::outcome_to_phase_decision(&outcome, state.workspace.phase()) {
-        crate::output::WorkspaceTransition::Exit => iced::exit(),
-        crate::output::WorkspaceTransition::StayInResultReview
-        | crate::output::WorkspaceTransition::EnterResultReview => {
-            if let crate::output::OutputOutcome::Error(err) = outcome {
-                state.transient_error = Some(err);
-            }
-            Task::none()
-        }
-    }
-}
-
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Overlay(msg) => {
@@ -256,50 +212,60 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     }
                     Task::none()
                 }
-                app::OverlayEffect::Finish => {
-                    let mode = *CAPTURE_MODE.lock().unwrap();
-                    if mode == Some(CaptureMode::Screenshot) {
-                        let crop = state.crop.unwrap();
-                        let ws = match state.window_size {
-                            Some(ws) => ws,
-                            None => {
-                                *RESULT_SLOT.lock().unwrap() = Some(Err(
-                                    "overlay surface size unknown (no Window::Opened event)"
-                                        .to_string(),
-                                ));
-                                return iced::exit();
-                            }
-                        };
-                        let crop_logical = LogicalRect {
-                            x: crop.x,
-                            y: crop.y,
-                            width: crop.width,
-                            height: crop.height,
-                        };
-                        let overlay_logical = rollshot_capture::Size {
-                            width: ws.width as u32,
-                            height: ws.height as u32,
-                        };
-                        let capture = ONE_SHOT_SLOT.lock().unwrap().take();
-                        let outcome = match capture {
-                            Some(cap) => crate::screenshot::finish_screenshot(
-                                &cap,
-                                crop_logical,
-                                overlay_logical,
-                            )
-                            .map(Some),
-                            None => Ok(None),
-                        };
-                        *RESULT_SLOT.lock().unwrap() = Some(outcome);
-                        iced::exit()
-                    } else {
-                        let driver = DRIVER_SLOT.lock().unwrap().take();
-                        let outcome = match driver {
-                            Some(driver) => driver.finalize().map(Some),
-                            None => Ok(None),
-                        };
-                        *RESULT_SLOT.lock().unwrap() = Some(outcome);
-                        iced::exit()
+                app::OverlayEffect::FinishScreenshot => {
+                    let crop = state.crop.unwrap();
+                    let ws = match state.window_size {
+                        Some(ws) => ws,
+                        None => {
+                            state.transient_error =
+                                Some("overlay surface size unknown".to_string());
+                            return Task::none();
+                        }
+                    };
+                    let crop_logical = LogicalRect {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: crop.height,
+                    };
+                    let overlay_logical = rollshot_capture::Size {
+                        width: ws.width as u32,
+                        height: ws.height as u32,
+                    };
+                    let outcome = match ONE_SHOT_SLOT.lock().unwrap().take() {
+                        Some(capture) => crate::screenshot::finish_screenshot(
+                            &capture,
+                            crop_logical,
+                            overlay_logical,
+                        )
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                    match outcome {
+                        Ok(opt) => {
+                            *RESULT_SLOT.lock().unwrap() = Some(Ok(opt));
+                            iced::exit()
+                        }
+                        Err(e) => {
+                            state.transient_error = Some(e);
+                            Task::none()
+                        }
+                    }
+                }
+                app::OverlayEffect::FinishScrolling => {
+                    let outcome = match DRIVER_SLOT.lock().unwrap().take() {
+                        Some(driver) => driver.finalize().map(Some),
+                        None => Err("No driver available".to_string()),
+                    };
+                    match outcome {
+                        Ok(opt) => {
+                            *RESULT_SLOT.lock().unwrap() = Some(Ok(opt));
+                            iced::exit()
+                        }
+                        Err(e) => {
+                            state.transient_error = Some(e);
+                            Task::none()
+                        }
                     }
                 }
                 app::OverlayEffect::Cancel => {
@@ -382,129 +348,6 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         }
                         Err(e) => {
                             state.transient_error = Some(format!("Capture failed: {e}"));
-                            Task::none()
-                        }
-                    }
-                }
-                app::OverlayEffect::PerformOutput(action) => match linux_output_decision(action) {
-                    LinuxOutputDecision::ExitForSaveAs => {
-                        let mut guard = RESULT_SLOT.lock().unwrap();
-                        match guard.as_mut() {
-                            Some(Ok(Some(result))) => {
-                                result.post_overlay_request = crate::PostOverlayRequest::SaveAs;
-                                iced::exit()
-                            }
-                            _ => {
-                                state.transient_error = Some("No result available".to_string());
-                                Task::none()
-                            }
-                        }
-                    }
-                    LinuxOutputDecision::PerformInOverlay => perform_output_action(state, action),
-                },
-                app::OverlayEffect::PrepareScreenshot(output) => {
-                    let crop = state.crop.unwrap();
-                    let ws = match state.window_size {
-                        Some(ws) => ws,
-                        None => {
-                            state.transient_error =
-                                Some("overlay surface size unknown".to_string());
-                            return Task::none();
-                        }
-                    };
-                    let crop_logical = LogicalRect {
-                        x: crop.x,
-                        y: crop.y,
-                        width: crop.width,
-                        height: crop.height,
-                    };
-                    let overlay_logical = rollshot_capture::Size {
-                        width: ws.width as u32,
-                        height: ws.height as u32,
-                    };
-                    let capture = ONE_SHOT_SLOT.lock().unwrap().take();
-                    let outcome = match capture {
-                        Some(cap) => crate::screenshot::finish_screenshot(
-                            &cap,
-                            crop_logical,
-                            overlay_logical,
-                        )
-                        .map(Some),
-                        None => Ok(None),
-                    };
-                    match outcome {
-                        Ok(Some(result)) => {
-                            let handle = crate::result_review::build_result_handle(&result.image);
-                            let size = iced::Size::new(
-                                result.image.width() as f32,
-                                result.image.height() as f32,
-                            );
-                            state.result_handle = Some(handle);
-                            state.result_size = Some(size);
-                            state.workspace.enter_result_review();
-                            *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
-                            output.map_or_else(Task::none, |action| {
-                                match linux_output_decision(action) {
-                                    LinuxOutputDecision::ExitForSaveAs => {
-                                        let mut guard = RESULT_SLOT.lock().unwrap();
-                                        if let Some(Ok(Some(r))) = guard.as_mut() {
-                                            r.post_overlay_request =
-                                                crate::PostOverlayRequest::SaveAs;
-                                        }
-                                        iced::exit()
-                                    }
-                                    LinuxOutputDecision::PerformInOverlay => {
-                                        perform_output_action(state, action)
-                                    }
-                                }
-                            })
-                        }
-                        Ok(None) => {
-                            state.transient_error = Some("No capture available".to_string());
-                            Task::none()
-                        }
-                        Err(e) => {
-                            state.transient_error = Some(e);
-                            Task::none()
-                        }
-                    }
-                }
-                app::OverlayEffect::FinalizeScrolling(output) => {
-                    let driver = DRIVER_SLOT.lock().unwrap().take();
-                    let outcome = match driver {
-                        Some(driver) => driver.finalize(),
-                        None => Err("No driver available".to_string()),
-                    };
-                    match outcome {
-                        Ok(result) => {
-                            let handle = crate::result_review::build_result_handle(&result.image);
-                            let size = iced::Size::new(
-                                result.image.width() as f32,
-                                result.image.height() as f32,
-                            );
-                            state.result_handle = Some(handle);
-                            state.result_size = Some(size);
-                            state.workspace.enter_result_review();
-                            *RESULT_SLOT.lock().unwrap() = Some(Ok(Some(result)));
-                            output.map_or_else(Task::none, |action| {
-                                match linux_output_decision(action) {
-                                    LinuxOutputDecision::ExitForSaveAs => {
-                                        let mut guard = RESULT_SLOT.lock().unwrap();
-                                        if let Some(Ok(Some(r))) = guard.as_mut() {
-                                            r.post_overlay_request =
-                                                crate::PostOverlayRequest::SaveAs;
-                                        }
-                                        iced::exit()
-                                    }
-                                    LinuxOutputDecision::PerformInOverlay => {
-                                        perform_output_action(state, action)
-                                    }
-                                }
-                            })
-                        }
-                        Err(e) => {
-                            state.transient_error = Some(e);
-                            state.workspace.revert_to_scrolling();
                             Task::none()
                         }
                     }
@@ -1129,14 +972,6 @@ mod tests {
     }
 
     #[test]
-    fn result_review_accepts_input_across_crop_and_toolbar() {
-        assert_eq!(
-            input_mode_for(WorkspacePhase::ResultReview),
-            app::InputRegionMode::FullOverlay
-        );
-    }
-
-    #[test]
     fn scrolling_uses_toolbar_only_input_and_selected_uses_full_overlay() {
         assert_eq!(
             input_mode_for(WorkspacePhase::ScrollingCapture),
@@ -1204,24 +1039,6 @@ mod tests {
         assert!(
             PREVIEW_RX.lock().unwrap().is_none(),
             "screenshot mode should not set up preview channel"
-        );
-    }
-
-    use crate::workspace::OutputAction;
-
-    #[test]
-    fn save_returns_exit_for_save_as() {
-        assert_eq!(
-            linux_output_decision(OutputAction::Save),
-            LinuxOutputDecision::ExitForSaveAs,
-        );
-    }
-
-    #[test]
-    fn copy_returns_perform_in_overlay() {
-        assert_eq!(
-            linux_output_decision(OutputAction::Copy),
-            LinuxOutputDecision::PerformInOverlay,
         );
     }
 }

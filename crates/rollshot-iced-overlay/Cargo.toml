@@ -5,9 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-arboard = "3.4"
 image = { version = "0.25", features = ["png"] }
-rfd = "0.15"
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-core = { path = "../rollshot-core" }
 rollshot-overlay-core = { path = "../rollshot-overlay-core" }

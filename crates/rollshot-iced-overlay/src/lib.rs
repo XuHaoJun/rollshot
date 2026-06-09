@@ -9,6 +9,9 @@ use image::RgbaImage;
 use rollshot_core::StitchStats;
 
 /// Post-overlay action the caller should perform after the overlay closes.
+///
+/// Retained only for `rollshot-app` compatibility during the migration; the
+/// overlay no longer produces it. Task 6 removes the remaining caller plumbing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PostOverlayRequest {
     /// No further action — the caller decides what to do with the result.
@@ -18,13 +21,12 @@ pub enum PostOverlayRequest {
     SaveAs,
 }
 
-/// The finalized capture handed back to the caller (Tauri in Phase 4).
-/// Named generically per architecture spec D5 — not "save PNG only".
+/// The finalized capture handed back to the caller. The overlay is capture-only:
+/// it selects a region, captures/stitches, and returns the image plus stats.
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub image: RgbaImage,
     pub stats: Option<StitchStats>,
-    pub post_overlay_request: PostOverlayRequest,
 }
 
 /// Inputs for a capture session.
@@ -57,8 +59,6 @@ impl std::fmt::Display for OverlayError {
 
 impl std::error::Error for OverlayError {}
 
-mod output;
-mod result_review;
 mod toolbar;
 mod workspace;
 

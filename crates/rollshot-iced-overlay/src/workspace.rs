@@ -5,13 +5,6 @@ pub enum WorkspacePhase {
     Selecting,
     Selected,
     ScrollingCapture,
-    ResultReview,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputAction {
-    Save,
-    Copy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,10 +13,8 @@ pub enum WorkspaceEffect {
     None,
     ActivateMode(CaptureMode),
     StartScrolling,
-    StopScrolling { discard: bool },
-    FinalizeScrolling { output: Option<OutputAction> },
-    PrepareScreenshot { output: Option<OutputAction> },
-    PerformOutput(OutputAction),
+    FinishScrolling,
+    FinishScreenshot,
     Cancel,
 }
 
@@ -102,21 +93,12 @@ impl WorkspaceState {
         self.auto_hide.accepted_frame(std::time::Instant::now());
     }
 
-    pub fn finish_scrolling(&mut self, output: Option<OutputAction>) -> WorkspaceEffect {
-        WorkspaceEffect::FinalizeScrolling { output }
+    pub fn finish_scrolling(&mut self) -> WorkspaceEffect {
+        WorkspaceEffect::FinishScrolling
     }
 
-    pub fn enter_result_review(&mut self) {
-        self.phase = WorkspacePhase::ResultReview;
-    }
-
-    pub fn revert_to_scrolling(&mut self) {
-        self.phase = WorkspacePhase::ScrollingCapture;
-    }
-
-    pub fn prepare_screenshot(&mut self, output: Option<OutputAction>) -> WorkspaceEffect {
-        self.phase = WorkspacePhase::ResultReview;
-        WorkspaceEffect::PrepareScreenshot { output }
+    pub fn finish_screenshot(&mut self) -> WorkspaceEffect {
+        WorkspaceEffect::FinishScreenshot
     }
 
     pub fn cancel(&mut self) -> WorkspaceEffect {
@@ -250,17 +232,55 @@ mod tests {
     }
 
     #[test]
-    fn finish_scrolling_enters_result_review() {
+    fn capture_lifecycle_never_leaves_capture_phases() {
+        // After Task 1 the overlay is capture-only: finishing a capture must
+        // not transition the workspace into any result-review state. Drive a
+        // full scrolling lifecycle and assert every phase stays among the
+        // three capture phases.
+        let is_capture_phase = |p: WorkspacePhase| {
+            matches!(
+                p,
+                WorkspacePhase::Selecting
+                    | WorkspacePhase::Selected
+                    | WorkspacePhase::ScrollingCapture
+            )
+        };
+
+        let mut state = WorkspaceState::new(CaptureMode::Scrolling);
+        assert_eq!(state.phase(), WorkspacePhase::Selecting);
+        assert!(is_capture_phase(state.phase()));
+
+        state.set_crop(valid_crop());
+        state.complete_selection();
+        assert_eq!(state.phase(), WorkspacePhase::Selected);
+        assert!(is_capture_phase(state.phase()));
+
+        state.begin_scrolling();
+        assert_eq!(state.phase(), WorkspacePhase::ScrollingCapture);
+        assert!(is_capture_phase(state.phase()));
+
+        // Finishing the capture returns an effect but keeps the phase in the
+        // capture set rather than advancing to a removed review phase.
+        state.finish_scrolling();
+        assert_eq!(state.phase(), WorkspacePhase::ScrollingCapture);
+        assert!(is_capture_phase(state.phase()));
+
+        // A screenshot finish behaves the same way from Selected.
+        let mut shot = WorkspaceState::new(CaptureMode::Screenshot);
+        shot.set_crop(valid_crop());
+        shot.complete_selection();
+        shot.finish_screenshot();
+        assert_eq!(shot.phase(), WorkspacePhase::Selected);
+        assert!(is_capture_phase(shot.phase()));
+    }
+
+    #[test]
+    fn finish_scrolling_requests_finalization() {
         let mut state = WorkspaceState::new(CaptureMode::Scrolling);
         state.set_crop(valid_crop());
         state.complete_selection();
         state.begin_scrolling();
-        assert_eq!(
-            state.finish_scrolling(None),
-            WorkspaceEffect::FinalizeScrolling { output: None }
-        );
+        assert_eq!(state.finish_scrolling(), WorkspaceEffect::FinishScrolling);
         assert_eq!(state.phase(), WorkspacePhase::ScrollingCapture);
-        state.enter_result_review();
-        assert_eq!(state.phase(), WorkspacePhase::ResultReview);
     }
 }

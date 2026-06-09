@@ -9,10 +9,7 @@ pub enum ToolbarAction {
     ScreenshotMode,
     ScrollingMode,
     Finish,
-    Save,
-    Copy,
     Cancel,
-    Close,
 }
 
 #[derive(Debug, Clone)]
@@ -37,22 +34,14 @@ pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
         WorkspacePhase::Selected => vec![
             ToolbarAction::ScreenshotMode,
             ToolbarAction::ScrollingMode,
-            ToolbarAction::Save,
-            ToolbarAction::Copy,
+            ToolbarAction::Finish,
             ToolbarAction::Cancel,
         ],
         WorkspacePhase::ScrollingCapture => vec![
             ToolbarAction::ScreenshotMode,
             ToolbarAction::ScrollingMode,
             ToolbarAction::Finish,
-            ToolbarAction::Save,
-            ToolbarAction::Copy,
             ToolbarAction::Cancel,
-        ],
-        WorkspacePhase::ResultReview => vec![
-            ToolbarAction::Save,
-            ToolbarAction::Copy,
-            ToolbarAction::Close,
         ],
     }
 }
@@ -77,10 +66,7 @@ fn action_label(action: ToolbarAction) -> &'static str {
         ToolbarAction::ScreenshotMode => "📷",
         ToolbarAction::ScrollingMode => "📜",
         ToolbarAction::Finish => "✓",
-        ToolbarAction::Save => "💾",
-        ToolbarAction::Copy => "📋",
         ToolbarAction::Cancel => "✕",
-        ToolbarAction::Close => "✕",
     }
 }
 
@@ -89,10 +75,7 @@ fn action_tooltip(action: ToolbarAction) -> &'static str {
         ToolbarAction::ScreenshotMode => "Screenshot Mode",
         ToolbarAction::ScrollingMode => "Scrolling Mode",
         ToolbarAction::Finish => "Finish Capture",
-        ToolbarAction::Save => "Save",
-        ToolbarAction::Copy => "Copy",
         ToolbarAction::Cancel => "Cancel",
-        ToolbarAction::Close => "Close",
     }
 }
 
@@ -214,30 +197,21 @@ mod tests {
     use rollshot_overlay_core::chrome_placement::Rect;
 
     #[test]
-    fn scrolling_toolbar_includes_finish_but_selected_toolbar_does_not() {
-        assert!(!actions_for(WorkspacePhase::Selected).contains(&ToolbarAction::Finish));
-        assert!(actions_for(WorkspacePhase::ScrollingCapture).contains(&ToolbarAction::Finish));
-    }
-
-    #[test]
-    fn selected_and_scrolling_toolbars_include_output_actions() {
-        for phase in [WorkspacePhase::Selected, WorkspacePhase::ScrollingCapture] {
-            let actions = actions_for(phase);
-            assert!(actions.contains(&ToolbarAction::Save));
-            assert!(actions.contains(&ToolbarAction::Copy));
-        }
-    }
-
-    #[test]
-    fn result_review_toolbar_only_contains_output_and_close_actions() {
+    fn selected_toolbar_contains_finish_but_no_output_actions() {
         assert_eq!(
-            actions_for(WorkspacePhase::ResultReview),
+            actions_for(WorkspacePhase::Selected),
             vec![
-                ToolbarAction::Save,
-                ToolbarAction::Copy,
-                ToolbarAction::Close
+                ToolbarAction::ScreenshotMode,
+                ToolbarAction::ScrollingMode,
+                ToolbarAction::Finish,
+                ToolbarAction::Cancel,
             ]
         );
+    }
+
+    #[test]
+    fn scrolling_toolbar_includes_finish() {
+        assert!(actions_for(WorkspacePhase::ScrollingCapture).contains(&ToolbarAction::Finish));
     }
 
     #[test]
