@@ -1,8 +1,30 @@
 # Post-Capture Image Viewer Design
 
 **Date:** 2026-06-09  
-**Status:** Approved design, pending implementation plan  
+**Status:** Approved design, revised by 2026-06-09 product review, pending implementation plan  
 **Scope:** Active iced product path in `rollshot-app` and `rollshot-iced-overlay`
+
+## Revision — 2026-06-09 product review
+
+Updated after a product/UX review (`plan-ceo-review`). Changes from the
+original approved design:
+
+- Linux now auto-saves every successful capture (previously a Non-Goal). Both
+  platforms auto-save; macOS additionally shows a floating thumbnail, while
+  Linux opens a saved Result Workspace directly.
+- Auto-save default location is the desktop directory on both platforms
+  (Linux: `XDG_DESKTOP_DIR`, fallback `~/Pictures`; the directory is not
+  created if missing).
+- `Fit Height` gains a dedicated status-bar button (previously an unexposed
+  mode).
+- Window-manager / OS-level window close is intercepted and routed through the
+  unsaved-capture discard confirmation, so an unsaved capture cannot be lost by
+  closing the window directly.
+- A saved Result Workspace shows its saved path in the inline message area on
+  open.
+
+The macOS floating thumbnail + AppKit native file drag remain in scope
+(required). Implementation sequencing is left to the engineering plan.
 
 ## 1. Summary
 
@@ -19,7 +41,8 @@ Post-capture presentation differs by platform:
 - macOS auto-saves to Desktop and shows a floating thumbnail. The thumbnail can
   be dragged as a native file into another application or clicked to open the
   Result Workspace.
-- Linux opens the Result Workspace immediately with an unsaved result.
+- Linux auto-saves to the desktop directory and opens the Result Workspace
+  immediately with the saved result (no floating thumbnail).
 
 Each capture remains an independent `rollshot-app` process. There is no
 persistent app, shared thumbnail host, cross-capture queue, or shared Result
@@ -33,6 +56,8 @@ unchanged historical snapshot.
 
 - Separate capture UI from post-capture result handling.
 - Make long screenshots practical to inspect with zoom and scrolling.
+- Auto-save every successful capture on both platforms so a durable file always
+  exists without requiring a save dialog.
 - Keep the default macOS capture flow fast and non-interrupting for the user's
   current desktop work.
 - Make native file drag from the macOS floating thumbnail a required feature.
@@ -48,7 +73,6 @@ unchanged historical snapshot.
 - Cross-capture thumbnail coordination, stacking, queue limits, or a shared
   Result Workspace.
 - Floating thumbnails on Linux.
-- Auto-save on Linux.
 - Refactoring the deprecated Tauri result path.
 
 ## 4. Product Model
@@ -132,8 +156,14 @@ waiting while the floating thumbnail or Result Workspace is open.
 ### 5.3 Linux Success
 
 1. The capture overlay returns `CaptureResult` and closes.
-2. An unsaved Result Workspace opens immediately.
-3. The user may Copy, Save As, or discard the result.
+2. `rollshot-app` generates a unique path in the desktop directory.
+3. The PNG is written to that path.
+4. A saved Result Workspace opens immediately (no floating thumbnail).
+5. The user may Copy, Save As to another location, or Reveal the result.
+
+If Linux auto-save fails, the flow follows the same path as macOS (§5.2): the
+image stays in memory and an unsaved Result Workspace opens with the auto-save
+error shown inline.
 
 ### 5.4 Cancellation
 
@@ -142,10 +172,15 @@ post-capture UI.
 
 ## 6. Desktop Auto-Save
 
-Both platforms use Desktop as the default file-dialog location where
-applicable, but only macOS auto-saves during this scope.
+Both platforms auto-save every successful capture and use the desktop directory
+as the default location (both for auto-save and as the Save As dialog default):
 
-The macOS auto-save filename format is:
+- macOS: `~/Desktop`.
+- Linux: `XDG_DESKTOP_DIR`, falling back to `~/Pictures` when it does not
+  resolve. The directory is not created if it does not already exist; the
+  fallback is used instead.
+
+The auto-save filename format is identical on both platforms:
 
 ```text
 Rollshot YYYY-MM-DD at HH.MM.SS.png
@@ -153,7 +188,7 @@ Rollshot YYYY-MM-DD at HH.MM.SS.png
 
 If that path exists, append `-2`, `-3`, and so on before `.png`.
 
-The floating thumbnail is shown only after the PNG has been written
+The macOS floating thumbnail is shown only after the PNG has been written
 successfully. It represents a durable saved file, not a temporary file.
 
 ## 7. macOS Floating Thumbnail
@@ -202,7 +237,7 @@ independent thumbnails, including overlapping thumbnails.
 |                                      thick scrollbar |
 |                                                      |
 +------------------------------------------------------+
-| 1440 x 18240 px   Fit Width  Fit Window  100%  -  +  |
+| 1440x18240 Fit Width Fit Window Fit Height 100% - +  |
 +------------------------------------------------------+
 ```
 
@@ -222,6 +257,8 @@ There is no generic `Save` action. The MVP has no editable state to overwrite.
 
 The area below the toolbar displays:
 
+- Initial auto-save success, showing the saved path, when a saved Result
+  Workspace opens.
 - Auto-save failure.
 - Save As success or failure.
 - Copy success or failure.
@@ -238,6 +275,7 @@ The status bar displays:
 - Active fit mode or custom zoom percentage.
 - `Fit Width`
 - `Fit Window`
+- `Fit Height`
 - `100%`
 - Zoom Out
 - Zoom In
@@ -251,8 +289,8 @@ The status bar displays:
 - Horizontal long image: `Fit Height`, initially scrolled to the left.
 - An image is long when its long edge exceeds its short edge by more than `2x`.
 
-`Fit Height` is a supported zoom mode even if it is not initially exposed as a
-dedicated status-bar button. It is used for the horizontal-long-image default.
+`Fit Height` is a supported zoom mode with a dedicated status-bar button. It is
+the horizontal-long-image default and can be reselected at any time.
 
 ### 9.2 Zoom Modes
 
@@ -349,6 +387,10 @@ error.
 - An unsaved Result Workspace asks for confirmation:
   `Discard unsaved capture?`
 - Rejecting discard returns to the workspace.
+- Window-manager / OS-level window close (macOS red close button or Cmd-W,
+  Linux title-bar close) is intercepted and routed through the same close
+  decision as the in-app `Close` action, so an unsaved capture cannot be lost
+  by closing the window directly.
 
 ## 12. Refactoring Boundaries
 
@@ -368,7 +410,7 @@ result-review phase.
 ### 12.2 Add To `rollshot-app`
 
 - Platform post-capture policy.
-- Desktop path generation and auto-save.
+- Desktop-directory path generation and auto-save on both platforms.
 - Independent Result Workspace application/window.
 - Result document and viewport state.
 - File actions and inline messages.
@@ -383,7 +425,7 @@ No behavior or UI changes are required under `crates/rollshot-tauri-app`.
 
 - Capture errors retain existing overlay error behavior until no result can be
   produced.
-- macOS auto-save errors open an unsaved Result Workspace.
+- Auto-save errors on either platform open an unsaved Result Workspace.
 - Result Workspace action errors remain inline and non-destructive.
 - Native drag cancellation or failure keeps the thumbnail available.
 - Failure to create the floating thumbnail after successful auto-save prints an
@@ -393,8 +435,11 @@ No behavior or UI changes are required under `crates/rollshot-tauri-app`.
 
 ### 14.1 Unit Tests
 
-- Unique Desktop filename generation.
-- Saved and unsaved close decisions.
+- Unique auto-save filename generation on both platforms.
+- Linux desktop-directory resolution with `XDG_DESKTOP_DIR` and `~/Pictures`
+  fallback.
+- Saved and unsaved close decisions, including window-manager / OS-level close
+  routing.
 - Default zoom mode for normal, vertical-long, and horizontal-long images.
 - Fit mode scale calculations.
 - Fixed zoom-step transitions and clamping.
@@ -408,7 +453,8 @@ No behavior or UI changes are required under `crates/rollshot-tauri-app`.
 - Capture cancellation does not open post-capture UI.
 - macOS successful auto-save selects floating-thumbnail presentation.
 - macOS auto-save failure selects unsaved Result Workspace presentation.
-- Linux completion selects unsaved Result Workspace presentation.
+- Linux completion auto-saves and selects saved Result Workspace presentation.
+- Linux auto-save failure selects unsaved Result Workspace presentation.
 - Save As updates the document saved path.
 
 ### 14.3 Runtime Verification
@@ -425,9 +471,11 @@ macOS:
 
 Linux:
 
-- Capture completion opens Result Workspace.
+- Capture completion auto-saves to the desktop directory and opens a saved
+  Result Workspace.
 - Copy and Save As.
-- Unsaved close confirmation.
+- Auto-save failure opens an unsaved Result Workspace.
+- Unsaved close confirmation, including window-manager / OS-level close.
 - Vertical and horizontal long-image navigation.
 
 Both:
