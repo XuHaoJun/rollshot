@@ -53,7 +53,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
             .arg(path)
             .spawn()
             .map_err(|e| format!("open -R failed: {e}"))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -72,6 +72,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
 }
 
 /// Try `primary`; if it fails, try `fallback` and combine both error messages.
+#[cfg(any(target_os = "linux", test))]
 fn reveal_with_fallback(
     primary: impl FnOnce() -> Result<(), String>,
     fallback: impl FnOnce() -> Result<(), String>,
