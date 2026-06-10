@@ -489,17 +489,21 @@ pub(crate) fn view_with_toolbar(
                 if let Some(handle) = &state.preview {
                     if let Some(preview_rect) = placement.preview_rect() {
                         chrome_stack = chrome_stack.push(
-                            container(image(handle.clone()))
-                                .width(Length::Fixed(preview_rect.width))
-                                .height(Length::Fixed(preview_rect.height))
-                                .align_x(iced::Alignment::Start)
-                                .align_y(iced::Alignment::Start)
-                                .padding(iced::Padding {
-                                    left: preview_rect.x,
-                                    top: preview_rect.y,
-                                    right: 0.0,
-                                    bottom: 0.0,
-                                }),
+                            container(
+                                container(image(handle.clone()))
+                                    .width(Length::Fixed(preview_rect.width))
+                                    .height(Length::Fixed(preview_rect.height)),
+                            )
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(iced::Alignment::Start)
+                            .align_y(iced::Alignment::Start)
+                            .padding(iced::Padding {
+                                left: preview_rect.x,
+                                top: preview_rect.y,
+                                right: 0.0,
+                                bottom: 0.0,
+                            }),
                         );
                     }
                 }
