@@ -123,10 +123,10 @@ impl FrameStream for MacosScapFrameStream {
         let mut empty_frames = 0;
 
         loop {
-            let frame = self
-                .capturer
-                .get_next_frame()
-                .map_err(|_| CaptureError::EndOfStream)?;
+            let frame = self.capturer.get_next_frame().map_err(|err| {
+                eprintln!("rollshot macos-sck: get_next_frame failed: {err:#}");
+                CaptureError::EndOfStream
+            })?;
 
             match process_scap_frame(frame, &mut empty_frames, self.effective_region)? {
                 Ok(captured) => return Ok(captured),
@@ -146,9 +146,12 @@ fn process_scap_frame(
             if frame.width <= 0 || frame.height <= 0 || frame.data.is_empty() {
                 *empty_frames += 1;
                 if *empty_frames >= EMPTY_FRAME_LIMIT {
-                    return Err(CaptureError::Backend(anyhow!(
-                        "macOS stream did not produce a usable video frame"
-                    )));
+                    // SCK delivers Idle (empty) frames while the screen is
+                    // static; yield a retryable Timeout so callers keep
+                    // waiting instead of treating the stream as dead.
+                    return Err(CaptureError::Timeout {
+                        message: format!("{EMPTY_FRAME_LIMIT} consecutive empty (SCK idle) frames"),
+                    });
                 }
                 return Ok(Err(FrameProcessOutcome::Empty));
             }
@@ -213,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn process_scap_frame_errors_after_empty_frame_limit() {
+    fn process_scap_frame_times_out_after_empty_frame_limit() {
         let mut empty_frames = EMPTY_FRAME_LIMIT - 1;
         let frame = scap::frame::Frame::BGRA(scap::frame::BGRAFrame {
             display_time: 0,
@@ -222,10 +225,13 @@ mod tests {
             data: Vec::new(),
         });
 
+        // SCK delivers Idle (empty) frames while the screen is static; that is
+        // a normal steady state, so the stream must yield a retryable Timeout
+        // rather than a fatal error.
         let err = process_scap_frame(frame, &mut empty_frames, None)
             .expect_err("empty frame limit reached");
 
-        assert!(matches!(err, CaptureError::Backend(_)));
+        assert!(matches!(err, CaptureError::Timeout { .. }));
         assert_eq!(empty_frames, EMPTY_FRAME_LIMIT);
     }
 }

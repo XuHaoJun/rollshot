@@ -160,6 +160,7 @@ fn run_headless(args: &CaptureArgs) -> Result<String, CliError> {
                 slot.signal_end();
                 break;
             }
+            Err(CaptureError::Timeout { .. }) => continue,
             Err(err) => {
                 slot.signal_error(format!("{err}"));
                 break;
