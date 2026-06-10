@@ -190,6 +190,13 @@ fn display_id_containing_point(
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
+    /// Find the CGDirectDisplayID of the display under the current cursor
+    /// position without performing a full capture.
+    pub fn display_id_under_cursor() -> Result<u32, MacosOneShotError> {
+        let (cursor_x, cursor_y) = get_cursor_location()?;
+        find_display_under_cursor(cursor_x, cursor_y)
+    }
+
     use super::*;
 
     /// Capture the display under the current cursor position using SCScreenshotManager.
@@ -572,12 +579,27 @@ pub fn capture_display_under_cursor(
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
+/// Stub for non-macOS platforms.
+pub fn display_id_under_cursor() -> Result<u32, MacosOneShotError> {
+    Err(MacosOneShotError::Unsupported(
+        "macOS one-shot capture requires macOS 14.0 or newer".to_string(),
+    ))
+}
+
 #[cfg(target_os = "macos")]
 /// Capture the display under the current cursor position using SCScreenshotManager.
 pub fn capture_display_under_cursor(
     show_cursor: bool,
 ) -> Result<CapturedDisplay, MacosOneShotError> {
     macos_impl::capture_display_under_cursor(show_cursor)
+}
+
+#[cfg(target_os = "macos")]
+/// Return the CGDirectDisplayID of the display under the current cursor
+/// position, without performing a full screenshot capture.
+pub fn display_id_under_cursor() -> Result<u32, MacosOneShotError> {
+    macos_impl::display_id_under_cursor()
 }
 
 #[cfg(test)]

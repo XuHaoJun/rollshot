@@ -7,17 +7,29 @@ pub(super) fn options_to_scap_options(
     options: &CaptureOptions,
 ) -> Result<scap::capturer::Options, CaptureError> {
     let crop_area = region_to_scap_area(&options.region)?;
+    let target = display_at_cursor().map(scap::targets::Target::Display);
 
     Ok(scap::capturer::Options {
         fps: options.fps,
         show_cursor: options.show_cursor,
         show_highlight: false,
-        target: None,
+        target,
         crop_area,
         output_type: scap::frame::FrameType::BGRAFrame,
         output_resolution: scap::capturer::Resolution::Captured,
         excluded_targets: None,
     })
+}
+
+fn display_at_cursor() -> Option<scap::targets::Display> {
+    let display_id = rollshot_macos_oneshot::display_id_under_cursor().ok()?;
+    scap::targets::get_all_targets()
+        .ok()?
+        .into_iter()
+        .find_map(|t| match t {
+            scap::targets::Target::Display(d) if d.id == display_id => Some(d),
+            _ => None,
+        })
 }
 
 pub(super) fn region_to_scap_area(
