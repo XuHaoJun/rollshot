@@ -226,7 +226,9 @@ impl Driver {
         let preview_tx = self.preview_tx.clone();
         self.stitch = Some(std::thread::spawn(move || {
             eprintln!("[rollshot][driver] stitch thread started");
-            let mut last_seq = shared.seq.load(Ordering::Relaxed);
+            let starting_seq = shared.seq.load(Ordering::Relaxed);
+            let fallback_deadline = Instant::now() + Duration::from_millis(250);
+            let mut last_seq = starting_seq;
             let mut capture_miss_tracker = CaptureMissTracker::default();
             let mut last_capture_miss_active = false;
             let mut spotlight_edge = CapturedEdge::Unknown;
@@ -234,6 +236,13 @@ impl Driver {
             let mut accepted_frames = 0_u64;
             while !stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
+                if seq == starting_seq
+                    && last_seq == starting_seq
+                    && Instant::now() >= fallback_deadline
+                {
+                    last_seq = starting_seq.saturating_sub(1);
+                    eprintln!("[rollshot][driver] using latest frame after clean-frame timeout");
+                }
                 let frame = if seq == last_seq {
                     None
                 } else {
