@@ -15,12 +15,7 @@ static SHARED_PREVIEW_RX: Mutex<
 
 #[allow(dead_code)]
 const SENTINEL_MAGENTA: Color = Color::from_rgba(1.0, 0.0, 1.0, 1.0);
-#[allow(dead_code)]
-const TOOLBAR_W: f32 = 360.0;
-const TOOLBAR_H: f32 = 50.0;
 const CHROME_SPACING: f32 = 8.0;
-/// Smallest band (px) around the crop that is worth placing chrome in (R3).
-const MIN_CHROME_BAND: f32 = 64.0;
 
 #[allow(dead_code)]
 const CAPTURE_STATUS_TEXT: &str = "Capturing - scroll the target";
@@ -252,68 +247,19 @@ impl canvas::Program<OverlayMessage> for CropCanvas {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Band {
-    Top,
-    Bottom,
-    Left,
-    Right,
-}
-
-/// R3: during capture, any chrome drawn inside the crop region is self-captured
-/// (the portal grabs the whole monitor, this overlay surface included). Pick the
-/// largest band of screen *outside* the crop rectangle big enough to host chrome
-/// (spec P3.4); `None` if the crop leaves no usable room.
-pub(crate) fn choose_chrome_band(crop: Rectangle, window: iced::Size) -> Option<Band> {
-    let top = crop.y.max(0.0);
-    let bottom = (window.height - (crop.y + crop.height)).max(0.0);
-    let left = crop.x.max(0.0);
-    let right = (window.width - (crop.x + crop.width)).max(0.0);
-
-    let preferred_side = [(Band::Right, right), (Band::Left, left)]
-        .into_iter()
-        .filter(|&(_, width)| width >= TOOLBAR_W)
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(band, _)| band);
-    if preferred_side.is_some() {
-        return preferred_side;
-    }
-
-    [
-        (Band::Bottom, bottom, window.width * bottom),
-        (Band::Top, top, window.width * top),
-        (Band::Right, right, right * window.height),
-        (Band::Left, left, left * window.height),
-    ]
-    .into_iter()
-    .filter(|&(_, edge, _)| edge >= MIN_CHROME_BAND)
-    .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-    .map(|(band, _, _)| band)
-}
-
-pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> PreviewConstraints {
-    let band = choose_chrome_band(crop, window);
-    let (available_width, available_height) = match band {
-        Some(Band::Top) => ((window.width - crop.x.max(0.0)).max(0.0), crop.y.max(0.0)),
-        Some(Band::Bottom) => (
-            (window.width - crop.x.max(0.0)).max(0.0),
-            (window.height - (crop.y + crop.height)).max(0.0),
-        ),
-        Some(Band::Left) => (crop.x.max(0.0), (window.height - crop.y.max(0.0)).max(0.0)),
-        Some(Band::Right) => (
-            (window.width - (crop.x + crop.width)).max(0.0),
-            (window.height - crop.y.max(0.0)).max(0.0),
-        ),
-        None => (PREVIEW_WIDTH as f32, 1.0),
-    };
-    let max_width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0);
-    let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
-    let crop_h = crop.height.max(1.0);
-    let max_height = (band_height as f32).min(crop_h);
-
+pub(crate) fn preview_constraints(crop: Rectangle, _window: iced::Size) -> PreviewConstraints {
     PreviewConstraints {
-        fixed_width: max_width.floor().max(1.0) as u32,
-        max_height: max_height.floor().max(1.0) as u32,
+        fixed_width: PREVIEW_WIDTH,
+        max_height: crop.height.max(1.0).floor() as u32,
+    }
+}
+
+fn preview_size(handle: &image::Handle) -> Option<chrome_placement::Size> {
+    match handle {
+        image::Handle::Rgba { width, height, .. } => {
+            Some(chrome_placement::Size::new(*width as f32, *height as f32))
+        }
+        image::Handle::Path(..) | image::Handle::Bytes(..) => None,
     }
 }
 
@@ -323,12 +269,7 @@ fn chrome_placement_for(
     let crop = state.crop?;
     let window = state.window_size?;
     let preview = (state.workspace.phase() == crate::workspace::WorkspacePhase::ScrollingCapture)
-        .then(|| {
-            state
-                .preview
-                .as_ref()
-                .map(|_| chrome_placement::Size::new(crate::toolbar::TOOLBAR_WIDTH, 100.0))
-        })
+        .then(|| state.preview.as_ref().and_then(preview_size))
         .flatten();
     Some(chrome_placement::place_chrome(
         Rect::new(0.0, 0.0, window.width, window.height),
@@ -368,7 +309,15 @@ pub(crate) fn toolbar_is_visible(state: &OverlayState) -> bool {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
+    view_with_toolbar(state, true)
+}
+
+pub(crate) fn view_with_toolbar(
+    state: &OverlayState,
+    render_toolbar: bool,
+) -> Element<'_, OverlayMessage> {
     let canvas_widget = canvas(CropCanvas::from_state(state))
         .width(Length::Fill)
         .height(Length::Fill);
@@ -423,6 +372,22 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
                 })
                 .into()
         });
+        let transient_error: Option<Element<'_, OverlayMessage>> =
+            state.transient_error.as_deref().map(|message| {
+                container(text(message).size(14))
+                    .padding(8)
+                    .style(|_theme| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgba(
+                            127.0 / 255.0,
+                            29.0 / 255.0,
+                            29.0 / 255.0,
+                            0.94,
+                        ))),
+                        text_color: Some(Color::WHITE),
+                        ..Default::default()
+                    })
+                    .into()
+            });
 
         let toolbar_rect = toolbar_rect_for(state).unwrap_or_else(|| placement.toolbar_rect());
         let chrome_visible = toolbar_is_visible(state);
@@ -445,23 +410,35 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         };
 
         if chrome_visible {
-            chrome_stack = chrome_stack.push(
-                container(toolbar_layer)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::Start)
-                    .align_y(iced::Alignment::Start)
-                    .padding(iced::Padding {
-                        left: toolbar_rect.x,
-                        top: toolbar_rect.y,
-                        right: 0.0,
-                        bottom: 0.0,
-                    }),
-            );
+            if render_toolbar {
+                chrome_stack = chrome_stack.push(
+                    container(toolbar_layer)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Start)
+                        .align_y(iced::Alignment::Start)
+                        .padding(iced::Padding {
+                            left: toolbar_rect.x,
+                            top: toolbar_rect.y,
+                            right: 0.0,
+                            bottom: 0.0,
+                        }),
+                );
+            }
 
             if let Some(w) = warning {
                 chrome_stack = chrome_stack.push(
                     container(w)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::End)
+                        .padding(16),
+                );
+            }
+            if let Some(error) = transient_error {
+                chrome_stack = chrome_stack.push(
+                    container(error)
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .align_x(iced::Alignment::Center)
@@ -474,17 +451,21 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
                 if let Some(handle) = &state.preview {
                     if let Some(preview_rect) = placement.preview_rect() {
                         chrome_stack = chrome_stack.push(
-                            container(image(handle.clone()))
-                                .width(Length::Fixed(preview_rect.width))
-                                .height(Length::Fixed(preview_rect.height))
-                                .align_x(iced::Alignment::Start)
-                                .align_y(iced::Alignment::Start)
-                                .padding(iced::Padding {
-                                    left: preview_rect.x,
-                                    top: preview_rect.y,
-                                    right: 0.0,
-                                    bottom: 0.0,
-                                }),
+                            container(
+                                container(image(handle.clone()))
+                                    .width(Length::Fixed(preview_rect.width))
+                                    .height(Length::Fixed(preview_rect.height)),
+                            )
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(iced::Alignment::Start)
+                            .align_y(iced::Alignment::Start)
+                            .padding(iced::Padding {
+                                left: preview_rect.x,
+                                top: preview_rect.y,
+                                right: 0.0,
+                                bottom: 0.0,
+                            }),
                         );
                     }
                 }
@@ -824,14 +805,14 @@ pub(crate) fn update(
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_chrome_band, crop_mask_bands, preview_constraints, token_color, Band,
-        OverlayMessage, OverlayState,
+        chrome_placement_for, crop_mask_bands, preview_constraints, token_color, OverlayMessage,
+        OverlayState,
     };
     use iced::{Point, Rectangle, Size};
     use rollshot_overlay_core::preview::PREVIEW_WIDTH;
 
     #[test]
-    fn preview_constraints_use_fixed_width_and_bottom_band_height() {
+    fn preview_constraints_use_fixed_width_and_crop_height() {
         let crop = Rectangle {
             x: 100.0,
             y: 100.0,
@@ -843,11 +824,11 @@ mod tests {
         let constraints = preview_constraints(crop, window);
 
         assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
-        assert_eq!(constraints.max_height, 382);
+        assert_eq!(constraints.max_height, 900);
     }
 
     #[test]
-    fn preview_constraints_clamp_width_to_side_band() {
+    fn preview_constraints_ignore_narrow_outside_bands() {
         let crop = Rectangle {
             x: 200.0,
             y: 10.0,
@@ -858,8 +839,8 @@ mod tests {
 
         let constraints = preview_constraints(crop, window);
 
-        assert_eq!(constraints.fixed_width, 200);
-        assert_eq!(constraints.max_height, 1372);
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 1420);
     }
 
     #[test]
@@ -879,42 +860,46 @@ mod tests {
     }
 
     #[test]
-    fn choose_chrome_band_prefers_side_that_fits_controls() {
+    fn preview_constraints_use_crop_for_activity_auto_hide_fallback() {
         let crop = Rectangle {
-            x: 100.0,
-            y: 100.0,
-            width: 700.0,
-            height: 200.0,
+            x: 10.0,
+            y: 10.0,
+            width: 980.0,
+            height: 780.0,
         };
-        let window = Size::new(1200.0, 1000.0);
+        let window = Size::new(1000.0, 800.0);
 
-        assert_eq!(choose_chrome_band(crop, window), Some(Band::Right));
+        let constraints = preview_constraints(crop, window);
+
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 780);
     }
 
     #[test]
-    fn choose_chrome_band_uses_larger_side_when_both_fit_controls() {
-        let crop = Rectangle {
-            x: 400.0,
-            y: 100.0,
-            width: 300.0,
-            height: 200.0,
+    fn chrome_placement_uses_actual_growing_preview_size() {
+        let mut state = OverlayState {
+            crop: Some(Rectangle {
+                x: 385.0,
+                y: 189.0,
+                width: 1037.0,
+                height: 520.0,
+            }),
+            window_size: Some(Size::new(1470.0, 956.0)),
+            preview: Some(iced::widget::image::Handle::from_rgba(
+                PREVIEW_WIDTH,
+                240,
+                vec![0; (PREVIEW_WIDTH * 240 * 4) as usize],
+            )),
+            ..OverlayState::default()
         };
-        let window = Size::new(1200.0, 1000.0);
+        state.workspace.begin_scrolling();
 
-        assert_eq!(choose_chrome_band(crop, window), Some(Band::Right));
-    }
+        let preview = chrome_placement_for(&state)
+            .and_then(|placement| placement.preview_rect())
+            .expect("preview placement");
 
-    #[test]
-    fn choose_chrome_band_falls_back_to_largest_band_when_sides_are_too_narrow() {
-        let crop = Rectangle {
-            x: 100.0,
-            y: 200.0,
-            width: 500.0,
-            height: 100.0,
-        };
-        let window = Size::new(800.0, 600.0);
-
-        assert_eq!(choose_chrome_band(crop, window), Some(Band::Bottom));
+        assert_eq!(preview.width, PREVIEW_WIDTH as f32);
+        assert_eq!(preview.height, 240.0);
     }
 
     #[test]

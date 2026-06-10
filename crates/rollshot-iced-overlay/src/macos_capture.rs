@@ -124,7 +124,11 @@ fn passthrough_action(old_phase: WorkspacePhase, new_phase: WorkspacePhase) -> P
         (_, WorkspacePhase::ScrollingCapture) if old_phase != WorkspacePhase::ScrollingCapture => {
             PassthroughAction::Enable
         }
-        (WorkspacePhase::ScrollingCapture, _) => PassthroughAction::Disable,
+        (WorkspacePhase::ScrollingCapture, new_phase)
+            if new_phase != WorkspacePhase::ScrollingCapture =>
+        {
+            PassthroughAction::Disable
+        }
         _ => PassthroughAction::Noop,
     }
 }
@@ -148,6 +152,10 @@ fn controls_message_to_overlay(
     }
 }
 
+fn render_overlay_toolbar(phase: WorkspacePhase) -> bool {
+    phase != WorkspacePhase::ScrollingCapture
+}
+
 #[derive(Debug, Clone)]
 pub struct Message(InternalMessage);
 
@@ -167,8 +175,8 @@ enum InternalMessage {
     OverlayWindowReady(window::Id),
     ControlsWindowReady(window::Id),
     WindowPatched(Result<(), String>),
-    PassthroughEnabled,
-    PassthroughDisabled,
+    PassthroughEnabled(Result<(), String>),
+    PassthroughDisabled(Result<(), String>),
 }
 
 /// Reported to the host after [`Component::update`] / [`Component::apply_overlay_effect`].
@@ -374,11 +382,17 @@ impl Component {
         self.pending_finish = Some(PendingFinish::Cancel);
     }
 
+    fn passthrough_window(&self) -> Option<window::Id> {
+        self.overlay_window.or(self.overlay.window_id)
+    }
+
     fn disable_passthrough_task(&self) -> Task<Message> {
-        match self.overlay.window_id {
-            Some(id) => window::disable_mouse_passthrough(id)
-                .chain(Task::done(Message(InternalMessage::PassthroughDisabled))),
-            None => Task::done(Message(InternalMessage::PassthroughDisabled)),
+        match self.passthrough_window() {
+            Some(id) => window::run(id, |window| {
+                crate::macos_window::set_mouse_passthrough(window, false)
+            })
+            .map(|result| Message(InternalMessage::PassthroughDisabled(result))),
+            None => Task::done(Message(InternalMessage::PassthroughDisabled(Ok(())))),
         }
     }
 
@@ -419,9 +433,7 @@ impl Component {
     pub fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![event::listen_with(overlay_event_message)];
         if self.overlay.workspace.phase() == WorkspacePhase::ScrollingCapture {
-            if PREVIEW_RX.lock().unwrap().is_some() {
-                subs.push(preview_stream());
-            }
+            subs.push(preview_stream());
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Message(InternalMessage::Overlay(OverlayMessage::Tick))),
@@ -449,7 +461,11 @@ impl Component {
                 .into();
         }
 
-        crate::app::view(&self.overlay).map(|m| Message(InternalMessage::Overlay(m)))
+        crate::app::view_with_toolbar(
+            &self.overlay,
+            render_overlay_toolbar(self.overlay.workspace.phase()),
+        )
+        .map(|m| Message(InternalMessage::Overlay(m)))
     }
 
     /// After the overlay window opens, validate that a screenshot one-shot image
@@ -506,12 +522,19 @@ impl Component {
                 }
                 HostEffect::None
             }
-            InternalMessage::PassthroughEnabled => {
-                self.overlay.mouse_passthrough_active = true;
+            InternalMessage::PassthroughEnabled(result) => {
+                self.overlay.mouse_passthrough_active = result.is_ok();
+                if let Err(error) = result {
+                    self.overlay.transient_error =
+                        Some(format!("failed to enable scroll passthrough: {error}"));
+                }
                 HostEffect::None
             }
-            InternalMessage::PassthroughDisabled => {
+            InternalMessage::PassthroughDisabled(result) => {
                 self.overlay.mouse_passthrough_active = false;
+                if let Err(error) = result {
+                    eprintln!("failed to disable macOS overlay passthrough: {error}");
+                }
                 match self.pending_finish.take() {
                     Some(PendingFinish::Complete(result)) => HostEffect::Completed(result),
                     Some(PendingFinish::Cancel) => HostEffect::Cancelled,
@@ -547,14 +570,18 @@ impl Component {
         }
 
         let passthrough_task = match passthrough {
-            PassthroughAction::Enable => match self.overlay.window_id {
-                Some(id) => window::enable_mouse_passthrough(id)
-                    .chain(Task::done(Message(InternalMessage::PassthroughEnabled))),
+            PassthroughAction::Enable => match self.passthrough_window() {
+                Some(id) => window::run(id, |window| {
+                    crate::macos_window::set_mouse_passthrough(window, true)
+                })
+                .map(|result| Message(InternalMessage::PassthroughEnabled(result))),
                 None => Task::none(),
             },
-            PassthroughAction::Disable => match self.overlay.window_id {
-                Some(id) => window::disable_mouse_passthrough(id)
-                    .chain(Task::done(Message(InternalMessage::PassthroughDisabled))),
+            PassthroughAction::Disable => match self.passthrough_window() {
+                Some(id) => window::run(id, |window| {
+                    crate::macos_window::set_mouse_passthrough(window, false)
+                })
+                .map(|result| Message(InternalMessage::PassthroughDisabled(result))),
                 None => Task::none(),
             },
             PassthroughAction::Noop => Task::none(),
@@ -686,17 +713,21 @@ impl Component {
                     EffectOutcome::Terminal(HostEffect::Cancelled)
                 }
             }
-            OverlayEffect::EnablePassthrough => match self.overlay.window_id {
+            OverlayEffect::EnablePassthrough => match self.passthrough_window() {
                 Some(id) => EffectOutcome::Task(
-                    window::enable_mouse_passthrough(id)
-                        .chain(Task::done(Message(InternalMessage::PassthroughEnabled))),
+                    window::run(id, |window| {
+                        crate::macos_window::set_mouse_passthrough(window, true)
+                    })
+                    .map(|result| Message(InternalMessage::PassthroughEnabled(result))),
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
-            OverlayEffect::DisablePassthrough => match self.overlay.window_id {
+            OverlayEffect::DisablePassthrough => match self.passthrough_window() {
                 Some(id) => EffectOutcome::Task(
-                    window::disable_mouse_passthrough(id)
-                        .chain(Task::done(Message(InternalMessage::PassthroughDisabled))),
+                    window::run(id, |window| {
+                        crate::macos_window::set_mouse_passthrough(window, false)
+                    })
+                    .map(|result| Message(InternalMessage::PassthroughDisabled(result))),
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
@@ -1055,7 +1086,7 @@ mod tests {
         let _ = effect;
         assert!(component.has_pending_completion());
         assert!(matches!(
-            component.update(Message(InternalMessage::PassthroughDisabled)),
+            component.update(Message(InternalMessage::PassthroughDisabled(Ok(())))),
             HostEffect::Completed(_)
         ));
     }
@@ -1086,7 +1117,7 @@ mod tests {
             Some(PendingFinish::Cancel)
         ));
         assert!(matches!(
-            component.update(Message(InternalMessage::PassthroughDisabled)),
+            component.update(Message(InternalMessage::PassthroughDisabled(Ok(())))),
             HostEffect::Cancelled
         ));
         // Pending state cleared once consumed.
@@ -1102,11 +1133,40 @@ mod tests {
     }
 
     #[test]
+    fn passthrough_targets_host_owned_overlay_window() {
+        let component = capture_component_with_windows();
+        assert_eq!(component.passthrough_window(), component.overlay_window());
+    }
+
+    #[test]
+    fn passthrough_result_updates_actual_state() {
+        let mut component = capture_component();
+        let _ = component.update(Message(InternalMessage::PassthroughEnabled(Err(
+            "native failure".to_string(),
+        ))));
+        assert!(!component.mouse_passthrough_active());
+        assert_eq!(
+            component.overlay.transient_error.as_deref(),
+            Some("failed to enable scroll passthrough: native failure")
+        );
+
+        let _ = component.update(Message(InternalMessage::PassthroughEnabled(Ok(()))));
+        assert!(component.mouse_passthrough_active());
+    }
+
+    #[test]
     fn controls_window_tracks_visible_toolbar_rect() {
         assert_eq!(
             controls_window_action(None, Some(rect(20.0, 30.0, 260.0, 48.0))),
             ControlsWindowAction::Open(rect(20.0, 30.0, 260.0, 48.0))
         );
+    }
+
+    #[test]
+    fn scrolling_toolbar_is_rendered_only_in_controls_window() {
+        assert!(!render_overlay_toolbar(WorkspacePhase::ScrollingCapture));
+        assert!(render_overlay_toolbar(WorkspacePhase::Selecting));
+        assert!(render_overlay_toolbar(WorkspacePhase::Selected));
     }
 
     #[test]
@@ -1138,6 +1198,17 @@ mod tests {
         assert_eq!(
             passthrough_action(WorkspacePhase::Selecting, WorkspacePhase::ScrollingCapture),
             PassthroughAction::Enable
+        );
+    }
+
+    #[test]
+    fn scrolling_capture_events_keep_passthrough_enabled() {
+        assert_eq!(
+            passthrough_action(
+                WorkspacePhase::ScrollingCapture,
+                WorkspacePhase::ScrollingCapture
+            ),
+            PassthroughAction::Noop
         );
     }
 

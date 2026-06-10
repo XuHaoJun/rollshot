@@ -143,6 +143,51 @@ fn position_in_band(band: Band, band_r: Rect, crop: Rect, size: Size) -> Rect {
     }
 }
 
+fn adjacent_preview_rect(
+    band: Band,
+    viewport: Rect,
+    crop: Rect,
+    size: Size,
+    margin: f32,
+) -> Option<Rect> {
+    let rect = match band {
+        Band::Right => Rect::new(
+            crop.x + crop.width + margin,
+            crop.y
+                .clamp(viewport.y, viewport.y + viewport.height - size.height),
+            size.width,
+            size.height,
+        ),
+        Band::Left => Rect::new(
+            crop.x - margin - size.width,
+            crop.y
+                .clamp(viewport.y, viewport.y + viewport.height - size.height),
+            size.width,
+            size.height,
+        ),
+        Band::Top => Rect::new(
+            crop.x
+                .clamp(viewport.x, viewport.x + viewport.width - size.width),
+            crop.y - margin - size.height,
+            size.width,
+            size.height,
+        ),
+        Band::Bottom => Rect::new(
+            crop.x
+                .clamp(viewport.x, viewport.x + viewport.width - size.width),
+            crop.y + crop.height + margin,
+            size.width,
+            size.height,
+        ),
+    };
+
+    (rect.x >= viewport.x
+        && rect.y >= viewport.y
+        && rect.x + rect.width <= viewport.x + viewport.width
+        && rect.y + rect.height <= viewport.y + viewport.height)
+        .then_some(rect)
+}
+
 fn stack_fits_in_band(band_r: Rect, s1: Size, s2: Size, spacing: f32) -> bool {
     s1.width <= band_r.width
         && s2.width <= band_r.width
@@ -223,24 +268,15 @@ pub fn place_chrome(viewport: Rect, crop: Rect, req: ChromeRequirements) -> Chro
         };
     };
 
-    let preview_band = band_rects
-        .iter()
-        .filter(|(b, _)| *b != toolbar_band)
-        .filter(|(b, r)| fits_in_band(*b, *r, preview_size))
-        .max_by(|(_, a), (_, b)| {
-            (a.width * a.height)
-                .partial_cmp(&(b.width * b.height))
-                .unwrap()
+    let preview = [Band::Right, Band::Left, Band::Top, Band::Bottom]
+        .into_iter()
+        .filter_map(|band| {
+            adjacent_preview_rect(band, viewport, crop, preview_size, req.margin)
+                .map(|rect| (band, rect))
         })
-        .map(|(b, _)| *b);
+        .find(|(_, rect)| !rect.intersects(&toolbar_rect));
 
-    if let Some(preview_band) = preview_band {
-        let preview_band_rect = band_rects
-            .iter()
-            .find(|(b, _)| *b == preview_band)
-            .map(|(_, r)| *r)
-            .unwrap();
-        let preview_rect = position_in_band(preview_band, preview_band_rect, crop, preview_size);
+    if let Some((preview_band, preview_rect)) = preview {
         return ChromePlacement::Separate {
             toolbar_band,
             toolbar: toolbar_rect,
@@ -351,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_uses_different_largest_band_when_available() {
+    fn preview_uses_right_left_top_bottom_priority_when_space_is_available() {
         let placement = place_chrome(
             Rect::new(0.0, 0.0, 1200.0, 900.0),
             Rect::new(250.0, 180.0, 600.0, 500.0),
@@ -362,6 +398,36 @@ mod tests {
         assert!(!placement
             .toolbar_rect()
             .intersects(&placement.preview_rect().unwrap()));
+        assert_eq!(placement.preview_rect().unwrap().x, 858.0);
+    }
+
+    #[test]
+    fn preview_uses_left_when_right_is_too_narrow() {
+        let placement = place_chrome(
+            Rect::new(0.0, 0.0, 1200.0, 900.0),
+            Rect::new(350.0, 180.0, 700.0, 500.0),
+            req(Size::new(280.0, 48.0), Some(Size::new(240.0, 320.0))),
+        );
+
+        assert_eq!(placement.preview_band(), Some(Band::Left));
+        assert_eq!(placement.preview_rect().unwrap().x, 102.0);
+    }
+
+    #[test]
+    fn preview_uses_top_then_bottom_when_sides_are_too_narrow() {
+        let top = place_chrome(
+            Rect::new(0.0, 0.0, 1000.0, 900.0),
+            Rect::new(100.0, 350.0, 800.0, 400.0),
+            req(Size::new(280.0, 48.0), Some(Size::new(280.0, 300.0))),
+        );
+        assert_eq!(top.preview_band(), Some(Band::Top));
+
+        let bottom = place_chrome(
+            Rect::new(0.0, 0.0, 1000.0, 900.0),
+            Rect::new(100.0, 50.0, 800.0, 400.0),
+            req(Size::new(280.0, 48.0), Some(Size::new(280.0, 300.0))),
+        );
+        assert_eq!(bottom.preview_band(), Some(Band::Bottom));
     }
 
     #[test]

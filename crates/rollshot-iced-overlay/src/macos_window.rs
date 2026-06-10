@@ -102,12 +102,41 @@ pub(crate) fn apply_overlay_window_patch(handle: &dyn window::Window) -> Result<
     apply_overlay_window_patch_impl(handle)
 }
 
+pub(crate) fn set_mouse_passthrough(
+    handle: &dyn window::Window,
+    enabled: bool,
+) -> Result<(), String> {
+    let ns_window = ns_window(handle)?;
+    ns_window.setIgnoresMouseEvents(enabled);
+    Ok(())
+}
+
 #[allow(unsafe_code)]
 fn apply_overlay_window_patch_impl(handle: &dyn window::Window) -> Result<(), String> {
+    use objc2_app_kit::NSWindowCollectionBehavior;
+
+    let ns_window = ns_window(handle)?;
+
+    ns_window.setHasShadow(false);
+    ns_window.setOpaque(false);
+    ns_window.setIgnoresMouseEvents(false);
+    ns_window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary,
+    );
+
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn ns_window(
+    handle: &dyn window::Window,
+) -> Result<objc2::rc::Retained<objc2_app_kit::NSWindow>, String> {
     use iced::window::raw_window_handle::RawWindowHandle;
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSView, NSWindowCollectionBehavior};
+    use objc2_app_kit::NSView;
 
     let raw = handle
         .window_handle()
@@ -126,20 +155,8 @@ fn apply_overlay_window_patch_impl(handle: &dyn window::Window) -> Result<(), St
         Retained::retain(view).ok_or_else(|| "failed to retain iced NSView".to_string())?
     };
 
-    let ns_window = view
-        .window()
-        .ok_or_else(|| "iced NSView is not attached to an NSWindow".to_string())?;
-
-    ns_window.setHasShadow(false);
-    ns_window.setOpaque(false);
-    ns_window.setIgnoresMouseEvents(false);
-    ns_window.setCollectionBehavior(
-        NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Stationary,
-    );
-
-    Ok(())
+    view.window()
+        .ok_or_else(|| "iced NSView is not attached to an NSWindow".to_string())
 }
 
 #[cfg(test)]

@@ -221,12 +221,23 @@ impl Driver {
         let stop = Arc::clone(&self.stop);
         let preview_tx = self.preview_tx.clone();
         self.stitch = Some(std::thread::spawn(move || {
-            let mut last_seq = shared.seq.load(Ordering::Relaxed);
+            let starting_seq = shared.seq.load(Ordering::Relaxed);
+            let fallback_deadline = Instant::now() + Duration::from_millis(250);
+            let mut last_seq = starting_seq;
             let mut capture_miss_tracker = CaptureMissTracker::default();
             let mut last_capture_miss_active = false;
             let mut spotlight_edge = CapturedEdge::Unknown;
+            let mut fallback_used = false;
             while !stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
+                if !fallback_used
+                    && seq == starting_seq
+                    && last_seq == starting_seq
+                    && Instant::now() >= fallback_deadline
+                {
+                    fallback_used = true;
+                    last_seq = starting_seq.saturating_sub(1);
+                }
                 let frame = if seq == last_seq {
                     None
                 } else {
