@@ -217,14 +217,21 @@ impl Driver {
         self.overlay_logical = overlay_logical;
         let region =
             crate::coords::map_crop_to_frame(crop_logical, overlay_logical, self.source_size);
+        eprintln!(
+            "[rollshot][driver] begin_stitch crop={crop_logical:?} overlay={overlay_logical:?} source={:?} region={region:?} preview={preview_constraints:?}",
+            self.source_size
+        );
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
         let preview_tx = self.preview_tx.clone();
         self.stitch = Some(std::thread::spawn(move || {
+            eprintln!("[rollshot][driver] stitch thread started");
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
             let mut capture_miss_tracker = CaptureMissTracker::default();
             let mut last_capture_miss_active = false;
             let mut spotlight_edge = CapturedEdge::Unknown;
+            let mut processed_frames = 0_u64;
+            let mut accepted_frames = 0_u64;
             while !stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
                 let frame = if seq == last_seq {
@@ -234,6 +241,7 @@ impl Driver {
                     shared.latest.lock().ok().and_then(|s| s.clone())
                 };
                 if let Some(frame) = frame {
+                    processed_frames += 1;
                     let cropped = match crop_frame(&frame, region) {
                         Ok(c) => c,
                         Err(err) => {
@@ -246,7 +254,18 @@ impl Driver {
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
                         let outcome = stitcher.push_frame(cropped.image);
                         let signal = progress_signal_from_outcome(&outcome);
+                        if processed_frames <= 3 {
+                            eprintln!(
+                                "[rollshot][driver] stitch frame={processed_frames} signal={signal:?}"
+                            );
+                        }
                         if let StitchProgressSignal::Accepted { edge } = signal {
+                            accepted_frames += 1;
+                            if accepted_frames == 1 || accepted_frames.is_multiple_of(30) {
+                                eprintln!(
+                                    "[rollshot][driver] accepted frame count={accepted_frames} edge={edge:?}"
+                                );
+                            }
                             if edge != CapturedEdge::Unknown {
                                 spotlight_edge = edge;
                             }
@@ -269,14 +288,22 @@ impl Driver {
                                 spotlight_edge,
                                 preview_constraints,
                             ) {
-                                let _ =
+                                let sent =
                                     preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
+                                if accepted_frames == 1 || sent.is_err() {
+                                    eprintln!(
+                                        "[rollshot][driver] preview send accepted_count={accepted_frames} result={sent:?}"
+                                    );
+                                }
                             }
                         }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            eprintln!(
+                "[rollshot][driver] stitch thread stopped processed={processed_frames} accepted={accepted_frames}"
+            );
         }));
     }
 

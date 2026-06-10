@@ -107,13 +107,13 @@ fn namespace() -> String {
 
 fn preview_stream() -> iced::Subscription<Message> {
     iced::Subscription::run(|| {
-        let rx = PREVIEW_RX
-            .lock()
-            .unwrap()
-            .take()
-            .expect("preview channel already consumed");
-
-        rx.map(|e| Message::Overlay(app::OverlayMessage::LiveEvent(e)))
+        let rx = PREVIEW_RX.lock().unwrap().take();
+        match rx {
+            Some(rx) => rx
+                .map(|e| Message::Overlay(app::OverlayMessage::LiveEvent(e)))
+                .boxed(),
+            None => iced::futures::stream::pending().boxed(),
+        }
     })
 }
 
@@ -122,9 +122,7 @@ fn subscription(state: &Overlay) -> iced::Subscription<Message> {
     let mut subs =
         vec![event::listen().map(|e| Message::Overlay(app::OverlayMessage::IcedEvent(e)))];
     if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
-        if PREVIEW_RX.lock().unwrap().is_some() {
-            subs.push(preview_stream());
-        }
+        subs.push(preview_stream());
         subs.push(
             iced::time::every(std::time::Duration::from_millis(250))
                 .map(|_| Message::Overlay(app::OverlayMessage::Tick)),

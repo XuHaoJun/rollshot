@@ -124,7 +124,11 @@ fn passthrough_action(old_phase: WorkspacePhase, new_phase: WorkspacePhase) -> P
         (_, WorkspacePhase::ScrollingCapture) if old_phase != WorkspacePhase::ScrollingCapture => {
             PassthroughAction::Enable
         }
-        (WorkspacePhase::ScrollingCapture, _) => PassthroughAction::Disable,
+        (WorkspacePhase::ScrollingCapture, new_phase)
+            if new_phase != WorkspacePhase::ScrollingCapture =>
+        {
+            PassthroughAction::Disable
+        }
         _ => PassthroughAction::Noop,
     }
 }
@@ -148,6 +152,10 @@ fn controls_message_to_overlay(
     }
 }
 
+fn render_overlay_toolbar(phase: WorkspacePhase) -> bool {
+    phase != WorkspacePhase::ScrollingCapture
+}
+
 #[derive(Debug, Clone)]
 pub struct Message(InternalMessage);
 
@@ -167,8 +175,8 @@ enum InternalMessage {
     OverlayWindowReady(window::Id),
     ControlsWindowReady(window::Id),
     WindowPatched(Result<(), String>),
-    PassthroughEnabled,
-    PassthroughDisabled,
+    PassthroughEnabled(Result<(), String>),
+    PassthroughDisabled(Result<(), String>),
 }
 
 /// Reported to the host after [`Component::update`] / [`Component::apply_overlay_effect`].
@@ -215,6 +223,10 @@ impl Component {
     /// picker dismissed). The host opens the overlay window and feeds the boot
     /// task returned by [`Component::boot`].
     pub fn new(config: &OverlayConfig) -> Result<Option<Self>, OverlayError> {
+        eprintln!(
+            "[rollshot][macos-capture] component new mode={:?} backend={} fps={}",
+            config.initial_mode, config.backend, config.fps
+        );
         #[cfg(not(test))]
         let factories = real_factories();
         #[cfg(test)]
@@ -340,6 +352,7 @@ impl Component {
     /// later, when the `Opened` event arrives through `subscription` -> `update`
     /// (matching the original runner), so no boot task is needed here.
     pub fn boot(&mut self, overlay_window: window::Id) -> Task<Message> {
+        eprintln!("[rollshot][macos-capture] boot overlay_window={overlay_window:?}");
         self.overlay_window = Some(overlay_window);
         Task::none()
     }
@@ -374,11 +387,17 @@ impl Component {
         self.pending_finish = Some(PendingFinish::Cancel);
     }
 
+    fn passthrough_window(&self) -> Option<window::Id> {
+        self.overlay_window.or(self.overlay.window_id)
+    }
+
     fn disable_passthrough_task(&self) -> Task<Message> {
-        match self.overlay.window_id {
-            Some(id) => window::disable_mouse_passthrough(id)
-                .chain(Task::done(Message(InternalMessage::PassthroughDisabled))),
-            None => Task::done(Message(InternalMessage::PassthroughDisabled)),
+        match self.passthrough_window() {
+            Some(id) => window::run(id, |window| {
+                crate::macos_window::set_mouse_passthrough(window, false)
+            })
+            .map(|result| Message(InternalMessage::PassthroughDisabled(result))),
+            None => Task::done(Message(InternalMessage::PassthroughDisabled(Ok(())))),
         }
     }
 
@@ -388,6 +407,9 @@ impl Component {
     fn arm_preview_subscription(&mut self) {
         if let Some(rx) = self.preview_rx.take() {
             *PREVIEW_RX.lock().unwrap() = Some(rx);
+            eprintln!("[rollshot][macos-capture] preview receiver armed");
+        } else {
+            eprintln!("[rollshot][macos-capture] preview receiver arm requested but missing");
         }
     }
 
@@ -419,9 +441,7 @@ impl Component {
     pub fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![event::listen_with(overlay_event_message)];
         if self.overlay.workspace.phase() == WorkspacePhase::ScrollingCapture {
-            if PREVIEW_RX.lock().unwrap().is_some() {
-                subs.push(preview_stream());
-            }
+            subs.push(preview_stream());
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Message(InternalMessage::Overlay(OverlayMessage::Tick))),
@@ -449,7 +469,11 @@ impl Component {
                 .into();
         }
 
-        crate::app::view(&self.overlay).map(|m| Message(InternalMessage::Overlay(m)))
+        crate::app::view_with_toolbar(
+            &self.overlay,
+            render_overlay_toolbar(self.overlay.workspace.phase()),
+        )
+        .map(|m| Message(InternalMessage::Overlay(m)))
     }
 
     /// After the overlay window opens, validate that a screenshot one-shot image
@@ -481,6 +505,10 @@ impl Component {
     pub fn update(&mut self, message: Message) -> HostEffect {
         match message.0 {
             InternalMessage::WindowOpened { id, size } => {
+                eprintln!(
+                    "[rollshot][macos-capture] window opened id={id:?} size={size:?} overlay={:?} controls={:?}",
+                    self.overlay_window, self.controls_window
+                );
                 let patch = window::run(id, crate::macos_window::apply_overlay_window_patch)
                     .map(|r| Message(InternalMessage::WindowPatched(r)));
                 if Some(id) == self.overlay_window {
@@ -492,26 +520,39 @@ impl Component {
                 HostEffect::Task(patch)
             }
             InternalMessage::OverlayWindowReady(id) => {
+                eprintln!("[rollshot][macos-capture] overlay window ready id={id:?}");
                 self.overlay_window = Some(id);
                 HostEffect::None
             }
             InternalMessage::ControlsWindowReady(id) => {
+                eprintln!("[rollshot][macos-capture] controls window ready id={id:?}");
                 self.controls_window = Some(id);
                 HostEffect::None
             }
             InternalMessage::Overlay(msg) => self.update_overlay(msg),
             InternalMessage::WindowPatched(result) => {
+                eprintln!("[rollshot][macos-capture] window patch result={result:?}");
                 if let Err(err) = result {
                     eprintln!("failed to patch macOS iced overlay window: {err}");
                 }
                 HostEffect::None
             }
-            InternalMessage::PassthroughEnabled => {
-                self.overlay.mouse_passthrough_active = true;
+            InternalMessage::PassthroughEnabled(result) => {
+                eprintln!("[rollshot][macos-capture] passthrough enable result={result:?}");
+                self.overlay.mouse_passthrough_active = result.is_ok();
+                if let Err(error) = result {
+                    eprintln!("failed to enable macOS overlay passthrough: {error}");
+                    self.overlay.transient_error =
+                        Some(format!("failed to enable scroll passthrough: {error}"));
+                }
                 HostEffect::None
             }
-            InternalMessage::PassthroughDisabled => {
+            InternalMessage::PassthroughDisabled(result) => {
+                eprintln!("[rollshot][macos-capture] passthrough disable result={result:?}");
                 self.overlay.mouse_passthrough_active = false;
+                if let Err(error) = result {
+                    eprintln!("failed to disable macOS overlay passthrough: {error}");
+                }
                 match self.pending_finish.take() {
                     Some(PendingFinish::Complete(result)) => HostEffect::Completed(result),
                     Some(PendingFinish::Cancel) => HostEffect::Cancelled,
@@ -525,6 +566,10 @@ impl Component {
     /// passthrough/controls-window side effects that depend on phase changes.
     fn update_overlay(&mut self, msg: OverlayMessage) -> HostEffect {
         let old_phase = self.overlay.workspace.phase();
+        let first_preview = matches!(
+            &msg,
+            OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::Preview(_))
+        ) && self.overlay.preview.is_none();
         let msg = controls_message_to_overlay(msg, self.controls_rect);
         let (effect, _region_mode) = app::update(&mut self.overlay, msg);
 
@@ -541,20 +586,32 @@ impl Component {
         let passthrough = passthrough_action(old_phase, new_phase);
         let visible_rect = self.visible_toolbar_rect();
         let controls = controls_window_action(self.controls_rect, visible_rect);
+        if old_phase != new_phase || !matches!(effect, OverlayEffect::None) {
+            eprintln!(
+                "[rollshot][macos-capture] update old_phase={old_phase:?} new_phase={new_phase:?} effect={effect:?} passthrough={passthrough:?} overlay_window={:?} app_window={:?}",
+                self.overlay_window, self.overlay.window_id
+            );
+        } else if first_preview {
+            eprintln!("[rollshot][macos-capture] first preview event received");
+        }
 
         if passthrough == PassthroughAction::Enable {
             self.arm_preview_subscription();
         }
 
         let passthrough_task = match passthrough {
-            PassthroughAction::Enable => match self.overlay.window_id {
-                Some(id) => window::enable_mouse_passthrough(id)
-                    .chain(Task::done(Message(InternalMessage::PassthroughEnabled))),
+            PassthroughAction::Enable => match self.passthrough_window() {
+                Some(id) => window::run(id, |window| {
+                    crate::macos_window::set_mouse_passthrough(window, true)
+                })
+                .map(|result| Message(InternalMessage::PassthroughEnabled(result))),
                 None => Task::none(),
             },
-            PassthroughAction::Disable => match self.overlay.window_id {
-                Some(id) => window::disable_mouse_passthrough(id)
-                    .chain(Task::done(Message(InternalMessage::PassthroughDisabled))),
+            PassthroughAction::Disable => match self.passthrough_window() {
+                Some(id) => window::run(id, |window| {
+                    crate::macos_window::set_mouse_passthrough(window, false)
+                })
+                .map(|result| Message(InternalMessage::PassthroughDisabled(result))),
                 None => Task::none(),
             },
             PassthroughAction::Noop => Task::none(),
@@ -589,6 +646,10 @@ impl Component {
                     height: ws.height as u32,
                 };
                 let preview_constraints = app::preview_constraints(crop, ws);
+                eprintln!(
+                    "[rollshot][macos-capture] begin stitch crop={crop:?} window={ws:?} preview={preview_constraints:?} driver_present={}",
+                    self.driver.is_some()
+                );
                 if let Some(driver) = self.driver.as_mut() {
                     driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                 }
@@ -686,17 +747,21 @@ impl Component {
                     EffectOutcome::Terminal(HostEffect::Cancelled)
                 }
             }
-            OverlayEffect::EnablePassthrough => match self.overlay.window_id {
+            OverlayEffect::EnablePassthrough => match self.passthrough_window() {
                 Some(id) => EffectOutcome::Task(
-                    window::enable_mouse_passthrough(id)
-                        .chain(Task::done(Message(InternalMessage::PassthroughEnabled))),
+                    window::run(id, |window| {
+                        crate::macos_window::set_mouse_passthrough(window, true)
+                    })
+                    .map(|result| Message(InternalMessage::PassthroughEnabled(result))),
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
-            OverlayEffect::DisablePassthrough => match self.overlay.window_id {
+            OverlayEffect::DisablePassthrough => match self.passthrough_window() {
                 Some(id) => EffectOutcome::Task(
-                    window::disable_mouse_passthrough(id)
-                        .chain(Task::done(Message(InternalMessage::PassthroughDisabled))),
+                    window::run(id, |window| {
+                        crate::macos_window::set_mouse_passthrough(window, false)
+                    })
+                    .map(|result| Message(InternalMessage::PassthroughDisabled(result))),
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
@@ -874,10 +939,17 @@ fn preview_stream() -> iced::Subscription<Message> {
     iced::Subscription::run(|| {
         let rx = PREVIEW_RX.lock().unwrap().take();
         match rx {
-            Some(rx) => rx
-                .map(|e| Message(InternalMessage::Overlay(OverlayMessage::LiveEvent(e))))
-                .boxed(),
-            None => iced::futures::stream::pending().boxed(),
+            Some(rx) => {
+                eprintln!("[rollshot][macos-capture] preview subscription took receiver");
+                rx.map(|e| Message(InternalMessage::Overlay(OverlayMessage::LiveEvent(e))))
+                    .boxed()
+            }
+            None => {
+                eprintln!(
+                    "[rollshot][macos-capture] preview subscription started without receiver"
+                );
+                iced::futures::stream::pending().boxed()
+            }
         }
     })
 }
@@ -1055,7 +1127,7 @@ mod tests {
         let _ = effect;
         assert!(component.has_pending_completion());
         assert!(matches!(
-            component.update(Message(InternalMessage::PassthroughDisabled)),
+            component.update(Message(InternalMessage::PassthroughDisabled(Ok(())))),
             HostEffect::Completed(_)
         ));
     }
@@ -1086,7 +1158,7 @@ mod tests {
             Some(PendingFinish::Cancel)
         ));
         assert!(matches!(
-            component.update(Message(InternalMessage::PassthroughDisabled)),
+            component.update(Message(InternalMessage::PassthroughDisabled(Ok(())))),
             HostEffect::Cancelled
         ));
         // Pending state cleared once consumed.
@@ -1102,11 +1174,40 @@ mod tests {
     }
 
     #[test]
+    fn passthrough_targets_host_owned_overlay_window() {
+        let component = capture_component_with_windows();
+        assert_eq!(component.passthrough_window(), component.overlay_window());
+    }
+
+    #[test]
+    fn passthrough_result_updates_actual_state() {
+        let mut component = capture_component();
+        let _ = component.update(Message(InternalMessage::PassthroughEnabled(Err(
+            "native failure".to_string(),
+        ))));
+        assert!(!component.mouse_passthrough_active());
+        assert_eq!(
+            component.overlay.transient_error.as_deref(),
+            Some("failed to enable scroll passthrough: native failure")
+        );
+
+        let _ = component.update(Message(InternalMessage::PassthroughEnabled(Ok(()))));
+        assert!(component.mouse_passthrough_active());
+    }
+
+    #[test]
     fn controls_window_tracks_visible_toolbar_rect() {
         assert_eq!(
             controls_window_action(None, Some(rect(20.0, 30.0, 260.0, 48.0))),
             ControlsWindowAction::Open(rect(20.0, 30.0, 260.0, 48.0))
         );
+    }
+
+    #[test]
+    fn scrolling_toolbar_is_rendered_only_in_controls_window() {
+        assert!(!render_overlay_toolbar(WorkspacePhase::ScrollingCapture));
+        assert!(render_overlay_toolbar(WorkspacePhase::Selecting));
+        assert!(render_overlay_toolbar(WorkspacePhase::Selected));
     }
 
     #[test]
@@ -1138,6 +1239,17 @@ mod tests {
         assert_eq!(
             passthrough_action(WorkspacePhase::Selecting, WorkspacePhase::ScrollingCapture),
             PassthroughAction::Enable
+        );
+    }
+
+    #[test]
+    fn scrolling_capture_events_keep_passthrough_enabled() {
+        assert_eq!(
+            passthrough_action(
+                WorkspacePhase::ScrollingCapture,
+                WorkspacePhase::ScrollingCapture
+            ),
+            PassthroughAction::Noop
         );
     }
 

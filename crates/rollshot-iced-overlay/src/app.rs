@@ -304,7 +304,12 @@ pub(crate) fn preview_constraints(crop: Rectangle, window: iced::Size) -> Previe
             (window.width - (crop.x + crop.width)).max(0.0),
             (window.height - crop.y.max(0.0)).max(0.0),
         ),
-        None => (PREVIEW_WIDTH as f32, 1.0),
+        None => {
+            return PreviewConstraints {
+                fixed_width: (PREVIEW_WIDTH as f32).min(crop.width.max(1.0)).floor() as u32,
+                max_height: crop.height.max(1.0).floor() as u32,
+            };
+        }
     };
     let max_width = (PREVIEW_WIDTH as f32).min(available_width).max(1.0);
     let band_height = (available_height - TOOLBAR_H - CHROME_SPACING).max(1.0) as u32;
@@ -368,7 +373,15 @@ pub(crate) fn toolbar_is_visible(state: &OverlayState) -> bool {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
+    view_with_toolbar(state, true)
+}
+
+pub(crate) fn view_with_toolbar(
+    state: &OverlayState,
+    render_toolbar: bool,
+) -> Element<'_, OverlayMessage> {
     let canvas_widget = canvas(CropCanvas::from_state(state))
         .width(Length::Fill)
         .height(Length::Fill);
@@ -445,19 +458,21 @@ pub(crate) fn view(state: &OverlayState) -> Element<'_, OverlayMessage> {
         };
 
         if chrome_visible {
-            chrome_stack = chrome_stack.push(
-                container(toolbar_layer)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::Start)
-                    .align_y(iced::Alignment::Start)
-                    .padding(iced::Padding {
-                        left: toolbar_rect.x,
-                        top: toolbar_rect.y,
-                        right: 0.0,
-                        bottom: 0.0,
-                    }),
-            );
+            if render_toolbar {
+                chrome_stack = chrome_stack.push(
+                    container(toolbar_layer)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Start)
+                        .align_y(iced::Alignment::Start)
+                        .padding(iced::Padding {
+                            left: toolbar_rect.x,
+                            top: toolbar_rect.y,
+                            right: 0.0,
+                            bottom: 0.0,
+                        }),
+                );
+            }
 
             if let Some(w) = warning {
                 chrome_stack = chrome_stack.push(
@@ -876,6 +891,22 @@ mod tests {
 
         assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
         assert_eq!(constraints.max_height, 600);
+    }
+
+    #[test]
+    fn preview_constraints_use_crop_for_activity_auto_hide_fallback() {
+        let crop = Rectangle {
+            x: 10.0,
+            y: 10.0,
+            width: 980.0,
+            height: 780.0,
+        };
+        let window = Size::new(1000.0, 800.0);
+
+        let constraints = preview_constraints(crop, window);
+
+        assert_eq!(constraints.fixed_width, PREVIEW_WIDTH);
+        assert_eq!(constraints.max_height, 780);
     }
 
     #[test]

@@ -187,6 +187,9 @@ fn open_capture_window(
 
     let (overlay_window, open_overlay) =
         window::open(overlay_window_settings(window_size, window_origin));
+    eprintln!(
+        "[rollshot][macos-product] opening capture window id={overlay_window:?} size={window_size:?} origin={window_origin:?}"
+    );
     let boot_task = component.boot(overlay_window);
 
     let open_task = open_overlay
