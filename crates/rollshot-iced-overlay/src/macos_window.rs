@@ -113,13 +113,14 @@ pub(crate) fn set_mouse_passthrough(
 
 #[allow(unsafe_code)]
 fn apply_overlay_window_patch_impl(handle: &dyn window::Window) -> Result<(), String> {
-    use objc2_app_kit::NSWindowCollectionBehavior;
+    use objc2_app_kit::{NSStatusWindowLevel, NSWindowCollectionBehavior};
 
     let ns_window = ns_window(handle)?;
 
     ns_window.setHasShadow(false);
     ns_window.setOpaque(false);
     ns_window.setIgnoresMouseEvents(false);
+    ns_window.setLevel(NSStatusWindowLevel + 1);
     ns_window.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary
