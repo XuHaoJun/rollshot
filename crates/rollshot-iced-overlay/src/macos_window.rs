@@ -108,10 +108,6 @@ pub(crate) fn set_mouse_passthrough(
 ) -> Result<(), String> {
     let ns_window = ns_window(handle)?;
     ns_window.setIgnoresMouseEvents(enabled);
-    eprintln!(
-        "[rollshot][macos-window] set_mouse_passthrough enabled={enabled} actual={}",
-        ns_window.ignoresMouseEvents()
-    );
     Ok(())
 }
 
@@ -128,10 +124,6 @@ fn apply_overlay_window_patch_impl(handle: &dyn window::Window) -> Result<(), St
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary
             | NSWindowCollectionBehavior::Stationary,
-    );
-    eprintln!(
-        "[rollshot][macos-window] patched overlay ignores_mouse_events={}",
-        ns_window.ignoresMouseEvents()
     );
 
     Ok(())

@@ -223,10 +223,6 @@ impl Component {
     /// picker dismissed). The host opens the overlay window and feeds the boot
     /// task returned by [`Component::boot`].
     pub fn new(config: &OverlayConfig) -> Result<Option<Self>, OverlayError> {
-        eprintln!(
-            "[rollshot][macos-capture] component new mode={:?} backend={} fps={}",
-            config.initial_mode, config.backend, config.fps
-        );
         #[cfg(not(test))]
         let factories = real_factories();
         #[cfg(test)]
@@ -352,7 +348,6 @@ impl Component {
     /// later, when the `Opened` event arrives through `subscription` -> `update`
     /// (matching the original runner), so no boot task is needed here.
     pub fn boot(&mut self, overlay_window: window::Id) -> Task<Message> {
-        eprintln!("[rollshot][macos-capture] boot overlay_window={overlay_window:?}");
         self.overlay_window = Some(overlay_window);
         Task::none()
     }
@@ -407,9 +402,6 @@ impl Component {
     fn arm_preview_subscription(&mut self) {
         if let Some(rx) = self.preview_rx.take() {
             *PREVIEW_RX.lock().unwrap() = Some(rx);
-            eprintln!("[rollshot][macos-capture] preview receiver armed");
-        } else {
-            eprintln!("[rollshot][macos-capture] preview receiver arm requested but missing");
         }
     }
 
@@ -505,10 +497,6 @@ impl Component {
     pub fn update(&mut self, message: Message) -> HostEffect {
         match message.0 {
             InternalMessage::WindowOpened { id, size } => {
-                eprintln!(
-                    "[rollshot][macos-capture] window opened id={id:?} size={size:?} overlay={:?} controls={:?}",
-                    self.overlay_window, self.controls_window
-                );
                 let patch = window::run(id, crate::macos_window::apply_overlay_window_patch)
                     .map(|r| Message(InternalMessage::WindowPatched(r)));
                 if Some(id) == self.overlay_window {
@@ -520,35 +508,29 @@ impl Component {
                 HostEffect::Task(patch)
             }
             InternalMessage::OverlayWindowReady(id) => {
-                eprintln!("[rollshot][macos-capture] overlay window ready id={id:?}");
                 self.overlay_window = Some(id);
                 HostEffect::None
             }
             InternalMessage::ControlsWindowReady(id) => {
-                eprintln!("[rollshot][macos-capture] controls window ready id={id:?}");
                 self.controls_window = Some(id);
                 HostEffect::None
             }
             InternalMessage::Overlay(msg) => self.update_overlay(msg),
             InternalMessage::WindowPatched(result) => {
-                eprintln!("[rollshot][macos-capture] window patch result={result:?}");
                 if let Err(err) = result {
                     eprintln!("failed to patch macOS iced overlay window: {err}");
                 }
                 HostEffect::None
             }
             InternalMessage::PassthroughEnabled(result) => {
-                eprintln!("[rollshot][macos-capture] passthrough enable result={result:?}");
                 self.overlay.mouse_passthrough_active = result.is_ok();
                 if let Err(error) = result {
-                    eprintln!("failed to enable macOS overlay passthrough: {error}");
                     self.overlay.transient_error =
                         Some(format!("failed to enable scroll passthrough: {error}"));
                 }
                 HostEffect::None
             }
             InternalMessage::PassthroughDisabled(result) => {
-                eprintln!("[rollshot][macos-capture] passthrough disable result={result:?}");
                 self.overlay.mouse_passthrough_active = false;
                 if let Err(error) = result {
                     eprintln!("failed to disable macOS overlay passthrough: {error}");
@@ -566,10 +548,6 @@ impl Component {
     /// passthrough/controls-window side effects that depend on phase changes.
     fn update_overlay(&mut self, msg: OverlayMessage) -> HostEffect {
         let old_phase = self.overlay.workspace.phase();
-        let first_preview = matches!(
-            &msg,
-            OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::Preview(_))
-        ) && self.overlay.preview.is_none();
         let msg = controls_message_to_overlay(msg, self.controls_rect);
         let (effect, _region_mode) = app::update(&mut self.overlay, msg);
 
@@ -586,14 +564,6 @@ impl Component {
         let passthrough = passthrough_action(old_phase, new_phase);
         let visible_rect = self.visible_toolbar_rect();
         let controls = controls_window_action(self.controls_rect, visible_rect);
-        if old_phase != new_phase || !matches!(effect, OverlayEffect::None) {
-            eprintln!(
-                "[rollshot][macos-capture] update old_phase={old_phase:?} new_phase={new_phase:?} effect={effect:?} passthrough={passthrough:?} overlay_window={:?} app_window={:?}",
-                self.overlay_window, self.overlay.window_id
-            );
-        } else if first_preview {
-            eprintln!("[rollshot][macos-capture] first preview event received");
-        }
 
         if passthrough == PassthroughAction::Enable {
             self.arm_preview_subscription();
@@ -646,10 +616,6 @@ impl Component {
                     height: ws.height as u32,
                 };
                 let preview_constraints = app::preview_constraints(crop, ws);
-                eprintln!(
-                    "[rollshot][macos-capture] begin stitch crop={crop:?} window={ws:?} preview={preview_constraints:?} driver_present={}",
-                    self.driver.is_some()
-                );
                 if let Some(driver) = self.driver.as_mut() {
                     driver.begin_stitch(crop_logical, overlay_logical, preview_constraints);
                 }
@@ -939,17 +905,10 @@ fn preview_stream() -> iced::Subscription<Message> {
     iced::Subscription::run(|| {
         let rx = PREVIEW_RX.lock().unwrap().take();
         match rx {
-            Some(rx) => {
-                eprintln!("[rollshot][macos-capture] preview subscription took receiver");
-                rx.map(|e| Message(InternalMessage::Overlay(OverlayMessage::LiveEvent(e))))
-                    .boxed()
-            }
-            None => {
-                eprintln!(
-                    "[rollshot][macos-capture] preview subscription started without receiver"
-                );
-                iced::futures::stream::pending().boxed()
-            }
+            Some(rx) => rx
+                .map(|e| Message(InternalMessage::Overlay(OverlayMessage::LiveEvent(e))))
+                .boxed(),
+            None => iced::futures::stream::pending().boxed(),
         }
     })
 }

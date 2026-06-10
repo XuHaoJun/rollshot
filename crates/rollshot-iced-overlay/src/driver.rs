@@ -161,33 +161,20 @@ impl Driver {
             let shared = Arc::clone(&shared);
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let mut frames_read = 0_u64;
                 while !stop.load(Ordering::Relaxed) {
                     match stream.next_frame() {
                         Ok(frame) => {
-                            frames_read += 1;
-                            if frames_read == 1 || frames_read.is_multiple_of(60) {
-                                eprintln!("[rollshot][driver] reader frames={frames_read}");
-                            }
                             if let Ok(mut slot) = shared.latest.lock() {
                                 *slot = Some(frame);
                                 shared.seq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Err(CaptureError::EndOfStream) => {
-                            eprintln!(
-                                "[rollshot][driver] reader end-of-stream after frames={frames_read}"
-                            );
-                            break;
-                        }
+                        Err(CaptureError::EndOfStream) => break,
                         Err(CaptureError::Timeout { .. }) => continue,
                         Err(err) => {
                             if !should_record_reader_error(&stop) {
                                 break;
                             }
-                            eprintln!(
-                                "[rollshot][driver] reader error after frames={frames_read}: {err}"
-                            );
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -195,7 +182,6 @@ impl Driver {
                         }
                     }
                 }
-                eprintln!("[rollshot][driver] reader thread stopped frames={frames_read}");
             })
         };
 
@@ -231,34 +217,18 @@ impl Driver {
         self.overlay_logical = overlay_logical;
         let region =
             crate::coords::map_crop_to_frame(crop_logical, overlay_logical, self.source_size);
-        eprintln!(
-            "[rollshot][driver] begin_stitch crop={crop_logical:?} overlay={overlay_logical:?} source={:?} region={region:?} preview={preview_constraints:?}",
-            self.source_size
-        );
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
         let preview_tx = self.preview_tx.clone();
         self.stitch = Some(std::thread::spawn(move || {
-            eprintln!("[rollshot][driver] stitch thread started");
             let starting_seq = shared.seq.load(Ordering::Relaxed);
             let fallback_deadline = Instant::now() + Duration::from_millis(250);
             let mut last_seq = starting_seq;
             let mut capture_miss_tracker = CaptureMissTracker::default();
             let mut last_capture_miss_active = false;
             let mut spotlight_edge = CapturedEdge::Unknown;
-            let mut processed_frames = 0_u64;
-            let mut accepted_frames = 0_u64;
-            let mut reader_error_logged = false;
             let mut fallback_used = false;
             while !stop.load(Ordering::Relaxed) {
-                if !reader_error_logged {
-                    if let Ok(e) = shared.error.lock() {
-                        if let Some(msg) = e.as_ref() {
-                            eprintln!("[rollshot][driver] stitch loop sees reader error: {msg}");
-                            reader_error_logged = true;
-                        }
-                    }
-                }
                 let seq = shared.seq.load(Ordering::Relaxed);
                 if !fallback_used
                     && seq == starting_seq
@@ -267,7 +237,6 @@ impl Driver {
                 {
                     fallback_used = true;
                     last_seq = starting_seq.saturating_sub(1);
-                    eprintln!("[rollshot][driver] using latest frame after clean-frame timeout");
                 }
                 let frame = if seq == last_seq {
                     None
@@ -276,7 +245,6 @@ impl Driver {
                     shared.latest.lock().ok().and_then(|s| s.clone())
                 };
                 if let Some(frame) = frame {
-                    processed_frames += 1;
                     let cropped = match crop_frame(&frame, region) {
                         Ok(c) => c,
                         Err(err) => {
@@ -289,18 +257,7 @@ impl Driver {
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
                         let outcome = stitcher.push_frame(cropped.image);
                         let signal = progress_signal_from_outcome(&outcome);
-                        if processed_frames <= 3 {
-                            eprintln!(
-                                "[rollshot][driver] stitch frame={processed_frames} signal={signal:?}"
-                            );
-                        }
                         if let StitchProgressSignal::Accepted { edge } = signal {
-                            accepted_frames += 1;
-                            if accepted_frames == 1 || accepted_frames.is_multiple_of(30) {
-                                eprintln!(
-                                    "[rollshot][driver] accepted frame count={accepted_frames} edge={edge:?}"
-                                );
-                            }
                             if edge != CapturedEdge::Unknown {
                                 spotlight_edge = edge;
                             }
@@ -323,22 +280,14 @@ impl Driver {
                                 spotlight_edge,
                                 preview_constraints,
                             ) {
-                                let sent =
+                                let _ =
                                     preview_tx.unbounded_send(LiveOverlayEvent::Preview(handle));
-                                if accepted_frames == 1 || sent.is_err() {
-                                    eprintln!(
-                                        "[rollshot][driver] preview send accepted_count={accepted_frames} result={sent:?}"
-                                    );
-                                }
                             }
                         }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            eprintln!(
-                "[rollshot][driver] stitch thread stopped processed={processed_frames} accepted={accepted_frames}"
-            );
         }));
     }
 

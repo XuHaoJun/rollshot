@@ -123,10 +123,10 @@ impl FrameStream for MacosScapFrameStream {
         let mut empty_frames = 0;
 
         loop {
-            let frame = self.capturer.get_next_frame().map_err(|err| {
-                eprintln!("rollshot macos-sck: get_next_frame failed: {err:#}");
-                CaptureError::EndOfStream
-            })?;
+            let frame = self
+                .capturer
+                .get_next_frame()
+                .map_err(|_| CaptureError::EndOfStream)?;
 
             match process_scap_frame(frame, &mut empty_frames, self.effective_region)? {
                 Ok(captured) => return Ok(captured),
