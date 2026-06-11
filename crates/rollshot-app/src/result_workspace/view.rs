@@ -1,9 +1,9 @@
 use super::viewport::{geometry_for, ZoomDirection, ZoomMode};
 use iced::widget::{
-    button, column, container, image as image_widget, mouse_area, row, scrollable, text, tooltip,
-    Space,
+    button, column, container, image as image_widget, mouse_area, row, scrollable, text, text_editor,
+    tooltip, Space,
 };
-use iced::{mouse, Alignment, Element, Length, Size, Vector};
+use iced::{keyboard, mouse, Alignment, Element, Length, Size, Vector};
 
 use super::canvas::Tool;
 use super::{Message, ResultWorkspace};
@@ -196,6 +196,39 @@ fn canvas_view<'a>(state: &'a ResultWorkspace, image_size: Size) -> Element<'a, 
     .height(Length::Fixed(geometry.rendered_size.height));
 
     let layered = iced::widget::stack![img, overlay];
+
+    let layered: Element<'_, Message> = if let Some(draft) = &state.editor.text_draft {
+        let editor = text_editor(&draft.content)
+            .id(state.text_editor_id.clone())
+            .on_action(Message::TextDraftAction)
+            .key_binding(|key_press| {
+                use iced::widget::text_editor::{Binding, KeyPress};
+                let KeyPress { key, modifiers, .. } = &key_press;
+                let commit_modifier = if cfg!(target_os = "macos") {
+                    modifiers.command()
+                } else {
+                    modifiers.control()
+                };
+                if commit_modifier
+                    && matches!(key, keyboard::Key::Named(keyboard::key::Named::Enter))
+                {
+                    return Some(Binding::Custom(Message::CommitTextDraft));
+                }
+                Binding::from_key_press(key_press)
+            })
+            .font(super::canvas::annotation_font())
+            .width(280.0);
+
+        let positioned = container(editor).padding(iced::Padding {
+            left: draft.position.x * geometry.scale,
+            top: draft.position.y * geometry.scale,
+            right: 0.0,
+            bottom: 0.0,
+        });
+        iced::widget::stack![layered, positioned].into()
+    } else {
+        layered.into()
+    };
 
     let content = container(layered)
         .width(Length::Fixed(geometry.content_size.width))

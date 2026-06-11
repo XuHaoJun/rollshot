@@ -83,6 +83,10 @@ pub enum Message {
     CanvasMoved(rollshot_image_document::ImagePoint),
     /// Canvas pointer released (image-space coordinate).
     CanvasReleased(rollshot_image_document::ImagePoint),
+    /// Inline text editor action.
+    TextDraftAction(iced::widget::text_editor::Action),
+    /// Commit the inline text editor draft.
+    CommitTextDraft,
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +450,16 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
             Task::none()
         }
+        Message::TextDraftAction(action) => {
+            if let Some(draft) = &mut state.editor.text_draft {
+                draft.content.perform(action);
+            }
+            Task::none()
+        }
+        Message::CommitTextDraft => {
+            commit_text_draft(state);
+            Task::none()
+        }
         Message::CanvasPressed(point) => {
             handle_canvas_pressed(state, point, std::time::Instant::now())
         }
@@ -464,9 +478,21 @@ fn prune_stale_selection(state: &mut super::ResultWorkspace) {
 }
 
 /// Commit a valid inline text draft, or cancel an invalid one (spec §15).
-/// Full implementation lands with the text editor task; until then:
 fn commit_text_draft(state: &mut super::ResultWorkspace) {
-    let _ = state;
+    let Some(draft) = state.editor.text_draft.take() else {
+        return;
+    };
+    let text = draft.content.text().trim_end().to_string();
+    match draft.target {
+        None => {
+            if let Ok(id) = state.document.image.add_text_note(draft.position, text) {
+                state.editor.selection = Some(id);
+            }
+        }
+        Some(id) => {
+            let _ = state.document.image.set_text(id, text);
+        }
+    }
 }
 
 /// The platform zoom modifier: Cmd on macOS, Ctrl on Linux.
@@ -1100,6 +1126,93 @@ mod tests {
             Annotation::OpaqueRedaction { bounds, .. } => {
                 assert_eq!(*bounds, ImageRect { x: 50.0, y: 50.0, width: 70.0, height: 60.0 });
             }
+            _ => panic!(),
+        }
+    }
+
+    // -- text editor tests (Task 20) ------------------------------------------
+
+    fn type_text(state: &mut super::super::ResultWorkspace, s: &str) {
+        if let Some(draft) = &mut state.editor.text_draft {
+            for ch in s.chars() {
+                draft.content.perform(iced::widget::text_editor::Action::Edit(
+                    iced::widget::text_editor::Edit::Insert(ch),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn typing_then_commit_creates_exactly_one_edit() {
+        let mut state = workspace_with_size(200, 100);
+        let _ = update(&mut state, Message::SelectTool(Tool::Text));
+        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        assert!(state.editor.text_draft.is_some());
+        type_text(&mut state, "hello");
+        let _ = update(&mut state, Message::CommitTextDraft);
+        assert!(state.editor.text_draft.is_none());
+        match &state.document.image.annotations()[0] {
+            Annotation::TextNote { text, .. } => {
+                assert_eq!(text, "hello")
+            }
+            _ => panic!(),
+        }
+        let mut undo_steps = 0;
+        while state.document.image.undo() {
+            undo_steps += 1;
+        }
+        assert_eq!(undo_steps, 1, "spec §9.3: whole text = one undo entry");
+    }
+
+    #[test]
+    fn empty_draft_commit_creates_nothing_and_esc_cancels() {
+        let mut state = workspace_with_size(200, 100);
+        let _ = update(&mut state, Message::SelectTool(Tool::Text));
+        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        let _ = update(&mut state, Message::CommitTextDraft);
+        assert!(state.document.image.annotations().is_empty(), "spec §15");
+
+        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        type_text(&mut state, "draft");
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.text_draft.is_none(), "esc cancels the draft");
+        assert!(state.document.image.annotations().is_empty());
+    }
+
+    #[test]
+    fn clicking_outside_commits_the_open_draft() {
+        let mut state = workspace_with_size(200, 100);
+        let _ = update(&mut state, Message::SelectTool(Tool::Text));
+        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        type_text(&mut state, "note");
+        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(100.0, 50.0)));
+        assert_eq!(state.document.image.annotations().len(), 1);
+    }
+
+    #[test]
+    fn double_click_reedit_commits_one_changed_text_edit() {
+        let mut state = workspace_with_size(300, 100);
+        let id = state
+            .document
+            .image
+            .add_text_note(ImagePoint::new(10.0, 10.0), "old".to_string())
+            .unwrap();
+        let _ = update(&mut state, Message::SelectTool(Tool::Select));
+        let now = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(15.0, 15.0), now);
+        let _ = handle_canvas_pressed(
+            &mut state,
+            ImagePoint::new(15.0, 15.0),
+            now + Duration::from_millis(100),
+        );
+        let draft = state.editor.text_draft.as_ref().expect("re-edit draft open");
+        assert_eq!(draft.target, Some(id));
+        assert_eq!(draft.content.text().trim_end(), "old");
+        state.editor.text_draft.as_mut().unwrap().content =
+            iced::widget::text_editor::Content::with_text("new");
+        let _ = update(&mut state, Message::CommitTextDraft);
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::TextNote { text, .. } => assert_eq!(text, "new"),
             _ => panic!(),
         }
     }
