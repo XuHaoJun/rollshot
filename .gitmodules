@@ -25,3 +25,6 @@
 [submodule "learn-projects/spectacle"]
 	path = learn-projects/spectacle
 	url = https://github.com/KDE/spectacle.git
+[submodule "learn-projects/mark-shot"]
+	path = learn-projects/mark-shot
+	url = https://github.com/jswysnemc/mark-shot.git
