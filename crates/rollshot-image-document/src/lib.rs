@@ -17,7 +17,7 @@ mod text;
 pub use annotation::{Annotation, AnnotationId};
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use geometry::{ImagePoint, ImageRect, Rgba8};
-// pub use hit::{redaction_handles, Hit, HitPart, ResizeHandle};
+pub use hit::{redaction_handles, Hit, HitPart, ResizeHandle};
 // pub use navigator::NavigatorItem;
 pub use shapes::{
     annotation_bounds, annotation_shapes, text_plate_rect, RenderShape, TextAnchor,
