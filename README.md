@@ -7,6 +7,26 @@ core, fixture-backed capture tests, and a macOS ScreenCaptureKit backend
 Linux Wayland portal backend is available on systems with ScreenCast portal
 and PipeWire support.
 
+## Features
+
+- **Interactive screenshots and scrolling captures**: use the active iced
+  desktop app to switch capture modes, drag-select a region, and finish or
+  cancel from the overlay.
+- **Live stitched preview**: watch the long screenshot grow while scrolling
+  inside the selected region.
+- **Bidirectional stitching**: the Rust stitching core supports vertical and
+  horizontal movement in either direction, ignores duplicate frames, and uses
+  multiple matching strategies for difficult content.
+- **Native platform capture**: ScreenCaptureKit is the default backend on macOS;
+  Linux supports Wayland capture through XDG Desktop Portal and PipeWire, with
+  KDE-specific native screenshot integration.
+- **Result workflow**: completed captures are auto-saved as PNG files and opened
+  in a result workspace with zoom, pan, Save As, and reveal-in-file-manager
+  controls. macOS also presents a draggable floating thumbnail after capture.
+- **Headless and debugging CLI**: capture and stitch without the GUI, inspect
+  backend availability with `probe`, stitch pre-recorded frame folders, dump
+  captured frames, and write matcher debug reports.
+
 ## Workspace
 
 - `crates/rollshot-core`: platform-independent stitching concepts
