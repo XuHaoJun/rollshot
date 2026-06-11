@@ -44,6 +44,12 @@ pub enum ZoomDirection {
 // Public functions
 // ---------------------------------------------------------------------------
 
+/// "Long image" rule shared by the default-zoom choice and the Navigator's
+/// default-open state (spec §8.2): strictly taller than 2× the width.
+pub fn is_tall_image(image: Size) -> bool {
+    image.height > 2.0 * image.width
+}
+
 /// Choose the default zoom mode based on image shape.
 ///
 /// Rule (strict): long edge > 2× short edge is "long".
@@ -54,7 +60,7 @@ pub enum ZoomDirection {
 pub fn default_zoom(image: Size) -> ZoomMode {
     let w = image.width;
     let h = image.height;
-    if h > 2.0 * w {
+    if is_tall_image(image) {
         ZoomMode::FitWidth
     } else if w > 2.0 * h {
         ZoomMode::FitHeight
@@ -330,6 +336,13 @@ mod tests {
             ZoomMode::FitHeight,
             "w > 2×h by epsilon should be FitHeight"
         );
+    }
+
+    #[test]
+    fn tall_image_rule_matches_default_zoom_fit_width_arm() {
+        assert!(is_tall_image(Size::new(800.0, 2401.0)));
+        assert!(!is_tall_image(Size::new(500.0, 1000.0)), "exactly 2× is not tall");
+        assert!(!is_tall_image(Size::new(1200.0, 800.0)));
     }
 
     // -- step_zoom non-uniform gaps and non-Custom inputs --------------------
