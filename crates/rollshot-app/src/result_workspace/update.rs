@@ -1,3 +1,5 @@
+use image::RgbaImage;
+
 use super::viewport::{anchored_scroll, geometry_for, step_zoom, ZoomDirection, ZoomMode};
 use iced::widget::scrollable;
 use iced::{keyboard, mouse, Point, Size, Subscription, Task, Vector};
@@ -24,6 +26,8 @@ pub enum Message {
     DismissMessage,
     /// User pressed "Copy".
     Copy,
+    /// User pressed "Copy Original" (unflattened source).
+    CopyOriginal,
     /// Background clipboard write completed.
     CopyFinished(Result<(), String>),
     /// User pressed "Save As…".
@@ -56,6 +60,30 @@ pub enum Message {
 }
 
 // ---------------------------------------------------------------------------
+// Payload helpers
+// ---------------------------------------------------------------------------
+
+/// The image Copy places on the clipboard: always the flattened document
+/// (pixel-identical to the source when no annotations exist — spec §12.1).
+pub(crate) fn copy_payload(state: &super::ResultWorkspace) -> RgbaImage {
+    state.document.image.flatten()
+}
+
+pub(crate) fn copy_original_payload(state: &super::ResultWorkspace) -> RgbaImage {
+    state.document.image.source().clone()
+}
+
+/// The image Save As writes: original bytes when no annotations exist,
+/// otherwise the flattened document (spec §12.2).
+pub(crate) fn save_payload(state: &super::ResultWorkspace) -> RgbaImage {
+    if state.document.image.annotations().is_empty() {
+        state.document.image.source().clone()
+    } else {
+        state.document.image.flatten()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
 
@@ -80,7 +108,11 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             Task::none()
         }
         Message::Copy => {
-            let result = super::actions::copy_image(state.document.image.source());
+            let result = super::actions::copy_image(&copy_payload(state));
+            Task::done(Message::CopyFinished(result))
+        }
+        Message::CopyOriginal => {
+            let result = super::actions::copy_image(&copy_original_payload(state));
             Task::done(Message::CopyFinished(result))
         }
         Message::CopyFinished(Ok(())) => {
@@ -102,8 +134,7 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             )
         }
         Message::SavePathChosen(Some(path)) => {
-            // Clone the source so the write future owns its pixels.
-            let image = state.document.image.source().clone();
+            let image = save_payload(state);
             Task::perform(
                 async move { super::actions::write_save_as(&image, &path) },
                 Message::SaveFinished,
@@ -272,6 +303,7 @@ mod tests {
     use super::*;
     use iced::Size as IcedSize;
     use image::Rgba;
+    use rollshot_image_document::{ImagePoint, ImageRect};
 
     fn image() -> image::RgbaImage {
         image::RgbaImage::from_pixel(2, 2, Rgba([100, 150, 200, 255]))
@@ -299,6 +331,53 @@ mod tests {
             ),
             None,
         )
+    }
+
+    // -- payload routing tests (Task 15) --------------------------------------
+
+    #[test]
+    fn copy_flattens_annotations_and_does_not_clear_dirty() {
+        let mut state = unsaved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 })
+            .unwrap();
+        assert!(state.annotations_dirty());
+        let flattened = copy_payload(&state);
+        assert_ne!(
+            flattened.get_pixel(0, 0).0,
+            state.document.image.source().get_pixel(0, 0).0,
+            "copy payload is the flattened image"
+        );
+        assert!(state.annotations_dirty(), "spec §12.1: copy never clears dirty");
+    }
+
+    #[test]
+    fn copy_original_payload_is_the_source() {
+        let mut state = unsaved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 })
+            .unwrap();
+        let original = copy_original_payload(&state);
+        assert_eq!(original.as_raw(), state.document.image.source().as_raw());
+    }
+
+    #[test]
+    fn save_payload_is_source_without_annotations_and_flatten_with() {
+        let mut state = unsaved_workspace();
+        assert_eq!(
+            save_payload(&state).as_raw(),
+            state.document.image.source().as_raw(),
+            "spec §12.2: no annotations → original bytes"
+        );
+        state.document.image.add_number_callout(
+            ImagePoint::new(1.0, 1.0),
+            ImagePoint::new(1.0, 1.0),
+        );
+        assert_ne!(save_payload(&state).as_raw(), state.document.image.source().as_raw());
     }
 
     /// The platform zoom modifier (Ctrl on Linux / Cmd on macOS), used to drive

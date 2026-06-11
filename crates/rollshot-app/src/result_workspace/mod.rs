@@ -241,6 +241,8 @@ pub fn run(document: ResultDocument, initial_error: Option<String>) -> Result<()
 
     iced::application(boot, update, view)
         .title("Rollshot")
+        .font(rollshot_image_document::style::FONT_REGULAR_BYTES)
+        .font(rollshot_image_document::style::FONT_BOLD_BYTES)
         .subscription(subscription)
         .window(iced::window::Settings {
             size: Size::new(1100.0, 760.0),

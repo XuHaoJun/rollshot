@@ -566,6 +566,8 @@ pub fn run(config: OverlayConfig) -> Result<(), String> {
         view,
     )
     .subscription(subscription)
+    .font(rollshot_image_document::style::FONT_REGULAR_BYTES)
+    .font(rollshot_image_document::style::FONT_BOLD_BYTES)
     .theme(theme)
     .style(style)
     .run()
