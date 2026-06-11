@@ -6,7 +6,12 @@ use iced::{keyboard, mouse, Point, Size, Subscription, Task, Vector};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use super::canvas::{
+    dragged_annotation, DragState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
+    DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
+};
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
+use rollshot_image_document::{Annotation, HitPart, ImagePoint, ImageRect};
 
 // ---------------------------------------------------------------------------
 // Message enum
@@ -73,14 +78,34 @@ pub enum Message {
     /// Toggle the Copy menu dropdown.
     ToggleCopyMenu,
     /// Canvas pointer pressed (image-space coordinate).
-    #[allow(dead_code)]
     CanvasPressed(rollshot_image_document::ImagePoint),
     /// Canvas pointer moved (image-space coordinate).
-    #[allow(dead_code)]
     CanvasMoved(rollshot_image_document::ImagePoint),
     /// Canvas pointer released (image-space coordinate).
-    #[allow(dead_code)]
     CanvasReleased(rollshot_image_document::ImagePoint),
+}
+
+// ---------------------------------------------------------------------------
+// Gesture helpers
+// ---------------------------------------------------------------------------
+
+fn current_scale(state: &super::ResultWorkspace) -> f32 {
+    geometry_for(state.viewport.zoom, state.original_size(), state.viewport_bounds).scale
+}
+
+fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f32, f32) {
+    match (annotation, part) {
+        (Annotation::TextNote { position, .. }, HitPart::Body) => {
+            (point.x - position.x, point.y - position.y)
+        }
+        (Annotation::OpaqueRedaction { bounds, .. }, HitPart::Body) => {
+            (point.x - bounds.x, point.y - bounds.y)
+        }
+        (Annotation::NumberCallout { bubble, .. }, HitPart::Body) => {
+            (point.x - bubble.x, point.y - bubble.y)
+        }
+        _ => (0.0, 0.0),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +130,162 @@ pub(crate) fn save_payload(state: &super::ResultWorkspace) -> RgbaImage {
     } else {
         state.document.image.flatten()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gesture handlers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn handle_canvas_pressed(
+    state: &mut super::ResultWorkspace,
+    point: ImagePoint,
+    now: std::time::Instant,
+) -> Task<Message> {
+    commit_text_draft(state);
+    state.editor.copy_menu_open = false;
+
+    let scale = current_scale(state);
+    let tolerance = HIT_TOLERANCE_SCREEN / scale;
+
+    let double_click = state.editor.last_press.is_some_and(|(at, p)| {
+        now.duration_since(at).as_millis() <= DOUBLE_CLICK_WINDOW_MS
+            && p.distance(point) <= DOUBLE_CLICK_SLOP_SCREEN / scale
+    });
+    state.editor.last_press = Some((now, point));
+
+    match state.editor.tool {
+        Tool::Select => {
+            if double_click {
+                if let Some(hit) = state.document.image.hit_test(point, tolerance) {
+                    if let Some(Annotation::TextNote { position, text, .. }) =
+                        state.document.image.annotation(hit.id).cloned().as_ref()
+                    {
+                        state.editor.drag = None;
+                        state.editor.selection = Some(hit.id);
+                        state.editor.text_draft = Some(TextDraft {
+                            target: Some(hit.id),
+                            position: *position,
+                            content: iced::widget::text_editor::Content::with_text(text),
+                        });
+                        return iced::widget::operation::focus(state.text_editor_id.clone());
+                    }
+                }
+            }
+            match state.document.image.hit_test(point, tolerance) {
+                Some(hit) => {
+                    let original = state
+                        .document
+                        .image
+                        .annotation(hit.id)
+                        .expect("hit returns existing annotations")
+                        .clone();
+                    state.editor.selection = Some(hit.id);
+                    state.editor.drag = Some(DragState::EditAnnotation {
+                        part: hit.part,
+                        grab_offset: grab_offset(&original, hit.part, point),
+                        current: original.clone(),
+                        original,
+                    });
+                }
+                None => {
+                    state.editor.selection = None;
+                    state.editor.drag = Some(DragState::Pan {
+                        last_pointer: state.pointer_position,
+                    });
+                }
+            }
+            Task::none()
+        }
+        Tool::Number => {
+            state.editor.drag = Some(DragState::CreateNumber { tip: point, bubble: point });
+            Task::none()
+        }
+        Tool::Text => {
+            state.editor.text_draft = Some(TextDraft {
+                target: None,
+                position: point,
+                content: iced::widget::text_editor::Content::new(),
+            });
+            iced::widget::operation::focus(state.text_editor_id.clone())
+        }
+        Tool::Redact => {
+            state.editor.drag = Some(DragState::CreateRedaction { anchor: point, current: point });
+            Task::none()
+        }
+    }
+}
+
+pub(crate) fn handle_canvas_moved(state: &mut super::ResultWorkspace, point: ImagePoint) -> Task<Message> {
+    let (w, h) = state.document.image.source().dimensions();
+    let point = point.clamp_to(w, h);
+    match &mut state.editor.drag {
+        Some(DragState::CreateNumber { bubble, .. }) => {
+            *bubble = point;
+            Task::none()
+        }
+        Some(DragState::CreateRedaction { current, .. }) => {
+            *current = point;
+            Task::none()
+        }
+        Some(DragState::EditAnnotation { part, original, grab_offset, current }) => {
+            *current = dragged_annotation(original, *part, point, *grab_offset);
+            Task::none()
+        }
+        Some(DragState::Pan { last_pointer }) => {
+            let pointer = state.pointer_position;
+            let delta = iced::Vector::new(pointer.x - last_pointer.x, pointer.y - last_pointer.y);
+            *last_pointer = pointer;
+            iced::widget::operation::scroll_by(
+                state.scrollable_id.clone(),
+                scrollable::AbsoluteOffset { x: -delta.x, y: -delta.y },
+            )
+        }
+        None => Task::none(),
+    }
+}
+
+pub(crate) fn handle_canvas_released(
+    state: &mut super::ResultWorkspace,
+    point: ImagePoint,
+) -> Task<Message> {
+    let (w, h) = state.document.image.source().dimensions();
+    let point = point.clamp_to(w, h);
+    match state.editor.drag.take() {
+        Some(DragState::CreateNumber { tip, .. }) => {
+            let id = state.document.image.add_number_callout(tip, point);
+            state.editor.selection = Some(id);
+        }
+        Some(DragState::CreateRedaction { anchor, .. }) => {
+            if let Ok(id) = state
+                .document
+                .image
+                .add_redaction(ImageRect::from_corners(anchor, point))
+            {
+                state.editor.selection = Some(id);
+            }
+        }
+        Some(DragState::EditAnnotation { original, current, .. }) => {
+            if current != original {
+                let result = match &current {
+                    Annotation::NumberCallout { tip, bubble, .. } => state
+                        .document
+                        .image
+                        .set_number_points(original.id(), *tip, *bubble),
+                    Annotation::TextNote { position, .. } => {
+                        state.document.image.set_text_position(original.id(), *position)
+                    }
+                    Annotation::OpaqueRedaction { bounds, .. } => {
+                        state.document.image.set_redaction_bounds(original.id(), *bounds)
+                    }
+                };
+                if let Err(e) = result {
+                    state.message = Some(InlineMessage::Error(e.to_string()));
+                }
+            }
+        }
+        Some(DragState::Pan { .. }) | None => {}
+    }
+    Task::none()
 }
 
 // ---------------------------------------------------------------------------
@@ -265,9 +446,11 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
             Task::none()
         }
-        Message::CanvasPressed(_) => Task::none(),
-        Message::CanvasMoved(_) => Task::none(),
-        Message::CanvasReleased(_) => Task::none(),
+        Message::CanvasPressed(point) => {
+            handle_canvas_pressed(state, point, std::time::Instant::now())
+        }
+        Message::CanvasMoved(point) => handle_canvas_moved(state, point),
+        Message::CanvasReleased(point) => handle_canvas_released(state, point),
     }
 }
 
@@ -399,7 +582,8 @@ mod tests {
     use super::*;
     use iced::Size as IcedSize;
     use image::Rgba;
-    use rollshot_image_document::{ImagePoint, ImageRect};
+    use rollshot_image_document::{Annotation, ImagePoint, ImageRect};
+    use std::time::{Duration, Instant};
 
     fn image() -> image::RgbaImage {
         image::RgbaImage::from_pixel(2, 2, Rgba([100, 150, 200, 255]))
@@ -785,5 +969,138 @@ mod tests {
             !state.editor.copy_menu_open,
             "choosing an item closes the menu"
         );
+    }
+
+    // -- gesture tests (Task 19) ----------------------------------------------
+
+    fn workspace_with_size(w: u32, h: u32) -> super::super::ResultWorkspace {
+        let img = RgbaImage::from_pixel(w, h, Rgba([100, 150, 200, 255]));
+        let mut ws = super::super::ResultWorkspace::new(
+            super::super::document::ResultDocument::unsaved(img),
+            None,
+        );
+        ws.viewport.zoom = ZoomMode::ActualSize;
+        ws.apply_viewport_bounds(Size::new(w as f32, h as f32));
+        ws
+    }
+
+    fn press_move_release(
+        state: &mut super::super::ResultWorkspace,
+        from: ImagePoint,
+        to: ImagePoint,
+    ) {
+        let _ = update(state, Message::CanvasPressed(from));
+        let _ = update(state, Message::CanvasMoved(to));
+        let _ = update(state, Message::CanvasReleased(to));
+    }
+
+    #[test]
+    fn number_click_creates_coincident_stamp_and_keeps_tool_active() {
+        let mut state = workspace_with_size(200, 200);
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        let p = ImagePoint::new(1.0, 1.0);
+        press_move_release(&mut state, p, p);
+        match &state.document.image.annotations()[0] {
+            Annotation::NumberCallout { tip, bubble, number, .. } => {
+                assert_eq!(tip, bubble, "click → coincident stamp");
+                assert_eq!(*number, 1);
+            }
+            _ => panic!(),
+        }
+        assert_eq!(state.editor.tool, Tool::Number, "spec §9.2: tool stays active");
+        press_move_release(&mut state, ImagePoint::new(1.5, 1.5), ImagePoint::new(1.5, 1.5));
+        assert_eq!(state.document.image.next_number(), 3);
+    }
+
+    #[test]
+    fn number_drag_anchors_tip_and_separates_bubble_in_one_edit() {
+        let mut state = workspace_with_size(200, 200);
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        press_move_release(&mut state, ImagePoint::new(0.5, 0.5), ImagePoint::new(1.8, 1.8));
+        assert_eq!(state.document.image.annotations().len(), 1);
+        match &state.document.image.annotations()[0] {
+            Annotation::NumberCallout { tip, bubble, .. } => {
+                assert_eq!(*tip, ImagePoint::new(0.5, 0.5), "tip anchored at press");
+                assert_eq!(*bubble, ImagePoint::new(1.8, 1.8), "bubble follows drag");
+            }
+            _ => panic!(),
+        }
+        let mut undo_steps = 0;
+        while state.document.image.undo() {
+            undo_steps += 1;
+        }
+        assert_eq!(undo_steps, 1, "spec §5.2: one drag = one history entry");
+    }
+
+    #[test]
+    fn redaction_drag_creates_rect_and_zero_drag_creates_nothing() {
+        let mut state = workspace_with_size(200, 200);
+        let _ = update(&mut state, Message::SelectTool(Tool::Redact));
+        press_move_release(&mut state, ImagePoint::new(0.0, 0.0), ImagePoint::new(2.0, 2.0));
+        assert_eq!(state.document.image.annotations().len(), 1);
+        press_move_release(&mut state, ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        assert_eq!(state.document.image.annotations().len(), 1);
+    }
+
+    #[test]
+    fn select_click_on_annotation_selects_without_history_entry() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state.document.image.add_number_callout(
+            ImagePoint::new(1.0, 1.0),
+            ImagePoint::new(1.0, 1.0),
+        );
+        let s = state.document.image.state_id();
+        let _ = update(&mut state, Message::SelectTool(Tool::Select));
+        press_move_release(&mut state, ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        assert_eq!(state.editor.selection, Some(id));
+        assert_eq!(state.document.image.state_id(), s, "no-move release edits nothing");
+    }
+
+    #[test]
+    fn select_click_on_empty_canvas_clears_selection_without_edits() {
+        let mut state = workspace_with_size(100, 100);
+        let id = state.document.image.add_number_callout(
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(10.0, 10.0),
+        );
+        state.editor.selection = Some(id);
+        let s = state.document.image.state_id();
+        press_move_release(&mut state, ImagePoint::new(90.0, 90.0), ImagePoint::new(90.0, 90.0));
+        assert_eq!(state.editor.selection, None);
+        assert_eq!(state.document.image.state_id(), s);
+    }
+
+    #[test]
+    fn dragging_the_bubble_commits_one_set_points_edit() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state.document.image.add_number_callout(
+            ImagePoint::new(20.0, 20.0),
+            ImagePoint::new(100.0, 100.0),
+        );
+        press_move_release(&mut state, ImagePoint::new(100.0, 100.0), ImagePoint::new(150.0, 150.0));
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::NumberCallout { tip, bubble, .. } => {
+                assert_eq!(*bubble, ImagePoint::new(150.0, 150.0));
+                assert_eq!(*tip, ImagePoint::new(20.0, 20.0), "tip moves independently");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn resizing_a_redaction_commits_new_bounds() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_redaction(ImageRect { x: 50.0, y: 50.0, width: 40.0, height: 30.0 })
+            .unwrap();
+        press_move_release(&mut state, ImagePoint::new(90.0, 80.0), ImagePoint::new(120.0, 110.0));
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::OpaqueRedaction { bounds, .. } => {
+                assert_eq!(*bounds, ImageRect { x: 50.0, y: 50.0, width: 70.0, height: 60.0 });
+            }
+            _ => panic!(),
+        }
     }
 }
