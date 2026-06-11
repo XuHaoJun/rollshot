@@ -8,6 +8,7 @@ use image::RgbaImage;
 use crate::annotation::{Annotation, AnnotationId};
 use crate::geometry::{ImagePoint, ImageRect};
 use crate::hit::Hit;
+use crate::navigator::NavigatorItem;
 
 /// Maximum undo entries (spec §10).
 pub const HISTORY_LIMIT: usize = 100;
@@ -77,6 +78,10 @@ impl ImageDocument {
 
     pub fn state_id(&self) -> u64 {
         self.state_id
+    }
+
+    pub fn navigator_items(&self) -> Vec<NavigatorItem> {
+        crate::navigator::navigator_items(&self.annotations)
     }
 
     pub fn hit_test(&self, point: ImagePoint, tolerance: f32) -> Option<Hit> {
