@@ -14,11 +14,12 @@ path = "src/main.rs"
 arboard = "3.4"
 chrono = "0.4"
 dirs = "6"
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
+rollshot-image-document = { path = "../rollshot-image-document" }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

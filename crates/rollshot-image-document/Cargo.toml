@@ -1,0 +1,15 @@
+[package]
+name = "rollshot-image-document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image = { workspace = true }
+cosmic-text = "0.15"
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
