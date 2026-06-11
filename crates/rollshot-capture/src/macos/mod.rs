@@ -15,6 +15,30 @@ use options::{manual_region, options_to_scap_options, NO_PERMISSION_PROMPT_ENV};
 use pixel::captured_frame_from_bgra;
 
 pub(super) const BACKEND_NAME: &str = "macos-sck";
+
+/// The `CGDirectDisplayID` of the display under the cursor, or `None` when the
+/// lookup fails. Hosts resolve this once and pass it to both the capture
+/// stream ([`crate::CaptureOptions::target_display_id`]) and their overlay
+/// window placement so the two cannot disagree.
+pub fn display_id_under_cursor() -> Option<u32> {
+    rollshot_macos_oneshot::display_id_under_cursor().ok()
+}
+
+/// Logical bounds of a display in Core Graphics global coordinates (points,
+/// top-left origin — the convention winit window positions use). `None` when
+/// the display id is unknown or reports an empty rect.
+pub fn display_logical_bounds(display_id: u32) -> Option<Region> {
+    let (x, y, width, height) = rollshot_macos_oneshot::display_logical_bounds(display_id).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Region {
+        x,
+        y,
+        width,
+        height,
+    })
+}
 const SCAP_VERSION: &str = "0.1.0-beta.1";
 const EMPTY_FRAME_LIMIT: u8 = 10;
 

@@ -7,7 +7,11 @@ pub(super) fn options_to_scap_options(
     options: &CaptureOptions,
 ) -> Result<scap::capturer::Options, CaptureError> {
     let crop_area = region_to_scap_area(&options.region)?;
-    let target = display_at_cursor().map(scap::Target::Display);
+    let target = options
+        .target_display_id
+        .or_else(|| rollshot_macos_oneshot::display_id_under_cursor().ok())
+        .and_then(display_by_id)
+        .map(scap::Target::Display);
 
     Ok(scap::capturer::Options {
         fps: options.fps,
@@ -21,8 +25,7 @@ pub(super) fn options_to_scap_options(
     })
 }
 
-fn display_at_cursor() -> Option<scap::Display> {
-    let display_id = rollshot_macos_oneshot::display_id_under_cursor().ok()?;
+fn display_by_id(display_id: u32) -> Option<scap::Display> {
     scap::get_all_targets()
         .ok()?
         .into_iter()
@@ -125,6 +128,7 @@ mod tests {
             fps: 12,
             show_cursor: true,
             prefer_portal_region: true,
+            target_display_id: None,
         };
         let scap_options = options_to_scap_options(&options).expect("valid options");
         assert_eq!(scap_options.fps, 12);

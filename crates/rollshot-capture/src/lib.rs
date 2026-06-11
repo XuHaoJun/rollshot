@@ -21,7 +21,7 @@ pub use linux::one_shot::LinuxKwinOneShotBackend;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPortalBackend;
 #[cfg(target_os = "macos")]
-pub use macos::MacosScreenCaptureKitBackend;
+pub use macos::{display_id_under_cursor, display_logical_bounds, MacosScreenCaptureKitBackend};
 pub use one_shot::{
     one_shot_backend_for, validate_surface_mapping, DisplayTarget, OneShotBackendKind,
     OneShotCapture, OneShotCaptureBackend, MAX_ONE_SHOT_PIXELS,

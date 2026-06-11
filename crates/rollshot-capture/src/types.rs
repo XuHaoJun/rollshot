@@ -15,6 +15,10 @@ pub struct CaptureOptions {
     pub fps: u32,
     pub show_cursor: bool,
     pub prefer_portal_region: bool,
+    /// Capture this specific display (macOS `CGDirectDisplayID`). `None` lets
+    /// the backend pick (macOS falls back to the display under the cursor).
+    /// Ignored by backends with their own source selection (Linux portal).
+    pub target_display_id: Option<u32>,
 }
 
 impl Default for CaptureOptions {
@@ -24,6 +28,7 @@ impl Default for CaptureOptions {
             fps: 5,
             show_cursor: false,
             prefer_portal_region: true,
+            target_display_id: None,
         }
     }
 }
