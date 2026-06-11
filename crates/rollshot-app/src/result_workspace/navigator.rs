@@ -22,10 +22,16 @@ pub(crate) fn jump_offset(
     let content_x = geometry.image_origin.x + target.x * geometry.scale;
     let content_y = geometry.image_origin.y + target.y * geometry.scale;
     let clamped = clamp_scroll(
-        Vector::new(content_x - viewport.width / 2.0, content_y - viewport.height / 2.0),
+        Vector::new(
+            content_x - viewport.width / 2.0,
+            content_y - viewport.height / 2.0,
+        ),
         geometry.max_scroll,
     );
-    scrollable::AbsoluteOffset { x: clamped.x, y: clamped.y }
+    scrollable::AbsoluteOffset {
+        x: clamped.x,
+        y: clamped.y,
+    }
 }
 
 pub(crate) fn navigator_panel(state: &ResultWorkspace) -> Element<'_, Message> {
@@ -38,7 +44,11 @@ pub(crate) fn navigator_panel(state: &ResultWorkspace) -> Element<'_, Message> {
         let selected = state.editor.selection == Some(item.id);
         let row_btn = button(text(item.label.clone()).size(13))
             .width(Length::Fill)
-            .style(if selected { button::primary } else { button::text })
+            .style(if selected {
+                button::primary
+            } else {
+                button::text
+            })
             .on_press(Message::NavigatorJump(item.id));
         list = list.push(row_btn);
     }
@@ -61,9 +71,17 @@ mod tests {
             Size::new(1000.0, 5000.0),
             Size::new(500.0, 400.0),
         );
-        let offset = jump_offset(ImagePoint::new(500.0, 2000.0), &geometry, Size::new(500.0, 400.0));
+        let offset = jump_offset(
+            ImagePoint::new(500.0, 2000.0),
+            &geometry,
+            Size::new(500.0, 400.0),
+        );
         assert_eq!(Vector::new(offset.x, offset.y), Vector::new(250.0, 1800.0));
-        let top = jump_offset(ImagePoint::new(10.0, 10.0), &geometry, Size::new(500.0, 400.0));
+        let top = jump_offset(
+            ImagePoint::new(10.0, 10.0),
+            &geometry,
+            Size::new(500.0, 400.0),
+        );
         assert_eq!(Vector::new(top.x, top.y), Vector::new(0.0, 0.0));
     }
 }

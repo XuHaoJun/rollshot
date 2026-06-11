@@ -96,7 +96,12 @@ pub enum Message {
 // ---------------------------------------------------------------------------
 
 fn current_scale(state: &super::ResultWorkspace) -> f32 {
-    geometry_for(state.viewport.zoom, state.original_size(), state.viewport_bounds).scale
+    geometry_for(
+        state.viewport.zoom,
+        state.original_size(),
+        state.viewport_bounds,
+    )
+    .scale
 }
 
 fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f32, f32) {
@@ -203,7 +208,10 @@ pub(crate) fn handle_canvas_pressed(
             Task::none()
         }
         Tool::Number => {
-            state.editor.drag = Some(DragState::CreateNumber { tip: point, bubble: point });
+            state.editor.drag = Some(DragState::CreateNumber {
+                tip: point,
+                bubble: point,
+            });
             Task::none()
         }
         Tool::Text => {
@@ -215,13 +223,19 @@ pub(crate) fn handle_canvas_pressed(
             iced::widget::operation::focus(state.text_editor_id.clone())
         }
         Tool::Redact => {
-            state.editor.drag = Some(DragState::CreateRedaction { anchor: point, current: point });
+            state.editor.drag = Some(DragState::CreateRedaction {
+                anchor: point,
+                current: point,
+            });
             Task::none()
         }
     }
 }
 
-pub(crate) fn handle_canvas_moved(state: &mut super::ResultWorkspace, point: ImagePoint) -> Task<Message> {
+pub(crate) fn handle_canvas_moved(
+    state: &mut super::ResultWorkspace,
+    point: ImagePoint,
+) -> Task<Message> {
     let (w, h) = state.document.image.source().dimensions();
     let point = point.clamp_to(w, h);
     match &mut state.editor.drag {
@@ -233,7 +247,12 @@ pub(crate) fn handle_canvas_moved(state: &mut super::ResultWorkspace, point: Ima
             *current = point;
             Task::none()
         }
-        Some(DragState::EditAnnotation { part, original, grab_offset, current }) => {
+        Some(DragState::EditAnnotation {
+            part,
+            original,
+            grab_offset,
+            current,
+        }) => {
             *current = dragged_annotation(original, *part, point, *grab_offset);
             Task::none()
         }
@@ -243,7 +262,10 @@ pub(crate) fn handle_canvas_moved(state: &mut super::ResultWorkspace, point: Ima
             *last_pointer = pointer;
             iced::widget::operation::scroll_by(
                 state.scrollable_id.clone(),
-                scrollable::AbsoluteOffset { x: -delta.x, y: -delta.y },
+                scrollable::AbsoluteOffset {
+                    x: -delta.x,
+                    y: -delta.y,
+                },
             )
         }
         None => Task::none(),
@@ -270,19 +292,23 @@ pub(crate) fn handle_canvas_released(
                 state.editor.selection = Some(id);
             }
         }
-        Some(DragState::EditAnnotation { original, current, .. }) => {
+        Some(DragState::EditAnnotation {
+            original, current, ..
+        }) => {
             if current != original {
                 let result = match &current {
                     Annotation::NumberCallout { tip, bubble, .. } => state
                         .document
                         .image
                         .set_number_points(original.id(), *tip, *bubble),
-                    Annotation::TextNote { position, .. } => {
-                        state.document.image.set_text_position(original.id(), *position)
-                    }
-                    Annotation::OpaqueRedaction { bounds, .. } => {
-                        state.document.image.set_redaction_bounds(original.id(), *bounds)
-                    }
+                    Annotation::TextNote { position, .. } => state
+                        .document
+                        .image
+                        .set_text_position(original.id(), *position),
+                    Annotation::OpaqueRedaction { bounds, .. } => state
+                        .document
+                        .image
+                        .set_redaction_bounds(original.id(), *bounds),
                 };
                 if let Err(e) = result {
                     state.message = Some(InlineMessage::Error(e.to_string()));
@@ -1100,14 +1126,27 @@ mod tests {
         let p = ImagePoint::new(1.0, 1.0);
         press_move_release(&mut state, p, p);
         match &state.document.image.annotations()[0] {
-            Annotation::NumberCallout { tip, bubble, number, .. } => {
+            Annotation::NumberCallout {
+                tip,
+                bubble,
+                number,
+                ..
+            } => {
                 assert_eq!(tip, bubble, "click → coincident stamp");
                 assert_eq!(*number, 1);
             }
             _ => panic!(),
         }
-        assert_eq!(state.editor.tool, Tool::Number, "spec §9.2: tool stays active");
-        press_move_release(&mut state, ImagePoint::new(1.5, 1.5), ImagePoint::new(1.5, 1.5));
+        assert_eq!(
+            state.editor.tool,
+            Tool::Number,
+            "spec §9.2: tool stays active"
+        );
+        press_move_release(
+            &mut state,
+            ImagePoint::new(1.5, 1.5),
+            ImagePoint::new(1.5, 1.5),
+        );
         assert_eq!(state.document.image.next_number(), 3);
     }
 
@@ -1115,7 +1154,11 @@ mod tests {
     fn number_drag_anchors_tip_and_separates_bubble_in_one_edit() {
         let mut state = workspace_with_size(200, 200);
         let _ = update(&mut state, Message::SelectTool(Tool::Number));
-        press_move_release(&mut state, ImagePoint::new(0.5, 0.5), ImagePoint::new(1.8, 1.8));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(0.5, 0.5),
+            ImagePoint::new(1.8, 1.8),
+        );
         assert_eq!(state.document.image.annotations().len(), 1);
         match &state.document.image.annotations()[0] {
             Annotation::NumberCallout { tip, bubble, .. } => {
@@ -1135,36 +1178,56 @@ mod tests {
     fn redaction_drag_creates_rect_and_zero_drag_creates_nothing() {
         let mut state = workspace_with_size(200, 200);
         let _ = update(&mut state, Message::SelectTool(Tool::Redact));
-        press_move_release(&mut state, ImagePoint::new(0.0, 0.0), ImagePoint::new(2.0, 2.0));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(2.0, 2.0),
+        );
         assert_eq!(state.document.image.annotations().len(), 1);
-        press_move_release(&mut state, ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(1.0, 1.0),
+            ImagePoint::new(1.0, 1.0),
+        );
         assert_eq!(state.document.image.annotations().len(), 1);
     }
 
     #[test]
     fn select_click_on_annotation_selects_without_history_entry() {
         let mut state = workspace_with_size(200, 200);
-        let id = state.document.image.add_number_callout(
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let s = state.document.image.state_id();
+        let _ = update(&mut state, Message::SelectTool(Tool::Select));
+        press_move_release(
+            &mut state,
             ImagePoint::new(1.0, 1.0),
             ImagePoint::new(1.0, 1.0),
         );
-        let s = state.document.image.state_id();
-        let _ = update(&mut state, Message::SelectTool(Tool::Select));
-        press_move_release(&mut state, ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
         assert_eq!(state.editor.selection, Some(id));
-        assert_eq!(state.document.image.state_id(), s, "no-move release edits nothing");
+        assert_eq!(
+            state.document.image.state_id(),
+            s,
+            "no-move release edits nothing"
+        );
     }
 
     #[test]
     fn select_click_on_empty_canvas_clears_selection_without_edits() {
         let mut state = workspace_with_size(100, 100);
-        let id = state.document.image.add_number_callout(
-            ImagePoint::new(10.0, 10.0),
-            ImagePoint::new(10.0, 10.0),
-        );
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
         state.editor.selection = Some(id);
         let s = state.document.image.state_id();
-        press_move_release(&mut state, ImagePoint::new(90.0, 90.0), ImagePoint::new(90.0, 90.0));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 90.0),
+            ImagePoint::new(90.0, 90.0),
+        );
         assert_eq!(state.editor.selection, None);
         assert_eq!(state.document.image.state_id(), s);
     }
@@ -1172,11 +1235,15 @@ mod tests {
     #[test]
     fn dragging_the_bubble_commits_one_set_points_edit() {
         let mut state = workspace_with_size(200, 200);
-        let id = state.document.image.add_number_callout(
-            ImagePoint::new(20.0, 20.0),
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(20.0, 20.0), ImagePoint::new(100.0, 100.0));
+        press_move_release(
+            &mut state,
             ImagePoint::new(100.0, 100.0),
+            ImagePoint::new(150.0, 150.0),
         );
-        press_move_release(&mut state, ImagePoint::new(100.0, 100.0), ImagePoint::new(150.0, 150.0));
         match state.document.image.annotation(id).unwrap() {
             Annotation::NumberCallout { tip, bubble, .. } => {
                 assert_eq!(*bubble, ImagePoint::new(150.0, 150.0));
@@ -1192,12 +1259,29 @@ mod tests {
         let id = state
             .document
             .image
-            .add_redaction(ImageRect { x: 50.0, y: 50.0, width: 40.0, height: 30.0 })
+            .add_redaction(ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            })
             .unwrap();
-        press_move_release(&mut state, ImagePoint::new(90.0, 80.0), ImagePoint::new(120.0, 110.0));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(120.0, 110.0),
+        );
         match state.document.image.annotation(id).unwrap() {
             Annotation::OpaqueRedaction { bounds, .. } => {
-                assert_eq!(*bounds, ImageRect { x: 50.0, y: 50.0, width: 70.0, height: 60.0 });
+                assert_eq!(
+                    *bounds,
+                    ImageRect {
+                        x: 50.0,
+                        y: 50.0,
+                        width: 70.0,
+                        height: 60.0
+                    }
+                );
             }
             _ => panic!(),
         }
@@ -1208,9 +1292,11 @@ mod tests {
     fn type_text(state: &mut super::super::ResultWorkspace, s: &str) {
         if let Some(draft) = &mut state.editor.text_draft {
             for ch in s.chars() {
-                draft.content.perform(iced::widget::text_editor::Action::Edit(
-                    iced::widget::text_editor::Edit::Insert(ch),
-                ));
+                draft
+                    .content
+                    .perform(iced::widget::text_editor::Action::Edit(
+                        iced::widget::text_editor::Edit::Insert(ch),
+                    ));
             }
         }
     }
@@ -1219,7 +1305,10 @@ mod tests {
     fn typing_then_commit_creates_exactly_one_edit() {
         let mut state = workspace_with_size(200, 100);
         let _ = update(&mut state, Message::SelectTool(Tool::Text));
-        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+        );
         assert!(state.editor.text_draft.is_some());
         type_text(&mut state, "hello");
         let _ = update(&mut state, Message::CommitTextDraft);
@@ -1241,11 +1330,17 @@ mod tests {
     fn empty_draft_commit_creates_nothing_and_esc_cancels() {
         let mut state = workspace_with_size(200, 100);
         let _ = update(&mut state, Message::SelectTool(Tool::Text));
-        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+        );
         let _ = update(&mut state, Message::CommitTextDraft);
         assert!(state.document.image.annotations().is_empty(), "spec §15");
 
-        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+        );
         type_text(&mut state, "draft");
         let _ = update(&mut state, Message::EscapePressed);
         assert!(state.editor.text_draft.is_none(), "esc cancels the draft");
@@ -1256,9 +1351,15 @@ mod tests {
     fn clicking_outside_commits_the_open_draft() {
         let mut state = workspace_with_size(200, 100);
         let _ = update(&mut state, Message::SelectTool(Tool::Text));
-        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(10.0, 10.0)));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+        );
         type_text(&mut state, "note");
-        let _ = update(&mut state, Message::CanvasPressed(ImagePoint::new(100.0, 50.0)));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(100.0, 50.0)),
+        );
         assert_eq!(state.document.image.annotations().len(), 1);
     }
 
@@ -1278,7 +1379,11 @@ mod tests {
             ImagePoint::new(15.0, 15.0),
             now + Duration::from_millis(100),
         );
-        let draft = state.editor.text_draft.as_ref().expect("re-edit draft open");
+        let draft = state
+            .editor
+            .text_draft
+            .as_ref()
+            .expect("re-edit draft open");
         assert_eq!(draft.target, Some(id));
         assert_eq!(draft.content.text().trim_end(), "old");
         state.editor.text_draft.as_mut().unwrap().content =
@@ -1295,10 +1400,10 @@ mod tests {
     #[test]
     fn navigator_jump_selects_and_ignores_stale_ids() {
         let mut state = workspace_with_size(100, 100);
-        let id = state.document.image.add_number_callout(
-            ImagePoint::new(10.0, 10.0),
-            ImagePoint::new(10.0, 10.0),
-        );
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
         let _ = update(&mut state, Message::NavigatorJump(id));
         assert_eq!(state.editor.selection, Some(id));
         let _ = update(&mut state, Message::Undo);
@@ -1332,7 +1437,11 @@ mod tests {
             Some(Message::Undo)
         ));
         assert!(matches!(
-            map_key_press(&Key::Character("z".into()), zmod() | keyboard::Modifiers::SHIFT, false),
+            map_key_press(
+                &Key::Character("z".into()),
+                zmod() | keyboard::Modifiers::SHIFT,
+                false
+            ),
             Some(Message::Redo)
         ));
         assert!(matches!(

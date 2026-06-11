@@ -144,111 +144,6 @@ fn resized_rect(original: ImageRect, handle: ResizeHandle, p: ImagePoint) -> Ima
     ImageRect::from_corners(ImagePoint::new(l, t), ImagePoint::new(r, b))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resize_from_each_side_normalizes_inverted_drags() {
-        let rect = ImageRect {
-            x: 10.0,
-            y: 10.0,
-            width: 20.0,
-            height: 20.0,
-        };
-        let r = resized_rect(rect, ResizeHandle::Right, ImagePoint::new(50.0, 99.0));
-        assert_eq!(
-            r,
-            ImageRect {
-                x: 10.0,
-                y: 10.0,
-                width: 40.0,
-                height: 20.0
-            }
-        );
-        let flipped = resized_rect(rect, ResizeHandle::Right, ImagePoint::new(2.0, 99.0));
-        assert_eq!(
-            flipped,
-            ImageRect {
-                x: 2.0,
-                y: 10.0,
-                width: 8.0,
-                height: 20.0
-            }
-        );
-    }
-
-    #[test]
-    fn body_drag_preserves_grab_offset_and_moves_number_as_a_unit() {
-        let original = Annotation::NumberCallout {
-            id: AnnotationId(1),
-            number: 1,
-            tip: ImagePoint::new(0.0, 0.0),
-            bubble: ImagePoint::new(10.0, 10.0),
-        };
-        let moved = dragged_annotation(
-            &original,
-            HitPart::Body,
-            ImagePoint::new(25.0, 25.0),
-            (5.0, 5.0),
-        );
-        match moved {
-            Annotation::NumberCallout { tip, bubble, .. } => {
-                assert_eq!(bubble, ImagePoint::new(20.0, 20.0));
-                assert_eq!(tip, ImagePoint::new(10.0, 10.0));
-            }
-            _ => panic!(),
-        }
-    }
-
-    use rollshot_image_document::{annotation_bounds, ImageDocument};
-    use image::{Rgba, RgbaImage};
-
-    #[test]
-    fn visible_image_rect_maps_scroll_and_scale() {
-        let visible = visible_image_rect(
-            iced::Vector::new(20.0, 40.0),
-            iced::Size::new(50.0, 80.0),
-            2.0,
-            iced::Point::new(0.0, 0.0),
-        );
-        assert_eq!(
-            visible,
-            ImageRect {
-                x: 10.0,
-                y: 20.0,
-                width: 25.0,
-                height: 40.0
-            }
-        );
-    }
-
-    #[test]
-    fn culling_skips_annotations_outside_the_visible_rect() {
-        let mut doc =
-            ImageDocument::new(RgbaImage::from_pixel(100, 10000, Rgba([0, 0, 0, 255])));
-        let near = doc.add_number_callout(ImagePoint::new(50.0, 50.0), ImagePoint::new(50.0, 50.0));
-        let far = doc.add_number_callout(
-            ImagePoint::new(50.0, 9000.0),
-            ImagePoint::new(50.0, 9000.0),
-        );
-        let visible = ImageRect {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 200.0,
-        };
-        let drawn: Vec<_> = doc
-            .annotations()
-            .iter()
-            .filter(|a| annotation_bounds(a).intersects(&visible))
-            .map(|a| a.id())
-            .collect();
-        assert_eq!(drawn, vec![near]);
-        assert!(!drawn.contains(&far));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Canvas program — annotation overlay with culling and event translation
 // ---------------------------------------------------------------------------
@@ -375,9 +270,7 @@ impl AnnotationCanvas<'_> {
                     position: Point::new(anchor.x * s, anchor.y * s),
                     color: token_color(*color),
                     size: iced::Pixels(px * s),
-                    line_height: iced::widget::text::LineHeight::Relative(
-                        style::TEXT_LINE_HEIGHT,
-                    ),
+                    line_height: iced::widget::text::LineHeight::Relative(style::TEXT_LINE_HEIGHT),
                     font: if *bold {
                         ANNOTATION_FONT_BOLD
                     } else {
@@ -473,7 +366,9 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let local = cursor.position_in(bounds)?;
-                Some(canvas::Action::publish(Message::CanvasMoved(self.image_point(local))))
+                Some(canvas::Action::publish(Message::CanvasMoved(
+                    self.image_point(local),
+                )))
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 let local = cursor.position_in(bounds)?;
@@ -548,5 +443,107 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             }
             _ => mouse::Interaction::Crosshair,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_from_each_side_normalizes_inverted_drags() {
+        let rect = ImageRect {
+            x: 10.0,
+            y: 10.0,
+            width: 20.0,
+            height: 20.0,
+        };
+        let r = resized_rect(rect, ResizeHandle::Right, ImagePoint::new(50.0, 99.0));
+        assert_eq!(
+            r,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 20.0
+            }
+        );
+        let flipped = resized_rect(rect, ResizeHandle::Right, ImagePoint::new(2.0, 99.0));
+        assert_eq!(
+            flipped,
+            ImageRect {
+                x: 2.0,
+                y: 10.0,
+                width: 8.0,
+                height: 20.0
+            }
+        );
+    }
+
+    #[test]
+    fn body_drag_preserves_grab_offset_and_moves_number_as_a_unit() {
+        let original = Annotation::NumberCallout {
+            id: AnnotationId(1),
+            number: 1,
+            tip: ImagePoint::new(0.0, 0.0),
+            bubble: ImagePoint::new(10.0, 10.0),
+        };
+        let moved = dragged_annotation(
+            &original,
+            HitPart::Body,
+            ImagePoint::new(25.0, 25.0),
+            (5.0, 5.0),
+        );
+        match moved {
+            Annotation::NumberCallout { tip, bubble, .. } => {
+                assert_eq!(bubble, ImagePoint::new(20.0, 20.0));
+                assert_eq!(tip, ImagePoint::new(10.0, 10.0));
+            }
+            _ => panic!(),
+        }
+    }
+
+    use image::{Rgba, RgbaImage};
+    use rollshot_image_document::{annotation_bounds, ImageDocument};
+
+    #[test]
+    fn visible_image_rect_maps_scroll_and_scale() {
+        let visible = visible_image_rect(
+            iced::Vector::new(20.0, 40.0),
+            iced::Size::new(50.0, 80.0),
+            2.0,
+            iced::Point::new(0.0, 0.0),
+        );
+        assert_eq!(
+            visible,
+            ImageRect {
+                x: 10.0,
+                y: 20.0,
+                width: 25.0,
+                height: 40.0
+            }
+        );
+    }
+
+    #[test]
+    fn culling_skips_annotations_outside_the_visible_rect() {
+        let mut doc = ImageDocument::new(RgbaImage::from_pixel(100, 10000, Rgba([0, 0, 0, 255])));
+        let near = doc.add_number_callout(ImagePoint::new(50.0, 50.0), ImagePoint::new(50.0, 50.0));
+        let far =
+            doc.add_number_callout(ImagePoint::new(50.0, 9000.0), ImagePoint::new(50.0, 9000.0));
+        let visible = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 200.0,
+        };
+        let drawn: Vec<_> = doc
+            .annotations()
+            .iter()
+            .filter(|a| annotation_bounds(a).intersects(&visible))
+            .map(|a| a.id())
+            .collect();
+        assert_eq!(drawn, vec![near]);
+        assert!(!drawn.contains(&far));
     }
 }

@@ -1,7 +1,7 @@
 use super::viewport::{geometry_for, ZoomDirection, ZoomMode};
 use iced::widget::{
-    button, column, container, image as image_widget, mouse_area, row, scrollable, text, text_editor,
-    tooltip, Space,
+    button, column, container, image as image_widget, mouse_area, row, scrollable, text,
+    text_editor, tooltip, Space,
 };
 use iced::{keyboard, mouse, Alignment, Element, Length, Size, Vector};
 
