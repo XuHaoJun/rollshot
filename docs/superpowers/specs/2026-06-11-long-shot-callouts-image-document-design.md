@@ -1,10 +1,10 @@
 # Long-Shot Callouts and Image Document Design
 
-**Date:** 2026-06-11  
-**Status:** Approved design, pending implementation plan  
+**Date:** 2026-06-11
+**Status:** Approved design, pending implementation plan
 **Revision:** 2026-06-11 product review — compact renumbering on Number
 Callout delete (D1), labeled output cluster in the toolbar (D2), visual
-defaults required as a plan deliverable.  
+defaults required as a plan deliverable.
 **Scope:** New headless image-document crate and active iced Result Workspace in
 `rollshot-app`
 
@@ -544,4 +544,3 @@ Navigator jumps, icon sizing, and long-image responsiveness.
 - Add no speculative OCR, Open Image, project persistence, style system, or
   generic editor APIs.
 - Do not commit the design or implementation unless the user explicitly asks.
-

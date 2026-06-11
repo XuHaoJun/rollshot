@@ -199,6 +199,12 @@ pub struct AnnotationCanvas<'a> {
     pub visible: ImageRect,
 }
 
+fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> Option<ImagePoint> {
+    cursor
+        .position_from(Point::new(bounds.x, bounds.y))
+        .map(|local| ImagePoint::new(local.x / scale, local.y / scale))
+}
+
 impl AnnotationCanvas<'_> {
     fn image_point(&self, local: Point) -> ImagePoint {
         ImagePoint::new(local.x / self.scale, local.y / self.scale)
@@ -371,11 +377,8 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
                 )))
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                let local = cursor.position_in(bounds)?;
-                Some(
-                    canvas::Action::publish(Message::CanvasReleased(self.image_point(local)))
-                        .and_capture(),
-                )
+                let point = release_image_point(cursor, bounds, self.scale)?;
+                Some(canvas::Action::publish(Message::CanvasReleased(point)).and_capture())
             }
             _ => None,
         }
@@ -545,5 +548,17 @@ mod tests {
             .collect();
         assert_eq!(drawn, vec![near]);
         assert!(!drawn.contains(&far));
+    }
+
+    #[test]
+    fn release_position_is_available_outside_canvas_bounds() {
+        let bounds = Rectangle::new(Point::new(10.0, 20.0), Size::new(100.0, 200.0));
+        let point = release_image_point(
+            mouse::Cursor::Available(Point::new(130.0, 250.0)),
+            bounds,
+            2.0,
+        )
+        .expect("active drag release should survive leaving the canvas");
+        assert_eq!(point, ImagePoint::new(60.0, 115.0));
     }
 }

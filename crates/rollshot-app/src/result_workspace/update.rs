@@ -40,7 +40,10 @@ pub enum Message {
     /// The async file-picker returned (None = cancelled).
     SavePathChosen(Option<PathBuf>),
     /// Background PNG write completed.
-    SaveFinished(Result<PathBuf, String>),
+    SaveFinished {
+        result: Result<PathBuf, String>,
+        saved_state_id: u64,
+    },
     /// User pressed "Reveal".
     Reveal,
     /// Background reveal command completed.
@@ -391,17 +394,25 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::SavePathChosen(Some(path)) => {
             let image = save_payload(state);
+            let saved_state_id = state.document.image.state_id();
             Task::perform(
                 async move { super::actions::write_save_as(&image, &path) },
-                Message::SaveFinished,
+                move |result| Message::SaveFinished {
+                    result,
+                    saved_state_id,
+                },
             )
         }
         Message::SavePathChosen(None) => Task::none(),
-        Message::SaveFinished(result) => {
-            state.apply_save_as(result.map(Some));
+        Message::SaveFinished {
+            result,
+            saved_state_id,
+        } => {
+            state.apply_save_as(result.map(Some), saved_state_id);
             Task::none()
         }
         Message::Reveal => {
+            commit_text_draft(state);
             let Some(path) = state.document.reveal_path().map(Path::to_path_buf) else {
                 return Task::none();
             };
@@ -421,10 +432,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::SetZoom(mode) => {
+            commit_text_draft(state);
             state.viewport.zoom = mode;
             Task::none()
         }
         Message::ZoomStep(dir) => {
+            commit_text_draft(state);
             let next = step_zoom(state.viewport.zoom, dir);
             apply_zoom_at_pointer(state, next)
         }
@@ -485,6 +498,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::ToggleNavigator => {
+            commit_text_draft(state);
             state.editor.navigator_open = !state.editor.navigator_open;
             Task::none()
         }
@@ -515,6 +529,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::ToggleCopyMenu => {
+            commit_text_draft(state);
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
             Task::none()
         }
@@ -798,6 +813,34 @@ mod tests {
         assert_ne!(
             save_payload(&state).as_raw(),
             state.document.image.source().as_raw()
+        );
+    }
+
+    #[test]
+    fn save_completion_marks_the_written_state_not_newer_edits() {
+        let mut state = unsaved_workspace();
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(0.5, 0.5), ImagePoint::new(0.5, 0.5));
+        let written_state_id = state.document.image.state_id();
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+
+        let _ = update(
+            &mut state,
+            Message::SaveFinished {
+                result: Ok(PathBuf::from("/tmp/annotated.png")),
+                saved_state_id: written_state_id,
+            },
+        );
+
+        assert_eq!(state.editor.saved_state_id, written_state_id);
+        assert!(
+            state.annotations_dirty(),
+            "edits made after the save payload was captured remain dirty"
         );
     }
 
@@ -1361,6 +1404,30 @@ mod tests {
             Message::CanvasPressed(ImagePoint::new(100.0, 50.0)),
         );
         assert_eq!(state.document.image.annotations().len(), 1);
+    }
+
+    #[test]
+    fn clicking_non_canvas_controls_commits_the_open_draft() {
+        for message in [
+            Message::SetZoom(ZoomMode::ActualSize),
+            Message::ZoomStep(ZoomDirection::In),
+            Message::ToggleNavigator,
+            Message::ToggleCopyMenu,
+            Message::Reveal,
+        ] {
+            let mut state = workspace_with_size(200, 100);
+            let _ = update(&mut state, Message::SelectTool(Tool::Text));
+            let _ = update(
+                &mut state,
+                Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+            );
+            type_text(&mut state, "note");
+
+            let _ = update(&mut state, message);
+
+            assert!(state.editor.text_draft.is_none());
+            assert_eq!(state.document.image.annotations().len(), 1);
+        }
     }
 
     #[test]

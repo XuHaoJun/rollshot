@@ -5042,7 +5042,3 @@ rtk git add -A && rtk git commit -m "test(app): runtime verification fixups for 
 - **Test pattern:** all gesture/update tests run through `update()` with `workspace_with_size` at `ActualSize` zoom so image coordinates equal screen coordinates (tolerance math stays honest).
 - **Do not** touch `crates/rollshot-tauri-app` or capture overlay crates anywhere in this plan (spec §17).
 - Commit after every task; never commit on red tests.
-
-
-
-

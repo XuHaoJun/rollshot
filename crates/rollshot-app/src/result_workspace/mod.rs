@@ -186,12 +186,12 @@ impl ResultWorkspace {
     /// - `Ok(Some(path))` — user chose a path and the write succeeded.
     /// - `Ok(None)` — user cancelled the dialog; no change.
     /// - `Err(e)` — write failed; show a persistent error.
-    pub fn apply_save_as(&mut self, result: Result<Option<PathBuf>, String>) {
+    pub fn apply_save_as(&mut self, result: Result<Option<PathBuf>, String>, saved_state_id: u64) {
         match result {
             Ok(Some(path)) => {
                 let text = format!("Saved to {}", path.display());
                 self.document.last_export_path = Some(path);
-                self.editor.saved_state_id = self.document.image.state_id();
+                self.editor.saved_state_id = saved_state_id;
                 self.message = Some(InlineMessage::success(text));
                 self.pending_discard = None;
             }
@@ -293,7 +293,8 @@ mod tests {
     #[test]
     fn save_as_success_updates_export_path_and_message() {
         let mut state = workspace();
-        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))));
+        let saved_state_id = state.document.image.state_id();
+        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))), saved_state_id);
         assert_eq!(
             state.document.last_export_path.as_deref(),
             Some(Path::new("/tmp/result.png"))
@@ -321,7 +322,8 @@ mod tests {
     #[test]
     fn save_as_cancel_leaves_no_change() {
         let mut state = workspace();
-        state.apply_save_as(Ok(None));
+        let saved_state_id = state.document.image.state_id();
+        state.apply_save_as(Ok(None), saved_state_id);
         assert!(state.document.last_export_path.is_none());
         assert!(state.message.is_none());
     }
@@ -329,7 +331,8 @@ mod tests {
     #[test]
     fn save_as_error_sets_persistent_error_and_no_path() {
         let mut state = workspace();
-        state.apply_save_as(Err("write failed".to_string()));
+        let saved_state_id = state.document.image.state_id();
+        state.apply_save_as(Err("write failed".to_string()), saved_state_id);
         assert!(state.document.last_export_path.is_none());
         assert!(matches!(&state.message, Some(InlineMessage::Error(e)) if e == "write failed"));
     }
@@ -356,7 +359,8 @@ mod tests {
     fn can_reveal_toggles_after_successful_save_as() {
         let mut state = unsaved_workspace();
         assert!(!state.can_reveal());
-        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))));
+        let saved_state_id = state.document.image.state_id();
+        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))), saved_state_id);
         assert!(state.can_reveal());
     }
 
@@ -416,7 +420,8 @@ mod tests {
             state.pending_discard.is_some(),
             "unsaved close should prompt"
         );
-        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))));
+        let saved_state_id = state.document.image.state_id();
+        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))), saved_state_id);
         assert!(
             state.pending_discard.is_none(),
             "a successful save should close the discard prompt"
