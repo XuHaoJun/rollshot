@@ -1,9 +1,9 @@
 use super::viewport::{geometry_for, ZoomDirection, ZoomMode};
 use iced::widget::{
-    button, column, container, image as image_widget, mouse_area, row, scrollable, text,
+    button, column, container, image as image_widget, mouse_area, opaque, row, scrollable, text,
     text_editor, tooltip, Space,
 };
-use iced::{keyboard, mouse, Alignment, Element, Length, Size, Vector};
+use iced::{keyboard, mouse, Alignment, Color, Element, Length, Size, Vector};
 
 use super::canvas::Tool;
 use super::{Message, ResultWorkspace};
@@ -318,6 +318,17 @@ fn zoom_label(state: &ResultWorkspace) -> String {
     }
 }
 
+fn discard_dialog_style(theme: &iced::Theme) -> container::Style {
+    container::rounded_box(theme)
+}
+
+fn discard_scrim_style(_theme: &iced::Theme) -> container::Style {
+    container::Style::default().background(Color {
+        a: 0.8,
+        ..Color::BLACK
+    })
+}
+
 fn discard_modal<'a>(base: Element<'a, Message>, prompt: &'a str) -> Element<'a, Message> {
     let dialog = container(
         column![
@@ -331,25 +342,49 @@ fn discard_modal<'a>(base: Element<'a, Message>, prompt: &'a str) -> Element<'a,
         .spacing(12)
         .align_x(Alignment::Center),
     )
-    .padding(20);
+    .padding(20)
+    .style(discard_dialog_style);
 
-    // Full-window scrim that actually blocks the base layer. iced's `stack`
-    // only levitates the cursor (suppressing input to lower layers) where the
-    // top layer reports a non-`None` `mouse_interaction`. A bare centered
-    // container leaves the surrounding area at `Interaction::None`, so toolbar
-    // buttons behind it stay clickable. Setting `mouse_area.interaction(Idle)`
-    // makes the scrim report a non-`None` interaction over the whole window,
-    // and `on_press` captures clicks outside the dialog (mapped to a no-op so
-    // an accidental outside-click neither dismisses nor discards).
-    let scrim = mouse_area(
-        container(dialog)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center),
-    )
-    .interaction(mouse::Interaction::Idle)
-    .on_press(Message::ModalScrimPressed);
+    // Follow iced's official modal pattern: an opaque dialog over a styled
+    // full-window scrim. Outside clicks remain a no-op for destructive prompts.
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog))
+                .style(discard_scrim_style)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::ModalScrimPressed),
+    );
 
     iced::widget::stack![base, scrim].into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discard_dialog_has_solid_background() {
+        let style = discard_dialog_style(&iced::Theme::Dark);
+        let iced::Background::Color(color) = style.background.expect("dialog background") else {
+            panic!("dialog background must be a solid color");
+        };
+        assert_eq!(color.a, 1.0);
+    }
+
+    #[test]
+    fn discard_scrim_is_translucent_black() {
+        let style = discard_scrim_style(&iced::Theme::Dark);
+        let iced::Background::Color(color) = style.background.expect("scrim background") else {
+            panic!("scrim background must be a solid color");
+        };
+        assert_eq!(color.r, 0.0);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 0.0);
+        assert!(color.a > 0.0 && color.a < 1.0);
+    }
 }
