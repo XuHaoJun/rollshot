@@ -152,6 +152,14 @@ fn controls_message_to_overlay(
     }
 }
 
+fn controls_global_rect(rect: LogicalRect, overlay_origin: Point) -> LogicalRect {
+    LogicalRect {
+        x: rect.x + overlay_origin.x,
+        y: rect.y + overlay_origin.y,
+        ..rect
+    }
+}
+
 fn render_overlay_toolbar(phase: WorkspacePhase) -> bool {
     phase != WorkspacePhase::ScrollingCapture
 }
@@ -195,6 +203,7 @@ pub enum HostEffect {
 pub struct Component {
     overlay: OverlayState,
     overlay_window: Option<window::Id>,
+    overlay_origin: Point,
     controls_window: Option<window::Id>,
     controls_rect: Option<LogicalRect>,
     driver: Option<Driver>,
@@ -260,6 +269,7 @@ impl Component {
         Ok(Some(Self {
             overlay,
             overlay_window: None,
+            overlay_origin: Point::ORIGIN,
             controls_window: None,
             controls_rect: None,
             driver,
@@ -354,8 +364,9 @@ impl Component {
     /// Record the overlay window the host opened. The window patch is applied
     /// later, when the `Opened` event arrives through `subscription` -> `update`
     /// (matching the original runner), so no boot task is needed here.
-    pub fn boot(&mut self, overlay_window: window::Id) -> Task<Message> {
+    pub fn boot(&mut self, overlay_window: window::Id, overlay_origin: Point) -> Task<Message> {
         self.overlay_window = Some(overlay_window);
+        self.overlay_origin = overlay_origin;
         Task::none()
     }
 
@@ -810,6 +821,7 @@ impl Component {
             ControlsWindowAction::Open(rect) => {
                 if Some(rect) != self.controls_rect {
                     self.controls_rect = Some(rect);
+                    let rect = controls_global_rect(rect, self.overlay_origin);
                     let (x, y, w, h) = (
                         rect.x as i32,
                         rect.y as i32,
@@ -952,7 +964,7 @@ fn overlay_event_message(
 fn controls_window_settings(x: i32, y: i32, w: i32, h: i32) -> window::Settings {
     window::Settings {
         size: Size::new(w.max(1) as f32, h.max(1) as f32),
-        position: window::Position::Specific(Point::new(x.max(0) as f32, y.max(0) as f32)),
+        position: window::Position::Specific(Point::new(x as f32, y as f32)),
         decorations: false,
         transparent: true,
         level: window::Level::AlwaysOnTop,
@@ -1037,6 +1049,7 @@ mod tests {
         Component {
             overlay: OverlayState::default(),
             overlay_window: None,
+            overlay_origin: Point::ORIGIN,
             controls_window: None,
             controls_rect: None,
             driver: None,
@@ -1242,6 +1255,24 @@ mod tests {
             controls_window_action(None, Some(rect(20.0, 30.0, 260.0, 48.0))),
             ControlsWindowAction::Open(rect(20.0, 30.0, 260.0, 48.0))
         );
+    }
+
+    #[test]
+    fn controls_window_rect_is_offset_by_captured_display_origin() {
+        assert_eq!(
+            controls_global_rect(rect(20.0, 30.0, 360.0, 48.0), Point::new(-2560.0, 100.0)),
+            rect(-2540.0, 130.0, 360.0, 48.0)
+        );
+    }
+
+    #[test]
+    fn controls_window_settings_preserve_negative_global_origin() {
+        let window::Position::Specific(position) =
+            controls_window_settings(-2540, 130, 360, 48).position
+        else {
+            panic!("expected specific controls window position");
+        };
+        assert_eq!(position, Point::new(-2540.0, 130.0));
     }
 
     #[test]

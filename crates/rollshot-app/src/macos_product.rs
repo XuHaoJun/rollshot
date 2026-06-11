@@ -187,7 +187,7 @@ fn open_capture_window(
 
     let (overlay_window, open_overlay) =
         window::open(overlay_window_settings(window_size, window_origin));
-    let boot_task = component.boot(overlay_window);
+    let boot_task = component.boot(overlay_window, window_origin);
 
     let open_task = open_overlay
         .map(rollshot_iced_overlay::macos_capture::Message::overlay_window_ready)
