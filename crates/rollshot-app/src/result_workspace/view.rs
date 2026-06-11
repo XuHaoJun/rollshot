@@ -107,11 +107,19 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
 
     let message_area = message_row(state);
 
-    let canvas = canvas_view(state, original);
+    let canvas_area = canvas_view(state, original);
 
     let status = status_bar(state, original);
 
-    let layout = column![toolbar, message_area, canvas, status]
+    let workspace_row: Element<'_, Message> = if state.editor.navigator_open {
+        row![canvas_area, super::navigator::navigator_panel(state)]
+            .spacing(4)
+            .into()
+    } else {
+        canvas_area
+    };
+
+    let layout = column![toolbar, message_area, workspace_row, status]
         .spacing(8)
         .padding(8);
 

@@ -1,6 +1,7 @@
 pub mod actions;
 pub(crate) mod canvas;
 mod document;
+mod navigator;
 mod update;
 mod view;
 pub mod viewport;

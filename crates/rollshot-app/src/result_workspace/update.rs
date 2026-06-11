@@ -11,7 +11,7 @@ use super::canvas::{
     DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
 };
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
-use rollshot_image_document::{Annotation, HitPart, ImagePoint, ImageRect};
+use rollshot_image_document::{Annotation, AnnotationId, HitPart, ImagePoint, ImageRect};
 
 // ---------------------------------------------------------------------------
 // Message enum
@@ -75,6 +75,8 @@ pub enum Message {
     EscapePressed,
     /// Toggle the Navigator panel.
     ToggleNavigator,
+    /// Jump to an annotation via the Navigator.
+    NavigatorJump(AnnotationId),
     /// Toggle the Copy menu dropdown.
     ToggleCopyMenu,
     /// Canvas pointer pressed (image-space coordinate).
@@ -297,6 +299,20 @@ pub(crate) fn handle_canvas_released(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
+    let task = update_inner(state, message);
+    refresh_navigator(state);
+    task
+}
+
+fn refresh_navigator(state: &mut super::ResultWorkspace) {
+    let current = state.document.image.state_id();
+    if state.editor.navigator_items_state != Some(current) {
+        state.editor.navigator_items = state.document.image.navigator_items();
+        state.editor.navigator_items_state = Some(current);
+    }
+}
+
+fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
     match message {
         Message::RequestClose => {
             commit_text_draft(state);
@@ -446,6 +462,32 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             state.editor.navigator_open = !state.editor.navigator_open;
             Task::none()
         }
+        Message::NavigatorJump(id) => {
+            commit_text_draft(state);
+            if state.document.image.annotation(id).is_none() {
+                state.editor.selection = None;
+                return Task::none();
+            }
+            state.editor.selection = Some(id);
+            if let Some(target) = state
+                .editor
+                .navigator_items
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| i.center)
+            {
+                let geometry = geometry_for(
+                    state.viewport.zoom,
+                    state.original_size(),
+                    state.viewport_bounds,
+                );
+                return iced::widget::operation::scroll_to(
+                    state.scrollable_id.clone(),
+                    super::navigator::jump_offset(target, &geometry, state.viewport_bounds),
+                );
+            }
+            Task::none()
+        }
         Message::ToggleCopyMenu => {
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
             Task::none()
@@ -562,26 +604,57 @@ fn scroll_delta_pixels(delta: mouse::ScrollDelta) -> (f32, f32) {
 }
 
 // ---------------------------------------------------------------------------
+// Keyboard routing
+// ---------------------------------------------------------------------------
+
+pub(crate) fn map_key_press(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    captured: bool,
+) -> Option<Message> {
+    use keyboard::key::Named;
+    if matches!(key, keyboard::Key::Named(Named::Escape)) {
+        return Some(Message::EscapePressed);
+    }
+    if captured {
+        return None;
+    }
+    let command = zoom_modifier_held(modifiers);
+    match key {
+        keyboard::Key::Named(Named::Delete) | keyboard::Key::Named(Named::Backspace) => {
+            Some(Message::DeleteSelected)
+        }
+        keyboard::Key::Character(c) if command => match c.as_str() {
+            "z" if modifiers.shift() => Some(Message::Redo),
+            "z" => Some(Message::Undo),
+            "c" => Some(Message::Copy),
+            _ => None,
+        },
+        keyboard::Key::Character(c) if !modifiers.alt() => match c.as_str() {
+            "v" => Some(Message::SelectTool(Tool::Select)),
+            "n" => Some(Message::SelectTool(Tool::Number)),
+            "t" => Some(Message::SelectTool(Tool::Text)),
+            "r" => Some(Message::SelectTool(Tool::Redact)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Subscription
 // ---------------------------------------------------------------------------
 
 pub(crate) fn subscription(state: &super::ResultWorkspace) -> Subscription<Message> {
     let mut subs = vec![
         iced::window::close_requests().map(|_id| Message::RequestClose),
-        iced::event::listen_with(|event, _status, _window| match event {
+        iced::event::listen_with(|event, status, _window| match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                 Some(Message::ModifiersChanged(m))
             }
-            iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                ..
-            }) => Some(Message::EscapePressed),
-            // Pointer position for pointer-anchored zoom comes solely from the
-            // canvas `mouse_area.on_move` (scrollable-local space, which
-            // `anchored_scroll` expects). The global window-relative
-            // `CursorMoved` event is intentionally NOT routed here: feeding it
-            // into `pointer_position` would mix coordinate spaces and anchor
-            // zoom at the wrong point.
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                map_key_press(&key, modifiers, status == iced::event::Status::Captured)
+            }
             _ => None,
         }),
     ];
@@ -1215,5 +1288,78 @@ mod tests {
             Annotation::TextNote { text, .. } => assert_eq!(text, "new"),
             _ => panic!(),
         }
+    }
+
+    // -- navigator jump (Task 21) -------------------------------------------
+
+    #[test]
+    fn navigator_jump_selects_and_ignores_stale_ids() {
+        let mut state = workspace_with_size(100, 100);
+        let id = state.document.image.add_number_callout(
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(10.0, 10.0),
+        );
+        let _ = update(&mut state, Message::NavigatorJump(id));
+        assert_eq!(state.editor.selection, Some(id));
+        let _ = update(&mut state, Message::Undo);
+        let _ = update(&mut state, Message::NavigatorJump(id));
+        assert_eq!(state.editor.selection, None);
+    }
+
+    // -- keyboard routing (Task 22) -----------------------------------------
+
+    fn zmod() -> keyboard::Modifiers {
+        #[cfg(target_os = "macos")]
+        {
+            keyboard::Modifiers::COMMAND
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            keyboard::Modifiers::CTRL
+        }
+    }
+
+    #[test]
+    fn key_mapping_routes_tools_undo_redo_delete_copy() {
+        use keyboard::{key::Named, Key};
+        let none = keyboard::Modifiers::default();
+        assert!(matches!(
+            map_key_press(&Key::Character("n".into()), none, false),
+            Some(Message::SelectTool(Tool::Number))
+        ));
+        assert!(matches!(
+            map_key_press(&Key::Character("z".into()), zmod(), false),
+            Some(Message::Undo)
+        ));
+        assert!(matches!(
+            map_key_press(&Key::Character("z".into()), zmod() | keyboard::Modifiers::SHIFT, false),
+            Some(Message::Redo)
+        ));
+        assert!(matches!(
+            map_key_press(&Key::Named(Named::Delete), none, false),
+            Some(Message::DeleteSelected)
+        ));
+        assert!(matches!(
+            map_key_press(&Key::Character("c".into()), zmod(), false),
+            Some(Message::Copy)
+        ));
+    }
+
+    #[test]
+    fn captured_keys_are_ignored_except_escape() {
+        use keyboard::{key::Named, Key};
+        let none = keyboard::Modifiers::default();
+        assert!(map_key_press(&Key::Character("n".into()), none, true).is_none());
+        assert!(map_key_press(&Key::Named(Named::Backspace), none, true).is_none());
+        assert!(matches!(
+            map_key_press(&Key::Named(Named::Escape), none, true),
+            Some(Message::EscapePressed)
+        ));
+    }
+
+    #[test]
+    fn plain_characters_do_not_fire_with_command_modifiers_held() {
+        use keyboard::Key;
+        assert!(map_key_press(&Key::Character("n".into()), zmod(), false).is_none());
     }
 }

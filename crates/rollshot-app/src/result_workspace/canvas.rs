@@ -69,6 +69,10 @@ pub struct EditorState {
     pub saved_state_id: u64,
     /// Last canvas press, for double-click detection.
     pub last_press: Option<(Instant, ImagePoint)>,
+    /// Cached Navigator order, refreshed only when the document changes
+    /// (spec §13). Keyed by the document state_id.
+    pub navigator_items: Vec<rollshot_image_document::NavigatorItem>,
+    pub navigator_items_state: Option<u64>,
 }
 
 impl EditorState {
@@ -82,6 +86,8 @@ impl EditorState {
             copy_menu_open: false,
             saved_state_id,
             last_press: None,
+            navigator_items: Vec::new(),
+            navigator_items_state: None,
         }
     }
 }
