@@ -14,8 +14,8 @@ mod shapes;
 pub mod style;
 mod text;
 
-// Uncommented as modules are implemented:
-// pub use annotation::{Annotation, AnnotationId};
+pub use annotation::{Annotation, AnnotationId};
+// pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 // pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use geometry::{ImagePoint, ImageRect, Rgba8};
 // pub use hit::{redaction_handles, Hit, HitPart, ResizeHandle};

@@ -115,12 +115,25 @@ mod tests {
     #[test]
     fn from_corners_normalizes_inverted_drag() {
         let r = ImageRect::from_corners(ImagePoint::new(10.0, 20.0), ImagePoint::new(4.0, 6.0));
-        assert_eq!(r, ImageRect { x: 4.0, y: 6.0, width: 6.0, height: 14.0 });
+        assert_eq!(
+            r,
+            ImageRect {
+                x: 4.0,
+                y: 6.0,
+                width: 6.0,
+                height: 14.0
+            }
+        );
     }
 
     #[test]
     fn contains_and_center() {
-        let r = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 4.0 };
+        let r = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 4.0,
+        };
         assert!(r.contains(ImagePoint::new(5.0, 2.0)));
         assert!(!r.contains(ImagePoint::new(11.0, 2.0)));
         assert_eq!(r.center(), ImagePoint::new(5.0, 2.0));
@@ -128,9 +141,24 @@ mod tests {
 
     #[test]
     fn intersects_overlapping_and_disjoint() {
-        let a = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
-        let b = ImageRect { x: 5.0, y: 5.0, width: 10.0, height: 10.0 };
-        let c = ImageRect { x: 20.0, y: 20.0, width: 5.0, height: 5.0 };
+        let a = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let b = ImageRect {
+            x: 5.0,
+            y: 5.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let c = ImageRect {
+            x: 20.0,
+            y: 20.0,
+            width: 5.0,
+            height: 5.0,
+        };
         assert!(a.intersects(&b));
         assert!(!a.intersects(&c));
     }
@@ -145,21 +173,54 @@ mod tests {
 
     #[test]
     fn rect_clamp_to_keeps_size_when_inside_and_clips_when_outside() {
-        let inside = ImageRect { x: 5.0, y: 5.0, width: 10.0, height: 10.0 };
+        let inside = ImageRect {
+            x: 5.0,
+            y: 5.0,
+            width: 10.0,
+            height: 10.0,
+        };
         assert_eq!(inside.clamp_to(100, 100), inside);
-        let overflow = ImageRect { x: 95.0, y: 95.0, width: 10.0, height: 10.0 };
+        let overflow = ImageRect {
+            x: 95.0,
+            y: 95.0,
+            width: 10.0,
+            height: 10.0,
+        };
         let clipped = overflow.clamp_to(100, 100);
-        assert_eq!(clipped, ImageRect { x: 95.0, y: 95.0, width: 5.0, height: 5.0 });
+        assert_eq!(
+            clipped,
+            ImageRect {
+                x: 95.0,
+                y: 95.0,
+                width: 5.0,
+                height: 5.0
+            }
+        );
     }
 
     #[test]
     fn zero_area_rect_is_empty() {
-        assert!(ImageRect { x: 0.0, y: 0.0, width: 0.5, height: 10.0 }.is_empty());
-        assert!(!ImageRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }.is_empty());
+        assert!(ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 10.0
+        }
+        .is_empty());
+        assert!(!ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0
+        }
+        .is_empty());
     }
 
     #[test]
     fn distance_is_euclidean() {
-        assert_eq!(ImagePoint::new(0.0, 0.0).distance(ImagePoint::new(3.0, 4.0)), 5.0);
+        assert_eq!(
+            ImagePoint::new(0.0, 0.0).distance(ImagePoint::new(3.0, 4.0)),
+            5.0
+        );
     }
 }
