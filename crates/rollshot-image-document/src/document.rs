@@ -106,6 +106,32 @@ impl ImageDocument {
         self.state_id = self.next_state_id;
     }
 
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.annotations = snapshot.annotations;
+        self.next_number = snapshot.next_number;
+        self.state_id = snapshot.state_id;
+    }
+
+    /// Returns `false` when there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo_stack.pop_back() else {
+            return false;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.restore(previous);
+        true
+    }
+
+    /// Returns `false` when there is nothing to redo.
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push_back(self.snapshot());
+        self.restore(next);
+        true
+    }
+
     fn allocate_id(&mut self) -> AnnotationId {
         let id = AnnotationId(self.next_id);
         self.next_id += 1;
@@ -268,5 +294,70 @@ mod tests {
         assert_ne!(s0, s1);
         let _ = d.add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string());
         assert_ne!(d.state_id(), s1);
+    }
+
+    #[test]
+    fn undo_redo_restore_annotations_sequence_and_state_id() {
+        let mut d = doc();
+        let s0 = d.state_id();
+        d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let s1 = d.state_id();
+        d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
+
+        assert!(d.undo());
+        assert_eq!(d.annotations().len(), 1);
+        assert_eq!(d.next_number(), 2, "sequence follows undo (spec §6)");
+        assert_eq!(d.state_id(), s1);
+
+        assert!(d.undo());
+        assert!(d.annotations().is_empty());
+        assert_eq!(d.next_number(), 1);
+        assert_eq!(d.state_id(), s0);
+        assert!(!d.undo(), "nothing left to undo");
+
+        assert!(d.redo());
+        assert_eq!(d.annotations().len(), 1);
+        assert_eq!(d.next_number(), 2);
+        assert_eq!(d.state_id(), s1);
+    }
+
+    #[test]
+    fn new_edit_after_undo_clears_redo() {
+        let mut d = doc();
+        d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
+        assert!(d.undo());
+        assert!(d.can_redo());
+        d.add_number_callout(ImagePoint::new(3.0, 3.0), ImagePoint::new(3.0, 3.0));
+        assert!(!d.can_redo(), "spec §10: new edit clears redo");
+    }
+
+    #[test]
+    fn history_caps_at_limit_dropping_oldest() {
+        let mut d = doc();
+        for i in 0..(HISTORY_LIMIT + 10) {
+            d.add_number_callout(
+                ImagePoint::new(i as f32 % 90.0, 1.0),
+                ImagePoint::new(i as f32 % 90.0, 1.0),
+            );
+        }
+        let mut undone = 0;
+        while d.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, HISTORY_LIMIT);
+        assert_eq!(d.annotations().len(), 10, "oldest 10 edits fell off the stack");
+    }
+
+    #[test]
+    fn ids_stay_stable_across_undo_redo_and_are_never_reused() {
+        let mut d = doc();
+        let first = d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        assert!(d.undo());
+        let second = d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
+        assert_ne!(first, second, "ids are never reused after undo");
+        assert!(d.undo());
+        assert!(d.redo());
+        assert_eq!(d.annotations()[0].id(), second, "redo restores the same id");
     }
 }
