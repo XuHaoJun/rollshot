@@ -57,6 +57,20 @@ pub enum Message {
     ModalScrimPressed,
     /// Wheel scrolled over the canvas.
     WheelScrolled(mouse::ScrollDelta),
+    /// Select an annotation tool.
+    SelectTool(super::canvas::Tool),
+    /// Undo the last annotation edit.
+    Undo,
+    /// Redo the last undone annotation edit.
+    Redo,
+    /// Delete the currently selected annotation.
+    DeleteSelected,
+    /// Escape priority: cancel draft → clear selection → request close.
+    EscapePressed,
+    /// Toggle the Navigator panel.
+    ToggleNavigator,
+    /// Toggle the Copy menu dropdown.
+    ToggleCopyMenu,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +104,7 @@ pub(crate) fn save_payload(state: &super::ResultWorkspace) -> RgbaImage {
 pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
     match message {
         Message::RequestClose => {
+            commit_text_draft(state);
             match super::document::close_decision(&state.document, state.annotations_dirty()) {
                 CloseDecision::Close => iced::exit(),
                 CloseDecision::Confirm(prompt) => {
@@ -108,10 +123,12 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             Task::none()
         }
         Message::Copy => {
+            commit_text_draft(state);
             let result = super::actions::copy_image(&copy_payload(state));
             Task::done(Message::CopyFinished(result))
         }
         Message::CopyOriginal => {
+            commit_text_draft(state);
             let result = super::actions::copy_image(&copy_original_payload(state));
             Task::done(Message::CopyFinished(result))
         }
@@ -124,6 +141,7 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             Task::none()
         }
         Message::SaveAs => {
+            commit_text_draft(state);
             let default_dir = crate::storage::Platform::current()
                 .and_then(crate::storage::default_output_dir)
                 .unwrap_or_else(|_| PathBuf::from("."));
@@ -187,7 +205,71 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
         }
         Message::ModalScrimPressed => Task::none(),
         Message::WheelScrolled(delta) => handle_wheel(state, delta),
+        Message::SelectTool(tool) => {
+            commit_text_draft(state);
+            state.editor.tool = tool;
+            state.editor.drag = None;
+            Task::none()
+        }
+        Message::Undo => {
+            commit_text_draft(state);
+            let _ = state.document.image.undo();
+            prune_stale_selection(state);
+            Task::none()
+        }
+        Message::Redo => {
+            commit_text_draft(state);
+            let _ = state.document.image.redo();
+            prune_stale_selection(state);
+            Task::none()
+        }
+        Message::DeleteSelected => {
+            if state.editor.text_draft.is_some() {
+                return Task::none();
+            }
+            if let Some(id) = state.editor.selection.take() {
+                let _ = state.document.image.delete_annotation(id);
+            }
+            Task::none()
+        }
+        Message::EscapePressed => {
+            if state.editor.copy_menu_open {
+                state.editor.copy_menu_open = false;
+            } else if state.editor.text_draft.is_some() {
+                state.editor.text_draft = None;
+            } else if state.editor.drag.is_some() {
+                state.editor.drag = None;
+            } else if state.editor.selection.is_some() {
+                state.editor.selection = None;
+            } else {
+                return update(state, Message::RequestClose);
+            }
+            Task::none()
+        }
+        Message::ToggleNavigator => {
+            state.editor.navigator_open = !state.editor.navigator_open;
+            Task::none()
+        }
+        Message::ToggleCopyMenu => {
+            state.editor.copy_menu_open = !state.editor.copy_menu_open;
+            Task::none()
+        }
     }
+}
+
+/// Drop a selection whose annotation no longer exists (spec §15).
+fn prune_stale_selection(state: &mut super::ResultWorkspace) {
+    if let Some(id) = state.editor.selection {
+        if state.document.image.annotation(id).is_none() {
+            state.editor.selection = None;
+        }
+    }
+}
+
+/// Commit a valid inline text draft, or cancel an invalid one (spec §15).
+/// Full implementation lands with the text editor task; until then:
+fn commit_text_draft(state: &mut super::ResultWorkspace) {
+    let _ = state;
 }
 
 /// The platform zoom modifier: Cmd on macOS, Ctrl on Linux.
@@ -270,7 +352,7 @@ pub(crate) fn subscription(state: &super::ResultWorkspace) -> Subscription<Messa
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
-            }) => Some(Message::RequestClose),
+            }) => Some(Message::EscapePressed),
             // Pointer position for pointer-anchored zoom comes solely from the
             // canvas `mouse_area.on_move` (scrollable-local space, which
             // `anchored_scroll` expects). The global window-relative
@@ -341,7 +423,12 @@ mod tests {
         state
             .document
             .image
-            .add_redaction(ImageRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 })
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
             .unwrap();
         assert!(state.annotations_dirty());
         let flattened = copy_payload(&state);
@@ -350,7 +437,10 @@ mod tests {
             state.document.image.source().get_pixel(0, 0).0,
             "copy payload is the flattened image"
         );
-        assert!(state.annotations_dirty(), "spec §12.1: copy never clears dirty");
+        assert!(
+            state.annotations_dirty(),
+            "spec §12.1: copy never clears dirty"
+        );
     }
 
     #[test]
@@ -359,7 +449,12 @@ mod tests {
         state
             .document
             .image
-            .add_redaction(ImageRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 })
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
             .unwrap();
         let original = copy_original_payload(&state);
         assert_eq!(original.as_raw(), state.document.image.source().as_raw());
@@ -373,11 +468,14 @@ mod tests {
             state.document.image.source().as_raw(),
             "spec §12.2: no annotations → original bytes"
         );
-        state.document.image.add_number_callout(
-            ImagePoint::new(1.0, 1.0),
-            ImagePoint::new(1.0, 1.0),
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        assert_ne!(
+            save_payload(&state).as_raw(),
+            state.document.image.source().as_raw()
         );
-        assert_ne!(save_payload(&state).as_raw(), state.document.image.source().as_raw());
     }
 
     /// The platform zoom modifier (Ctrl on Linux / Cmd on macOS), used to drive
@@ -567,5 +665,97 @@ mod tests {
         assert_eq!(state.viewport.zoom, before);
         assert!(!zoom_modifier_held(state.modifiers));
         assert!(!state.modifiers.shift());
+    }
+
+    // -- editor state, tools, undo/redo/delete/escape (Task 16) ---------------
+
+    #[test]
+    fn select_is_the_default_tool_and_tools_switch() {
+        let mut state = unsaved_workspace();
+        assert_eq!(state.editor.tool, super::super::canvas::Tool::Select);
+        let _ = update(
+            &mut state,
+            Message::SelectTool(super::super::canvas::Tool::Number),
+        );
+        assert_eq!(state.editor.tool, super::super::canvas::Tool::Number);
+    }
+
+    #[test]
+    fn switching_tools_preserves_viewport() {
+        let mut state = unsaved_workspace();
+        state.viewport.zoom = ZoomMode::Custom(150);
+        state.viewport.scroll_offset = Vector::new(11.0, 22.0);
+        let _ = update(
+            &mut state,
+            Message::SelectTool(super::super::canvas::Tool::Redact),
+        );
+        assert_eq!(state.viewport.zoom, ZoomMode::Custom(150));
+        assert_eq!(state.viewport.scroll_offset, Vector::new(11.0, 22.0));
+    }
+
+    #[test]
+    fn undo_redo_messages_drive_the_document() {
+        let mut state = unsaved_workspace();
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let _ = update(&mut state, Message::Undo);
+        assert!(state.document.image.annotations().is_empty());
+        let _ = update(&mut state, Message::Redo);
+        assert_eq!(state.document.image.annotations().len(), 1);
+    }
+
+    #[test]
+    fn delete_removes_the_selected_annotation_and_clears_selection() {
+        let mut state = unsaved_workspace();
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::DeleteSelected);
+        assert!(state.document.image.annotations().is_empty());
+        assert_eq!(state.editor.selection, None);
+    }
+
+    #[test]
+    fn escape_priority_draft_then_selection_then_close() {
+        let mut state = unsaved_workspace();
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        state.editor.selection = Some(id);
+        state.editor.drag = Some(super::super::canvas::DragState::CreateRedaction {
+            anchor: ImagePoint::new(0.0, 0.0),
+            current: ImagePoint::new(1.0, 1.0),
+        });
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none(), "1st Esc cancels the draft");
+        assert_eq!(state.editor.selection, Some(id), "selection survives");
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert_eq!(state.editor.selection, None, "2nd Esc clears selection");
+        assert!(state.pending_discard.is_none());
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(
+            state.pending_discard.is_some(),
+            "3rd Esc requests close (unsaved)"
+        );
+    }
+
+    #[test]
+    fn undo_after_undo_clears_selection_of_removed_annotation() {
+        let mut state = unsaved_workspace();
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::Undo);
+        assert_eq!(state.editor.selection, None, "stale selection cleared");
     }
 }

@@ -411,7 +411,10 @@ mod tests {
     fn save_as_success_clears_pending_discard_prompt() {
         let mut state = unsaved_workspace();
         let _ = update(&mut state, Message::RequestClose);
-        assert!(state.pending_discard.is_some(), "unsaved close should prompt");
+        assert!(
+            state.pending_discard.is_some(),
+            "unsaved close should prompt"
+        );
         state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))));
         assert!(
             state.pending_discard.is_none(),

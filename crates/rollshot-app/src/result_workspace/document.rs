@@ -35,7 +35,9 @@ impl ResultDocument {
     /// Reveal opens the latest durable output, preferring the annotated
     /// export over the original (spec §7).
     pub fn reveal_path(&self) -> Option<&Path> {
-        self.last_export_path.as_deref().or(self.source_path.as_deref())
+        self.last_export_path
+            .as_deref()
+            .or(self.source_path.as_deref())
     }
 
     pub fn display_name(&self) -> String {
@@ -79,7 +81,10 @@ pub enum CloseDecision {
 pub fn close_decision(document: &ResultDocument, annotations_dirty: bool) -> CloseDecision {
     let lose_capture = document.source_path.is_none() && document.last_export_path.is_none();
     if lose_capture || annotations_dirty {
-        CloseDecision::Confirm(DiscardPrompt { lose_capture, lose_edits: annotations_dirty })
+        CloseDecision::Confirm(DiscardPrompt {
+            lose_capture,
+            lose_edits: annotations_dirty,
+        })
     } else {
         CloseDecision::Close
     }
@@ -122,7 +127,10 @@ mod tests {
         let d = ResultDocument::unsaved(image());
         assert_eq!(
             close_decision(&d, false),
-            CloseDecision::Confirm(DiscardPrompt { lose_capture: true, lose_edits: false })
+            CloseDecision::Confirm(DiscardPrompt {
+                lose_capture: true,
+                lose_edits: false
+            })
         );
     }
 
@@ -131,7 +139,10 @@ mod tests {
         let d = ResultDocument::saved(image(), PathBuf::from("/tmp/a.png"));
         assert_eq!(
             close_decision(&d, true),
-            CloseDecision::Confirm(DiscardPrompt { lose_capture: false, lose_edits: true })
+            CloseDecision::Confirm(DiscardPrompt {
+                lose_capture: false,
+                lose_edits: true
+            })
         );
     }
 
@@ -145,15 +156,27 @@ mod tests {
     #[test]
     fn prompt_text_distinguishes_capture_edits_and_both() {
         assert_eq!(
-            DiscardPrompt { lose_capture: true, lose_edits: false }.text(),
+            DiscardPrompt {
+                lose_capture: true,
+                lose_edits: false
+            }
+            .text(),
             "Discard unsaved capture?"
         );
         assert_eq!(
-            DiscardPrompt { lose_capture: false, lose_edits: true }.text(),
+            DiscardPrompt {
+                lose_capture: false,
+                lose_edits: true
+            }
+            .text(),
             "Discard annotation edits?"
         );
         assert_eq!(
-            DiscardPrompt { lose_capture: true, lose_edits: true }.text(),
+            DiscardPrompt {
+                lose_capture: true,
+                lose_edits: true
+            }
+            .text(),
             "Discard unsaved capture and annotation edits?"
         );
     }
