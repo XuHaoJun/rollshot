@@ -16,13 +16,7 @@ const SCROLLBAR_SPACING: f32 = 2.0;
 pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
     let original = state.original_size();
 
-    let title = state
-        .document
-        .saved_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| super::document::UNSAVED_LABEL.to_string());
+    let title = state.document.display_name();
 
     let toolbar = row![
         button(text("Close")).on_press(Message::RequestClose),
@@ -44,8 +38,8 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
         .spacing(8)
         .padding(8);
 
-    if state.confirming_discard {
-        discard_modal(layout)
+    if let Some(prompt) = &state.pending_discard {
+        discard_modal(layout, prompt)
     } else {
         layout.into()
     }
@@ -166,10 +160,13 @@ fn zoom_label(state: &ResultWorkspace) -> String {
     }
 }
 
-fn discard_modal(base: iced::widget::Column<'_, Message>) -> Element<'_, Message> {
+fn discard_modal<'a>(
+    base: iced::widget::Column<'a, Message>,
+    prompt: &super::DiscardPrompt,
+) -> Element<'a, Message> {
     let dialog = container(
         column![
-            text(super::document::DISCARD_PROMPT),
+            text(prompt.text()),
             row![
                 button(text("Keep")).on_press(Message::KeepUnsaved),
                 button(text("Discard")).on_press(Message::ConfirmDiscard),

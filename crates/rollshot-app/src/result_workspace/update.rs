@@ -1,7 +1,7 @@
 use super::viewport::{anchored_scroll, geometry_for, step_zoom, ZoomDirection, ZoomMode};
 use iced::widget::scrollable;
 use iced::{keyboard, mouse, Point, Size, Subscription, Task, Vector};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
@@ -61,16 +61,18 @@ pub enum Message {
 
 pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
     match message {
-        Message::RequestClose => match super::document::close_decision(&state.document) {
-            CloseDecision::Close => iced::exit(),
-            CloseDecision::ConfirmDiscard => {
-                state.confirming_discard = true;
-                Task::none()
+        Message::RequestClose => {
+            match super::document::close_decision(&state.document, state.annotations_dirty()) {
+                CloseDecision::Close => iced::exit(),
+                CloseDecision::Confirm(prompt) => {
+                    state.pending_discard = Some(prompt);
+                    Task::none()
+                }
             }
-        },
+        }
         Message::ConfirmDiscard => iced::exit(),
         Message::KeepUnsaved => {
-            state.confirming_discard = false;
+            state.pending_discard = None;
             Task::none()
         }
         Message::DismissMessage => {
@@ -78,7 +80,7 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             Task::none()
         }
         Message::Copy => {
-            let result = super::actions::copy_image(&state.document.source_image);
+            let result = super::actions::copy_image(state.document.image.source());
             Task::done(Message::CopyFinished(result))
         }
         Message::CopyFinished(Ok(())) => {
@@ -101,7 +103,7 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
         }
         Message::SavePathChosen(Some(path)) => {
             // Clone the source so the write future owns its pixels.
-            let image = state.document.source_image.clone();
+            let image = state.document.image.source().clone();
             Task::perform(
                 async move { super::actions::write_save_as(&image, &path) },
                 Message::SaveFinished,
@@ -113,7 +115,7 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             Task::none()
         }
         Message::Reveal => {
-            let Some(path) = state.document.saved_path.clone() else {
+            let Some(path) = state.document.reveal_path().map(Path::to_path_buf) else {
                 return Task::none();
             };
             Task::done(Message::RevealFinished(super::actions::reveal(&path)))
@@ -380,23 +382,23 @@ mod tests {
     fn operating_system_close_uses_unsaved_close_confirmation() {
         let mut state = unsaved_workspace();
         let _ = update(&mut state, Message::RequestClose);
-        assert!(state.confirming_discard);
+        assert!(state.pending_discard.is_some());
     }
 
     #[test]
     fn saved_close_does_not_confirm_discard() {
         let mut state = saved_workspace();
         let _ = update(&mut state, Message::RequestClose);
-        assert!(!state.confirming_discard);
+        assert!(state.pending_discard.is_none());
     }
 
     #[test]
     fn confirm_discard_then_keep_unsaved_transitions() {
         let mut state = unsaved_workspace();
         let _ = update(&mut state, Message::RequestClose);
-        assert!(state.confirming_discard);
+        assert!(state.pending_discard.is_some());
         let _ = update(&mut state, Message::KeepUnsaved);
-        assert!(!state.confirming_discard);
+        assert!(state.pending_discard.is_none());
     }
 
     // -- message expiry ------------------------------------------------------

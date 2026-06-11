@@ -1,11 +1,12 @@
 pub mod actions;
+pub(crate) mod canvas;
 mod document;
 mod update;
 mod view;
 pub mod viewport;
 
 #[allow(unused_imports)]
-pub use document::{close_decision, CloseDecision, ResultDocument};
+pub use document::{close_decision, CloseDecision, DiscardPrompt, ResultDocument};
 pub use update::Message;
 pub(crate) use update::{subscription, update};
 pub(crate) use view::view;
@@ -66,7 +67,7 @@ impl InlineMessage {
 pub struct ResultWorkspace {
     pub document: ResultDocument,
     pub message: Option<InlineMessage>,
-    pub confirming_discard: bool,
+    pub pending_discard: Option<DiscardPrompt>,
     /// Iced image handle built once. For oversized captures this is a
     /// downscaled display copy (spec §9.6); the document keeps the full source.
     pub image_handle: ImageHandle,
@@ -81,6 +82,11 @@ pub struct ResultWorkspace {
     pub viewport_bounds: Size,
     /// Identity of the single canvas scrollable, for scroll operations.
     pub scrollable_id: iced::widget::Id,
+    /// UI/session editor state (active tool, selection, drafts, Navigator).
+    pub editor: canvas::EditorState,
+    /// Identity of the inline text editor widget, for focus operations.
+    #[allow(dead_code)]
+    pub text_editor_id: iced::widget::Id,
 }
 
 impl ResultWorkspace {
@@ -96,17 +102,17 @@ impl ResultWorkspace {
         max_texture_dim: u32,
     ) -> Self {
         let source_size = Size::new(
-            document.source_image.width() as f32,
-            document.source_image.height() as f32,
+            document.image.source().width() as f32,
+            document.image.source().height() as f32,
         );
         let scale = display_downscale_scale(source_size, max_texture_dim);
-        let image_handle = build_display_handle(&document.source_image, scale);
+        let image_handle = build_display_handle(document.image.source(), scale);
 
         let message = if let Some(err) = initial_error {
             Some(InlineMessage::Error(err))
         } else {
             document
-                .saved_path
+                .source_path
                 .as_deref()
                 .map(|path| InlineMessage::success(format!("Saved to {}", path.display())))
         };
@@ -114,9 +120,14 @@ impl ResultWorkspace {
         let zoom = viewport::default_zoom(source_size);
 
         Self {
+            pending_discard: None,
+            editor: canvas::EditorState::new(
+                document.image.state_id(),
+                viewport::is_tall_image(source_size),
+            ),
+            text_editor_id: iced::widget::Id::unique(),
             document,
             message,
-            confirming_discard: false,
             image_handle,
             viewport: ViewportState {
                 zoom,
@@ -146,18 +157,20 @@ impl ResultWorkspace {
         self
     }
 
-    /// Reveal is only meaningful once the capture has a saved path on disk.
+    /// Reveal is only meaningful once the capture has a durable path on disk.
     pub fn can_reveal(&self) -> bool {
-        self.document.saved_path.is_some()
+        self.document.reveal_path().is_some()
+    }
+
+    pub fn annotations_dirty(&self) -> bool {
+        self.document.image.state_id() != self.editor.saved_state_id
     }
 
     /// Original (full-resolution) image dimensions, reported by the status bar
     /// regardless of any display downscale.
     pub(crate) fn original_size(&self) -> Size {
-        Size::new(
-            self.document.source_image.width() as f32,
-            self.document.source_image.height() as f32,
-        )
+        let (w, h) = self.document.image.source().dimensions();
+        Size::new(w as f32, h as f32)
     }
 
     /// Record the latest scrollable bounds so fit modes and pointer anchoring
@@ -176,18 +189,13 @@ impl ResultWorkspace {
         match result {
             Ok(Some(path)) => {
                 let text = format!("Saved to {}", path.display());
-                self.document.saved_path = Some(path);
+                self.document.last_export_path = Some(path);
+                self.editor.saved_state_id = self.document.image.state_id();
                 self.message = Some(InlineMessage::success(text));
-                // A successful save resolves the unsaved state, so any pending
-                // discard prompt should close.
-                self.confirming_discard = false;
+                self.pending_discard = None;
             }
-            Ok(None) => {
-                // User cancelled — no change, no error.
-            }
-            Err(e) => {
-                self.message = Some(InlineMessage::Error(e));
-            }
+            Ok(None) => {}
+            Err(e) => self.message = Some(InlineMessage::Error(e)),
         }
     }
 }
@@ -280,11 +288,11 @@ mod tests {
     // -- existing model tests (Task 3/4) -------------------------------------
 
     #[test]
-    fn save_as_success_updates_saved_path_and_message() {
+    fn save_as_success_updates_export_path_and_message() {
         let mut state = workspace();
         state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))));
         assert_eq!(
-            state.document.saved_path.as_deref(),
+            state.document.last_export_path.as_deref(),
             Some(Path::new("/tmp/result.png"))
         );
         assert!(matches!(state.message, Some(InlineMessage::Success { .. })));
@@ -311,7 +319,7 @@ mod tests {
     fn save_as_cancel_leaves_no_change() {
         let mut state = workspace();
         state.apply_save_as(Ok(None));
-        assert!(state.document.saved_path.is_none());
+        assert!(state.document.last_export_path.is_none());
         assert!(state.message.is_none());
     }
 
@@ -319,7 +327,7 @@ mod tests {
     fn save_as_error_sets_persistent_error_and_no_path() {
         let mut state = workspace();
         state.apply_save_as(Err("write failed".to_string()));
-        assert!(state.document.saved_path.is_none());
+        assert!(state.document.last_export_path.is_none());
         assert!(matches!(&state.message, Some(InlineMessage::Error(e)) if e == "write failed"));
     }
 
@@ -365,7 +373,7 @@ mod tests {
         // downscaled, but the source + reported dims stay original.
         let img = RgbaImage::from_pixel(100, 400, Rgba([9, 9, 9, 255]));
         let state = ResultWorkspace::with_max_texture_dim(ResultDocument::unsaved(img), None, 200);
-        assert_eq!(state.document.source_image.dimensions(), (100, 400));
+        assert_eq!(state.document.image.source().dimensions(), (100, 400));
         assert_eq!(state.original_size(), IcedSize::new(100.0, 400.0));
     }
 
@@ -380,7 +388,7 @@ mod tests {
             ResultWorkspace::with_max_texture_dim(ResultDocument::unsaved(img), None, ceiling);
 
         // Source + status-bar dims stay full resolution.
-        assert_eq!(state.document.source_image.dimensions(), (16000, 10000));
+        assert_eq!(state.document.image.source().dimensions(), (16000, 10000));
         assert_eq!(state.original_size(), IcedSize::new(16000.0, 10000.0));
 
         // Display handle was downscaled: both axes at/under the ceiling.
@@ -401,10 +409,10 @@ mod tests {
     fn save_as_success_clears_pending_discard_prompt() {
         let mut state = unsaved_workspace();
         let _ = update(&mut state, Message::RequestClose);
-        assert!(state.confirming_discard, "unsaved close should prompt");
+        assert!(state.pending_discard.is_some(), "unsaved close should prompt");
         state.apply_save_as(Ok(Some(PathBuf::from("/tmp/result.png"))));
         assert!(
-            !state.confirming_discard,
+            state.pending_discard.is_none(),
             "a successful save should close the discard prompt"
         );
     }
