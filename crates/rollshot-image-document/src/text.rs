@@ -21,8 +21,12 @@ fn system() -> &'static Mutex<TextSystem> {
     static SYSTEM: OnceLock<Mutex<TextSystem>> = OnceLock::new();
     SYSTEM.get_or_init(|| {
         let mut fonts = FontSystem::new();
-        fonts.db_mut().load_font_data(style::FONT_REGULAR_BYTES.to_vec());
-        fonts.db_mut().load_font_data(style::FONT_BOLD_BYTES.to_vec());
+        fonts
+            .db_mut()
+            .load_font_data(style::FONT_REGULAR_BYTES.to_vec());
+        fonts
+            .db_mut()
+            .load_font_data(style::FONT_BOLD_BYTES.to_vec());
         Mutex::new(TextSystem {
             fonts,
             cache: SwashCache::new(),
@@ -39,7 +43,7 @@ fn attrs(bold: bool) -> Attrs<'static> {
     }
 }
 
-fn shaped_buffer(fonts: &mut FontSystem, text: &str, px: f32) -> Buffer {
+fn shaped_buffer(fonts: &mut FontSystem, _text: &str, px: f32) -> Buffer {
     let metrics = Metrics::new(px, px * style::TEXT_LINE_HEIGHT);
     let mut buffer = Buffer::new(fonts, metrics);
     buffer.set_size(fonts, None, None);

@@ -76,19 +76,35 @@ mod tests {
             // Same y as the text note, smaller x — sorts first of the two.
             Annotation::OpaqueRedaction {
                 id: AnnotationId(3),
-                bounds: ImageRect { x: 5.0, y: 100.0, width: 10.0, height: 10.0 },
+                bounds: ImageRect {
+                    x: 5.0,
+                    y: 100.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
             },
         ];
         let order: Vec<AnnotationId> = navigator_items(&anns).iter().map(|i| i.id).collect();
-        assert_eq!(order, vec![AnnotationId(3), AnnotationId(2), AnnotationId(1)]);
+        assert_eq!(
+            order,
+            vec![AnnotationId(3), AnnotationId(2), AnnotationId(1)]
+        );
     }
 
     #[test]
     fn exact_ties_fall_back_to_stable_id() {
         let at = ImagePoint::new(50.0, 50.0);
         let anns = vec![
-            Annotation::TextNote { id: AnnotationId(9), position: at, text: "b".into() },
-            Annotation::TextNote { id: AnnotationId(4), position: at, text: "a".into() },
+            Annotation::TextNote {
+                id: AnnotationId(9),
+                position: at,
+                text: "b".into(),
+            },
+            Annotation::TextNote {
+                id: AnnotationId(4),
+                position: at,
+                text: "a".into(),
+            },
         ];
         let order: Vec<AnnotationId> = navigator_items(&anns).iter().map(|i| i.id).collect();
         assert_eq!(order, vec![AnnotationId(4), AnnotationId(9)]);
@@ -110,7 +126,12 @@ mod tests {
             },
             Annotation::OpaqueRedaction {
                 id: AnnotationId(3),
-                bounds: ImageRect { x: 0.0, y: 20.0, width: 5.0, height: 5.0 },
+                bounds: ImageRect {
+                    x: 0.0,
+                    y: 20.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
             },
         ];
         let items = navigator_items(&anns);

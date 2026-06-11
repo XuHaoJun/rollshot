@@ -71,7 +71,10 @@ fn hit_annotation(annotation: &Annotation, point: ImagePoint, tolerance: f32) ->
                     return Some(HitPart::Resize(handle));
                 }
             }
-            bounds.expanded(tolerance).contains(point).then_some(HitPart::Body)
+            bounds
+                .expanded(tolerance)
+                .contains(point)
+                .then_some(HitPart::Body)
         }
     }
 }
@@ -79,9 +82,10 @@ fn hit_annotation(annotation: &Annotation, point: ImagePoint, tolerance: f32) ->
 /// Topmost hit at `point` (later annotations paint on top, so scan reversed).
 /// First release: linear scan, no spatial index (spec §13).
 pub fn hit_test(annotations: &[Annotation], point: ImagePoint, tolerance: f32) -> Option<Hit> {
-    annotations.iter().rev().find_map(|a| {
-        hit_annotation(a, point, tolerance).map(|part| Hit { id: a.id(), part })
-    })
+    annotations
+        .iter()
+        .rev()
+        .find_map(|a| hit_annotation(a, point, tolerance).map(|part| Hit { id: a.id(), part }))
 }
 
 #[cfg(test)]
@@ -138,7 +142,12 @@ mod tests {
     fn redaction_handles_beat_body_and_corners_resolve() {
         let anns = vec![Annotation::OpaqueRedaction {
             id: AnnotationId(3),
-            bounds: ImageRect { x: 50.0, y: 50.0, width: 40.0, height: 30.0 },
+            bounds: ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            },
         }];
         let corner = hit_test(&anns, ImagePoint::new(50.0, 50.0), TOL).unwrap();
         assert_eq!(corner.part, HitPart::Resize(ResizeHandle::TopLeft));
@@ -153,11 +162,21 @@ mod tests {
         let anns = vec![
             Annotation::OpaqueRedaction {
                 id: AnnotationId(1),
-                bounds: ImageRect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                bounds: ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
             },
             Annotation::OpaqueRedaction {
                 id: AnnotationId(2),
-                bounds: ImageRect { x: 25.0, y: 25.0, width: 100.0, height: 100.0 },
+                bounds: ImageRect {
+                    x: 25.0,
+                    y: 25.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
             },
         ];
         let hit = hit_test(&anns, ImagePoint::new(60.0, 60.0), TOL).unwrap();

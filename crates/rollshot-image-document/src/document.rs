@@ -88,6 +88,12 @@ impl ImageDocument {
         crate::hit::hit_test(&self.annotations, point, tolerance)
     }
 
+    /// Render the annotated full-resolution output. Infallible and
+    /// non-mutating; called only for explicit Copy/Save actions (spec §11.2).
+    pub fn flatten(&self) -> RgbaImage {
+        crate::flatten::flatten_onto(&self.source, &self.annotations)
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
@@ -192,8 +198,10 @@ impl ImageDocument {
         }
         let before = self.snapshot();
         let id = self.allocate_id();
-        self.annotations
-            .push(Annotation::OpaqueRedaction { id, bounds: clamped });
+        self.annotations.push(Annotation::OpaqueRedaction {
+            id,
+            bounds: clamped,
+        });
         self.commit(before);
         Ok(id)
     }
@@ -216,7 +224,9 @@ impl ImageDocument {
         let index = self.annotation_index(id)?;
         let before = self.snapshot();
         match &mut self.annotations[index] {
-            Annotation::NumberCallout { tip: t, bubble: b, .. } => {
+            Annotation::NumberCallout {
+                tip: t, bubble: b, ..
+            } => {
                 if *t == tip && *b == bubble {
                     return Ok(());
                 }
@@ -489,7 +499,11 @@ mod tests {
             undone += 1;
         }
         assert_eq!(undone, HISTORY_LIMIT);
-        assert_eq!(d.annotations().len(), 10, "oldest 10 edits fell off the stack");
+        assert_eq!(
+            d.annotations().len(),
+            10,
+            "oldest 10 edits fell off the stack"
+        );
     }
 
     #[test]
@@ -537,7 +551,9 @@ mod tests {
     #[test]
     fn set_text_replaces_content_and_rejects_empty() {
         let mut d = doc();
-        let id = d.add_text_note(ImagePoint::new(5.0, 5.0), "old".to_string()).unwrap();
+        let id = d
+            .add_text_note(ImagePoint::new(5.0, 5.0), "old".to_string())
+            .unwrap();
         d.set_text(id, "new".to_string()).unwrap();
         match d.annotation(id).unwrap() {
             Annotation::TextNote { text, .. } => assert_eq!(text, "new"),
@@ -549,7 +565,9 @@ mod tests {
     #[test]
     fn wrong_kind_and_unknown_id_are_rejected() {
         let mut d = doc();
-        let id = d.add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string()).unwrap();
+        let id = d
+            .add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string())
+            .unwrap();
         assert_eq!(
             d.set_number_points(id, ImagePoint::new(0.0, 0.0), ImagePoint::new(0.0, 0.0)),
             Err(EditError::WrongKind)
@@ -564,12 +582,33 @@ mod tests {
     fn set_redaction_bounds_resizes_and_rejects_zero_area() {
         let mut d = doc();
         let id = d
-            .add_redaction(ImageRect { x: 1.0, y: 1.0, width: 10.0, height: 10.0 })
+            .add_redaction(ImageRect {
+                x: 1.0,
+                y: 1.0,
+                width: 10.0,
+                height: 10.0,
+            })
             .unwrap();
-        d.set_redaction_bounds(id, ImageRect { x: 2.0, y: 2.0, width: 20.0, height: 5.0 })
-            .unwrap();
+        d.set_redaction_bounds(
+            id,
+            ImageRect {
+                x: 2.0,
+                y: 2.0,
+                width: 20.0,
+                height: 5.0,
+            },
+        )
+        .unwrap();
         assert_eq!(
-            d.set_redaction_bounds(id, ImageRect { x: 2.0, y: 2.0, width: 0.1, height: 5.0 }),
+            d.set_redaction_bounds(
+                id,
+                ImageRect {
+                    x: 2.0,
+                    y: 2.0,
+                    width: 0.1,
+                    height: 5.0
+                }
+            ),
             Err(EditError::ZeroArea)
         );
     }
@@ -595,7 +634,11 @@ mod tests {
 
         d.delete_annotation(two).unwrap();
         assert_eq!(numbers(&d), vec![1, 2], "1,2,3 minus #2 compacts to 1,2");
-        assert_eq!(d.next_number(), 3, "next allocation is highest remaining + 1");
+        assert_eq!(
+            d.next_number(),
+            3,
+            "next allocation is highest remaining + 1"
+        );
     }
 
     #[test]
@@ -619,17 +662,27 @@ mod tests {
         assert!(d.undo(), "delete + renumber is ONE history entry");
         assert_eq!(numbers(&d), vec![1, 2, 3]);
         assert_eq!(d.next_number(), 4);
-        assert_eq!(d.annotations()[1].id(), two, "identity preserved through undo");
+        assert_eq!(
+            d.annotations()[1].id(),
+            two,
+            "identity preserved through undo"
+        );
     }
 
     #[test]
     fn deleting_last_callout_resets_sequence_and_non_number_delete_does_not_renumber() {
         let mut d = doc();
         let n = d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
-        let t = d.add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string()).unwrap();
+        let t = d
+            .add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string())
+            .unwrap();
         d.delete_annotation(t).unwrap();
         assert_eq!(numbers(&d), vec![1], "text delete leaves numbering alone");
         d.delete_annotation(n).unwrap();
-        assert_eq!(d.next_number(), 1, "no callouts left → sequence restarts at 1");
+        assert_eq!(
+            d.next_number(),
+            1,
+            "no callouts left → sequence restarts at 1"
+        );
     }
 }

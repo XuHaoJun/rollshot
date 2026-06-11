@@ -96,10 +96,18 @@ pub fn text_plate_rect(position: ImagePoint, text: &str) -> ImageRect {
 /// (spec §6) — those are editor concerns and never enter this model.
 pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
     match annotation {
-        Annotation::NumberCallout { number, tip, bubble, .. } => {
+        Annotation::NumberCallout {
+            number,
+            tip,
+            bubble,
+            ..
+        } => {
             let mut shapes = Vec::with_capacity(3);
             if let Some(points) = leader_triangle(*tip, *bubble) {
-                shapes.push(RenderShape::Triangle { points, color: style::ACCENT });
+                shapes.push(RenderShape::Triangle {
+                    points,
+                    color: style::ACCENT,
+                });
             }
             shapes.push(RenderShape::Circle {
                 center: *bubble,
@@ -161,7 +169,12 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
             let y0 = bubble_box.y.min(tip.y);
             let x1 = (bubble_box.x + bubble_box.width).max(tip.x);
             let y1 = (bubble_box.y + bubble_box.height).max(tip.y);
-            ImageRect { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+            ImageRect {
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
+            }
         }
         Annotation::TextNote { position, text, .. } => text_plate_rect(*position, text),
         Annotation::OpaqueRedaction { bounds, .. } => *bounds,
@@ -235,7 +248,12 @@ mod tests {
         let shapes = annotation_shapes(&note);
         assert!(matches!(shapes[0], RenderShape::Rect { .. }));
         match &shapes[1] {
-            RenderShape::Label { anchor, anchor_kind, bold, .. } => {
+            RenderShape::Label {
+                anchor,
+                anchor_kind,
+                bold,
+                ..
+            } => {
                 assert_eq!(*anchor_kind, TextAnchor::TopLeft);
                 assert!(!bold);
                 assert_eq!(
@@ -262,11 +280,21 @@ mod tests {
 
         let r = Annotation::OpaqueRedaction {
             id: AnnotationId(3),
-            bounds: ImageRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 },
+            bounds: ImageRect {
+                x: 5.0,
+                y: 6.0,
+                width: 7.0,
+                height: 8.0,
+            },
         };
         assert_eq!(
             annotation_bounds(&r),
-            ImageRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 }
+            ImageRect {
+                x: 5.0,
+                y: 6.0,
+                width: 7.0,
+                height: 8.0
+            }
         );
     }
 
@@ -275,7 +303,10 @@ mod tests {
         let small = number_label_px("3");
         let large = number_label_px("888");
         assert_eq!(small, style::NUMBER_FONT_PX);
-        assert!(large < small, "3-digit labels shrink to stay inside the bubble");
+        assert!(
+            large < small,
+            "3-digit labels shrink to stay inside the bubble"
+        );
         assert!(large >= style::NUMBER_FONT_MIN_PX);
     }
 }
