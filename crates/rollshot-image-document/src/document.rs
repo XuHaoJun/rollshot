@@ -187,6 +187,139 @@ impl ImageDocument {
         self.commit(before);
         Ok(id)
     }
+
+    fn annotation_index(&self, id: AnnotationId) -> Result<usize, EditError> {
+        self.annotations
+            .iter()
+            .position(|a| a.id() == id)
+            .ok_or(EditError::UnknownAnnotation)
+    }
+
+    pub fn set_number_points(
+        &mut self,
+        id: AnnotationId,
+        tip: ImagePoint,
+        bubble: ImagePoint,
+    ) -> Result<(), EditError> {
+        let (w, h) = self.source.dimensions();
+        let (tip, bubble) = (tip.clamp_to(w, h), bubble.clamp_to(w, h));
+        let index = self.annotation_index(id)?;
+        let before = self.snapshot();
+        match &mut self.annotations[index] {
+            Annotation::NumberCallout { tip: t, bubble: b, .. } => {
+                if *t == tip && *b == bubble {
+                    return Ok(());
+                }
+                *t = tip;
+                *b = bubble;
+            }
+            _ => return Err(EditError::WrongKind),
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    pub fn set_text_position(
+        &mut self,
+        id: AnnotationId,
+        position: ImagePoint,
+    ) -> Result<(), EditError> {
+        let (w, h) = self.source.dimensions();
+        let position = position.clamp_to(w, h);
+        let index = self.annotation_index(id)?;
+        let before = self.snapshot();
+        match &mut self.annotations[index] {
+            Annotation::TextNote { position: p, .. } => {
+                if *p == position {
+                    return Ok(());
+                }
+                *p = position;
+            }
+            _ => return Err(EditError::WrongKind),
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    pub fn set_text(&mut self, id: AnnotationId, text: String) -> Result<(), EditError> {
+        if text.trim().is_empty() {
+            return Err(EditError::EmptyText);
+        }
+        let index = self.annotation_index(id)?;
+        let before = self.snapshot();
+        match &mut self.annotations[index] {
+            Annotation::TextNote { text: t, .. } => {
+                if *t == text {
+                    return Ok(());
+                }
+                *t = text;
+            }
+            _ => return Err(EditError::WrongKind),
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    pub fn set_redaction_bounds(
+        &mut self,
+        id: AnnotationId,
+        bounds: ImageRect,
+    ) -> Result<(), EditError> {
+        let (w, h) = self.source.dimensions();
+        let clamped = bounds.clamp_to(w, h);
+        if clamped.is_empty() {
+            return Err(EditError::ZeroArea);
+        }
+        let index = self.annotation_index(id)?;
+        let before = self.snapshot();
+        match &mut self.annotations[index] {
+            Annotation::OpaqueRedaction { bounds: b, .. } => {
+                if *b == clamped {
+                    return Ok(());
+                }
+                *b = clamped;
+            }
+            _ => return Err(EditError::WrongKind),
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    /// Delete an annotation. Deleting a Number Callout compactly renumbers
+    /// the remaining callouts preserving relative order; the deletion and its
+    /// renumbering form ONE history entry (spec §9.2, decision D1).
+    pub fn delete_annotation(&mut self, id: AnnotationId) -> Result<(), EditError> {
+        let index = self.annotation_index(id)?;
+        let before = self.snapshot();
+        let removed = self.annotations.remove(index);
+        if matches!(removed, Annotation::NumberCallout { .. }) {
+            self.renumber_compactly();
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    /// Reassign callout numbers to 1..=n preserving current relative order;
+    /// next allocation becomes n + 1.
+    fn renumber_compactly(&mut self) {
+        let mut callout_indices: Vec<usize> = self
+            .annotations
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(a, Annotation::NumberCallout { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        callout_indices.sort_by_key(|&i| match &self.annotations[i] {
+            Annotation::NumberCallout { number, .. } => *number,
+            _ => unreachable!(),
+        });
+        for (new_number, &i) in callout_indices.iter().enumerate() {
+            if let Annotation::NumberCallout { number, .. } = &mut self.annotations[i] {
+                *number = new_number as u32 + 1;
+            }
+        }
+        self.next_number = callout_indices.len() as u32 + 1;
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +492,134 @@ mod tests {
         assert!(d.undo());
         assert!(d.redo());
         assert_eq!(d.annotations()[0].id(), second, "redo restores the same id");
+    }
+
+    #[test]
+    fn setters_update_geometry_and_are_undoable() {
+        let mut d = doc();
+        let id = d.add_number_callout(ImagePoint::new(5.0, 5.0), ImagePoint::new(5.0, 5.0));
+        d.set_number_points(id, ImagePoint::new(10.0, 10.0), ImagePoint::new(40.0, 40.0))
+            .unwrap();
+        match d.annotation(id).unwrap() {
+            Annotation::NumberCallout { tip, bubble, .. } => {
+                assert_eq!(*tip, ImagePoint::new(10.0, 10.0));
+                assert_eq!(*bubble, ImagePoint::new(40.0, 40.0));
+            }
+            _ => panic!(),
+        }
+        assert!(d.undo());
+        match d.annotation(id).unwrap() {
+            Annotation::NumberCallout { tip, .. } => assert_eq!(*tip, ImagePoint::new(5.0, 5.0)),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn unchanged_setter_is_a_no_op_without_history_entry() {
+        let mut d = doc();
+        let id = d.add_number_callout(ImagePoint::new(5.0, 5.0), ImagePoint::new(6.0, 6.0));
+        let s = d.state_id();
+        d.set_number_points(id, ImagePoint::new(5.0, 5.0), ImagePoint::new(6.0, 6.0))
+            .unwrap();
+        assert_eq!(d.state_id(), s, "no-op edit must not commit");
+    }
+
+    #[test]
+    fn set_text_replaces_content_and_rejects_empty() {
+        let mut d = doc();
+        let id = d.add_text_note(ImagePoint::new(5.0, 5.0), "old".to_string()).unwrap();
+        d.set_text(id, "new".to_string()).unwrap();
+        match d.annotation(id).unwrap() {
+            Annotation::TextNote { text, .. } => assert_eq!(text, "new"),
+            _ => panic!(),
+        }
+        assert_eq!(d.set_text(id, "  ".to_string()), Err(EditError::EmptyText));
+    }
+
+    #[test]
+    fn wrong_kind_and_unknown_id_are_rejected() {
+        let mut d = doc();
+        let id = d.add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string()).unwrap();
+        assert_eq!(
+            d.set_number_points(id, ImagePoint::new(0.0, 0.0), ImagePoint::new(0.0, 0.0)),
+            Err(EditError::WrongKind)
+        );
+        assert_eq!(
+            d.delete_annotation(AnnotationId(999)),
+            Err(EditError::UnknownAnnotation)
+        );
+    }
+
+    #[test]
+    fn set_redaction_bounds_resizes_and_rejects_zero_area() {
+        let mut d = doc();
+        let id = d
+            .add_redaction(ImageRect { x: 1.0, y: 1.0, width: 10.0, height: 10.0 })
+            .unwrap();
+        d.set_redaction_bounds(id, ImageRect { x: 2.0, y: 2.0, width: 20.0, height: 5.0 })
+            .unwrap();
+        assert_eq!(
+            d.set_redaction_bounds(id, ImageRect { x: 2.0, y: 2.0, width: 0.1, height: 5.0 }),
+            Err(EditError::ZeroArea)
+        );
+    }
+
+    // -- D1: compact renumbering on delete ------------------------------------
+
+    fn numbers(d: &ImageDocument) -> Vec<u32> {
+        d.annotations()
+            .iter()
+            .filter_map(|a| match a {
+                Annotation::NumberCallout { number, .. } => Some(*number),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deleting_a_middle_callout_renumbers_compactly() {
+        let mut d = doc();
+        let _one = d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let two = d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
+        let _three = d.add_number_callout(ImagePoint::new(3.0, 3.0), ImagePoint::new(3.0, 3.0));
+
+        d.delete_annotation(two).unwrap();
+        assert_eq!(numbers(&d), vec![1, 2], "1,2,3 minus #2 compacts to 1,2");
+        assert_eq!(d.next_number(), 3, "next allocation is highest remaining + 1");
+    }
+
+    #[test]
+    fn delete_then_create_allocates_highest_remaining_plus_one() {
+        let mut d = doc();
+        d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let two = d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
+        d.add_number_callout(ImagePoint::new(3.0, 3.0), ImagePoint::new(3.0, 3.0));
+        d.delete_annotation(two).unwrap();
+        d.add_number_callout(ImagePoint::new(4.0, 4.0), ImagePoint::new(4.0, 4.0));
+        assert_eq!(numbers(&d), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn undo_of_delete_restores_exact_prior_numbering_in_one_step() {
+        let mut d = doc();
+        d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let two = d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
+        d.add_number_callout(ImagePoint::new(3.0, 3.0), ImagePoint::new(3.0, 3.0));
+        d.delete_annotation(two).unwrap();
+        assert!(d.undo(), "delete + renumber is ONE history entry");
+        assert_eq!(numbers(&d), vec![1, 2, 3]);
+        assert_eq!(d.next_number(), 4);
+        assert_eq!(d.annotations()[1].id(), two, "identity preserved through undo");
+    }
+
+    #[test]
+    fn deleting_last_callout_resets_sequence_and_non_number_delete_does_not_renumber() {
+        let mut d = doc();
+        let n = d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let t = d.add_text_note(ImagePoint::new(5.0, 5.0), "x".to_string()).unwrap();
+        d.delete_annotation(t).unwrap();
+        assert_eq!(numbers(&d), vec![1], "text delete leaves numbering alone");
+        d.delete_annotation(n).unwrap();
+        assert_eq!(d.next_number(), 1, "no callouts left → sequence restarts at 1");
     }
 }
