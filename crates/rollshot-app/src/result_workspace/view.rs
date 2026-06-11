@@ -1,13 +1,100 @@
 use super::viewport::{geometry_for, ZoomDirection, ZoomMode};
 use iced::widget::{
-    button, column, container, image as image_widget, mouse_area, row, scrollable, text, Space,
+    button, column, container, image as image_widget, mouse_area, row, scrollable, text, tooltip,
+    Space,
 };
 use iced::{mouse, Alignment, Element, Length, Size, Vector};
 
+use super::canvas::Tool;
 use super::{Message, ResultWorkspace};
 
 const SCROLLBAR_WIDTH: f32 = 14.0;
 const SCROLLBAR_SPACING: f32 = 2.0;
+
+const ICON_SELECT: &str = "\u{2196}";
+const ICON_NUMBER: &str = "\u{2460}";
+const ICON_TEXT: &str = "T";
+const ICON_REDACT: &str = "\u{2588}";
+const ICON_UNDO: &str = "\u{21B6}";
+const ICON_REDO: &str = "\u{21B7}";
+const ICON_NAVIGATOR: &str = "\u{2261}";
+
+fn shortcut_label(name: &str, key: &str) -> String {
+    format!("{name} ({key})")
+}
+
+fn icon_button<'a>(
+    glyph: &'a str,
+    tip: String,
+    message: Message,
+    active: bool,
+) -> Element<'a, Message> {
+    let btn = button(text(glyph).size(16))
+        .padding([4, 10])
+        .on_press(message)
+        .style(if active {
+            button::primary
+        } else {
+            button::secondary
+        });
+    tooltip(btn, text(tip), tooltip::Position::Bottom).into()
+}
+
+fn tool_button<'a>(
+    glyph: &'a str,
+    name: &str,
+    key: &str,
+    tool: Tool,
+    state: &ResultWorkspace,
+) -> Element<'a, Message> {
+    icon_button(
+        glyph,
+        shortcut_label(name, key),
+        Message::SelectTool(tool),
+        state.editor.tool == tool,
+    )
+}
+
+fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
+    let undo_btn = button(text(ICON_UNDO).size(16))
+        .padding([4, 10])
+        .on_press_maybe(state.document.image.can_undo().then_some(Message::Undo));
+    let redo_btn = button(text(ICON_REDO).size(16))
+        .padding([4, 10])
+        .on_press_maybe(state.document.image.can_redo().then_some(Message::Redo));
+
+    row![
+        button(text("Close")).on_press(Message::RequestClose),
+        text(state.document.display_name()).width(Length::Fill),
+        tool_button(ICON_SELECT, "Select", "V", Tool::Select, state),
+        tool_button(ICON_NUMBER, "Number", "N", Tool::Number, state),
+        tool_button(ICON_TEXT, "Text", "T", Tool::Text, state),
+        tool_button(ICON_REDACT, "Redact", "R", Tool::Redact, state),
+        tooltip(
+            undo_btn,
+            text(shortcut_label("Undo", "Ctrl+Z")),
+            tooltip::Position::Bottom
+        ),
+        tooltip(
+            redo_btn,
+            text(shortcut_label("Redo", "Ctrl+Shift+Z")),
+            tooltip::Position::Bottom
+        ),
+        icon_button(
+            ICON_NAVIGATOR,
+            "Navigator".to_string(),
+            Message::ToggleNavigator,
+            state.editor.navigator_open,
+        ),
+        button(text("Copy")).on_press(Message::Copy),
+        button(text("\u{25BE}")).on_press(Message::ToggleCopyMenu),
+        button(text("Save As")).on_press(Message::SaveAs),
+        reveal_button(state),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
+}
 
 // ---------------------------------------------------------------------------
 // View
@@ -16,17 +103,7 @@ const SCROLLBAR_SPACING: f32 = 2.0;
 pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
     let original = state.original_size();
 
-    let title = state.document.display_name();
-
-    let toolbar = row![
-        button(text("Close")).on_press(Message::RequestClose),
-        text(title).width(Length::Fill),
-        button(text("Copy")).on_press(Message::Copy),
-        button(text("Save As")).on_press(Message::SaveAs),
-        reveal_button(state),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let toolbar = toolbar(state);
 
     let message_area = message_row(state);
 
@@ -38,11 +115,36 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
         .spacing(8)
         .padding(8);
 
-    if let Some(prompt) = &state.pending_discard {
-        discard_modal(layout, prompt)
+    let layout: Element<'_, Message> = if let Some(prompt) = &state.pending_discard {
+        discard_modal(layout.into(), prompt.text())
     } else {
         layout.into()
+    };
+    if state.editor.copy_menu_open {
+        copy_menu(layout)
+    } else {
+        layout
     }
+}
+
+fn copy_menu(base: Element<'_, Message>) -> Element<'_, Message> {
+    let menu = container(button(text("Copy Original")).on_press(Message::CopyOriginal)).padding(4);
+
+    let positioned = container(menu)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .padding(iced::Padding {
+            top: 44.0,
+            right: 180.0,
+            ..Default::default()
+        });
+
+    let scrim = mouse_area(positioned)
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::ToggleCopyMenu);
+
+    iced::widget::stack![base, scrim].into()
 }
 
 fn reveal_button(state: &ResultWorkspace) -> Element<'_, Message> {
@@ -160,13 +262,10 @@ fn zoom_label(state: &ResultWorkspace) -> String {
     }
 }
 
-fn discard_modal<'a>(
-    base: iced::widget::Column<'a, Message>,
-    prompt: &super::DiscardPrompt,
-) -> Element<'a, Message> {
+fn discard_modal<'a>(base: Element<'a, Message>, prompt: &'a str) -> Element<'a, Message> {
     let dialog = container(
         column![
-            text(prompt.text()),
+            text(prompt),
             row![
                 button(text("Keep")).on_press(Message::KeepUnsaved),
                 button(text("Discard")).on_press(Message::ConfirmDiscard),

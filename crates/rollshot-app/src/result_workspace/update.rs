@@ -64,6 +64,7 @@ pub enum Message {
     /// Redo the last undone annotation edit.
     Redo,
     /// Delete the currently selected annotation.
+    #[allow(dead_code)]
     DeleteSelected,
     /// Escape priority: cancel draft → clear selection → request close.
     EscapePressed,
@@ -128,6 +129,7 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             Task::done(Message::CopyFinished(result))
         }
         Message::CopyOriginal => {
+            state.editor.copy_menu_open = false;
             commit_text_draft(state);
             let result = super::actions::copy_image(&copy_original_payload(state));
             Task::done(Message::CopyFinished(result))
@@ -757,5 +759,19 @@ mod tests {
         state.editor.selection = Some(id);
         let _ = update(&mut state, Message::Undo);
         assert_eq!(state.editor.selection, None, "stale selection cleared");
+    }
+
+    // -- copy menu (Task 17) --------------------------------------------------
+
+    #[test]
+    fn copy_menu_toggles_and_copy_original_closes_it() {
+        let mut state = unsaved_workspace();
+        let _ = update(&mut state, Message::ToggleCopyMenu);
+        assert!(state.editor.copy_menu_open);
+        let _ = update(&mut state, Message::CopyOriginal);
+        assert!(
+            !state.editor.copy_menu_open,
+            "choosing an item closes the menu"
+        );
     }
 }

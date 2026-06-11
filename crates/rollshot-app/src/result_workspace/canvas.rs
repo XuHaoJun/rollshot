@@ -1,6 +1,11 @@
 //! Editor/session state for the Result Workspace (spec §5.2/§7): active tool,
 //! selection, in-progress gesture drafts, and the inline text draft. None of
 //! this enters the image document or its history.
+//!
+//! Most types here are consumed by the pointer handlers and canvas rendering in
+//! later tasks; dead-code warnings are suppressed until those are wired in.
+
+#![allow(dead_code)]
 
 use iced::widget::text_editor;
 use iced::Point;
