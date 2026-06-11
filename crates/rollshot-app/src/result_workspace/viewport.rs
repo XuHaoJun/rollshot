@@ -341,7 +341,10 @@ mod tests {
     #[test]
     fn tall_image_rule_matches_default_zoom_fit_width_arm() {
         assert!(is_tall_image(Size::new(800.0, 2401.0)));
-        assert!(!is_tall_image(Size::new(500.0, 1000.0)), "exactly 2× is not tall");
+        assert!(
+            !is_tall_image(Size::new(500.0, 1000.0)),
+            "exactly 2× is not tall"
+        );
         assert!(!is_tall_image(Size::new(1200.0, 800.0)));
     }
 
