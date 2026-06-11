@@ -389,14 +389,14 @@ mod tests {
     /// original dims stay at the full resolution.
     #[test]
     fn oversized_both_axes_downscales_display_handle_only() {
-        let ceiling = 8192u32;
-        let img = RgbaImage::from_pixel(16000, 10000, Rgba([7, 7, 7, 255]));
+        let ceiling = 128u32;
+        let img = RgbaImage::from_pixel(250, 160, Rgba([7, 7, 7, 255]));
         let state =
             ResultWorkspace::with_max_texture_dim(ResultDocument::unsaved(img), None, ceiling);
 
         // Source + status-bar dims stay full resolution.
-        assert_eq!(state.document.image.source().dimensions(), (16000, 10000));
-        assert_eq!(state.original_size(), IcedSize::new(16000.0, 10000.0));
+        assert_eq!(state.document.image.source().dimensions(), (250, 160));
+        assert_eq!(state.original_size(), IcedSize::new(250.0, 160.0));
 
         // Display handle was downscaled: both axes at/under the ceiling.
         let (dw, dh) = match state.image_handle.clone() {
@@ -405,9 +405,9 @@ mod tests {
         };
         assert!(dw <= ceiling, "display width {dw} should be <= {ceiling}");
         assert!(dh <= ceiling, "display height {dh} should be <= {ceiling}");
-        // The longest axis (16000) drives the scale, so the display copy is
+        // The longest axis (250) drives the scale, so the display copy is
         // strictly smaller than the source on that axis.
-        assert!(dw < 16000, "display width {dw} should be downscaled");
+        assert!(dw < 250, "display width {dw} should be downscaled");
     }
 
     // -- discard modal / save interaction ------------------------------------
