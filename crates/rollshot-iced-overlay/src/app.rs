@@ -624,8 +624,13 @@ pub(crate) fn update(
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
             ..
         })) => {
-            state.workspace.cancel();
-            (OverlayEffect::Cancel, InputRegionMode::None)
+            if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
+                state.workspace.finish_scrolling();
+                (OverlayEffect::FinishScrolling, InputRegionMode::None)
+            } else {
+                state.workspace.cancel();
+                (OverlayEffect::Cancel, InputRegionMode::None)
+            }
         }
         OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Enter),
@@ -1086,6 +1091,49 @@ mod tests {
         );
 
         assert_eq!(effect, super::OverlayEffect::FinishScrolling);
+    }
+
+    #[test]
+    fn escape_finalizes_active_scrolling_capture() {
+        use iced::{keyboard, Event};
+        let mut state = OverlayState::default();
+        state.workspace.begin_scrolling();
+
+        let (effect, _) = super::update(
+            &mut state,
+            OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+                text: None,
+                repeat: false,
+            })),
+        );
+
+        assert_eq!(effect, super::OverlayEffect::FinishScrolling);
+    }
+
+    #[test]
+    fn escape_cancels_while_selecting() {
+        use iced::{keyboard, Event};
+        let mut state = OverlayState::default();
+
+        let (effect, _) = super::update(
+            &mut state,
+            OverlayMessage::IcedEvent(Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+                text: None,
+                repeat: false,
+            })),
+        );
+
+        assert_eq!(effect, super::OverlayEffect::Cancel);
     }
 
     #[test]
