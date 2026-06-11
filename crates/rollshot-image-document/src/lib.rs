@@ -23,4 +23,4 @@ pub use geometry::{ImagePoint, ImageRect, Rgba8};
 // pub use shapes::{
 //     annotation_bounds, annotation_shapes, text_plate_rect, RenderShape, TextAnchor,
 // };
-// pub use text::measure_block;
+pub use text::measure_block;
