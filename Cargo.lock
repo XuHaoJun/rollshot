@@ -5708,6 +5708,7 @@ dependencies = [
  "rfd 0.15.4",
  "rollshot-capture",
  "rollshot-iced-overlay",
+ "rollshot-image-document",
  "serde_json",
  "tempfile",
  "url",
@@ -5773,6 +5774,15 @@ dependencies = [
  "rollshot-capture",
  "rollshot-core",
  "rollshot-overlay-core",
+]
+
+[[package]]
+name = "rollshot-image-document"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "image",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
