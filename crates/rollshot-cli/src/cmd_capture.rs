@@ -110,6 +110,7 @@ fn run_headless(args: &CaptureArgs) -> Result<String, CliError> {
         fps: args.fps,
         show_cursor: args.show_cursor,
         prefer_portal_region: true,
+        target_display_id: None,
     };
 
     let mut stream = backend.start(options).map_err(CliError::from_capture)?;

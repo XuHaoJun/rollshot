@@ -282,7 +282,7 @@ impl Component {
             return WindowGeometry {
                 source_size,
                 scale,
-                display_id: None,
+                display_id: driver.target_display_id(),
             };
         }
         if let Some(capture) = &self.one_shot {
@@ -312,36 +312,43 @@ impl Component {
 
     /// Resolve the logical overlay window size and origin from the acquired
     /// capture resource. The host (`rollshot-app`'s product daemon) calls this to
-    /// size/position the overlay window before `boot`. The display-origin lookup
-    /// (`display_screen_geometry`) lives here so the host need not reach into the
-    /// crate-private `macos_window` module.
+    /// size/position the overlay window before `boot`.
     ///
-    /// iced window sizes are logical points but `source_size` is physical pixels;
-    /// the returned size is `source_size / scale` so the window covers the
-    /// display 1:1 and the crop maps at the true device scale.
+    /// The overlay must cover the *captured* display exactly: origin and size
+    /// come from that display's logical bounds in Core Graphics global
+    /// coordinates (points, top-left origin — the convention winit positions
+    /// use), so `map_crop_to_frame`'s `source_size / overlay_logical` ratio
+    /// equals the true device scale.
     pub fn overlay_window_layout(&self) -> Result<(iced::Size, iced::Point), OverlayError> {
-        let geom = self.window_geometry();
-        let scale = geom.scale;
-        let source_size = geom.source_size;
-        let window_size = iced::Size::new(
-            source_size.width as f32 / scale as f32,
-            source_size.height as f32 / scale as f32,
-        );
-        let window_origin = match self.capture_mode {
-            Some(CaptureMode::Screenshot) => match geom.display_id {
-                Some(did) => {
-                    let display_geom = crate::macos_window::display_screen_geometry(did)
-                        .map_err(OverlayError::Capture)?;
-                    iced::Point::new(
-                        display_geom.logical_origin.0 as f32,
-                        display_geom.logical_origin.1 as f32,
-                    )
-                }
-                None => iced::Point::ORIGIN,
-            },
-            _ => iced::Point::ORIGIN,
-        };
-        Ok((window_size, window_origin))
+        if let Some(capture) = &self.one_shot {
+            return Ok(layout_from_logical_bounds(
+                capture.target_display().logical_region,
+            ));
+        }
+        if let Some(driver) = &self.driver {
+            if let Some(did) = driver.target_display_id() {
+                // The stream is pinned to this display; opening the overlay
+                // anywhere else would crop against the wrong screen.
+                let bounds = rollshot_capture::display_logical_bounds(did).ok_or_else(|| {
+                    OverlayError::Capture(format!("no logical bounds for display {did}"))
+                })?;
+                return Ok(layout_from_logical_bounds(bounds));
+            }
+            // No display resolved: the stream fell back to the main display, so
+            // cover it from the origin at the main scale.
+            let source_size = driver.source_size();
+            let scale = crate::macos_window::main_screen_scale_factor()
+                .filter(|s| *s > 0.0)
+                .unwrap_or(1.0);
+            return Ok((
+                iced::Size::new(
+                    source_size.width as f32 / scale as f32,
+                    source_size.height as f32 / scale as f32,
+                ),
+                iced::Point::ORIGIN,
+            ));
+        }
+        Ok((iced::Size::new(0.0, 0.0), iced::Point::ORIGIN))
     }
 
     /// Record the overlay window the host opened. The window patch is applied
@@ -531,7 +538,7 @@ impl Component {
                 HostEffect::None
             }
             InternalMessage::PassthroughDisabled(result) => {
-                self.overlay.mouse_passthrough_active = false;
+                self.overlay.mouse_passthrough_active = result.is_err();
                 if let Err(error) = result {
                     eprintln!("failed to disable macOS overlay passthrough: {error}");
                 }
@@ -885,6 +892,16 @@ impl Drop for Component {
     }
 }
 
+/// Overlay window size/origin (logical points) covering a display whose
+/// logical bounds are given in Core Graphics global coordinates (top-left
+/// origin), matching winit's window-position convention.
+fn layout_from_logical_bounds(bounds: rollshot_capture::Region) -> (iced::Size, iced::Point) {
+    (
+        iced::Size::new(bounds.width as f32, bounds.height as f32),
+        iced::Point::new(bounds.x as f32, bounds.y as f32),
+    )
+}
+
 /// Result/scale/display geometry resolved from the acquired capture resource.
 pub struct WindowGeometry {
     pub source_size: rollshot_capture::Size,
@@ -948,7 +965,16 @@ fn controls_window_settings(x: i32, y: i32, w: i32, h: i32) -> window::Settings 
 fn real_factories() -> ResourceFactories {
     ResourceFactories {
         streaming: Box::new(|cfg, preview_tx| {
-            Driver::start_capture(&cfg.backend, cfg.fps, cfg.show_cursor, preview_tx)
+            // Resolve the target display once so the capture stream and the
+            // overlay window placement agree on the same display.
+            let target_display_id = rollshot_capture::display_id_under_cursor();
+            Driver::start_capture(
+                &cfg.backend,
+                cfg.fps,
+                cfg.show_cursor,
+                target_display_id,
+                preview_tx,
+            )
         }),
         one_shot: Box::new(|show_cursor| {
             let kind = rollshot_capture::OneShotBackendKind::from_environment("auto")?;
@@ -1062,6 +1088,52 @@ mod tests {
     }
 
     #[test]
+    fn layout_from_logical_bounds_maps_region_to_size_and_origin() {
+        let (size, origin) = layout_from_logical_bounds(Region {
+            x: -2560,
+            y: 100,
+            width: 2560,
+            height: 1440,
+        });
+        assert_eq!(size, iced::Size::new(2560.0, 1440.0));
+        assert_eq!(origin, iced::Point::new(-2560.0, 100.0));
+    }
+
+    /// The overlay must open on the captured display: origin and size come from
+    /// the one-shot target's logical region (CG global coordinates), not from
+    /// the main display.
+    #[test]
+    fn screenshot_overlay_covers_target_display_logical_bounds() {
+        let mut component = capture_component();
+        let img = RgbaImage::new(1280, 720);
+        component.one_shot = Some(
+            rollshot_capture::OneShotCapture::new(
+                img,
+                DisplayTarget {
+                    output_name: Some("42".to_string()),
+                    logical_region: Region {
+                        x: -640,
+                        y: 100,
+                        width: 640,
+                        height: 360,
+                    },
+                    physical_size: Size {
+                        width: 1280,
+                        height: 720,
+                    },
+                },
+            )
+            .expect("test capture"),
+        );
+
+        let (size, origin) = component
+            .overlay_window_layout()
+            .expect("layout for one-shot capture");
+        assert_eq!(size, iced::Size::new(640.0, 360.0));
+        assert_eq!(origin, iced::Point::new(-640.0, 100.0));
+    }
+
+    #[test]
     fn finish_screenshot_reports_completed_result_without_exiting_host() {
         let mut component = capture_component_with_one_shot();
         let effect = component.apply_overlay_effect(OverlayEffect::FinishScreenshot);
@@ -1152,6 +1224,16 @@ mod tests {
 
         let _ = component.update(Message(InternalMessage::PassthroughEnabled(Ok(()))));
         assert!(component.mouse_passthrough_active());
+
+        // A failed disable leaves the window still in passthrough mode: the
+        // flag must stay true so later transitions retry the disable.
+        let _ = component.update(Message(InternalMessage::PassthroughDisabled(Err(
+            "native failure".to_string(),
+        ))));
+        assert!(component.mouse_passthrough_active());
+
+        let _ = component.update(Message(InternalMessage::PassthroughDisabled(Ok(()))));
+        assert!(!component.mouse_passthrough_active());
     }
 
     #[test]

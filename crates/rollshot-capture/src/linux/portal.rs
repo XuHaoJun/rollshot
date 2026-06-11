@@ -1357,6 +1357,7 @@ mod tests {
             fps: 5,
             show_cursor: false,
             prefer_portal_region: true,
+            target_display_id: None,
         }
     }
 

@@ -424,7 +424,7 @@ fn input_mode_for(phase: crate::workspace::WorkspacePhase) -> app::InputRegionMo
 fn real_factories() -> ResourceFactories {
     ResourceFactories {
         streaming: Box::new(|cfg, preview_tx| {
-            Driver::start_capture(&cfg.backend, cfg.fps, cfg.show_cursor, preview_tx)
+            Driver::start_capture(&cfg.backend, cfg.fps, cfg.show_cursor, None, preview_tx)
         }),
         one_shot: Box::new(|show_cursor| {
             let kind = rollshot_capture::OneShotBackendKind::from_environment("auto")?;

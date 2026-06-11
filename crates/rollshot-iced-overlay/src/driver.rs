@@ -120,6 +120,9 @@ pub struct Driver {
     stitch: Option<JoinHandle<()>>,
     source_size: Size,
     overlay_logical: Size,
+    /// Display the stream was pinned to (macOS display id), when the host
+    /// resolved one. Lets the host place the overlay on the same display.
+    target_display_id: Option<u32>,
     preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
@@ -135,6 +138,7 @@ impl Driver {
         backend: &str,
         fps: u32,
         show_cursor: bool,
+        target_display_id: Option<u32>,
         preview_tx: UnboundedSender<LiveOverlayEvent>,
     ) -> Result<Self, String> {
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
@@ -145,6 +149,7 @@ impl Driver {
                 fps,
                 show_cursor,
                 prefer_portal_region: false,
+                target_display_id,
             })
             .map_err(|e| e.to_string())?;
         let mut stream = SendStream(stream);
@@ -197,6 +202,7 @@ impl Driver {
                 width: 0,
                 height: 0,
             },
+            target_display_id,
             preview_tx,
         })
     }
@@ -293,6 +299,10 @@ impl Driver {
 
     pub(crate) fn source_size(&self) -> Size {
         self.source_size
+    }
+
+    pub(crate) fn target_display_id(&self) -> Option<u32> {
+        self.target_display_id
     }
 
     pub(crate) fn overlay_size(&self) -> Size {

@@ -197,6 +197,14 @@ mod macos_impl {
         find_display_under_cursor(cursor_x, cursor_y)
     }
 
+    /// Logical bounds `(x, y, width, height)` of a display in Core Graphics
+    /// global coordinates (points, top-left origin).
+    pub fn display_logical_bounds(
+        display_id: u32,
+    ) -> Result<(i32, i32, u32, u32), MacosOneShotError> {
+        get_logical_geometry(display_id, 0, 0)
+    }
+
     use super::*;
 
     /// Capture the display under the current cursor position using SCScreenshotManager.
@@ -587,6 +595,14 @@ pub fn display_id_under_cursor() -> Result<u32, MacosOneShotError> {
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
+/// Stub for non-macOS platforms.
+pub fn display_logical_bounds(_display_id: u32) -> Result<(i32, i32, u32, u32), MacosOneShotError> {
+    Err(MacosOneShotError::Unsupported(
+        "macOS one-shot capture requires macOS 14.0 or newer".to_string(),
+    ))
+}
+
 #[cfg(target_os = "macos")]
 /// Capture the display under the current cursor position using SCScreenshotManager.
 pub fn capture_display_under_cursor(
@@ -600,6 +616,13 @@ pub fn capture_display_under_cursor(
 /// position, without performing a full screenshot capture.
 pub fn display_id_under_cursor() -> Result<u32, MacosOneShotError> {
     macos_impl::display_id_under_cursor()
+}
+
+#[cfg(target_os = "macos")]
+/// Logical bounds `(x, y, width, height)` of a display in Core Graphics
+/// global coordinates (points, top-left origin).
+pub fn display_logical_bounds(display_id: u32) -> Result<(i32, i32, u32, u32), MacosOneShotError> {
+    macos_impl::display_logical_bounds(display_id)
 }
 
 #[cfg(test)]
