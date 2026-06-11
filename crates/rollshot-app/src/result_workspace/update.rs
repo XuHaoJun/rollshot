@@ -72,6 +72,15 @@ pub enum Message {
     ToggleNavigator,
     /// Toggle the Copy menu dropdown.
     ToggleCopyMenu,
+    /// Canvas pointer pressed (image-space coordinate).
+    #[allow(dead_code)]
+    CanvasPressed(rollshot_image_document::ImagePoint),
+    /// Canvas pointer moved (image-space coordinate).
+    #[allow(dead_code)]
+    CanvasMoved(rollshot_image_document::ImagePoint),
+    /// Canvas pointer released (image-space coordinate).
+    #[allow(dead_code)]
+    CanvasReleased(rollshot_image_document::ImagePoint),
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +265,9 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
             Task::none()
         }
+        Message::CanvasPressed(_) => Task::none(),
+        Message::CanvasMoved(_) => Task::none(),
+        Message::CanvasReleased(_) => Task::none(),
     }
 }
 

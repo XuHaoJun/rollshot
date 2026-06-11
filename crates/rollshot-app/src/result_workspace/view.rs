@@ -181,8 +181,23 @@ fn canvas_view<'a>(state: &'a ResultWorkspace, image_size: Size) -> Element<'a, 
         .width(Length::Fixed(geometry.rendered_size.width))
         .height(Length::Fixed(geometry.rendered_size.height));
 
-    // Place the (possibly centered) image inside content sized to the geometry.
-    let content = container(img)
+    let overlay = iced::widget::canvas(super::canvas::AnnotationCanvas {
+        document: &state.document.image,
+        editor: &state.editor,
+        scale: geometry.scale,
+        visible: super::canvas::visible_image_rect(
+            state.viewport.scroll_offset,
+            state.viewport_bounds,
+            geometry.scale,
+            geometry.image_origin,
+        ),
+    })
+    .width(Length::Fixed(geometry.rendered_size.width))
+    .height(Length::Fixed(geometry.rendered_size.height));
+
+    let layered = iced::widget::stack![img, overlay];
+
+    let content = container(layered)
         .width(Length::Fixed(geometry.content_size.width))
         .height(Length::Fixed(geometry.content_size.height))
         .padding(iced::Padding {
