@@ -8,6 +8,7 @@ mod portal;
 pub(crate) mod portal_screenshot;
 
 use crate::backend::{CaptureBackend, FrameStream};
+use crate::diagnostics::TARGET_CAPTURE;
 use crate::error::CaptureError;
 use crate::types::{CaptureOptions, CaptureProbe, RegionMode};
 
@@ -89,15 +90,28 @@ impl CaptureBackend for LinuxPortalBackend {
     }
 
     fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
+        let region_category = match &options.region {
+            RegionMode::Manual(_) => "manual",
+            RegionMode::PortalPicker => "portal-picker",
+            RegionMode::FullSource => "full-source",
+        };
+        tracing::info!(
+            target: TARGET_CAPTURE,
+            backend = "linux-portal",
+            fps = options.fps,
+            show_cursor = options.show_cursor,
+            region = region_category,
+            target_display = options.target_display_id.is_some(),
+            "capture start requested"
+        );
+
         let session = self.portal.start(options.clone())?;
 
         if let RegionMode::Manual(region) = &options.region {
             validate_manual_crop(region, session.frame_width, session.frame_height)?;
         }
 
-        if std::env::var("ROLLSHOT_CAPTURE_TRACE").ok().as_deref() == Some("1") {
-            eprintln!("rollshot linux-portal: connecting pipewire stream");
-        }
+        tracing::debug!(target: TARGET_CAPTURE, "connecting PipeWire stream");
         let stream = LinuxPortalFrameStream::connect(session, options)?;
         Ok(Box::new(stream))
     }

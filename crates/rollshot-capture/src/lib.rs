@@ -1,6 +1,6 @@
-mod diagnostics;
 pub mod backend;
 pub mod crop;
+mod diagnostics;
 pub mod error;
 pub mod fake;
 pub mod fixture;

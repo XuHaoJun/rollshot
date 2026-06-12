@@ -1,3 +1,4 @@
+use crate::diagnostics::TARGET_CAPTURE;
 use crate::error::CaptureError;
 use crate::types::{CaptureOptions, CaptureProbe, CapturedFrame};
 
@@ -30,7 +31,7 @@ impl BackendKind {
     }
 
     pub fn from_cli_flag(flag: &str) -> Result<Self, CaptureError> {
-        match flag {
+        let result = match flag {
             "auto" => Ok(default_backend()),
             "fixture" => Ok(BackendKind::Fixture),
             "linux-portal" => Ok(BackendKind::LinuxPortalPipeWire),
@@ -40,45 +41,68 @@ impl BackendKind {
                     "unknown backend '{other}'; expected one of: auto, fixture, linux-portal, macos-sck"
                 ),
             }),
+        };
+        match &result {
+            Ok(kind) => {
+                tracing::debug!(target: TARGET_CAPTURE, flag, kind = kind.as_flag(), "backend flag resolved")
+            }
+            Err(e) => {
+                tracing::error!(target: TARGET_CAPTURE, flag, error = %e, "backend flag rejected")
+            }
         }
+        result
     }
 
     pub fn create(self) -> Result<Box<dyn CaptureBackend>, CaptureError> {
         match self {
-            BackendKind::Fixture => Err(CaptureError::InvalidConfig {
-                message: "fixture backend requires --fixture <DIR>".to_string(),
-            }),
+            BackendKind::Fixture => {
+                let err = CaptureError::InvalidConfig {
+                    message: "fixture backend requires --fixture <DIR>".to_string(),
+                };
+                tracing::error!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend creation failed");
+                Err(err)
+            }
             BackendKind::LinuxPortalPipeWire => {
                 #[cfg(target_os = "linux")]
                 {
+                    tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
                     Ok(Box::new(crate::linux::LinuxPortalBackend::new()))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    Err(CaptureError::Unsupported {
+                    let err = CaptureError::Unsupported {
                         message: "linux-portal backend requires a Linux host".to_string(),
-                    })
+                    };
+                    tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                    Err(err)
                 }
             }
             BackendKind::MacosScreenCaptureKit => {
                 #[cfg(target_os = "macos")]
                 {
+                    tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
                     Ok(Box::new(crate::macos::MacosScreenCaptureKitBackend::new()))
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    Err(CaptureError::Unsupported {
+                    let err = CaptureError::Unsupported {
                         message: "macos-sck backend requires a macOS host".to_string(),
-                    })
+                    };
+                    tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                    Err(err)
                 }
             }
-            BackendKind::Unsupported => Err(CaptureError::Unsupported {
-                message: format!(
-                    "no capture backend is available on os={} session={}",
-                    std::env::consts::OS,
-                    std::env::var("XDG_SESSION_TYPE").unwrap_or_default()
-                ),
-            }),
+            BackendKind::Unsupported => {
+                let err = CaptureError::Unsupported {
+                    message: format!(
+                        "no capture backend is available on os={} session={}",
+                        std::env::consts::OS,
+                        std::env::var("XDG_SESSION_TYPE").unwrap_or_default()
+                    ),
+                };
+                tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                Err(err)
+            }
         }
     }
 }
