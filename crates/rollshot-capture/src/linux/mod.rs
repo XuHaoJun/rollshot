@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 
 pub mod kwin_screenshot;
+pub mod kwin_screencast;
 pub mod one_shot;
 mod pipewire;
 mod pixel;
