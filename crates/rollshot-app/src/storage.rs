@@ -153,9 +153,7 @@ pub fn auto_save_to(image: &RgbaImage, dir: &Path, timestamp: &str) -> Result<Pa
         let path = unique_capture_path(dir, timestamp, |p| p.exists());
         match try_write_png_exclusive(image, &path) {
             Ok(true) => {
-                let encoded_bytes = std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let encoded_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 let category = destination_category(dir);
                 tracing::info!(
                     target: TARGET_SAVE,
