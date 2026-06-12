@@ -15,6 +15,8 @@ pub trait FrameStream {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Fixture,
+    LinuxAuto,
+    LinuxKwinPipeWire,
     LinuxPortalPipeWire,
     MacosScreenCaptureKit,
     Unsupported,
@@ -24,6 +26,8 @@ impl BackendKind {
     pub fn as_flag(self) -> &'static str {
         match self {
             BackendKind::Fixture => "fixture",
+            BackendKind::LinuxAuto => "auto",
+            BackendKind::LinuxKwinPipeWire => "linux-kwin",
             BackendKind::LinuxPortalPipeWire => "linux-portal",
             BackendKind::MacosScreenCaptureKit => "macos-sck",
             BackendKind::Unsupported => "unsupported",
@@ -31,17 +35,8 @@ impl BackendKind {
     }
 
     pub fn from_cli_flag(flag: &str) -> Result<Self, CaptureError> {
-        let result = match flag {
-            "auto" => Ok(default_backend()),
-            "fixture" => Ok(BackendKind::Fixture),
-            "linux-portal" => Ok(BackendKind::LinuxPortalPipeWire),
-            "macos-sck" => Ok(BackendKind::MacosScreenCaptureKit),
-            other => Err(CaptureError::InvalidConfig {
-                message: format!(
-                    "unknown backend '{other}'; expected one of: auto, fixture, linux-portal, macos-sck"
-                ),
-            }),
-        };
+        let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+        let result = backend_for_flag(flag, std::env::consts::OS, session_type.as_deref());
         match &result {
             Ok(kind) => {
                 tracing::debug!(target: TARGET_CAPTURE, flag, kind = kind.as_flag(), "backend flag resolved")
@@ -62,7 +57,7 @@ impl BackendKind {
                 tracing::error!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend creation failed");
                 Err(err)
             }
-            BackendKind::LinuxPortalPipeWire => {
+            BackendKind::LinuxAuto | BackendKind::LinuxPortalPipeWire => {
                 #[cfg(target_os = "linux")]
                 {
                     tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
@@ -76,6 +71,13 @@ impl BackendKind {
                     tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
                     Err(err)
                 }
+            }
+            BackendKind::LinuxKwinPipeWire => {
+                let err = CaptureError::Unsupported {
+                    message: "linux-kwin backend not yet wired".to_string(),
+                };
+                tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                Err(err)
             }
             BackendKind::MacosScreenCaptureKit => {
                 #[cfg(target_os = "macos")]
@@ -112,13 +114,36 @@ pub fn default_backend() -> BackendKind {
     default_backend_for(std::env::consts::OS, session_type.as_deref())
 }
 
+/// Pure helper that preserves `auto` intent — `auto` on Linux Wayland resolves
+/// to `LinuxAuto` (not directly to `LinuxPortalPipeWire`) so the product can
+/// distinguish user-explicit portal from default auto-selection.
+pub fn backend_for_flag(
+    flag: &str,
+    os: &str,
+    session_type: Option<&str>,
+) -> Result<BackendKind, CaptureError> {
+    match flag {
+        "auto" if os == "linux" && session_type == Some("wayland") => Ok(BackendKind::LinuxAuto),
+        "auto" => Ok(default_backend_for(os, session_type)),
+        "linux-kwin" => Ok(BackendKind::LinuxKwinPipeWire),
+        "linux-portal" => Ok(BackendKind::LinuxPortalPipeWire),
+        "fixture" => Ok(BackendKind::Fixture),
+        "macos-sck" => Ok(BackendKind::MacosScreenCaptureKit),
+        other => Err(CaptureError::InvalidConfig {
+            message: format!(
+                "unknown backend '{other}'; expected one of: auto, fixture, linux-kwin, linux-portal, macos-sck"
+            ),
+        }),
+    }
+}
+
 /// Pure helper for `default_backend` — exposed for tests so they can exercise
 /// the OS / session decision matrix without mutating process-global env vars.
 pub fn default_backend_for(os: &str, session_type: Option<&str>) -> BackendKind {
     match os {
         "macos" => BackendKind::MacosScreenCaptureKit,
         "linux" => match session_type {
-            Some("wayland") => BackendKind::LinuxPortalPipeWire,
+            Some("wayland") => BackendKind::LinuxAuto,
             _ => BackendKind::Unsupported,
         },
         _ => BackendKind::Unsupported,
@@ -127,7 +152,7 @@ pub fn default_backend_for(os: &str, session_type: Option<&str>) -> BackendKind 
 
 #[cfg(test)]
 mod tests {
-    use super::{default_backend_for, BackendKind};
+    use super::{backend_for_flag, default_backend_for, BackendKind};
     use crate::error::CaptureError;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -222,7 +247,7 @@ mod tests {
         );
         assert_eq!(
             default_backend_for("linux", Some("wayland")),
-            BackendKind::LinuxPortalPipeWire
+            BackendKind::LinuxAuto
         );
         assert_eq!(
             default_backend_for("linux", Some("tty")),
@@ -267,5 +292,33 @@ mod tests {
             Err(other) => panic!("expected Unsupported, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    #[test]
+    fn from_cli_flag_preserves_linux_auto_intent() {
+        assert_eq!(
+            backend_for_flag("auto", "linux", Some("wayland")).unwrap(),
+            BackendKind::LinuxAuto
+        );
+    }
+
+    #[test]
+    fn from_cli_flag_accepts_linux_kwin() {
+        assert_eq!(
+            BackendKind::from_cli_flag("linux-kwin").unwrap(),
+            BackendKind::LinuxKwinPipeWire
+        );
+    }
+
+    #[test]
+    fn explicit_linux_backends_round_trip() {
+        assert_eq!(
+            backend_for_flag(BackendKind::LinuxAuto.as_flag(), "linux", Some("wayland")).unwrap(),
+            BackendKind::LinuxAuto
+        );
+        assert_eq!(
+            BackendKind::from_cli_flag(BackendKind::LinuxKwinPipeWire.as_flag()).unwrap(),
+            BackendKind::LinuxKwinPipeWire
+        );
     }
 }

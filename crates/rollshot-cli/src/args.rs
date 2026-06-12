@@ -34,7 +34,7 @@ pub struct CaptureArgs {
     #[arg(
         long,
         default_value = "auto",
-        value_parser = ["auto", "fixture", "linux-portal", "macos-sck"],
+        value_parser = ["auto", "fixture", "linux-kwin", "linux-portal", "macos-sck"],
     )]
     pub backend: String,
 

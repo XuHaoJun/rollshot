@@ -1349,6 +1349,7 @@ mod tests {
             show_cursor: false,
             prefer_portal_region: true,
             target_display_id: None,
+            target_output_name: None,
         }
     }
 

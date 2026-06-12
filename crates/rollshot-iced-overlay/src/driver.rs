@@ -152,6 +152,7 @@ impl Driver {
                 show_cursor,
                 prefer_portal_region: false,
                 target_display_id,
+                target_output_name: None,
             })
             .map_err(|e| e.to_string())?;
         tracing::info!(target: TARGET_CAPTURE, "capture stream started");

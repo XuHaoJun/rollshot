@@ -129,6 +129,7 @@ mod tests {
             show_cursor: true,
             prefer_portal_region: true,
             target_display_id: None,
+            target_output_name: None,
         };
         let scap_options = options_to_scap_options(&options).expect("valid options");
         assert_eq!(scap_options.fps, 12);

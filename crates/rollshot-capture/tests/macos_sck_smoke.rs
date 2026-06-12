@@ -26,6 +26,7 @@ fn macos_sck_receives_frames() {
         show_cursor: false,
         prefer_portal_region: false,
         target_display_id: None,
+        target_output_name: None,
     };
 
     let mut stream = backend.start(options).expect("start macOS capture");

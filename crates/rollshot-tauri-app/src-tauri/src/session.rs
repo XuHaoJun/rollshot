@@ -466,6 +466,7 @@ impl SharedSession {
                 show_cursor: options.show_cursor,
                 prefer_portal_region: false,
                 target_display_id: None,
+                target_output_name: None,
             };
             let mut stream = match backend.start(capture_options) {
                 Ok(stream) => stream,
