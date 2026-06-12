@@ -36,6 +36,7 @@ use rollshot_capture::CaptureMode;
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
 
+use crate::diagnostics::TARGET_APP;
 use crate::macos_native_drag::{self, NativeDragResult};
 use crate::macos_thumbnail::{self, release_action, ThumbnailAction, ThumbnailState};
 use crate::post_capture::{select_presentation, Presentation};
@@ -262,7 +263,7 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 HostEffect::Completed(result) => complete_capture(product, result),
                 HostEffect::Cancelled => iced::exit(),
                 HostEffect::Fatal(error) => {
-                    eprintln!("{error}");
+                    tracing::error!(target: TARGET_APP, %error, "capture fatal");
                     iced::exit()
                 }
             }
@@ -350,20 +351,15 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             .map(Message::ThumbnailWindowPatched)
         }
         Message::ThumbnailWindowPatched(result) => {
-            // A patch failure means the floating chrome is unusable. The durable
-            // saved file remains (spec §13), so surface the error and exit.
             if let Err(error) = result {
-                eprintln!("{error}");
+                tracing::error!(target: TARGET_APP, %error, "thumbnail window patch failed");
                 return iced::exit();
             }
             Task::none()
         }
         Message::NativeDragStarted(result) => {
-            // The drag could not start (e.g. no left-mouse event). Clear the
-            // drag intent and restart the countdown so the thumbnail stays
-            // usable; the saved file is durable regardless.
             if let Err(error) = result {
-                eprintln!("{error}");
+                tracing::warn!(target: TARGET_APP, %error, "native drag failed to start");
                 if let Phase::Thumbnail(state) = &mut product.phase {
                     let now = Instant::now();
                     state.dragging = false;
@@ -416,7 +412,7 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
                     open.map(Message::ThumbnailWindowReady)
                 }
                 Err(error) => {
-                    eprintln!("{error}");
+                    tracing::error!(target: TARGET_APP, %error, "thumbnail window settings failed");
                     close_tasks.push(iced::exit());
                     return Task::batch(close_tasks);
                 }

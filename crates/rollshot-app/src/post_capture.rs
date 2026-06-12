@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::diagnostics::TARGET_APP;
 use crate::storage::Platform;
 
 #[cfg(target_os = "linux")]
@@ -27,19 +28,27 @@ pub fn capture_completion(
     result: Option<rollshot_iced_overlay::CaptureResult>,
 ) -> CaptureCompletion {
     match result {
-        Some(cr) => CaptureCompletion::Present(cr),
-        None => CaptureCompletion::Cancelled,
+        Some(cr) => {
+            tracing::info!(target: TARGET_APP, "capture present");
+            CaptureCompletion::Present(cr)
+        }
+        None => {
+            tracing::info!(target: TARGET_APP, "capture cancelled");
+            CaptureCompletion::Cancelled
+        }
     }
 }
 
 /// Select which presentation to show based on the platform and auto-save outcome.
 pub fn select_presentation(platform: Platform, auto_save: Result<PathBuf, String>) -> Presentation {
-    match (platform, auto_save) {
+    let presentation = match (platform, auto_save) {
         (Platform::Linux, Ok(path)) => Presentation::LinuxSavedWorkspace(path),
         (Platform::Linux, Err(msg)) => Presentation::LinuxUnsavedWorkspace(msg),
         (Platform::Macos, Ok(path)) => Presentation::MacosSavedThumbnail(path),
         (Platform::Macos, Err(msg)) => Presentation::MacosUnsavedWorkspace(msg),
-    }
+    };
+    tracing::info!(target: TARGET_APP, ?presentation, "presentation selected");
+    presentation
 }
 
 /// Linux end-to-end: auto-save, then launch the Result Workspace.
