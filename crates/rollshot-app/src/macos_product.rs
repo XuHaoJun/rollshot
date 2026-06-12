@@ -650,7 +650,8 @@ mod tests {
                 .document
                 .as_ref()
                 .expect("saved document")
-                .source_image
+                .image
+                .source()
                 .dimensions(),
             (100, 9000)
         );
@@ -678,8 +679,8 @@ mod tests {
         match &product.phase {
             Phase::Workspace(ws) => {
                 // Same pixels reused from the in-memory document; not reloaded.
-                assert_eq!(ws.document.source_image.as_raw(), &raw);
-                assert!(ws.document.saved_path.is_some());
+                assert_eq!(ws.document.image.source().as_raw(), &raw);
+                assert!(ws.document.source_path.is_some());
             }
             _ => panic!("expected saved workspace phase"),
         }
