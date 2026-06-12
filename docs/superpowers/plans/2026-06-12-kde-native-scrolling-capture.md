@@ -55,6 +55,8 @@
   - Passes a target output name into streaming capture.
 - `crates/rollshot-iced-overlay/src/linux_runner.rs`
   - Acquires the KWin frozen active-output image before native/auto scrolling startup, carries it with the driver, and targets the overlay output.
+- `crates/rollshot-iced-overlay/src/macos_capture.rs`
+  - Call-site-only update for the new `Driver::start_capture` parameter (passes `None`; macOS behavior unchanged).
 - `packaging/linux/dev.rollshot.io.desktop`
   - Declares `zkde_screencast_unstable_v1`.
 - `README.md`
@@ -79,7 +81,7 @@ In `crates/rollshot-capture/src/backend.rs`, extend the existing tests:
 #[test]
 fn from_cli_flag_preserves_linux_auto_intent() {
     assert_eq!(
-        backend_for_flag("auto", "linux", Some("wayland")),
+        backend_for_flag("auto", "linux", Some("wayland")).unwrap(),
         BackendKind::LinuxAuto
     );
 }
@@ -119,8 +121,11 @@ fn capture_options_default_has_no_target_output_name() {
 Run:
 
 ```bash
-rtk cargo test -p rollshot-capture backend::tests types::tests
+rtk cargo test -p rollshot-capture backend::tests
+rtk cargo test -p rollshot-capture types::tests
 ```
+
+(`cargo test` accepts only one positional test filter per invocation.)
 
 Expected: FAIL because `LinuxAuto`, `LinuxKwinPipeWire`, `backend_for_flag`, and `target_output_name` do not exist.
 
@@ -176,7 +181,19 @@ pub fn backend_for_flag(
 Make `BackendKind::from_cli_flag` delegate to `backend_for_flag` with the real
 environment. Change `default_backend_for("linux", Some("wayland"))` to
 `LinuxAuto`, so probe output accurately reports that the product default owns
-native-first fallback. `LinuxAuto::as_flag()` returns `"auto"`.
+native-first fallback. `LinuxAuto::as_flag()` returns `"auto"`;
+`LinuxKwinPipeWire::as_flag()` returns `"linux-kwin"`.
+
+Keep this commit shippable on its own:
+
+- `BackendKind::create` matches exhaustively, so the new variants need arms
+  now: `LinuxAuto` creates the existing Linux portal backend (current behavior,
+  replaced by the real auto backend in Task 5), and `LinuxKwinPipeWire`
+  returns `CaptureError::Unsupported` with a "not yet wired" message until
+  Task 5. Without these arms Task 1 does not compile.
+- The probe report's `default_backend` string for Linux Wayland changes from
+  `"linux-portal"` to `"auto"`; update any existing probe assertions that
+  depend on the old value.
 
 Update CLI accepted backend values and make `parse_region("auto", ...)` resolve `PortalPicker` only for explicit `LinuxPortalPipeWire`; `LinuxAuto` and `LinuxKwinPipeWire` use `FullSource`.
 
@@ -185,8 +202,10 @@ Update CLI accepted backend values and make `parse_region("auto", ...)` resolve 
 Run:
 
 ```bash
-rtk cargo test -p rollshot-capture backend::tests types::tests
+rtk cargo test -p rollshot-capture backend::tests
+rtk cargo test -p rollshot-capture types::tests
 rtk cargo test -p rollshot-cli --test capture_fixture
+rtk cargo test -p rollshot-cli --test probe_cli
 ```
 
 Expected: PASS.
@@ -465,7 +484,19 @@ fn connection_mode_distinguishes_default_and_portal_remote() {
     assert!(matches!(PipeWireRemote::Default, PipeWireRemote::Default));
     assert!(matches!(fake_portal_remote(), PipeWireRemote::PortalFd(_)));
 }
+
+#[test]
+fn source_session_outlives_pipewire_consumer() {
+    let drops = DropOrder::default();
+    {
+        let _stream = fake_stream_with(drops.tracked_pipewire(), drops.tracked_session());
+    }
+    assert_eq!(drops.order(), vec!["pipewire", "session"]);
+}
 ```
+
+The drop-order test covers the spec's teardown risk: the KWin stream session
+must stay alive until the PipeWire consumer has stopped.
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
@@ -493,6 +524,11 @@ pub struct LinuxPipeWireFrameStream<R> {
     queue: Arc<FrameQueue>,
 }
 ```
+
+Field order is load-bearing: Rust drops fields in declaration order, so
+`pipewire` must be declared before `_source_session` to stop the consumer
+before releasing the KWin (or portal) session. State this in a comment on the
+struct and keep the Step 1 drop-order test green.
 
 Change `PipeWireConnection::connect_fd` into:
 
@@ -603,6 +639,21 @@ fn native_runtime_stream_error_does_not_construct_portal() {
     assert!(stream.next_frame().is_err());
     assert_eq!(calls.portal(), 0);
 }
+
+#[test]
+fn explicit_kwin_backend_resolves_active_output_when_target_is_missing() {
+    let mut backend = test_kwin_backend(recording_kwin_client(), active_output_resolver("eDP-1"));
+    backend.start(CaptureOptions::default()).unwrap();
+    assert_eq!(started_output_name(&backend), Some("eDP-1"));
+}
+
+#[test]
+fn user_cancelled_and_invalid_config_are_not_fallback_eligible() {
+    assert!(!is_fallback_eligible(&CaptureError::UserCancelled));
+    assert!(!is_fallback_eligible(&CaptureError::InvalidConfig {
+        message: "bad".into(),
+    }));
+}
 ```
 
 - [ ] **Step 2: Run focused tests and verify failure**
@@ -630,7 +681,8 @@ Its `start` method must:
 - require Wayland and KDE;
 - use `options.target_output_name` when the overlay host already resolved it;
 - otherwise call the existing strict KWin active-screen one-shot path to
-  resolve the active output name without invoking the portal;
+  resolve the active output name without invoking the portal (inject the
+  active-output resolver for tests alongside the screencast client);
 - call `client.start_output(output_name, options.show_cursor)`;
 - connect a native Linux PipeWire frame stream;
 - return errors unchanged;
@@ -671,10 +723,33 @@ tracing::warn!(
 ```
 
 - never fallback on `UserCancelled` or `InvalidConfig`;
-- combine native and portal failures if fallback also fails.
+- combine native and portal failures if fallback also fails;
+- pass the caller's `CaptureOptions` to the portal leg unchanged. This is a
+  deliberate semantics change for the CLI: `auto` now resolves region
+  `FullSource` (Task 1), so a portal fallback captures the full source instead
+  of honoring a portal-picked region. Task 8 documents it. The overlay
+  scrolling path already uses `FullSource` and is unaffected.
+
+Add this startup flow as a doc comment on `LinuxAutoBackend`:
+
+```text
+auto (Linux Wayland)
+        │
+   KDE detected? ──no──► start linux-portal
+        │ yes
+   strict linux-kwin startup
+        │
+   ok? ──yes──► native stream
+        │ no
+   fallback-eligible? ──no──► return native error
+        │ yes
+   warn (target rollshot::capture::linux::kwin)
+        │
+   start linux-portal ──err──► combined native+portal error
+```
 
 Wire `BackendKind::LinuxAuto` and `BackendKind::LinuxKwinPipeWire` into
-`BackendKind::create`.
+`BackendKind::create`, replacing the Task 1 stub arms.
 
 - [ ] **Step 5: Run focused and capture-crate tests**
 
@@ -702,6 +777,7 @@ rtk git commit -m "feat(capture): add KDE native-first Linux backend"
 **Files:**
 - Modify: `crates/rollshot-iced-overlay/src/driver.rs`
 - Modify: `crates/rollshot-iced-overlay/src/linux_runner.rs`
+- Modify: `crates/rollshot-iced-overlay/src/macos_capture.rs` (call-site only)
 
 - [ ] **Step 1: Write failing scrolling-resource tests**
 
@@ -742,6 +818,17 @@ fn explicit_kwin_one_shot_failure_returns_error_without_portal() {
         &factories_with_failed_kwin_one_shot_and_portal_driver(),
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn frozen_handle_exists_only_for_kwin_streaming_resources() {
+    let kwin = CaptureResource::Streaming {
+        driver: fake_driver(Some("DP-2")),
+        frozen: Some(fake_one_shot_capture_for("DP-2")),
+    };
+    let portal = CaptureResource::Streaming { driver: fake_driver(None), frozen: None };
+    assert!(frozen_handle_for(&kwin).is_some());
+    assert!(frozen_handle_for(&portal).is_none());
 }
 ```
 
@@ -786,7 +873,10 @@ pub fn target_output_name(&self) -> Option<&str> {
 
 Keep the existing `target_display_id` field and macOS behavior unchanged.
 `target_output_name` is an additional Linux-oriented field; do not change the
-macOS runner's capture semantics.
+macOS runner's capture semantics. The signature change does require a
+mechanical edit to the `Driver::start_capture` call site in
+`macos_capture.rs`: pass `None` for `target_output_name`. That is the only
+macOS change in this plan.
 
 - [ ] **Step 4: Carry frozen background with scrolling resources**
 
@@ -951,10 +1041,15 @@ Run:
 
 ```bash
 rtk rg -n '^X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1$' packaging/linux/dev.rollshot.io.desktop
-rtk rg -n 'KDE Native Capture Permission|linux-kwin|fallback' README.md
+rtk rg -n 'KDE Native Capture Permission' README.md
+rtk rg -n 'linux-kwin' README.md
 ```
 
-Expected: FAIL because the desktop declaration and new documentation do not exist.
+Run each check separately — an OR-pattern (`a|b|c`) passes if any one phrase
+already exists in the file (e.g. README may already mention "fallback").
+
+Expected: each command FAILs because the desktop declaration and new
+documentation do not exist.
 
 - [ ] **Step 2: Add the desktop entry authorization**
 
@@ -979,7 +1074,9 @@ and explicitly document:
 - `cargo run`/`target/...` normally causes `auto` to fall back to portal;
 - installed `auto` scrolling capture should not show a picker;
 - explicit `linux-portal` always tests the picker path;
-- explicit `linux-kwin` diagnoses native authorization without fallback.
+- explicit `linux-kwin` diagnoses native authorization without fallback;
+- under `auto`, a portal fallback captures the full source and crops locally;
+  it does not honor a portal-picked region.
 
 Include these verification commands:
 
@@ -996,7 +1093,9 @@ Run:
 ```bash
 rtk rg -n '^X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2$' packaging/linux/dev.rollshot.io.desktop
 rtk rg -n '^X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1$' packaging/linux/dev.rollshot.io.desktop
-rtk rg -n 'KDE Native Capture Permission|linux-kwin|linux-portal|fallback' README.md
+rtk rg -n 'KDE Native Capture Permission' README.md
+rtk rg -n 'linux-kwin' README.md
+rtk rg -n 'linux-portal' README.md
 rtk git diff --check
 ```
 
@@ -1046,7 +1145,6 @@ Run:
 ```bash
 rtk cargo build --release -p rollshot-app
 rtk install -Dm755 target/release/rollshot-app ~/.local/bin/rollshot-app
-rtk sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" packaging/linux/dev.rollshot.io.desktop
 ```
 
 Write the transformed desktop entry to
