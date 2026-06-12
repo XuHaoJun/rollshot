@@ -141,6 +141,7 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
                 if remaining.is_zero() {
                     return Err(CaptureError::Timeout {
                         message: "KWin pipe read timed out after 5s".to_string(),
+                        duration: KWIN_PIPE_TIMEOUT,
                     });
                 }
 
@@ -191,6 +192,7 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
                 .await
                 .map_err(|_| CaptureError::Timeout {
                     message: "KWin DBus connection timed out after 5s".to_string(),
+                    duration: KWIN_DBUS_TIMEOUT,
                 })?
                 .map_err(|e| {
                     if e.to_string()
@@ -229,6 +231,7 @@ impl KwinScreenshotClient for KwinScreenshotDBusClient {
             .await
             .map_err(|_| CaptureError::Timeout {
                 message: "KWin CaptureActiveScreen timed out after 5s".to_string(),
+                duration: KWIN_DBUS_TIMEOUT,
             })?
             .map_err(|e| {
                 let msg = e.to_string();
@@ -593,11 +596,12 @@ mod tests {
     fn capture_once_timeout_returns_timeout_error() {
         let err = CaptureError::Timeout {
             message: "KWin CaptureActiveScreen timed out after 5s".to_string(),
+            duration: KWIN_DBUS_TIMEOUT,
         };
         let client = FakeKwinClient::returning_error(err);
         let mut backend = LinuxKwinOneShotBackend::new(client);
         match backend.capture_once(false) {
-            Err(CaptureError::Timeout { message }) => {
+            Err(CaptureError::Timeout { message, .. }) => {
                 assert!(message.contains("5s"), "msg: {message}");
             }
             other => panic!("expected Timeout error, got {other:?}"),

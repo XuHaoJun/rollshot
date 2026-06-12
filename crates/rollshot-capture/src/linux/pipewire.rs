@@ -110,6 +110,7 @@ impl FrameQueue {
         if wait_result.timed_out() && deque.is_empty() {
             return Err(CaptureError::Timeout {
                 message: format!("PipeWire stream produced no frames within {timeout:?}"),
+                duration: timeout,
             });
         }
 
@@ -882,7 +883,7 @@ mod tests {
             .next_frame_with_timeout(Duration::from_millis(100))
             .unwrap_err();
         match err {
-            CaptureError::Timeout { message } => {
+            CaptureError::Timeout { message, .. } => {
                 assert!(message.contains("no frames within"), "msg = {message}");
             }
             other => panic!("expected Timeout, got {other:?}"),

@@ -16,7 +16,10 @@ pub enum CaptureError {
     EndOfStream,
 
     #[error("frame timeout: {message}")]
-    Timeout { message: String },
+    Timeout {
+        message: String,
+        duration: std::time::Duration,
+    },
 
     #[error("invalid configuration: {message}")]
     InvalidConfig { message: String },

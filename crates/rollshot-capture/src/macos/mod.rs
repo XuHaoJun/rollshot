@@ -205,6 +205,7 @@ fn process_scap_frame(
                     );
                     return Err(CaptureError::Timeout {
                         message: format!("{EMPTY_FRAME_LIMIT} consecutive empty (SCK idle) frames"),
+                        duration: std::time::Duration::from_secs(EMPTY_FRAME_LIMIT as u64),
                     });
                 }
                 return Ok(Err(FrameProcessOutcome::Empty));

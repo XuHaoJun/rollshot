@@ -144,6 +144,7 @@ impl PortalScreenshotClient for AshpdScreenshotClient {
             .await
             .map_err(|_| CaptureError::Timeout {
                 message: "Screenshot portal request timed out after 60s".to_string(),
+                duration: std::time::Duration::from_secs(60),
             })?
             .map_err(map_screenshot_ashpd_error)?;
 
@@ -404,10 +405,11 @@ mod tests {
     fn portal_request_timeout_returns_timeout() {
         let client = FakeScreenshotClient::returning_error(CaptureError::Timeout {
             message: "Screenshot portal request timed out after 60s".to_string(),
+            duration: std::time::Duration::from_secs(60),
         });
         let backend = PortalScreenshotBackend::new(client);
         match backend.capture_once(false) {
-            Err(CaptureError::Timeout { message }) => {
+            Err(CaptureError::Timeout { message, .. }) => {
                 assert!(message.contains("60s"), "unexpected message: {message}");
             }
             other => panic!("expected Timeout, got {other:?}"),
