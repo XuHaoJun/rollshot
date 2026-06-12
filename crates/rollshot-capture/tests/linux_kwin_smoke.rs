@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use rollshot_capture::{CaptureBackend, FrameStream};
+use rollshot_capture::CaptureBackend;
 
 #[test]
 #[ignore = "requires installed Rollshot desktop entry and live KDE Wayland session"]
@@ -23,8 +23,10 @@ fn captures_linux_kwin_frames() {
         rollshot_capture::linux::kwin_screencast::RealKwinScreencastClient::new(),
         None,
     );
-    let mut options = rollshot_capture::CaptureOptions::default();
-    options.target_output_name = Some(output);
+    let options = rollshot_capture::CaptureOptions {
+        target_output_name: Some(output),
+        ..Default::default()
+    };
     let mut stream = backend.start(options).expect("start KWin stream");
     let frame = stream.next_frame().expect("first KWin frame");
     assert_eq!(frame.metadata.backend, "linux-kwin");

@@ -540,11 +540,8 @@ mod tests {
     #[test]
     fn non_kde_skips_native_entirely() {
         let calls = Calls::default();
-        let mut backend = LinuxAutoBackend::with_factories(
-            native_ok(&calls),
-            portal_ok(&calls),
-            false,
-        );
+        let mut backend =
+            LinuxAutoBackend::with_factories(native_ok(&calls), portal_ok(&calls), false);
         backend.start(targeted_options("eDP-1")).unwrap();
         assert_eq!(calls.native(), 0);
         assert_eq!(calls.portal(), 1);

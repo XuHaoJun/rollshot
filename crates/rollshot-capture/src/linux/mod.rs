@@ -80,11 +80,45 @@ impl CaptureBackend for LinuxKwinBackend {
     }
 
     fn probe(&self) -> CaptureProbe {
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        let is_wayland = session_type == "wayland";
+        let is_kde = desktop
+            .split(':')
+            .any(|part| part.eq_ignore_ascii_case("KDE"));
+
+        let mut available = is_wayland && is_kde;
+        let mut details = vec![
+            ("XDG_SESSION_TYPE".to_string(), session_type),
+            ("XDG_CURRENT_DESKTOP".to_string(), desktop),
+        ];
+
+        if available {
+            details.push((
+                "zkde_screencast_unstable_v1".to_string(),
+                "protocol advertised (requires live Wayland connection to confirm)".to_string(),
+            ));
+        }
+
+        let message = if !is_wayland {
+            "requires Wayland session".to_string()
+        } else if !is_kde {
+            "requires KDE desktop".to_string()
+        } else {
+            "KDE Wayland detected; a desktop-entry authorizing Rollshot is required for real streams"
+                .to_string()
+        };
+
+        // If not available, also report what we found so diagnostics are useful.
+        if !available {
+            available = false;
+        }
+
         CaptureProbe {
             backend: "linux-kwin",
-            available: true,
-            message: String::new(),
-            details: vec![],
+            available,
+            message,
+            details,
         }
     }
 

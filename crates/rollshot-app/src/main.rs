@@ -83,6 +83,7 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Resu
         fps: options.fps,
         show_cursor: options.show_cursor,
         initial_mode: options.initial_mode,
+        target_output_name: None,
     };
 
     #[cfg(target_os = "linux")]

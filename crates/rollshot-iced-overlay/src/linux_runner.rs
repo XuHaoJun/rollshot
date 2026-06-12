@@ -420,7 +420,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
                             state.frozen = frozen_handle_for(&resource);
                             match resource {
-                                CaptureResource::Streaming { mut driver, frozen: _ } => {
+                                CaptureResource::Streaming {
+                                    mut driver,
+                                    frozen: _,
+                                } => {
                                     if let (Some(crop), Some(ws)) = (state.crop, state.window_size)
                                     {
                                         state.workspace.begin_scrolling();

@@ -28,6 +28,7 @@ fn overlay_config(options: &InteractiveLaunchOptions) -> OverlayConfig {
         fps: options.fps.max(NATIVE_OVERLAY_MIN_FPS),
         show_cursor: options.show_cursor,
         initial_mode: options.initial_mode,
+        target_output_name: None,
     }
 }
 
