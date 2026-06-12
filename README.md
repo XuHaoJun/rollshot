@@ -124,6 +124,66 @@ To enforce the current hosted-runner threshold locally or in the manual
 rtk env ROLLSHOT_PERF_STRICT=1 cargo test --release -p rollshot-core large_retina_pair_perf_smoke -- --ignored --nocapture
 ```
 
+## Runtime Diagnostics
+
+Rollshot uses structured diagnostic logging through the `tracing` ecosystem.
+Release builds retain debug and trace events; they are enabled at runtime
+through `RUST_LOG`.
+
+### Quick Start
+
+```bash
+# Default: warnings and errors on the console.
+rollshot-app
+
+# Debug all Rollshot subsystems on the console.
+RUST_LOG=warn,rollshot=debug rollshot-app
+
+# Capture-only diagnostics in an explicit JSONL file and on the console.
+RUST_LOG=warn,rollshot::capture=debug rollshot-app --log-file ./rollshot-debug.jsonl
+
+# Stitch decisions plus detailed matcher events.
+RUST_LOG=warn,rollshot::stitch=debug,rollshot::stitch::matcher=trace rollshot-app --log-file ./rollshot-debug.jsonl
+```
+
+### `--log-file <PATH>`
+
+Writes the same diagnostic session to a JSONL file alongside console output.
+The file is truncated per launch. Parent directories must exist. Console output
+remains enabled when file output is active. Normally combined with `RUST_LOG`
+to enable the desired diagnostic level.
+
+### Stable Diagnostic Targets
+
+These target names are stable support controls. Use them in `RUST_LOG`
+directives to enable diagnostics for specific subsystems:
+
+| Target | Scope |
+| --- | --- |
+| `rollshot::app` | Product launch, completion, and top-level failures |
+| `rollshot::app::filter` | Invalid `RUST_LOG` directive warnings (additive) |
+| `rollshot::overlay` | Shared iced overlay lifecycle and interaction state |
+| `rollshot::capture` | Backend-independent capture decisions and outcomes |
+| `rollshot::capture::linux::portal` | Linux portal lifecycle and negotiation |
+| `rollshot::capture::linux::pipewire` | Linux PipeWire stream and frame handling |
+| `rollshot::capture::macos::sck` | macOS ScreenCaptureKit capture behavior |
+| `rollshot::stitch` | Stitch session lifecycle and outcomes |
+| `rollshot::stitch::matcher` | Candidate search and match selection |
+| `rollshot::stitch::verifier` | Match verification decisions |
+| `rollshot::stitch::canvas` | Canvas growth, append, and memory behavior |
+| `rollshot::save` | Auto-save, explicit save, and result handoff |
+
+Parent directives enable events from child targets. For example,
+`rollshot::stitch=debug` enables debug events from `rollshot::stitch`,
+`rollshot::stitch::matcher`, `rollshot::stitch::verifier`, and
+`rollshot::stitch::canvas`.
+
+### Privacy
+
+Diagnostic events intentionally omit captured pixels, full save paths, and
+environment dumps. Logs contain only safe fields: dimensions, coordinates,
+backend names, enum variants, counts, durations, scores, and error categories.
+
 ## GitHub Actions
 
 `.github/workflows/ci.yml` runs on `ubuntu-24.04` and `macos-14` for pushes to
