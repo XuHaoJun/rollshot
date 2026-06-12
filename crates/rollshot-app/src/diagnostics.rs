@@ -131,6 +131,33 @@ pub(crate) fn select_filter(raw: Option<&str>) -> SelectedFilter {
     }
 }
 
+pub(crate) fn classify_app_error(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    if lower.contains("launch") || lower.contains("argument") || lower.contains("payload") {
+        "launch"
+    } else if lower.contains("capture")
+        || lower.contains("backend")
+        || lower.contains("portal")
+        || lower.contains("pipewire")
+        || lower.contains("screencapturekit")
+        || lower.contains("sck")
+    {
+        "capture"
+    } else if lower.contains("overlay") || lower.contains("iced") || lower.contains("layer") {
+        "overlay"
+    } else if lower.contains("save")
+        || lower.contains("write")
+        || lower.contains("png")
+        || lower.contains("image")
+    {
+        "save"
+    } else if lower.contains("workspace") {
+        "workspace"
+    } else {
+        "unknown"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

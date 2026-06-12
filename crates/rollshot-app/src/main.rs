@@ -2,6 +2,7 @@ mod diagnostics;
 mod launch;
 
 use launch::LaunchMode;
+use std::process::ExitCode;
 
 // Registered on every target so the portable thumbnail timer + interaction
 // helpers compile and unit-test on Linux. Only its `view` is macOS-gated.
@@ -15,23 +16,68 @@ mod post_capture;
 mod result_workspace;
 mod storage;
 
-fn main() {
-    let launch_mode = match launch::parse_launch_args(std::env::args()) {
-        Ok(mode) => mode,
+fn main() -> ExitCode {
+    let logging = match launch::extract_logging_args(std::env::args()) {
+        Ok(logging) => logging,
         Err(message) => {
             eprintln!("{message}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
     };
 
-    match launch_mode {
-        LaunchMode::Capture(options) => {
-            run_iced_capture(options);
+    let selected = diagnostics::select_filter(std::env::var("RUST_LOG").ok().as_deref());
+    let _diagnostics = match diagnostics::init(logging.log_file.as_deref(), &selected) {
+        Ok(guard) => guard,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !selected.ignored.is_empty() {
+        tracing::warn!(
+            target: diagnostics::TARGET_FILTER,
+            ignored = ?selected.ignored,
+            "ignored invalid RUST_LOG directives"
+        );
+    }
+
+    match run(logging.remaining, logging.log_file.is_some()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(
+                target: diagnostics::TARGET_APP,
+                error_category = diagnostics::classify_app_error(&error),
+                "application failed"
+            );
+            ExitCode::FAILURE
         }
     }
 }
 
-fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
+fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
+    let launch_mode = launch::parse_launch_args(args)?;
+
+    match launch_mode {
+        LaunchMode::Capture(options) => {
+            tracing::info!(
+                target: diagnostics::TARGET_APP,
+                version = env!("CARGO_PKG_VERSION"),
+                os = std::env::consts::OS,
+                arch = std::env::consts::ARCH,
+                backend = options.backend.as_str(),
+                fps = options.fps,
+                show_cursor = options.show_cursor,
+                initial_mode = ?options.initial_mode,
+                file_logging,
+                "capture session started"
+            );
+            run_iced_capture(options)
+        }
+    }
+}
+
+fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Result<(), String> {
     let config = rollshot_iced_overlay::OverlayConfig {
         backend: options.backend,
         fps: options.fps,
@@ -41,25 +87,18 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) {
 
     #[cfg(target_os = "linux")]
     {
-        if let Err(e) = run_product_capture(config) {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
+        run_product_capture(config)
     }
 
     #[cfg(target_os = "macos")]
     {
-        if let Err(e) = run_product_capture(config) {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
+        run_product_capture(config)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = config;
-        eprintln!("unsupported platform");
-        std::process::exit(1);
+        Err("unsupported platform".to_string())
     }
 }
 
@@ -92,5 +131,19 @@ mod tests {
             launch::parse_launch_args(["rollshot-app", "--save-dialog-temp", "/tmp/a.png"])
                 .is_err()
         );
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn run_returns_error_for_unsupported_platform() {
+        let err = run(
+            vec![
+                "rollshot-app".to_string(),
+                "--capture".to_string(),
+                r#"{"backend":"auto","fps":5,"show_cursor":false}"#.to_string(),
+            ],
+            false,
+        );
+        assert!(err.is_err());
     }
 }

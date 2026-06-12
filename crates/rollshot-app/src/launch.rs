@@ -6,12 +6,14 @@ pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggingArgs {
     pub log_file: Option<PathBuf>,
     pub remaining: Vec<String>,
 }
 
+#[allow(dead_code)]
 pub fn extract_logging_args<I, S>(args: I) -> Result<LoggingArgs, String>
 where
     I: IntoIterator<Item = S>,
