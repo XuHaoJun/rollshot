@@ -51,3 +51,39 @@ fn probe_json_parses_and_has_expected_shape() {
         .collect();
     assert!(names.contains(&"fixture"), "names = {names:?}");
 }
+
+#[cfg(target_os = "linux")]
+fn run_probe_json() -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+        .arg("probe")
+        .arg("--json")
+        .output()
+        .expect("run rollshot probe --json");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    serde_json::from_str(stdout.trim()).expect("probe --json must be valid json")
+}
+
+#[cfg(target_os = "linux")]
+fn backend_names(report: &serde_json::Value) -> Vec<&str> {
+    report
+        .get("backends")
+        .and_then(|v| v.as_array())
+        .expect("backends array")
+        .iter()
+        .filter_map(|b| b.get("name").and_then(|v| v.as_str()))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn probe_json_lists_kwin_and_portal_backends() {
+    let report = run_probe_json();
+    let names = backend_names(&report);
+    assert!(names.contains(&"linux-kwin"));
+    assert!(names.contains(&"linux-portal"));
+}
