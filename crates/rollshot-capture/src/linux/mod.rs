@@ -113,7 +113,7 @@ impl CaptureBackend for LinuxPortalBackend {
         }
 
         tracing::debug!(target: TARGET_CAPTURE, "connecting PipeWire stream");
-        let stream = LinuxPortalFrameStream::connect(session, options)?;
+        let stream = LinuxPortalFrameStream::connect_portal(session, options)?;
         Ok(Box::new(stream))
     }
 }

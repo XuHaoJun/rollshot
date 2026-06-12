@@ -247,7 +247,9 @@ impl KwinScreencastClient for RealKwinScreencastClient {
             match nix::poll::poll(std::slice::from_mut(&mut pollfd), poll_timeout_ms) {
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(CaptureError::Backend(anyhow::anyhow!("stream poll failed: {e}")));
+                    return Err(CaptureError::Backend(anyhow::anyhow!(
+                        "stream poll failed: {e}"
+                    )));
                 }
             }
 
@@ -281,8 +283,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for KwinState {
                         tracing::debug!(target: TARGET_LINUX_KWIN, version, "skipping wl_output below version 4 (name event unavailable)");
                         return;
                     }
-                    let output: wl_output::WlOutput =
-                        registry.bind(name, version.min(MAX_SUPPORTED_VERSION), qh, RegistryName(name));
+                    let output: wl_output::WlOutput = registry.bind(
+                        name,
+                        version.min(MAX_SUPPORTED_VERSION),
+                        qh,
+                        RegistryName(name),
+                    );
                     state.outputs.push(OutputInfo {
                         registry_name: name,
                         wl_output: Some(output),

@@ -282,12 +282,23 @@ pub fn map_spa_video_format(
     }
 }
 
-#[allow(dead_code)] // fields exist for drop order: pipewire tears down before portal closes
-pub struct LinuxPortalFrameStream {
-    pipewire: connection::PipeWireConnection,
-    portal: super::portal::PortalSession,
-    queue: Arc<FrameQueue>,
+#[allow(dead_code)] // variants used in non-test connect() and for future KWin native path
+pub enum PipeWireRemote {
+    Default,
+    PortalFd(std::os::fd::OwnedFd),
 }
+
+/// Field order is load-bearing: Rust drops fields in declaration order, so
+/// `pipewire` must be declared before `_source_session` to stop the PipeWire
+/// consumer before releasing the KWin (or portal) source session.
+#[allow(dead_code)] // fields exist for drop order and future KWin native path
+pub struct LinuxPipeWireFrameStream<R> {
+    pub(crate) pipewire: connection::PipeWireConnection,
+    pub(crate) _source_session: R,
+    pub(crate) queue: Arc<FrameQueue>,
+}
+
+pub type LinuxPortalFrameStream = LinuxPipeWireFrameStream<super::portal::PortalSession>;
 
 #[cfg(not(test))]
 mod connection {
@@ -320,6 +331,7 @@ mod connection {
         pub crop: Option<VideoCrop>,
         pub transform: LinuxVideoTransform,
         pub options: crate::types::CaptureOptions,
+        pub backend_name: &'static str,
     }
 
     fn build_meta_param_bytes(meta_type: u32, size: i32) -> Vec<u8> {
@@ -568,7 +580,7 @@ mod connection {
                                         LinuxPixelFormat::Rgb => crate::types::PixelFormat::Rgb,
                                     }),
                                     stride: Some(meta.stride),
-                                    backend: "linux-portal",
+                                    backend: user_data.backend_name,
                                 },
                             }));
                             tracing::trace!(
@@ -606,9 +618,10 @@ mod connection {
 
     impl PipeWireConnection {
         #[allow(unsafe_code)] // ThreadLoop::new is documented as safe but marked unsafe in the crate
-        pub fn connect_fd(
-            portal_fd: std::os::fd::OwnedFd,
+        pub fn connect(
+            remote: PipeWireRemote,
             node_id: u32,
+            backend_name: &'static str,
             options: crate::types::CaptureOptions,
             queue: Arc<FrameQueue>,
         ) -> Result<Self, CaptureError> {
@@ -625,11 +638,14 @@ mod connection {
             let context = pipewire::context::ContextRc::new(&thread_loop, None)
                 .map_err(|e| CaptureError::Backend(anyhow::anyhow!("context: {e}")))?;
 
-            let dup_fd = dup_pipewire_fd(portal_fd.as_fd())?;
-
-            let core = context
-                .connect_fd_rc(dup_fd, None)
-                .map_err(|e| CaptureError::Backend(anyhow::anyhow!("connect_fd: {e}")))?;
+            let core = match remote {
+                PipeWireRemote::Default => context
+                    .connect_rc(None)
+                    .map_err(|e| CaptureError::Backend(anyhow::anyhow!("connect: {e}")))?,
+                PipeWireRemote::PortalFd(fd) => context
+                    .connect_fd_rc(dup_pipewire_fd(fd.as_fd())?, None)
+                    .map_err(|e| CaptureError::Backend(anyhow::anyhow!("connect_fd: {e}")))?,
+            };
 
             let mut props = pipewire::properties::PropertiesBox::new();
             props.insert("media.type", "Video");
@@ -659,6 +675,7 @@ mod connection {
                 crop: initial_crop,
                 transform: LinuxVideoTransform::Normal,
                 options: options.clone(),
+                backend_name,
             };
 
             let formats = [
@@ -776,41 +793,80 @@ pub(crate) mod connection {
         CAPTURED_OPTIONS.lock().ok().and_then(|mut o| o.take())
     }
 
-    pub struct PipeWireConnection;
+    pub enum PipeWireConnection {
+        Connect,
+        Recording(Arc<Mutex<Vec<&'static str>>>),
+    }
 
     impl PipeWireConnection {
-        pub fn connect_fd(
-            _portal_fd: std::os::fd::OwnedFd,
+        pub fn connect(
+            _remote: PipeWireRemote,
             _node_id: u32,
+            _backend_name: &'static str,
             options: crate::types::CaptureOptions,
             _queue: Arc<FrameQueue>,
         ) -> Result<Self, CaptureError> {
             if let Ok(mut captured) = CAPTURED_OPTIONS.lock() {
                 *captured = Some(options);
             }
-            Ok(PipeWireConnection)
+            Ok(PipeWireConnection::Connect)
+        }
+
+        pub fn recording(log: Arc<Mutex<Vec<&'static str>>>) -> Self {
+            PipeWireConnection::Recording(log)
+        }
+    }
+
+    impl Drop for PipeWireConnection {
+        fn drop(&mut self) {
+            if let PipeWireConnection::Recording(log) = self {
+                log.lock().unwrap().push("pipewire");
+            }
         }
     }
 }
 
-impl LinuxPortalFrameStream {
+impl<R> LinuxPipeWireFrameStream<R> {
     pub fn connect(
-        mut portal: super::portal::PortalSession,
+        remote: PipeWireRemote,
+        node_id: u32,
+        backend_name: &'static str,
+        source_session: R,
         options: crate::types::CaptureOptions,
     ) -> Result<Self, CaptureError> {
         let queue = Arc::new(FrameQueue::new());
-        let (fd, node_id) = portal.take_resources();
-        let pipewire =
-            connection::PipeWireConnection::connect_fd(fd, node_id, options, Arc::clone(&queue))?;
+        let pipewire = connection::PipeWireConnection::connect(
+            remote,
+            node_id,
+            backend_name,
+            options,
+            Arc::clone(&queue),
+        )?;
         Ok(Self {
             pipewire,
-            portal,
+            _source_session: source_session,
             queue,
         })
     }
 }
 
-impl FrameStream for LinuxPortalFrameStream {
+impl LinuxPortalFrameStream {
+    pub fn connect_portal(
+        mut portal: super::portal::PortalSession,
+        options: crate::types::CaptureOptions,
+    ) -> Result<Self, CaptureError> {
+        let (fd, node_id) = portal.take_resources();
+        Self::connect(
+            PipeWireRemote::PortalFd(fd),
+            node_id,
+            "linux-portal",
+            portal,
+            options,
+        )
+    }
+}
+
+impl<R> FrameStream for LinuxPipeWireFrameStream<R> {
     fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
         self.queue.next_frame_with_timeout(NEXT_FRAME_TIMEOUT)
     }
@@ -819,7 +875,7 @@ impl FrameStream for LinuxPortalFrameStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CapturedFrame, FrameMetadata};
+    use crate::types::{CaptureOptions, CapturedFrame, FrameMetadata};
     use image::RgbaImage;
     use std::io::{Read, Write};
     use std::os::fd::AsFd;
@@ -1287,5 +1343,100 @@ mod tests {
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    fn frame_metadata_for_backend(
+        backend: &'static str,
+        _options: &crate::types::CaptureOptions,
+        meta: LinuxFrameMetadata,
+    ) -> FrameMetadata {
+        FrameMetadata {
+            source_size: Some(crate::types::Size {
+                width: meta.width,
+                height: meta.height,
+            }),
+            effective_region: None,
+            pixel_format: Some(crate::types::PixelFormat::Bgra),
+            stride: Some(meta.stride),
+            backend,
+        }
+    }
+
+    fn fake_portal_remote() -> PipeWireRemote {
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null")
+            .expect("open /dev/null")
+            .into();
+        PipeWireRemote::PortalFd(fd)
+    }
+
+    #[derive(Default)]
+    struct DropOrder {
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl DropOrder {
+        fn tracked_pipewire(&self) -> connection::PipeWireConnection {
+            connection::PipeWireConnection::recording(Arc::clone(&self.log))
+        }
+
+        fn tracked_session(&self) -> DropRecordingSession {
+            DropRecordingSession {
+                log: Arc::clone(&self.log),
+            }
+        }
+
+        fn order(&self) -> Vec<&'static str> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    struct DropRecordingSession {
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for DropRecordingSession {
+        fn drop(&mut self) {
+            self.log.lock().unwrap().push("session");
+        }
+    }
+
+    fn fake_stream_with(
+        pw: connection::PipeWireConnection,
+        session: DropRecordingSession,
+    ) -> LinuxPipeWireFrameStream<DropRecordingSession> {
+        LinuxPipeWireFrameStream {
+            pipewire: pw,
+            _source_session: session,
+            queue: Arc::new(FrameQueue::new()),
+        }
+    }
+
+    #[test]
+    fn native_stream_records_linux_kwin_backend_name() {
+        let options = CaptureOptions::default();
+        let metadata = frame_metadata_for_backend("linux-kwin", &options, make_meta(10, 20));
+        assert_eq!(metadata.backend, "linux-kwin");
+    }
+
+    #[test]
+    fn portal_stream_records_linux_portal_backend_name() {
+        let options = CaptureOptions::default();
+        let metadata = frame_metadata_for_backend("linux-portal", &options, make_meta(10, 20));
+        assert_eq!(metadata.backend, "linux-portal");
+    }
+
+    #[test]
+    fn connection_mode_distinguishes_default_and_portal_remote() {
+        assert!(matches!(PipeWireRemote::Default, PipeWireRemote::Default));
+        assert!(matches!(fake_portal_remote(), PipeWireRemote::PortalFd(_)));
+    }
+
+    #[test]
+    fn source_session_outlives_pipewire_consumer() {
+        let drops = DropOrder::default();
+        {
+            let _stream = fake_stream_with(drops.tracked_pipewire(), drops.tracked_session());
+        }
+        assert_eq!(drops.order(), vec!["pipewire", "session"]);
     }
 }
