@@ -51,10 +51,10 @@ whether a second output destination is added. These controls remain independent:
 rollshot-app
 
 # Debug diagnostics on the console.
-RUST_LOG=rollshot=debug rollshot-app
+RUST_LOG=warn,rollshot=debug rollshot-app
 
 # Debug diagnostics on the console and in one explicit file.
-RUST_LOG=rollshot=debug rollshot-app --log-file ./rollshot-debug.log
+RUST_LOG=warn,rollshot=debug rollshot-app --log-file ./rollshot-debug.log
 ```
 
 The file is created or truncated at startup. Each invocation therefore produces
@@ -135,6 +135,52 @@ Every diagnostic session starts with one event containing safe execution
 context: Rollshot version, operating system, architecture, selected backend,
 requested FPS, cursor setting, and whether file logging is enabled. It must not
 include environment dumps or arbitrary command-line arguments.
+
+## Stable Diagnostic Targets
+
+Rollshot defines explicit `tracing` targets instead of exposing Rust crate and
+module paths as its diagnostic interface. These target names are stable support
+controls: internal modules may move without changing the documented
+`RUST_LOG` directives used to investigate a subsystem.
+
+The first-phase target taxonomy is:
+
+| Target | Scope |
+| --- | --- |
+| `rollshot::app` | Product launch, completion, and top-level failures |
+| `rollshot::overlay` | Shared iced overlay lifecycle and interaction state |
+| `rollshot::capture` | Backend-independent capture decisions and outcomes |
+| `rollshot::capture::linux::portal` | Linux portal lifecycle and negotiation |
+| `rollshot::capture::linux::pipewire` | Linux PipeWire stream and frame handling |
+| `rollshot::capture::macos::sck` | macOS ScreenCaptureKit capture behavior |
+| `rollshot::stitch` | Stitch session lifecycle and outcomes |
+| `rollshot::stitch::matcher` | Candidate search and match selection |
+| `rollshot::stitch::verifier` | Match verification decisions |
+| `rollshot::stitch::canvas` | Canvas growth, append, and memory behavior |
+| `rollshot::save` | Auto-save, explicit save, and result handoff |
+
+Examples:
+
+```bash
+# Diagnose capture without enabling stitching details.
+RUST_LOG=warn,rollshot::capture=debug rollshot-app
+
+# Diagnose stitch decisions and inspect matcher frame-level details.
+RUST_LOG=warn,rollshot::stitch=debug,rollshot::stitch::matcher=trace rollshot-app
+
+# Enable debug events across all Rollshot targets.
+RUST_LOG=warn,rollshot=debug rollshot-app
+```
+
+Every first-phase diagnostic event must use the narrowest applicable explicit
+target. When no child target applies, the event uses its nearest parent target,
+such as `rollshot::capture` or `rollshot::stitch`. New targets should only be
+added for a distinct support-facing diagnostic domain, not merely because a new
+Rust module exists.
+
+Renaming or removing a documented target is a compatibility change for support
+instructions and must be intentional. Adding a child target is compatible
+because parent directives continue to enable its events.
 
 ## Critical Path Instrumentation
 
@@ -222,7 +268,7 @@ Diagnostic events must not contain:
 - Full user file paths by default.
 
 Safe fields include dimensions, coordinates, backend names, enum variants,
-counts, durations, scores, error categories, and source-code module targets.
+counts, durations, scores, error categories, and stable diagnostic targets.
 When an underlying error may contain sensitive payloads, log a classified error
 and expose the original message only after reviewing that error type.
 
@@ -246,6 +292,8 @@ Automated tests should cover:
 
 - Default filter selection when `RUST_LOG` is absent.
 - Valid and invalid `RUST_LOG` parsing.
+- Representative events use their documented explicit diagnostic targets.
+- Parent target directives enable events from child targets.
 - `--log-file <PATH>` argument parsing.
 - File creation/truncation and startup failure for invalid paths.
 - Console output remains configured when file output is enabled.
@@ -254,7 +302,9 @@ Automated tests should cover:
 Integration verification should run a release build and confirm:
 
 - Debug events are absent under the default filter.
-- `RUST_LOG=rollshot=debug` enables debug events.
+- `RUST_LOG=warn,rollshot=debug` enables debug events across Rollshot.
+- Fine-grained capture and stitching directives enable only their target
+  subtrees.
 - `--log-file <PATH>` writes a complete session while console logging remains
   active.
 - Debug events are present in the release binary and visible when enabled.
