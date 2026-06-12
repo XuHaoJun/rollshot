@@ -10,7 +10,8 @@
 use iced::widget::text_editor;
 use iced::Point;
 use rollshot_image_document::{
-    Annotation, AnnotationId, HitPart, ImagePoint, ImageRect, ResizeHandle,
+    Annotation, AnnotationId, HitPart, ImagePoint, ImageRect,
+    ResizeHandle::{self, *},
 };
 use std::time::Instant;
 
@@ -439,7 +440,12 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             tolerance,
         ) {
             Some(hit) => match hit.part {
-                rollshot_image_document::HitPart::Resize(_) => mouse::Interaction::Crosshair,
+                HitPart::Resize(TopLeft | BottomRight) => {
+                    mouse::Interaction::ResizingDiagonallyDown
+                }
+                HitPart::Resize(TopRight | BottomLeft) => mouse::Interaction::ResizingDiagonallyUp,
+                HitPart::Resize(Top | Bottom) => mouse::Interaction::ResizingVertically,
+                HitPart::Resize(Left | Right) => mouse::Interaction::ResizingHorizontally,
                 _ => mouse::Interaction::Grab,
             },
             None if self.editor.tool == Tool::Select => mouse::Interaction::default(),
