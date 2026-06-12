@@ -156,19 +156,31 @@ behavior against code before relying on them.
   canvas, verifier, or stitcher paths usually need core tests and the benchmark
   checks listed above.
 - `crates/rollshot-capture`: capture traits, frame metadata, fixture capture,
-  Linux portal/PipeWire capture, and feature-gated macOS ScreenCaptureKit via
-  `scap`.
+  Linux portal/PipeWire capture, and the macOS ScreenCaptureKit backend
+  (`macos-sck`) — `scap` for streaming, `rollshot-macos-oneshot` for one-shot
+  screenshots.
+- `crates/rollshot-macos-oneshot`: unsafe-isolation crate for macOS
+  ScreenCaptureKit one-shot capture (Objective-C FFI via `objc2`). Public API
+  is safe; the rest of the workspace keeps `unsafe_code = "forbid"`. Used by
+  `rollshot-capture`.
 - `crates/rollshot-cli`: command-line entry points. `src/args.rs` is the source
   of truth for subcommands and flags; `cmd_*` modules hold behavior.
-- `crates/rollshot-app`: new Rust-only iced product app shell. It owns launch
-  parsing, overlay selection, and iced capture delegation during the migration.
+- `crates/rollshot-app`: Rust-only iced product app. It owns launch parsing,
+  overlay selection, iced capture delegation, the macOS product flow, and the
+  post-capture result workspace (annotation editing, storage, save handoff).
+- `crates/rollshot-image-document`: headless, framework-neutral,
+  non-destructive image document and editing engine — annotation graph,
+  history, geometry, hit-testing, and flattened rendering. No UI, windowing,
+  clipboard, or capture code. Used by `rollshot-app` for annotations,
+  redactions, and callouts.
 - `crates/rollshot-tauri-app`: retained Tauri v2/React interactive capture app.
   It remains the macOS webview overlay reference/fallback during iced validation.
   Frontend code lives under `crates/rollshot-tauri-app/src`; Rust/Tauri commands
   live under `crates/rollshot-tauri-app/src-tauri/src`.
-- `crates/rollshot-iced-overlay`: iced overlay renderer. Linux uses its
-  layer-shell runner today; the macOS runner is scaffolded but not wired to
-  capture yet.
+- `crates/rollshot-iced-overlay`: iced overlay renderer. Both platform runners
+  are active product paths: Linux uses the layer-shell runner
+  (`linux_runner.rs`), macOS uses the capture-wired runner
+  (`macos_capture.rs`).
 - `crates/rollshot-overlay-core`: framework-neutral overlay logic shared by the
   Tauri/webview and iced overlay paths, including preview viewport logic,
   capture-miss state, and crop visual tokens.
@@ -188,10 +200,14 @@ learn-projects results when needed.
 
 | Project | Remote | Relationship to rollshot |
 |---------|--------|--------------------------|
+| `exwlshelleventloop` | waycrate/exwlshelleventloop | Upstream repo of the `iced_layershell` crate, a direct dependency of `rollshot-iced-overlay`'s Linux layer-shell runner. |
+| `flameshot` | flameshot-org/flameshot | Same category: screenshot tool with in-place annotation editor (C++/Qt). Reference for annotation/editing UX relevant to `rollshot-image-document` and `rollshot-app`. |
+| `mark-shot` | jswysnemc/mark-shot | Same category: screenshot annotation/markup tool (Qt), by the wayscrollshot author. Reference for annotation workflows. |
 | `obs-studio` | obsproject/obs-studio | Reference for streaming and capture layer (OBS capture architecture, PipeWire, ScreenCaptureKit patterns). Directly relevant to `rollshot-capture`. |
 | `rust-cv` | rust-cv/cv | Computer Vision library in Rust. Reference for image stitching, feature detection, and geometric transforms used in `rollshot-core`. |
 | `scap` | zed-industries/scap | Screen capture library by Zed Industries. `rollshot-capture` is built as a scap-compatible crate; the macOS backend uses scap. Directly relevant to `rollshot-capture`. |
 | `snow-shot` | mg-chao/snow-shot | Same category: screenshot/long-screenshot software. Reference for screenshot workflows, UI patterns. |
+| `spectacle` | KDE/spectacle | KDE screenshot utility. Reference for capture workflows and Linux/Wayland portal integration. |
 | `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-tauri-app`. |
 | `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
