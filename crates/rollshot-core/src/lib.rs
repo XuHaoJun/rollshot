@@ -1,5 +1,6 @@
 mod axis;
 mod canvas;
+mod diagnostics;
 mod duplicate;
 mod feature_matcher;
 mod matcher;

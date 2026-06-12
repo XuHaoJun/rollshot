@@ -256,6 +256,14 @@ pub(crate) fn estimate_motion(
         let _t = ScopedTimer::new(&mut metrics.verifier_us);
         rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
     } {
+        tracing::trace!(
+            target: crate::diagnostics::TARGET_MATCHER,
+            dx = candidate.dx,
+            dy = candidate.dy,
+            score = candidate.score,
+            method = ?candidate.method,
+            "selected candidate"
+        );
         return MotionSearchOutcome::Candidate(candidate);
     }
 
@@ -268,6 +276,14 @@ pub(crate) fn estimate_motion(
     if let Some(candidate) =
         relaxed_coarse_candidate(prev, curr, locked_axis, last_motion, config, metrics)
     {
+        tracing::trace!(
+            target: crate::diagnostics::TARGET_MATCHER,
+            dx = candidate.dx,
+            dy = candidate.dy,
+            score = candidate.score,
+            method = ?candidate.method,
+            "selected candidate"
+        );
         return MotionSearchOutcome::Candidate(candidate);
     }
 
@@ -276,18 +292,36 @@ pub(crate) fn estimate_motion(
         feature_fallback_candidates(prev.rgba(), curr.rgba(), locked_axis, config)
     };
     match fallback_outcome {
-        FeatureFallbackOutcome::Disabled => MotionSearchOutcome::NoMatch {
-            reason: NoMatchReason::FeatureFallbackDisabled,
-            best_candidate: None,
-        },
+        FeatureFallbackOutcome::Disabled => {
+            tracing::trace!(
+                target: crate::diagnostics::TARGET_MATCHER,
+                reason = ?NoMatchReason::FeatureFallbackDisabled,
+                "no match"
+            );
+            MotionSearchOutcome::NoMatch {
+                reason: NoMatchReason::FeatureFallbackDisabled,
+                best_candidate: None,
+            }
+        }
         FeatureFallbackOutcome::NotEnoughFeatures { prev, curr } => {
             metrics.fallback_features_extracted = prev.max(curr);
+            tracing::trace!(
+                target: crate::diagnostics::TARGET_MATCHER,
+                reason = ?NoMatchReason::NotEnoughFeatures,
+                features = prev.max(curr),
+                "no match"
+            );
             MotionSearchOutcome::NoMatch {
                 reason: NoMatchReason::NotEnoughFeatures,
                 best_candidate: None,
             }
         }
         FeatureFallbackOutcome::NotEnoughMatches { raw_matches: _ } => {
+            tracing::trace!(
+                target: crate::diagnostics::TARGET_MATCHER,
+                reason = ?NoMatchReason::FeatureLowInliers,
+                "no match"
+            );
             MotionSearchOutcome::NoMatch {
                 reason: NoMatchReason::FeatureLowInliers,
                 best_candidate: None,
@@ -302,11 +336,28 @@ pub(crate) fn estimate_motion(
                 rank_verified_candidates(prev.rgba(), curr.rgba(), locked_axis, candidates, config)
             };
             match result {
-                Some(candidate) => MotionSearchOutcome::Candidate(candidate),
-                None => MotionSearchOutcome::NoMatch {
-                    reason: NoMatchReason::FeatureLowInliers,
-                    best_candidate: best,
-                },
+                Some(candidate) => {
+                    tracing::trace!(
+                        target: crate::diagnostics::TARGET_MATCHER,
+                        dx = candidate.dx,
+                        dy = candidate.dy,
+                        score = candidate.score,
+                        method = ?candidate.method,
+                        "selected candidate"
+                    );
+                    MotionSearchOutcome::Candidate(candidate)
+                }
+                None => {
+                    tracing::trace!(
+                        target: crate::diagnostics::TARGET_MATCHER,
+                        reason = ?NoMatchReason::FeatureLowInliers,
+                        "no match"
+                    );
+                    MotionSearchOutcome::NoMatch {
+                        reason: NoMatchReason::FeatureLowInliers,
+                        best_candidate: best,
+                    }
+                }
             }
         }
     }

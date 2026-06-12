@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use crate::app::{self, OverlayState as Overlay};
 use crate::coords::LogicalRect;
+use crate::diagnostics::TARGET_OVERLAY;
 use crate::driver::Driver;
 use crate::CaptureResult;
 use crate::OverlayConfig;
@@ -58,6 +59,7 @@ pub(crate) fn acquire_resource(
 ) -> Result<Option<CaptureResource>, OverlayError> {
     match mode {
         CaptureMode::Scrolling => {
+            tracing::debug!(target: TARGET_OVERLAY, "acquiring streaming capture resource");
             let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
             *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
             let driver =
@@ -65,6 +67,7 @@ pub(crate) fn acquire_resource(
             Ok(Some(CaptureResource::Streaming(driver)))
         }
         CaptureMode::Screenshot => {
+            tracing::debug!(target: TARGET_OVERLAY, "acquiring one-shot capture resource");
             let capture = match (factories.one_shot)(config.show_cursor) {
                 Ok(c) => c,
                 Err(rollshot_capture::CaptureError::UserCancelled) => return Ok(None),
@@ -185,6 +188,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             let task = match effect {
                 app::OverlayEffect::None => Task::none(),
                 app::OverlayEffect::BeginStitch => {
+                    tracing::info!(target: TARGET_OVERLAY, "begin stitch requested");
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
@@ -211,6 +215,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     Task::none()
                 }
                 app::OverlayEffect::FinishScreenshot => {
+                    tracing::info!(target: TARGET_OVERLAY, "finishing screenshot capture");
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
@@ -245,12 +250,14 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             iced::exit()
                         }
                         Err(e) => {
+                            tracing::error!(target: TARGET_OVERLAY, %e, "screenshot finish failed");
                             state.transient_error = Some(e);
                             Task::none()
                         }
                     }
                 }
                 app::OverlayEffect::FinishScrolling => {
+                    tracing::info!(target: TARGET_OVERLAY, "finishing scrolling capture");
                     let outcome = match DRIVER_SLOT.lock().unwrap().take() {
                         Some(driver) => driver.finalize().map(Some),
                         None => Err("No driver available".to_string()),
@@ -261,12 +268,14 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             iced::exit()
                         }
                         Err(e) => {
+                            tracing::error!(target: TARGET_OVERLAY, %e, "scrolling finish failed");
                             state.transient_error = Some(e);
                             Task::none()
                         }
                     }
                 }
                 app::OverlayEffect::Cancel => {
+                    tracing::info!(target: TARGET_OVERLAY, "overlay cancel");
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
                         driver.cancel();
                     }
@@ -278,6 +287,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     Task::none()
                 }
                 app::OverlayEffect::ActivateMode(new_mode) => {
+                    tracing::info!(target: TARGET_OVERLAY, ?new_mode, "activating capture mode");
                     // Stop/discard current workflow.
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
                         driver.cancel();
@@ -434,6 +444,7 @@ fn real_factories() -> ResourceFactories {
 }
 
 pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    tracing::info!(target: TARGET_OVERLAY, mode = ?config.initial_mode, "blocking overlay starting");
     *PREVIEW_RX.lock().unwrap() = None;
     *DRIVER_SLOT.lock().unwrap() = None;
     *ONE_SHOT_SLOT.lock().unwrap() = None;
@@ -540,16 +551,30 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
     // Safety net: if the loop exited without finalize/cancel taking the driver,
     // tear capture down so the PipeWire stream + reader thread don't leak.
     if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
+        tracing::warn!(target: TARGET_OVERLAY, "safety-net teardown of leaked driver");
         driver.cancel();
     }
     ONE_SHOT_SLOT.lock().unwrap().take();
 
-    run_result.map_err(|e| OverlayError::Overlay(e.to_string()))?;
+    run_result.map_err(|e| {
+        tracing::error!(target: TARGET_OVERLAY, %e, "overlay loop error");
+        OverlayError::Overlay(e.to_string())
+    })?;
 
     // After the iced app exits cleanly, read the result slot.
     match RESULT_SLOT.lock().unwrap().take().unwrap_or(Ok(None)) {
-        Ok(opt) => Ok(opt),
-        Err(e) => Err(OverlayError::Capture(e)),
+        Ok(opt) => {
+            if opt.is_some() {
+                tracing::info!(target: TARGET_OVERLAY, "overlay completed with result");
+            } else {
+                tracing::info!(target: TARGET_OVERLAY, "overlay cancelled (no result)");
+            }
+            Ok(opt)
+        }
+        Err(e) => {
+            tracing::error!(target: TARGET_OVERLAY, %e, "overlay result error");
+            Err(OverlayError::Capture(e))
+        }
     }
 }
 

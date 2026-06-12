@@ -1,8 +1,47 @@
 use rollshot_capture::InteractiveLaunchOptions;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggingArgs {
+    pub log_file: Option<PathBuf>,
+    pub remaining: Vec<String>,
+}
+
+#[allow(dead_code)]
+pub fn extract_logging_args<I, S>(args: I) -> Result<LoggingArgs, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut input = args.into_iter().map(Into::into);
+    let program = input.next().unwrap_or_else(|| "rollshot-app".to_string());
+    let mut remaining = vec![program];
+    let mut log_file = None;
+
+    while let Some(arg) = input.next() {
+        if arg == "--log-file" {
+            if log_file.is_some() {
+                return Err("--log-file may only be specified once".to_string());
+            }
+            let path = input
+                .next()
+                .ok_or_else(|| "--log-file requires a path".to_string())?;
+            log_file = Some(PathBuf::from(path));
+        } else {
+            remaining.push(arg);
+        }
+    }
+
+    Ok(LoggingArgs {
+        log_file,
+        remaining,
+    })
 }
 
 pub fn parse_launch_args<I, S>(args: I) -> Result<LaunchMode, String>
@@ -40,8 +79,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_launch_args, LaunchMode};
+    use super::{extract_logging_args, parse_launch_args, LaunchMode};
     use rollshot_capture::{CaptureMode, OverlayMode};
+    use std::path::PathBuf;
 
     #[test]
     fn no_args_uses_defaults() {
@@ -103,5 +143,44 @@ mod tests {
             err.contains("invalid --capture JSON payload"),
             "err = {err}"
         );
+    }
+
+    #[test]
+    fn extracts_log_file_before_capture_args() {
+        let extracted = extract_logging_args([
+            "rollshot-app",
+            "--log-file",
+            "/tmp/rollshot.jsonl",
+            "--capture",
+            r#"{"backend":"auto","fps":5,"show_cursor":false}"#,
+        ])
+        .expect("extract logging args");
+
+        assert_eq!(
+            extracted.log_file,
+            Some(PathBuf::from("/tmp/rollshot.jsonl"))
+        );
+        assert_eq!(extracted.remaining[0], "rollshot-app");
+        assert_eq!(extracted.remaining[1], "--capture");
+    }
+
+    #[test]
+    fn rejects_missing_log_file_path() {
+        let err = extract_logging_args(["rollshot-app", "--log-file"])
+            .expect_err("missing path must fail");
+        assert_eq!(err, "--log-file requires a path");
+    }
+
+    #[test]
+    fn rejects_duplicate_log_file() {
+        let err = extract_logging_args([
+            "rollshot-app",
+            "--log-file",
+            "a.jsonl",
+            "--log-file",
+            "b.jsonl",
+        ])
+        .expect_err("duplicate option must fail");
+        assert_eq!(err, "--log-file may only be specified once");
     }
 }

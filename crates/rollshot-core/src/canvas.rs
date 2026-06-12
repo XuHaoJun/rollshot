@@ -222,6 +222,18 @@ impl StripCanvas {
         self.axis = Some(target_axis);
         self.composed_cache = None;
         self.compact_if_needed();
+
+        tracing::trace!(
+            target: crate::diagnostics::TARGET_CANVAS,
+            direction = ?direction,
+            added_px = added,
+            width = self.logical_width,
+            height = self.logical_height,
+            allocated_bytes = self.allocated_bytes(),
+            copied_bytes = self.last_append_copied_bytes,
+            "appended slice"
+        );
+
         Ok(added)
     }
 

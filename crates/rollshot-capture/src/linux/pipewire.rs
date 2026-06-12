@@ -3,6 +3,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::backend::FrameStream;
+use crate::diagnostics::TARGET_LINUX_PIPEWIRE;
 use crate::error::CaptureError;
 use crate::types::CapturedFrame;
 
@@ -89,7 +90,7 @@ impl FrameQueue {
         let deque = match self.inner.lock() {
             Ok(guard) => guard,
             Err(_poisoned) => {
-                eprintln!("frame queue mutex poisoned — producer thread panicked");
+                tracing::warn!(target: TARGET_LINUX_PIPEWIRE, "frame queue mutex poisoned — producer thread panicked");
                 return Err(CaptureError::EndOfStream);
             }
         };
@@ -101,7 +102,7 @@ impl FrameQueue {
         let (mut deque, wait_result) = match result {
             Ok(pair) => pair,
             Err(_poisoned) => {
-                eprintln!("frame queue mutex poisoned during wait — producer thread panicked");
+                tracing::warn!(target: TARGET_LINUX_PIPEWIRE, "frame queue mutex poisoned during wait — producer thread panicked");
                 return Err(CaptureError::EndOfStream);
             }
         };
@@ -569,6 +570,14 @@ mod connection {
                                     backend: "linux-portal",
                                 },
                             }));
+                            tracing::trace!(
+                                target: TARGET_LINUX_PIPEWIRE,
+                                width = meta.width,
+                                height = meta.height,
+                                pixel_format = ?pixel_format,
+                                has_source_size = true,
+                                "frame captured"
+                            );
                         }
                         Err(e) => user_data.queue.push(FrameEvent::Error(e.to_string())),
                     }
@@ -749,7 +758,7 @@ mod connection {
         fn drop(&mut self) {
             self.thread_loop.stop();
             if let Err(e) = self.stream.disconnect() {
-                eprintln!("PipeWire stream disconnect error: {e}");
+                tracing::warn!(target: TARGET_LINUX_PIPEWIRE, error = %e, "PipeWire stream disconnect error");
             }
         }
     }

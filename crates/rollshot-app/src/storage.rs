@@ -8,6 +8,8 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::diagnostics::TARGET_SAVE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Linux,
@@ -136,21 +138,53 @@ pub fn write_png(image: &RgbaImage, path: &Path) -> Result<(), String> {
 /// Stops after 10_000 suffix attempts and returns an error.
 pub fn auto_save_to(image: &RgbaImage, dir: &Path, timestamp: &str) -> Result<PathBuf, String> {
     if !dir.exists() {
+        tracing::error!(
+            target: TARGET_SAVE,
+            category = "path_missing",
+            destination = destination_category(dir),
+            "save failure"
+        );
         return Err(format!(
             "output directory does not exist: {}",
             dir.display()
         ));
     }
 
+    let width = image.width();
+    let height = image.height();
+    tracing::info!(target: TARGET_SAVE, width, height, "save start");
+
     const MAX_ATTEMPTS: u32 = 10_000;
     for _ in 0..MAX_ATTEMPTS {
         let path = unique_capture_path(dir, timestamp, |p| p.exists());
         match try_write_png_exclusive(image, &path) {
-            Ok(true) => return Ok(path),
+            Ok(true) => {
+                let encoded_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let category = destination_category(dir);
+                tracing::info!(
+                    target: TARGET_SAVE,
+                    width,
+                    height,
+                    encoded_bytes,
+                    platform = %platform_label(),
+                    category,
+                    "save success"
+                );
+                return Ok(path);
+            }
             Ok(false) => continue,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                let category = classify_save_error(&e.to_string());
+                tracing::error!(target: TARGET_SAVE, category, "save failure");
+                return Err(e.to_string());
+            }
         }
     }
+    tracing::error!(
+        target: TARGET_SAVE,
+        category = "filename_exhausted",
+        "save failure"
+    );
     Err(format!(
         "auto-save could not find a free filename after {MAX_ATTEMPTS} attempts"
     ))
@@ -163,6 +197,40 @@ pub fn auto_save(image: &RgbaImage, platform: Platform) -> Result<PathBuf, Strin
         .to_string();
     let dir = default_output_dir(platform)?;
     auto_save_to(image, &dir, &timestamp)
+}
+
+fn platform_label() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "unknown"
+    }
+}
+
+fn destination_category(dir: &Path) -> &'static str {
+    let dir_str = dir.to_string_lossy().to_lowercase();
+    if dir_str.contains("desktop") {
+        "desktop"
+    } else if dir_str.contains("pictures") {
+        "pictures"
+    } else {
+        "unknown"
+    }
+}
+
+pub(crate) fn classify_save_error(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    if lower.contains("permission") || lower.contains("access") {
+        "permission"
+    } else if lower.contains("space") || lower.contains("disk") || lower.contains("no space") {
+        "disk_space"
+    } else if lower.contains("not found") || lower.contains("missing") {
+        "path_missing"
+    } else {
+        "unknown"
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +355,26 @@ mod tests {
         .expect_err("missing directory must fail");
         assert!(err.contains("does not exist"));
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn missing_auto_save_directory_emits_private_failure_category() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("Secret");
+        let log = crate::diagnostics::capture_test_logs(|| {
+            let _ = auto_save_to(
+                &image::RgbaImage::new(2, 2),
+                &missing,
+                "2026-06-09 at 12.34.56",
+            );
+        });
+
+        assert!(log.contains("save failure"), "log = {log}");
+        assert!(log.contains("category=\"path_missing\""), "log = {log}");
+        assert!(
+            !log.contains(missing.to_string_lossy().as_ref()),
+            "log = {log}"
+        );
     }
 
     #[test]

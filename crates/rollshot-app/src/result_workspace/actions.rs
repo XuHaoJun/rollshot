@@ -2,6 +2,8 @@ use image::RgbaImage;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use crate::diagnostics::TARGET_SAVE;
+
 /// Copy the full-resolution image to the system clipboard.
 pub fn copy_image(image: &RgbaImage) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?;
@@ -33,10 +35,73 @@ pub async fn prompt_save_as(default_dir: PathBuf, default_name: String) -> Optio
 /// normal overwrite write is correct — unlike auto-save, no exclusive-create
 /// semantics are needed.
 pub fn write_save_as(image: &RgbaImage, path: &Path) -> Result<PathBuf, String> {
-    image
-        .save_with_format(path, image::ImageFormat::Png)
-        .map_err(|e| format!("failed to write PNG: {e}"))?;
+    let width = image.width();
+    let height = image.height();
+    tracing::info!(
+        target: TARGET_SAVE,
+        width,
+        height,
+        destination = "save_as",
+        "save start"
+    );
+    if let Err(error) = image.save_with_format(path, image::ImageFormat::Png) {
+        let category = crate::storage::classify_save_error(&error.to_string());
+        tracing::error!(
+            target: TARGET_SAVE,
+            category,
+            destination = "save_as",
+            "save failure"
+        );
+        return Err(format!("failed to write PNG: {error}"));
+    }
+    let encoded_bytes = std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    tracing::info!(
+        target: TARGET_SAVE,
+        width,
+        height,
+        encoded_bytes,
+        destination = "save_as",
+        "save success"
+    );
     Ok(path.to_path_buf())
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn save_as_emits_start_and_success_without_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private.png");
+        let log = crate::diagnostics::capture_test_logs(|| {
+            write_save_as(&RgbaImage::new(2, 3), &path).unwrap();
+        });
+
+        assert!(log.contains("save start"), "log = {log}");
+        assert!(log.contains("save success"), "log = {log}");
+        assert!(
+            !log.contains(path.to_string_lossy().as_ref()),
+            "log = {log}"
+        );
+    }
+
+    #[test]
+    fn save_as_emits_failure_without_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("private.png");
+        let log = crate::diagnostics::capture_test_logs(|| {
+            assert!(write_save_as(&RgbaImage::new(2, 3), &path).is_err());
+        });
+
+        assert!(log.contains("save failure"), "log = {log}");
+        assert!(
+            !log.contains(path.to_string_lossy().as_ref()),
+            "log = {log}"
+        );
+    }
 }
 
 /// Open the directory containing `path` in the platform file manager.

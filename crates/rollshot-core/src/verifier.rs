@@ -42,6 +42,14 @@ impl<'a> PixelOverlapVerifier<'a> {
         };
 
         if region.area() < self.min_overlap_area {
+            tracing::trace!(
+                target: crate::diagnostics::TARGET_VERIFIER,
+                dx = candidate.dx,
+                dy = candidate.dy,
+                overlap_area = region.area(),
+                outcome = "InsufficientOverlap",
+                "verify result"
+            );
             return VerifierOutcome::InsufficientOverlap;
         }
 
@@ -60,9 +68,20 @@ impl<'a> PixelOverlapVerifier<'a> {
         let legacy_pass =
             downsample_ok && full_mad.is_finite() && full_mad <= self.config.full_res_max_mad;
         if legacy_pass {
+            let score = full_mad.clamp(0.0, 1.0);
+            tracing::trace!(
+                target: crate::diagnostics::TARGET_VERIFIER,
+                dx = candidate.dx,
+                dy = candidate.dy,
+                overlap_area = region.area(),
+                downsample_mad = downsample_mad,
+                full_mad = full_mad,
+                outcome = "Pass",
+                "verify result"
+            );
             return VerifierOutcome::Pass {
                 overlap: region,
-                score: full_mad.clamp(0.0, 1.0),
+                score,
             };
         }
 
@@ -89,12 +108,33 @@ impl<'a> PixelOverlapVerifier<'a> {
             } else {
                 1.0 - agree
             };
+            tracing::trace!(
+                target: crate::diagnostics::TARGET_VERIFIER,
+                dx = candidate.dx,
+                dy = candidate.dy,
+                overlap_area = region.area(),
+                tile_agreement = agree,
+                full_mad = full_mad,
+                outcome = "Pass",
+                "verify result"
+            );
             return VerifierOutcome::Pass {
                 overlap: region,
                 score,
             };
         }
 
+        tracing::trace!(
+            target: crate::diagnostics::TARGET_VERIFIER,
+            dx = candidate.dx,
+            dy = candidate.dy,
+            overlap_area = region.area(),
+            downsample_mad = downsample_mad,
+            full_mad = full_mad,
+            tile_agreement = agree,
+            outcome = "OverlapDisagreement",
+            "verify result"
+        );
         VerifierOutcome::OverlapDisagreement {
             downsample_mad,
             full_mad,

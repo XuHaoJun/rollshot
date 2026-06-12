@@ -1,3 +1,4 @@
+use crate::diagnostics::TARGET_CAPTURE;
 use crate::error::CaptureError;
 use crate::types::{CaptureOptions, CaptureProbe, CapturedFrame};
 
@@ -30,7 +31,7 @@ impl BackendKind {
     }
 
     pub fn from_cli_flag(flag: &str) -> Result<Self, CaptureError> {
-        match flag {
+        let result = match flag {
             "auto" => Ok(default_backend()),
             "fixture" => Ok(BackendKind::Fixture),
             "linux-portal" => Ok(BackendKind::LinuxPortalPipeWire),
@@ -40,45 +41,68 @@ impl BackendKind {
                     "unknown backend '{other}'; expected one of: auto, fixture, linux-portal, macos-sck"
                 ),
             }),
+        };
+        match &result {
+            Ok(kind) => {
+                tracing::debug!(target: TARGET_CAPTURE, flag, kind = kind.as_flag(), "backend flag resolved")
+            }
+            Err(e) => {
+                tracing::error!(target: TARGET_CAPTURE, flag, error = %e, "backend flag rejected")
+            }
         }
+        result
     }
 
     pub fn create(self) -> Result<Box<dyn CaptureBackend>, CaptureError> {
         match self {
-            BackendKind::Fixture => Err(CaptureError::InvalidConfig {
-                message: "fixture backend requires --fixture <DIR>".to_string(),
-            }),
+            BackendKind::Fixture => {
+                let err = CaptureError::InvalidConfig {
+                    message: "fixture backend requires --fixture <DIR>".to_string(),
+                };
+                tracing::error!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend creation failed");
+                Err(err)
+            }
             BackendKind::LinuxPortalPipeWire => {
                 #[cfg(target_os = "linux")]
                 {
+                    tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
                     Ok(Box::new(crate::linux::LinuxPortalBackend::new()))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    Err(CaptureError::Unsupported {
+                    let err = CaptureError::Unsupported {
                         message: "linux-portal backend requires a Linux host".to_string(),
-                    })
+                    };
+                    tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                    Err(err)
                 }
             }
             BackendKind::MacosScreenCaptureKit => {
                 #[cfg(target_os = "macos")]
                 {
+                    tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
                     Ok(Box::new(crate::macos::MacosScreenCaptureKitBackend::new()))
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    Err(CaptureError::Unsupported {
+                    let err = CaptureError::Unsupported {
                         message: "macos-sck backend requires a macOS host".to_string(),
-                    })
+                    };
+                    tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                    Err(err)
                 }
             }
-            BackendKind::Unsupported => Err(CaptureError::Unsupported {
-                message: format!(
-                    "no capture backend is available on os={} session={}",
-                    std::env::consts::OS,
-                    std::env::var("XDG_SESSION_TYPE").unwrap_or_default()
-                ),
-            }),
+            BackendKind::Unsupported => {
+                let err = CaptureError::Unsupported {
+                    message: format!(
+                        "no capture backend is available on os={} session={}",
+                        std::env::consts::OS,
+                        std::env::var("XDG_SESSION_TYPE").unwrap_or_default()
+                    ),
+                };
+                tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend unsupported");
+                Err(err)
+            }
         }
     }
 }
@@ -105,6 +129,46 @@ pub fn default_backend_for(os: &str, session_type: Option<&str>) -> BackendKind 
 mod tests {
     use super::{default_backend_for, BackendKind};
     use crate::error::CaptureError;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct LogGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogWriter {
+        type Writer = LogGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogGuard(Arc::clone(&self.0))
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let writer = LogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = writer.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
 
     #[test]
     fn from_cli_flag_accepts_known_backends() {
@@ -169,6 +233,20 @@ mod tests {
             default_backend_for("windows", None),
             BackendKind::Unsupported
         );
+    }
+
+    #[test]
+    fn unsupported_backend_event_omits_session_value() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap();
+        let session = "private-custom-session";
+        std::env::set_var("XDG_SESSION_TYPE", session);
+        let log = capture_logs(|| {
+            assert!(BackendKind::Unsupported.create().is_err());
+        });
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        assert!(log.contains("backend unsupported"), "log = {log}");
+        assert!(!log.contains(session), "log = {log}");
     }
 
     #[test]

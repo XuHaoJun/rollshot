@@ -1,3 +1,5 @@
+#[cfg(not(test))]
+use crate::diagnostics::TARGET_LINUX_PORTAL;
 use crate::error::CaptureError;
 use crate::types::{CaptureOptions, CaptureProbe, RegionMode};
 
@@ -179,7 +181,7 @@ impl PortalClient {
         let rt_handle = rt.handle().clone();
 
         let result: Result<PortalSession, CaptureError> = rt.block_on(async {
-            trace_capture_stage("creating screencast proxy");
+            tracing::debug!(target: TARGET_LINUX_PORTAL, "creating screencast proxy");
             let screencast = tokio::time::timeout(
                 CAPTURE_STAGE_TIMEOUT,
                 ashpd::desktop::screencast::Screencast::new(),
@@ -188,7 +190,7 @@ impl PortalClient {
             .map_err(|_| portal_timeout("screencast proxy"))?
             .map_err(|e| CaptureError::Backend(anyhow::anyhow!("screencast proxy: {e}")))?;
 
-            trace_capture_stage("probing capabilities");
+            tracing::debug!(target: TARGET_LINUX_PORTAL, "probing capabilities");
             let source_types_raw =
                 tokio::time::timeout(CAPTURE_STAGE_TIMEOUT, screencast.available_source_types())
                     .await
@@ -237,7 +239,7 @@ impl PortalClient {
                 quirks,
             };
 
-            trace_capture_stage("creating portal session");
+            tracing::debug!(target: TARGET_LINUX_PORTAL, "creating portal session");
             let session = tokio::time::timeout(CAPTURE_STAGE_TIMEOUT, screencast.create_session())
                 .await
                 .map_err(|_| portal_timeout("create session"))?
@@ -249,7 +251,7 @@ impl PortalClient {
                     PortalCursorMode::Embedded => ashpd::desktop::screencast::CursorMode::Embedded,
                 };
 
-            trace_capture_stage("selecting portal sources");
+            tracing::debug!(target: TARGET_LINUX_PORTAL, "selecting portal sources");
             tokio::time::timeout(
                 CAPTURE_STAGE_TIMEOUT,
                 screencast.select_sources(
@@ -265,7 +267,7 @@ impl PortalClient {
             .map_err(|_| portal_timeout("select sources"))?
             .map_err(map_ashpd_error)?;
 
-            trace_capture_stage("starting portal session");
+            tracing::debug!(target: TARGET_LINUX_PORTAL, "starting portal session");
             let streams = tokio::time::timeout(
                 CAPTURE_STAGE_TIMEOUT,
                 screencast.start(&session, &ashpd::WindowIdentifier::default()),
@@ -296,7 +298,7 @@ impl PortalClient {
             }
             let node_id = chosen.node_id;
 
-            trace_capture_stage("opening pipewire remote");
+            tracing::debug!(target: TARGET_LINUX_PORTAL, "opening pipewire remote");
             let fd = tokio::time::timeout(
                 CAPTURE_STAGE_TIMEOUT,
                 screencast.open_pipe_wire_remote(&session),
@@ -408,23 +410,12 @@ impl PortalClient {
 }
 
 #[cfg(not(test))]
-fn trace_capture_stage(stage: &str) {
-    if std::env::var("ROLLSHOT_CAPTURE_TRACE").ok().as_deref() == Some("1") {
-        eprintln!("rollshot linux-portal: {stage}");
-    }
-}
-
-#[cfg(not(test))]
 fn portal_timeout(stage: &str) -> CaptureError {
     CaptureError::Backend(anyhow::anyhow!(portal_timeout_message(
         stage,
         CAPTURE_STAGE_TIMEOUT
     )))
 }
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn trace_capture_stage(_stage: &str) {}
 
 fn portal_timeout_message(stage: &str, timeout: std::time::Duration) -> String {
     format!("portal {stage} timed out after {}ms", timeout.as_millis())

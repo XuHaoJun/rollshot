@@ -5,6 +5,8 @@
 //! named for the renderer framework so it can coexist with the retained Tauri
 //! overlay during validation.
 
+mod diagnostics;
+
 use image::RgbaImage;
 use rollshot_core::StitchStats;
 
@@ -78,11 +80,13 @@ pub mod screenshot;
 pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     #[cfg(target_os = "linux")]
     {
+        tracing::info!(target: diagnostics::TARGET_OVERLAY, "run_overlay called (linux)");
         linux_runner::run(config)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = config;
+        tracing::info!(target: diagnostics::TARGET_OVERLAY, "run_overlay called (unsupported platform)");
         Err(OverlayError::Unsupported)
     }
 }
