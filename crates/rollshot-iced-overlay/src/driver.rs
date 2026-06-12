@@ -124,6 +124,9 @@ pub struct Driver {
     /// Display the stream was pinned to (macOS display id), when the host
     /// resolved one. Lets the host place the overlay on the same display.
     target_display_id: Option<u32>,
+    /// Wayland output name the stream was pinned to (KWin scrolling), when
+    /// the host resolved one. Lets the overlay target the same output.
+    target_output_name: Option<String>,
     preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
@@ -140,9 +143,10 @@ impl Driver {
         fps: u32,
         show_cursor: bool,
         target_display_id: Option<u32>,
+        target_output_name: Option<String>,
         preview_tx: UnboundedSender<LiveOverlayEvent>,
     ) -> Result<Self, String> {
-        tracing::info!(target: TARGET_CAPTURE, backend, fps, show_cursor, ?target_display_id, "creating capture backend");
+        tracing::info!(target: TARGET_CAPTURE, backend, fps, show_cursor, ?target_display_id, ?target_output_name, "creating capture backend");
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
         let stream = backend_impl
@@ -152,7 +156,7 @@ impl Driver {
                 show_cursor,
                 prefer_portal_region: false,
                 target_display_id,
-                target_output_name: None,
+                target_output_name: target_output_name.clone(),
             })
             .map_err(|e| e.to_string())?;
         tracing::info!(target: TARGET_CAPTURE, "capture stream started");
@@ -212,6 +216,7 @@ impl Driver {
                 height: 0,
             },
             target_display_id,
+            target_output_name,
             preview_tx,
         })
     }
@@ -331,6 +336,10 @@ impl Driver {
 
     pub(crate) fn target_display_id(&self) -> Option<u32> {
         self.target_display_id
+    }
+
+    pub fn target_output_name(&self) -> Option<&str> {
+        self.target_output_name.as_deref()
     }
 
     pub(crate) fn overlay_size(&self) -> Size {

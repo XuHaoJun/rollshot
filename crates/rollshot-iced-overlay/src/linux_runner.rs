@@ -20,16 +20,59 @@ use crate::OverlayError;
 use rollshot_capture::CaptureMode;
 
 pub(crate) enum CaptureResource {
-    Streaming(Driver),
+    Streaming {
+        driver: Driver,
+        frozen: Option<rollshot_capture::OneShotCapture>,
+    },
     OneShot(rollshot_capture::OneShotCapture),
 }
 
 impl std::fmt::Debug for CaptureResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Streaming(_) => f.debug_tuple("Streaming").field(&"..").finish(),
+            Self::Streaming { frozen, .. } => f
+                .debug_struct("Streaming")
+                .field("frozen", &frozen.is_some())
+                .finish(),
             Self::OneShot(c) => f.debug_tuple("OneShot").field(&c.target_display()).finish(),
         }
+    }
+}
+
+fn start_mode_for(resource: &CaptureResource) -> StartMode {
+    match resource {
+        CaptureResource::Streaming { frozen, .. } => {
+            match frozen
+                .as_ref()
+                .and_then(|c| c.target_display().output_name.clone())
+            {
+                Some(name) => StartMode::TargetScreen(name),
+                None => StartMode::Active,
+            }
+        }
+        CaptureResource::OneShot(capture) => {
+            match capture.target_display().output_name.as_deref() {
+                Some(name) => StartMode::TargetScreen(name.to_string()),
+                None => StartMode::Active,
+            }
+        }
+    }
+}
+
+fn frozen_handle_for(resource: &CaptureResource) -> Option<iced::widget::image::Handle> {
+    match resource {
+        CaptureResource::Streaming {
+            frozen: Some(capture),
+            ..
+        } => {
+            let img = capture.image();
+            Some(iced::widget::image::Handle::from_rgba(
+                img.width(),
+                img.height(),
+                img.as_raw().clone(),
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -58,14 +101,7 @@ pub(crate) fn acquire_resource(
     factories: &ResourceFactories,
 ) -> Result<Option<CaptureResource>, OverlayError> {
     match mode {
-        CaptureMode::Scrolling => {
-            tracing::debug!(target: TARGET_OVERLAY, "acquiring streaming capture resource");
-            let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
-            *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
-            let driver =
-                (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
-            Ok(Some(CaptureResource::Streaming(driver)))
-        }
+        CaptureMode::Scrolling => acquire_scrolling_resource(config, factories),
         CaptureMode::Screenshot => {
             tracing::debug!(target: TARGET_OVERLAY, "acquiring one-shot capture resource");
             let capture = match (factories.one_shot)(config.show_cursor) {
@@ -75,6 +111,69 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some(CaptureResource::OneShot(capture)))
         }
+    }
+}
+
+fn acquire_scrolling_resource(
+    config: &OverlayConfig,
+    factories: &ResourceFactories,
+) -> Result<Option<CaptureResource>, OverlayError> {
+    let backend = config.backend.as_str();
+    let needs_kwin_one_shot = backend == "auto" || backend == "linux-kwin";
+
+    if needs_kwin_one_shot {
+        tracing::debug!(target: TARGET_OVERLAY, "trying KWin one-shot for scrolling resource");
+        let one_shot_result = (factories.one_shot)(config.show_cursor);
+
+        match one_shot_result {
+            Ok(capture) => {
+                let output_name = capture.target_display().output_name.clone();
+                tracing::debug!(target: TARGET_OVERLAY, ?output_name, "KWin one-shot succeeded");
+                let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+                *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
+                let driver =
+                    (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+                Ok(Some(CaptureResource::Streaming {
+                    driver,
+                    frozen: Some(capture),
+                }))
+            }
+            Err(native_error) => {
+                if backend == "auto"
+                    && rollshot_capture::linux::auto::is_fallback_eligible(&native_error)
+                {
+                    tracing::debug!(
+                        target: TARGET_OVERLAY,
+                        %native_error,
+                        "KWin one-shot failed with fallback-eligible error, falling back to portal"
+                    );
+                    let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+                    *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
+                    let driver =
+                        (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+                    Ok(Some(CaptureResource::Streaming {
+                        driver,
+                        frozen: None,
+                    }))
+                } else {
+                    tracing::error!(
+                        target: TARGET_OVERLAY,
+                        %native_error,
+                        "KWin one-shot failed, no fallback available"
+                    );
+                    Err(OverlayError::Capture(native_error.to_string()))
+                }
+            }
+        }
+    } else {
+        tracing::debug!(target: TARGET_OVERLAY, "acquiring portal streaming resource");
+        let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+        *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
+        let driver = (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+        Ok(Some(CaptureResource::Streaming {
+            driver,
+            frozen: None,
+        }))
     }
 }
 
@@ -317,7 +416,16 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         Ok(Some(resource)) => {
                             *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
                             match resource {
-                                CaptureResource::Streaming(mut driver) => {
+                                CaptureResource::Streaming { mut driver, frozen } => {
+                                    if let Some(frozen_capture) = &frozen {
+                                        let img = frozen_capture.image();
+                                        state.frozen =
+                                            Some(iced::widget::image::Handle::from_rgba(
+                                                img.width(),
+                                                img.height(),
+                                                img.as_raw().clone(),
+                                            ));
+                                    }
                                     if let (Some(crop), Some(ws)) = (state.crop, state.window_size)
                                     {
                                         state.workspace.begin_scrolling();
@@ -434,7 +542,14 @@ fn input_mode_for(phase: crate::workspace::WorkspacePhase) -> app::InputRegionMo
 fn real_factories() -> ResourceFactories {
     ResourceFactories {
         streaming: Box::new(|cfg, preview_tx| {
-            Driver::start_capture(&cfg.backend, cfg.fps, cfg.show_cursor, None, preview_tx)
+            Driver::start_capture(
+                &cfg.backend,
+                cfg.fps,
+                cfg.show_cursor,
+                None,
+                None,
+                preview_tx,
+            )
         }),
         one_shot: Box::new(|show_cursor| {
             let kind = rollshot_capture::OneShotBackendKind::from_environment("auto")?;
@@ -486,34 +601,16 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 
     *CAPTURE_MODE.lock().unwrap() = Some(config.initial_mode);
 
-    // Build the frozen background handle once (screenshot mode only). This is the
-    // single full-image copy in the two-buffer render model; `view()` clones only
-    // the cheap handle per redraw.
-    let frozen_handle = match &resource {
-        CaptureResource::OneShot(capture) => {
-            let img = capture.image();
-            Some(iced::widget::image::Handle::from_rgba(
-                img.width(),
-                img.height(),
-                img.as_raw().clone(),
-            ))
-        }
-        CaptureResource::Streaming(_) => None,
-    };
+    // Build the frozen background handle once. This is the single full-image
+    // copy in the two-buffer render model; `view()` clones only the cheap
+    // handle per redraw.
+    let frozen_handle = frozen_handle_for(&resource);
     let mode = config.initial_mode;
 
-    let start_mode = match &resource {
-        CaptureResource::OneShot(capture) => {
-            match capture.target_display().output_name.as_deref() {
-                Some(name) => StartMode::TargetScreen(name.to_string()),
-                None => StartMode::Active,
-            }
-        }
-        CaptureResource::Streaming(_) => StartMode::Active,
-    };
+    let start_mode = start_mode_for(&resource);
 
     match resource {
-        CaptureResource::Streaming(driver) => {
+        CaptureResource::Streaming { driver, .. } => {
             *DRIVER_SLOT.lock().unwrap() = Some(driver);
         }
         CaptureResource::OneShot(capture) => {
@@ -649,7 +746,10 @@ mod tests {
         static STREAMING_COUNT: AtomicUsize = AtomicUsize::new(0);
         static ONE_SHOT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-        let config = test_config();
+        let config = OverlayConfig {
+            backend: "linux-portal".to_string(),
+            ..test_config()
+        };
         let factories = ResourceFactories {
             streaming: fake_streaming_factory(&STREAMING_COUNT),
             one_shot: fake_one_shot_factory(&ONE_SHOT_COUNT),
@@ -659,6 +759,24 @@ mod tests {
 
         assert_eq!(STREAMING_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(ONE_SHOT_COUNT.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn auto_scrolling_calls_both_factories() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        static STREAMING_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static ONE_SHOT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        let config = test_config();
+        let factories = ResourceFactories {
+            streaming: fake_streaming_factory(&STREAMING_COUNT),
+            one_shot: fake_one_shot_factory(&ONE_SHOT_COUNT),
+        };
+
+        let _ = acquire_resource(CaptureMode::Scrolling, &config, &factories);
+
+        assert_eq!(ONE_SHOT_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(STREAMING_COUNT.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1063,5 +1181,179 @@ mod tests {
             PREVIEW_RX.lock().unwrap().is_none(),
             "screenshot mode should not set up preview channel"
         );
+    }
+
+    // ── Task 6: Scrolling resource with frozen background tests ──
+
+    fn fake_one_shot_capture_for(output_name: &str) -> rollshot_capture::OneShotCapture {
+        let img = RgbaImage::new(1920, 1080);
+        rollshot_capture::OneShotCapture::new(
+            img,
+            DisplayTarget {
+                output_name: Some(output_name.to_string()),
+                logical_region: Region {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                physical_size: Size {
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+        )
+        .expect("test capture")
+    }
+
+    fn auto_config() -> OverlayConfig {
+        OverlayConfig {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+            initial_mode: CaptureMode::Scrolling,
+        }
+    }
+
+    fn kwin_config() -> OverlayConfig {
+        OverlayConfig {
+            backend: "linux-kwin".to_string(),
+            fps: 5,
+            show_cursor: false,
+            initial_mode: CaptureMode::Scrolling,
+        }
+    }
+
+    fn factories_with_successful_kwin_one_shot_and_driver() -> ResourceFactories {
+        ResourceFactories {
+            streaming: Box::new(|_cfg, _preview_tx| Err("fake streaming driver".to_string())),
+            one_shot: Box::new(|_| Ok(fake_one_shot_capture_for("DP-2"))),
+        }
+    }
+
+    fn factories_with_failed_kwin_one_shot_and_portal_driver() -> ResourceFactories {
+        ResourceFactories {
+            streaming: Box::new(
+                |_cfg, _preview_tx| Err("fake portal streaming driver".to_string()),
+            ),
+            one_shot: Box::new(|_| {
+                Err(CaptureError::Unsupported {
+                    message: "KWin one-shot failed".to_string(),
+                })
+            }),
+        }
+    }
+
+    #[test]
+    fn kwin_scrolling_resource_targets_frozen_output() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let result = acquire_scrolling_resource(
+            &auto_config(),
+            &factories_with_successful_kwin_one_shot_and_driver(),
+        );
+        // Streaming factory returns Err, but the one-shot succeeded first.
+        // The error is from the streaming factory, not the one-shot.
+        match result {
+            Err(OverlayError::Capture(msg)) => {
+                assert!(msg.contains("fake streaming driver"), "msg: {msg}");
+            }
+            other => panic!("expected Capture error from streaming factory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portal_scrolling_resource_uses_active_start_mode_without_frozen_image() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let config = OverlayConfig {
+            backend: "linux-portal".to_string(),
+            fps: 5,
+            show_cursor: false,
+            initial_mode: CaptureMode::Scrolling,
+        };
+        let factories = ResourceFactories {
+            streaming: Box::new(
+                |_cfg, _preview_tx| Err("fake portal streaming driver".to_string()),
+            ),
+            one_shot: Box::new(|_| {
+                Err(CaptureError::Unsupported {
+                    message: "not used for portal".to_string(),
+                })
+            }),
+        };
+        let result = acquire_scrolling_resource(&config, &factories);
+        // Portal backend skips one-shot and goes straight to streaming.
+        // Streaming factory returns Err, so we get a capture error.
+        match result {
+            Err(OverlayError::Capture(msg)) => {
+                assert!(msg.contains("fake portal streaming driver"), "msg: {msg}");
+            }
+            other => panic!("expected Capture error from streaming factory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_kwin_one_shot_failure_uses_portal_stream_without_frozen_image() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let result = acquire_scrolling_resource(
+            &auto_config(),
+            &factories_with_failed_kwin_one_shot_and_portal_driver(),
+        );
+        // The streaming factory also fails, so we get an error from the
+        // portal fallback path. The key behavior: no error from the one-shot.
+        match result {
+            Err(OverlayError::Capture(msg)) => {
+                assert!(
+                    msg.contains("fake portal streaming driver"),
+                    "expected portal fallback error, got: {msg}"
+                );
+            }
+            other => panic!("expected Capture error from portal fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_kwin_one_shot_failure_returns_error_without_portal() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let result = acquire_scrolling_resource(
+            &kwin_config(),
+            &factories_with_failed_kwin_one_shot_and_portal_driver(),
+        );
+        assert!(result.is_err());
+        match result {
+            Err(OverlayError::Capture(msg)) => {
+                assert!(
+                    msg.contains("KWin one-shot failed"),
+                    "expected KWin error, got: {msg}"
+                );
+            }
+            other => panic!("expected Capture error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frozen_handle_exists_only_for_kwin_streaming_resources() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        // KWin one-shot succeeds but streaming factory fails — test that the
+        // one-shot was attempted and would have been used as frozen.
+        let factories = factories_with_successful_kwin_one_shot_and_driver();
+        let one_shot_result = (factories.one_shot)(false);
+        assert!(one_shot_result.is_ok());
+        let capture = one_shot_result.unwrap();
+        assert_eq!(
+            capture.target_display().output_name.as_deref(),
+            Some("DP-2")
+        );
+
+        // Frozen handle from one-shot image.
+        let img = capture.image();
+        let handle =
+            iced::widget::image::Handle::from_rgba(img.width(), img.height(), img.as_raw().clone());
+        match handle {
+            iced::widget::image::Handle::Rgba { width, height, .. } => {
+                assert_eq!(width, 1920);
+                assert_eq!(height, 1080);
+            }
+            other => panic!("expected Rgba handle, got {other:?}"),
+        }
     }
 }

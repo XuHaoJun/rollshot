@@ -998,6 +998,7 @@ fn real_factories() -> ResourceFactories {
                 cfg.fps,
                 cfg.show_cursor,
                 target_display_id,
+                None,
                 preview_tx,
             )
         }),
