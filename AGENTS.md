@@ -69,7 +69,20 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 - Always prefix shell commands with `rtk`, unless invoking MCP tools or another non-shell tool.
 
-## 7. Verification
+## 7. Rust Diagnostics
+
+- Use `tracing` for all runtime diagnostics in active product paths, including
+  temporary debugging instrumentation.
+- Every tracing event must use a stable explicit `rollshot::*` target and
+  structured fields. Use `trace` for high-volume or per-frame details.
+- Do not use `println!`, `eprintln!`, or `dbg!` as temporary diagnostics.
+- `eprintln!` is allowed only for intentional user-facing stderr output,
+  test/benchmark/spike UX, or failures before the tracing subscriber can be
+  initialized.
+- Before committing temporary instrumentation, either remove it or confirm it
+  is privacy-safe, appropriately leveled, and useful as retained diagnostics.
+
+## 8. Verification
 
 For Rust changes, prefer:
 - `rtk cargo test`
@@ -133,7 +146,7 @@ path, and any remaining runtime-verification risk.
 
 @RTK.md
 
-## 8. Project Map
+## 9. Project Map
 
 Use this as orientation only; verify current symbols, command flags, and
 behavior against code before relying on them.
@@ -164,7 +177,7 @@ behavior against code before relying on them.
   examples as documentation to verify against code, not as implementation
   source of truth.
 
-## 9. learn-projects
+## 10. learn-projects
 
 The `learn-projects/` directory contains cloned reference repositories for
 learning and cross-referencing. They are **not** part of rollshot's build
@@ -182,7 +195,7 @@ learn-projects results when needed.
 | `tauri-template` | dannysmith/tauri-template | Tauri v2 app template. Reference for Tauri app structure and patterns used in `rollshot-tauri-app`. |
 | `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
-## 10. docs/ — Snapshots, Not Source of Truth
+## 11. docs/ — Snapshots, Not Source of Truth
 
 **Code is the source of truth. `docs/` contains snapshots, not current spec.**
 
@@ -225,7 +238,7 @@ to the plan being worked on — that plan is the source of truth for the
 duration of the workflow. The plan becomes a frozen snapshot only after the
 workflow completes and the branch lands.
 
-## 11. Spec/Plan Process — Default Flow and Lightweight Escape
+## 12. Spec/Plan Process — Default Flow and Lightweight Escape
 
 The default for creative/implementation work is the full superpowers flow:
 brainstorm → spec → approval → writing-plans → execute. The native superpowers
@@ -245,7 +258,7 @@ implementation — no design doc, no plan file.
   choices), you MAY proactively *suggest* skipping the spec/plan and wait for
   the user's go-ahead — but default to the normal flow until they agree.
 - Skipping the spec/plan does NOT skip engineering discipline: still apply §1
-  (surface assumptions, ask when unclear), §4 (goal-driven / TDD), and §7
+  (surface assumptions, ask when unclear), §4 (goal-driven / TDD), and §8
   (verification).
 
 <!-- code-review-graph MCP tools -->
