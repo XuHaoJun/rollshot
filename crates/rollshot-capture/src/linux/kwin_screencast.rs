@@ -11,7 +11,6 @@ pub mod protocol {
     wayland_scanner::generate_client_code!("protocols/zkde-screencast-unstable-v1.xml");
 }
 
-#[allow(unused_imports)]
 use crate::diagnostics::TARGET_LINUX_KWIN;
 use crate::error::CaptureError;
 
@@ -155,6 +154,8 @@ impl KwinScreencastClient for RealKwinScreencastClient {
         output_name: &str,
         show_cursor: bool,
     ) -> Result<KwinScreencastSession, CaptureError> {
+        tracing::debug!(target: TARGET_LINUX_KWIN, "connecting to Wayland display");
+
         let conn = Connection::connect_to_env().map_err(|e| {
             CaptureError::Backend(anyhow::anyhow!("Wayland connection failed: {e}"))
         })?;
@@ -185,7 +186,12 @@ impl KwinScreencastClient for RealKwinScreencastClient {
                 message: "zkde_screencast_unstable_v1 global not available".to_string(),
             })?;
 
+        tracing::debug!(target: TARGET_LINUX_KWIN, version = MAX_SUPPORTED_VERSION, "bound zkde_screencast_unstable_v1");
+
         let selected = select_output(&state.outputs, output_name)?;
+        let registry_name = selected.registry_name;
+        tracing::debug!(target: TARGET_LINUX_KWIN, output_name, registry_name, "selected output");
+
         let wl_output_ref = selected.wl_output.as_ref().ok_or_else(|| {
             CaptureError::Backend(anyhow::anyhow!("wl_output proxy not available"))
         })?;
@@ -196,6 +202,7 @@ impl KwinScreencastClient for RealKwinScreencastClient {
             POINTER_HIDDEN
         };
 
+        tracing::debug!(target: TARGET_LINUX_KWIN, "requesting stream_output");
         let stream = screencast.stream_output(wl_output_ref, pointer_mode, &qh, ());
 
         let deadline = std::time::Instant::now() + STREAM_DEADLINE;
@@ -207,6 +214,7 @@ impl KwinScreencastClient for RealKwinScreencastClient {
 
             match &state.stream_outcome {
                 StreamOutcome::Created(node_id) => {
+                    tracing::info!(target: TARGET_LINUX_KWIN, node_id, "KWin screencast session created");
                     return Ok(KwinScreencastSession {
                         node_id: *node_id,
                         connection: conn,
@@ -219,6 +227,7 @@ impl KwinScreencastClient for RealKwinScreencastClient {
                     )));
                 }
                 StreamOutcome::Failed(reason) => {
+                    tracing::warn!(target: TARGET_LINUX_KWIN, error = %reason, "KWin screencast failed");
                     return Err(map_stream_failure(reason));
                 }
                 StreamOutcome::Closed => {
@@ -229,6 +238,7 @@ impl KwinScreencastClient for RealKwinScreencastClient {
                 StreamOutcome::Pending => {}
             }
 
+            tracing::debug!(target: TARGET_LINUX_KWIN, outcome = ?state.stream_outcome, "stream event received");
             event_queue.blocking_dispatch(&mut state).map_err(|e| {
                 CaptureError::Backend(anyhow::anyhow!("Stream dispatch failed: {e}"))
             })?;
