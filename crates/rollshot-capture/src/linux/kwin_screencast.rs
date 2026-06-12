@@ -11,30 +11,38 @@ pub mod protocol {
     wayland_scanner::generate_client_code!("protocols/zkde-screencast-unstable-v1.xml");
 }
 
-pub(crate) const TARGET_LINUX_KWIN: &str = "rollshot::capture::linux::kwin";
+#[allow(unused_imports)]
+use crate::diagnostics::TARGET_LINUX_KWIN;
 
+#[allow(dead_code)]
 const MAX_SUPPORTED_VERSION: u32 = 6;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StreamEvent {
     Created(u32),
+    Serial { hi: u32, lo: u32 },
     Failed(String),
     Closed,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum StreamOutcome {
     #[default]
     Pending,
     Created(u32),
+    Serial { hi: u32, lo: u32 },
     Failed(String),
     Closed,
 }
 
 impl StreamOutcome {
+    #[allow(dead_code)]
     fn apply(self, event: StreamEvent) -> StreamOutcome {
         match (&self, &event) {
             (StreamOutcome::Pending, StreamEvent::Created(id)) => StreamOutcome::Created(*id),
+            (StreamOutcome::Pending, StreamEvent::Serial { hi, lo }) => StreamOutcome::Serial { hi: *hi, lo: *lo },
             (StreamOutcome::Pending, StreamEvent::Failed(msg)) => StreamOutcome::Failed(msg.clone()),
             (StreamOutcome::Pending, StreamEvent::Closed) => StreamOutcome::Closed,
             _ => self,
@@ -63,6 +71,15 @@ mod tests {
         assert_eq!(
             state.apply(StreamEvent::Failed("denied".to_string())),
             StreamOutcome::Failed("denied".to_string())
+        );
+    }
+
+    #[test]
+    fn serial_event_produces_hi_lo_pair() {
+        let state = StreamOutcome::default();
+        assert_eq!(
+            state.apply(StreamEvent::Serial { hi: 1, lo: 42 }),
+            StreamOutcome::Serial { hi: 1, lo: 42 }
         );
     }
 }
