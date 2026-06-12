@@ -866,6 +866,28 @@ impl LinuxPortalFrameStream {
     }
 }
 
+impl LinuxPipeWireFrameStream<super::kwin_screencast::KwinScreencastSession> {
+    pub fn connect_kwin(
+        session: super::kwin_screencast::KwinScreencastSession,
+        options: crate::types::CaptureOptions,
+    ) -> Result<Self, CaptureError> {
+        let node_id = session.node_id();
+        let queue = Arc::new(FrameQueue::new());
+        let pipewire = connection::PipeWireConnection::connect(
+            PipeWireRemote::Default,
+            node_id,
+            "linux-kwin",
+            options,
+            Arc::clone(&queue),
+        )?;
+        Ok(Self {
+            pipewire,
+            _source_session: session,
+            queue,
+        })
+    }
+}
+
 impl<R> FrameStream for LinuxPipeWireFrameStream<R> {
     fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
         self.queue.next_frame_with_timeout(NEXT_FRAME_TIMEOUT)
