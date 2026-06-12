@@ -11,6 +11,7 @@ build = "build.rs"
 image = { workspace = true }
 imageproc = { version = "0.26", default-features = false }
 rayon = { workspace = true }
+tracing = { workspace = true }
 wide = { workspace = true }
 
 [dev-dependencies]

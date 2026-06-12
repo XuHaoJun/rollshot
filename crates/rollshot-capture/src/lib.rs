@@ -1,3 +1,4 @@
+mod diagnostics;
 pub mod backend;
 pub mod crop;
 pub mod error;

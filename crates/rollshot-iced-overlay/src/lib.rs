@@ -5,6 +5,8 @@
 //! named for the renderer framework so it can coexist with the retained Tauri
 //! overlay during validation.
 
+mod diagnostics;
+
 use image::RgbaImage;
 use rollshot_core::StitchStats;
 
