@@ -82,11 +82,21 @@ impl CaptureBackend for LinuxAutoBackend {
     }
 
     fn probe(&self) -> CaptureProbe {
+        let session_type = self
+            .session_type
+            .clone()
+            .or_else(|| std::env::var("XDG_SESSION_TYPE").ok())
+            .unwrap_or_default();
+        let is_wayland = session_type == "wayland";
         CaptureProbe {
             backend: "linux-auto",
-            available: true,
-            message: String::new(),
-            details: vec![],
+            available: is_wayland,
+            message: if is_wayland {
+                String::new()
+            } else {
+                "linux-auto requires a Wayland session".to_string()
+            },
+            details: vec![("XDG_SESSION_TYPE".to_string(), session_type)],
         }
     }
 
@@ -525,5 +535,18 @@ mod tests {
         assert!(!is_fallback_eligible(&CaptureError::InvalidConfig {
             message: "bad".into(),
         }));
+    }
+
+    #[test]
+    fn non_kde_skips_native_entirely() {
+        let calls = Calls::default();
+        let mut backend = LinuxAutoBackend::with_factories(
+            native_ok(&calls),
+            portal_ok(&calls),
+            false,
+        );
+        backend.start(targeted_options("eDP-1")).unwrap();
+        assert_eq!(calls.native(), 0);
+        assert_eq!(calls.portal(), 1);
     }
 }
