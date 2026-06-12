@@ -19,6 +19,7 @@ use iced::{event, window, Element, Event, Length, Point, Size, Task};
 
 use crate::app::{self, OverlayEffect, OverlayMessage, OverlayState};
 use crate::coords::LogicalRect;
+use crate::diagnostics::TARGET_OVERLAY;
 use crate::driver::{Driver, LiveOverlayEvent};
 use crate::workspace::WorkspacePhase;
 use crate::{CaptureResult, OverlayConfig, OverlayError};
@@ -232,6 +233,7 @@ impl Component {
     /// picker dismissed). The host opens the overlay window and feeds the boot
     /// task returned by [`Component::boot`].
     pub fn new(config: &OverlayConfig) -> Result<Option<Self>, OverlayError> {
+        tracing::info!(target: TARGET_OVERLAY, mode = ?config.initial_mode, "macos capture component starting");
         #[cfg(not(test))]
         let factories = real_factories();
         #[cfg(test)]
@@ -365,6 +367,7 @@ impl Component {
     /// later, when the `Opened` event arrives through `subscription` -> `update`
     /// (matching the original runner), so no boot task is needed here.
     pub fn boot(&mut self, overlay_window: window::Id, overlay_origin: Point) -> Task<Message> {
+        tracing::info!(target: TARGET_OVERLAY, ?overlay_window, "macos component boot");
         self.overlay_window = Some(overlay_window);
         self.overlay_origin = overlay_origin;
         Task::none()
@@ -433,6 +436,7 @@ impl Component {
     /// Tear down any live capture resources so the stream + reader thread don't
     /// leak. Called by the host on shutdown.
     pub fn shutdown(&mut self) {
+        tracing::info!(target: TARGET_OVERLAY, "macos component shutdown");
         if let Some(driver) = self.driver.take() {
             driver.cancel();
         }
@@ -536,7 +540,7 @@ impl Component {
             InternalMessage::Overlay(msg) => self.update_overlay(msg),
             InternalMessage::WindowPatched(result) => {
                 if let Err(err) = result {
-                    eprintln!("failed to patch macOS iced overlay window: {err}");
+                    tracing::warn!(target: TARGET_OVERLAY, %err, "failed to patch macOS overlay window");
                 }
                 HostEffect::None
             }
@@ -551,7 +555,7 @@ impl Component {
             InternalMessage::PassthroughDisabled(result) => {
                 self.overlay.mouse_passthrough_active = result.is_err();
                 if let Err(error) = result {
-                    eprintln!("failed to disable macOS overlay passthrough: {error}");
+                    tracing::warn!(target: TARGET_OVERLAY, %error, "failed to disable macOS overlay passthrough");
                 }
                 match self.pending_finish.take() {
                     Some(PendingFinish::Complete(result)) => HostEffect::Completed(result),
@@ -579,6 +583,9 @@ impl Component {
         };
 
         let new_phase = self.overlay.workspace.phase();
+        if new_phase != old_phase {
+            tracing::debug!(target: TARGET_OVERLAY, ?old_phase, ?new_phase, "workspace phase transition");
+        }
         let passthrough = passthrough_action(old_phase, new_phase);
         let visible_rect = self.visible_toolbar_rect();
         let controls = controls_window_action(self.controls_rect, visible_rect);
@@ -614,6 +621,7 @@ impl Component {
         match effect {
             OverlayEffect::None => EffectOutcome::Task(Task::none()),
             OverlayEffect::BeginStitch => {
+                tracing::info!(target: TARGET_OVERLAY, "begin stitch requested");
                 let crop = self.overlay.crop.unwrap();
                 let ws = match self.overlay.window_size {
                     Some(ws) => ws,
@@ -640,6 +648,7 @@ impl Component {
                 EffectOutcome::Task(Task::none())
             }
             OverlayEffect::FinishScreenshot => {
+                tracing::info!(target: TARGET_OVERLAY, "finishing screenshot capture");
                 let crop = self.overlay.crop.unwrap();
                 let ws = match self.overlay.window_size {
                     Some(ws) => ws,
@@ -685,6 +694,7 @@ impl Component {
                 }
             }
             OverlayEffect::FinishScrolling => {
+                tracing::info!(target: TARGET_OVERLAY, "finishing scrolling capture");
                 let outcome = match self.driver.take() {
                     Some(driver) => driver.finalize(),
                     None => Err("No driver available".to_string()),
@@ -713,6 +723,7 @@ impl Component {
                 EffectOutcome::Task(Task::none())
             }
             OverlayEffect::Cancel => {
+                tracing::info!(target: TARGET_OVERLAY, "overlay cancel");
                 // Tear capture down and report cancellation. When passthrough is
                 // active (cancel during scrolling capture), mirror the original
                 // runner: disable mouse passthrough on the overlay window *first*,
@@ -753,6 +764,7 @@ impl Component {
     }
 
     fn activate_mode(&mut self, new_mode: CaptureMode) {
+        tracing::info!(target: TARGET_OVERLAY, ?new_mode, "activating capture mode");
         if let Some(driver) = self.driver.take() {
             driver.cancel();
         }
@@ -898,6 +910,7 @@ impl Drop for Component {
         // flight (the daemon exited without a finish/cancel taking the driver),
         // tear it down so the stream + reader thread don't leak.
         if let Some(driver) = self.driver.take() {
+            tracing::warn!(target: TARGET_OVERLAY, "safety-net teardown of leaked driver");
             driver.cancel();
         }
         *PREVIEW_RX.lock().unwrap() = None;

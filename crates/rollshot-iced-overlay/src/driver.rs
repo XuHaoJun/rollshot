@@ -16,6 +16,7 @@ use rollshot_capture::{BackendKind, CaptureOptions, CapturedFrame, RegionMode, S
 
 use crate::app::PreviewConstraints;
 use crate::coords::LogicalRect;
+use crate::diagnostics::{TARGET_CAPTURE, TARGET_STITCH};
 
 use crate::CaptureResult;
 
@@ -141,6 +142,7 @@ impl Driver {
         target_display_id: Option<u32>,
         preview_tx: UnboundedSender<LiveOverlayEvent>,
     ) -> Result<Self, String> {
+        tracing::info!(target: TARGET_CAPTURE, backend, fps, show_cursor, ?target_display_id, "creating capture backend");
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
         let stream = backend_impl
@@ -152,6 +154,7 @@ impl Driver {
                 target_display_id,
             })
             .map_err(|e| e.to_string())?;
+        tracing::info!(target: TARGET_CAPTURE, "capture stream started");
         let mut stream = SendStream(stream);
 
         let shared = Arc::new(Shared {
@@ -174,12 +177,16 @@ impl Driver {
                                 shared.seq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Err(CaptureError::EndOfStream) => break,
+                        Err(CaptureError::EndOfStream) => {
+                            tracing::debug!(target: TARGET_CAPTURE, "reader reached end-of-stream");
+                            break;
+                        }
                         Err(CaptureError::Timeout { .. }) => continue,
                         Err(err) => {
                             if !should_record_reader_error(&stop) {
                                 break;
                             }
+                            tracing::error!(target: TARGET_CAPTURE, %err, "reader terminal error");
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -191,6 +198,7 @@ impl Driver {
         };
 
         let source_size = wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
+        tracing::debug!(target: TARGET_CAPTURE, width = source_size.width, height = source_size.height, "first frame arrived");
 
         Ok(Self {
             stop,
@@ -223,6 +231,16 @@ impl Driver {
         self.overlay_logical = overlay_logical;
         let region =
             crate::coords::map_crop_to_frame(crop_logical, overlay_logical, self.source_size);
+        tracing::info!(
+            target: TARGET_STITCH,
+            source_width = self.source_size.width,
+            source_height = self.source_size.height,
+            crop_x = region.x,
+            crop_y = region.y,
+            crop_w = region.width,
+            crop_h = region.height,
+            "begin stitch"
+        );
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
         let preview_tx = self.preview_tx.clone();
@@ -241,6 +259,7 @@ impl Driver {
                     && last_seq == starting_seq
                     && Instant::now() >= fallback_deadline
                 {
+                    tracing::debug!(target: TARGET_STITCH, "fallback deadline reached, seeding first frame");
                     fallback_used = true;
                     last_seq = starting_seq.saturating_sub(1);
                 }
@@ -254,6 +273,7 @@ impl Driver {
                     let cropped = match crop_frame(&frame, region) {
                         Ok(c) => c,
                         Err(err) => {
+                            tracing::error!(target: TARGET_STITCH, %err, "crop failed");
                             if let Ok(mut e) = shared.error.lock() {
                                 *e = Some(err.to_string());
                             }
@@ -271,6 +291,12 @@ impl Driver {
                         let capture_miss_state =
                             capture_miss_tracker.update(signal, Instant::now());
                         if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
+                            tracing::debug!(
+                                target: TARGET_STITCH,
+                                active = capture_miss_state.active,
+                                warn = capture_miss_state.warn,
+                                "capture-miss transition"
+                            );
                             let _ = preview_tx
                                 .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
                         }
@@ -294,6 +320,7 @@ impl Driver {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            tracing::debug!(target: TARGET_STITCH, "stitch thread exiting");
         }));
     }
 
@@ -313,16 +340,21 @@ impl Driver {
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.stitch.take() {
-            let _ = h.join();
+            if h.join().is_err() {
+                tracing::warn!(target: TARGET_STITCH, "stitch thread panicked");
+            }
         }
         if let Some(h) = self.reader.take() {
-            let _ = h.join();
+            if h.join().is_err() {
+                tracing::warn!(target: TARGET_CAPTURE, "reader thread panicked");
+            }
         }
     }
 
     /// Stop capture without producing a result (user cancelled at/ before the
     /// crop, or the loop exited early). Tears the PipeWire stream down cleanly.
     pub fn cancel(mut self) {
+        tracing::info!(target: TARGET_CAPTURE, "driver cancel");
         self.stop_and_join();
     }
 
@@ -343,9 +375,17 @@ impl Driver {
             .full_image()
             .ok_or_else(|| "stitcher produced no output".to_string())?
             .clone();
+        let stats = stitcher.stats();
+        tracing::info!(
+            target: TARGET_STITCH,
+            width = image.width(),
+            height = image.height(),
+            frame_count = stats.frame_count,
+            "finalize complete"
+        );
         Ok(CaptureResult {
             image,
-            stats: Some(stitcher.stats()),
+            stats: Some(stats),
         })
     }
 }
@@ -379,6 +419,7 @@ fn wait_for_source_size(
         }
         if Instant::now() >= deadline {
             stop.store(true, Ordering::Relaxed);
+            tracing::error!(target: TARGET_CAPTURE, "timed out waiting for first frame");
             return Err("timed out waiting for first capture frame".to_string());
         }
         std::thread::sleep(Duration::from_millis(20));

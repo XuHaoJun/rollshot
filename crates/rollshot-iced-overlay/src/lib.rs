@@ -80,11 +80,13 @@ pub mod screenshot;
 pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     #[cfg(target_os = "linux")]
     {
+        tracing::info!(target: diagnostics::TARGET_OVERLAY, "run_overlay called (linux)");
         linux_runner::run(config)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = config;
+        tracing::info!(target: diagnostics::TARGET_OVERLAY, "run_overlay called (unsupported platform)");
         Err(OverlayError::Unsupported)
     }
 }
