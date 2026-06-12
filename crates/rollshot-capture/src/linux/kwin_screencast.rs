@@ -89,10 +89,11 @@ pub(crate) fn map_stream_failure(reason: &str) -> CaptureError {
 pub(crate) fn stream_timeout(stage: &str) -> CaptureError {
     CaptureError::Timeout {
         message: format!("KWin screencast {stage} timed out"),
-        duration: std::time::Duration::from_secs(5),
+        duration: STREAM_DEADLINE,
     }
 }
 
+use std::os::fd::AsFd;
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 
@@ -206,6 +207,7 @@ impl KwinScreencastClient for RealKwinScreencastClient {
         let stream = screencast.stream_output(wl_output_ref, pointer_mode, &qh, ());
 
         let deadline = std::time::Instant::now() + STREAM_DEADLINE;
+        let fd = conn.as_fd();
 
         loop {
             if std::time::Instant::now() >= deadline {
@@ -238,8 +240,19 @@ impl KwinScreencastClient for RealKwinScreencastClient {
                 StreamOutcome::Pending => {}
             }
 
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let poll_timeout_ms = (remaining.as_millis() as u16).min(50);
+
+            let mut pollfd = nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN);
+            match nix::poll::poll(std::slice::from_mut(&mut pollfd), poll_timeout_ms) {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(CaptureError::Backend(anyhow::anyhow!("stream poll failed: {e}")));
+                }
+            }
+
             tracing::debug!(target: TARGET_LINUX_KWIN, outcome = ?state.stream_outcome, "stream event received");
-            event_queue.blocking_dispatch(&mut state).map_err(|e| {
+            event_queue.dispatch_pending(&mut state).map_err(|e| {
                 CaptureError::Backend(anyhow::anyhow!("Stream dispatch failed: {e}"))
             })?;
         }
@@ -264,9 +277,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for KwinState {
         {
             match &interface[..] {
                 "wl_output" => {
-                    let wl_version = version.max(4);
+                    if version < 4 {
+                        tracing::debug!(target: TARGET_LINUX_KWIN, version, "skipping wl_output below version 4 (name event unavailable)");
+                        return;
+                    }
                     let output: wl_output::WlOutput =
-                        registry.bind(name, wl_version, qh, RegistryName(name));
+                        registry.bind(name, version.min(MAX_SUPPORTED_VERSION), qh, RegistryName(name));
                     state.outputs.push(OutputInfo {
                         registry_name: name,
                         wl_output: Some(output),
