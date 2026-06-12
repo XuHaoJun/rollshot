@@ -91,8 +91,17 @@ The application subscriber uses an `EnvFilter` with:
 
 - `RUST_LOG` directives when the variable is present and valid.
 - A default directive appropriate for normal use when `RUST_LOG` is absent.
-- A clear startup error for an invalid `RUST_LOG` directive rather than silently
-  enabling an unexpected filter.
+- Lossy parsing for an invalid `RUST_LOG` value: invalid directives are
+  ignored, startup proceeds, and one `warn` event listing the ignored
+  directives is emitted immediately after initialization so the problem is
+  visible on the console and in any diagnostic file. `RUST_LOG` is a shared
+  environment variable; a value set for another program must not prevent
+  Rollshot from launching.
+
+Filter selection is implemented as a pure function that accepts the raw
+`RUST_LOG` value as `Option<&str>` and returns the chosen filter plus any
+ignored directives. Only `main` reads the real environment; unit tests pass
+strings directly and never mutate process environment variables.
 
 The default filter is `warn` for release and debug builds. Developers who want
 debug output opt in with `RUST_LOG`. This keeps behavior consistent between
@@ -101,8 +110,8 @@ build profiles and avoids noisy output during ordinary development commands.
 `--log-file <PATH>`:
 
 - Adds file output without disabling console output.
-- Creates parent directories only when they already exist; a missing parent is
-  reported as a startup error.
+- Does not create missing parent directories; a missing parent is reported as
+  a startup error.
 - Creates or truncates the named file at startup.
 - Fails startup with a clear error if the file cannot be opened.
 - Does not imply a log level. A user normally combines it with `RUST_LOG`.
@@ -114,11 +123,12 @@ implementation.
 
 ## Architecture
 
-Add a small shared diagnostics crate or module that owns subscriber
-initialization and the file-writer guard. The implementation plan must first
-verify whether more than one active executable needs identical initialization.
-Use a shared crate only if that duplication is real; otherwise keep the
-initializer inside `rollshot-app`.
+Subscriber initialization and the file-writer guard live in a module inside
+`rollshot-app` (for example `src/diagnostics.rs`). Today only `rollshot-app`
+needs the full console-plus-file initialization: `rollshot-cli` keeps its own
+user-facing progress output, and the deprecated Tauri app is out of scope.
+Extract a shared crate only if a second active executable later needs
+identical initialization.
 
 Library crates emit `tracing` spans and events but never initialize a global
 subscriber. User-facing executables parse the logging options first, initialize
@@ -178,6 +188,15 @@ such as `rollshot::capture` or `rollshot::stitch`. New targets should only be
 added for a distinct support-facing diagnostic domain, not merely because a new
 Rust module exists.
 
+Explicit targets are enforced mechanically, not by convention. The default
+`tracing` target is the Rust module path (for example
+`rollshot_core::matcher`), which lies outside the `rollshot::` namespace, so
+an event that omits `target:` silently escapes every documented directive,
+including `rollshot=debug`. Each instrumented crate therefore defines its
+documented targets as string constants, diagnostic events reference those
+constants, and a test or CI check scans instrumented crates for `tracing`
+macro calls that omit an explicit `target:`.
+
 Renaming or removing a documented target is a compatibility change for support
 instructions and must be intentional. Adding a child target is compatible
 because parent directives continue to enable its events.
@@ -227,12 +246,26 @@ useful for a normal reproduction session without producing excessive output.
 File paths are sensitive. Log only a coarse destination category or a redacted
 filename unless the user explicitly supplied the diagnostic log path itself.
 
+## Migration Of Existing Diagnostics
+
+The instrumented paths already emit ad-hoc `eprintln!` diagnostics (portal and
+PipeWire errors in `rollshot-capture`, launch and product errors in
+`rollshot-app`, overlay diagnostics in `rollshot-iced-overlay`). The first
+phase migrates these diagnostic prints to `tracing` events so the console does
+not double-report and the diagnostic file does not miss information that only
+`eprintln!` carried.
+
+The per-frame progress output and diagnostics summary in `rollshot-cli` are a
+user-facing interface controlled by `--quiet`, not diagnostics; they remain
+`eprintln!` and are out of scope.
+
 ## Event Design
 
 Prefer structured fields over interpolated prose:
 
 ```text
 debug!(
+    target: TARGET_STITCH,
     frame_index,
     outcome = ?outcome_kind,
     best_dx,
@@ -286,18 +319,32 @@ custom logging system.
 The writer guard must live until application shutdown so buffered events are
 flushed.
 
+Executables that initialize the subscriber must terminate by returning an exit
+code from `main` (for example `std::process::ExitCode`) rather than calling
+`std::process::exit`, which skips `Drop` and discards buffered events on
+exactly the failing paths diagnostics exist for. The existing
+`std::process::exit(1)` call sites in `rollshot-app` are migrated as part of
+this work.
+
 ## Testing And Verification
 
 Automated tests should cover:
 
 - Default filter selection when `RUST_LOG` is absent.
-- Valid and invalid `RUST_LOG` parsing.
+- Valid and invalid `RUST_LOG` parsing, including the post-initialization
+  warning event that lists ignored directives. Filter tests exercise the pure
+  filter-selection function and never mutate process environment variables.
 - Representative events use their documented explicit diagnostic targets.
+- A scan check that instrumented crates contain no `tracing` macro calls
+  without an explicit `target:`.
 - Parent target directives enable events from child targets.
 - `--log-file <PATH>` argument parsing.
 - File creation/truncation and startup failure for invalid paths.
 - Console output remains configured when file output is enabled.
 - Representative structured events do not expose image data or full save paths.
+- A subprocess integration test that runs the binary with `--log-file` down a
+  failing exit path and asserts a non-zero exit code and a complete file
+  containing the session-start and final error events.
 
 Integration verification should run a release build and confirm:
 
