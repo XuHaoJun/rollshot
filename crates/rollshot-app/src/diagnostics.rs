@@ -159,6 +159,48 @@ pub(crate) fn classify_app_error(error: &str) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) fn capture_test_logs(run: impl FnOnce()) -> String {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct LogGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogWriter {
+        type Writer = LogGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogGuard(Arc::clone(&self.0))
+        }
+    }
+
+    let writer = LogWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let bytes = writer.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

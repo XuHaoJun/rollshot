@@ -138,6 +138,12 @@ pub fn write_png(image: &RgbaImage, path: &Path) -> Result<(), String> {
 /// Stops after 10_000 suffix attempts and returns an error.
 pub fn auto_save_to(image: &RgbaImage, dir: &Path, timestamp: &str) -> Result<PathBuf, String> {
     if !dir.exists() {
+        tracing::error!(
+            target: TARGET_SAVE,
+            category = "path_missing",
+            destination = destination_category(dir),
+            "save failure"
+        );
         return Err(format!(
             "output directory does not exist: {}",
             dir.display()
@@ -169,11 +175,16 @@ pub fn auto_save_to(image: &RgbaImage, dir: &Path, timestamp: &str) -> Result<Pa
             Ok(false) => continue,
             Err(e) => {
                 let category = classify_save_error(&e.to_string());
-                tracing::error!(target: TARGET_SAVE, error = %e, category, "save failure");
+                tracing::error!(target: TARGET_SAVE, category, "save failure");
                 return Err(e.to_string());
             }
         }
     }
+    tracing::error!(
+        target: TARGET_SAVE,
+        category = "filename_exhausted",
+        "save failure"
+    );
     Err(format!(
         "auto-save could not find a free filename after {MAX_ATTEMPTS} attempts"
     ))
@@ -209,7 +220,7 @@ fn destination_category(dir: &Path) -> &'static str {
     }
 }
 
-fn classify_save_error(error: &str) -> &'static str {
+pub(crate) fn classify_save_error(error: &str) -> &'static str {
     let lower = error.to_lowercase();
     if lower.contains("permission") || lower.contains("access") {
         "permission"
@@ -344,6 +355,26 @@ mod tests {
         .expect_err("missing directory must fail");
         assert!(err.contains("does not exist"));
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn missing_auto_save_directory_emits_private_failure_category() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("Secret");
+        let log = crate::diagnostics::capture_test_logs(|| {
+            let _ = auto_save_to(
+                &image::RgbaImage::new(2, 2),
+                &missing,
+                "2026-06-09 at 12.34.56",
+            );
+        });
+
+        assert!(log.contains("save failure"), "log = {log}");
+        assert!(log.contains("category=\"path_missing\""), "log = {log}");
+        assert!(
+            !log.contains(missing.to_string_lossy().as_ref()),
+            "log = {log}"
+        );
     }
 
     #[test]

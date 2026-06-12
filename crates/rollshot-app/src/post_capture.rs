@@ -47,7 +47,18 @@ pub fn select_presentation(platform: Platform, auto_save: Result<PathBuf, String
         (Platform::Macos, Ok(path)) => Presentation::MacosSavedThumbnail(path),
         (Platform::Macos, Err(msg)) => Presentation::MacosUnsavedWorkspace(msg),
     };
-    tracing::info!(target: TARGET_APP, ?presentation, "presentation selected");
+    let (platform, disposition) = match &presentation {
+        Presentation::LinuxSavedWorkspace(_) => ("linux", "saved"),
+        Presentation::LinuxUnsavedWorkspace(_) => ("linux", "unsaved"),
+        Presentation::MacosSavedThumbnail(_) => ("macos", "saved"),
+        Presentation::MacosUnsavedWorkspace(_) => ("macos", "unsaved"),
+    };
+    tracing::info!(
+        target: TARGET_APP,
+        platform,
+        disposition,
+        "presentation selected"
+    );
     presentation
 }
 
@@ -113,5 +124,20 @@ mod tests {
             capture_completion(Some(capture_result())),
             CaptureCompletion::Present(_)
         ));
+    }
+
+    #[test]
+    fn presentation_event_omits_saved_path_and_raw_error() {
+        let saved_path = "/home/noah/Desktop/private-capture.png";
+        let raw_error = "output directory does not exist: /home/noah/Secret";
+        let log = crate::diagnostics::capture_test_logs(|| {
+            select_presentation(Platform::Linux, Ok(PathBuf::from(saved_path)));
+            select_presentation(Platform::Macos, Err(raw_error.to_string()));
+        });
+
+        assert!(!log.contains(saved_path), "log = {log}");
+        assert!(!log.contains(raw_error), "log = {log}");
+        assert!(log.contains("disposition=\"saved\""), "log = {log}");
+        assert!(log.contains("disposition=\"unsaved\""), "log = {log}");
     }
 }
