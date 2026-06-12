@@ -255,17 +255,24 @@ Manual checks:
 The smoke test requires a live human-driven desktop session because the portal
 picker must be clicked. Hosted CI must not run it.
 
-### KDE Normal Screenshot Permission
+### KDE Native Capture Permission
 
-KDE Plasma restricts the KWin `ScreenShot2` DBus interface. KWin authorizes a
-caller by reading `/proc/<pid>/exe`, then searching installed desktop entries
-for one whose `Exec` first token canonicalizes to that exact executable path
-and declares `X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2`. There
-is **no `PATH` lookup** — the `Exec` path must be the absolute path of the
-running binary. Without a matching entry, KWin returns
-`org.kde.KWin.ScreenShot2.Error.NoAuthorized`.
+KDE Plasma restricts both the KWin `ScreenShot2` DBus interface and the
+`zkde_screencast_unstable_v1` Wayland protocol. KWin authorizes a caller by
+reading `/proc/<pid>/exe`, then searching installed desktop entries for one
+whose `Exec` first token canonicalizes to that exact executable path and
+declares both required keys:
 
-`packaging/linux/dev.rollshot.io.desktop` declares the interface with
+```ini
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
+```
+
+There is **no `PATH` lookup** — the `Exec` path must be the absolute path of
+the running binary. Without a matching entry, KWin returns
+`org.kde.KWin.ScreenShot2.Error.NoAuthorized` or denies Wayland screencast.
+
+`packaging/linux/dev.rollshot.io.desktop` declares both interfaces with
 `Exec=/usr/bin/rollshot-app`.
 
 **System install** (binary path matches `Exec`):
@@ -287,7 +294,26 @@ sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" \
 ```
 
 Either way, launch the **installed** binary (the one whose path matches `Exec`),
-not a `cargo run` / `target/...` build, or KWin denies the request.
+not a `cargo run` / `target/...` build, or KWin denies the request. You do not
+need to launch from the application menu — running the installed binary
+directly from a terminal is sufficient.
+
+**Backend selection and fallback behavior.** The `auto` backend resolves to
+`linux-kwin` when native authorization succeeds. Running from `cargo run` or
+`target/...` normally causes `auto` to fall back to the portal path because
+KWin cannot match the binary to a desktop entry. An installed `auto` scrolling
+capture should not show a picker. Use `linux-portal` to always test the picker
+path, or `linux-kwin` to diagnose native authorization without fallback. Under
+`auto`, a portal fallback captures the full source and crops locally — it does
+not honor a portal-picked region.
+
+**Verification commands** (after local install):
+
+```bash
+~/.local/bin/rollshot-app --capture '{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"scrolling"}'
+~/.local/bin/rollshot-app --capture '{"backend":"linux-kwin","fps":5,"show_cursor":false,"initial_mode":"scrolling"}'
+~/.local/bin/rollshot-app --capture '{"backend":"linux-portal","fps":5,"show_cursor":false,"initial_mode":"scrolling"}'
+```
 
 **One-shot dev run.** This single command builds the release binary, installs
 it to `~/.local/bin`, registers a desktop entry whose `Exec` points at that
