@@ -99,6 +99,42 @@ impl Stitcher {
         // for FirstFrame/Appended outcomes.
         self.snapshot_canvas_state();
         self.last_metrics.total_us = total_start.elapsed().as_micros() as u64;
+
+        let metrics = &self.last_metrics;
+        tracing::trace!(
+            target: crate::diagnostics::TARGET_STITCH,
+            frame_index = metrics.frame_index,
+            outcome = ?metrics.outcome,
+            no_match_reason = ?metrics.no_match_reason,
+            total_us = metrics.total_us,
+            best_dx = metrics.best_dx,
+            best_dy = metrics.best_dy,
+            best_score = metrics.best_score,
+            second_best_score = ?metrics.second_best_score,
+            match_method = ?metrics.match_method,
+            canvas_logical_pixels = metrics.canvas_logical_pixels,
+            canvas_allocated_bytes = metrics.canvas_allocated_bytes,
+            "processed stitch frame"
+        );
+
+        if matches!(outcome, StitchOutcome::NoMatch { .. }) {
+            tracing::debug!(
+                target: crate::diagnostics::TARGET_STITCH,
+                frame_index = metrics.frame_index,
+                reason = ?metrics.no_match_reason,
+                total_us = metrics.total_us,
+                "frame rejected"
+            );
+        } else if matches!(outcome, StitchOutcome::AxisChanged { .. }) {
+            tracing::debug!(
+                target: crate::diagnostics::TARGET_STITCH,
+                frame_index = metrics.frame_index,
+                outcome = ?metrics.outcome,
+                total_us = metrics.total_us,
+                "axis changed"
+            );
+        }
+
         outcome
     }
 
@@ -460,10 +496,11 @@ impl Stitcher {
     /// is accepted and logged. Last-resort floor beneath the robust verifier
     /// and feature consensus.
     fn reanchor_mid_capture(&mut self, frame: RgbaImage) {
-        eprintln!(
-            "rollshot: mid-capture re-anchor after {} consecutive misses; \
-             a content gap may appear at canvas height {}",
-            self.first_frame_misses, self.stats.total_height
+        tracing::warn!(
+            target: crate::diagnostics::TARGET_STITCH,
+            miss_count = self.first_frame_misses,
+            canvas_height = self.stats.total_height,
+            "mid-capture re-anchor; a content gap may appear"
         );
         self.last_good = Some(PreparedFrame::new(frame));
         self.last_motion = (0, 0);
