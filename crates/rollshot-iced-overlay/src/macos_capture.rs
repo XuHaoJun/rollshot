@@ -776,6 +776,7 @@ impl Component {
             fps: 5,
             show_cursor: false,
             initial_mode: new_mode,
+            target_output_name: None,
         };
         #[cfg(not(test))]
         let factories = real_factories();

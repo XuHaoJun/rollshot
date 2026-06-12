@@ -129,10 +129,12 @@ fn acquire_scrolling_resource(
             Ok(capture) => {
                 let output_name = capture.target_display().output_name.clone();
                 tracing::debug!(target: TARGET_OVERLAY, ?output_name, "KWin one-shot succeeded");
+                let mut resolved_config = config.clone();
+                resolved_config.target_output_name = output_name;
                 let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
                 *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
-                let driver =
-                    (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+                let driver = (factories.streaming)(&resolved_config, preview_tx)
+                    .map_err(OverlayError::Capture)?;
                 Ok(Some(CaptureResource::Streaming {
                     driver,
                     frozen: Some(capture),
@@ -399,6 +401,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         fps: 5,
                         show_cursor: false,
                         initial_mode: new_mode,
+                        target_output_name: None,
                     };
                     #[cfg(not(test))]
                     let factories = real_factories();
@@ -415,17 +418,9 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     match acquire_resource(new_mode, &config, &factories) {
                         Ok(Some(resource)) => {
                             *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
+                            state.frozen = frozen_handle_for(&resource);
                             match resource {
-                                CaptureResource::Streaming { mut driver, frozen } => {
-                                    if let Some(frozen_capture) = &frozen {
-                                        let img = frozen_capture.image();
-                                        state.frozen =
-                                            Some(iced::widget::image::Handle::from_rgba(
-                                                img.width(),
-                                                img.height(),
-                                                img.as_raw().clone(),
-                                            ));
-                                    }
+                                CaptureResource::Streaming { mut driver, frozen: _ } => {
                                     if let (Some(crop), Some(ws)) = (state.crop, state.window_size)
                                     {
                                         state.workspace.begin_scrolling();
@@ -547,7 +542,7 @@ fn real_factories() -> ResourceFactories {
                 cfg.fps,
                 cfg.show_cursor,
                 None,
-                None,
+                cfg.target_output_name.clone(),
                 preview_tx,
             )
         }),
@@ -692,6 +687,7 @@ mod tests {
             fps: 5,
             show_cursor: false,
             initial_mode: CaptureMode::Scrolling,
+            target_output_name: None,
         }
     }
 
@@ -1212,12 +1208,14 @@ mod tests {
             fps: 5,
             show_cursor: false,
             initial_mode: CaptureMode::Scrolling,
+            target_output_name: None,
         }
     }
 
     fn kwin_config() -> OverlayConfig {
         OverlayConfig {
             backend: "linux-kwin".to_string(),
+            target_output_name: None,
             fps: 5,
             show_cursor: false,
             initial_mode: CaptureMode::Scrolling,
@@ -1269,6 +1267,7 @@ mod tests {
             fps: 5,
             show_cursor: false,
             initial_mode: CaptureMode::Scrolling,
+            target_output_name: None,
         };
         let factories = ResourceFactories {
             streaming: Box::new(
