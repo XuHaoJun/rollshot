@@ -50,7 +50,11 @@ pub fn redaction_handles(bounds: ImageRect) -> [(ResizeHandle, ImagePoint); 8] {
     ]
 }
 
-fn hit_annotation(annotation: &Annotation, point: ImagePoint, tolerance: f32) -> Option<HitPart> {
+pub fn hit_test_annotation(
+    annotation: &Annotation,
+    point: ImagePoint,
+    tolerance: f32,
+) -> Option<HitPart> {
     match annotation {
         Annotation::NumberCallout { tip, bubble, .. } => {
             if point.distance(*bubble) <= style::NUMBER_BUBBLE_RADIUS + tolerance {
@@ -85,7 +89,7 @@ pub fn hit_test(annotations: &[Annotation], point: ImagePoint, tolerance: f32) -
     annotations
         .iter()
         .rev()
-        .find_map(|a| hit_annotation(a, point, tolerance).map(|part| Hit { id: a.id(), part }))
+        .find_map(|a| hit_test_annotation(a, point, tolerance).map(|part| Hit { id: a.id(), part }))
 }
 
 #[cfg(test)]

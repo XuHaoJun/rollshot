@@ -7,11 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::canvas::{
-    dragged_annotation, DragState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
+    dragged_annotation, DragState, EditorState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
     DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
 };
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
-use rollshot_image_document::{Annotation, AnnotationId, HitPart, ImagePoint, ImageRect};
+use rollshot_image_document::{
+    hit_test_annotation, Annotation, AnnotationId, Hit, HitPart, ImageDocument, ImagePoint,
+    ImageRect,
+};
 
 // ---------------------------------------------------------------------------
 // Message enum
@@ -122,6 +125,28 @@ fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f3
     }
 }
 
+pub(crate) fn direct_manipulation_hit(
+    document: &ImageDocument,
+    editor: &EditorState,
+    point: ImagePoint,
+    tolerance: f32,
+) -> Option<Hit> {
+    match editor.tool {
+        Tool::Select => document.hit_test(point, tolerance),
+        Tool::Redact => {
+            let annotation = document.annotation(editor.selection?)?;
+            matches!(annotation, Annotation::OpaqueRedaction { .. })
+                .then(|| hit_test_annotation(annotation, point, tolerance))
+                .flatten()
+                .map(|part| Hit {
+                    id: annotation.id(),
+                    part,
+                })
+        }
+        Tool::Number | Tool::Text => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Payload helpers
 // ---------------------------------------------------------------------------
@@ -185,7 +210,7 @@ pub(crate) fn handle_canvas_pressed(
                     }
                 }
             }
-            match state.document.image.hit_test(point, tolerance) {
+            match direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance) {
                 Some(hit) => {
                     let original = state
                         .document
@@ -226,6 +251,23 @@ pub(crate) fn handle_canvas_pressed(
             iced::widget::operation::focus(state.text_editor_id.clone())
         }
         Tool::Redact => {
+            if let Some(hit) =
+                direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance)
+            {
+                let original = state
+                    .document
+                    .image
+                    .annotation(hit.id)
+                    .expect("hit returns existing annotations")
+                    .clone();
+                state.editor.drag = Some(DragState::EditAnnotation {
+                    part: hit.part,
+                    grab_offset: grab_offset(&original, hit.part, point),
+                    current: original.clone(),
+                    original,
+                });
+                return Task::none();
+            }
             state.editor.drag = Some(DragState::CreateRedaction {
                 anchor: point,
                 current: point,
@@ -1328,6 +1370,109 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn redact_tool_resizes_the_selected_redaction_from_a_handle() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            })
+            .unwrap();
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::SelectTool(Tool::Redact));
+
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(120.0, 110.0),
+        );
+
+        assert_eq!(state.document.image.annotations().len(), 1);
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::OpaqueRedaction { bounds, .. } => {
+                assert_eq!(
+                    *bounds,
+                    ImageRect {
+                        x: 50.0,
+                        y: 50.0,
+                        width: 70.0,
+                        height: 60.0
+                    }
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn redact_tool_moves_the_selected_redaction_from_its_body() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            })
+            .unwrap();
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::SelectTool(Tool::Redact));
+
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(100.0, 95.0),
+        );
+
+        assert_eq!(state.document.image.annotations().len(), 1);
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::OpaqueRedaction { bounds, .. } => {
+                assert_eq!(
+                    *bounds,
+                    ImageRect {
+                        x: 80.0,
+                        y: 80.0,
+                        width: 40.0,
+                        height: 30.0
+                    }
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn redact_tool_still_creates_on_empty_canvas_with_a_selection() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            })
+            .unwrap();
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::SelectTool(Tool::Redact));
+
+        press_move_release(
+            &mut state,
+            ImagePoint::new(120.0, 120.0),
+            ImagePoint::new(160.0, 160.0),
+        );
+
+        assert_eq!(state.document.image.annotations().len(), 2);
     }
 
     // -- text editor tests (Task 20) ------------------------------------------

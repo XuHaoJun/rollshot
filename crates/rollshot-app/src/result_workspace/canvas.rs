@@ -154,7 +154,7 @@ use rollshot_image_document::{
     annotation_bounds, annotation_shapes, redaction_handles, style, RenderShape, TextAnchor,
 };
 
-use super::update::Message;
+use super::update::{direct_manipulation_hit, Message};
 
 /// Screen-space radius of selection handles (zoom-independent).
 pub const HANDLE_RADIUS_SCREEN: f32 = 6.0;
@@ -431,20 +431,19 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
         let Some(local) = cursor.position_in(bounds) else {
             return mouse::Interaction::default();
         };
-        match self.editor.tool {
-            Tool::Select => {
-                let tolerance = HIT_TOLERANCE_SCREEN / self.scale;
-                match self.document.hit_test(self.image_point(local), tolerance) {
-                    Some(hit) => match hit.part {
-                        rollshot_image_document::HitPart::Resize(_) => {
-                            mouse::Interaction::Crosshair
-                        }
-                        _ => mouse::Interaction::Grab,
-                    },
-                    None => mouse::Interaction::default(),
-                }
-            }
-            _ => mouse::Interaction::Crosshair,
+        let tolerance = HIT_TOLERANCE_SCREEN / self.scale;
+        match direct_manipulation_hit(
+            self.document,
+            self.editor,
+            self.image_point(local),
+            tolerance,
+        ) {
+            Some(hit) => match hit.part {
+                rollshot_image_document::HitPart::Resize(_) => mouse::Interaction::Crosshair,
+                _ => mouse::Interaction::Grab,
+            },
+            None if self.editor.tool == Tool::Select => mouse::Interaction::default(),
+            None => mouse::Interaction::Crosshair,
         }
     }
 }
