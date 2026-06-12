@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+pub mod auto;
 pub mod kwin_screencast;
 pub mod kwin_screenshot;
 pub mod one_shot;
@@ -53,6 +54,58 @@ impl LinuxPortalBackend {
 impl Default for LinuxPortalBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct LinuxKwinBackend {
+    client: Box<dyn kwin_screencast::KwinScreencastClient>,
+    active_output_resolver: Option<Box<dyn Fn() -> Result<String, CaptureError> + Send>>,
+}
+
+impl LinuxKwinBackend {
+    pub fn new(
+        client: impl kwin_screencast::KwinScreencastClient + 'static,
+        active_output_resolver: Option<Box<dyn Fn() -> Result<String, CaptureError> + Send>>,
+    ) -> Self {
+        Self {
+            client: Box::new(client),
+            active_output_resolver,
+        }
+    }
+}
+
+impl CaptureBackend for LinuxKwinBackend {
+    fn name(&self) -> &'static str {
+        "linux-kwin"
+    }
+
+    fn probe(&self) -> CaptureProbe {
+        CaptureProbe {
+            backend: "linux-kwin",
+            available: true,
+            message: String::new(),
+            details: vec![],
+        }
+    }
+
+    fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
+        let output_name = match &options.target_output_name {
+            Some(name) => name.clone(),
+            None => match &self.active_output_resolver {
+                Some(resolver) => resolver()?,
+                None => {
+                    return Err(CaptureError::InvalidConfig {
+                        message: "no target output and no active-output resolver".to_string(),
+                    })
+                }
+            },
+        };
+
+        let session = self
+            .client
+            .start_output(&output_name, options.show_cursor)?;
+        let stream = pipewire::LinuxPipeWireFrameStream::connect_kwin(session, options)?;
+        Ok(Box::new(stream))
     }
 }
 

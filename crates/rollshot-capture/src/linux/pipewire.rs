@@ -872,7 +872,13 @@ impl LinuxPipeWireFrameStream<super::kwin_screencast::KwinScreencastSession> {
         options: crate::types::CaptureOptions,
     ) -> Result<Self, CaptureError> {
         let node_id = session.node_id();
-        Self::connect(PipeWireRemote::Default, node_id, "linux-kwin", session, options)
+        Self::connect(
+            PipeWireRemote::Default,
+            node_id,
+            "linux-kwin",
+            session,
+            options,
+        )
     }
 }
 

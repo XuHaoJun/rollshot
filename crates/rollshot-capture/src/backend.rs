@@ -57,7 +57,22 @@ impl BackendKind {
                 tracing::error!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend creation failed");
                 Err(err)
             }
-            BackendKind::LinuxAuto | BackendKind::LinuxPortalPipeWire => {
+            BackendKind::LinuxAuto => {
+                #[cfg(target_os = "linux")]
+                {
+                    tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
+                    Ok(Box::new(crate::linux::auto::LinuxAutoBackend::new()))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let err = CaptureError::Unsupported {
+                        message: "linux-auto backend requires a Linux host".to_string(),
+                    };
+                    tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                    Err(err)
+                }
+            }
+            BackendKind::LinuxPortalPipeWire => {
                 #[cfg(target_os = "linux")]
                 {
                     tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
@@ -73,11 +88,22 @@ impl BackendKind {
                 }
             }
             BackendKind::LinuxKwinPipeWire => {
-                let err = CaptureError::Unsupported {
-                    message: "linux-kwin backend not yet wired".to_string(),
-                };
-                tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
-                Err(err)
+                #[cfg(target_os = "linux")]
+                {
+                    tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
+                    Ok(Box::new(crate::linux::LinuxKwinBackend::new(
+                        crate::linux::kwin_screencast::RealKwinScreencastClient::new(),
+                        None,
+                    )))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let err = CaptureError::Unsupported {
+                        message: "linux-kwin backend requires a Linux host".to_string(),
+                    };
+                    tracing::warn!(target: TARGET_CAPTURE, kind = self.as_flag(), error = %err, "backend unsupported");
+                    Err(err)
+                }
             }
             BackendKind::MacosScreenCaptureKit => {
                 #[cfg(target_os = "macos")]
