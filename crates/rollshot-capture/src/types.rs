@@ -148,7 +148,10 @@ mod tests {
         };
 
         let json = serde_json::to_string(&options).expect("serialize launch options");
-        assert!(json.contains("\"backend\":\"linux-portal\""), "json = {json}");
+        assert!(
+            json.contains("\"backend\":\"linux-portal\""),
+            "json = {json}"
+        );
         assert!(
             json.contains("\"initial_mode\":\"screenshot\""),
             "json = {json}"

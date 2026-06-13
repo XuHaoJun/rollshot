@@ -313,7 +313,6 @@ mod tests {
             err.message
         );
         assert!(err.message.contains("--headless"), "{}", err.message);
-
     }
 
     #[test]
@@ -323,6 +322,5 @@ mod tests {
 
         assert!(err.message.contains("not found"), "{}", err.message);
         assert!(err.message.contains("ROLLSHOT_APP"), "{}", err.message);
-
     }
 }

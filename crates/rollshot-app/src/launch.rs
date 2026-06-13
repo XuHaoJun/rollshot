@@ -102,12 +102,8 @@ mod tests {
         let payload = format!(
             r#"{{"backend":"macos-sck","fps":30,"show_cursor":false,"{obsolete_field}":"legacy"}}"#
         );
-        let mode = parse_launch_args([
-            "rollshot-app",
-            "--capture",
-            payload.as_str(),
-        ])
-        .expect("parse launch args");
+        let mode = parse_launch_args(["rollshot-app", "--capture", payload.as_str()])
+            .expect("parse launch args");
 
         match mode {
             LaunchMode::Capture(options) => {
