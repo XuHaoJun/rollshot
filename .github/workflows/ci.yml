@@ -7,38 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  frontend-test:
-    name: Frontend Test
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.8.1
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24.15.0
-          cache: pnpm
-          cache-dependency-path: crates/rollshot-tauri-app/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        run: pnpm --dir crates/rollshot-tauri-app install --frozen-lockfile
-
-      - name: Test frontend
-        run: pnpm --dir crates/rollshot-tauri-app test
-
-      - name: Typecheck frontend
-        run: pnpm --dir crates/rollshot-tauri-app typecheck
-
-      - name: Build frontend
-        run: pnpm --dir crates/rollshot-tauri-app build
-
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -61,7 +29,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-dev libdbus-1-dev
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Check explicit tracing targets
         run: ./scripts/check-tracing-targets.sh
@@ -80,7 +47,6 @@ jobs:
         run: |
           cargo check -p rollshot-capture --all-targets
           cargo check -p rollshot-cli --all-targets
-          cargo check -p rollshot-tauri-app --all-targets
           cargo check -p rollshot-iced-overlay --all-targets
           cargo check -p rollshot-app --all-targets
           cargo check -p rollshot-macos-oneshot --all-targets
