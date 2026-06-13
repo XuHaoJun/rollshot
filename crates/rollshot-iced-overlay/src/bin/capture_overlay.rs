@@ -1,5 +1,5 @@
-//! Standalone harness for the Phase 3 KDE 6 acceptance checks. Stands in for
-//! Tauri: runs the overlay, then saves the finalized image as a PNG.
+//! Standalone harness for the Phase 3 KDE 6 acceptance checks. Runs the
+//! overlay, then saves the finalized image as a PNG.
 
 use rollshot_iced_overlay::{run_overlay, OverlayConfig};
 

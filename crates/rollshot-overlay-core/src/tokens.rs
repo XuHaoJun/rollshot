@@ -1,7 +1,5 @@
-//! Crop selection visual design tokens. Canonical source of truth, mirrored in
-//! `crates/rollshot-tauri-app/src/App.css` `:root` and consumed by the iced overlay's
-//! `CropCanvas`. The token sync test in `rollshot-tauri-app/src-tauri` asserts the CSS
-//! values still match these.
+//! Crop selection visual design tokens consumed by the iced overlay's
+//! `CropCanvas`.
 
 /// An sRGB color: 8-bit channels + float alpha — the form both CSS
 /// (`#rrggbb` / `rgba(r,g,b,a)`) and `iced::Color::from_rgba8` can express.
@@ -18,8 +16,7 @@ impl Rgba {
         Self { r, g, b, a }
     }
 
-    /// CSS spelling: `#rrggbb` when opaque, else `rgba(r, g, b, a)`. Matches the
-    /// exact text used in App.css so the sync test can compare by substring.
+    /// CSS-compatible spelling: `#rrggbb` when opaque, else `rgba(r, g, b, a)`.
     pub fn to_css(&self) -> String {
         if self.a >= 1.0 {
             format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)

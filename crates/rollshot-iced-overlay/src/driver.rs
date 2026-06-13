@@ -63,8 +63,7 @@ impl SendStream {
     }
 }
 
-/// StitchConfig the overlay uses (matches the Tauri app default,
-/// session.rs:188-190).
+/// Stitch configuration used by the live capture overlay.
 #[allow(dead_code)]
 pub fn overlay_stitch_config() -> StitchConfig {
     let mut config = StitchConfig::default();
@@ -73,8 +72,7 @@ pub fn overlay_stitch_config() -> StitchConfig {
 }
 
 /// Crop+stitch a finite frame stream to completion. This is the tested core
-/// the threaded live driver (Task 5) wraps. Mirrors the crop+push+finalize of
-/// session.rs:199-212,214-231.
+/// the threaded live driver wraps.
 #[allow(dead_code)]
 pub fn stitch_stream(
     mut stream: Box<dyn FrameStream>,
