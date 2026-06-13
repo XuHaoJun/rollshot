@@ -278,6 +278,25 @@ mod tests {
     }
 
     #[test]
+    fn reveal_labels_cover_disabled_general_original_and_last_safe_export() {
+        let unsaved = ResultDocument::unsaved(image());
+        assert_eq!(reveal_action(&unsaved).label(), "Reveal");
+
+        let saved_doc = saved();
+        assert_eq!(reveal_action(&saved_doc).label(), "Reveal");
+
+        let mut redacted = saved();
+        add_redaction(&mut redacted);
+        assert_eq!(
+            reveal_action(&redacted).label(),
+            "Reveal Unredacted Original\u{2026}"
+        );
+
+        redacted.last_export_path = Some(PathBuf::from("/tmp/safe.png"));
+        assert_eq!(reveal_action(&redacted).label(), "Reveal Last Safe Export");
+    }
+
+    #[test]
     fn user_facing_policy_copy_never_says_secure() {
         let mut document = saved();
         add_redaction(&mut document);

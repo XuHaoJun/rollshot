@@ -100,10 +100,8 @@ pub enum Message {
     /// Commit the inline text editor draft.
     CommitTextDraft,
     /// User confirmed the pending unredacted-action dialog.
-    #[allow(dead_code)]
     ConfirmUnredactedAction,
     /// User cancelled the pending unredacted-action dialog.
-    #[allow(dead_code)]
     CancelUnredactedAction,
 }
 

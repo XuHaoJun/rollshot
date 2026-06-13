@@ -162,6 +162,7 @@ impl ResultWorkspace {
     }
 
     /// Reveal is only meaningful once the capture has a durable path on disk.
+    #[allow(dead_code)]
     pub fn can_reveal(&self) -> bool {
         self.document.reveal_path().is_some()
     }
