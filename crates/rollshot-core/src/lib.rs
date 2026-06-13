@@ -15,6 +15,6 @@ pub use metrics::{StitchMetrics, StitchOutcomeKind};
 pub use stitcher::Stitcher;
 pub use types::{
     AppendDirection, FastHnswConfig, MatchMethod, MatchStrategy, MotionCandidate, MotionEstimate,
-    NoMatchReason, OverlapRegion, ScrollAxis, StitchConfig, StitchOutcome, StitchStats,
-    VerifierConfig,
+    NoMatchReason, OverlapRegion, RecoveryProbeResult, ScrollAxis, StitchConfig, StitchOutcome,
+    StitchStats, VerifierConfig,
 };

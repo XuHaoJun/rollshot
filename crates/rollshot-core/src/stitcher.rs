@@ -7,8 +7,8 @@ use crate::matcher::{estimate_motion, MotionSearchOutcome, PreparedFrame};
 use crate::metrics::{StitchMetrics, StitchOutcomeKind};
 use crate::overlap::compute_overlap;
 use crate::types::{
-    AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, ScrollAxis, StitchConfig,
-    StitchOutcome, StitchStats,
+    AppendDirection, MotionCandidate, MotionEstimate, NoMatchReason, OverlapRegion,
+    RecoveryProbeResult, ScrollAxis, StitchConfig, StitchOutcome, StitchStats,
 };
 use crate::verifier::{PixelOverlapVerifier, VerifierOutcome};
 
@@ -49,6 +49,18 @@ impl Stitcher {
     }
 
     pub fn push_frame(&mut self, frame: RgbaImage) -> StitchOutcome {
+        self.push_frame_with_reanchor(frame, true)
+    }
+
+    pub fn push_frame_preserving_anchor(&mut self, frame: RgbaImage) -> StitchOutcome {
+        self.push_frame_with_reanchor(frame, false)
+    }
+
+    fn push_frame_with_reanchor(
+        &mut self,
+        frame: RgbaImage,
+        allow_reanchor: bool,
+    ) -> StitchOutcome {
         let total_start = std::time::Instant::now();
         self.last_metrics = StitchMetrics::default();
         self.last_metrics.frame_index = self.frame_counter;
@@ -57,41 +69,45 @@ impl Stitcher {
         // Keep a copy only while at risk of re-anchoring (mid miss-streak), so
         // clean steady-state frames pay no clone cost. A stale/bad anchor
         // (e.g. a lazy-load image not yet painted) must not block forever.
-        let reanchor_candidate =
-            if self.canvas.is_some() && self.first_frame_misses + 1 >= REANCHOR_MISS_THRESHOLD {
-                Some(frame.clone())
-            } else {
-                None
-            };
+        let reanchor_candidate = if allow_reanchor
+            && self.canvas.is_some()
+            && self.first_frame_misses + 1 >= REANCHOR_MISS_THRESHOLD
+        {
+            Some(frame.clone())
+        } else {
+            None
+        };
 
         let outcome = self.push_frame_inner(frame);
 
-        // Only a genuine content disagreement counts toward the re-anchor floor.
-        // `ReverseDirection` is a deliberate, valid rejection (the user scrolled
-        // back the way they came); the overlapping frame is not a stall, so it
-        // must not erode the monotonic-direction guard by triggering a re-anchor.
-        let counts_as_miss = matches!(
-            outcome,
-            StitchOutcome::NoMatch { reason, .. }
-                if reason != NoMatchReason::ReverseDirection
-        );
-        if counts_as_miss {
-            if self.canvas.is_some() {
-                self.first_frame_misses += 1;
-                if self.first_frame_misses >= REANCHOR_MISS_THRESHOLD {
-                    if let Some(candidate) = reanchor_candidate {
-                        if self.stats.frame_count == 1 {
-                            // Stale first frame: nothing committed, rebuild.
-                            self.reanchor_to(candidate);
-                        } else {
-                            // Mid-capture: PRESERVE the committed canvas.
-                            self.reanchor_mid_capture(candidate);
+        if allow_reanchor {
+            // Only a genuine content disagreement counts toward the re-anchor floor.
+            // `ReverseDirection` is a deliberate, valid rejection (the user scrolled
+            // back the way they came); the overlapping frame is not a stall, so it
+            // must not erode the monotonic-direction guard by triggering a re-anchor.
+            let counts_as_miss = matches!(
+                outcome,
+                StitchOutcome::NoMatch { reason, .. }
+                    if reason != NoMatchReason::ReverseDirection
+            );
+            if counts_as_miss {
+                if self.canvas.is_some() {
+                    self.first_frame_misses += 1;
+                    if self.first_frame_misses >= REANCHOR_MISS_THRESHOLD {
+                        if let Some(candidate) = reanchor_candidate {
+                            if self.stats.frame_count == 1 {
+                                // Stale first frame: nothing committed, rebuild.
+                                self.reanchor_to(candidate);
+                            } else {
+                                // Mid-capture: PRESERVE the committed canvas.
+                                self.reanchor_mid_capture(candidate);
+                            }
                         }
                     }
                 }
+            } else if self.canvas.is_some() {
+                self.first_frame_misses = 0;
             }
-        } else if self.canvas.is_some() {
-            self.first_frame_misses = 0;
         }
 
         // Snapshot canvas state on every return path so the per-frame record
@@ -100,40 +116,7 @@ impl Stitcher {
         self.snapshot_canvas_state();
         self.last_metrics.total_us = total_start.elapsed().as_micros() as u64;
 
-        let metrics = &self.last_metrics;
-        tracing::trace!(
-            target: crate::diagnostics::TARGET_STITCH,
-            frame_index = metrics.frame_index,
-            outcome = ?metrics.outcome,
-            no_match_reason = ?metrics.no_match_reason,
-            total_us = metrics.total_us,
-            best_dx = metrics.best_dx,
-            best_dy = metrics.best_dy,
-            best_score = metrics.best_score,
-            second_best_score = ?metrics.second_best_score,
-            match_method = ?metrics.match_method,
-            canvas_logical_pixels = metrics.canvas_logical_pixels,
-            canvas_allocated_bytes = metrics.canvas_allocated_bytes,
-            "processed stitch frame"
-        );
-
-        if matches!(outcome, StitchOutcome::NoMatch { .. }) {
-            tracing::debug!(
-                target: crate::diagnostics::TARGET_STITCH,
-                frame_index = metrics.frame_index,
-                reason = ?metrics.no_match_reason,
-                total_us = metrics.total_us,
-                "frame rejected"
-            );
-        } else if matches!(outcome, StitchOutcome::AxisChanged { .. }) {
-            tracing::debug!(
-                target: crate::diagnostics::TARGET_STITCH,
-                frame_index = metrics.frame_index,
-                outcome = ?metrics.outcome,
-                total_us = metrics.total_us,
-                "axis changed"
-            );
-        }
+        self.log_frame_outcome(&outcome);
 
         outcome
     }
@@ -177,111 +160,266 @@ impl Stitcher {
             PreparedFrame::from_parts(frame, signature)
         };
 
+        let mut metrics = std::mem::take(&mut self.last_metrics);
+        let evaluation = self.evaluate_frame(anchor, &curr, &mut metrics, true);
+        self.last_metrics = metrics;
+
+        match evaluation {
+            FrameEvaluation::Append {
+                candidate,
+                direction,
+                overlap,
+            } => {
+                let slice_px = match direction {
+                    AppendDirection::Bottom | AppendDirection::Top => candidate.dy.unsigned_abs(),
+                    AppendDirection::Right | AppendDirection::Left => candidate.dx.unsigned_abs(),
+                };
+                let append_result = {
+                    let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.append_us);
+                    let canvas = self
+                        .canvas
+                        .as_mut()
+                        .expect("canvas present after first frame");
+                    canvas.append(direction, curr.rgba(), slice_px)
+                };
+                let added = match append_result {
+                    Ok(n) => n,
+                    Err(CanvasAppendError::AxisMismatch { locked, attempted }) => {
+                        let estimate = MotionEstimate {
+                            dx: candidate.dx,
+                            dy: candidate.dy,
+                            axis: attempted,
+                            direction,
+                            confidence: candidate.score,
+                            method: candidate.method,
+                            overlap,
+                            inliers: candidate.inliers,
+                            raw_matches: candidate.raw_matches,
+                        };
+                        self.last_metrics.outcome = StitchOutcomeKind::AxisChanged;
+                        return StitchOutcome::AxisChanged {
+                            previous_axis: locked,
+                            new_axis: attempted,
+                            estimate,
+                        };
+                    }
+                    Err(CanvasAppendError::DimensionMismatch { .. }) => {
+                        self.last_metrics
+                            .set_no_match(NoMatchReason::DimensionMismatch);
+                        return StitchOutcome::NoMatch {
+                            reason: NoMatchReason::DimensionMismatch,
+                            best_estimate: build_estimate(
+                                anchor.rgba(),
+                                curr.rgba(),
+                                &candidate,
+                                self.config.axis_ratio_threshold,
+                            ),
+                        };
+                    }
+                    Err(CanvasAppendError::EmptyAppend) => {
+                        self.last_metrics.outcome = StitchOutcomeKind::NoProgress;
+                        return StitchOutcome::NoProgress {
+                            estimate: build_estimate(
+                                anchor.rgba(),
+                                curr.rgba(),
+                                &candidate,
+                                self.config.axis_ratio_threshold,
+                            ),
+                        };
+                    }
+                };
+                let (canvas_height, canvas_width, append_copied_bytes) = {
+                    let canvas = self
+                        .canvas
+                        .as_ref()
+                        .expect("canvas present after first frame");
+                    (
+                        canvas.height(),
+                        canvas.width(),
+                        canvas.last_append_copied_bytes(),
+                    )
+                };
+                self.last_metrics.append_copied_bytes = append_copied_bytes;
+
+                self.locked_axis = Some(direction.axis());
+                self.locked_direction = Some(direction);
+                self.last_motion = (candidate.dx, candidate.dy);
+
+                let estimate = MotionEstimate {
+                    dx: candidate.dx,
+                    dy: candidate.dy,
+                    axis: direction.axis(),
+                    direction,
+                    confidence: candidate.score,
+                    method: candidate.method,
+                    overlap,
+                    inliers: candidate.inliers,
+                    raw_matches: candidate.raw_matches,
+                };
+
+                self.last_good = Some(curr);
+                self.stats.frame_count += 1;
+                self.stats.total_height = canvas_height;
+                self.stats.total_width = canvas_width;
+                self.stats.last_append = added;
+
+                self.last_metrics.outcome = StitchOutcomeKind::Appended;
+
+                StitchOutcome::Appended {
+                    direction,
+                    added,
+                    estimate,
+                }
+            }
+            FrameEvaluation::NoProgress { candidate } => {
+                self.last_metrics.outcome = StitchOutcomeKind::NoProgress;
+                StitchOutcome::NoProgress {
+                    estimate: build_estimate(
+                        anchor.rgba(),
+                        curr.rgba(),
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    ),
+                }
+            }
+            FrameEvaluation::AxisChanged {
+                candidate,
+                new_axis,
+                locked,
+            } => {
+                self.last_metrics.outcome = StitchOutcomeKind::AxisChanged;
+                StitchOutcome::AxisChanged {
+                    previous_axis: locked,
+                    new_axis,
+                    estimate: build_estimate(
+                        anchor.rgba(),
+                        curr.rgba(),
+                        &candidate,
+                        self.config.axis_ratio_threshold,
+                    )
+                    .expect("axis-change estimate must compute overlap"),
+                }
+            }
+            FrameEvaluation::Reject { reason, candidate } => {
+                self.last_metrics.set_no_match(reason);
+                StitchOutcome::NoMatch {
+                    reason,
+                    best_estimate: candidate.and_then(|c| {
+                        build_estimate(
+                            anchor.rgba(),
+                            curr.rgba(),
+                            &c,
+                            self.config.axis_ratio_threshold,
+                        )
+                    }),
+                }
+            }
+        }
+    }
+
+    pub fn probe_recovery(&self, frame: &RgbaImage) -> RecoveryProbeResult {
+        if self.canvas.is_none() || self.last_good.is_none() {
+            return RecoveryProbeResult::Missed;
+        }
+        let anchor = self.last_good.as_ref().unwrap();
+
+        if anchor.dimensions() != frame.dimensions() {
+            return RecoveryProbeResult::Missed;
+        }
+
+        let signature = duplicate::signature(frame);
+        if duplicate::is_duplicate(
+            anchor.signature(),
+            &signature,
+            self.config.duplicate_threshold,
+        ) {
+            return RecoveryProbeResult::Recovered;
+        }
+
+        let curr = PreparedFrame::from_parts(frame.clone(), signature);
+
+        let mut metrics = StitchMetrics::default();
+        match self.evaluate_frame(anchor, &curr, &mut metrics, false) {
+            FrameEvaluation::Append { .. } | FrameEvaluation::NoProgress { .. } => {
+                RecoveryProbeResult::Recovered
+            }
+            FrameEvaluation::AxisChanged { .. } | FrameEvaluation::Reject { .. } => {
+                RecoveryProbeResult::Missed
+            }
+        }
+    }
+
+    fn evaluate_frame(
+        &self,
+        anchor: &PreparedFrame,
+        curr: &PreparedFrame,
+        metrics: &mut StitchMetrics,
+        enforce_direction_lock: bool,
+    ) -> FrameEvaluation {
         let candidate = match estimate_motion(
             anchor,
-            &curr,
+            curr,
             self.locked_axis,
             self.last_motion,
             &self.config,
-            &mut self.last_metrics,
+            metrics,
         ) {
             MotionSearchOutcome::Candidate(c) => c,
             MotionSearchOutcome::NoMatch {
                 reason,
                 best_candidate,
             } => {
-                let best_estimate = best_candidate.and_then(|candidate| {
-                    build_estimate(
-                        anchor.rgba(),
-                        curr.rgba(),
-                        &candidate,
-                        self.config.axis_ratio_threshold,
-                    )
-                });
-                self.last_metrics.set_no_match(reason);
-                return StitchOutcome::NoMatch {
+                return FrameEvaluation::Reject {
                     reason,
-                    best_estimate,
+                    candidate: best_candidate,
                 };
             }
         };
 
-        self.last_metrics.best_dx = candidate.dx;
-        self.last_metrics.best_dy = candidate.dy;
-        self.last_metrics.best_score = candidate.score;
-        self.last_metrics.second_best_score = candidate.second_best_score;
-        self.last_metrics.match_method = Some(candidate.method);
+        metrics.best_dx = candidate.dx;
+        metrics.best_dy = candidate.dy;
+        metrics.best_score = candidate.score;
+        metrics.second_best_score = candidate.second_best_score;
+        metrics.match_method = Some(candidate.method);
 
         if candidate.score > self.config.accept_confidence {
-            self.last_metrics.set_no_match(NoMatchReason::LowConfidence);
-            return StitchOutcome::NoMatch {
+            return FrameEvaluation::Reject {
                 reason: NoMatchReason::LowConfidence,
-                best_estimate: build_estimate(
-                    anchor.rgba(),
-                    curr.rgba(),
-                    &candidate,
-                    self.config.axis_ratio_threshold,
-                ),
+                candidate: Some(candidate),
             };
         }
 
         let direction = match self.classify_direction(&candidate) {
             DirectionResult::Direction(dir) => dir,
             DirectionResult::Ambiguous => {
-                self.last_metrics.set_no_match(NoMatchReason::AmbiguousAxis);
-                return StitchOutcome::NoMatch {
+                return FrameEvaluation::Reject {
                     reason: NoMatchReason::AmbiguousAxis,
-                    best_estimate: build_estimate(
-                        anchor.rgba(),
-                        curr.rgba(),
-                        &candidate,
-                        self.config.axis_ratio_threshold,
-                    ),
+                    candidate: Some(candidate),
                 };
             }
             DirectionResult::CrossAxisTooLarge => {
-                self.last_metrics
-                    .set_no_match(NoMatchReason::CrossAxisTooLarge);
-                return StitchOutcome::NoMatch {
+                return FrameEvaluation::Reject {
                     reason: NoMatchReason::CrossAxisTooLarge,
-                    best_estimate: build_estimate(
-                        anchor.rgba(),
-                        curr.rgba(),
-                        &candidate,
-                        self.config.axis_ratio_threshold,
-                    ),
+                    candidate: Some(candidate),
                 };
             }
             DirectionResult::AxisChanged { new_axis, locked } => {
-                let estimate = build_estimate(
-                    anchor.rgba(),
-                    curr.rgba(),
-                    &candidate,
-                    self.config.axis_ratio_threshold,
-                )
-                .expect("axis-change estimate must compute overlap");
-                self.last_metrics.outcome = StitchOutcomeKind::AxisChanged;
-                return StitchOutcome::AxisChanged {
-                    previous_axis: locked,
+                return FrameEvaluation::AxisChanged {
+                    candidate,
                     new_axis,
-                    estimate,
+                    locked,
                 };
             }
         };
 
-        if let Some(locked_dir) = self.locked_direction {
-            if direction != locked_dir {
-                self.last_metrics
-                    .set_no_match(NoMatchReason::ReverseDirection);
-                return StitchOutcome::NoMatch {
-                    reason: NoMatchReason::ReverseDirection,
-                    best_estimate: build_estimate(
-                        anchor.rgba(),
-                        curr.rgba(),
-                        &candidate,
-                        self.config.axis_ratio_threshold,
-                    ),
-                };
+        if enforce_direction_lock {
+            if let Some(locked_dir) = self.locked_direction {
+                if direction != locked_dir {
+                    return FrameEvaluation::Reject {
+                        reason: NoMatchReason::ReverseDirection,
+                        candidate: Some(candidate),
+                    };
+                }
             }
         }
 
@@ -290,152 +428,33 @@ impl Stitcher {
             AppendDirection::Right | AppendDirection::Left => candidate.dx.unsigned_abs(),
         };
         if slice_px < self.config.min_append {
-            self.last_metrics.outcome = StitchOutcomeKind::NoProgress;
-            return StitchOutcome::NoProgress {
-                estimate: build_estimate(
-                    anchor.rgba(),
-                    curr.rgba(),
-                    &candidate,
-                    self.config.axis_ratio_threshold,
-                ),
-            };
+            return FrameEvaluation::NoProgress { candidate };
         }
 
         let verifier = PixelOverlapVerifier::new(&self.config.verifier, self.config.min_overlap);
-        let (overlap_region, _verifier_score) = {
-            let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.verifier_us);
+        let overlap_region = {
+            let _t = crate::metrics::ScopedTimer::new(&mut metrics.verifier_us);
             match verifier.verify(anchor.rgba(), curr.rgba(), &candidate) {
-                VerifierOutcome::Pass { overlap, score } => (overlap, score),
+                VerifierOutcome::Pass { overlap, .. } => overlap,
                 VerifierOutcome::InsufficientOverlap => {
-                    drop(_t);
-                    self.last_metrics
-                        .set_no_match(NoMatchReason::InsufficientOverlap);
-                    return StitchOutcome::NoMatch {
+                    return FrameEvaluation::Reject {
                         reason: NoMatchReason::InsufficientOverlap,
-                        best_estimate: build_estimate(
-                            anchor.rgba(),
-                            curr.rgba(),
-                            &candidate,
-                            self.config.axis_ratio_threshold,
-                        ),
+                        candidate: Some(candidate),
                     };
                 }
                 VerifierOutcome::OverlapDisagreement { .. } => {
-                    drop(_t);
-                    self.last_metrics
-                        .set_no_match(NoMatchReason::OverlapVerificationFailed);
-                    return StitchOutcome::NoMatch {
+                    return FrameEvaluation::Reject {
                         reason: NoMatchReason::OverlapVerificationFailed,
-                        best_estimate: build_estimate(
-                            anchor.rgba(),
-                            curr.rgba(),
-                            &candidate,
-                            self.config.axis_ratio_threshold,
-                        ),
+                        candidate: Some(candidate),
                     };
                 }
             }
         };
 
-        // Run the append in its own scope so the canvas borrow (and the append
-        // timer) are released before the error match. That lets the error arms
-        // borrow `anchor`/`self.last_metrics` again and compute `build_estimate`
-        // lazily — only on the rejection paths that actually need it.
-        let append_result = {
-            let _t = crate::metrics::ScopedTimer::new(&mut self.last_metrics.append_us);
-            let canvas = self
-                .canvas
-                .as_mut()
-                .expect("canvas present after first frame");
-            canvas.append(direction, curr.rgba(), slice_px)
-        };
-        let added = match append_result {
-            Ok(n) => n,
-            Err(CanvasAppendError::AxisMismatch { locked, attempted }) => {
-                let estimate = MotionEstimate {
-                    dx: candidate.dx,
-                    dy: candidate.dy,
-                    axis: attempted,
-                    direction,
-                    confidence: candidate.score,
-                    method: candidate.method,
-                    overlap: overlap_region,
-                    inliers: candidate.inliers,
-                    raw_matches: candidate.raw_matches,
-                };
-                self.last_metrics.outcome = StitchOutcomeKind::AxisChanged;
-                return StitchOutcome::AxisChanged {
-                    previous_axis: locked,
-                    new_axis: attempted,
-                    estimate,
-                };
-            }
-            Err(CanvasAppendError::DimensionMismatch { .. }) => {
-                self.last_metrics
-                    .set_no_match(NoMatchReason::DimensionMismatch);
-                return StitchOutcome::NoMatch {
-                    reason: NoMatchReason::DimensionMismatch,
-                    best_estimate: build_estimate(
-                        anchor.rgba(),
-                        curr.rgba(),
-                        &candidate,
-                        self.config.axis_ratio_threshold,
-                    ),
-                };
-            }
-            Err(CanvasAppendError::EmptyAppend) => {
-                self.last_metrics.outcome = StitchOutcomeKind::NoProgress;
-                return StitchOutcome::NoProgress {
-                    estimate: build_estimate(
-                        anchor.rgba(),
-                        curr.rgba(),
-                        &candidate,
-                        self.config.axis_ratio_threshold,
-                    ),
-                };
-            }
-        };
-        let (canvas_height, canvas_width, append_copied_bytes) = {
-            let canvas = self
-                .canvas
-                .as_ref()
-                .expect("canvas present after first frame");
-            (
-                canvas.height(),
-                canvas.width(),
-                canvas.last_append_copied_bytes(),
-            )
-        };
-        self.last_metrics.append_copied_bytes = append_copied_bytes;
-
-        self.locked_axis = Some(direction.axis());
-        self.locked_direction = Some(direction);
-        self.last_motion = (candidate.dx, candidate.dy);
-
-        let estimate = MotionEstimate {
-            dx: candidate.dx,
-            dy: candidate.dy,
-            axis: direction.axis(),
+        FrameEvaluation::Append {
+            candidate,
             direction,
-            confidence: candidate.score,
-            method: candidate.method,
             overlap: overlap_region,
-            inliers: candidate.inliers,
-            raw_matches: candidate.raw_matches,
-        };
-
-        self.last_good = Some(curr);
-        self.stats.frame_count += 1;
-        self.stats.total_height = canvas_height;
-        self.stats.total_width = canvas_width;
-        self.stats.last_append = added;
-
-        self.last_metrics.outcome = StitchOutcomeKind::Appended;
-
-        StitchOutcome::Appended {
-            direction,
-            added,
-            estimate,
         }
     }
 
@@ -516,6 +535,43 @@ impl Stitcher {
         }
     }
 
+    fn log_frame_outcome(&self, outcome: &StitchOutcome) {
+        let metrics = &self.last_metrics;
+        tracing::trace!(
+            target: crate::diagnostics::TARGET_STITCH,
+            frame_index = metrics.frame_index,
+            outcome = ?metrics.outcome,
+            no_match_reason = ?metrics.no_match_reason,
+            total_us = metrics.total_us,
+            best_dx = metrics.best_dx,
+            best_dy = metrics.best_dy,
+            best_score = metrics.best_score,
+            second_best_score = ?metrics.second_best_score,
+            match_method = ?metrics.match_method,
+            canvas_logical_pixels = metrics.canvas_logical_pixels,
+            canvas_allocated_bytes = metrics.canvas_allocated_bytes,
+            "processed stitch frame"
+        );
+
+        if matches!(outcome, StitchOutcome::NoMatch { .. }) {
+            tracing::debug!(
+                target: crate::diagnostics::TARGET_STITCH,
+                frame_index = metrics.frame_index,
+                reason = ?metrics.no_match_reason,
+                total_us = metrics.total_us,
+                "frame rejected"
+            );
+        } else if matches!(outcome, StitchOutcome::AxisChanged { .. }) {
+            tracing::debug!(
+                target: crate::diagnostics::TARGET_STITCH,
+                frame_index = metrics.frame_index,
+                outcome = ?metrics.outcome,
+                total_us = metrics.total_us,
+                "axis changed"
+            );
+        }
+    }
+
     fn classify_direction(&self, candidate: &MotionCandidate) -> DirectionResult {
         match self.locked_axis {
             None => {
@@ -550,6 +606,26 @@ enum DirectionResult {
     AxisChanged {
         new_axis: ScrollAxis,
         locked: ScrollAxis,
+    },
+}
+
+enum FrameEvaluation {
+    Append {
+        candidate: MotionCandidate,
+        direction: AppendDirection,
+        overlap: OverlapRegion,
+    },
+    NoProgress {
+        candidate: MotionCandidate,
+    },
+    AxisChanged {
+        candidate: MotionCandidate,
+        new_axis: ScrollAxis,
+        locked: ScrollAxis,
+    },
+    Reject {
+        reason: NoMatchReason,
+        candidate: Option<MotionCandidate>,
     },
 }
 

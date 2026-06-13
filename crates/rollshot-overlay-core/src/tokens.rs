@@ -38,6 +38,9 @@ pub const CROP_DIM: Rgba = Rgba::new(0, 0, 0, 0.22);
 /// Cursor crosshair guides.
 pub const CROP_GUIDE: Rgba = Rgba::new(147, 197, 253, 0.48);
 pub const CROP_GUIDE_WIDTH: f32 = 1.0;
+/// Recovery edge guide (amber) — drawn on the captured edge while paused.
+pub const RECOVERY_EDGE: Rgba = Rgba::new(0xf5, 0x9e, 0x0b, 1.0);
+pub const RECOVERY_EDGE_WIDTH: f32 = 4.0;
 
 #[cfg(test)]
 mod tests {
@@ -52,5 +55,10 @@ mod tests {
     fn to_css_translucent_is_rgba() {
         assert_eq!(CROP_MASK.to_css(), "rgba(0, 0, 0, 0.24)");
         assert_eq!(CROP_GUIDE.to_css(), "rgba(147, 197, 253, 0.48)");
+    }
+
+    #[test]
+    fn recovery_edge_is_amber() {
+        assert_eq!(RECOVERY_EDGE.to_css(), "#f59e0b");
     }
 }

@@ -12,6 +12,7 @@ pub const CAPTURE_MISS_THROTTLE: Duration = Duration::from_millis(3000);
 pub enum StitchProgressSignal {
     Accepted { edge: CapturedEdge },
     Missed { edge: CapturedEdge },
+    ReverseDirection,
     Idle,
 }
 
@@ -63,10 +64,18 @@ pub fn progress_signal_from_outcome(outcome: &StitchOutcome) -> StitchProgressSi
         StitchOutcome::Appended { direction, .. } => StitchProgressSignal::Accepted {
             edge: captured_edge_from_direction(*direction),
         },
-        StitchOutcome::NoMatch { best_estimate, .. } => StitchProgressSignal::Missed {
-            edge: best_estimate
-                .map(|estimate| captured_edge_from_direction(estimate.direction))
-                .unwrap_or(CapturedEdge::Unknown),
+        StitchOutcome::NoMatch {
+            reason,
+            best_estimate,
+        } => match reason {
+            rollshot_core::NoMatchReason::ReverseDirection => {
+                StitchProgressSignal::ReverseDirection
+            }
+            _ => StitchProgressSignal::Missed {
+                edge: best_estimate
+                    .map(|estimate| captured_edge_from_direction(estimate.direction))
+                    .unwrap_or(CapturedEdge::Unknown),
+            },
         },
         StitchOutcome::AxisChanged { estimate, .. } => StitchProgressSignal::Missed {
             edge: captured_edge_from_direction(estimate.direction),
@@ -75,10 +84,20 @@ pub fn progress_signal_from_outcome(outcome: &StitchOutcome) -> StitchProgressSi
     }
 }
 
+/// Two-miss recovery gate for capture-miss tracking.
+///
+/// ```text
+/// Stitching { consecutive_misses }
+///   -- second consecutive genuine miss -->
+/// Paused { captured_edge }
+///   -- reliable match against frozen last_good -->
+/// Stitching { consecutive_misses: 0 }
+/// ```
 #[derive(Debug)]
 pub struct CaptureMissTracker {
     active: bool,
-    edge: CapturedEdge,
+    captured_edge: CapturedEdge,
+    consecutive_misses: u8,
     last_warning_at: Option<Instant>,
     throttle: Duration,
 }
@@ -93,44 +112,84 @@ impl CaptureMissTracker {
     pub fn new(throttle: Duration) -> Self {
         Self {
             active: false,
-            edge: CapturedEdge::Unknown,
+            captured_edge: CapturedEdge::Unknown,
+            consecutive_misses: 0,
             last_warning_at: None,
             throttle,
         }
     }
 
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
     pub fn update(&mut self, signal: StitchProgressSignal, now: Instant) -> CaptureMissState {
         match signal {
-            StitchProgressSignal::Accepted { .. } => {
+            StitchProgressSignal::Accepted { edge } => {
                 self.active = false;
-                self.edge = CapturedEdge::Unknown;
-                // R7: forget the last warning time so a miss right after recovery
-                // warns immediately rather than being throttled by the old pulse.
+                self.consecutive_misses = 0;
+                self.captured_edge = edge;
                 self.last_warning_at = None;
                 CaptureMissState::default()
             }
-            StitchProgressSignal::Missed { edge } => {
-                self.active = true;
-                self.edge = edge;
-                let warn = match self.last_warning_at {
-                    Some(last) => now.duration_since(last) >= self.throttle,
-                    None => true,
-                };
-                if warn {
-                    self.last_warning_at = Some(now);
-                }
-                CaptureMissState {
-                    active: true,
-                    warn,
-                    edge,
-                    affordance: PreviewRecoveryAffordance {
+            StitchProgressSignal::Missed { edge: _ } => {
+                self.consecutive_misses = self.consecutive_misses.saturating_add(1);
+                if self.consecutive_misses >= 2 {
+                    self.active = true;
+                    let warn = match self.last_warning_at {
+                        Some(last) => now.duration_since(last) >= self.throttle,
+                        None => true,
+                    };
+                    if warn {
+                        self.last_warning_at = Some(now);
+                    }
+                    CaptureMissState {
                         active: true,
-                        edge,
-                        processing: false,
-                    },
+                        warn,
+                        edge: self.captured_edge,
+                        affordance: PreviewRecoveryAffordance {
+                            active: true,
+                            edge: self.captured_edge,
+                            processing: false,
+                        },
+                    }
+                } else {
+                    CaptureMissState::default()
                 }
             }
-            StitchProgressSignal::Idle => self.state(),
+            StitchProgressSignal::ReverseDirection => self.state(),
+            StitchProgressSignal::Idle => {
+                self.consecutive_misses = 0;
+                self.state()
+            }
+        }
+    }
+
+    pub fn update_recovery(&mut self, recovered: bool, now: Instant) -> CaptureMissState {
+        if recovered {
+            self.active = false;
+            self.consecutive_misses = 0;
+            self.captured_edge = CapturedEdge::Unknown;
+            self.last_warning_at = None;
+            CaptureMissState::default()
+        } else {
+            let warn = match self.last_warning_at {
+                Some(last) => now.duration_since(last) >= self.throttle,
+                None => true,
+            };
+            if warn {
+                self.last_warning_at = Some(now);
+            }
+            CaptureMissState {
+                active: true,
+                warn,
+                edge: self.captured_edge,
+                affordance: PreviewRecoveryAffordance {
+                    active: true,
+                    edge: self.captured_edge,
+                    processing: false,
+                },
+            }
         }
     }
 
@@ -138,10 +197,10 @@ impl CaptureMissTracker {
         CaptureMissState {
             active: self.active,
             warn: false,
-            edge: self.edge,
+            edge: self.captured_edge,
             affordance: PreviewRecoveryAffordance {
                 active: self.active,
-                edge: self.edge,
+                edge: self.captured_edge,
                 processing: false,
             },
         }
@@ -157,145 +216,257 @@ mod tests {
     }
 
     #[test]
-    fn missed_enters_active_state_and_warns() {
-        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-
-        let state = tracker.update(
-            StitchProgressSignal::Missed {
+    fn second_consecutive_genuine_miss_enters_paused_state() {
+        let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
+        gate.update(
+            StitchProgressSignal::Accepted {
                 edge: CapturedEdge::Bottom,
             },
             t(0),
         );
-
-        assert!(state.active);
-        assert!(state.warn);
-        assert_eq!(state.edge, CapturedEdge::Bottom);
-        assert!(state.affordance.active);
-        assert_eq!(state.affordance.edge, CapturedEdge::Bottom);
+        // The miss-signal edge is intentionally `Unknown`; the paused edge below
+        // must come from the last *accepted* append (`captured_edge`), proving the
+        // gate sources the guide edge from progress, not from the failed frame.
+        assert!(
+            !gate
+                .update(
+                    StitchProgressSignal::Missed {
+                        edge: CapturedEdge::Unknown
+                    },
+                    t(10)
+                )
+                .active
+        );
+        let paused = gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(20),
+        );
+        assert!(paused.active);
+        assert!(paused.warn);
+        assert_eq!(paused.edge, CapturedEdge::Bottom);
     }
 
     #[test]
-    fn repeated_misses_are_throttled_but_stay_active() {
-        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-        let _ = tracker.update(
+    fn reverse_direction_is_neutral_and_preserves_miss_count() {
+        let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
+        gate.update(
             StitchProgressSignal::Missed {
-                edge: CapturedEdge::Bottom,
+                edge: CapturedEdge::Unknown,
             },
             t(0),
         );
+        let state = gate.update(StitchProgressSignal::ReverseDirection, t(10));
+        assert!(!state.active);
+        assert!(
+            gate.update(
+                StitchProgressSignal::Missed {
+                    edge: CapturedEdge::Unknown
+                },
+                t(20)
+            )
+            .active
+        );
+    }
 
-        let state = tracker.update(
+    #[test]
+    fn paused_gate_clears_only_after_recovery() {
+        let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(0),
+        );
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(10),
+        );
+        assert!(gate.update_recovery(false, t(20)).active);
+        assert!(!gate.update_recovery(true, t(30)).active);
+    }
+
+    #[test]
+    fn warning_is_throttled_in_paused_state() {
+        let mut gate = CaptureMissTracker::new(Duration::from_millis(3000));
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(0),
+        );
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Bottom,
+            },
+            t(10),
+        );
+
+        let throttled = gate.update(
             StitchProgressSignal::Missed {
                 edge: CapturedEdge::Bottom,
             },
             t(1000),
         );
-
-        assert!(state.active);
-        assert!(!state.warn);
+        assert!(throttled.active);
+        assert!(!throttled.warn);
     }
 
     #[test]
-    fn missed_warns_again_after_throttle_window() {
-        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-        let _ = tracker.update(
+    fn warning_pulses_again_after_throttle_window() {
+        let mut gate = CaptureMissTracker::new(Duration::from_millis(3000));
+        gate.update(
             StitchProgressSignal::Missed {
-                edge: CapturedEdge::Bottom,
+                edge: CapturedEdge::Unknown,
             },
             t(0),
         );
-
-        let state = tracker.update(
+        gate.update(
             StitchProgressSignal::Missed {
                 edge: CapturedEdge::Bottom,
             },
-            t(3001),
+            t(10),
         );
 
+        let pulsed = gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Bottom,
+            },
+            t(3011),
+        );
+        assert!(pulsed.active);
+        assert!(pulsed.warn);
+    }
+
+    #[test]
+    fn miss_after_recovery_warns_immediately() {
+        let mut gate = CaptureMissTracker::new(Duration::from_millis(3000));
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(0),
+        );
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Bottom,
+            },
+            t(10),
+        );
+        gate.update_recovery(true, t(100));
+
+        // Fresh miss cycle: first miss doesn't activate.
+        assert!(
+            !gate
+                .update(
+                    StitchProgressSignal::Missed {
+                        edge: CapturedEdge::Unknown
+                    },
+                    t(200)
+                )
+                .active
+        );
+        // Second miss activates and warns immediately (throttle was cleared).
+        let state = gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Bottom,
+            },
+            t(300),
+        );
         assert!(state.active);
         assert!(state.warn);
     }
 
     #[test]
-    fn idle_does_not_create_or_clear_miss_state() {
-        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-        let idle = tracker.update(StitchProgressSignal::Idle, t(0));
-        assert!(!idle.active);
-        assert!(!idle.warn);
-
-        let _ = tracker.update(
+    fn accepted_resets_miss_count_and_updates_captured_edge() {
+        let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
+        gate.update(
             StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(0),
+        );
+        gate.update(
+            StitchProgressSignal::Accepted {
                 edge: CapturedEdge::Top,
             },
             t(10),
         );
-        let idle_after_miss = tracker.update(StitchProgressSignal::Idle, t(20));
-        assert!(idle_after_miss.active);
-        assert!(!idle_after_miss.warn);
-        assert_eq!(idle_after_miss.edge, CapturedEdge::Top);
+        // Next miss cycle: first miss doesn't activate (count was reset).
+        assert!(
+            !gate
+                .update(
+                    StitchProgressSignal::Missed {
+                        edge: CapturedEdge::Unknown
+                    },
+                    t(20)
+                )
+                .active
+        );
     }
 
     #[test]
-    fn accepted_clears_active_miss_state() {
-        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-        let _ = tracker.update(
+    fn idle_resets_miss_count() {
+        let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
+        gate.update(
             StitchProgressSignal::Missed {
-                edge: CapturedEdge::Bottom,
+                edge: CapturedEdge::Unknown,
             },
             t(0),
         );
+        gate.update(StitchProgressSignal::Idle, t(10));
+        // Next miss cycle: first miss doesn't activate.
+        assert!(
+            !gate
+                .update(
+                    StitchProgressSignal::Missed {
+                        edge: CapturedEdge::Unknown
+                    },
+                    t(20)
+                )
+                .active
+        );
+    }
 
-        let state = tracker.update(
-            StitchProgressSignal::Accepted {
+    #[test]
+    fn active_accessor_reflects_state() {
+        let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
+        assert!(!gate.active());
+        gate.update(
+            StitchProgressSignal::Missed {
+                edge: CapturedEdge::Unknown,
+            },
+            t(0),
+        );
+        assert!(!gate.active());
+        gate.update(
+            StitchProgressSignal::Missed {
                 edge: CapturedEdge::Bottom,
             },
             t(10),
         );
-
-        assert!(!state.active);
-        assert!(!state.warn);
-        assert_eq!(state.edge, CapturedEdge::Unknown);
-        assert!(!state.affordance.active);
+        assert!(gate.active());
     }
 
-    // R7: a fresh miss right after a successful reconnect must warn again, not
-    // be silently throttled by the pre-recovery `last_warning_at`.
     #[test]
-    fn miss_after_recovery_warns_immediately() {
-        let mut tracker = CaptureMissTracker::new(Duration::from_millis(3000));
-        let _ = tracker.update(
-            StitchProgressSignal::Missed {
-                edge: CapturedEdge::Bottom,
-            },
-            t(0),
-        );
-        let _ = tracker.update(
-            StitchProgressSignal::Accepted {
-                edge: CapturedEdge::Bottom,
-            },
-            t(100),
-        );
-
-        let state = tracker.update(
-            StitchProgressSignal::Missed {
-                edge: CapturedEdge::Bottom,
-            },
-            t(200),
-        );
-
-        assert!(state.active);
-        assert!(
-            state.warn,
-            "miss after recovery must warn within throttle window"
-        );
-    }
-
-    // R2: the shared outcome->signal converter, exercised here so both capture
-    // paths inherit the coverage instead of each re-testing the mapping.
-    #[test]
-    fn no_match_outcome_maps_to_missed_signal() {
+    fn reverse_direction_outcome_maps_to_reverse_signal() {
         let outcome = StitchOutcome::NoMatch {
             reason: rollshot_core::NoMatchReason::ReverseDirection,
+            best_estimate: None,
+        };
+        assert_eq!(
+            progress_signal_from_outcome(&outcome),
+            StitchProgressSignal::ReverseDirection
+        );
+    }
+
+    #[test]
+    fn other_no_match_outcomes_map_to_missed() {
+        let outcome = StitchOutcome::NoMatch {
+            reason: rollshot_core::NoMatchReason::OverlapVerificationFailed,
             best_estimate: None,
         };
         assert_eq!(
@@ -304,6 +475,39 @@ mod tests {
                 edge: CapturedEdge::Unknown
             }
         );
+    }
+
+    #[test]
+    fn axis_changed_outcome_maps_to_missed() {
+        let outcome = StitchOutcome::AxisChanged {
+            previous_axis: rollshot_core::ScrollAxis::Vertical,
+            new_axis: rollshot_core::ScrollAxis::Horizontal,
+            estimate: rollshot_core::MotionEstimate {
+                dx: 0,
+                dy: 50,
+                axis: rollshot_core::ScrollAxis::Horizontal,
+                direction: AppendDirection::Bottom,
+                confidence: 0.9,
+                method: rollshot_core::MatchMethod::Template,
+                overlap: rollshot_core::OverlapRegion {
+                    prev_x: 0,
+                    prev_y: 0,
+                    curr_x: 0,
+                    curr_y: 50,
+                    width: 100,
+                    height: 100,
+                },
+                inliers: None,
+                raw_matches: None,
+            },
+        };
+        let signal = progress_signal_from_outcome(&outcome);
+        match signal {
+            StitchProgressSignal::Missed { edge } => {
+                assert_eq!(edge, CapturedEdge::Bottom);
+            }
+            _ => panic!("expected Missed, got {:?}", signal),
+        }
     }
 
     #[test]

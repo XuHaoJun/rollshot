@@ -276,6 +276,12 @@ impl Default for StitchConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryProbeResult {
+    Recovered,
+    Missed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

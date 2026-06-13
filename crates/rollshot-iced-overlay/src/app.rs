@@ -1,4 +1,5 @@
 use iced::futures::StreamExt;
+use iced::widget::canvas::Path;
 use iced::widget::{canvas, container, image, text};
 use iced::{
     keyboard, mouse, window, Color, ContentFit, Element, Event, Length, Point, Rectangle, Size,
@@ -82,6 +83,8 @@ pub(crate) struct OverlayState {
     pub(crate) window_size: Option<Size>,
     pub(crate) capture_miss_warn: bool,
     pub(crate) capture_miss_message_expires_at: Option<std::time::Instant>,
+    pub(crate) capture_miss_active: bool,
+    pub(crate) capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge,
     /// Active workflow. Screenshot mode finishes immediately on a valid release;
     /// scrolling mode confirms the crop and begins streaming/stitching.
     pub(crate) mode: CaptureMode,
@@ -110,6 +113,8 @@ impl Default for OverlayState {
             window_size: None,
             capture_miss_warn: false,
             capture_miss_message_expires_at: None,
+            capture_miss_active: false,
+            capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge::Unknown,
             mode: CaptureMode::Scrolling,
             frozen: None,
             cursor_position: None,
@@ -128,6 +133,13 @@ impl OverlayState {
     }
 }
 
+fn clear_capture_miss_ui(state: &mut OverlayState) {
+    state.capture_miss_active = false;
+    state.capture_miss_edge = rollshot_overlay_core::capture_miss::CapturedEdge::Unknown;
+    state.capture_miss_warn = false;
+    state.capture_miss_message_expires_at = None;
+}
+
 pub(crate) fn token_color(c: tokens::Rgba) -> Color {
     Color::from_rgba(
         c.r as f32 / 255.0,
@@ -135,6 +147,32 @@ pub(crate) fn token_color(c: tokens::Rgba) -> Color {
         c.b as f32 / 255.0,
         c.a,
     )
+}
+
+pub(crate) fn recovery_edge_line(
+    crop: Rectangle,
+    edge: rollshot_overlay_core::capture_miss::CapturedEdge,
+) -> Option<(Point, Point)> {
+    use rollshot_overlay_core::capture_miss::CapturedEdge;
+    match edge {
+        CapturedEdge::Top => Some((
+            Point::new(crop.x, crop.y),
+            Point::new(crop.x + crop.width, crop.y),
+        )),
+        CapturedEdge::Bottom => Some((
+            Point::new(crop.x, crop.y + crop.height),
+            Point::new(crop.x + crop.width, crop.y + crop.height),
+        )),
+        CapturedEdge::Left => Some((
+            Point::new(crop.x, crop.y),
+            Point::new(crop.x, crop.y + crop.height),
+        )),
+        CapturedEdge::Right => Some((
+            Point::new(crop.x + crop.width, crop.y),
+            Point::new(crop.x + crop.width, crop.y + crop.height),
+        )),
+        CapturedEdge::Unknown => None,
+    }
 }
 
 pub(crate) fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Size); 4] {
@@ -161,6 +199,7 @@ pub(crate) fn crop_mask_bands(crop: Rectangle, bounds: Rectangle) -> [(Point, Si
 pub(crate) struct CropCanvas {
     crop: Option<Rectangle>,
     confirmed: bool,
+    recovery_edge: Option<rollshot_overlay_core::capture_miss::CapturedEdge>,
 }
 
 impl CropCanvas {
@@ -168,6 +207,11 @@ impl CropCanvas {
         Self {
             crop: state.crop,
             confirmed: state.workspace.phase() != crate::workspace::WorkspacePhase::Selecting,
+            recovery_edge: if state.capture_miss_active {
+                Some(state.capture_miss_edge)
+            } else {
+                None
+            },
         }
     }
 }
@@ -219,6 +263,19 @@ impl canvas::Program<OverlayMessage> for CropCanvas {
                         Size::new(crop.width, crop.height),
                         border,
                     );
+                }
+
+                // Draw recovery edge guide when confirmed and paused.
+                if self.confirmed {
+                    if let Some(edge) = self.recovery_edge {
+                        if let Some((p1, p2)) = recovery_edge_line(crop, edge) {
+                            let stroke = canvas::Stroke::default()
+                                .with_color(token_color(tokens::RECOVERY_EDGE))
+                                .with_width(tokens::RECOVERY_EDGE_WIDTH);
+                            let path = Path::line(p1, p2);
+                            frame.stroke(&path, stroke);
+                        }
+                    }
                 }
             }
             None => {
@@ -716,6 +773,7 @@ pub(crate) fn update(
             state.mode = mode;
             state.workspace.activate_mode(mode);
             state.drag_start = None;
+            clear_capture_miss_ui(state);
             let region = match mode {
                 CaptureMode::Scrolling => InputRegionMode::ToolbarOnly,
                 CaptureMode::Screenshot => InputRegionMode::None,
@@ -732,6 +790,8 @@ pub(crate) fn update(
             (OverlayEffect::None, InputRegionMode::None)
         }
         OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)) => {
+            state.capture_miss_active = miss.active;
+            state.capture_miss_edge = miss.edge;
             if miss.warn {
                 state.capture_miss_warn = true;
                 state.capture_miss_message_expires_at =
@@ -753,6 +813,7 @@ pub(crate) fn update(
             crate::toolbar::ToolbarAction::ScreenshotMode => {
                 state.mode = CaptureMode::Screenshot;
                 state.workspace.activate_mode(CaptureMode::Screenshot);
+                clear_capture_miss_ui(state);
                 (
                     OverlayEffect::ActivateMode(CaptureMode::Screenshot),
                     InputRegionMode::None,
@@ -761,6 +822,7 @@ pub(crate) fn update(
             crate::toolbar::ToolbarAction::ScrollingMode => {
                 state.mode = CaptureMode::Scrolling;
                 state.workspace.activate_mode(CaptureMode::Scrolling);
+                clear_capture_miss_ui(state);
                 (
                     OverlayEffect::ActivateMode(CaptureMode::Scrolling),
                     InputRegionMode::None,
@@ -1081,6 +1143,31 @@ mod tests {
     }
 
     #[test]
+    fn switching_modes_clears_capture_miss_ui_state() {
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
+
+        let mut state = OverlayState {
+            capture_miss_active: true,
+            capture_miss_edge: CapturedEdge::Bottom,
+            capture_miss_warn: true,
+            capture_miss_message_expires_at: Some(
+                std::time::Instant::now() + std::time::Duration::from_secs(3),
+            ),
+            ..OverlayState::default()
+        };
+
+        super::update(
+            &mut state,
+            OverlayMessage::ToolbarAction(crate::toolbar::ToolbarAction::ScreenshotMode),
+        );
+
+        assert!(!state.capture_miss_active);
+        assert_eq!(state.capture_miss_edge, CapturedEdge::Unknown);
+        assert!(!state.capture_miss_warn);
+        assert!(state.capture_miss_message_expires_at.is_none());
+    }
+
+    #[test]
     fn scrolling_finish_requests_finalization() {
         let mut state = OverlayState::default();
         state.workspace.begin_scrolling();
@@ -1244,5 +1331,106 @@ mod tests {
         );
         assert_eq!(super::FINISH_LABEL, "Finish");
         assert_eq!(super::CANCEL_LABEL, "Cancel");
+    }
+
+    #[test]
+    fn capture_miss_active_stores_active_recovery_edge() {
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
+
+        let mut state = OverlayState::default();
+        let miss = rollshot_overlay_core::capture_miss::CaptureMissState {
+            active: true,
+            warn: true,
+            edge: CapturedEdge::Bottom,
+            ..Default::default()
+        };
+
+        super::update(
+            &mut state,
+            OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)),
+        );
+
+        assert!(state.capture_miss_active);
+        assert_eq!(state.capture_miss_edge, CapturedEdge::Bottom);
+    }
+
+    #[test]
+    fn capture_miss_clearing_removes_active_edge() {
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
+
+        let mut state = OverlayState {
+            capture_miss_active: true,
+            capture_miss_edge: CapturedEdge::Bottom,
+            ..OverlayState::default()
+        };
+        let miss = rollshot_overlay_core::capture_miss::CaptureMissState {
+            active: false,
+            warn: false,
+            edge: CapturedEdge::Unknown,
+            ..Default::default()
+        };
+
+        super::update(
+            &mut state,
+            OverlayMessage::LiveEvent(crate::driver::LiveOverlayEvent::CaptureMiss(miss)),
+        );
+
+        assert!(!state.capture_miss_active);
+    }
+
+    #[test]
+    fn warning_timeout_does_not_clear_active_edge() {
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
+
+        let mut state = OverlayState {
+            capture_miss_active: true,
+            capture_miss_edge: CapturedEdge::Bottom,
+            capture_miss_warn: true,
+            capture_miss_message_expires_at: Some(
+                std::time::Instant::now() - std::time::Duration::from_millis(100),
+            ),
+            ..OverlayState::default()
+        };
+
+        super::update(&mut state, OverlayMessage::Tick);
+
+        assert!(!state.capture_miss_warn);
+        assert!(state.capture_miss_active);
+        assert_eq!(state.capture_miss_edge, CapturedEdge::Bottom);
+    }
+
+    #[test]
+    fn recovery_edge_line_returns_correct_endpoints() {
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
+
+        let crop = Rectangle {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 80.0,
+        };
+
+        // Top edge
+        let (p1, p2) = super::recovery_edge_line(crop, CapturedEdge::Top).unwrap();
+        assert_eq!(p1, Point::new(10.0, 20.0));
+        assert_eq!(p2, Point::new(110.0, 20.0));
+
+        // Bottom edge
+        let (p1, p2) = super::recovery_edge_line(crop, CapturedEdge::Bottom).unwrap();
+        assert_eq!(p1, Point::new(10.0, 100.0));
+        assert_eq!(p2, Point::new(110.0, 100.0));
+
+        // Left edge
+        let (p1, p2) = super::recovery_edge_line(crop, CapturedEdge::Left).unwrap();
+        assert_eq!(p1, Point::new(10.0, 20.0));
+        assert_eq!(p2, Point::new(10.0, 100.0));
+
+        // Right edge
+        let (p1, p2) = super::recovery_edge_line(crop, CapturedEdge::Right).unwrap();
+        assert_eq!(p1, Point::new(110.0, 20.0));
+        assert_eq!(p2, Point::new(110.0, 100.0));
+
+        // Unknown returns None
+        assert!(super::recovery_edge_line(crop, CapturedEdge::Unknown).is_none());
     }
 }
