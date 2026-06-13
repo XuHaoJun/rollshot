@@ -96,6 +96,7 @@ pub(crate) fn stream_timeout(stage: &str) -> CaptureError {
     }
 }
 
+use std::os::fd::AsFd;
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 
@@ -105,6 +106,59 @@ const STREAM_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 const POINTER_HIDDEN: u32 = 1;
 const POINTER_EMBEDDED: u32 = 2;
+
+fn poll_timeout_until(now: std::time::Instant, deadline: std::time::Instant) -> u16 {
+    let remaining = deadline.saturating_duration_since(now);
+    if remaining.is_zero() {
+        0
+    } else {
+        remaining.as_millis().clamp(1, 100) as u16
+    }
+}
+
+fn dispatch_until_event(
+    conn: &Connection,
+    event_queue: &mut wayland_client::EventQueue<KwinState>,
+    state: &mut KwinState,
+    deadline: std::time::Instant,
+    stage: &str,
+) -> Result<(), CaptureError> {
+    loop {
+        if event_queue.dispatch_pending(state).map_err(|e| {
+            CaptureError::Backend(anyhow::anyhow!("{stage} pending dispatch failed: {e}"))
+        })? > 0
+        {
+            return Ok(());
+        }
+
+        conn.flush().map_err(|e| {
+            CaptureError::Backend(anyhow::anyhow!("{stage} Wayland flush failed: {e}"))
+        })?;
+
+        let timeout = poll_timeout_until(std::time::Instant::now(), deadline);
+        if timeout == 0 {
+            return Err(stream_timeout(stage));
+        }
+
+        let Some(read_guard) = event_queue.prepare_read() else {
+            continue;
+        };
+        let mut poll_fd = nix::poll::PollFd::new(conn.as_fd(), nix::poll::PollFlags::POLLIN);
+        match nix::poll::poll(std::slice::from_mut(&mut poll_fd), timeout) {
+            Ok(0) => continue,
+            Ok(_) => {
+                read_guard.read().map_err(|e| {
+                    CaptureError::Backend(anyhow::anyhow!("{stage} Wayland read failed: {e}"))
+                })?;
+            }
+            Err(e) => {
+                return Err(CaptureError::Backend(anyhow::anyhow!(
+                    "{stage} Wayland poll failed: {e}"
+                )))
+            }
+        }
+    }
+}
 
 pub struct KwinScreencastSession {
     node_id: u32,
@@ -175,9 +229,14 @@ impl KwinScreencastClient for RealKwinScreencastClient {
             stream_outcome: StreamOutcome::Pending,
         };
 
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(|e| CaptureError::Backend(anyhow::anyhow!("Registry dispatch failed: {e}")))?;
+        let registry_deadline = std::time::Instant::now() + STREAM_DEADLINE;
+        dispatch_until_event(
+            &conn,
+            &mut event_queue,
+            &mut state,
+            registry_deadline,
+            "registry",
+        )?;
 
         // Dispatch pending output name events
         while event_queue.dispatch_pending(&mut state).unwrap_or(0) > 0 {}
@@ -186,9 +245,13 @@ impl KwinScreencastClient for RealKwinScreencastClient {
         // proxies.  Do one more blocking read so those events are received
         // before we attempt to select an output by name.
         if state.outputs.iter().any(|o| o.name.is_none()) {
-            event_queue.blocking_dispatch(&mut state).map_err(|e| {
-                CaptureError::Backend(anyhow::anyhow!("Output name dispatch failed: {e}"))
-            })?;
+            dispatch_until_event(
+                &conn,
+                &mut event_queue,
+                &mut state,
+                registry_deadline,
+                "output name",
+            )?;
             while event_queue.dispatch_pending(&mut state).unwrap_or(0) > 0 {}
         }
 
@@ -251,13 +314,13 @@ impl KwinScreencastClient for RealKwinScreencastClient {
                 StreamOutcome::Pending => {}
             }
 
-            // blocking_dispatch reads from the Wayland socket AND dispatches
-            // events.  dispatch_pending only dispatches already-buffered
-            // events and never reads from the socket, which caused the
-            // compositor's response to go unread.
-            event_queue.blocking_dispatch(&mut state).map_err(|e| {
-                CaptureError::Backend(anyhow::anyhow!("Stream dispatch failed: {e}"))
-            })?;
+            dispatch_until_event(
+                &conn,
+                &mut event_queue,
+                &mut state,
+                deadline,
+                "stream_output",
+            )?;
 
             tracing::debug!(target: TARGET_LINUX_KWIN, outcome = ?state.stream_outcome, "stream event received");
         }
@@ -442,5 +505,20 @@ mod tests {
     fn timeout_is_fallback_eligible_capture_timeout() {
         let err = stream_timeout("stream_output");
         assert!(matches!(err, CaptureError::Timeout { .. }));
+    }
+
+    #[test]
+    fn expired_deadline_has_zero_poll_timeout() {
+        let now = std::time::Instant::now();
+        assert_eq!(poll_timeout_until(now, now), 0);
+    }
+
+    #[test]
+    fn future_deadline_caps_poll_timeout() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            poll_timeout_until(now, now + std::time::Duration::from_secs(10)),
+            100
+        );
     }
 }

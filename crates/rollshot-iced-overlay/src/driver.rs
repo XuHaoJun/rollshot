@@ -127,6 +127,7 @@ pub struct Driver {
     /// Wayland output name the stream was pinned to (KWin scrolling), when
     /// the host resolved one. Lets the overlay target the same output.
     target_output_name: Option<String>,
+    capture_backend: &'static str,
     preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
@@ -202,7 +203,8 @@ impl Driver {
             })
         };
 
-        let source_size = wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
+        let (source_size, capture_backend) =
+            wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
         tracing::debug!(target: TARGET_CAPTURE, width = source_size.width, height = source_size.height, "first frame arrived");
 
         Ok(Self {
@@ -217,6 +219,7 @@ impl Driver {
             },
             target_display_id,
             target_output_name,
+            capture_backend,
             preview_tx,
         })
     }
@@ -342,6 +345,10 @@ impl Driver {
         self.target_output_name.as_deref()
     }
 
+    pub fn capture_backend(&self) -> &'static str {
+        self.capture_backend
+    }
+
     pub(crate) fn overlay_size(&self) -> Size {
         self.overlay_logical
     }
@@ -411,7 +418,7 @@ fn wait_for_source_size(
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
     timeout: Duration,
-) -> Result<Size, String> {
+) -> Result<(Size, &'static str), String> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(e) = shared.error.lock() {
@@ -421,10 +428,13 @@ fn wait_for_source_size(
         }
         if let Ok(slot) = shared.latest.lock() {
             if let Some(frame) = slot.as_ref() {
-                return Ok(frame.metadata.source_size.unwrap_or(Size {
-                    width: frame.image.width(),
-                    height: frame.image.height(),
-                }));
+                return Ok((
+                    frame.metadata.source_size.unwrap_or(Size {
+                        width: frame.image.width(),
+                        height: frame.image.height(),
+                    }),
+                    frame.metadata.backend,
+                ));
             }
         }
         if Instant::now() >= deadline {

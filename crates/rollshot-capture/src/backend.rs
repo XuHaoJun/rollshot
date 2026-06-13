@@ -91,10 +91,7 @@ impl BackendKind {
                 #[cfg(target_os = "linux")]
                 {
                     tracing::debug!(target: TARGET_CAPTURE, kind = self.as_flag(), "backend created");
-                    Ok(Box::new(crate::linux::LinuxKwinBackend::new(
-                        crate::linux::kwin_screencast::RealKwinScreencastClient::new(),
-                        None,
-                    )))
+                    Ok(Box::new(crate::linux::LinuxKwinBackend::new_real()))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -345,6 +342,20 @@ mod tests {
         assert_eq!(
             BackendKind::from_cli_flag(BackendKind::LinuxKwinPipeWire.as_flag()).unwrap(),
             BackendKind::LinuxKwinPipeWire
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_linux_kwin_backend_has_active_output_resolver() {
+        let mut backend = BackendKind::LinuxKwinPipeWire.create().unwrap();
+        let err = match backend.start(crate::types::CaptureOptions::default()) {
+            Ok(_) => return,
+            Err(err) => err,
+        };
+        assert!(
+            !matches!(err, CaptureError::InvalidConfig { .. }),
+            "real explicit KWin backend must resolve the active output: {err}"
         );
     }
 }

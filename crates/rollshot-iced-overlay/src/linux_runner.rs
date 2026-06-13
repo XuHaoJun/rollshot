@@ -76,6 +76,17 @@ fn frozen_handle_for(resource: &CaptureResource) -> Option<iced::widget::image::
     }
 }
 
+fn frozen_for_stream_backend(
+    frozen: Option<rollshot_capture::OneShotCapture>,
+    backend: &str,
+) -> Option<rollshot_capture::OneShotCapture> {
+    if backend == "linux-kwin" {
+        frozen
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) struct ResourceFactories {
     pub streaming: Box<
@@ -135,10 +146,8 @@ fn acquire_scrolling_resource(
                 *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
                 let driver = (factories.streaming)(&resolved_config, preview_tx)
                     .map_err(OverlayError::Capture)?;
-                Ok(Some(CaptureResource::Streaming {
-                    driver,
-                    frozen: Some(capture),
-                }))
+                let frozen = frozen_for_stream_backend(Some(capture), driver.capture_backend());
+                Ok(Some(CaptureResource::Streaming { driver, frozen }))
             }
             Err(native_error) => {
                 if backend == "auto"
@@ -151,8 +160,11 @@ fn acquire_scrolling_resource(
                     );
                     let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
                     *PREVIEW_RX.lock().unwrap() = Some(preview_rx);
-                    let driver =
-                        (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+                    let mut portal_config = config.clone();
+                    portal_config.backend = "linux-portal".to_string();
+                    portal_config.target_output_name = None;
+                    let driver = (factories.streaming)(&portal_config, preview_tx)
+                        .map_err(OverlayError::Capture)?;
                     Ok(Some(CaptureResource::Streaming {
                         driver,
                         frozen: None,
@@ -680,6 +692,7 @@ mod tests {
     use rollshot_capture::one_shot::DisplayTarget;
     use rollshot_capture::{CaptureError, Region, Size};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -1296,10 +1309,20 @@ mod tests {
     #[test]
     fn auto_kwin_one_shot_failure_uses_portal_stream_without_frozen_image() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        let result = acquire_scrolling_resource(
-            &auto_config(),
-            &factories_with_failed_kwin_one_shot_and_portal_driver(),
-        );
+        let seen_backend = Arc::new(Mutex::new(None));
+        let seen_backend_for_factory = Arc::clone(&seen_backend);
+        let factories = ResourceFactories {
+            streaming: Box::new(move |cfg, _preview_tx| {
+                *seen_backend_for_factory.lock().unwrap() = Some(cfg.backend.clone());
+                Err("fake portal streaming driver".to_string())
+            }),
+            one_shot: Box::new(|_| {
+                Err(CaptureError::Unsupported {
+                    message: "KWin one-shot failed".to_string(),
+                })
+            }),
+        };
+        let result = acquire_scrolling_resource(&auto_config(), &factories);
         // The streaming factory also fails, so we get an error from the
         // portal fallback path. The key behavior: no error from the one-shot.
         match result {
@@ -1311,6 +1334,10 @@ mod tests {
             }
             other => panic!("expected Capture error from portal fallback, got {other:?}"),
         }
+        assert_eq!(
+            seen_backend.lock().unwrap().as_deref(),
+            Some("linux-portal")
+        );
     }
 
     #[test]
@@ -1357,5 +1384,21 @@ mod tests {
             }
             other => panic!("expected Rgba handle, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn portal_fallback_discards_kwin_frozen_capture() {
+        assert!(
+            frozen_for_stream_backend(Some(fake_one_shot_capture_for("DP-2")), "linux-portal")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_stream_keeps_kwin_frozen_capture() {
+        assert!(
+            frozen_for_stream_backend(Some(fake_one_shot_capture_for("DP-2")), "linux-kwin")
+                .is_some()
+        );
     }
 }

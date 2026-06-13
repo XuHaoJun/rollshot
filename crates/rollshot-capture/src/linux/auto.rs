@@ -43,12 +43,7 @@ impl LinuxAutoBackend {
             .is_some_and(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")));
 
         Self {
-            native_factory: Box::new(|| {
-                Box::new(LinuxKwinBackend::new(
-                    super::kwin_screencast::RealKwinScreencastClient::new(),
-                    None,
-                ))
-            }),
+            native_factory: Box::new(|| Box::new(LinuxKwinBackend::new_real())),
             portal_factory: Box::new(|| Box::new(LinuxPortalBackend::new())),
             is_kde,
             session_type: None,
@@ -114,46 +109,78 @@ impl CaptureBackend for LinuxAutoBackend {
         if self.is_kde {
             let mut native = (self.native_factory)();
             match native.start(options.clone()) {
-                Ok(stream) => {
-                    tracing::debug!(
-                        target: TARGET_CAPTURE,
-                        backend = "linux-kwin",
-                        "native KWin capture started"
-                    );
-                    Ok(stream)
-                }
-                Err(native_error) => {
-                    if !is_fallback_eligible(&native_error) {
-                        return Err(native_error);
+                Ok(mut stream) => match stream.next_frame() {
+                    Ok(first_frame) => {
+                        tracing::debug!(
+                            target: TARGET_CAPTURE,
+                            backend = "linux-kwin",
+                            "native KWin capture started"
+                        );
+                        Ok(Box::new(PrefetchedFrameStream {
+                            first_frame: Some(first_frame),
+                            inner: stream,
+                        }))
                     }
-
-                    tracing::warn!(
-                        target: TARGET_LINUX_KWIN,
-                        reason = fallback_reason(&native_error),
-                        fallback = "linux-portal",
-                        error = %native_error,
-                        "KWin native capture unavailable; falling back to portal"
-                    );
-
-                    let mut portal = (self.portal_factory)();
-                    match portal.start(options) {
-                        Ok(stream) => {
-                            tracing::debug!(
-                                target: TARGET_CAPTURE,
-                                backend = "linux-portal",
-                                "portal fallback capture started"
-                            );
-                            Ok(stream)
-                        }
-                        Err(portal_error) => {
-                            Err(combine_fallback_errors(native_error, portal_error))
-                        }
-                    }
-                }
+                    Err(CaptureError::EndOfStream) => self.start_portal_fallback(
+                        options,
+                        CaptureError::Backend(anyhow::anyhow!(
+                            "KWin native stream ended before first frame"
+                        )),
+                    ),
+                    Err(native_error) => self.start_portal_fallback(options, native_error),
+                },
+                Err(native_error) => self.start_portal_fallback(options, native_error),
             }
         } else {
             let mut portal = (self.portal_factory)();
             portal.start(options)
+        }
+    }
+}
+
+impl LinuxAutoBackend {
+    fn start_portal_fallback(
+        &self,
+        options: CaptureOptions,
+        native_error: CaptureError,
+    ) -> Result<Box<dyn FrameStream>, CaptureError> {
+        if !is_fallback_eligible(&native_error) {
+            return Err(native_error);
+        }
+
+        tracing::warn!(
+            target: TARGET_LINUX_KWIN,
+            reason = fallback_reason(&native_error),
+            fallback = "linux-portal",
+            error = %native_error,
+            "KWin native capture unavailable; falling back to portal"
+        );
+
+        let mut portal = (self.portal_factory)();
+        match portal.start(options) {
+            Ok(stream) => {
+                tracing::debug!(
+                    target: TARGET_CAPTURE,
+                    backend = "linux-portal",
+                    "portal fallback capture started"
+                );
+                Ok(stream)
+            }
+            Err(portal_error) => Err(combine_fallback_errors(native_error, portal_error)),
+        }
+    }
+}
+
+struct PrefetchedFrameStream {
+    first_frame: Option<crate::types::CapturedFrame>,
+    inner: Box<dyn FrameStream>,
+}
+
+impl FrameStream for PrefetchedFrameStream {
+    fn next_frame(&mut self) -> Result<crate::types::CapturedFrame, CaptureError> {
+        match self.first_frame.take() {
+            Some(frame) => Ok(frame),
+            None => self.inner.next_frame(),
         }
     }
 }
@@ -218,11 +245,24 @@ mod tests {
         }
     }
 
-    struct RecordingStream;
+    struct RecordingStream {
+        frame: Option<CapturedFrame>,
+    }
 
     impl FrameStream for RecordingStream {
         fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
-            Err(CaptureError::EndOfStream)
+            self.frame.take().ok_or(CaptureError::EndOfStream)
+        }
+    }
+
+    fn frame(backend: &'static str) -> CapturedFrame {
+        CapturedFrame {
+            image: image::RgbaImage::new(10, 10),
+            timestamp: std::time::SystemTime::UNIX_EPOCH,
+            metadata: crate::types::FrameMetadata {
+                backend,
+                ..crate::types::FrameMetadata::fake()
+            },
         }
     }
 
@@ -262,7 +302,9 @@ mod tests {
                 self.calls.inc_portal();
             }
             match &self.action {
-                BackendAction::Ok => Ok(Box::new(RecordingStream)),
+                BackendAction::Ok => Ok(Box::new(RecordingStream {
+                    frame: Some(frame(self.name)),
+                })),
                 BackendAction::Err(e) => Err(clone_error(e)),
             }
         }
@@ -510,15 +552,16 @@ mod tests {
     }
 
     #[test]
-    fn native_runtime_stream_error_does_not_construct_portal() {
+    fn native_first_frame_error_falls_back_to_portal() {
         let calls = Calls::default();
         let mut backend = test_auto_backend(
             native_stream_that_fails_on_next_frame(&calls),
             portal_ok(&calls),
         );
         let mut stream = backend.start(targeted_options("eDP-1")).unwrap();
-        assert!(stream.next_frame().is_err());
-        assert_eq!(calls.portal(), 0);
+        let first = stream.next_frame().unwrap();
+        assert_eq!(first.metadata.backend, "linux-portal");
+        assert_eq!(calls.portal(), 1);
     }
 
     #[test]

@@ -72,6 +72,32 @@ impl LinuxKwinBackend {
             active_output_resolver,
         }
     }
+
+    pub fn new_real() -> Self {
+        Self::new(
+            kwin_screencast::RealKwinScreencastClient::new(),
+            Some(Box::new(resolve_active_kwin_output)),
+        )
+    }
+}
+
+#[cfg(not(test))]
+fn resolve_active_kwin_output() -> Result<String, CaptureError> {
+    crate::one_shot::OneShotBackendKind::LinuxKwin
+        .capture_once(false)?
+        .target_display()
+        .output_name
+        .clone()
+        .ok_or_else(|| CaptureError::Mapping {
+            message: "KWin active-screen capture did not identify an output".to_string(),
+        })
+}
+
+#[cfg(test)]
+fn resolve_active_kwin_output() -> Result<String, CaptureError> {
+    Err(CaptureError::Unsupported {
+        message: "real KWin active-output resolution is unavailable in unit tests".to_string(),
+    })
 }
 
 impl CaptureBackend for LinuxKwinBackend {
