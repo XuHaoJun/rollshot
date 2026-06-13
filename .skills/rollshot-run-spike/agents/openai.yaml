@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rollshot Run Spike"
+  short_description: "Run focused Rollshot feasibility experiments"
+  default_prompt: "Use $rollshot-run-spike to decide whether this Rollshot technical unknown needs a spike and run it if appropriate."
