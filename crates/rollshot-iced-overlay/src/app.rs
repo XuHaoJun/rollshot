@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn warning_timeout_does_not_clear_active_edge() {
-        use rollshot_overlay_core::capture_miss::{CaptureMissState, CapturedEdge};
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
 
         let mut state = OverlayState {
             capture_miss_active: true,
