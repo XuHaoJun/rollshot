@@ -13,7 +13,11 @@
 ## File Structure
 
 - Create `crates/rollshot-app/src/result_workspace/secure_sharing.rs`
-  - Pure, independently tested safe-sharing policy.
+  - Independently tested safe-sharing policy. All label/route/disclosure
+    derivation is pure; the single impurity is `safe_export_overwrites_source`,
+    which calls `std::fs::canonicalize` to catch symlink/syntactic source
+    aliases (see Task 1 Step 3 note). Tests of that function therefore touch a
+    real temp filesystem.
   - Owns user-facing safe/original labels and confirmation copy so the UI never invents security language.
   - Owns reveal routing, `-redacted` filename generation, and source-path overwrite detection.
 - Modify `crates/rollshot-app/src/result_workspace/mod.rs`
@@ -249,7 +253,7 @@ pub(crate) enum RevealAction<'a> {
 impl RevealAction<'_> {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Disabled | Self::Immediate { label: "Reveal", .. } => "Reveal",
+            Self::Disabled => "Reveal",
             Self::Immediate { label, .. } => label,
             Self::ConfirmUnredacted(_) => "Reveal Unredacted Original\u{2026}",
         }
@@ -383,8 +387,15 @@ rtk git commit -m "feat(app): add secure sharing policy"
 ### Task 2: Route Safe Copy And Save Through The Policy
 
 **Files:**
-- Modify: `crates/rollshot-app/src/result_workspace/mod.rs:65-202`
-- Modify: `crates/rollshot-app/src/result_workspace/update.rs:26-55,386-455,801-887`
+- Modify: `crates/rollshot-app/src/result_workspace/mod.rs:65-202` (and its
+  `#[cfg(test)]` module: the existing `apply_save_as` test callers gain a
+  `false` argument)
+- Modify: `crates/rollshot-app/src/result_workspace/update.rs:26-55,386-455`
+  (and its `#[cfg(test)]` module: `save_completion_marks_the_written_state_not_newer_edits`
+  passes the new `safe_output` field)
+
+(Line ranges are approximate orientation, not exact; verify against the current
+file before editing.)
 
 - [ ] **Step 1: Write failing Copy/Save routing tests**
 
@@ -474,6 +485,9 @@ fn safe_save_completion_records_safe_message_and_path() {
         state.document.last_export_path.as_deref(),
         Some(Path::new("/tmp/safe.png"))
     );
+    // Spec §Copy And Save: a successful safe save advances the saved-state
+    // marker, so the document is no longer dirty relative to the written state.
+    assert!(!state.annotations_dirty());
 }
 ```
 
@@ -504,7 +518,7 @@ SaveFinished {
 },
 ```
 
-In `Message::Copy`, compute `let safe_output = state.has_secure_redactions();`, copy the existing flattened payload, and map the result into the new variant. In `Message::CopyFinished`, use `COPY_SAFE_SUCCESS` for safe output and `"Copied image"` otherwise.
+In `Message::Copy`, keep the existing `commit_text_draft(state);` call first, then compute `let safe_output = state.has_secure_redactions();` (after the commit, so a just-committed annotation is reflected), copy the existing flattened payload, and map the result into the new variant. In `Message::CopyFinished`, use `COPY_SAFE_SUCCESS` for safe output and `"Copied image"` otherwise.
 
 In `ResultWorkspace`, add:
 
@@ -639,6 +653,16 @@ fn request_close_clears_unredacted_confirmation_before_close_routing() {
     let _ = update(&mut state, Message::RequestClose);
     assert_eq!(state.pending_unredacted_action, None);
 }
+
+#[test]
+fn escape_cancels_pending_unredacted_confirmation_without_closing() {
+    let mut state = saved_workspace();
+    state.pending_unredacted_action = Some(UnredactedAction::RevealOriginal);
+    let _ = update(&mut state, Message::EscapePressed);
+    assert_eq!(state.pending_unredacted_action, None);
+    // Esc cancelled the blocking dialog; it must not have escalated to close.
+    assert!(state.pending_discard.is_none());
+}
 ```
 
 - [ ] **Step 2: Run focused tests and verify they fail**
@@ -648,6 +672,7 @@ Run:
 ```bash
 rtk cargo test -p rollshot-app result_workspace::update::tests::redacted_
 rtk cargo test -p rollshot-app result_workspace::update::tests::request_close_clears_
+rtk cargo test -p rollshot-app result_workspace::update::tests::escape_cancels_
 ```
 
 Expected: compilation fails because pending unredacted confirmation state and messages do not exist.
@@ -671,13 +696,25 @@ CancelUnredactedAction,
 
 Update `RequestClose` to clear `pending_unredacted_action` before close routing. `CancelUnredactedAction` clears it and does nothing else.
 
+Update `Message::EscapePressed` so that a pending unredacted-action
+confirmation is the highest-priority Escape target: if
+`pending_unredacted_action.is_some()`, clear it and return `Task::none()`
+*before* the existing copy-menu / draft / drag / selection / close branches.
+The confirmation is a blocking dialog (spec §Confirmation And Error Behavior),
+so Esc must cancel it rather than fall through to close routing.
+
 - [ ] **Step 4: Route Copy Original and Reveal through confirmation**
 
 For `Message::CopyOriginal`, close the copy menu and commit text. If redactions exist, set `pending_unredacted_action` to `CopyOriginal` and return without touching the clipboard. Otherwise retain the existing direct original-copy behavior.
 
-For `Message::Reveal`, match `secure_sharing::reveal_action(&state.document)`:
+For `Message::Reveal`, keep the existing `commit_text_draft(state);` call first
+(the current handler commits an open text draft before revealing; an existing
+test, `clicking_non_canvas_controls_commits_the_open_draft`, depends on this and
+would otherwise regress), then match
+`secure_sharing::reveal_action(&state.document)`:
 
 ```rust
+commit_text_draft(state);
 match secure_sharing::reveal_action(&state.document) {
     secure_sharing::RevealAction::Disabled => Task::none(),
     secure_sharing::RevealAction::Immediate { path, .. } => {
@@ -853,7 +890,12 @@ fn confirmation_scrim_style(_theme: &iced::Theme) -> container::Style {
 }
 ```
 
-Update the discard modal to use them. Add:
+Update the discard modal to use them. Because this renames
+`discard_dialog_style` / `discard_scrim_style`, update their two existing
+callers in the `view.rs` test module (`discard_dialog_has_solid_background` and
+`discard_scrim_is_translucent_black`) to the new
+`confirmation_dialog_style` / `confirmation_scrim_style` names, or the package
+will no longer compile. Add:
 
 ```rust
 fn unredacted_action_modal<'a>(
