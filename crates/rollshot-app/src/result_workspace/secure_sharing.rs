@@ -97,11 +97,13 @@ pub(crate) fn retained_original_disclosure(document: &ResultDocument) -> Option<
 
 pub(crate) fn reveal_action(document: &ResultDocument) -> RevealAction<'_> {
     if has_secure_redactions(document) {
-        if let Some(path) = document.last_export_path.as_deref() {
-            return RevealAction::Immediate {
-                label: "Reveal Last Safe Export",
-                path,
-            };
+        if document.last_export_is_safe {
+            if let Some(path) = document.last_export_path.as_deref() {
+                return RevealAction::Immediate {
+                    label: "Reveal Last Safe Export",
+                    path,
+                };
+            }
         }
         return document
             .source_path
@@ -232,6 +234,7 @@ mod tests {
         );
 
         document.last_export_path = Some(PathBuf::from("/tmp/safe.png"));
+        document.last_export_is_safe = true;
         assert_eq!(
             reveal_action(&document),
             RevealAction::Immediate {
@@ -293,6 +296,7 @@ mod tests {
         );
 
         redacted.last_export_path = Some(PathBuf::from("/tmp/safe.png"));
+        redacted.last_export_is_safe = true;
         assert_eq!(reveal_action(&redacted).label(), "Reveal Last Safe Export");
     }
 

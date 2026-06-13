@@ -208,6 +208,7 @@ impl ResultWorkspace {
                     format!("Saved to {}", path.display())
                 };
                 self.document.last_export_path = Some(path);
+                self.document.last_export_is_safe = safe_output;
                 self.editor.saved_state_id = saved_state_id;
                 self.message = Some(InlineMessage::success(text));
                 self.pending_discard = None;

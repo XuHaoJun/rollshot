@@ -1774,7 +1774,37 @@ mod tests {
             state.document.last_export_path.as_deref(),
             Some(Path::new("/tmp/safe.png"))
         );
+        assert!(state.document.last_export_is_safe);
         assert!(!state.annotations_dirty());
+    }
+
+    #[test]
+    fn unredacted_save_is_not_revealed_as_safe_after_adding_redaction() {
+        let mut state = saved_workspace();
+        let state_id = state.document.image.state_id();
+        state.apply_save_as(
+            Ok(Some(PathBuf::from("/tmp/unredacted-export.png"))),
+            state_id,
+            false,
+        );
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+
+        assert!(!state.document.last_export_is_safe);
+        assert_eq!(
+            super::super::secure_sharing::reveal_action(&state.document),
+            super::super::secure_sharing::RevealAction::ConfirmUnredacted(Path::new(
+                "/tmp/result.png"
+            ))
+        );
     }
 
     // -- keyboard routing (Task 22) -----------------------------------------
