@@ -1,5 +1,5 @@
 use rollshot_capture::{crop_frame, CaptureError, FrameStream, Region};
-use rollshot_core::{StitchConfig, Stitcher};
+use rollshot_core::{RecoveryProbeResult, StitchConfig, Stitcher};
 use rollshot_overlay_core::capture_miss::{
     progress_signal_from_outcome, CaptureMissState, CaptureMissTracker, CapturedEdge,
     StitchProgressSignal,
@@ -42,6 +42,65 @@ fn should_emit_preview(signal: &StitchProgressSignal) -> bool {
 
 fn should_emit_accepted_activity(signal: &StitchProgressSignal) -> bool {
     matches!(signal, StitchProgressSignal::Accepted { .. })
+}
+
+/// Result of processing a single frame through the stitch-or-probe pipeline.
+struct ProcessedFrame {
+    signal: Option<StitchProgressSignal>,
+    capture_miss: CaptureMissState,
+    publish_preview: bool,
+    publish_activity: bool,
+}
+
+/// Route one frame through the correct stitcher path:
+/// - When the capture-miss gate is **active** (paused), use the read-only
+///   `probe_recovery` to detect overlap without mutating the canvas.
+/// - Otherwise, use `push_frame_preserving_anchor` (strict mode, no re-anchor).
+fn process_frame(
+    stitcher: &mut Stitcher,
+    gate: &mut CaptureMissTracker,
+    frame: image::RgbaImage,
+    now: Instant,
+) -> ProcessedFrame {
+    if gate.active() {
+        let recovered = stitcher.probe_recovery(&frame) == RecoveryProbeResult::Recovered;
+        let was_active = gate.active();
+        let capture_miss = gate.update_recovery(recovered, now);
+        if capture_miss.active != was_active || capture_miss.warn {
+            tracing::debug!(
+                target: TARGET_STITCH,
+                edge = ?capture_miss.edge,
+                recovered,
+                "capture-miss recovery probe"
+            );
+        }
+        return ProcessedFrame {
+            signal: None,
+            capture_miss,
+            publish_preview: false,
+            publish_activity: false,
+        };
+    }
+
+    let outcome = stitcher.push_frame_preserving_anchor(frame);
+    let signal = progress_signal_from_outcome(&outcome);
+    let was_active = gate.active();
+    let capture_miss = gate.update(signal, now);
+    if capture_miss.active != was_active || capture_miss.warn {
+        tracing::debug!(
+            target: TARGET_STITCH,
+            active = capture_miss.active,
+            warn = capture_miss.warn,
+            edge = ?capture_miss.edge,
+            "capture-miss transition"
+        );
+    }
+    ProcessedFrame {
+        signal: Some(signal),
+        capture_miss,
+        publish_preview: should_emit_preview(&signal),
+        publish_activity: should_emit_accepted_activity(&signal),
+    }
 }
 
 /// Wrapper that lets us move a `Box<dyn FrameStream>` to the reader thread.
@@ -288,31 +347,27 @@ impl Driver {
                         }
                     };
                     if let Ok(mut stitcher) = shared.stitcher.lock() {
-                        let outcome = stitcher.push_frame(cropped.image);
-                        let signal = progress_signal_from_outcome(&outcome);
-                        if let StitchProgressSignal::Accepted { edge } = signal {
+                        let result = process_frame(
+                            &mut stitcher,
+                            &mut capture_miss_tracker,
+                            cropped.image,
+                            Instant::now(),
+                        );
+                        if let Some(StitchProgressSignal::Accepted { edge }) = result.signal {
                             if edge != CapturedEdge::Unknown {
                                 spotlight_edge = edge;
                             }
                         }
-                        let capture_miss_state =
-                            capture_miss_tracker.update(signal, Instant::now());
-                        if should_emit_capture_miss(&capture_miss_state, last_capture_miss_active) {
-                            tracing::debug!(
-                                target: TARGET_STITCH,
-                                active = capture_miss_state.active,
-                                warn = capture_miss_state.warn,
-                                "capture-miss transition"
-                            );
+                        if should_emit_capture_miss(&result.capture_miss, last_capture_miss_active) {
                             let _ = preview_tx
-                                .unbounded_send(LiveOverlayEvent::CaptureMiss(capture_miss_state));
+                                .unbounded_send(LiveOverlayEvent::CaptureMiss(result.capture_miss));
                         }
-                        last_capture_miss_active = capture_miss_state.active;
-                        if should_emit_accepted_activity(&signal) {
+                        last_capture_miss_active = result.capture_miss.active;
+                        if result.publish_activity {
                             let _ = preview_tx
                                 .unbounded_send(LiveOverlayEvent::AcceptedActivity(Instant::now()));
                         }
-                        if should_emit_preview(&signal) {
+                        if result.publish_preview {
                             if let Some(handle) = preview_handle(
                                 &mut stitcher,
                                 region,
@@ -482,16 +537,19 @@ fn preview_handle(
 #[cfg(test)]
 mod tests {
     use super::{
-        overlay_stitch_config, preview_handle, should_emit_accepted_activity,
-        should_emit_capture_miss, should_emit_preview, stitch_stream, PreviewConstraints,
+        overlay_stitch_config, preview_handle, process_frame, should_emit_accepted_activity,
+        should_emit_capture_miss, should_emit_preview, stitch_stream, ProcessedFrame,
+        PreviewConstraints,
     };
     use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use rollshot_core::{StitchOutcome, Stitcher};
-    use rollshot_overlay_core::capture_miss::{CaptureMissState, StitchProgressSignal};
+    use rollshot_overlay_core::capture_miss::{
+        CaptureMissTracker, CaptureMissState, StitchProgressSignal,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::SystemTime;
+    use std::time::{Duration, Instant, SystemTime};
 
     // A tall canvas; each frame is an 80x80 window scrolled down by `offset_y`.
     fn scrolling_frame(offset_y: u32) -> CapturedFrame {
@@ -704,5 +762,98 @@ mod tests {
             events.push(LiveEventKind::AcceptedActivity);
         }
         events
+    }
+
+    // ------------------------------------------------------------------
+    // Local RgbaImage helpers for process_frame tests
+    // ------------------------------------------------------------------
+
+    /// Build a tall scroll canvas (80 × 200) with unique stripe patterns.
+    fn make_scroll_canvas() -> RgbaImage {
+        let (w, h) = (80u32, 200u32);
+        let mut canvas = RgbaImage::from_pixel(w, h, Rgba([245, 245, 245, 255]));
+        for y in (0..h).step_by(11) {
+            for x in 8..w.saturating_sub(8) {
+                let stripe = if (x / 5 + y / 7) % 2 == 0 { 220 } else { 180 };
+                canvas.put_pixel(x, y, Rgba([(y % 180) as u8, stripe, 80, 255]));
+                if y + 1 < h {
+                    canvas.put_pixel(x, y + 1, Rgba([30, 30, 30, 255]));
+                }
+            }
+        }
+        canvas
+    }
+
+    /// Crop an 80×80 window from the scroll canvas at `offset_y`.
+    fn crop_scroll(canvas: &RgbaImage, offset_y: u32) -> RgbaImage {
+        image::imageops::crop_imm(canvas, 0, offset_y, 80, 80).to_image()
+    }
+
+    /// A solid-color frame that shares no overlap with the scroll canvas.
+    fn solid_miss_frame() -> RgbaImage {
+        RgbaImage::from_pixel(80, 80, Rgba([10, 200, 200, 255]))
+    }
+
+    #[test]
+    fn process_frame_routes_through_probe_recovery_when_paused() {
+        let canvas = make_scroll_canvas();
+        let mut stitcher = Stitcher::new(overlay_stitch_config());
+        let mut gate = CaptureMissTracker::default();
+        let now = Instant::now();
+
+        // 1. Anchor: first frame seeds the canvas.
+        let anchor = crop_scroll(&canvas, 0);
+        let r = process_frame(&mut stitcher, &mut gate, anchor, now);
+        assert!(r.signal.is_some(), "anchor should produce a signal");
+        assert!(r.publish_preview, "anchor should publish preview");
+
+        // 2. Successful append: overlap region matches.
+        let append = crop_scroll(&canvas, 8);
+        let r = process_frame(&mut stitcher, &mut gate, append, now);
+        assert!(r.publish_preview, "append should publish preview");
+        assert!(r.publish_activity, "append should publish activity");
+        let stats_after_append = stitcher.stats();
+        let dims_after_append = stitcher.full_image().map(|i| (i.width(), i.height()));
+
+        // 3–4. Two unrelated (miss) frames to trigger the capture-miss gate.
+        let miss1 = solid_miss_frame();
+        let r = process_frame(&mut stitcher, &mut gate, miss1.clone(), now);
+        assert!(!gate.active(), "one miss should not activate gate yet");
+
+        let miss2 = solid_miss_frame();
+        let r = process_frame(&mut stitcher, &mut gate, miss2, now);
+        assert!(gate.active(), "two misses should activate gate");
+
+        // 5. While paused, a further unrelated frame: stats and canvas unchanged.
+        let stats_while_paused = stitcher.stats();
+        let dims_while_paused = stitcher.full_image().map(|i| (i.width(), i.height()));
+        let r = process_frame(&mut stitcher, &mut gate, miss1.clone(), now + Duration::from_millis(100));
+        assert!(!r.publish_preview, "paused frame must not publish preview");
+        assert!(!r.publish_activity, "paused frame must not publish activity");
+        assert_eq!(stitcher.stats().frame_count, stats_while_paused.frame_count, "stats must not change while paused");
+        assert_eq!(stitcher.full_image().map(|i| (i.width(), i.height())), dims_while_paused, "canvas dims must not change while paused");
+
+        // 6. Recovery overlap: frame that overlaps the committed canvas.
+        //    This clears the active state but does NOT publish preview.
+        let recovery = crop_scroll(&canvas, 16);
+        let r = process_frame(&mut stitcher, &mut gate, recovery, now + Duration::from_millis(200));
+        assert!(!gate.active(), "recovery should clear active state");
+        assert!(!r.publish_preview, "recovery frame must not publish preview");
+
+        // 7. Next forward append: publishes preview and grows stats.
+        let forward = crop_scroll(&canvas, 24);
+        let r = process_frame(&mut stitcher, &mut gate, forward, now + Duration::from_millis(300));
+        assert!(r.publish_preview, "next forward append should publish preview");
+        assert!(r.publish_activity, "next forward append should publish activity");
+        let stats_after_forward = stitcher.stats();
+        assert!(
+            stats_after_forward.frame_count > stats_after_append.frame_count,
+            "stats should grow after recovery"
+        );
+        let dims_after_forward = stitcher.full_image().map(|i| (i.width(), i.height()));
+        assert!(
+            dims_after_forward > dims_after_append,
+            "canvas should grow after recovery"
+        );
     }
 }
