@@ -358,7 +358,8 @@ impl Driver {
                                 spotlight_edge = edge;
                             }
                         }
-                        if should_emit_capture_miss(&result.capture_miss, last_capture_miss_active) {
+                        if should_emit_capture_miss(&result.capture_miss, last_capture_miss_active)
+                        {
                             let _ = preview_tx
                                 .unbounded_send(LiveOverlayEvent::CaptureMiss(result.capture_miss));
                         }
@@ -545,7 +546,7 @@ mod tests {
     use rollshot_capture::{CapturedFrame, FakeFrameStream, FrameMetadata, Region};
     use rollshot_core::{StitchOutcome, Stitcher};
     use rollshot_overlay_core::capture_miss::{
-        CaptureMissTracker, CaptureMissState, StitchProgressSignal,
+        CaptureMissState, CaptureMissTracker, StitchProgressSignal,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -826,24 +827,59 @@ mod tests {
         // 5. While paused, a further unrelated frame: stats and canvas unchanged.
         let stats_while_paused = stitcher.stats();
         let dims_while_paused = stitcher.full_image().map(|i| (i.width(), i.height()));
-        let r = process_frame(&mut stitcher, &mut gate, miss1.clone(), now + Duration::from_millis(100));
+        let r = process_frame(
+            &mut stitcher,
+            &mut gate,
+            miss1.clone(),
+            now + Duration::from_millis(100),
+        );
         assert!(!r.publish_preview, "paused frame must not publish preview");
-        assert!(!r.publish_activity, "paused frame must not publish activity");
-        assert_eq!(stitcher.stats().frame_count, stats_while_paused.frame_count, "stats must not change while paused");
-        assert_eq!(stitcher.full_image().map(|i| (i.width(), i.height())), dims_while_paused, "canvas dims must not change while paused");
+        assert!(
+            !r.publish_activity,
+            "paused frame must not publish activity"
+        );
+        assert_eq!(
+            stitcher.stats().frame_count,
+            stats_while_paused.frame_count,
+            "stats must not change while paused"
+        );
+        assert_eq!(
+            stitcher.full_image().map(|i| (i.width(), i.height())),
+            dims_while_paused,
+            "canvas dims must not change while paused"
+        );
 
         // 6. Recovery overlap: frame that overlaps the committed canvas.
         //    This clears the active state but does NOT publish preview.
         let recovery = crop_scroll(&canvas, 16);
-        let r = process_frame(&mut stitcher, &mut gate, recovery, now + Duration::from_millis(200));
+        let r = process_frame(
+            &mut stitcher,
+            &mut gate,
+            recovery,
+            now + Duration::from_millis(200),
+        );
         assert!(!gate.active(), "recovery should clear active state");
-        assert!(!r.publish_preview, "recovery frame must not publish preview");
+        assert!(
+            !r.publish_preview,
+            "recovery frame must not publish preview"
+        );
 
         // 7. Next forward append: publishes preview and grows stats.
         let forward = crop_scroll(&canvas, 24);
-        let r = process_frame(&mut stitcher, &mut gate, forward, now + Duration::from_millis(300));
-        assert!(r.publish_preview, "next forward append should publish preview");
-        assert!(r.publish_activity, "next forward append should publish activity");
+        let r = process_frame(
+            &mut stitcher,
+            &mut gate,
+            forward,
+            now + Duration::from_millis(300),
+        );
+        assert!(
+            r.publish_preview,
+            "next forward append should publish preview"
+        );
+        assert!(
+            r.publish_activity,
+            "next forward append should publish activity"
+        );
         let stats_after_forward = stitcher.stats();
         assert!(
             stats_after_forward.frame_count > stats_after_append.frame_count,
