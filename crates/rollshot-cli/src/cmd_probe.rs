@@ -66,6 +66,11 @@ fn build_report() -> ProbeReport {
 
     #[cfg(target_os = "linux")]
     {
+        let backend = rollshot_capture::LinuxKwinBackend::new_real();
+        backends.push(backend.probe().into());
+    }
+    #[cfg(target_os = "linux")]
+    {
         let backend = rollshot_capture::LinuxPortalBackend::new();
         backends.push(backend.probe().into());
     }

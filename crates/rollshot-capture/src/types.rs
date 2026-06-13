@@ -19,6 +19,9 @@ pub struct CaptureOptions {
     /// the backend pick (macOS falls back to the display under the cursor).
     /// Ignored by backends with their own source selection (Linux portal).
     pub target_display_id: Option<u32>,
+    /// Wayland output name selected by a platform host. Linux KWin uses this to
+    /// bind the same output as the selection overlay. Other backends ignore it.
+    pub target_output_name: Option<String>,
 }
 
 impl Default for CaptureOptions {
@@ -29,6 +32,7 @@ impl Default for CaptureOptions {
             show_cursor: false,
             prefer_portal_region: true,
             target_display_id: None,
+            target_output_name: None,
         }
     }
 }
@@ -144,7 +148,7 @@ pub enum PixelFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureMode, InteractiveLaunchOptions, OverlayMode};
+    use super::{CaptureMode, CaptureOptions, InteractiveLaunchOptions, OverlayMode};
 
     #[test]
     fn interactive_launch_options_round_trip_json() {
@@ -194,5 +198,10 @@ mod tests {
         let mut opts = InteractiveLaunchOptions::default_capture();
         opts.fps = 60;
         assert_eq!(opts.initial_mode, CaptureMode::Scrolling);
+    }
+
+    #[test]
+    fn capture_options_default_has_no_target_output_name() {
+        assert_eq!(CaptureOptions::default().target_output_name, None);
     }
 }

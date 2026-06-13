@@ -111,6 +111,7 @@ fn run_headless(args: &CaptureArgs) -> Result<String, CliError> {
         show_cursor: args.show_cursor,
         prefer_portal_region: true,
         target_display_id: None,
+        target_output_name: None,
     };
 
     let mut stream = backend.start(options).map_err(CliError::from_capture)?;
@@ -504,7 +505,9 @@ fn parse_region(flag: &str, kind: BackendKind) -> Result<RegionMode, CliError> {
     match flag {
         "auto" => Ok(match kind {
             BackendKind::LinuxPortalPipeWire => RegionMode::PortalPicker,
-            BackendKind::MacosScreenCaptureKit
+            BackendKind::LinuxAuto
+            | BackendKind::LinuxKwinPipeWire
+            | BackendKind::MacosScreenCaptureKit
             | BackendKind::Fixture
             | BackendKind::Unsupported => RegionMode::FullSource,
         }),

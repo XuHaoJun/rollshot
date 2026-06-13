@@ -12,13 +12,20 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-pub use backend::{default_backend, default_backend_for, BackendKind, CaptureBackend, FrameStream};
+pub use backend::{
+    backend_for_flag, default_backend, default_backend_for, BackendKind, CaptureBackend,
+    FrameStream,
+};
 pub use crop::{crop_frame, crop_image};
 pub use error::CaptureError;
 pub use fake::FakeFrameStream;
 pub use fixture::{FixtureBackend, FixtureFrameStream};
 #[cfg(target_os = "linux")]
+pub use linux::auto::LinuxAutoBackend;
+#[cfg(target_os = "linux")]
 pub use linux::one_shot::LinuxKwinOneShotBackend;
+#[cfg(target_os = "linux")]
+pub use linux::LinuxKwinBackend;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPortalBackend;
 #[cfg(target_os = "macos")]

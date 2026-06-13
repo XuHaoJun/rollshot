@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+pub mod auto;
+pub mod kwin_screencast;
 pub mod kwin_screenshot;
 pub mod one_shot;
 mod pipewire;
@@ -52,6 +54,118 @@ impl LinuxPortalBackend {
 impl Default for LinuxPortalBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct LinuxKwinBackend {
+    client: Box<dyn kwin_screencast::KwinScreencastClient>,
+    active_output_resolver: Option<Box<dyn Fn() -> Result<String, CaptureError> + Send>>,
+}
+
+impl LinuxKwinBackend {
+    pub fn new(
+        client: impl kwin_screencast::KwinScreencastClient + 'static,
+        active_output_resolver: Option<Box<dyn Fn() -> Result<String, CaptureError> + Send>>,
+    ) -> Self {
+        Self {
+            client: Box::new(client),
+            active_output_resolver,
+        }
+    }
+
+    pub fn new_real() -> Self {
+        Self::new(
+            kwin_screencast::RealKwinScreencastClient::new(),
+            Some(Box::new(resolve_active_kwin_output)),
+        )
+    }
+}
+
+#[cfg(not(test))]
+fn resolve_active_kwin_output() -> Result<String, CaptureError> {
+    crate::one_shot::OneShotBackendKind::LinuxKwin
+        .capture_once(false)?
+        .target_display()
+        .output_name
+        .clone()
+        .ok_or_else(|| CaptureError::Mapping {
+            message: "KWin active-screen capture did not identify an output".to_string(),
+        })
+}
+
+#[cfg(test)]
+fn resolve_active_kwin_output() -> Result<String, CaptureError> {
+    Err(CaptureError::Unsupported {
+        message: "real KWin active-output resolution is unavailable in unit tests".to_string(),
+    })
+}
+
+impl CaptureBackend for LinuxKwinBackend {
+    fn name(&self) -> &'static str {
+        "linux-kwin"
+    }
+
+    fn probe(&self) -> CaptureProbe {
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        let is_wayland = session_type == "wayland";
+        let is_kde = desktop
+            .split(':')
+            .any(|part| part.eq_ignore_ascii_case("KDE"));
+
+        let mut available = is_wayland && is_kde;
+        let mut details = vec![
+            ("XDG_SESSION_TYPE".to_string(), session_type),
+            ("XDG_CURRENT_DESKTOP".to_string(), desktop),
+        ];
+
+        if available {
+            details.push((
+                "zkde_screencast_unstable_v1".to_string(),
+                "protocol advertised (requires live Wayland connection to confirm)".to_string(),
+            ));
+        }
+
+        let message = if !is_wayland {
+            "requires Wayland session".to_string()
+        } else if !is_kde {
+            "requires KDE desktop".to_string()
+        } else {
+            "KDE Wayland detected; a desktop-entry authorizing Rollshot is required for real streams"
+                .to_string()
+        };
+
+        // If not available, also report what we found so diagnostics are useful.
+        if !available {
+            available = false;
+        }
+
+        CaptureProbe {
+            backend: "linux-kwin",
+            available,
+            message,
+            details,
+        }
+    }
+
+    fn start(&mut self, options: CaptureOptions) -> Result<Box<dyn FrameStream>, CaptureError> {
+        let output_name = match &options.target_output_name {
+            Some(name) => name.clone(),
+            None => match &self.active_output_resolver {
+                Some(resolver) => resolver()?,
+                None => {
+                    return Err(CaptureError::InvalidConfig {
+                        message: "no target output and no active-output resolver".to_string(),
+                    })
+                }
+            },
+        };
+
+        let session = self
+            .client
+            .start_output(&output_name, options.show_cursor)?;
+        let stream = pipewire::LinuxPipeWireFrameStream::connect_kwin(session, options)?;
+        Ok(Box::new(stream))
     }
 }
 
@@ -112,7 +226,7 @@ impl CaptureBackend for LinuxPortalBackend {
         }
 
         tracing::debug!(target: TARGET_CAPTURE, "connecting PipeWire stream");
-        let stream = LinuxPortalFrameStream::connect(session, options)?;
+        let stream = LinuxPortalFrameStream::connect_portal(session, options)?;
         Ok(Box::new(stream))
     }
 }
@@ -238,6 +352,7 @@ mod tests {
             show_cursor: false,
             prefer_portal_region: true,
             target_display_id: None,
+            target_output_name: None,
         }
     }
 

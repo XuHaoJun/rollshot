@@ -776,6 +776,7 @@ impl Component {
             fps: 5,
             show_cursor: false,
             initial_mode: new_mode,
+            target_output_name: None,
         };
         #[cfg(not(test))]
         let factories = real_factories();
@@ -998,6 +999,7 @@ fn real_factories() -> ResourceFactories {
                 cfg.fps,
                 cfg.show_cursor,
                 target_display_id,
+                None,
                 preview_tx,
             )
         }),

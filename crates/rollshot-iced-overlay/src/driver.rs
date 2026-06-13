@@ -124,6 +124,10 @@ pub struct Driver {
     /// Display the stream was pinned to (macOS display id), when the host
     /// resolved one. Lets the host place the overlay on the same display.
     target_display_id: Option<u32>,
+    /// Wayland output name the stream was pinned to (KWin scrolling), when
+    /// the host resolved one. Lets the overlay target the same output.
+    target_output_name: Option<String>,
+    capture_backend: &'static str,
     preview_tx: UnboundedSender<LiveOverlayEvent>,
 }
 
@@ -140,9 +144,10 @@ impl Driver {
         fps: u32,
         show_cursor: bool,
         target_display_id: Option<u32>,
+        target_output_name: Option<String>,
         preview_tx: UnboundedSender<LiveOverlayEvent>,
     ) -> Result<Self, String> {
-        tracing::info!(target: TARGET_CAPTURE, backend, fps, show_cursor, ?target_display_id, "creating capture backend");
+        tracing::info!(target: TARGET_CAPTURE, backend, fps, show_cursor, ?target_display_id, ?target_output_name, "creating capture backend");
         let kind = BackendKind::from_cli_flag(backend).map_err(|e| e.to_string())?;
         let mut backend_impl = kind.create().map_err(|e| e.to_string())?;
         let stream = backend_impl
@@ -152,6 +157,7 @@ impl Driver {
                 show_cursor,
                 prefer_portal_region: false,
                 target_display_id,
+                target_output_name: target_output_name.clone(),
             })
             .map_err(|e| e.to_string())?;
         tracing::info!(target: TARGET_CAPTURE, "capture stream started");
@@ -197,7 +203,8 @@ impl Driver {
             })
         };
 
-        let source_size = wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
+        let (source_size, capture_backend) =
+            wait_for_source_size(&shared, &stop, Duration::from_secs(5))?;
         tracing::debug!(target: TARGET_CAPTURE, width = source_size.width, height = source_size.height, "first frame arrived");
 
         Ok(Self {
@@ -211,6 +218,8 @@ impl Driver {
                 height: 0,
             },
             target_display_id,
+            target_output_name,
+            capture_backend,
             preview_tx,
         })
     }
@@ -332,6 +341,14 @@ impl Driver {
         self.target_display_id
     }
 
+    pub fn target_output_name(&self) -> Option<&str> {
+        self.target_output_name.as_deref()
+    }
+
+    pub fn capture_backend(&self) -> &'static str {
+        self.capture_backend
+    }
+
     pub(crate) fn overlay_size(&self) -> Size {
         self.overlay_logical
     }
@@ -401,7 +418,7 @@ fn wait_for_source_size(
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
     timeout: Duration,
-) -> Result<Size, String> {
+) -> Result<(Size, &'static str), String> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(e) = shared.error.lock() {
@@ -411,10 +428,13 @@ fn wait_for_source_size(
         }
         if let Ok(slot) = shared.latest.lock() {
             if let Some(frame) = slot.as_ref() {
-                return Ok(frame.metadata.source_size.unwrap_or(Size {
-                    width: frame.image.width(),
-                    height: frame.image.height(),
-                }));
+                return Ok((
+                    frame.metadata.source_size.unwrap_or(Size {
+                        width: frame.image.width(),
+                        height: frame.image.height(),
+                    }),
+                    frame.metadata.backend,
+                ));
             }
         }
         if Instant::now() >= deadline {

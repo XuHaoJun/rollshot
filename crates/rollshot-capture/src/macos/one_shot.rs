@@ -113,9 +113,10 @@ fn map_isolation_error(err: rollshot_macos_oneshot::MacosOneShotError) -> Captur
         rollshot_macos_oneshot::MacosOneShotError::PermissionDenied(msg) => {
             CaptureError::PermissionDenied { message: msg }
         }
-        rollshot_macos_oneshot::MacosOneShotError::Timeout(msg) => {
-            CaptureError::Timeout { message: msg }
-        }
+        rollshot_macos_oneshot::MacosOneShotError::Timeout(msg) => CaptureError::Timeout {
+            message: msg,
+            duration: std::time::Duration::from_secs(30),
+        },
         rollshot_macos_oneshot::MacosOneShotError::Capture(msg) => {
             CaptureError::Backend(anyhow::anyhow!(msg))
         }
@@ -304,7 +305,7 @@ mod tests {
         );
         let mapped = map_isolation_error(iso_err);
         match mapped {
-            CaptureError::Timeout { message } => {
+            CaptureError::Timeout { message, .. } => {
                 assert!(message.contains("30 seconds"), "msg: {message}");
             }
             other => panic!("expected Timeout, got {other:?}"),

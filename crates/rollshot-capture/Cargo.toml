@@ -23,6 +23,9 @@ nix = { workspace = true }
 url = { workspace = true }
 pipewire = { workspace = true }
 tokio = { workspace = true }
+wayland-backend = { workspace = true }
+wayland-client = { workspace = true }
+wayland-scanner = { workspace = true }
 zbus = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

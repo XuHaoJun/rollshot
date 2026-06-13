@@ -25,6 +25,7 @@ fn captures_linux_portal_frames() {
             show_cursor: false,
             prefer_portal_region: true,
             target_display_id: None,
+            target_output_name: None,
         })
         .expect("start linux portal capture");
 

@@ -20,6 +20,7 @@ fn main() {
         fps,
         show_cursor: false,
         initial_mode: rollshot_capture::CaptureMode::Scrolling,
+        target_output_name: None,
     };
 
     // The matcher is the throughput bottleneck. In a debug build it is slow

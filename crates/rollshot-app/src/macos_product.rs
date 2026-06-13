@@ -587,6 +587,7 @@ mod tests {
             fps: 5,
             show_cursor: false,
             initial_mode: CaptureMode::Screenshot,
+            target_output_name: None,
         };
         // `Component::new` uses test factories under cfg(test), so this builds a
         // bare component without touching real capture.

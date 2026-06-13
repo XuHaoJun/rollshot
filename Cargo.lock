@@ -5759,6 +5759,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
  "zbus 4.4.0",
  "zed-scap",
 ]
