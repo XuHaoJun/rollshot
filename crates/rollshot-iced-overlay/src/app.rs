@@ -133,6 +133,13 @@ impl OverlayState {
     }
 }
 
+fn clear_capture_miss_ui(state: &mut OverlayState) {
+    state.capture_miss_active = false;
+    state.capture_miss_edge = rollshot_overlay_core::capture_miss::CapturedEdge::Unknown;
+    state.capture_miss_warn = false;
+    state.capture_miss_message_expires_at = None;
+}
+
 pub(crate) fn token_color(c: tokens::Rgba) -> Color {
     Color::from_rgba(
         c.r as f32 / 255.0,
@@ -766,6 +773,7 @@ pub(crate) fn update(
             state.mode = mode;
             state.workspace.activate_mode(mode);
             state.drag_start = None;
+            clear_capture_miss_ui(state);
             let region = match mode {
                 CaptureMode::Scrolling => InputRegionMode::ToolbarOnly,
                 CaptureMode::Screenshot => InputRegionMode::None,
@@ -805,6 +813,7 @@ pub(crate) fn update(
             crate::toolbar::ToolbarAction::ScreenshotMode => {
                 state.mode = CaptureMode::Screenshot;
                 state.workspace.activate_mode(CaptureMode::Screenshot);
+                clear_capture_miss_ui(state);
                 (
                     OverlayEffect::ActivateMode(CaptureMode::Screenshot),
                     InputRegionMode::None,
@@ -813,6 +822,7 @@ pub(crate) fn update(
             crate::toolbar::ToolbarAction::ScrollingMode => {
                 state.mode = CaptureMode::Scrolling;
                 state.workspace.activate_mode(CaptureMode::Scrolling);
+                clear_capture_miss_ui(state);
                 (
                     OverlayEffect::ActivateMode(CaptureMode::Scrolling),
                     InputRegionMode::None,
@@ -1130,6 +1140,31 @@ mod tests {
         );
         assert_eq!(state.crop, Some(crop));
         assert_eq!(state.workspace.phase(), WorkspacePhase::Selected);
+    }
+
+    #[test]
+    fn switching_modes_clears_capture_miss_ui_state() {
+        use rollshot_overlay_core::capture_miss::CapturedEdge;
+
+        let mut state = OverlayState {
+            capture_miss_active: true,
+            capture_miss_edge: CapturedEdge::Bottom,
+            capture_miss_warn: true,
+            capture_miss_message_expires_at: Some(
+                std::time::Instant::now() + std::time::Duration::from_secs(3),
+            ),
+            ..OverlayState::default()
+        };
+
+        super::update(
+            &mut state,
+            OverlayMessage::ToolbarAction(crate::toolbar::ToolbarAction::ScreenshotMode),
+        );
+
+        assert!(!state.capture_miss_active);
+        assert_eq!(state.capture_miss_edge, CapturedEdge::Unknown);
+        assert!(!state.capture_miss_warn);
+        assert!(state.capture_miss_message_expires_at.is_none());
     }
 
     #[test]
