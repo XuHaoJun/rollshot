@@ -80,7 +80,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{extract_logging_args, parse_launch_args, LaunchMode};
-    use rollshot_capture::{CaptureMode, OverlayMode};
+    use rollshot_capture::CaptureMode;
     use std::path::PathBuf;
 
     #[test]
@@ -91,24 +91,28 @@ mod tests {
                 assert_eq!(options.backend, "auto");
                 assert_eq!(options.fps, 5);
                 assert!(!options.show_cursor);
-                assert_eq!(options.overlay_mode, OverlayMode::Auto);
                 assert_eq!(options.initial_mode, CaptureMode::Scrolling);
             }
         }
     }
 
     #[test]
-    fn parses_overlay_mode() {
+    fn ignores_obsolete_capture_option() {
+        let obsolete_field = concat!("overlay", "_mode");
+        let payload = format!(
+            r#"{{"backend":"macos-sck","fps":30,"show_cursor":false,"{obsolete_field}":"legacy"}}"#
+        );
         let mode = parse_launch_args([
             "rollshot-app",
             "--capture",
-            r#"{"backend":"macos-sck","fps":30,"show_cursor":false,"overlay_mode":"iced"}"#,
+            payload.as_str(),
         ])
         .expect("parse launch args");
 
         match mode {
             LaunchMode::Capture(options) => {
-                assert_eq!(options.overlay_mode, OverlayMode::Iced);
+                assert_eq!(options.backend, "macos-sck");
+                assert_eq!(options.initial_mode, CaptureMode::Scrolling);
             }
         }
     }
