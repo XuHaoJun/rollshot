@@ -142,6 +142,35 @@ fn recovery_probe_rejects_unrelated_and_dimension_mismatched_frames() {
         RecoveryProbeResult::Missed
     );
 }
+
+// Parity guard: a frame the normal push path would accept as an on-axis
+// append must probe as `Recovered`, and a genuine non-overlapping frame the
+// push path rejects must probe as `Missed`. Pins probe vs push so the shared
+// evaluation core cannot drift apart. Uses two independent stitchers so the
+// push-side acceptance does not perturb the probe-side anchor.
+#[test]
+fn probe_recovery_agrees_with_push_accept_reject() {
+    let canvas = make_scroll_canvas(320, 1800);
+    let forward = crop_frame(&canvas, 96, 320);
+    let unrelated = RgbaImage::from_pixel(320, 320, Rgba([255, 255, 255, 255]));
+
+    let mut pushed = Stitcher::new(StitchConfig::default());
+    pushed.push_frame(crop_frame(&canvas, 0, 320));
+    let mut probed = Stitcher::new(StitchConfig::default());
+    probed.push_frame(crop_frame(&canvas, 0, 320));
+
+    assert!(matches!(
+        pushed.push_frame(forward.clone()),
+        StitchOutcome::Appended { .. }
+    ));
+    assert_eq!(probed.probe_recovery(&forward), RecoveryProbeResult::Recovered);
+
+    assert!(matches!(
+        pushed.push_frame(unrelated.clone()),
+        StitchOutcome::NoMatch { .. }
+    ));
+    assert_eq!(probed.probe_recovery(&unrelated), RecoveryProbeResult::Missed);
+}
 ```
 
 - [ ] **Step 2: Run the new tests to verify they fail**
@@ -218,6 +247,38 @@ or verifier disagreement.
 The method must take `&self`, must not call `push_frame`, and must not update
 canvas, anchor, stats, locks, last motion, frame counter, or `last_metrics`.
 
+**DRY — do not fork the matching policy.** `push_frame_inner` already encodes
+the full accept ladder (duplicate → `estimate_motion` → confidence →
+direction/axis → min-append → verifier). Re-typing that ladder inside
+`probe_recovery` creates two copies of acceptance policy that will silently
+drift, exactly what the design's "reuse existing matcher and verifier behavior
+without duplicating matching policy" forbids. Extract the read-only evaluation
+core of `push_frame_inner` into a private helper, e.g.
+
+```rust
+enum FrameEvaluation { Duplicate, Append { /* candidate, direction, overlap */ }, Reject(NoMatchReason) }
+
+fn evaluate_frame(
+    &self,
+    anchor: &PreparedFrame,
+    frame: &RgbaImage,
+    metrics: &mut StitchMetrics,
+    enforce_direction_lock: bool,
+) -> FrameEvaluation;
+```
+
+`push_frame_inner` calls it with `enforce_direction_lock = true` and then mutates
+on `Append`; `probe_recovery` calls it with `enforce_direction_lock = false`,
+maps `Duplicate`/`Append → Recovered` and `Reject → Missed`, and mutates
+nothing. If a clean extraction proves too invasive for one commit, the fallback
+is to keep the duplicated ladder but pin parity with the cross-check test below
+— note the duplication explicitly in a code comment so the drift risk is visible.
+
+Performance note: building `PreparedFrame` for the candidate requires an owned
+`RgbaImage`, so the probe clones `frame` once per paused frame. This is
+acceptable because the probe runs *only* while paused (not in the steady-state
+hot loop); do not add the clone to the normal push path.
+
 - [ ] **Step 6: Run focused core tests**
 
 Run:
@@ -255,8 +316,15 @@ fn second_consecutive_genuine_miss_enters_paused_state() {
         StitchProgressSignal::Accepted { edge: CapturedEdge::Bottom },
         t(0),
     );
-    assert!(!gate.update(StitchProgressSignal::Missed, t(10)).active);
-    let paused = gate.update(StitchProgressSignal::Missed, t(20));
+    // The miss-signal edge is intentionally `Unknown`; the paused edge below
+    // must come from the last *accepted* append (`captured_edge`), proving the
+    // gate sources the guide edge from progress, not from the failed frame.
+    assert!(
+        !gate
+            .update(StitchProgressSignal::Missed { edge: CapturedEdge::Unknown }, t(10))
+            .active
+    );
+    let paused = gate.update(StitchProgressSignal::Missed { edge: CapturedEdge::Unknown }, t(20));
     assert!(paused.active);
     assert!(paused.warn);
     assert_eq!(paused.edge, CapturedEdge::Bottom);
@@ -265,17 +333,21 @@ fn second_consecutive_genuine_miss_enters_paused_state() {
 #[test]
 fn reverse_direction_is_neutral_and_preserves_miss_count() {
     let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
-    gate.update(StitchProgressSignal::Missed, t(0));
+    gate.update(StitchProgressSignal::Missed { edge: CapturedEdge::Unknown }, t(0));
     let state = gate.update(StitchProgressSignal::ReverseDirection, t(10));
     assert!(!state.active);
-    assert!(gate.update(StitchProgressSignal::Missed, t(20)).active);
+    assert!(
+        gate
+            .update(StitchProgressSignal::Missed { edge: CapturedEdge::Unknown }, t(20))
+            .active
+    );
 }
 
 #[test]
 fn paused_gate_clears_only_after_recovery() {
     let mut gate = CaptureMissTracker::new(Duration::from_secs(3));
-    gate.update(StitchProgressSignal::Missed, t(0));
-    gate.update(StitchProgressSignal::Missed, t(10));
+    gate.update(StitchProgressSignal::Missed { edge: CapturedEdge::Unknown }, t(0));
+    gate.update(StitchProgressSignal::Missed { edge: CapturedEdge::Unknown }, t(10));
     assert!(gate.update_recovery(false, t(20)).active);
     assert!(!gate.update_recovery(true, t(30)).active);
 }
@@ -283,6 +355,13 @@ fn paused_gate_clears_only_after_recovery() {
 
 Also retain tests for warning throttling and immediate warning after a later
 fresh pause.
+
+**Update the existing mapping test (same file):** `no_match_outcome_maps_to_missed_signal`
+currently feeds `NoMatchReason::ReverseDirection` and asserts it maps to `Missed`.
+After this task it must assert `StitchProgressSignal::ReverseDirection`. Add a
+companion test that a *non*-reverse `NoMatch` (e.g. `OverlapVerificationFailed`)
+and an `AxisChanged` outcome both map to `Missed { .. }`, so the genuine-miss
+classification is pinned.
 
 - [ ] **Step 2: Run overlay-core tests to verify failure**
 
@@ -297,20 +376,43 @@ has no recovery-specific update method.
 
 - [ ] **Step 3: Implement the recovery-gate semantics**
 
-Change `StitchProgressSignal` to make policy explicit:
+Change `StitchProgressSignal` to make policy explicit. **Keep the change
+additive** — split `ReverseDirection` out as a new variant but leave `Missed`'s
+existing `{ edge }` payload in place:
 
 ```rust
 pub enum StitchProgressSignal {
     Accepted { edge: CapturedEdge },
-    Missed,
+    Missed { edge: CapturedEdge },
     ReverseDirection,
     Idle,
 }
 ```
 
+Rationale (architecture/blast-radius): `StitchProgressSignal` is public and
+`rollshot-iced-overlay/src/driver.rs` is its only consumer (the `session.rs`
+webview path no longer exists — tauri was removed). Three driver unit tests
+construct `Missed { edge: ... }`. Dropping the `edge` field would break the
+driver crate's compilation and force driver edits into this task, defeating the
+Task 2 ∥ Task 3 parallelism and leaving a non-green intermediate commit. Adding
+`ReverseDirection` is purely additive: driver matches `Accepted { .. }` only, so
+the new variant compiles cleanly and every existing driver test keeps passing.
+The gate ignores the miss `edge` and derives the guide edge from `captured_edge`
+(set on accepted appends) per the spec; the retained `Missed.edge` is harmless.
+
 Update `progress_signal_from_outcome` so `NoMatchReason::ReverseDirection` maps
-to `ReverseDirection`, other `NoMatch` and `AxisChanged` map to `Missed`, and
-accepted/idle mappings remain intact.
+to `ReverseDirection`, other `NoMatch` and `AxisChanged` map to `Missed { .. }`
+(edge derivation may stay as-is or collapse to `Unknown` — the gate does not use
+it), and accepted/idle mappings remain intact.
+
+Add an ASCII state-machine doc-comment above `CaptureMissTracker` mirroring the
+`Stitching → Paused → Stitching` diagram from the design doc, so the two-miss /
+recovery transitions are legible at the definition site.
+
+Note the pre-existing `PreviewRecoveryAffordance` / `affordance` field on
+`CaptureMissState` is currently dead (constructed, read nowhere). Keep
+constructing it as today; do not expand or remove it in this task (out of scope
+— flag only).
 
 Extend `CaptureMissTracker` with:
 
@@ -318,6 +420,11 @@ Extend `CaptureMissTracker` with:
 consecutive_misses: u8,
 captured_edge: CapturedEdge,
 ```
+
+Note `captured_edge` is the spec-correct successor to the existing `edge` field
+(which today stores the *miss* estimate). Reuse/rename the existing `edge` field
+rather than carrying both — `state()` and `update()` should report
+`captured_edge`, so there is a single source of truth for the guide edge.
 
 and add:
 
@@ -379,11 +486,22 @@ normal anchor -> successful append -> unrelated miss -> unrelated miss
 -> paused unrelated frame -> recovery overlap -> next forward append
 ```
 
+The test drives `process_frame(&mut stitcher, &mut gate, frame, now)` directly
+with deterministic frames — append/overlap frames cropped from a tall scroll
+canvas and a solid-color frame for the genuine miss. `driver.rs`'s test module
+has no `make_scroll_canvas` helper today (the existing `scrolling_frame` helper
+produces `CapturedFrame`s, not bare `RgbaImage`s); add a small local
+`RgbaImage` canvas/crop helper or lift the shared one — do not depend on
+`rollshot-core`'s `tests/common`.
+
 Assert after entering paused:
 
 - stats and canvas dimensions stay unchanged across additional unrelated frames;
 - `publish_preview` and `publish_activity` are false;
-- finalizing from paused state returns the last successfully committed canvas;
+- the committed canvas is preserved while paused — assert directly on
+  `stitcher.full_image()` dimensions / `stitcher.stats()` (NOT via
+  `Driver::finalize`, which spins real reader/stitch threads and is not
+  reachable from this helper-level unit test);
 - recovery overlap clears active state but still does not publish preview;
 - the next forward append publishes preview and grows stats.
 
@@ -522,8 +640,15 @@ pub(crate) capture_miss_edge: CapturedEdge,
 ```
 
 On every `LiveOverlayEvent::CaptureMiss(miss)`, update these fields from
-`miss.active` and `miss.edge`. Preserve the existing three-second toast expiry;
-the tick handler must not clear active edge state.
+`miss.active` and `miss.edge`. **Critical:** today's handler only mutates state
+*inside* `if miss.warn { ... }`. The recovery (clearing) event arrives with
+`active = false, warn = false`, so the `capture_miss_active`/`capture_miss_edge`
+assignment must move *outside* the `if miss.warn` guard — otherwise the guide
+never clears on recovery. Keep the toast (`capture_miss_warn` +
+`capture_miss_message_expires_at`) update inside the `if miss.warn` branch.
+Preserve the existing three-second toast expiry; the tick handler must not clear
+active edge state. Add a test asserting a `CaptureMiss { active: false }` event
+with `warn: false` clears `capture_miss_active`.
 
 - [ ] **Step 5: Draw the captured-edge guide**
 
