@@ -37,7 +37,10 @@ pub enum Message {
     /// User pressed "Copy Original" (unflattened source).
     CopyOriginal,
     /// Background clipboard write completed.
-    CopyFinished(Result<(), String>),
+    CopyFinished {
+        result: Result<(), String>,
+        safe_output: bool,
+    },
     /// User pressed "Save As…".
     SaveAs,
     /// The async file-picker returned (None = cancelled).
@@ -46,6 +49,7 @@ pub enum Message {
     SaveFinished {
         result: Result<PathBuf, String>,
         saved_state_id: u64,
+        safe_output: bool,
     },
     /// User pressed "Reveal".
     Reveal,
@@ -406,20 +410,35 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::Copy => {
             commit_text_draft(state);
+            let safe_output = state.has_secure_redactions();
             let result = super::actions::copy_image(&copy_payload(state));
-            Task::done(Message::CopyFinished(result))
+            Task::done(Message::CopyFinished {
+                result,
+                safe_output,
+            })
         }
         Message::CopyOriginal => {
             state.editor.copy_menu_open = false;
             commit_text_draft(state);
             let result = super::actions::copy_image(&copy_original_payload(state));
-            Task::done(Message::CopyFinished(result))
+            Task::done(Message::CopyFinished {
+                result,
+                safe_output: false,
+            })
         }
-        Message::CopyFinished(Ok(())) => {
-            state.message = Some(InlineMessage::success("Copied image".to_string()));
+        Message::CopyFinished {
+            result: Ok(()),
+            safe_output,
+        } => {
+            let text = if safe_output {
+                super::secure_sharing::COPY_SAFE_SUCCESS.to_string()
+            } else {
+                "Copied image".to_string()
+            };
+            state.message = Some(InlineMessage::success(text));
             Task::none()
         }
-        Message::CopyFinished(Err(e)) => {
+        Message::CopyFinished { result: Err(e), .. } => {
             state.message = Some(InlineMessage::Error(e));
             Task::none()
         }
@@ -428,13 +447,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             let default_dir = crate::storage::Platform::current()
                 .and_then(crate::storage::default_output_dir)
                 .unwrap_or_else(|_| PathBuf::from("."));
-            let default_name = super::document::default_save_name(&state.document);
+            let default_name = super::secure_sharing::default_save_name(&state.document);
             Task::perform(
                 super::actions::prompt_save_as(default_dir, default_name),
                 Message::SavePathChosen,
             )
         }
         Message::SavePathChosen(Some(path)) => {
+            let safe_output = state.has_secure_redactions();
+            if super::secure_sharing::safe_export_overwrites_source(&state.document, &path) {
+                state.message = Some(InlineMessage::Error(
+                    super::secure_sharing::SAFE_EXPORT_OVERWRITE_ERROR.to_string(),
+                ));
+                return Task::none();
+            }
             let image = save_payload(state);
             let saved_state_id = state.document.image.state_id();
             Task::perform(
@@ -442,6 +468,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 move |result| Message::SaveFinished {
                     result,
                     saved_state_id,
+                    safe_output,
                 },
             )
         }
@@ -449,8 +476,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::SaveFinished {
             result,
             saved_state_id,
+            safe_output,
         } => {
-            state.apply_save_as(result.map(Some), saved_state_id);
+            state.apply_save_as(result.map(Some), saved_state_id, safe_output);
             Task::none()
         }
         Message::Reveal => {
@@ -876,6 +904,7 @@ mod tests {
             Message::SaveFinished {
                 result: Ok(PathBuf::from("/tmp/annotated.png")),
                 saved_state_id: written_state_id,
+                safe_output: false,
             },
         );
 
@@ -1621,6 +1650,90 @@ mod tests {
         let _ = update(&mut state, Message::Undo);
         let _ = update(&mut state, Message::NavigatorJump(id));
         assert_eq!(state.editor.selection, None);
+    }
+
+    // -- safe copy/save routing (Task 2) ------------------------------------
+
+    use super::super::secure_sharing::{
+        COPY_SAFE_SUCCESS, SAFE_EXPORT_OVERWRITE_ERROR, SAVE_SAFE_SUCCESS,
+    };
+
+    #[test]
+    fn safe_copy_completion_uses_safe_message() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+
+        let _ = update(
+            &mut state,
+            Message::CopyFinished {
+                result: Ok(()),
+                safe_output: true,
+            },
+        );
+        assert_eq!(state.message_text().as_deref(), Some(COPY_SAFE_SUCCESS));
+    }
+
+    #[test]
+    fn safe_save_rejects_source_before_write_and_preserves_state() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+        let state_id = state.document.image.state_id();
+
+        let _ = update(
+            &mut state,
+            Message::SavePathChosen(Some(PathBuf::from("/tmp/result.png"))),
+        );
+
+        assert_eq!(
+            state.message_text().as_deref(),
+            Some(SAFE_EXPORT_OVERWRITE_ERROR)
+        );
+        assert_eq!(state.document.image.state_id(), state_id);
+        assert!(state.document.last_export_path.is_none());
+        assert!(state.annotations_dirty());
+    }
+
+    #[test]
+    fn safe_save_completion_records_safe_message_and_path() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+        let state_id = state.document.image.state_id();
+
+        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/safe.png"))), state_id, true);
+
+        assert_eq!(state.message_text().as_deref(), Some(SAVE_SAFE_SUCCESS));
+        assert_eq!(
+            state.document.last_export_path.as_deref(),
+            Some(Path::new("/tmp/safe.png"))
+        );
+        assert!(!state.annotations_dirty());
     }
 
     // -- keyboard routing (Task 22) -----------------------------------------
