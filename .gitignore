@@ -6,8 +6,6 @@ target/
 .superpowers/
 # Added by code-review-graph
 .code-review-graph/
-crates/rollshot-tauri-app/node_modules/
-crates/rollshot-tauri-app/dist/
 __pycache__/
 
 # Local benchmark artifacts. Accepted compare reports live under

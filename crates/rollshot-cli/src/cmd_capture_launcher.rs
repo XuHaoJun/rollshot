@@ -42,7 +42,6 @@ fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
         backend: args.backend.clone(),
         fps: args.fps,
         show_cursor: args.show_cursor,
-        overlay_mode: rollshot_capture::OverlayMode::Auto,
         initial_mode: rollshot_capture::CaptureMode::Scrolling,
     }
 }
@@ -314,7 +313,6 @@ mod tests {
             err.message
         );
         assert!(err.message.contains("--headless"), "{}", err.message);
-        assert!(!err.message.contains("tauri"), "{}", err.message);
     }
 
     #[test]
@@ -324,6 +322,5 @@ mod tests {
 
         assert!(err.message.contains("not found"), "{}", err.message);
         assert!(err.message.contains("ROLLSHOT_APP"), "{}", err.message);
-        assert!(!err.message.contains("Tauri toolchain"), "{}", err.message);
     }
 }

@@ -33,15 +33,7 @@ and PipeWire support.
 - `crates/rollshot-capture`: capture traits and frame metadata
 - `crates/rollshot-cli`: command-line interface
 - `crates/rollshot-app`: iced interactive capture app
-- `crates/rollshot-tauri-app`: deprecated Tauri v2 app retained temporarily as
-  legacy/reference code during the iced migration
-
-### Desktop app crates during iced migration
-
-- `rollshot-app` is the active iced product app for interactive capture.
-- `rollshot-tauri-app` is deprecated and retained temporarily as legacy/reference
-  code. It is no longer the default product launch path.
-- `rollshot-iced-overlay` is the iced overlay renderer used by the active app.
+- `crates/rollshot-iced-overlay`: iced capture overlay renderer used by `rollshot-app`
 
 ## Local Development
 
@@ -57,25 +49,6 @@ sudo apt-get install -y pkg-config libpipewire-0.3-dev libspa-0.2-dev libclang-1
 `libclang-18-dev` provides the `libclang.so` symlink that `bindgen` (used by
 the `pipewire` crate) needs. Without it, set `LIBCLANG_PATH=/usr/lib/llvm-18/lib`
 before building.
-
-### Tauri App
-
-The `rollshot-tauri-app` crate is a Tauri v2 app that needs WebKit, GTK, and X11
-development headers on Linux. On macOS it needs Xcode (or Xcode Command Line
-Tools) but no extra packages.
-
-This crate is deprecated and retained temporarily for reference during the iced
-migration.
-
-On Debian/Ubuntu:
-
-```bash
-sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev \
-  libayatana-appindicator3-dev librsvg2-dev
-```
-
-These packages are not needed for the CLI (`rollshot-cli`) or capture library
-(`rollshot-capture`). They are only required to build the deprecated Tauri crate.
 
 ### Build & Test
 
@@ -189,8 +162,7 @@ backend names, enum variants, counts, durations, scores, and error categories.
 `.github/workflows/ci.yml` runs on `ubuntu-24.04` and `macos-14` for pushes to
 `main` and pull requests.
 
-It installs PipeWire/D-Bus development packages and Tauri Linux system
-dependencies on the Ubuntu runner, then runs:
+It installs PipeWire/D-Bus development packages on the Ubuntu runner, then runs:
 
 ```bash
 cargo fmt --all -- --check
@@ -217,7 +189,7 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
 - [ ] `mkdir -p target/test-artifacts`.
 - [ ] `cargo run -p rollshot-cli -- stitch-folder crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames --output target/test-artifacts/stitch-folder.png` writes a PNG.
-- [ ] `cargo check -p rollshot-tauri-app` passes (requires Tauri Linux deps on Linux, Xcode on macOS).
+
 
 ## Manual Testing: Linux Wayland Portal Capture
 

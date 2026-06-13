@@ -5,7 +5,6 @@ members = [
     "crates/rollshot-capture",
     "crates/rollshot-cli",
     "crates/rollshot-app",
-    "crates/rollshot-tauri-app/src-tauri",
     "crates/rollshot-iced-overlay",
     "crates/rollshot-overlay-core",
     "crates/rollshot-macos-oneshot",

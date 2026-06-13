@@ -105,8 +105,6 @@ overlay, or result UI, inspect both active platform paths:
 - macOS: iced overlay through `rollshot-app` with ScreenCaptureKit.
 - Shared product logic: `rollshot-overlay-core`, `rollshot-iced-overlay`, and
   `rollshot-app`.
-- Deprecated Tauri paths are reference behavior only unless explicitly in
-  scope.
 
 Use relevant reference products under `learn-projects/` when they can clarify a
 product convention or expose a stronger interaction. Do not turn the review

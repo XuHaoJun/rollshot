@@ -39,15 +39,6 @@ impl Default for CaptureOptions {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum OverlayMode {
-    #[default]
-    Auto,
-    Tauri,
-    Iced,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum CaptureMode {
     #[default]
     Scrolling,
@@ -60,8 +51,6 @@ pub struct InteractiveLaunchOptions {
     pub fps: u32,
     pub show_cursor: bool,
     #[serde(default)]
-    pub overlay_mode: OverlayMode,
-    #[serde(default)]
     pub initial_mode: CaptureMode,
 }
 
@@ -71,7 +60,6 @@ impl InteractiveLaunchOptions {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            overlay_mode: OverlayMode::Auto,
             initial_mode: CaptureMode::Scrolling,
         }
     }
@@ -148,7 +136,7 @@ pub enum PixelFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureMode, CaptureOptions, InteractiveLaunchOptions, OverlayMode};
+    use super::{CaptureMode, CaptureOptions, InteractiveLaunchOptions};
 
     #[test]
     fn interactive_launch_options_round_trip_json() {
@@ -156,7 +144,6 @@ mod tests {
             backend: "linux-portal".to_string(),
             fps: 7,
             show_cursor: true,
-            overlay_mode: OverlayMode::Iced,
             initial_mode: CaptureMode::Screenshot,
         };
 
@@ -169,6 +156,8 @@ mod tests {
             json.contains("\"initial_mode\":\"screenshot\""),
             "json = {json}"
         );
+        let obsolete_field = concat!("overlay", "_mode");
+        assert!(!json.contains(obsolete_field), "json = {json}");
 
         let decoded: InteractiveLaunchOptions =
             serde_json::from_str(&json).expect("deserialize launch options");
@@ -176,20 +165,14 @@ mod tests {
     }
 
     #[test]
-    fn interactive_launch_options_default_overlay_mode_for_old_json() {
+    fn interactive_launch_options_ignore_obsolete_field() {
+        let obsolete_field = concat!("overlay", "_mode");
+        let json = format!(
+            r#"{{"backend":"auto","fps":5,"show_cursor":false,"{obsolete_field}":"legacy"}}"#
+        );
         let decoded: InteractiveLaunchOptions =
-            serde_json::from_str(r#"{"backend":"auto","fps":5,"show_cursor":false}"#)
-                .expect("deserialize old launch options");
+            serde_json::from_str(&json).expect("deserialize payload with obsolete field");
 
-        assert_eq!(decoded.overlay_mode, OverlayMode::Auto);
-    }
-
-    #[test]
-    fn interactive_launch_options_default_initial_mode_for_old_json() {
-        let decoded: InteractiveLaunchOptions = serde_json::from_str(
-            r#"{"backend":"auto","fps":5,"show_cursor":false,"overlay_mode":"iced"}"#,
-        )
-        .expect("old payload");
         assert_eq!(decoded.initial_mode, CaptureMode::Scrolling);
     }
 

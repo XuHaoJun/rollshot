@@ -1,9 +1,4 @@
-//! Iced capture overlay renderer.
-//!
-//! Linux currently uses the iced/layer-shell runner. macOS and Windows compile
-//! to an unsupported result until their normal-window runners land. The crate is
-//! named for the renderer framework so it can coexist with the retained Tauri
-//! overlay during validation.
+//! Iced capture overlay renderer for the active Linux and macOS product paths.
 
 mod diagnostics;
 
