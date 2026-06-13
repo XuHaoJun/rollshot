@@ -15,7 +15,10 @@ use crate::diagnostics::TARGET_LINUX_KWIN;
 use crate::error::CaptureError;
 
 #[allow(dead_code)]
-const MAX_SUPPORTED_VERSION: u32 = 6;
+// Cap at v5 to match KDE Spectacle's behavior.  Version 6 deprecates the
+// `created` event in favour of `serial`, but the current event-loop
+// structure expects `created` to arrive as the success signal.
+const MAX_SUPPORTED_VERSION: u32 = 5;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +96,6 @@ pub(crate) fn stream_timeout(stage: &str) -> CaptureError {
     }
 }
 
-use std::os::fd::AsFd;
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 
@@ -180,6 +182,16 @@ impl KwinScreencastClient for RealKwinScreencastClient {
         // Dispatch pending output name events
         while event_queue.dispatch_pending(&mut state).unwrap_or(0) > 0 {}
 
+        // The compositor sends wl_output::Name events after we bind the
+        // proxies.  Do one more blocking read so those events are received
+        // before we attempt to select an output by name.
+        if state.outputs.iter().any(|o| o.name.is_none()) {
+            event_queue.blocking_dispatch(&mut state).map_err(|e| {
+                CaptureError::Backend(anyhow::anyhow!("Output name dispatch failed: {e}"))
+            })?;
+            while event_queue.dispatch_pending(&mut state).unwrap_or(0) > 0 {}
+        }
+
         let screencast = state
             .screencast
             .as_ref()
@@ -207,7 +219,6 @@ impl KwinScreencastClient for RealKwinScreencastClient {
         let stream = screencast.stream_output(wl_output_ref, pointer_mode, &qh, ());
 
         let deadline = std::time::Instant::now() + STREAM_DEADLINE;
-        let fd = conn.as_fd();
 
         loop {
             if std::time::Instant::now() >= deadline {
@@ -240,23 +251,15 @@ impl KwinScreencastClient for RealKwinScreencastClient {
                 StreamOutcome::Pending => {}
             }
 
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let poll_timeout_ms = (remaining.as_millis() as u16).min(50);
-
-            let mut pollfd = nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN);
-            match nix::poll::poll(std::slice::from_mut(&mut pollfd), poll_timeout_ms) {
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(CaptureError::Backend(anyhow::anyhow!(
-                        "stream poll failed: {e}"
-                    )));
-                }
-            }
-
-            tracing::debug!(target: TARGET_LINUX_KWIN, outcome = ?state.stream_outcome, "stream event received");
-            event_queue.dispatch_pending(&mut state).map_err(|e| {
+            // blocking_dispatch reads from the Wayland socket AND dispatches
+            // events.  dispatch_pending only dispatches already-buffered
+            // events and never reads from the socket, which caused the
+            // compositor's response to go unread.
+            event_queue.blocking_dispatch(&mut state).map_err(|e| {
                 CaptureError::Backend(anyhow::anyhow!("Stream dispatch failed: {e}"))
             })?;
+
+            tracing::debug!(target: TARGET_LINUX_KWIN, outcome = ?state.stream_outcome, "stream event received");
         }
     }
 }
