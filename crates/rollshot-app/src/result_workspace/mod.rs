@@ -70,6 +70,7 @@ pub struct ResultWorkspace {
     pub document: ResultDocument,
     pub message: Option<InlineMessage>,
     pub pending_discard: Option<DiscardPrompt>,
+    pub pending_unredacted_action: Option<secure_sharing::UnredactedAction>,
     /// Iced image handle built once. For oversized captures this is a
     /// downscaled display copy (spec §9.6); the document keeps the full source.
     pub image_handle: ImageHandle,
@@ -123,6 +124,7 @@ impl ResultWorkspace {
 
         Self {
             pending_discard: None,
+            pending_unredacted_action: None,
             editor: canvas::EditorState::new(
                 document.image.state_id(),
                 viewport::is_tall_image(source_size),
