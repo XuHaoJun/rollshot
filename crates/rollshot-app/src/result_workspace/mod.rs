@@ -2,6 +2,7 @@ pub mod actions;
 pub(crate) mod canvas;
 mod document;
 mod navigator;
+mod secure_sharing;
 mod update;
 mod view;
 pub mod viewport;
