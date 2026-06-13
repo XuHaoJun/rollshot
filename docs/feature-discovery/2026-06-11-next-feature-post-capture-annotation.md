@@ -126,9 +126,12 @@ coherent first annotation workflow.
 
 ### Window or Element Selection
 
-This is the strongest alternative. Snow Shot includes automatic window and
-element selection, and CleanShot supports window capture as a first-class mode.
-It would improve ordinary screenshot speed and precision.
+This is the strongest alternative. Snow Shot includes automatic window
+selection on Windows and macOS, but its child-element selection is currently a
+Windows-only feature implemented through Windows UI Automation; the equivalent
+Linux and macOS child-element paths are not implemented. CleanShot supports
+window capture as a first-class mode. It would improve ordinary screenshot
+speed and precision.
 
 However, Rollshot's Linux portal path currently accepts portal monitor
 selection but explicitly rejects a selected window stream. Shipping a polished
