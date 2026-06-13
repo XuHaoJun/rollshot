@@ -2,7 +2,11 @@
 
 **Status:** Approved design  
 **Date:** 2026-06-13  
-**Scope:** Result Workspace secure-sharing contract for existing opaque redactions
+**Scope:** Result Workspace secure-sharing contract for existing opaque redactions  
+**Revision (2026-06-13):** User-facing tool renamed `Secure Redact` → `Redact`;
+all user-facing copy uses "Safe" (never "Secure"); the retained-original notice
+changed from a once-per-session message to a persistent derived disclosure.
+"Secure redaction" is retained only as an internal state concept.
 
 ## Product Thesis
 
@@ -74,10 +78,9 @@ This is derived state and is not stored separately. Adding, deleting, undoing,
 or redoing a redaction immediately changes the workspace's secure-redaction
 state.
 
-The workspace stores one additional session-only flag recording whether it has
-already shown the first-redaction explanation. The flag prevents repeated
-notices while multiple redactions are added. It does not affect document dirty
-state or undo history.
+The retained-original disclosure is likewise derived state, not a stored flag:
+it is shown whenever `has_secure_redactions` is true and `source_path` exists.
+It does not affect document dirty state or undo history.
 
 The workspace also supports a pending unredacted-action confirmation with one
 of two purposes:
@@ -91,20 +94,24 @@ No confirmation can be permanently disabled.
 
 ### Redaction Tool
 
-The toolbar names the existing tool `Secure Redact`. Its shortcut remains
-`R`. The tool continues to create solid black opaque rectangles with the
-existing move, resize, delete, undo, and redo behavior.
+The toolbar names the existing tool `Redact`. Its shortcut remains `R`. The
+tool continues to create solid black opaque rectangles with the existing move,
+resize, delete, undo, and redo behavior.
 
-The first time a secure redaction is added in a workspace, Rollshot shows one
-non-blocking inline explanation:
+User-facing copy never uses the word "Secure". The product promise is
+communicated as "Safe" exports plus an honest disclosure that the original is
+retained. ("Secure redaction" remains an internal state concept only; see
+State Model.)
 
-- If `source_path` exists:
-  `Redaction added. Safe exports are flattened; the unredacted original remains saved.`
-- If `source_path` does not exist:
-  `Redaction added. Safe exports are flattened.`
+While at least one redaction exists and `source_path` exists, Rollshot shows a
+persistent, low-key inline disclosure near the primary output actions:
 
-The notice is shown once per workspace session. Undoing and adding a redaction
-again does not repeat it.
+`Unredacted original remains saved. Safe exports are flattened.`
+
+The disclosure is derived from current state, not a one-time notice: it appears
+whenever a redaction exists alongside a retained original, and disappears when
+either condition no longer holds. When `source_path` does not exist there is no
+retained original to disclose, so no disclosure is shown.
 
 ### Contextual Primary Actions
 
@@ -119,9 +126,11 @@ When at least one secure redaction exists, the primary output actions become:
 - `Copy Safe Image`
 - `Save Safe Image As`
 
-The workspace does not show a persistent safety banner. The contextual action
-labels communicate the guarantee at the decision point without consuming
-canvas space.
+The workspace does not show a persistent banner claiming the result is safe;
+the contextual action labels carry that guarantee at the decision point. It
+does show the retained-original disclosure described above when an unredacted
+original exists, because that caveat is the one fact the "Safe" labels do not
+convey on their own.
 
 ### Safe Copy
 
@@ -165,9 +174,8 @@ When a secure redaction exists, the copy-menu action is named:
 `Copy Unredacted Original…`
 
 Selecting it opens a confirmation that explicitly states that the action will
-copy content hidden by secure redactions. Confirming copies the immutable
-source. Cancelling has no side effect. Every attempt requires a new
-confirmation.
+copy content hidden by redactions. Confirming copies the immutable source.
+Cancelling has no side effect. Every attempt requires a new confirmation.
 
 When a secure redaction exists, no safe export exists, and `source_path`
 exists, the reveal action is named:
@@ -175,9 +183,8 @@ exists, the reveal action is named:
 `Reveal Unredacted Original…`
 
 Selecting it opens a confirmation that explicitly states that the revealed
-file contains content hidden by secure redactions. Confirming reveals
-`source_path`. Cancelling has no side effect. Every attempt requires a new
-confirmation.
+file contains content hidden by redactions. Confirming reveals `source_path`.
+Cancelling has no side effect. Every attempt requires a new confirmation.
 
 ### Reveal Routing
 
@@ -261,9 +268,10 @@ Safe-export overwrite rejection is a persistent inline error because the user
 must choose a new destination. Existing asynchronous save failures continue to
 use the current error path.
 
-The first-redaction explanation is informational and non-blocking. It may
-expire like other success information, but it must be shown only once per
-workspace.
+The retained-original disclosure is informational and non-blocking. It is
+persistent derived state rather than an expiring notice: it remains visible
+while a redaction and a retained original coexist, and is not dismissed by
+adding, undoing, or re-adding redactions.
 
 ## Platform Behavior
 
@@ -296,8 +304,11 @@ The feature must not imply that the existing auto-save is redacted or deleted.
   state immediately.
 - Toolbar, copy-menu, and reveal labels match the routing rules.
 - Removing all redactions restores general labels and behavior.
-- The first-redaction explanation appears exactly once per workspace and uses
-  the correct text for saved and unsaved originals.
+- The retained-original disclosure is visible whenever a redaction and a
+  retained `source_path` coexist, and is absent when either is missing
+  (including unsaved captures with no original).
+- No user-facing label, message, or confirmation copy contains the word
+  "Secure".
 
 ### Copy And Save
 
