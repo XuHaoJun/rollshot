@@ -538,8 +538,7 @@ fn preview_handle(
 mod tests {
     use super::{
         overlay_stitch_config, preview_handle, process_frame, should_emit_accepted_activity,
-        should_emit_capture_miss, should_emit_preview, stitch_stream, ProcessedFrame,
-        PreviewConstraints,
+        should_emit_capture_miss, should_emit_preview, stitch_stream, PreviewConstraints,
     };
     use iced::widget::image::Handle as ImageHandle;
     use image::{Rgba, RgbaImage};
@@ -817,11 +816,11 @@ mod tests {
 
         // 3–4. Two unrelated (miss) frames to trigger the capture-miss gate.
         let miss1 = solid_miss_frame();
-        let r = process_frame(&mut stitcher, &mut gate, miss1.clone(), now);
+        let _r = process_frame(&mut stitcher, &mut gate, miss1.clone(), now);
         assert!(!gate.active(), "one miss should not activate gate yet");
 
         let miss2 = solid_miss_frame();
-        let r = process_frame(&mut stitcher, &mut gate, miss2, now);
+        let _r = process_frame(&mut stitcher, &mut gate, miss2, now);
         assert!(gate.active(), "two misses should activate gate");
 
         // 5. While paused, a further unrelated frame: stats and canvas unchanged.
