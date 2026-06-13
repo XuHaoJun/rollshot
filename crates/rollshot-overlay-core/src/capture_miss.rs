@@ -133,7 +133,7 @@ impl CaptureMissTracker {
                 CaptureMissState::default()
             }
             StitchProgressSignal::Missed { edge: _ } => {
-                self.consecutive_misses += 1;
+                self.consecutive_misses = self.consecutive_misses.saturating_add(1);
                 if self.consecutive_misses >= 2 {
                     self.active = true;
                     let warn = match self.last_warning_at {
