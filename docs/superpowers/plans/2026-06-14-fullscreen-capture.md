@@ -14,6 +14,7 @@
 
 - Modify `crates/rollshot-capture/src/types.rs`: define `Scrolling | Region | Fullscreen` JSON contract and legacy `"screenshot"` alias.
 - Modify `crates/rollshot-capture/src/one_shot.rs`: add fullscreen-only backend selection and consuming image access.
+- Modify `crates/rollshot-capture/src/lib.rs`: export `fullscreen_one_shot_backend_for` (Task 2).
 - Rename `crates/rollshot-iced-overlay/src/screenshot.rs` to `crates/rollshot-iced-overlay/src/region.rs`: keep crop-only finalization under region terminology.
 - Create `crates/rollshot-iced-overlay/src/fullscreen.rs`: own direct one-shot-to-`CaptureResult` completion.
 - Modify `crates/rollshot-iced-overlay/src/lib.rs`: register/export region and fullscreen capture boundaries.
@@ -99,18 +100,38 @@ Keep `InteractiveLaunchOptions::default_capture()` on `CaptureMode::Scrolling`.
 Perform these scoped renames only in the listed capture/overlay/app files:
 
 ```text
-CaptureMode::Screenshot        -> CaptureMode::Region
-ToolbarAction::ScreenshotMode  -> ToolbarAction::RegionMode
-WorkspaceEffect::FinishScreenshot -> WorkspaceEffect::FinishRegion
-OverlayEffect::FinishScreenshot   -> OverlayEffect::FinishRegion
-finish_screenshot              -> finish_region
-screenshot.rs                  -> region.rs
+CaptureMode::Screenshot              -> CaptureMode::Region
+ToolbarAction::ScreenshotMode        -> ToolbarAction::RegionMode
+WorkspaceEffect::FinishScreenshot    -> WorkspaceEffect::FinishRegion
+OverlayEffect::FinishScreenshot      -> OverlayEffect::FinishRegion
+finish_screenshot                    -> finish_region
+crate::screenshot::finish_screenshot -> crate::region::finish_region   # call sites in linux_runner.rs AND macos_capture.rs
+validate_screenshot_surface_or_exit  -> validate_region_surface_or_exit  # linux_runner.rs
+validate_screenshot_surface          -> validate_region_surface          # macos_capture.rs
+screenshot.rs                        -> region.rs
 ```
+
+Also update the `from_environment` error string in `one_shot.rs`
+(`"screenshot mode only accepts 'auto' backend, got '{backend_flag}'"`) to say
+`"region mode ..."` — it describes the renamed one-shot/region workflow, not a
+platform API.
 
 Update user-visible toolbar text from `"Screenshot Mode"` to `"Region Mode"`.
 Update comments and test names that describe the old workflow as screenshot
-mode. Do not rename platform API names such as `SCScreenshotManager`,
-`KwinScreenshotClient`, or the freedesktop Screenshot portal.
+mode (e.g. `screenshot_calls_only_one_shot_factory`,
+`screenshot_surface_validation_*`, `clear_screenshot_globals`,
+`finish_screenshot_*`, `screenshot_release_*`). Do **not** rename platform API
+names: `SCScreenshotManager`, `KwinScreenshotClient`, the freedesktop
+Screenshot portal, the KWin `ScreenShot2` interface, or the
+`OneShotBackendKind::MacosScreenshotManager` variant (it names the macOS
+ScreenshotManager API, not the workflow).
+
+> **Review note (rename completeness):** the original Step 4 list omitted
+> `validate_screenshot_surface_or_exit`, `validate_screenshot_surface`, and the
+> `crate::screenshot::` module path. A half-rename still compiles and passes
+> tests, so the gap is invisible to the test suite — the Step 4-of-Task-6 grep
+> (widened below) is the only guard. Rename all workflow identifiers in one
+> pass.
 
 Use:
 
@@ -137,7 +158,21 @@ CaptureMode::Fullscreen => {
 }
 ```
 
-Toolbar actions remain exactly Region, Scrolling, Finish, and Cancel.
+Rust exhaustiveness checking means the compiler flags every match that needs
+this arm; Step 6's build will not pass until all are handled. The known sites
+(verify against code — the count may shift):
+
+- `linux_runner::acquire_resource` (one `match mode { Scrolling, Region }`)
+- `macos_capture::acquire_resource` (a **separate** `match mode { ... }` — easy
+  to miss because it mirrors the Linux one)
+- `app.rs` mode dispatch arms: the finish-on-release / Enter / toolbar-finish
+  paths (`CaptureMode::Region => { … FinishRegion }`) and the `view` background
+  arm (`(Some(handle), CaptureMode::Region)`). These are reached only while the
+  interactive overlay is live, so `unreachable!` is correct for Fullscreen.
+
+`toolbar.rs::action_style_fn` uses `matches!(…)` (not an exhaustive `match`), so
+it needs no Fullscreen arm. Toolbar actions remain exactly Region, Scrolling,
+Finish, and Cancel.
 
 - [ ] **Step 6: Run focused tests**
 
@@ -288,8 +323,23 @@ pub fn from_fullscreen_environment(backend_flag: &str) -> Result<Self, CaptureEr
 }
 ```
 
-Make `OneShotBackendKind::capture_once` available in normal and test builds; it
-must still dispatch only to target-compiled platform implementations.
+Keep `OneShotBackendKind::capture_once` exactly as it is — it stays
+`#[cfg(not(test))]`. `rollshot-iced-overlay`'s `fullscreen::capture` (Task 3)
+and `linux_runner` see `rollshot-capture` as a **non-test** dependency, so the
+`#[cfg(not(test))]` method is already present when those crates (including their
+test builds) compile. None of this task's new tests call `capture_once` — they
+exercise the pure `fullscreen_one_shot_backend_for` selector and `into_image`.
+Only relax the gate if a concrete compile error proves it necessary (it
+shouldn't); widening it pulls platform dispatch into `rollshot-capture`'s own
+test binary for no benefit (§3 surgical changes).
+
+> **Review note (error variant):** `fullscreen_one_shot_backend_for` returns
+> `CaptureError::Unsupported` for a non-`auto` backend flag, while the sibling
+> `from_environment` returns `CaptureError::InvalidConfig` for the same case.
+> This is a deliberate choice — for fullscreen, "you asked for a specific
+> backend we can't honor here" reads as an environment/support limitation. The
+> Task-2 test `fullscreen_rejects_explicit_portal_backend` pins `Unsupported`.
+> Left intentionally divergent; do not "fix" it to match `from_environment`.
 
 Add to `OneShotCapture`:
 
@@ -412,9 +462,36 @@ Expected: compilation fails because `capture_with` does not exist.
 
 - [ ] **Step 3: Implement direct completion**
 
-Implement `crates/rollshot-iced-overlay/src/fullscreen.rs`:
+Implement `crates/rollshot-iced-overlay/src/fullscreen.rs`. Open it with a
+module doc-comment carrying the routing diagram, so the fact that fullscreen
+bypasses the overlay on *both* platforms is legible at the call site:
 
 ```rust
+//! Direct fullscreen completion: one-shot capture straight to `CaptureResult`,
+//! no selection overlay, no streaming/stitching. Routed *before* any overlay
+//! state on both platforms — this module owns the shared completion; the two
+//! platform entry points only decide whether to call it.
+//!
+//!   launch JSON: initial_mode
+//!          │
+//!          ├─ "fullscreen" ──┐
+//!          │                 ▼
+//!          │   ┌─────────────────────────────────────────────┐
+//!          │   │ Linux:  linux_runner::run_initial_path       │
+//!          │   │ macOS:  MacosProduct::new (initial_capture_  │
+//!          │   │         path == Fullscreen)                  │
+//!          │   └─────────────────────────────────────────────┘
+//!          │                 │ both call
+//!          │                 ▼
+//!          │       fullscreen::capture(config)
+//!          │                 │  from_fullscreen_environment → capture_once
+//!          │                 ▼
+//!          │       Ok(Some(CaptureResult{ stats: None }))   ── existing
+//!          │       Ok(None)  on UserCancelled                  presentation
+//!          │       Err(..)   on Unsupported / backend error    (Workspace /
+//!          │                                                    thumbnail)
+//!          └─ "region" | "scrolling" ─► overlay session (unchanged)
+//!
 use crate::{CaptureResult, OverlayConfig, OverlayError};
 use rollshot_capture::{CaptureError, CaptureMode, OneShotCapture};
 
@@ -566,9 +643,14 @@ where
 }
 ```
 
-Rename the current `run` body to `run_overlay_session`; it must reject
-`CaptureMode::Fullscreen` defensively before resource acquisition. Make the
-public runner:
+Rename the current `run` body to `run_overlay_session`. Its first statement
+must reject `CaptureMode::Fullscreen` by returning
+`Err(OverlayError::Capture("fullscreen must not reach the overlay runner"))`
+**before** touching any global slot or calling `acquire_resource` — a clean
+error here is the systems-over-heroes alternative to letting execution fall
+through to `acquire_resource`'s `CaptureMode::Fullscreen => unreachable!()`,
+which would panic in production if the routing invariant were ever violated.
+Make the public runner:
 
 ```rust
 pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
@@ -698,6 +780,18 @@ fn open_presentation_window(product: &mut MacosProduct) -> Task<Message>
 `complete_capture` closes capture-owned windows, applies completion, then calls
 this helper. Fullscreen bootstrap calls the same helper without any
 capture-window close tasks.
+
+The helper owns the full phase match and records the opened window id on
+`product` (`thumbnail_window` / `workspace_window`), matching today's
+`complete_capture`. The current thumbnail-settings-failure path early-returns
+`Task::batch(close_tasks)` with an `iced::exit()` pushed onto the caller's local
+`close_tasks`; since the helper has no access to that vector, it must instead
+**return** `iced::exit()` as its own task on settings failure (after logging),
+and the caller batches it with its close tasks. Net behavior is unchanged: the
+durable saved file remains and the daemon exits. Confirm
+`completed_capture_auto_save_*` tests stay green — they assert the resulting
+`Phase`, which `from_completed_image` now sets, so the window-open extraction
+must not alter phase selection.
 
 - [ ] **Step 5: Route fullscreen before creating `Component`**
 
@@ -846,11 +940,27 @@ In `README.md`:
 Run:
 
 ```bash
-rtk rg -n 'CaptureMode::Screenshot|initial_mode":"screenshot"|ScreenshotMode|FinishScreenshot' crates README.md
+# (a) Workflow identifiers that MUST be gone after the rename:
+rtk rg -n 'CaptureMode::Screenshot|ScreenshotMode|FinishScreenshot|finish_screenshot|validate_screenshot_surface|crate::screenshot' crates
+
+# (b) Any remaining lowercase "screenshot", minus the intentionally retained
+#     platform-API names and the legacy alias test, to eyeball the long tail
+#     (comments, test fn names):
+rtk rg -n -i 'screenshot' crates \
+  | rtk rg -v 'SCScreenshotManager|KwinScreenshot|MacosScreenshotManager|ScreenShot2|portal_screenshot|PortalScreenshot|AshpdScreenshot|initial_mode":"screenshot"'
 ```
 
-Expected: only the explicit legacy JSON compatibility tests contain
-`initial_mode":"screenshot"`; no old Rust identifiers remain.
+Expected: grep (a) returns nothing — no old Rust workflow identifiers remain.
+Grep (b) returns only retained platform-API lines (SCScreenshotManager, KWin
+ScreenShot2, freedesktop Screenshot portal, the MacosScreenshotManager variant)
+and the explicit legacy `"screenshot"` alias compatibility tests; confirm every
+remaining hit is one of those, not a missed workflow rename.
+
+> **Review note:** the original single grep
+> (`CaptureMode::Screenshot|initial_mode":"screenshot"|ScreenshotMode|FinishScreenshot`)
+> would have passed even with `finish_screenshot`,
+> `validate_screenshot_surface_or_exit`, and `crate::screenshot::` left
+> un-renamed — those compile fine, so only this widened check catches the drift.
 
 - [ ] **Step 5: Run full verification**
 
@@ -898,6 +1008,35 @@ overlay and the existing saved-capture thumbnail appears.
 rtk git add crates/rollshot-app/src/launch.rs crates/rollshot-cli/src/cmd_capture_launcher.rs README.md
 rtk git commit -m "docs(capture): document fullscreen launch mode"
 ```
+
+## Not in Scope
+
+Considered and deliberately deferred:
+
+- **New CLI flag for fullscreen.** `rollshot capture` stays Scrolling-only
+  (Task 6 Step 1 asserts this). Fullscreen is reachable only via the
+  `--capture` JSON contract; a dedicated flag is a follow-up if demand appears.
+- **Linux portal fullscreen fallback.** Non-KDE Linux returns `Unsupported`
+  with no portal fallback (the portal can't prove a single-output fullscreen
+  image — same provable-single-output gate the Region path enforces). Adding a
+  portal fullscreen path is out of scope.
+- **Multi-display / "all displays" fullscreen.** Only the display containing the
+  pointer is captured; stitching multiple monitors into one image is not
+  attempted.
+- **X11 / Windows fullscreen.** Only Wayland-KDE and macOS are supported.
+- **`rollshot-core` stitching changes.** Fullscreen returns `stats: None` and
+  touches no matcher/canvas/verifier/stitcher path — no benchmark required
+  (Task 6 Step 5).
+- **Renaming retained platform-API symbols** (`SCScreenshotManager`,
+  `KwinScreenshotClient`, KWin `ScreenShot2`, freedesktop Screenshot portal,
+  `OneShotBackendKind::MacosScreenshotManager`) — these name external APIs, not
+  the workflow.
+
+> **Manual-only verification (no hosted-CI coverage).** Task 5 (macOS bootstrap)
+> compiles and unit-tests only on a macOS host; Task 6 Step 6's KDE/KWin,
+> non-KDE-Linux, and macOS runs are manual. The `MacosProduct::new` fullscreen
+> routing (Task 5 Step 5) calls the real `fullscreen::capture` and so is not
+> unit-tested — its pieces (`initial_capture_path`, `from_completed_image`) are.
 
 ## Final Acceptance Check
 
