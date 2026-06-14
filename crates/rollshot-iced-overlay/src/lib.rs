@@ -1,6 +1,7 @@
 //! Iced capture overlay renderer for the active Linux and macOS product paths.
 
 mod diagnostics;
+pub mod fullscreen;
 
 use image::RgbaImage;
 use rollshot_core::StitchStats;
