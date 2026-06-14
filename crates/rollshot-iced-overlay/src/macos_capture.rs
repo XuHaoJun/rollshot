@@ -213,7 +213,7 @@ pub struct Component {
     driver: Option<Driver>,
     one_shot: Option<rollshot_capture::OneShotCapture>,
     preview_rx: Option<PreviewReceiver>,
-    /// Active capture mode, used by the screenshot surface-mapping gate.
+    /// Active capture mode, used by the region surface-mapping gate.
     capture_mode: Option<CaptureMode>,
     /// A terminal outcome staged while mouse passthrough is being disabled
     /// (scrolling finish or cancel during scrolling). The original runner
@@ -285,7 +285,7 @@ impl Component {
         }))
     }
 
-    /// Source size, scale, and (screenshot-only) display id resolved from the
+    /// Source size, scale, and (region-only) display id resolved from the
     /// acquired resource. The host uses these to size and position the overlay
     /// window before calling [`Component::boot`].
     pub fn window_geometry(&self) -> WindowGeometry {
@@ -672,11 +672,9 @@ impl Component {
                     height: ws.height as u32,
                 };
                 let outcome = match self.one_shot.take() {
-                    Some(capture) => crate::region::finish_region(
-                        &capture,
-                        crop_logical,
-                        overlay_logical,
-                    ),
+                    Some(capture) => {
+                        crate::region::finish_region(&capture, crop_logical, overlay_logical)
+                    }
                     None => {
                         // No one-shot resource available; nothing to crop. This
                         // matches the runner's `None => Ok(None)` no-op, which is

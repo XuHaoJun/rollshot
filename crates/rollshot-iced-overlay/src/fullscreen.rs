@@ -94,8 +94,16 @@ mod tests {
             RgbaImage::from_pixel(2, 1, Rgba([1, 2, 3, 255])),
             DisplayTarget {
                 output_name: Some("display".to_string()),
-                logical_region: Region { x: 0, y: 0, width: 2, height: 1 },
-                physical_size: Size { width: 2, height: 1 },
+                logical_region: Region {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                },
+                physical_size: Size {
+                    width: 2,
+                    height: 1,
+                },
             },
         )
         .unwrap()

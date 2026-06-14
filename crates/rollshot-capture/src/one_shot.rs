@@ -87,9 +87,7 @@ impl OneShotBackendKind {
     pub fn from_environment(backend_flag: &str) -> Result<Self, CaptureError> {
         if backend_flag != "auto" {
             return Err(CaptureError::InvalidConfig {
-                message: format!(
-                    "region mode only accepts 'auto' backend, got '{backend_flag}'"
-                ),
+                message: format!("region mode only accepts 'auto' backend, got '{backend_flag}'"),
             });
         }
 
@@ -582,25 +580,16 @@ mod tests {
 
     #[test]
     fn fullscreen_linux_non_kde_is_unsupported() {
-        let err = fullscreen_one_shot_backend_for(
-            "auto",
-            "linux",
-            Some("wayland"),
-            Some("GNOME"),
-        )
-        .unwrap_err();
+        let err = fullscreen_one_shot_backend_for("auto", "linux", Some("wayland"), Some("GNOME"))
+            .unwrap_err();
         assert!(matches!(err, CaptureError::Unsupported { .. }));
     }
 
     #[test]
     fn fullscreen_rejects_explicit_portal_backend() {
-        let err = fullscreen_one_shot_backend_for(
-            "linux-portal",
-            "linux",
-            Some("wayland"),
-            Some("KDE"),
-        )
-        .unwrap_err();
+        let err =
+            fullscreen_one_shot_backend_for("linux-portal", "linux", Some("wayland"), Some("KDE"))
+                .unwrap_err();
         assert!(matches!(err, CaptureError::Unsupported { .. }));
     }
 
@@ -620,8 +609,16 @@ mod tests {
             RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
             DisplayTarget {
                 output_name: Some("test".to_string()),
-                logical_region: Region { x: 0, y: 0, width: 1, height: 1 },
-                physical_size: Size { width: 1, height: 1 },
+                logical_region: Region {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                physical_size: Size {
+                    width: 1,
+                    height: 1,
+                },
             },
         )
         .unwrap();
