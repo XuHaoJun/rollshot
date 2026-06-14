@@ -81,13 +81,16 @@ pub(crate) fn acquire_resource(
                 (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
             Ok(Some((CaptureResource::Streaming(driver), Some(preview_rx))))
         }
-        CaptureMode::Screenshot => {
+        CaptureMode::Region => {
             let capture = match (factories.one_shot)(config.show_cursor) {
                 Ok(c) => c,
                 Err(rollshot_capture::CaptureError::UserCancelled) => return Ok(None),
                 Err(e) => return Err(OverlayError::Capture(e.to_string())),
             };
             Ok(Some((CaptureResource::OneShot(capture), None)))
+        }
+        CaptureMode::Fullscreen => {
+            unreachable!("fullscreen is routed before active overlay state")
         }
     }
 }
@@ -210,7 +213,7 @@ pub struct Component {
     driver: Option<Driver>,
     one_shot: Option<rollshot_capture::OneShotCapture>,
     preview_rx: Option<PreviewReceiver>,
-    /// Active capture mode, used by the screenshot surface-mapping gate.
+    /// Active capture mode, used by the region surface-mapping gate.
     capture_mode: Option<CaptureMode>,
     /// A terminal outcome staged while mouse passthrough is being disabled
     /// (scrolling finish or cancel during scrolling). The original runner
@@ -282,7 +285,7 @@ impl Component {
         }))
     }
 
-    /// Source size, scale, and (screenshot-only) display id resolved from the
+    /// Source size, scale, and (region-only) display id resolved from the
     /// acquired resource. The host uses these to size and position the overlay
     /// window before calling [`Component::boot`].
     pub fn window_geometry(&self) -> WindowGeometry {
@@ -490,12 +493,12 @@ impl Component {
         .map(|m| Message(InternalMessage::Overlay(m)))
     }
 
-    /// After the overlay window opens, validate that a screenshot one-shot image
+    /// After the overlay window opens, validate that a region one-shot image
     /// is a provable single-output match for the resolved display (mirrors the
     /// Linux runner gate). On mismatch, report `Fatal` instead of cropping
     /// against the wrong geometry.
-    fn validate_screenshot_surface(&self) -> Option<HostEffect> {
-        if self.capture_mode != Some(CaptureMode::Screenshot) {
+    fn validate_region_surface(&self) -> Option<HostEffect> {
+        if self.capture_mode != Some(CaptureMode::Region) {
             return None;
         }
         let ws = self.overlay.window_size?;
@@ -523,7 +526,7 @@ impl Component {
                     .map(|r| Message(InternalMessage::WindowPatched(r)));
                 if Some(id) == self.overlay_window {
                     app::update(&mut self.overlay, OverlayMessage::WindowOpened { id, size });
-                    if let Some(effect) = self.validate_screenshot_surface() {
+                    if let Some(effect) = self.validate_region_surface() {
                         return effect;
                     }
                 }
@@ -647,8 +650,8 @@ impl Component {
                 }
                 EffectOutcome::Task(Task::none())
             }
-            OverlayEffect::FinishScreenshot => {
-                tracing::info!(target: TARGET_OVERLAY, "finishing screenshot capture");
+            OverlayEffect::FinishRegion => {
+                tracing::info!(target: TARGET_OVERLAY, "finishing region capture");
                 let crop = self.overlay.crop.unwrap();
                 let ws = match self.overlay.window_size {
                     Some(ws) => ws,
@@ -669,11 +672,9 @@ impl Component {
                     height: ws.height as u32,
                 };
                 let outcome = match self.one_shot.take() {
-                    Some(capture) => crate::screenshot::finish_screenshot(
-                        &capture,
-                        crop_logical,
-                        overlay_logical,
-                    ),
+                    Some(capture) => {
+                        crate::region::finish_region(&capture, crop_logical, overlay_logical)
+                    }
                     None => {
                         // No one-shot resource available; nothing to crop. This
                         // matches the runner's `None => Ok(None)` no-op, which is
@@ -1070,17 +1071,17 @@ mod tests {
             driver: None,
             one_shot: None,
             preview_rx: None,
-            capture_mode: Some(CaptureMode::Screenshot),
+            capture_mode: Some(CaptureMode::Region),
             pending_finish: None,
         }
     }
 
-    /// A screenshot component with a confirmed crop and a one-shot capture ready
+    /// A region component with a confirmed crop and a one-shot capture ready
     /// to finalize.
     fn capture_component_with_one_shot() -> Component {
         let mut c = capture_component();
         c.one_shot = Some(fake_one_shot_capture());
-        c.overlay.mode = CaptureMode::Screenshot;
+        c.overlay.mode = CaptureMode::Region;
         c.overlay.window_size = Some(iced::Size::new(1920.0, 1080.0));
         c.overlay.crop = Some(iced::Rectangle {
             x: 10.0,
@@ -1131,7 +1132,7 @@ mod tests {
     /// the one-shot target's logical region (CG global coordinates), not from
     /// the main display.
     #[test]
-    fn screenshot_overlay_covers_target_display_logical_bounds() {
+    fn region_overlay_covers_target_display_logical_bounds() {
         let mut component = capture_component();
         let img = RgbaImage::new(1280, 720);
         component.one_shot = Some(
@@ -1162,9 +1163,9 @@ mod tests {
     }
 
     #[test]
-    fn finish_screenshot_reports_completed_result_without_exiting_host() {
+    fn finish_region_reports_completed_result_without_exiting_host() {
         let mut component = capture_component_with_one_shot();
-        let effect = component.apply_overlay_effect(OverlayEffect::FinishScreenshot);
+        let effect = component.apply_overlay_effect(OverlayEffect::FinishRegion);
         assert!(matches!(
             effect,
             HostEffect::Completed(CaptureResult { .. })

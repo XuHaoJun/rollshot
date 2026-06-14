@@ -14,7 +14,7 @@ pub enum WorkspaceEffect {
     ActivateMode(CaptureMode),
     StartScrolling,
     FinishScrolling,
-    FinishScreenshot,
+    FinishRegion,
     Cancel,
 }
 
@@ -97,8 +97,8 @@ impl WorkspaceState {
         WorkspaceEffect::FinishScrolling
     }
 
-    pub fn finish_screenshot(&mut self) -> WorkspaceEffect {
-        WorkspaceEffect::FinishScreenshot
+    pub fn finish_region(&mut self) -> WorkspaceEffect {
+        WorkspaceEffect::FinishRegion
     }
 
     pub fn cancel(&mut self) -> WorkspaceEffect {
@@ -175,8 +175,8 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_release_enters_selected_instead_of_finishing() {
-        let mut state = WorkspaceState::new(CaptureMode::Screenshot);
+    fn region_release_enters_selected_instead_of_finishing() {
+        let mut state = WorkspaceState::new(CaptureMode::Region);
         state.set_crop(valid_crop());
         assert_eq!(state.complete_selection(), WorkspaceEffect::None);
         assert_eq!(state.phase(), WorkspacePhase::Selected);
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn switching_modes_requests_new_workflow_resources() {
-        let mut state = WorkspaceState::new(CaptureMode::Screenshot);
+        let mut state = WorkspaceState::new(CaptureMode::Region);
         state.set_crop(valid_crop());
         state.complete_selection();
         assert_eq!(
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn cancel_resets_phase_to_selecting() {
-        let mut state = WorkspaceState::new(CaptureMode::Screenshot);
+        let mut state = WorkspaceState::new(CaptureMode::Region);
         state.set_crop(valid_crop());
         state.complete_selection();
         assert_eq!(state.phase(), WorkspacePhase::Selected);
@@ -265,11 +265,11 @@ mod tests {
         assert_eq!(state.phase(), WorkspacePhase::ScrollingCapture);
         assert!(is_capture_phase(state.phase()));
 
-        // A screenshot finish behaves the same way from Selected.
-        let mut shot = WorkspaceState::new(CaptureMode::Screenshot);
+        // A region finish behaves the same way from Selected.
+        let mut shot = WorkspaceState::new(CaptureMode::Region);
         shot.set_crop(valid_crop());
         shot.complete_selection();
-        shot.finish_screenshot();
+        shot.finish_region();
         assert_eq!(shot.phase(), WorkspacePhase::Selected);
         assert!(is_capture_phase(shot.phase()));
     }

@@ -36,6 +36,32 @@ pub(crate) fn is_kde(desktop: Option<&str>) -> bool {
         .any(|part| part.eq_ignore_ascii_case("KDE"))
 }
 
+pub fn fullscreen_one_shot_backend_for(
+    backend_flag: &str,
+    os: &str,
+    session_type: Option<&str>,
+    desktop: Option<&str>,
+) -> Result<OneShotBackendKind, CaptureError> {
+    if backend_flag != "auto" {
+        return Err(CaptureError::Unsupported {
+            message: format!(
+                "fullscreen capture only supports backend 'auto', got '{backend_flag}'"
+            ),
+        });
+    }
+
+    match (os, session_type) {
+        ("linux", Some("wayland")) if is_kde(desktop) => Ok(OneShotBackendKind::LinuxKwin),
+        ("linux", _) => Err(CaptureError::Unsupported {
+            message: "fullscreen capture requires KDE/KWin on Linux".to_string(),
+        }),
+        ("macos", _) => Ok(OneShotBackendKind::MacosScreenshotManager),
+        _ => Err(CaptureError::Unsupported {
+            message: format!("fullscreen capture is unsupported on {os}"),
+        }),
+    }
+}
+
 pub fn one_shot_backend_for(
     os: &str,
     session_type: Option<&str>,
@@ -61,9 +87,7 @@ impl OneShotBackendKind {
     pub fn from_environment(backend_flag: &str) -> Result<Self, CaptureError> {
         if backend_flag != "auto" {
             return Err(CaptureError::InvalidConfig {
-                message: format!(
-                    "screenshot mode only accepts 'auto' backend, got '{backend_flag}'"
-                ),
+                message: format!("region mode only accepts 'auto' backend, got '{backend_flag}'"),
             });
         }
 
@@ -75,6 +99,17 @@ impl OneShotBackendKind {
             session_type.as_deref(),
             desktop.as_deref(),
         ))
+    }
+
+    pub fn from_fullscreen_environment(backend_flag: &str) -> Result<Self, CaptureError> {
+        let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        fullscreen_one_shot_backend_for(
+            backend_flag,
+            std::env::consts::OS,
+            session_type.as_deref(),
+            desktop.as_deref(),
+        )
     }
 
     #[cfg(not(test))]
@@ -156,6 +191,10 @@ impl OneShotCapture {
 
     pub fn target_display(&self) -> &DisplayTarget {
         &self.target_display
+    }
+
+    pub fn into_image(self) -> RgbaImage {
+        self.image
     }
 }
 
@@ -527,6 +566,64 @@ mod tests {
     fn pixel_count_zero_dimension() {
         let result = checked_pixel_count(0, 100);
         assert!(matches!(result, Err(CaptureError::Mapping { .. })));
+    }
+
+    // ── Fullscreen backend selection tests ──
+
+    #[test]
+    fn fullscreen_linux_kde_selects_kwin() {
+        assert_eq!(
+            fullscreen_one_shot_backend_for("auto", "linux", Some("wayland"), Some("KDE")).unwrap(),
+            OneShotBackendKind::LinuxKwin
+        );
+    }
+
+    #[test]
+    fn fullscreen_linux_non_kde_is_unsupported() {
+        let err = fullscreen_one_shot_backend_for("auto", "linux", Some("wayland"), Some("GNOME"))
+            .unwrap_err();
+        assert!(matches!(err, CaptureError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn fullscreen_rejects_explicit_portal_backend() {
+        let err =
+            fullscreen_one_shot_backend_for("linux-portal", "linux", Some("wayland"), Some("KDE"))
+                .unwrap_err();
+        assert!(matches!(err, CaptureError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn fullscreen_macos_selects_screenshot_manager() {
+        assert_eq!(
+            fullscreen_one_shot_backend_for("auto", "macos", None, None).unwrap(),
+            OneShotBackendKind::MacosScreenshotManager
+        );
+    }
+
+    // ── OneShotCapture::into_image test ──
+
+    #[test]
+    fn into_image_returns_the_original_pixels() {
+        let capture = OneShotCapture::new(
+            RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+            DisplayTarget {
+                output_name: Some("test".to_string()),
+                logical_region: Region {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                physical_size: Size {
+                    width: 1,
+                    height: 1,
+                },
+            },
+        )
+        .unwrap();
+        let image = capture.into_image();
+        assert_eq!(image.dimensions(), (1, 1));
     }
 
     // ── CaptureError::Mapping test ──

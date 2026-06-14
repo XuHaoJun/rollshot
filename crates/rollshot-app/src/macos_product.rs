@@ -31,7 +31,6 @@ use std::time::Instant;
 use iced::{window, Element, Point, Size, Task};
 use image::RgbaImage;
 
-#[cfg(test)]
 use rollshot_capture::CaptureMode;
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
@@ -42,6 +41,21 @@ use crate::macos_thumbnail::{self, release_action, ThumbnailAction, ThumbnailSta
 use crate::post_capture::{select_presentation, Presentation};
 use crate::result_workspace::{self, ResultDocument, ResultWorkspace};
 use crate::storage::{self, Platform};
+
+/// Whether fullscreen mode bypasses the overlay entirely or the overlay session
+/// is needed (Region / Scrolling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialCapturePath {
+    Overlay,
+    Fullscreen,
+}
+
+fn initial_capture_path(mode: CaptureMode) -> InitialCapturePath {
+    match mode {
+        CaptureMode::Fullscreen => InitialCapturePath::Fullscreen,
+        CaptureMode::Scrolling | CaptureMode::Region => InitialCapturePath::Overlay,
+    }
+}
 
 /// Estimated canvas area for the workspace window (1100×760 minus chrome),
 /// so fit-mode zoom produces a visible scale before the scrollable reports its
@@ -105,22 +119,74 @@ impl MacosProduct {
     /// cancelled before any capture began (the caller then skips the daemon
     /// entirely), or `Err` if capture setup failed.
     pub fn new(config: OverlayConfig) -> Result<Option<(Self, Task<Message>)>, String> {
-        let component = match Component::new(&config).map_err(|e| e.to_string())? {
-            Some(c) => c,
-            None => return Ok(None),
+        match initial_capture_path(config.initial_mode) {
+            InitialCapturePath::Fullscreen => {
+                let result = match rollshot_iced_overlay::fullscreen::capture(&config)
+                    .map_err(|error| error.to_string())?
+                {
+                    Some(result) => result,
+                    None => return Ok(None),
+                };
+                let auto_save = storage::auto_save(&result.image, Platform::Macos);
+                let mut product = MacosProduct::from_completed_image(result.image, auto_save);
+                let open_task = open_presentation_window(&mut product);
+                Ok(Some((product, open_task)))
+            }
+            InitialCapturePath::Overlay => {
+                let component = match Component::new(&config).map_err(|error| error.to_string())? {
+                    Some(component) => component,
+                    None => return Ok(None),
+                };
+                let (component, open_task) = open_capture_window(component, &config)?;
+                Ok(Some((
+                    MacosProduct {
+                        phase: Phase::Capture(component),
+                        document: None,
+                        thumbnail_window: None,
+                        workspace_window: None,
+                        thumbnail_cursor: Point::ORIGIN,
+                    },
+                    open_task,
+                )))
+            }
+        }
+    }
+
+    /// Construct a product directly from a completed image and auto-save result,
+    /// bypassing the overlay capture phase. Used by fullscreen bootstrap.
+    fn from_completed_image(
+        image: RgbaImage,
+        auto_save: Result<std::path::PathBuf, String>,
+    ) -> Self {
+        let (phase, document) = match select_presentation(Platform::Macos, auto_save) {
+            Presentation::MacosSavedThumbnail(path) => {
+                let source_size = Size::new(image.width() as f32, image.height() as f32);
+                let scale = crate::result_workspace::viewport::display_downscale_scale(
+                    source_size,
+                    crate::result_workspace::viewport::DEFAULT_MAX_TEXTURE_DIM,
+                );
+                let handle = crate::result_workspace::build_display_handle(&image, scale);
+                (
+                    Phase::Thumbnail(ThumbnailState::new(handle, path.clone(), Instant::now())),
+                    Some(ResultDocument::saved(image, path)),
+                )
+            }
+            Presentation::MacosUnsavedWorkspace(error) => {
+                let workspace = ResultWorkspace::new(ResultDocument::unsaved(image), Some(error))
+                    .with_initial_viewport(INITIAL_WORKSPACE_VIEWPORT);
+                (Phase::Workspace(workspace), None)
+            }
+            Presentation::LinuxSavedWorkspace(_) | Presentation::LinuxUnsavedWorkspace(_) => {
+                unreachable!("macOS daemon received a Linux presentation");
+            }
         };
-
-        let (component, open_task) = open_capture_window(component, &config)?;
-
-        let product = Self {
-            phase: Phase::Capture(component),
-            document: None,
+        MacosProduct {
+            phase,
+            document,
             thumbnail_window: None,
             workspace_window: None,
             thumbnail_cursor: Point::ORIGIN,
-        };
-
-        Ok(Some((product, open_task)))
+        }
     }
 
     /// Auto-save the completed capture and enter the resulting phase. Keeps the
@@ -130,28 +196,9 @@ impl MacosProduct {
         image: RgbaImage,
         auto_save: Result<std::path::PathBuf, String>,
     ) {
-        match select_presentation(Platform::Macos, auto_save) {
-            Presentation::MacosSavedThumbnail(path) => {
-                let source_size = Size::new(image.width() as f32, image.height() as f32);
-                let scale = crate::result_workspace::viewport::display_downscale_scale(
-                    source_size,
-                    crate::result_workspace::viewport::DEFAULT_MAX_TEXTURE_DIM,
-                );
-                let handle = crate::result_workspace::build_display_handle(&image, scale);
-                self.document = Some(ResultDocument::saved(image, path.clone()));
-                self.phase = Phase::Thumbnail(ThumbnailState::new(handle, path, Instant::now()));
-            }
-            Presentation::MacosUnsavedWorkspace(error) => {
-                self.document = None;
-                let workspace = ResultWorkspace::new(ResultDocument::unsaved(image), Some(error))
-                    .with_initial_viewport(INITIAL_WORKSPACE_VIEWPORT);
-                self.phase = Phase::Workspace(workspace);
-            }
-            // Linux policy never reaches the macOS daemon.
-            Presentation::LinuxSavedWorkspace(_) | Presentation::LinuxUnsavedWorkspace(_) => {
-                unreachable!("macOS daemon received a Linux presentation");
-            }
-        }
+        let completed = Self::from_completed_image(image, auto_save);
+        self.phase = completed.phase;
+        self.document = completed.document;
     }
 
     /// Open the saved Result Workspace reusing the SAME in-memory document, so a
@@ -400,34 +447,34 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
     let auto_save = storage::auto_save(&image, Platform::Macos);
     product.apply_capture_completion(image, auto_save);
 
-    let open_task = match &product.phase {
-        Phase::Thumbnail(_) => {
-            // Origin lookup / window creation failure is thumbnail-creation
-            // failure: the durable saved file remains (spec §13), so surface
-            // the error and exit rather than open an unplaced window.
-            match thumbnail_window_settings() {
-                Ok(settings) => {
-                    let (id, open) = window::open(settings);
-                    product.thumbnail_window = Some(id);
-                    open.map(Message::ThumbnailWindowReady)
-                }
-                Err(error) => {
-                    tracing::error!(target: TARGET_APP, %error, "thumbnail window settings failed");
-                    close_tasks.push(iced::exit());
-                    return Task::batch(close_tasks);
-                }
+    close_tasks.push(open_presentation_window(product));
+    Task::batch(close_tasks)
+}
+
+/// Open the window for the current presentation phase (thumbnail or workspace),
+/// recording the window id on `product`. On thumbnail-settings failure the
+/// durable saved file remains (spec §13), so this returns `iced::exit()` after
+/// logging.
+fn open_presentation_window(product: &mut MacosProduct) -> Task<Message> {
+    match &product.phase {
+        Phase::Thumbnail(_) => match thumbnail_window_settings() {
+            Ok(settings) => {
+                let (id, open) = window::open(settings);
+                product.thumbnail_window = Some(id);
+                open.map(Message::ThumbnailWindowReady)
             }
-        }
+            Err(error) => {
+                tracing::error!(target: TARGET_APP, %error, "thumbnail window settings failed");
+                iced::exit()
+            }
+        },
         Phase::Workspace(_) => {
             let (id, open) = window::open(workspace_window_settings());
             product.workspace_window = Some(id);
             open.map(Message::WorkspaceWindowReady)
         }
         Phase::Capture(_) => Task::none(),
-    };
-
-    close_tasks.push(open_task);
-    Task::batch(close_tasks)
+    }
 }
 
 /// Thumbnail click: close the thumbnail window and open the saved Result
@@ -586,7 +633,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Screenshot,
+            initial_mode: CaptureMode::Region,
             target_output_name: None,
         };
         // `Component::new` uses test factories under cfg(test), so this builds a
@@ -704,5 +751,30 @@ mod tests {
         // A native drag hands off to AppKit without leaving the thumbnail
         // phase; the thumbnail window stays open while the drag is in flight.
         assert!(matches!(product.phase, Phase::Thumbnail(_)));
+    }
+
+    #[test]
+    fn fullscreen_selects_direct_initial_path() {
+        assert_eq!(
+            initial_capture_path(CaptureMode::Fullscreen),
+            InitialCapturePath::Fullscreen
+        );
+        assert_eq!(
+            initial_capture_path(CaptureMode::Region),
+            InitialCapturePath::Overlay
+        );
+    }
+
+    #[test]
+    fn fullscreen_success_bootstraps_existing_thumbnail_phase() {
+        let product =
+            MacosProduct::from_completed_image(image(), Ok(PathBuf::from("/tmp/fullscreen.png")));
+        assert!(matches!(product.phase, Phase::Thumbnail(_)));
+    }
+
+    #[test]
+    fn fullscreen_auto_save_failure_bootstraps_existing_workspace_phase() {
+        let product = MacosProduct::from_completed_image(image(), Err("disk full".to_string()));
+        assert!(matches!(product.phase, Phase::Workspace(_)));
     }
 }

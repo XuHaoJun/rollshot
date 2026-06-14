@@ -4,7 +4,7 @@ use rollshot_capture::{crop_image, Size};
 use crate::coords::{map_crop_to_frame, LogicalRect};
 use crate::CaptureResult;
 
-pub fn finish_screenshot(
+pub fn finish_region(
     capture: &OneShotCapture,
     crop: LogicalRect,
     overlay_logical: Size,
@@ -51,7 +51,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_screenshot_returns_result_with_none_stats() {
+    fn finish_region_returns_result_with_none_stats() {
         let capture = test_capture();
         let crop = LogicalRect {
             x: 10.0,
@@ -64,7 +64,7 @@ mod tests {
             height: 200,
         };
 
-        let result = finish_screenshot(&capture, crop, overlay_logical).expect("screenshot ok");
+        let result = finish_region(&capture, crop, overlay_logical).expect("region ok");
 
         assert!(result.stats.is_none());
         assert_eq!(result.image.width(), 50);
@@ -72,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_screenshot_maps_crop_to_frame_coordinates() {
+    fn finish_region_maps_crop_to_frame_coordinates() {
         let capture = test_capture();
         let crop = LogicalRect {
             x: 0.0,
@@ -85,14 +85,14 @@ mod tests {
             height: 200,
         };
 
-        let result = finish_screenshot(&capture, crop, overlay_logical).expect("screenshot ok");
+        let result = finish_region(&capture, crop, overlay_logical).expect("region ok");
 
         assert_eq!(result.image.width(), 100);
         assert_eq!(result.image.height(), 100);
     }
 
     #[test]
-    fn finish_screenshot_scales_at_2x() {
+    fn finish_region_scales_at_2x() {
         let mut img = RgbaImage::new(400, 400);
         for y in 0..400 {
             for x in 0..400 {
@@ -128,7 +128,7 @@ mod tests {
             height: 200,
         };
 
-        let result = finish_screenshot(&capture, crop, overlay_logical).expect("screenshot ok");
+        let result = finish_region(&capture, crop, overlay_logical).expect("region ok");
 
         assert!(result.stats.is_none());
         assert_eq!(result.image.width(), 100);
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_screenshot_rejects_empty_crop() {
+    fn finish_region_rejects_empty_crop() {
         let capture = test_capture();
         let crop = LogicalRect {
             x: 10.0,
@@ -149,7 +149,7 @@ mod tests {
             height: 200,
         };
 
-        let err = finish_screenshot(&capture, crop, overlay_logical).expect_err("empty crop");
+        let err = finish_region(&capture, crop, overlay_logical).expect_err("empty crop");
         assert!(err.contains("non-zero"), "err = {err}");
     }
 }

@@ -183,4 +183,32 @@ mod tests {
         .expect_err("duplicate option must fail");
         assert_eq!(err, "--log-file may only be specified once");
     }
+
+    #[test]
+    fn fullscreen_capture_payload_parses() {
+        let mode = parse_launch_args([
+            "rollshot-app",
+            "--capture",
+            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"fullscreen"}"#,
+        ])
+        .unwrap();
+        assert!(matches!(
+            mode,
+            LaunchMode::Capture(options) if options.initial_mode == CaptureMode::Fullscreen
+        ));
+    }
+
+    #[test]
+    fn legacy_screenshot_payload_parses_as_region() {
+        let mode = parse_launch_args([
+            "rollshot-app",
+            "--capture",
+            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"screenshot"}"#,
+        ])
+        .unwrap();
+        assert!(matches!(
+            mode,
+            LaunchMode::Capture(options) if options.initial_mode == CaptureMode::Region
+        ));
+    }
 }

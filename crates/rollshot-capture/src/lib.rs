@@ -31,8 +31,8 @@ pub use linux::LinuxPortalBackend;
 #[cfg(target_os = "macos")]
 pub use macos::{display_id_under_cursor, display_logical_bounds, MacosScreenCaptureKitBackend};
 pub use one_shot::{
-    one_shot_backend_for, validate_surface_mapping, DisplayTarget, OneShotBackendKind,
-    OneShotCapture, OneShotCaptureBackend, MAX_ONE_SHOT_PIXELS,
+    fullscreen_one_shot_backend_for, one_shot_backend_for, validate_surface_mapping, DisplayTarget,
+    OneShotBackendKind, OneShotCapture, OneShotCaptureBackend, MAX_ONE_SHOT_PIXELS,
 };
 pub use types::{
     CaptureMode, CaptureOptions, CaptureProbe, CapturedFrame, FrameMetadata,

@@ -42,7 +42,9 @@ impl Default for CaptureOptions {
 pub enum CaptureMode {
     #[default]
     Scrolling,
-    Screenshot,
+    #[serde(alias = "screenshot")]
+    Region,
+    Fullscreen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -139,12 +141,31 @@ mod tests {
     use super::{CaptureMode, CaptureOptions, InteractiveLaunchOptions};
 
     #[test]
+    fn capture_modes_round_trip_with_current_names() {
+        for (mode, encoded) in [
+            (CaptureMode::Scrolling, "\"scrolling\""),
+            (CaptureMode::Region, "\"region\""),
+            (CaptureMode::Fullscreen, "\"fullscreen\""),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), encoded);
+            assert_eq!(serde_json::from_str::<CaptureMode>(encoded).unwrap(), mode);
+        }
+    }
+
+    #[test]
+    fn legacy_screenshot_mode_deserializes_as_region() {
+        let mode = serde_json::from_str::<CaptureMode>("\"screenshot\"").unwrap();
+        assert_eq!(mode, CaptureMode::Region);
+        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"region\"");
+    }
+
+    #[test]
     fn interactive_launch_options_round_trip_json() {
         let options = InteractiveLaunchOptions {
             backend: "linux-portal".to_string(),
             fps: 7,
             show_cursor: true,
-            initial_mode: CaptureMode::Screenshot,
+            initial_mode: CaptureMode::Region,
         };
 
         let json = serde_json::to_string(&options).expect("serialize launch options");
@@ -153,7 +174,7 @@ mod tests {
             "json = {json}"
         );
         assert!(
-            json.contains("\"initial_mode\":\"screenshot\""),
+            json.contains("\"initial_mode\":\"region\""),
             "json = {json}"
         );
         let obsolete_field = concat!("overlay", "_mode");

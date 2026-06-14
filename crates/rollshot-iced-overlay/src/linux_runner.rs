@@ -113,7 +113,7 @@ pub(crate) fn acquire_resource(
 ) -> Result<Option<CaptureResource>, OverlayError> {
     match mode {
         CaptureMode::Scrolling => acquire_scrolling_resource(config, factories),
-        CaptureMode::Screenshot => {
+        CaptureMode::Region => {
             tracing::debug!(target: TARGET_OVERLAY, "acquiring one-shot capture resource");
             let capture = match (factories.one_shot)(config.show_cursor) {
                 Ok(c) => c,
@@ -121,6 +121,9 @@ pub(crate) fn acquire_resource(
                 Err(e) => return Err(OverlayError::Capture(e.to_string())),
             };
             Ok(Some(CaptureResource::OneShot(capture)))
+        }
+        CaptureMode::Fullscreen => {
+            unreachable!("fullscreen is routed before active overlay state")
         }
     }
 }
@@ -203,8 +206,8 @@ static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex
 // FinishScrolling/Cancel effects.
 static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 
-// One-shot capture for screenshot mode. The update fn reads this on the
-// FinishScreenshot effect (emitted immediately on a valid screenshot release) to
+// One-shot capture for region mode. The update fn reads this on the
+// FinishRegion effect (emitted immediately on a valid region release) to
 // crop and return the frozen image.
 static ONE_SHOT_SLOT: Mutex<Option<rollshot_capture::OneShotCapture>> = Mutex::new(None);
 
@@ -247,14 +250,14 @@ fn subscription(state: &Overlay) -> iced::Subscription<Message> {
     iced::Subscription::batch(subs)
 }
 
-/// After the layer surface opens, validate that a screenshot one-shot image is a
+/// After the layer surface opens, validate that a region one-shot image is a
 /// provable single-output match for the active surface (spec: non-KDE portal and
 /// KWin captures must map to exactly the opened output). On mismatch — e.g. a
 /// multi-monitor portal composite, or a layer surface that opened on a different
 /// output than KWin captured — record an explicit mapping error and exit instead
 /// of cropping against the wrong geometry. Returns `Some(exit_task)` on failure.
-fn validate_screenshot_surface_or_exit(state: &Overlay) -> Option<Task<Message>> {
-    if *CAPTURE_MODE.lock().unwrap() != Some(CaptureMode::Screenshot) {
+fn validate_region_surface_or_exit(state: &Overlay) -> Option<Task<Message>> {
+    if *CAPTURE_MODE.lock().unwrap() != Some(CaptureMode::Region) {
         return None;
     }
     let ws = state.window_size?;
@@ -294,7 +297,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             );
             let (effect, _region_mode) = app::update(state, msg);
             if opened {
-                if let Some(exit) = validate_screenshot_surface_or_exit(state) {
+                if let Some(exit) = validate_region_surface_or_exit(state) {
                     return exit;
                 }
             }
@@ -327,8 +330,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     }
                     Task::none()
                 }
-                app::OverlayEffect::FinishScreenshot => {
-                    tracing::info!(target: TARGET_OVERLAY, "finishing screenshot capture");
+                app::OverlayEffect::FinishRegion => {
+                    tracing::info!(target: TARGET_OVERLAY, "finishing region capture");
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
@@ -349,12 +352,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         height: ws.height as u32,
                     };
                     let outcome = match ONE_SHOT_SLOT.lock().unwrap().take() {
-                        Some(capture) => crate::screenshot::finish_screenshot(
-                            &capture,
-                            crop_logical,
-                            overlay_logical,
-                        )
-                        .map(Some),
+                        Some(capture) => {
+                            crate::region::finish_region(&capture, crop_logical, overlay_logical)
+                                .map(Some)
+                        }
                         None => Ok(None),
                     };
                     match outcome {
@@ -363,7 +364,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             iced::exit()
                         }
                         Err(e) => {
-                            tracing::error!(target: TARGET_OVERLAY, %e, "screenshot finish failed");
+                            tracing::error!(target: TARGET_OVERLAY, %e, "region finish failed");
                             state.transient_error = Some(e);
                             Task::none()
                         }
@@ -568,7 +569,32 @@ fn real_factories() -> ResourceFactories {
     }
 }
 
+fn run_initial_path<Direct, Overlay>(
+    config: OverlayConfig,
+    direct: Direct,
+    overlay: Overlay,
+) -> Result<Option<CaptureResult>, OverlayError>
+where
+    Direct: FnOnce(&OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>,
+    Overlay: FnOnce(OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>,
+{
+    if config.initial_mode == CaptureMode::Fullscreen {
+        return direct(&config);
+    }
+    overlay(config)
+}
+
 pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    run_initial_path(config, crate::fullscreen::capture, run_overlay_session)
+}
+
+fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    if config.initial_mode == CaptureMode::Fullscreen {
+        return Err(OverlayError::Capture(
+            "fullscreen must not reach the overlay runner".to_string(),
+        ));
+    }
+
     tracing::info!(target: TARGET_OVERLAY, mode = ?config.initial_mode, "blocking overlay starting");
     *PREVIEW_RX.lock().unwrap() = None;
     *DRIVER_SLOT.lock().unwrap() = None;
@@ -792,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_calls_only_one_shot_factory() {
+    fn region_calls_only_one_shot_factory() {
         static STREAMING_COUNT: AtomicUsize = AtomicUsize::new(0);
         static ONE_SHOT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -802,7 +828,7 @@ mod tests {
             one_shot: fake_one_shot_factory(&ONE_SHOT_COUNT),
         };
 
-        let result = acquire_resource(CaptureMode::Screenshot, &config, &factories);
+        let result = acquire_resource(CaptureMode::Region, &config, &factories);
         assert!(result.unwrap().is_some());
 
         assert_eq!(STREAMING_COUNT.load(Ordering::SeqCst), 0);
@@ -817,7 +843,7 @@ mod tests {
             streaming: Box::new(|_c, _p| Err("first".to_string())),
             one_shot: Box::new(|_| Ok(fake_one_shot_capture())),
         };
-        let result_1 = acquire_resource(CaptureMode::Screenshot, &config, &factories_1)
+        let result_1 = acquire_resource(CaptureMode::Region, &config, &factories_1)
             .unwrap()
             .unwrap();
         drop(result_1);
@@ -826,7 +852,7 @@ mod tests {
             streaming: Box::new(|_c, _p| Err("second".to_string())),
             one_shot: Box::new(|_| Ok(fake_one_shot_capture())),
         };
-        let result_2 = acquire_resource(CaptureMode::Screenshot, &config, &factories_2)
+        let result_2 = acquire_resource(CaptureMode::Region, &config, &factories_2)
             .unwrap()
             .unwrap();
         drop(result_2);
@@ -859,7 +885,7 @@ mod tests {
             }),
         };
 
-        let result = acquire_resource(CaptureMode::Screenshot, &config, &factories)
+        let result = acquire_resource(CaptureMode::Region, &config, &factories)
             .unwrap()
             .unwrap();
 
@@ -885,7 +911,7 @@ mod tests {
             }),
         };
 
-        let result = acquire_resource(CaptureMode::Screenshot, &config, &factories);
+        let result = acquire_resource(CaptureMode::Region, &config, &factories);
         match result {
             Err(OverlayError::Capture(msg)) => {
                 assert!(msg.contains("empty screen name"), "msg: {msg}");
@@ -921,7 +947,7 @@ mod tests {
             }),
         };
 
-        let result = acquire_resource(CaptureMode::Screenshot, &config, &factories)
+        let result = acquire_resource(CaptureMode::Region, &config, &factories)
             .unwrap()
             .unwrap();
 
@@ -940,19 +966,19 @@ mod tests {
             one_shot: Box::new(|_| Err(CaptureError::UserCancelled)),
         };
 
-        let result = acquire_resource(CaptureMode::Screenshot, &config, &factories).unwrap();
+        let result = acquire_resource(CaptureMode::Region, &config, &factories).unwrap();
         assert!(result.is_none(), "expected Ok(None) for cancellation");
     }
 
     #[test]
-    fn screenshot_mode_creates_one_shot_not_driver() {
+    fn region_mode_creates_one_shot_not_driver() {
         let config = test_config();
         let factories = ResourceFactories {
             streaming: Box::new(|_c, _p| Err("unused".to_string())),
             one_shot: Box::new(|_| Ok(fake_one_shot_capture())),
         };
 
-        let result = acquire_resource(CaptureMode::Screenshot, &config, &factories)
+        let result = acquire_resource(CaptureMode::Region, &config, &factories)
             .unwrap()
             .unwrap();
 
@@ -983,16 +1009,16 @@ mod tests {
         .expect("test capture")
     }
 
-    fn clear_screenshot_globals() {
+    fn clear_region_globals() {
         *CAPTURE_MODE.lock().unwrap() = None;
         *ONE_SHOT_SLOT.lock().unwrap() = None;
         *RESULT_SLOT.lock().unwrap() = None;
     }
 
     #[test]
-    fn screenshot_surface_validation_accepts_exact_single_output() {
+    fn region_surface_validation_accepts_exact_single_output() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Screenshot);
+        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Region);
         *RESULT_SLOT.lock().unwrap() = None;
         // 1x portal image: physical == logical, overlay surface matches exactly.
         *ONE_SHOT_SLOT.lock().unwrap() = Some(one_shot_capture((200, 100), (200, 100)));
@@ -1002,16 +1028,16 @@ mod tests {
             ..Overlay::default()
         };
 
-        let exit = validate_screenshot_surface_or_exit(&state);
+        let exit = validate_region_surface_or_exit(&state);
         assert!(exit.is_none(), "exact single output must pass");
         assert!(RESULT_SLOT.lock().unwrap().is_none());
-        clear_screenshot_globals();
+        clear_region_globals();
     }
 
     #[test]
-    fn screenshot_surface_validation_rejects_multi_output_composite() {
+    fn region_surface_validation_rejects_multi_output_composite() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Screenshot);
+        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Region);
         *RESULT_SLOT.lock().unwrap() = None;
         // Portal returned a two-output composite (400x100), but the layer surface
         // opened on a single 200x100 output.
@@ -1022,13 +1048,13 @@ mod tests {
             ..Overlay::default()
         };
 
-        let exit = validate_screenshot_surface_or_exit(&state);
+        let exit = validate_region_surface_or_exit(&state);
         assert!(exit.is_some(), "composite image must be rejected");
         assert!(
             RESULT_SLOT.lock().unwrap().as_ref().unwrap().is_err(),
             "composite rejection must record a mapping error"
         );
-        clear_screenshot_globals();
+        clear_region_globals();
     }
 
     #[test]
@@ -1043,8 +1069,8 @@ mod tests {
             ..Overlay::default()
         };
 
-        assert!(validate_screenshot_surface_or_exit(&state).is_none());
-        clear_screenshot_globals();
+        assert!(validate_region_surface_or_exit(&state).is_none());
+        clear_region_globals();
     }
 
     use crate::workspace::{CropRect, WorkspacePhase, WorkspaceState};
@@ -1177,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_mode_does_not_consume_preview_receiver() {
+    fn region_mode_does_not_consume_preview_receiver() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let config = test_config();
         let factories = ResourceFactories {
@@ -1187,11 +1213,11 @@ mod tests {
 
         *PREVIEW_RX.lock().unwrap() = None;
 
-        let _result = acquire_resource(CaptureMode::Screenshot, &config, &factories).unwrap();
+        let _result = acquire_resource(CaptureMode::Region, &config, &factories).unwrap();
 
         assert!(
             PREVIEW_RX.lock().unwrap().is_none(),
-            "screenshot mode should not set up preview channel"
+            "region mode should not set up preview channel"
         );
     }
 
@@ -1400,5 +1426,33 @@ mod tests {
             frozen_for_stream_backend(Some(fake_one_shot_capture_for("DP-2")), "linux-kwin")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn fullscreen_routes_to_direct_capture_before_overlay_startup() {
+        let mut config = test_config();
+        config.initial_mode = CaptureMode::Fullscreen;
+        let direct_calls = std::cell::Cell::new(0);
+        let overlay_calls = std::cell::Cell::new(0);
+
+        let result = run_initial_path(
+            config,
+            |_| {
+                direct_calls.set(direct_calls.get() + 1);
+                Ok(Some(CaptureResult {
+                    image: RgbaImage::new(2, 2),
+                    stats: None,
+                }))
+            },
+            |_| {
+                overlay_calls.set(overlay_calls.get() + 1);
+                Ok(None)
+            },
+        )
+        .unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(direct_calls.get(), 1);
+        assert_eq!(overlay_calls.get(), 0);
     }
 }

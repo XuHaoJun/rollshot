@@ -41,7 +41,7 @@ pub(crate) enum OverlayEffect {
     None,
     BeginStitch,
     FinishScrolling,
-    FinishScreenshot,
+    FinishRegion,
     Cancel,
     EnablePassthrough,
     DisablePassthrough,
@@ -85,10 +85,10 @@ pub(crate) struct OverlayState {
     pub(crate) capture_miss_message_expires_at: Option<std::time::Instant>,
     pub(crate) capture_miss_active: bool,
     pub(crate) capture_miss_edge: rollshot_overlay_core::capture_miss::CapturedEdge,
-    /// Active workflow. Screenshot mode finishes immediately on a valid release;
+    /// Active workflow. Region mode finishes immediately on a valid release;
     /// scrolling mode confirms the crop and begins streaming/stitching.
     pub(crate) mode: CaptureMode,
-    /// Frozen one-shot background, present only in screenshot mode. Built once by
+    /// Frozen one-shot background, present only in region mode. Built once by
     /// the platform runner; `view()` clones the cheap handle, never the pixels.
     pub(crate) frozen: Option<image::Handle>,
     /// Last known window-relative cursor position, tracked from `CursorMoved`.
@@ -456,7 +456,7 @@ pub(crate) fn view_with_toolbar(
             .align_y(iced::Alignment::Center);
 
         let mut chrome_stack = match (&state.frozen, state.mode) {
-            (Some(handle), CaptureMode::Screenshot) => iced::widget::stack![
+            (Some(handle), CaptureMode::Region) => iced::widget::stack![
                 image(handle.clone())
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -548,7 +548,7 @@ pub(crate) fn view_with_toolbar(
         .align_y(iced::Alignment::Start)
         .padding(16);
 
-    // Screenshot mode draws the frozen capture as the background, with the dim
+    // Region mode draws the frozen capture as the background, with the dim
     // mask, crosshair guides, and selection border (the canvas) composited above
     // it (spec steps 2-3). Scrolling mode has no frozen image; the canvas sits on
     // the transparent layer surface so the live target shows through.
@@ -663,13 +663,16 @@ pub(crate) fn update(
                 state.workspace.set_crop(Some(crop_rect));
                 state.workspace.complete_selection();
                 let effect = match state.mode {
-                    CaptureMode::Screenshot => {
-                        state.workspace.finish_screenshot();
-                        OverlayEffect::FinishScreenshot
+                    CaptureMode::Region => {
+                        state.workspace.finish_region();
+                        OverlayEffect::FinishRegion
                     }
                     CaptureMode::Scrolling => {
                         state.workspace.begin_scrolling();
                         OverlayEffect::BeginStitch
+                    }
+                    CaptureMode::Fullscreen => {
+                        unreachable!("fullscreen is routed before active overlay state")
                     }
                 };
                 (effect, InputRegionMode::None)
@@ -705,13 +708,16 @@ pub(crate) fn update(
             state.workspace.set_crop(Some(crop_rect));
             state.workspace.complete_selection();
             let effect = match state.mode {
-                CaptureMode::Screenshot => {
-                    state.workspace.finish_screenshot();
-                    OverlayEffect::FinishScreenshot
+                CaptureMode::Region => {
+                    state.workspace.finish_region();
+                    OverlayEffect::FinishRegion
                 }
                 CaptureMode::Scrolling => {
                     state.workspace.begin_scrolling();
                     OverlayEffect::BeginStitch
+                }
+                CaptureMode::Fullscreen => {
+                    unreachable!("fullscreen is routed before active overlay state")
                 }
             };
             (effect, InputRegionMode::None)
@@ -731,9 +737,9 @@ pub(crate) fn update(
                     (OverlayEffect::FinishScrolling, InputRegionMode::None)
                 }
                 WorkspacePhase::Selected => {
-                    if state.mode == CaptureMode::Screenshot {
-                        state.workspace.finish_screenshot();
-                        return (OverlayEffect::FinishScreenshot, InputRegionMode::None);
+                    if state.mode == CaptureMode::Region {
+                        state.workspace.finish_region();
+                        return (OverlayEffect::FinishRegion, InputRegionMode::None);
                     }
                     // Scrolling in Selected: the runner calls begin_scrolling.
                     (OverlayEffect::None, InputRegionMode::None)
@@ -759,11 +765,14 @@ pub(crate) fn update(
                     state.workspace.set_crop(Some(crop_rect));
                     state.workspace.complete_selection();
                     let effect = match state.mode {
-                        CaptureMode::Screenshot => {
-                            state.workspace.finish_screenshot();
-                            OverlayEffect::FinishScreenshot
+                        CaptureMode::Region => {
+                            state.workspace.finish_region();
+                            OverlayEffect::FinishRegion
                         }
                         CaptureMode::Scrolling => OverlayEffect::BeginStitch,
+                        CaptureMode::Fullscreen => {
+                            unreachable!("fullscreen is routed before active overlay state")
+                        }
                     };
                     (effect, InputRegionMode::None)
                 }
@@ -776,7 +785,10 @@ pub(crate) fn update(
             clear_capture_miss_ui(state);
             let region = match mode {
                 CaptureMode::Scrolling => InputRegionMode::ToolbarOnly,
-                CaptureMode::Screenshot => InputRegionMode::None,
+                CaptureMode::Region => InputRegionMode::None,
+                CaptureMode::Fullscreen => {
+                    unreachable!("fullscreen is routed before active overlay state")
+                }
             };
             (OverlayEffect::ActivateMode(mode), region)
         }
@@ -810,12 +822,12 @@ pub(crate) fn update(
             (OverlayEffect::None, InputRegionMode::None)
         }
         OverlayMessage::ToolbarAction(action) => match action {
-            crate::toolbar::ToolbarAction::ScreenshotMode => {
-                state.mode = CaptureMode::Screenshot;
-                state.workspace.activate_mode(CaptureMode::Screenshot);
+            crate::toolbar::ToolbarAction::RegionMode => {
+                state.mode = CaptureMode::Region;
+                state.workspace.activate_mode(CaptureMode::Region);
                 clear_capture_miss_ui(state);
                 (
-                    OverlayEffect::ActivateMode(CaptureMode::Screenshot),
+                    OverlayEffect::ActivateMode(CaptureMode::Region),
                     InputRegionMode::None,
                 )
             }
@@ -833,9 +845,9 @@ pub(crate) fn update(
                     state.workspace.finish_scrolling();
                     (OverlayEffect::FinishScrolling, InputRegionMode::None)
                 }
-                WorkspacePhase::Selected if state.mode == CaptureMode::Screenshot => {
-                    state.workspace.finish_screenshot();
-                    (OverlayEffect::FinishScreenshot, InputRegionMode::None)
+                WorkspacePhase::Selected if state.mode == CaptureMode::Region => {
+                    state.workspace.finish_region();
+                    (OverlayEffect::FinishRegion, InputRegionMode::None)
                 }
                 _ => (OverlayEffect::None, InputRegionMode::None),
             },
@@ -1053,11 +1065,11 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_release_requests_immediate_finalization() {
+    fn region_release_requests_immediate_finalization() {
         use crate::workspace::WorkspacePhase;
         use iced::{mouse, Event};
         let mut state = OverlayState {
-            mode: rollshot_capture::CaptureMode::Screenshot,
+            mode: rollshot_capture::CaptureMode::Region,
             crop: Some(Rectangle {
                 x: 10.0,
                 y: 10.0,
@@ -1074,11 +1086,11 @@ mod tests {
             ))),
         );
 
-        assert_eq!(effect, super::OverlayEffect::FinishScreenshot);
+        assert_eq!(effect, super::OverlayEffect::FinishRegion);
         assert_eq!(
             state.workspace.phase(),
             WorkspacePhase::Selected,
-            "screenshot release confirms the crop then finalizes immediately"
+            "region release confirms the crop then finalizes immediately"
         );
     }
 
@@ -1117,7 +1129,7 @@ mod tests {
             height: 40.0,
         };
         let mut state = OverlayState {
-            mode: rollshot_capture::CaptureMode::Screenshot,
+            mode: rollshot_capture::CaptureMode::Region,
             crop: Some(crop),
             ..OverlayState::default()
         };
@@ -1158,7 +1170,7 @@ mod tests {
 
         super::update(
             &mut state,
-            OverlayMessage::ToolbarAction(crate::toolbar::ToolbarAction::ScreenshotMode),
+            OverlayMessage::ToolbarAction(crate::toolbar::ToolbarAction::RegionMode),
         );
 
         assert!(!state.capture_miss_active);
@@ -1293,11 +1305,11 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_empty_release_stays_in_selection() {
+    fn region_empty_release_stays_in_selection() {
         use crate::workspace::WorkspacePhase;
         use iced::{mouse, Event};
         let mut state = OverlayState {
-            mode: rollshot_capture::CaptureMode::Screenshot,
+            mode: rollshot_capture::CaptureMode::Region,
             crop: None,
             ..OverlayState::default()
         };

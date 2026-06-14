@@ -1,6 +1,7 @@
 //! Iced capture overlay renderer for the active Linux and macOS product paths.
 
 mod diagnostics;
+pub mod fullscreen;
 
 use image::RgbaImage;
 use rollshot_core::StitchStats;
@@ -65,7 +66,7 @@ mod linux_runner;
 pub mod macos_capture;
 #[cfg(target_os = "macos")]
 mod macos_window;
-pub mod screenshot;
+pub mod region;
 
 /// Run the blocking capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
