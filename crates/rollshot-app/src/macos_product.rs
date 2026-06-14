@@ -167,8 +167,8 @@ impl MacosProduct {
                 );
                 let handle = crate::result_workspace::build_display_handle(&image, scale);
                 (
-                    Phase::Thumbnail(ThumbnailState::new(handle, path, Instant::now())),
-                    Some(ResultDocument::saved(image, path.clone())),
+                    Phase::Thumbnail(ThumbnailState::new(handle, path.clone(), Instant::now())),
+                    Some(ResultDocument::saved(image, path)),
                 )
             }
             Presentation::MacosUnsavedWorkspace(error) => {
