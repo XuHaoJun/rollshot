@@ -102,6 +102,55 @@ mod diagnostic_tests {
             "log = {log}"
         );
     }
+
+    fn png_chunk_types(bytes: &[u8]) -> Vec<[u8; 4]> {
+        let mut offset = 8;
+        let mut chunks = Vec::new();
+        while offset + 12 <= bytes.len() {
+            let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let chunk_type: [u8; 4] = bytes[offset + 4..offset + 8].try_into().unwrap();
+            chunks.push(chunk_type);
+            offset += 12 + length;
+            if chunk_type == *b"IEND" {
+                break;
+            }
+        }
+        chunks
+    }
+
+    #[test]
+    fn save_as_png_contains_only_flattened_pixels_and_core_png_chunks() {
+        use rollshot_image_document::{ImageDocument, ImageRect};
+
+        let mut document =
+            ImageDocument::new(RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255])));
+        document
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            })
+            .unwrap();
+        let flattened = document.flatten();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("safe.png");
+        write_save_as(&flattened, &path).unwrap();
+
+        let decoded = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(decoded.as_raw(), flattened.as_raw());
+        assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_ne!(
+            decoded.get_pixel(0, 0).0,
+            document.source().get_pixel(0, 0).0
+        );
+
+        let chunks = png_chunk_types(&std::fs::read(path).unwrap());
+        assert!(chunks
+            .iter()
+            .all(|chunk| matches!(chunk.as_slice(), b"IHDR" | b"IDAT" | b"IEND")));
+    }
 }
 
 /// Open the directory containing `path` in the platform file manager.

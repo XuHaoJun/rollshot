@@ -3,7 +3,7 @@ use image::RgbaImage;
 use super::viewport::{anchored_scroll, geometry_for, step_zoom, ZoomDirection, ZoomMode};
 use iced::widget::scrollable;
 use iced::{keyboard, mouse, Point, Size, Subscription, Task, Vector};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::canvas::{
@@ -37,7 +37,10 @@ pub enum Message {
     /// User pressed "Copy Original" (unflattened source).
     CopyOriginal,
     /// Background clipboard write completed.
-    CopyFinished(Result<(), String>),
+    CopyFinished {
+        result: Result<(), String>,
+        safe_output: bool,
+    },
     /// User pressed "Save As…".
     SaveAs,
     /// The async file-picker returned (None = cancelled).
@@ -46,6 +49,7 @@ pub enum Message {
     SaveFinished {
         result: Result<PathBuf, String>,
         saved_state_id: u64,
+        safe_output: bool,
     },
     /// User pressed "Reveal".
     Reveal,
@@ -95,6 +99,10 @@ pub enum Message {
     TextDraftAction(iced::widget::text_editor::Action),
     /// Commit the inline text editor draft.
     CommitTextDraft,
+    /// User confirmed the pending unredacted-action dialog.
+    ConfirmUnredactedAction,
+    /// User cancelled the pending unredacted-action dialog.
+    CancelUnredactedAction,
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +395,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
     match message {
         Message::RequestClose => {
             commit_text_draft(state);
+            state.pending_unredacted_action = None;
             match super::document::close_decision(&state.document, state.annotations_dirty()) {
                 CloseDecision::Close => iced::exit(),
                 CloseDecision::Confirm(prompt) => {
@@ -406,20 +415,41 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::Copy => {
             commit_text_draft(state);
+            let safe_output = state.has_secure_redactions();
             let result = super::actions::copy_image(&copy_payload(state));
-            Task::done(Message::CopyFinished(result))
+            Task::done(Message::CopyFinished {
+                result,
+                safe_output,
+            })
         }
         Message::CopyOriginal => {
             state.editor.copy_menu_open = false;
             commit_text_draft(state);
-            let result = super::actions::copy_image(&copy_original_payload(state));
-            Task::done(Message::CopyFinished(result))
+            if super::secure_sharing::has_secure_redactions(&state.document) {
+                state.pending_unredacted_action =
+                    Some(super::secure_sharing::UnredactedAction::CopyOriginal);
+                Task::none()
+            } else {
+                let result = super::actions::copy_image(&copy_original_payload(state));
+                Task::done(Message::CopyFinished {
+                    result,
+                    safe_output: false,
+                })
+            }
         }
-        Message::CopyFinished(Ok(())) => {
-            state.message = Some(InlineMessage::success("Copied image".to_string()));
+        Message::CopyFinished {
+            result: Ok(()),
+            safe_output,
+        } => {
+            let text = if safe_output {
+                super::secure_sharing::COPY_SAFE_SUCCESS.to_string()
+            } else {
+                "Copied image".to_string()
+            };
+            state.message = Some(InlineMessage::success(text));
             Task::none()
         }
-        Message::CopyFinished(Err(e)) => {
+        Message::CopyFinished { result: Err(e), .. } => {
             state.message = Some(InlineMessage::Error(e));
             Task::none()
         }
@@ -428,13 +458,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             let default_dir = crate::storage::Platform::current()
                 .and_then(crate::storage::default_output_dir)
                 .unwrap_or_else(|_| PathBuf::from("."));
-            let default_name = super::document::default_save_name(&state.document);
+            let default_name = super::secure_sharing::default_save_name(&state.document);
             Task::perform(
                 super::actions::prompt_save_as(default_dir, default_name),
                 Message::SavePathChosen,
             )
         }
         Message::SavePathChosen(Some(path)) => {
+            let safe_output = state.has_secure_redactions();
+            if super::secure_sharing::safe_export_overwrites_source(&state.document, &path) {
+                state.message = Some(InlineMessage::Error(
+                    super::secure_sharing::SAFE_EXPORT_OVERWRITE_ERROR.to_string(),
+                ));
+                return Task::none();
+            }
             let image = save_payload(state);
             let saved_state_id = state.document.image.state_id();
             Task::perform(
@@ -442,6 +479,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 move |result| Message::SaveFinished {
                     result,
                     saved_state_id,
+                    safe_output,
                 },
             )
         }
@@ -449,16 +487,24 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::SaveFinished {
             result,
             saved_state_id,
+            safe_output,
         } => {
-            state.apply_save_as(result.map(Some), saved_state_id);
+            state.apply_save_as(result.map(Some), saved_state_id, safe_output);
             Task::none()
         }
         Message::Reveal => {
             commit_text_draft(state);
-            let Some(path) = state.document.reveal_path().map(Path::to_path_buf) else {
-                return Task::none();
-            };
-            Task::done(Message::RevealFinished(super::actions::reveal(&path)))
+            match super::secure_sharing::reveal_action(&state.document) {
+                super::secure_sharing::RevealAction::Disabled => Task::none(),
+                super::secure_sharing::RevealAction::Immediate { path, .. } => {
+                    Task::done(Message::RevealFinished(super::actions::reveal(path)))
+                }
+                super::secure_sharing::RevealAction::ConfirmUnredacted(_) => {
+                    state.pending_unredacted_action =
+                        Some(super::secure_sharing::UnredactedAction::RevealOriginal);
+                    Task::none()
+                }
+            }
         }
         Message::RevealFinished(Ok(())) => Task::none(),
         Message::RevealFinished(Err(e)) => {
@@ -526,7 +572,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::EscapePressed => {
-            if state.editor.copy_menu_open {
+            if state.pending_unredacted_action.is_some() {
+                state.pending_unredacted_action = None;
+            } else if state.editor.copy_menu_open {
                 state.editor.copy_menu_open = false;
             } else if state.editor.text_draft.is_some() {
                 state.editor.text_draft = None;
@@ -583,6 +631,26 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::CommitTextDraft => {
             commit_text_draft(state);
+            Task::none()
+        }
+        Message::ConfirmUnredactedAction => match state.pending_unredacted_action.take() {
+            Some(super::secure_sharing::UnredactedAction::CopyOriginal) => {
+                let result = super::actions::copy_image(&copy_original_payload(state));
+                Task::done(Message::CopyFinished {
+                    result,
+                    safe_output: false,
+                })
+            }
+            Some(super::secure_sharing::UnredactedAction::RevealOriginal) => {
+                let Some(path) = state.document.source_path.as_deref() else {
+                    return Task::none();
+                };
+                Task::done(Message::RevealFinished(super::actions::reveal(path)))
+            }
+            None => Task::none(),
+        },
+        Message::CancelUnredactedAction => {
+            state.pending_unredacted_action = None;
             Task::none()
         }
         Message::CanvasPressed(point) => {
@@ -765,6 +833,7 @@ mod tests {
     use iced::Size as IcedSize;
     use image::Rgba;
     use rollshot_image_document::{Annotation, ImagePoint, ImageRect};
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     fn image() -> image::RgbaImage {
@@ -876,6 +945,7 @@ mod tests {
             Message::SaveFinished {
                 result: Ok(PathBuf::from("/tmp/annotated.png")),
                 saved_state_id: written_state_id,
+                safe_output: false,
             },
         );
 
@@ -1623,6 +1693,120 @@ mod tests {
         assert_eq!(state.editor.selection, None);
     }
 
+    // -- safe copy/save routing (Task 2) ------------------------------------
+
+    use super::super::secure_sharing::{
+        UnredactedAction, COPY_SAFE_SUCCESS, SAFE_EXPORT_OVERWRITE_ERROR, SAVE_SAFE_SUCCESS,
+    };
+
+    #[test]
+    fn safe_copy_completion_uses_safe_message() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+
+        let _ = update(
+            &mut state,
+            Message::CopyFinished {
+                result: Ok(()),
+                safe_output: true,
+            },
+        );
+        assert_eq!(state.message_text().as_deref(), Some(COPY_SAFE_SUCCESS));
+    }
+
+    #[test]
+    fn safe_save_rejects_source_before_write_and_preserves_state() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+        let state_id = state.document.image.state_id();
+
+        let _ = update(
+            &mut state,
+            Message::SavePathChosen(Some(PathBuf::from("/tmp/result.png"))),
+        );
+
+        assert_eq!(
+            state.message_text().as_deref(),
+            Some(SAFE_EXPORT_OVERWRITE_ERROR)
+        );
+        assert_eq!(state.document.image.state_id(), state_id);
+        assert!(state.document.last_export_path.is_none());
+        assert!(state.annotations_dirty());
+    }
+
+    #[test]
+    fn safe_save_completion_records_safe_message_and_path() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+        let state_id = state.document.image.state_id();
+
+        state.apply_save_as(Ok(Some(PathBuf::from("/tmp/safe.png"))), state_id, true);
+
+        assert_eq!(state.message_text().as_deref(), Some(SAVE_SAFE_SUCCESS));
+        assert_eq!(
+            state.document.last_export_path.as_deref(),
+            Some(Path::new("/tmp/safe.png"))
+        );
+        assert!(state.document.last_export_is_safe);
+        assert!(!state.annotations_dirty());
+    }
+
+    #[test]
+    fn unredacted_save_is_not_revealed_as_safe_after_adding_redaction() {
+        let mut state = saved_workspace();
+        let state_id = state.document.image.state_id();
+        state.apply_save_as(
+            Ok(Some(PathBuf::from("/tmp/unredacted-export.png"))),
+            state_id,
+            false,
+        );
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+
+        assert!(!state.document.last_export_is_safe);
+        assert_eq!(
+            super::super::secure_sharing::reveal_action(&state.document),
+            super::super::secure_sharing::RevealAction::ConfirmUnredacted(Path::new(
+                "/tmp/result.png"
+            ))
+        );
+    }
+
     // -- keyboard routing (Task 22) -----------------------------------------
 
     fn zmod() -> keyboard::Modifiers {
@@ -1682,5 +1866,81 @@ mod tests {
     fn plain_characters_do_not_fire_with_command_modifiers_held() {
         use keyboard::Key;
         assert!(map_key_press(&Key::Character("n".into()), zmod(), false).is_none());
+    }
+
+    // -- unredacted-action confirmation (Task 3) ----------------------------
+
+    #[test]
+    fn redacted_copy_original_requires_fresh_confirmation() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+
+        let _ = update(&mut state, Message::CopyOriginal);
+        assert_eq!(
+            state.pending_unredacted_action,
+            Some(UnredactedAction::CopyOriginal)
+        );
+        let _ = update(&mut state, Message::CancelUnredactedAction);
+        assert_eq!(state.pending_unredacted_action, None);
+        let _ = update(&mut state, Message::CopyOriginal);
+        assert_eq!(
+            state.pending_unredacted_action,
+            Some(UnredactedAction::CopyOriginal)
+        );
+        let _ = update(&mut state, Message::ConfirmUnredactedAction);
+        assert_eq!(state.pending_unredacted_action, None);
+        let _ = update(&mut state, Message::CopyOriginal);
+        assert_eq!(
+            state.pending_unredacted_action,
+            Some(UnredactedAction::CopyOriginal)
+        );
+    }
+
+    #[test]
+    fn redacted_reveal_original_requires_confirmation() {
+        let mut state = saved_workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+
+        let _ = update(&mut state, Message::Reveal);
+        assert_eq!(
+            state.pending_unredacted_action,
+            Some(UnredactedAction::RevealOriginal)
+        );
+    }
+
+    #[test]
+    fn request_close_clears_unredacted_confirmation_before_close_routing() {
+        let mut state = saved_workspace();
+        state.pending_unredacted_action = Some(UnredactedAction::CopyOriginal);
+        let _ = update(&mut state, Message::RequestClose);
+        assert_eq!(state.pending_unredacted_action, None);
+    }
+
+    #[test]
+    fn escape_cancels_pending_unredacted_confirmation_without_closing() {
+        let mut state = saved_workspace();
+        state.pending_unredacted_action = Some(UnredactedAction::RevealOriginal);
+        let _ = update(&mut state, Message::EscapePressed);
+        assert_eq!(state.pending_unredacted_action, None);
+        // Esc cancelled the blocking dialog; it must not have escalated to close.
+        assert!(state.pending_discard.is_none());
     }
 }

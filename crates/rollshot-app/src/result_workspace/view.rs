@@ -63,6 +63,9 @@ fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
         .padding([4, 10])
         .on_press_maybe(state.document.image.can_redo().then_some(Message::Redo));
 
+    let copy_label = super::secure_sharing::copy_label(&state.document);
+    let save_label = super::secure_sharing::save_label(&state.document);
+
     row![
         button(text("Close")).on_press(Message::RequestClose),
         text(state.document.display_name()).width(Length::Fill),
@@ -86,9 +89,9 @@ fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
             Message::ToggleNavigator,
             state.editor.navigator_open,
         ),
-        button(text("Copy")).on_press(Message::Copy),
+        button(text(copy_label)).on_press(Message::Copy),
         button(text("\u{25BE}")).on_press(Message::ToggleCopyMenu),
-        button(text("Save As")).on_press(Message::SaveAs),
+        button(text(save_label)).on_press(Message::SaveAs),
         reveal_button(state),
     ]
     .spacing(8)
@@ -104,7 +107,7 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
     let original = state.original_size();
 
     let toolbar = toolbar(state);
-
+    let disclosure = retained_original_disclosure(state);
     let message_area = message_row(state);
 
     let canvas_area = canvas_view(state, original);
@@ -119,24 +122,30 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
         canvas_area
     };
 
-    let layout = column![toolbar, message_area, workspace_row, status]
+    let layout = column![toolbar, disclosure, message_area, workspace_row, status]
         .spacing(8)
         .padding(8);
 
     let layout: Element<'_, Message> = if let Some(prompt) = &state.pending_discard {
         discard_modal(layout.into(), prompt.text())
+    } else if let Some(action) = state.pending_unredacted_action {
+        unredacted_action_modal(layout.into(), action)
     } else {
         layout.into()
     };
-    if state.editor.copy_menu_open {
-        copy_menu(layout)
+    if state.editor.copy_menu_open
+        && state.pending_discard.is_none()
+        && state.pending_unredacted_action.is_none()
+    {
+        copy_menu(layout, state)
     } else {
         layout
     }
 }
 
-fn copy_menu(base: Element<'_, Message>) -> Element<'_, Message> {
-    let menu = container(button(text("Copy Original")).on_press(Message::CopyOriginal)).padding(4);
+fn copy_menu<'a>(base: Element<'a, Message>, state: &'a ResultWorkspace) -> Element<'a, Message> {
+    let label = super::secure_sharing::copy_original_label(&state.document);
+    let menu = container(button(text(label)).on_press(Message::CopyOriginal)).padding(4);
 
     let positioned = container(menu)
         .width(Length::Fill)
@@ -156,8 +165,9 @@ fn copy_menu(base: Element<'_, Message>) -> Element<'_, Message> {
 }
 
 fn reveal_button(state: &ResultWorkspace) -> Element<'_, Message> {
-    let btn = button(text("Reveal"));
-    if state.can_reveal() {
+    let action = super::secure_sharing::reveal_action(&state.document);
+    let btn = button(text(action.label()));
+    if !matches!(action, super::secure_sharing::RevealAction::Disabled) {
         btn.on_press(Message::Reveal).into()
     } else {
         btn.into()
@@ -318,11 +328,11 @@ fn zoom_label(state: &ResultWorkspace) -> String {
     }
 }
 
-fn discard_dialog_style(theme: &iced::Theme) -> container::Style {
+fn confirmation_dialog_style(theme: &iced::Theme) -> container::Style {
     container::rounded_box(theme)
 }
 
-fn discard_scrim_style(_theme: &iced::Theme) -> container::Style {
+fn confirmation_scrim_style(_theme: &iced::Theme) -> container::Style {
     container::Style::default().background(Color {
         a: 0.8,
         ..Color::BLACK
@@ -343,14 +353,14 @@ fn discard_modal<'a>(base: Element<'a, Message>, prompt: &'a str) -> Element<'a,
         .align_x(Alignment::Center),
     )
     .padding(20)
-    .style(discard_dialog_style);
+    .style(confirmation_dialog_style);
 
     // Follow iced's official modal pattern: an opaque dialog over a styled
     // full-window scrim. Outside clicks remain a no-op for destructive prompts.
     let scrim = opaque(
         mouse_area(
             container(opaque(dialog))
-                .style(discard_scrim_style)
+                .style(confirmation_scrim_style)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(Alignment::Center)
@@ -363,13 +373,60 @@ fn discard_modal<'a>(base: Element<'a, Message>, prompt: &'a str) -> Element<'a,
     iced::widget::stack![base, scrim].into()
 }
 
+fn retained_original_disclosure(state: &ResultWorkspace) -> Element<'_, Message> {
+    match super::secure_sharing::retained_original_disclosure(&state.document) {
+        Some(disclosure) => container(text(disclosure).size(12))
+            .width(Length::Fill)
+            .padding([2, 4])
+            .into(),
+        None => Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into(),
+    }
+}
+
+fn unredacted_action_modal<'a>(
+    base: Element<'a, Message>,
+    action: super::secure_sharing::UnredactedAction,
+) -> Element<'a, Message> {
+    let dialog = container(
+        column![
+            text(action.prompt()),
+            row![
+                button(text("Cancel")).on_press(Message::CancelUnredactedAction),
+                button(text(action.confirm_label())).on_press(Message::ConfirmUnredactedAction),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12)
+        .align_x(Alignment::Center),
+    )
+    .padding(20)
+    .style(confirmation_dialog_style);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog))
+                .style(confirmation_scrim_style)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::ModalScrimPressed),
+    );
+    iced::widget::stack![base, scrim].into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn discard_dialog_has_solid_background() {
-        let style = discard_dialog_style(&iced::Theme::Dark);
+        let style = confirmation_dialog_style(&iced::Theme::Dark);
         let iced::Background::Color(color) = style.background.expect("dialog background") else {
             panic!("dialog background must be a solid color");
         };
@@ -378,7 +435,7 @@ mod tests {
 
     #[test]
     fn discard_scrim_is_translucent_black() {
-        let style = discard_scrim_style(&iced::Theme::Dark);
+        let style = confirmation_scrim_style(&iced::Theme::Dark);
         let iced::Background::Color(color) = style.background.expect("scrim background") else {
             panic!("scrim background must be a solid color");
         };
@@ -386,5 +443,13 @@ mod tests {
         assert_eq!(color.g, 0.0);
         assert_eq!(color.b, 0.0);
         assert!(color.a > 0.0 && color.a < 1.0);
+    }
+
+    #[test]
+    fn unredacted_confirmation_uses_blocking_modal_styles() {
+        let dialog = confirmation_dialog_style(&iced::Theme::Dark);
+        let scrim = confirmation_scrim_style(&iced::Theme::Dark);
+        assert!(dialog.background.is_some());
+        assert!(scrim.background.is_some());
     }
 }

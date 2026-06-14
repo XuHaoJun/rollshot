@@ -8,11 +8,13 @@ pub(crate) const UNSAVED_LABEL: &str = "Unsaved capture";
 /// The Result Workspace document: the image document plus durable-path
 /// identity (spec §7). `source_path` is the original auto-saved capture and
 /// never changes because of annotation export; `last_export_path` is the most
-/// recent successful annotated Save As.
+/// recent successful Save As, with `last_export_is_safe` recording whether it
+/// was flattened while secure redactions existed.
 pub struct ResultDocument {
     pub image: ImageDocument,
     pub source_path: Option<PathBuf>,
     pub last_export_path: Option<PathBuf>,
+    pub last_export_is_safe: bool,
 }
 
 impl ResultDocument {
@@ -21,6 +23,7 @@ impl ResultDocument {
             image: ImageDocument::new(image),
             source_path: Some(path),
             last_export_path: None,
+            last_export_is_safe: false,
         }
     }
 
@@ -29,6 +32,7 @@ impl ResultDocument {
             image: ImageDocument::new(image),
             source_path: None,
             last_export_path: None,
+            last_export_is_safe: false,
         }
     }
 
