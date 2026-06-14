@@ -352,12 +352,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         height: ws.height as u32,
                     };
                     let outcome = match ONE_SHOT_SLOT.lock().unwrap().take() {
-                        Some(capture) => crate::region::finish_region(
-                            &capture,
-                            crop_logical,
-                            overlay_logical,
-                        )
-                        .map(Some),
+                        Some(capture) => {
+                            crate::region::finish_region(&capture, crop_logical, overlay_logical)
+                                .map(Some)
+                        }
                         None => Ok(None),
                     };
                     match outcome {
@@ -571,7 +569,32 @@ fn real_factories() -> ResourceFactories {
     }
 }
 
+fn run_initial_path<Direct, Overlay>(
+    config: OverlayConfig,
+    direct: Direct,
+    overlay: Overlay,
+) -> Result<Option<CaptureResult>, OverlayError>
+where
+    Direct: FnOnce(&OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>,
+    Overlay: FnOnce(OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>,
+{
+    if config.initial_mode == CaptureMode::Fullscreen {
+        return direct(&config);
+    }
+    overlay(config)
+}
+
 pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    run_initial_path(config, crate::fullscreen::capture, run_overlay_session)
+}
+
+fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    if config.initial_mode == CaptureMode::Fullscreen {
+        return Err(OverlayError::Capture(
+            "fullscreen must not reach the overlay runner".to_string(),
+        ));
+    }
+
     tracing::info!(target: TARGET_OVERLAY, mode = ?config.initial_mode, "blocking overlay starting");
     *PREVIEW_RX.lock().unwrap() = None;
     *DRIVER_SLOT.lock().unwrap() = None;
@@ -1403,5 +1426,33 @@ mod tests {
             frozen_for_stream_backend(Some(fake_one_shot_capture_for("DP-2")), "linux-kwin")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn fullscreen_routes_to_direct_capture_before_overlay_startup() {
+        let mut config = test_config();
+        config.initial_mode = CaptureMode::Fullscreen;
+        let direct_calls = std::cell::Cell::new(0);
+        let overlay_calls = std::cell::Cell::new(0);
+
+        let result = run_initial_path(
+            config,
+            |_| {
+                direct_calls.set(direct_calls.get() + 1);
+                Ok(Some(CaptureResult {
+                    image: RgbaImage::new(2, 2),
+                    stats: None,
+                }))
+            },
+            |_| {
+                overlay_calls.set(overlay_calls.get() + 1);
+                Ok(None)
+            },
+        )
+        .unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(direct_calls.get(), 1);
+        assert_eq!(overlay_calls.get(), 0);
     }
 }
