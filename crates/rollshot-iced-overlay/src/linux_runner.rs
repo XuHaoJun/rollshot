@@ -331,7 +331,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                     Task::none()
                 }
                 app::OverlayEffect::FinishRegion => {
-                    tracing::info!(target: TARGET_OVERLAY, "finishing screenshot capture");
+                    tracing::info!(target: TARGET_OVERLAY, "finishing region capture");
                     let crop = state.crop.unwrap();
                     let ws = match state.window_size {
                         Some(ws) => ws,
@@ -366,7 +366,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             iced::exit()
                         }
                         Err(e) => {
-                            tracing::error!(target: TARGET_OVERLAY, %e, "screenshot finish failed");
+                            tracing::error!(target: TARGET_OVERLAY, %e, "region finish failed");
                             state.transient_error = Some(e);
                             Task::none()
                         }

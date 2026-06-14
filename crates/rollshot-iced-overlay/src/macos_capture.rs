@@ -651,7 +651,7 @@ impl Component {
                 EffectOutcome::Task(Task::none())
             }
             OverlayEffect::FinishRegion => {
-                tracing::info!(target: TARGET_OVERLAY, "finishing screenshot capture");
+                tracing::info!(target: TARGET_OVERLAY, "finishing region capture");
                 let crop = self.overlay.crop.unwrap();
                 let ws = match self.overlay.window_size {
                     Some(ws) => ws,
@@ -1078,7 +1078,7 @@ mod tests {
         }
     }
 
-    /// A screenshot component with a confirmed crop and a one-shot capture ready
+    /// A region component with a confirmed crop and a one-shot capture ready
     /// to finalize.
     fn capture_component_with_one_shot() -> Component {
         let mut c = capture_component();
