@@ -62,7 +62,7 @@ impl OneShotBackendKind {
         if backend_flag != "auto" {
             return Err(CaptureError::InvalidConfig {
                 message: format!(
-                    "screenshot mode only accepts 'auto' backend, got '{backend_flag}'"
+                    "region mode only accepts 'auto' backend, got '{backend_flag}'"
                 ),
             });
         }

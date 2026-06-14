@@ -6,7 +6,7 @@ use rollshot_overlay_core::chrome_placement::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
-    ScreenshotMode,
+    RegionMode,
     ScrollingMode,
     Finish,
     Cancel,
@@ -27,18 +27,18 @@ pub const TOOLBAR_HEIGHT: f32 = 48.0;
 pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
     match phase {
         WorkspacePhase::Selecting => vec![
-            ToolbarAction::ScreenshotMode,
+            ToolbarAction::RegionMode,
             ToolbarAction::ScrollingMode,
             ToolbarAction::Cancel,
         ],
         WorkspacePhase::Selected => vec![
-            ToolbarAction::ScreenshotMode,
+            ToolbarAction::RegionMode,
             ToolbarAction::ScrollingMode,
             ToolbarAction::Finish,
             ToolbarAction::Cancel,
         ],
         WorkspacePhase::ScrollingCapture => vec![
-            ToolbarAction::ScreenshotMode,
+            ToolbarAction::RegionMode,
             ToolbarAction::ScrollingMode,
             ToolbarAction::Finish,
             ToolbarAction::Cancel,
@@ -63,7 +63,7 @@ pub fn finish_drag(toolbar: Rect, viewport: Rect) -> CropRect {
 
 fn action_label(action: ToolbarAction) -> &'static str {
     match action {
-        ToolbarAction::ScreenshotMode => "📷",
+        ToolbarAction::RegionMode => "📷",
         ToolbarAction::ScrollingMode => "📜",
         ToolbarAction::Finish => "✓",
         ToolbarAction::Cancel => "✕",
@@ -72,7 +72,7 @@ fn action_label(action: ToolbarAction) -> &'static str {
 
 fn action_tooltip(action: ToolbarAction) -> &'static str {
     match action {
-        ToolbarAction::ScreenshotMode => "Screenshot Mode",
+        ToolbarAction::RegionMode => "Region Mode",
         ToolbarAction::ScrollingMode => "Scrolling Mode",
         ToolbarAction::Finish => "Finish Capture",
         ToolbarAction::Cancel => "Cancel",
@@ -85,7 +85,7 @@ fn action_style_fn(
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     let is_active = matches!(
         (action, active_mode),
-        (ToolbarAction::ScreenshotMode, CaptureMode::Screenshot)
+        (ToolbarAction::RegionMode, CaptureMode::Region)
             | (ToolbarAction::ScrollingMode, CaptureMode::Scrolling)
     );
 
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(
             actions_for(WorkspacePhase::Selected),
             vec![
-                ToolbarAction::ScreenshotMode,
+                ToolbarAction::RegionMode,
                 ToolbarAction::ScrollingMode,
                 ToolbarAction::Finish,
                 ToolbarAction::Cancel,

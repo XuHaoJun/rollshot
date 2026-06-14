@@ -586,7 +586,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Screenshot,
+            initial_mode: CaptureMode::Region,
             target_output_name: None,
         };
         // `Component::new` uses test factories under cfg(test), so this builds a
