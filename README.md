@@ -290,7 +290,7 @@ not honor a portal-picked region.
 **One-shot dev run.** This single command builds the release binary, installs
 it to `~/.local/bin`, registers a desktop entry whose `Exec` points at that
 absolute path, refreshes the desktop database, then launches the installed
-binary in screenshot mode — copy-paste it from the repo root to capture on KDE:
+binary in region mode — copy-paste it from the repo root to capture on KDE:
 
 ```bash
 cargo build --release -p rollshot-app \
@@ -298,25 +298,33 @@ cargo build --release -p rollshot-app \
   && sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" packaging/linux/dev.rollshot.io.desktop \
        > ~/.local/share/applications/dev.rollshot.io.desktop \
   && update-desktop-database ~/.local/share/applications 2>/dev/null; \
-  ~/.local/bin/rollshot-app --capture '{"backend":"auto","fps":30,"show_cursor":false,"initial_mode":"screenshot"}'
+  ~/.local/bin/rollshot-app --capture '{"backend":"auto","fps":30,"show_cursor":false,"initial_mode":"region"}'
 ```
 
 #### `initial_mode` JSON
 
 Interactive launch options accept an `initial_mode` field to choose between
-scrolling capture and single-screenshot mode:
+scrolling capture, region (crop) mode, and fullscreen mode:
 
 ```json
 {"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"scrolling"}
-{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"screenshot"}
+{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"region"}
+{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"fullscreen"}
 ```
 
 The default is `"scrolling"` when the field is omitted.
 
-#### Non-KDE portal screenshot limitations
+Legacy `"screenshot"` payloads are still accepted as an alias for `"region"`.
 
-On non-KDE desktops, rollshot uses the freedesktop Screenshot portal. This
-mode has two restrictions:
+Fullscreen mode captures the display containing the pointer, skipping the
+selection overlay. It is supported on macOS and KDE/KWin. On other Linux
+environments without portal fallback, fullscreen returns an `Unsupported`
+error.
+
+#### Non-KDE portal region-mode limitations
+
+On non-KDE desktops, rollshot uses the freedesktop Screenshot portal for region
+captures. This mode has two restrictions:
 
 - **Single-output only.** The portal may return a multi-monitor composite image.
   Rollshot rejects composites that do not match the overlay surface dimensions,

@@ -229,6 +229,10 @@ mod tests {
         assert_eq!(options.backend, "linux-portal");
         assert_eq!(options.fps, 7);
         assert!(options.show_cursor);
+        assert_eq!(
+            options.initial_mode,
+            rollshot_capture::CaptureMode::Scrolling
+        );
     }
 
     #[test]
