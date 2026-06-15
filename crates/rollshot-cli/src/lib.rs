@@ -1,5 +1,7 @@
 pub mod args;
 pub mod cli_error;
+#[cfg(feature = "action-guide")]
+pub mod cmd_action_guide;
 pub mod cmd_capture;
 pub mod cmd_capture_launcher;
 pub mod cmd_probe;
@@ -30,5 +32,7 @@ where
         Command::Capture(a) => cmd_capture::run(a),
         Command::Probe(a) => cmd_probe::run(a),
         Command::StitchFolder(a) => cmd_stitch_folder::run(a),
+        #[cfg(feature = "action-guide")]
+        Command::ActionGuide(a) => cmd_action_guide::run(a),
     }
 }

@@ -19,6 +19,9 @@ rollshot-core = { path = "../rollshot-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+action-guide = []
+
 [dev-dependencies]
 image = { workspace = true }
 
