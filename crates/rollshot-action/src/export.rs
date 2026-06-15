@@ -137,7 +137,7 @@ fn build(
     };
     let json = serde_json::to_string_pretty(&manifest).map_err(|e| ExportError::Io {
         path: "session.json".to_string(),
-        source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        source: std::io::Error::other(e.to_string()),
     })?;
     std::fs::write(tmp.join("session.json"), json).map_err(|source| ExportError::Io {
         path: tmp.join("session.json").display().to_string(),

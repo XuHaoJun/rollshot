@@ -270,9 +270,7 @@ impl Detector {
         if self.in_typing {
             self.in_typing = false;
             self.typing_force_end = false;
-            let Some((id, at)) = self.last_frame else {
-                return None;
-            };
+            let (id, at) = self.last_frame?;
             if self.cooldown_ok(at) {
                 self.last_candidate_ms = Some(at);
                 return Some(CandidateMarker {
@@ -443,7 +441,7 @@ mod tests {
             },
             100,
         ));
-        let frames = vec![
+        let frames = [
             af(1, 150, quadrant(0.0, 255.0)),
             af(2, 250, quadrant(0.0, 255.0)),
             af(3, 350, quadrant(0.0, 255.0)), // settle within click window [100, 700]
@@ -465,7 +463,7 @@ mod tests {
             },
             100,
         ));
-        let frames = vec![af(1, 150, uniform(0.0)), af(2, 250, uniform(0.0))];
+        let frames = [af(1, 150, uniform(0.0)), af(2, 250, uniform(0.0))];
         let markers: Vec<_> = frames.iter().filter_map(|f| det.observe_frame(f)).collect();
         assert!(markers.is_empty());
     }
