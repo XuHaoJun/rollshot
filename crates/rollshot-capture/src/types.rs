@@ -122,7 +122,7 @@ pub struct InteractiveLaunchOptions {
     pub fps: u32,
     pub show_cursor: bool,
     #[serde(default)]
-    pub initial_mode: CaptureMode,
+    pub initial_request: CaptureRequest,
 }
 
 impl InteractiveLaunchOptions {
@@ -131,7 +131,7 @@ impl InteractiveLaunchOptions {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Scrolling,
+            initial_request: CaptureRequest::scrolling_region(),
         }
     }
 }
@@ -207,26 +207,7 @@ pub enum PixelFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureMode, CaptureOptions, InteractiveLaunchOptions};
-
-    #[test]
-    fn capture_modes_round_trip_with_current_names() {
-        for (mode, encoded) in [
-            (CaptureMode::Scrolling, "\"scrolling\""),
-            (CaptureMode::Region, "\"region\""),
-            (CaptureMode::Fullscreen, "\"fullscreen\""),
-        ] {
-            assert_eq!(serde_json::to_string(&mode).unwrap(), encoded);
-            assert_eq!(serde_json::from_str::<CaptureMode>(encoded).unwrap(), mode);
-        }
-    }
-
-    #[test]
-    fn legacy_screenshot_mode_deserializes_as_region() {
-        let mode = serde_json::from_str::<CaptureMode>("\"screenshot\"").unwrap();
-        assert_eq!(mode, CaptureMode::Region);
-        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"region\"");
-    }
+    use super::{CaptureMode, CaptureOptions, CaptureRequest, InteractiveLaunchOptions};
 
     #[test]
     fn interactive_launch_options_round_trip_json() {
@@ -234,24 +215,22 @@ mod tests {
             backend: "linux-portal".to_string(),
             fps: 7,
             show_cursor: true,
-            initial_mode: CaptureMode::Region,
+            initial_request: CaptureRequest::screenshot_region(),
         };
-
-        let json = serde_json::to_string(&options).expect("serialize launch options");
+        let json = serde_json::to_string(&options).expect("serialize");
         assert!(
-            json.contains("\"backend\":\"linux-portal\""),
+            json.contains(r#""initial_request":{"workflow":"screenshot","scope":"region"}"#),
             "json = {json}"
         );
-        assert!(
-            json.contains("\"initial_mode\":\"region\""),
-            "json = {json}"
-        );
-        let obsolete_field = concat!("overlay", "_mode");
-        assert!(!json.contains(obsolete_field), "json = {json}");
-
-        let decoded: InteractiveLaunchOptions =
-            serde_json::from_str(&json).expect("deserialize launch options");
+        let decoded: InteractiveLaunchOptions = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, options);
+    }
+
+    #[test]
+    fn interactive_launch_options_default_initial_request() {
+        let json = r#"{"backend":"auto","fps":5,"show_cursor":false}"#;
+        let decoded: InteractiveLaunchOptions = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(decoded.initial_request, CaptureRequest::scrolling_region());
     }
 
     #[test]
@@ -263,14 +242,14 @@ mod tests {
         let decoded: InteractiveLaunchOptions =
             serde_json::from_str(&json).expect("deserialize payload with obsolete field");
 
-        assert_eq!(decoded.initial_mode, CaptureMode::Scrolling);
+        assert_eq!(decoded.initial_request, CaptureRequest::scrolling_region());
     }
 
     #[test]
-    fn fps_change_does_not_affect_initial_mode() {
+    fn fps_change_does_not_affect_initial_request() {
         let mut opts = InteractiveLaunchOptions::default_capture();
         opts.fps = 60;
-        assert_eq!(opts.initial_mode, CaptureMode::Scrolling);
+        assert_eq!(opts.initial_request, CaptureRequest::scrolling_region());
     }
 
     #[test]
@@ -278,7 +257,7 @@ mod tests {
         assert_eq!(CaptureOptions::default().target_output_name, None);
     }
 
-    use super::{CaptureRequest, CaptureScope, Workflow};
+    use super::{CaptureScope, Workflow};
 
     #[test]
     fn capture_request_default_is_scrolling_region() {

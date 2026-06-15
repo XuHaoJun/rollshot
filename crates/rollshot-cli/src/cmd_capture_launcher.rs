@@ -42,7 +42,7 @@ fn launch_options(args: &CaptureArgs) -> InteractiveLaunchOptions {
         backend: args.backend.clone(),
         fps: args.fps,
         show_cursor: args.show_cursor,
-        initial_mode: rollshot_capture::CaptureMode::Scrolling,
+        initial_request: rollshot_capture::CaptureRequest::scrolling_region(),
     }
 }
 
@@ -201,6 +201,7 @@ mod tests {
         app_args, launch_options, reject_headless_only_flags, resolve_app_binary_from_env_and_exe,
     };
     use crate::args::CaptureArgs;
+    use rollshot_capture::CaptureRequest;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -229,10 +230,7 @@ mod tests {
         assert_eq!(options.backend, "linux-portal");
         assert_eq!(options.fps, 7);
         assert!(options.show_cursor);
-        assert_eq!(
-            options.initial_mode,
-            rollshot_capture::CaptureMode::Scrolling
-        );
+        assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
     }
 
     #[test]
@@ -247,6 +245,10 @@ mod tests {
         assert!(payload.contains("\"backend\":\"linux-portal\""));
         assert!(payload.contains("\"fps\":7"));
         assert!(payload.contains("\"show_cursor\":true"));
+
+        let decoded: rollshot_capture::InteractiveLaunchOptions =
+            serde_json::from_str(&payload).expect("deserialize payload");
+        assert_eq!(decoded.initial_request, CaptureRequest::scrolling_region());
     }
 
     #[test]
