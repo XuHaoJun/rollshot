@@ -54,25 +54,34 @@ pub fn export_guide(
         })?;
     }
 
-    // Build everything in the temp dir; roll back the whole dir on any error.
-    if let Err(err) = build(guide, store, region, capability, source, &tmp_dir) {
+    // Build everything in the temp dir, then swap it into place. On ANY failure
+    // — during build OR during the swap — remove the temp dir so no partial
+    // `.action-guide.tmp` artifact is left behind and the editable session is
+    // preserved.
+    if let Err(err) = build(guide, store, region, capability, source, &tmp_dir)
+        .and_then(|()| swap_into_place(&tmp_dir, &final_dir))
+    {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         tracing::debug!(target: TARGET_EXPORT, "export failed; temp dir rolled back");
         return Err(err);
     }
+    tracing::info!(target: TARGET_EXPORT, steps = guide.steps().len(), "export complete");
+    Ok(final_dir)
+}
 
+/// Replace `final_dir` with the freshly-built `tmp_dir`: remove the previous
+/// export (if any), then rename the temp dir into place.
+fn swap_into_place(tmp_dir: &Path, final_dir: &Path) -> Result<(), ExportError> {
     if final_dir.exists() {
-        std::fs::remove_dir_all(&final_dir).map_err(|source| ExportError::Io {
+        std::fs::remove_dir_all(final_dir).map_err(|source| ExportError::Io {
             path: final_dir.display().to_string(),
             source,
         })?;
     }
-    std::fs::rename(&tmp_dir, &final_dir).map_err(|source| ExportError::Io {
+    std::fs::rename(tmp_dir, final_dir).map_err(|source| ExportError::Io {
         path: final_dir.display().to_string(),
         source,
-    })?;
-    tracing::info!(target: TARGET_EXPORT, steps = guide.steps().len(), "export complete");
-    Ok(final_dir)
+    })
 }
 
 fn build(
@@ -269,32 +278,57 @@ mod tests {
 
     #[test]
     fn session_json_has_capability_and_no_raw_input_fields() {
-        let (guide, store) = one_step_recording();
+        // Exercise the exact cases that make a naive substring scan brittle: a
+        // Typing step (default title "Enter text") exported under SemanticEvents
+        // capability ("semantic-events"). These safe, static labels MUST be
+        // tolerated, while raw input artifacts MUST never appear.
+        let (_guide, store) = one_step_recording();
+        let kf = store
+            .retained_ids_for_test()
+            .into_iter()
+            .next()
+            .expect("a retained frame exists");
+        let guide = Guide::from_candidates(vec![CandidateStep {
+            id: 0,
+            kind: CandidateKind::Typing,
+            reason: DetectReason::TypingSettled,
+            at_ms: 0,
+            keyframe: kf,
+            nearby: vec![kf],
+        }]);
         let out = temp_dir("export-json");
         let dir = export_guide(
             &guide,
             &store,
             region(),
-            InputCapability::VisualOnly {
-                reason: crate::models::DegradedReason::SourceStartFailed,
-            },
-            InputSourceKind::VisualOnly,
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
             &out,
         )
         .unwrap();
 
         let json = std::fs::read_to_string(dir.join("session.json")).unwrap();
         let parsed: SessionManifest = serde_json::from_str(&json).expect("manifest parses");
-        assert_eq!(parsed.input_source, InputSourceKind::VisualOnly);
+        assert_eq!(parsed.input_source, InputSourceKind::LinuxEvdev);
+        assert_eq!(parsed.input_capability, InputCapability::SemanticEvents);
         assert_eq!(parsed.steps.len(), 1);
-        assert!(json.contains("visual-only"));
+        assert_eq!(parsed.steps[0].title, "Enter text");
+        // Safe, static labels are allowed to appear.
+        assert!(json.contains("semantic-events"), "json = {json}");
+        assert!(json.contains("Enter text"), "json = {json}");
+        // Raw input artifacts must never appear: no key codes, device identity,
+        // typed content, or raw per-event `SemanticAction` records.
         for forbidden in [
-            "semantic",
-            "events",
-            "text",
             "keycode",
+            "key_code",
+            "keysym",
+            "scancode",
             "device",
+            "unicode",
+            "clipboard",
             "typing-activity",
+            "scroll-activity",
+            "\"action\"",
         ] {
             assert!(
                 !json.contains(forbidden),

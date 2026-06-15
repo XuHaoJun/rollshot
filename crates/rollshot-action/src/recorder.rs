@@ -122,11 +122,8 @@ impl ActionRecorder {
             );
             return;
         }
-        let keyframe = if window.contains(&marker.center_id) {
-            marker.center_id
-        } else {
-            *window.last().expect("non-empty window")
-        };
+        // `retain_window` always copies the center frame, so it is the keyframe.
+        let keyframe = marker.center_id;
         let nearby = self.store.nearby(&window, keyframe);
         let id = self.next_candidate_id;
         self.next_candidate_id += 1;

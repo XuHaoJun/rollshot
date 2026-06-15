@@ -282,6 +282,31 @@ impl Detector {
             }
             return None;
         }
+        // An open scroll session closes into one step at recording finish, even
+        // if its settle-dwell never elapsed, when the final state differs
+        // meaningfully from the pre-scroll baseline. Typing takes priority above
+        // when both are open, mirroring `observe_frame`.
+        if self.in_scroll {
+            self.in_scroll = false;
+            self.saw_change = false;
+            let (Some(luma), Some((id, at))) = (self.prev.clone(), self.last_frame) else {
+                return None;
+            };
+            let meaningful = match &self.pre_scroll_baseline {
+                Some(b) => motion(b, &luma, &self.config),
+                None => self.meaningful_vs_baseline(&luma),
+            };
+            if meaningful && self.cooldown_ok(at) {
+                self.last_candidate_ms = Some(at);
+                return Some(CandidateMarker {
+                    kind: CandidateKind::Scroll,
+                    reason: DetectReason::ScrollSettled,
+                    at_ms: at,
+                    center_id: id,
+                });
+            }
+            return None;
+        }
         // A visual change still in progress flushes if it differs from baseline.
         if self.moving && self.saw_change {
             let (Some(luma), Some((id, at))) = (self.prev.clone(), self.last_frame) else {
@@ -579,5 +604,36 @@ mod tests {
         // No terminating pause / Enter / Tab; recording ends -> finish flushes Typing.
         let m = det.finish();
         assert_eq!(m.map(|m| m.kind), Some(CandidateKind::Typing));
+    }
+
+    #[test]
+    fn scroll_burst_closes_on_finish_when_dwell_does_not_elapse() {
+        // User scrolls to a new state, then ends recording before scroll_dwell_ms
+        // elapses past the last scroll event: finish() must still flush one Scroll
+        // step (not a generic UiChanged) when the final state differs from the
+        // pre-scroll baseline.
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0))); // pre-scroll baseline A
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+        det.observe_frame(&af(1, 100, quadrant(0.0, 100.0))); // moving
+        det.observe_event(ev(SemanticAction::ScrollActivity, 200));
+        det.observe_frame(&af(2, 200, quadrant(0.0, 200.0))); // moving
+        det.observe_event(ev(SemanticAction::ScrollActivity, 300));
+        det.observe_frame(&af(3, 300, quadrant(0.0, 255.0))); // moving
+        det.observe_frame(&af(4, 400, quadrant(0.0, 255.0))); // dwell not elapsed (400-300 < 600)
+        let m = det.finish();
+        assert_eq!(m.map(|m| m.kind), Some(CandidateKind::Scroll));
+    }
+
+    #[test]
+    fn scroll_returning_to_baseline_emits_nothing_on_finish() {
+        // Scrolling that ends back at the pre-scroll state is not a step.
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0))); // pre-scroll baseline A
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+        det.observe_frame(&af(1, 100, quadrant(0.0, 255.0))); // moving (B)
+        det.observe_event(ev(SemanticAction::ScrollActivity, 200));
+        det.observe_frame(&af(2, 200, uniform(0.0))); // back to A
+        assert!(det.finish().is_none());
     }
 }

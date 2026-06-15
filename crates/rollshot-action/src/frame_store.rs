@@ -74,6 +74,15 @@ pub struct FrameStore {
 
 impl FrameStore {
     pub fn new(config: StoreConfig) -> Self {
+        // The ring must hold a full candidate window long enough for the
+        // recorder to retain it `window_after` frames after detection; a smaller
+        // ring silently drops steps (see `ActionRecorder::finalize`).
+        debug_assert!(
+            config.ring_capacity > config.window_before + config.window_after,
+            "ring_capacity ({}) must exceed window_before + window_after ({})",
+            config.ring_capacity,
+            config.window_before + config.window_after,
+        );
         Self {
             config,
             ring: VecDeque::new(),
