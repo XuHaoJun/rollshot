@@ -4529,9 +4529,12 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "raw-window-handle",
  "rfd",
+ "rollshot-action",
  "rollshot-capture",
  "rollshot-iced-overlay",
  "rollshot-image-document",
+ "rollshot-linux-input",
+ "rollshot-macos-input",
  "serde_json",
  "tempfile",
  "tracing",
@@ -4631,6 +4634,14 @@ dependencies = [
 [[package]]
 name = "rollshot-macos-input"
 version = "0.1.0"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "rollshot-action",
+ "thiserror 1.0.69",
+ "tracing",
+]
 
 [[package]]
 name = "rollshot-macos-oneshot"
