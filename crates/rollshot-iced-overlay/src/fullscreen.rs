@@ -26,13 +26,7 @@
 use crate::{CaptureResult, OverlayConfig, OverlayError};
 use rollshot_capture::{CaptureError, CaptureScope, OneShotCapture, Workflow};
 
-pub(crate) fn capture_with<F>(
-    config: &OverlayConfig,
-    capture_once: F,
-) -> Result<Option<CaptureResult>, OverlayError>
-where
-    F: FnOnce(bool) -> Result<OneShotCapture, CaptureError>,
-{
+fn validate_request(config: &OverlayConfig) -> Result<(), OverlayError> {
     if config.request.scope != CaptureScope::Fullscreen {
         return Err(OverlayError::Capture(
             "direct fullscreen completion requires fullscreen scope".to_string(),
@@ -43,6 +37,17 @@ where
             "scrolling capture is not supported in fullscreen mode".to_string(),
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn capture_with<F>(
+    config: &OverlayConfig,
+    capture_once: F,
+) -> Result<Option<CaptureResult>, OverlayError>
+where
+    F: FnOnce(bool) -> Result<OneShotCapture, CaptureError>,
+{
+    validate_request(config)?;
 
     match capture_once(config.show_cursor) {
         Ok(capture) => Ok(Some(CaptureResult {
@@ -55,6 +60,7 @@ where
 }
 
 pub fn capture(config: &OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    validate_request(config)?;
     tracing::info!(
         target: crate::diagnostics::TARGET_OVERLAY,
         request = ?config.request,
@@ -165,5 +171,19 @@ mod tests {
         let config = config(request);
         let err = capture_with(&config, |_| Ok(one_shot())).unwrap_err();
         assert!(matches!(err, OverlayError::Capture(_)));
+    }
+
+    #[test]
+    fn unsupported_request_is_rejected_before_backend_resolution() {
+        let request = rollshot_capture::CaptureRequest {
+            workflow: rollshot_capture::Workflow::Scrolling,
+            scope: rollshot_capture::CaptureScope::Fullscreen,
+        };
+        let mut config = config(request);
+        config.backend = "invalid-backend".to_string();
+
+        let err = capture(&config).unwrap_err().to_string();
+        assert!(err.contains("scrolling"), "err = {err}");
+        assert!(err.contains("fullscreen"), "err = {err}");
     }
 }
