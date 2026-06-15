@@ -25,3 +25,6 @@
 [submodule "learn-projects/mark-shot"]
 	path = learn-projects/mark-shot
 	url = https://github.com/jswysnemc/mark-shot.git
+[submodule "learn-projects/CrossMacro"]
+	path = learn-projects/CrossMacro
+	url = https://github.com/alper-han/CrossMacro.git
