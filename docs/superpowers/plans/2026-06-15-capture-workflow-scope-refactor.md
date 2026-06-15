@@ -1,10 +1,10 @@
 # Capture Workflow × Scope Refactor Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this sequential plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the conflated `CaptureMode { Scrolling, Region, Fullscreen }` with two orthogonal types — `Workflow { Screenshot, Scrolling }` and `CaptureScope { Region, Fullscreen }`, bundled as `CaptureRequest` — without changing any runtime behavior.
 
-**Architecture:** Parallel-change refactor. Task 1 adds the new types plus a temporary `From<CaptureMode>` / `to_legacy_mode()` bridge (additive, green). Tasks 2–3 migrate consumers crate-by-crate, converting at the not-yet-migrated boundary so every commit compiles and all tests pass. Task 4 deletes `CaptureMode` and the bridge. The three existing capture flows map 1:1 to the three supported `CaptureRequest` combinations; `Scrolling × Fullscreen` is expressible but rejected by `is_supported()` and never constructed.
+**Architecture:** Parallel-change refactor. Task 1 adds the new types plus a temporary one-way `From<CaptureMode>` bridge (additive, green). Tasks 2–3 migrate consumers crate-by-crate, converting at the not-yet-migrated boundary so every commit compiles and all tests pass. Task 4 deletes `CaptureMode` and the bridge. The three existing capture flows map 1:1 to the three supported `CaptureRequest` combinations; `Scrolling × Fullscreen` is expressible but rejected by `is_supported()` at launch and platform-routing boundaries.
 
 **Tech Stack:** Rust (workspace), serde, iced (overlay), `cargo test` / `clippy` / `fmt`.
 
@@ -26,6 +26,7 @@
 - Modify: `crates/rollshot-iced-overlay/src/bin/capture_overlay.rs` — fixture config.
 - Modify: `crates/rollshot-app/src/macos_product.rs` — `initial_capture_path` → `f(scope)`; OverlayConfig construction.
 - Modify: `crates/rollshot-app/src/launch.rs` — any `CaptureMode` references.
+- Modify: `crates/rollshot-app/src/main.rs` — launch tracing and `InteractiveLaunchOptions` → `OverlayConfig` boundary.
 - Modify: `crates/rollshot-cli/src/cmd_capture_launcher.rs` — build `CaptureRequest`.
 
 **Mechanical-site convention:** Many call sites are rote substitutions. To keep them uniform, Task 1 adds the constructors `CaptureRequest::screenshot_region()`, `screenshot_fullscreen()`, `scrolling_region()`. The substitution rule everywhere is:
@@ -90,19 +91,20 @@ fn legacy_capture_mode_maps_to_request() {
 }
 
 #[test]
-fn request_round_trips_through_legacy_mode() {
-    use super::CaptureMode;
-    for m in [CaptureMode::Region, CaptureMode::Fullscreen, CaptureMode::Scrolling] {
-        assert_eq!(CaptureRequest::from(m).to_legacy_mode(), m);
+fn capture_request_serde_round_trips_all_combinations() {
+    for (request, expected) in [
+        (CaptureRequest::screenshot_region(), r#"{"workflow":"screenshot","scope":"region"}"#),
+        (CaptureRequest::screenshot_fullscreen(), r#"{"workflow":"screenshot","scope":"fullscreen"}"#),
+        (CaptureRequest::scrolling_region(), r#"{"workflow":"scrolling","scope":"region"}"#),
+        (
+            CaptureRequest { workflow: Workflow::Scrolling, scope: CaptureScope::Fullscreen },
+            r#"{"workflow":"scrolling","scope":"fullscreen"}"#,
+        ),
+    ] {
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(json, expected);
+        assert_eq!(serde_json::from_str::<CaptureRequest>(&json).unwrap(), request);
     }
-}
-
-#[test]
-fn capture_request_serde_round_trip() {
-    let r = CaptureRequest::scrolling_region();
-    let json = serde_json::to_string(&r).unwrap();
-    assert_eq!(json, r#"{"workflow":"scrolling","scope":"region"}"#);
-    assert_eq!(serde_json::from_str::<CaptureRequest>(&json).unwrap(), r);
 }
 ```
 
@@ -177,17 +179,11 @@ impl From<CaptureMode> for CaptureRequest {
     }
 }
 
-impl CaptureRequest {
-    /// Bridge for incremental migration; removed once `CaptureMode` is gone.
-    pub fn to_legacy_mode(self) -> CaptureMode {
-        match (self.workflow, self.scope) {
-            (Workflow::Screenshot, CaptureScope::Region) => CaptureMode::Region,
-            (Workflow::Screenshot, CaptureScope::Fullscreen) => CaptureMode::Fullscreen,
-            (Workflow::Scrolling, _) => CaptureMode::Scrolling,
-        }
-    }
-}
 ```
+
+Do **not** add a `CaptureRequest` → `CaptureMode` bridge. No migration step needs
+it, and it would silently collapse the unsupported `Scrolling × Fullscreen`
+combination into `CaptureMode::Scrolling`.
 
 - [ ] **Step 4: Re-export from the crate root**
 
@@ -202,7 +198,7 @@ pub use types::{CaptureMode, CaptureRequest, CaptureScope, Workflow};
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `rtk cargo test -p rollshot-capture types::`
-Expected: PASS (all six new tests).
+Expected: PASS (all five new tests).
 
 - [ ] **Step 6: Verify the whole crate still builds**
 
@@ -224,7 +220,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 Migrate `rollshot-iced-overlay` and `rollshot-app`'s overlay wiring to `CaptureRequest`/`Workflow`/`CaptureScope`. The launch payload (`InteractiveLaunchOptions.initial_mode: CaptureMode`) is unchanged in this task; `rollshot-app` converts it with `.into()` at the `OverlayConfig` boundary, so the whole workspace stays green.
 
-**This task touches both platform paths (AGENTS.md §8):** Linux (`linux_runner.rs`) and macOS (`macos_capture.rs`, `macos_product.rs`). Apply the same transformation to both and verify both compile.
+**This task touches both platform paths (AGENTS.md §8):** Linux
+(`linux_runner.rs`) and macOS (`macos_capture.rs`, `macos_product.rs`). Apply
+the same transformation to both; verify Linux locally and run the explicit
+macOS-host verification before considering the task complete.
 
 **Files:**
 - Modify: `crates/rollshot-iced-overlay/src/lib.rs`
@@ -236,9 +235,15 @@ Migrate `rollshot-iced-overlay` and `rollshot-app`'s overlay wiring to `CaptureR
 - Modify: `crates/rollshot-iced-overlay/src/fullscreen.rs`
 - Modify: `crates/rollshot-iced-overlay/src/bin/capture_overlay.rs`
 - Modify: `crates/rollshot-app/src/macos_product.rs`
-- Modify: `crates/rollshot-app/src/launch.rs`
+- Modify: `crates/rollshot-app/src/main.rs`
 
-- [ ] **Step 1: Change `OverlayConfig` to carry a `CaptureRequest`**
+- [ ] **Step 1: Run characterization tests before the structural change**
+
+Run: `rtk cargo test -p rollshot-iced-overlay -p rollshot-app`
+Expected: PASS on Linux. Record the result before changing types so later
+failures can be distinguished from pre-existing failures.
+
+- [ ] **Step 2: Change `OverlayConfig` to carry a `CaptureRequest`**
 
 In `crates/rollshot-iced-overlay/src/lib.rs`, change the field:
 
@@ -252,22 +257,28 @@ pub struct OverlayConfig {
 }
 ```
 
-- [ ] **Step 2: Decouple acquisition routing in `linux_runner.rs`**
+- [ ] **Step 3: Decouple acquisition routing in `linux_runner.rs`**
 
 In `crates/rollshot-iced-overlay/src/linux_runner.rs`:
 
 - `run_initial_path` (~line 581): replace `if config.initial_mode == CaptureMode::Fullscreen` with `if config.request.scope == rollshot_capture::CaptureScope::Fullscreen`.
-- `run_overlay_session` (~line 592): replace the same comparison; keep the existing `OverlayError::Overlay("fullscreen must not reach the overlay runner")`.
-- `acquire_resource` (~lines 109–129): change the signature and body to match on `Workflow` (no `Fullscreen` arm — fullscreen is handled by the scope routing above, so the previous `unreachable!` arm is deleted):
+- `run_overlay_session` (~line 592): replace the same comparison; keep the
+  existing `OverlayError::Capture("fullscreen must not reach the overlay
+  runner")`.
+- `acquire_resource` (~lines 109–129): change the signature and body to take and
+  match on `Workflow` (no `Fullscreen` arm — fullscreen is handled by the scope
+  routing above, so the previous `unreachable!` arm is deleted). Keep this
+  signature identical to the macOS helper; acquisition depends on workflow,
+  not the whole request:
 
 ```rust
 pub(crate) fn acquire_resource(
-    request: rollshot_capture::CaptureRequest,
+    workflow: rollshot_capture::Workflow,
     config: &OverlayConfig,
     factories: &ResourceFactories,
 ) -> Result<Option<CaptureResource>, OverlayError> {
     use rollshot_capture::Workflow;
-    match request.workflow {
+    match workflow {
         Workflow::Scrolling => acquire_scrolling_resource(config, factories),
         Workflow::Screenshot => {
             tracing::debug!(target: TARGET_OVERLAY, "acquiring one-shot capture resource");
@@ -282,22 +293,42 @@ pub(crate) fn acquire_resource(
 }
 ```
 
-- Update the call site (~line 617) to `acquire_resource(config.request, &config, &factories)?`.
+- Update the call site (~line 617) to
+  `acquire_resource(config.request.workflow, &config, &factories)?`.
 - The `CAPTURE_MODE` global (~line 638) becomes a `Workflow`. Rename it to `CAPTURE_WORKFLOW: Mutex<Option<rollshot_capture::Workflow>>` and store `Some(config.request.workflow)`. Update its other readers (toolbar active-state) accordingly.
-- Runtime mode-switch (~line 416, `initial_mode: new_mode`): rebuild the config preserving scope — `request: rollshot_capture::CaptureRequest { workflow: new_workflow, scope: config.request.scope }`.
+- Runtime mode-switch (~line 416, `initial_mode: new_mode`): rebuild the config
+  with `request: CaptureRequest { workflow: new_workflow, scope:
+  CaptureScope::Region }`. Workflow switching only occurs inside the region
+  overlay; do not invent a `scope_or_region()` helper or try to read an
+  out-of-scope prior `config`.
+- In `run_initial_path`, reject `!config.request.is_supported()` with a clear
+  `OverlayError::Capture` before choosing direct-vs-overlay routing. Add
+  `unsupported_scrolling_fullscreen_is_rejected_before_routing`, using closures
+  that panic if either route is invoked.
 
-- [ ] **Step 3: Mirror the routing change in `macos_capture.rs` (macOS path)**
+- [ ] **Step 4: Mirror the routing change in `macos_capture.rs` (macOS path)**
 
 In `crates/rollshot-iced-overlay/src/macos_capture.rs`, apply the same shape:
 
 - The inner capture/acquire fn (`mode: CaptureMode`, ~line 73) → take `workflow: Workflow` and match `Screenshot`/`Scrolling`; delete the `Fullscreen` arm (it is the same defensive `unreachable!`/bypass as Linux — verify and remove).
+- At the start of public `Component::new`, reject any request whose scope is not
+  `CaptureScope::Region` with `OverlayError::Overlay("fullscreen must not reach
+  the macOS capture component")` before acquiring a resource. Add
+  `component_rejects_fullscreen_scope_before_acquisition`. Removing the old
+  `CaptureMode::Fullscreen` arm without this replacement would let a direct
+  caller incorrectly open the overlay.
 - `acquire_resource(config.initial_mode, ...)` (~line 245) → `acquire_resource(config.request.workflow, ...)`.
 - Struct fields `mode: config.initial_mode` (~264) and `capture_mode: Some(config.initial_mode)` (~283) → store `Workflow` (`config.request.workflow`); rename the fields to `workflow` / `active_workflow` for clarity.
 - The `if self.capture_mode != Some(CaptureMode::Region)` guard (~501) → `if self.active_workflow != Some(Workflow::Screenshot)` (Region screenshot ⇒ Screenshot workflow).
-- `activate_mode(new_mode: CaptureMode)` (~767) → `activate_workflow(new_workflow: Workflow)`; line 779 `initial_mode: new_mode` → `request: CaptureRequest { workflow: new_workflow, scope: self.scope_or_region() }` (scope stays `Region` in the overlay); line 787 `acquire_resource(new_mode, ...)` → `acquire_resource(new_workflow, ...)`.
-- `OverlayEffect::ActivateMode(new_mode)` (~722) → `ActivateWorkflow(new_workflow)` (see Step 5).
+- `activate_mode(new_mode: CaptureMode)` (~767) →
+  `activate_workflow(new_workflow: Workflow)`; line 779 `initial_mode:
+  new_mode` → `request: CaptureRequest { workflow: new_workflow, scope:
+  CaptureScope::Region }` (scope is an explicit overlay invariant; do not add a
+  helper); line 787 `acquire_resource(new_mode, ...)` →
+  `acquire_resource(new_workflow, ...)`.
+- `OverlayEffect::ActivateMode(new_mode)` (~722) → `ActivateWorkflow(new_workflow)` (see Step 6).
 
-- [ ] **Step 4: Migrate overlay state in `app.rs` and `workspace.rs`**
+- [ ] **Step 5: Migrate overlay state in `app.rs` and `workspace.rs`**
 
 In `crates/rollshot-iced-overlay/src/workspace.rs`: rename `active_mode: CaptureMode` → `active_workflow: Workflow`, `new(mode: CaptureMode)` → `new(workflow: Workflow)`, `active_mode()` → `active_workflow()`, `activate_mode(mode)` → `activate_workflow(workflow)`. Update the `WorkspaceMessage::ActivateMode(CaptureMode)` variant (~line 14) → `ActivateWorkflow(Workflow)`.
 
@@ -309,7 +340,7 @@ In `crates/rollshot-iced-overlay/src/app.rs`:
 - The `ActivateMode` handler (~781): `state.workflow = workflow; state.workspace.activate_workflow(workflow);` and the region/passthrough match (`Scrolling => ToolbarOnly`, `Region => None`, `Fullscreen => ...`) → `Workflow::Scrolling => ToolbarOnly`, `Workflow::Screenshot => None` (drop the Fullscreen arm).
 - Map toolbar actions to workflows where `ToolbarAction` is handled: `RegionMode => Workflow::Screenshot`, `ScrollingMode => Workflow::Scrolling`.
 
-- [ ] **Step 5: Update the toolbar to highlight by workflow**
+- [ ] **Step 6: Update the toolbar to highlight by workflow**
 
 In `crates/rollshot-iced-overlay/src/toolbar.rs`, change `active_mode: CaptureMode` → `active_workflow: Workflow` in both `action_style_fn` (~84) and `render_toolbar` (~125), and update the active-match:
 
@@ -323,36 +354,63 @@ let is_active = matches!(
 
 Keep `ToolbarAction` variant names, labels (📷 / 📜), and tooltips ("Region Mode" / "Scrolling Mode") **unchanged** — no UX change.
 
-- [ ] **Step 6: Update `fullscreen.rs`, the `capture_overlay` bin, and remaining fixtures**
+- [ ] **Step 7: Update `fullscreen.rs`, the `capture_overlay` bin, and remaining fixtures**
 
-- `crates/rollshot-iced-overlay/src/fullscreen.rs` (~line 87, `initial_mode: mode`): build the `OverlayConfig` with `request: CaptureRequest::screenshot_fullscreen()` (fullscreen is always the Screenshot workflow here).
+- `crates/rollshot-iced-overlay/src/fullscreen.rs` (~line 82): migrate the
+  parameterized test config helper from `CaptureMode` to `CaptureRequest`;
+  successful direct-capture tests use `CaptureRequest::screenshot_fullscreen()`
+  while negative tests pass non-fullscreen/unsupported requests.
+- In `fullscreen.rs`, update the module-level ASCII flow diagram from
+  `initial_mode` strings to `CaptureRequest { workflow, scope }`; update the
+  `capture_with` guard to require exactly
+  `CaptureRequest::screenshot_fullscreen()`; and trace `workflow` and `scope`
+  as structured fields. Keep the test helper parameterized as
+  `fn config(request: CaptureRequest)` so the existing non-fullscreen rejection
+  test remains meaningful, and add a rejection test for
+  `CaptureRequest { workflow: Workflow::Scrolling, scope:
+  CaptureScope::Fullscreen }`.
 - `crates/rollshot-iced-overlay/src/bin/capture_overlay.rs` (~line 22): `initial_mode: CaptureMode::Scrolling` → `request: CaptureRequest::scrolling_region()`.
-- All `initial_mode: CaptureMode::Scrolling` test fixtures in `linux_runner.rs` (lines 731, 1252, 1263, 1311) → `request: CaptureRequest::scrolling_region()`; the fullscreen routing test (~1432–1434, `config.initial_mode = CaptureMode::Fullscreen`) → `config.request = CaptureRequest::screenshot_fullscreen()`.
+- All `initial_mode: CaptureMode::Scrolling` test fixtures in `linux_runner.rs` (lines 731, 1252, 1263, 1311) → `request: CaptureRequest::scrolling_region()`; update direct `acquire_resource(CaptureMode::...)` calls to `Workflow::...`; the fullscreen routing test (~1432–1434, `config.initial_mode = CaptureMode::Fullscreen`) → `config.request = CaptureRequest::screenshot_fullscreen()`.
 - `macos_capture.rs` test fixtures (lines 1074, 1084, 1102): `Some(CaptureMode::Region)` → `Some(Workflow::Screenshot)`; `c.overlay.mode = CaptureMode::Region` → `c.overlay.workflow = Workflow::Screenshot`; `CaptureMode::Scrolling` → `Workflow::Scrolling`.
 
-- [ ] **Step 7: Convert at the `rollshot-app` boundary (keep the launch payload on `CaptureMode`)**
+- [ ] **Step 8: Convert at the `rollshot-app` boundary (keep the launch payload on `CaptureMode`)**
 
 In `crates/rollshot-app/src/macos_product.rs`:
 - `initial_capture_path(mode: CaptureMode)` (~53) → take the scope: `fn initial_capture_path(scope: CaptureScope) -> InitialCapturePath { match scope { CaptureScope::Fullscreen => InitialCapturePath::Fullscreen, CaptureScope::Region => InitialCapturePath::Overlay } }`. Update its callers: `initial_capture_path(config.request.scope)` (~122) and the two unit-test calls (~759, 763) → `initial_capture_path(CaptureScope::Fullscreen)` / `(CaptureScope::Region)`.
 - OverlayConfig construction (~632–636, `initial_mode: CaptureMode::Region`) → `request: CaptureRequest::screenshot_region()`.
-- Wherever `rollshot-app` builds an `OverlayConfig` from the parsed `InteractiveLaunchOptions`, set `request: options.initial_mode.into()` (the `From<CaptureMode>` bridge). `cargo build` will point to the exact construction site(s).
 
-In `crates/rollshot-app/src/launch.rs`: update any remaining `CaptureMode` references the compiler flags (assertions/imports) to read through the bridge or the new types as appropriate.
+In `crates/rollshot-app/src/main.rs`, build `OverlayConfig` with
+`request: options.initial_mode.into()` and keep launch tracing on
+`options.initial_mode` until Task 3 migrates the payload. Do not modify
+`launch.rs` in this task; its payload remains intentionally legacy until Task
+3.
 
-- [ ] **Step 8: Build the workspace and find any missed sites**
+- [ ] **Step 9: Build the workspace and find any missed sites**
 
 Run: `rtk cargo build --workspace`
 Expected: success. If it fails, the errors are the remaining `CaptureMode` sites in the overlay/app layer — apply the substitution rule from the File Structure table and rebuild until green.
 
-- [ ] **Step 9: Run the affected test suites (both platforms' shared tests)**
+- [ ] **Step 10: Run the affected test suites (both platforms' shared tests)**
 
 Run: `rtk cargo test -p rollshot-iced-overlay -p rollshot-app`
-Expected: PASS (behavior unchanged; the fullscreen-routing and toolbar/workspace tests still pass with the new types).
+Expected: PASS on Linux (behavior unchanged; fullscreen routing,
+unsupported-request rejection, toolbar/workspace, and shared app tests pass).
 
-- [ ] **Step 10: Commit**
+On a macOS host, run the same command before committing:
 
 ```bash
-rtk git add crates/rollshot-iced-overlay crates/rollshot-app
+rtk cargo test -p rollshot-iced-overlay -p rollshot-app
+```
+
+Expected: PASS, including the active `macos_capture.rs` and
+`macos_product.rs` paths. A Linux workspace build does **not** compile the
+macOS-gated capture component, so this check is mandatory before the refactor
+is considered verified.
+
+- [ ] **Step 11: Commit**
+
+```bash
+rtk git add crates/rollshot-iced-overlay crates/rollshot-app/src/main.rs crates/rollshot-app/src/macos_product.rs
 rtk git commit -m "refactor(overlay): drive capture by Workflow x CaptureScope
 
 Decouple overlay-vs-direct routing onto CaptureScope; the overlay now
@@ -372,11 +430,18 @@ Flip `InteractiveLaunchOptions` to carry a `CaptureRequest`, update the CLI buil
 **Files:**
 - Modify: `crates/rollshot-capture/src/types.rs`
 - Modify: `crates/rollshot-cli/src/cmd_capture_launcher.rs`
-- Modify: `crates/rollshot-app/src/macos_product.rs` (and any other OverlayConfig construction)
+- Modify: `crates/rollshot-app/src/launch.rs`
+- Modify: `crates/rollshot-app/src/main.rs`
 
 - [ ] **Step 1: Rewrite the serde tests for the new payload shape**
 
-In `crates/rollshot-capture/src/types.rs` tests: delete `capture_modes_round_trip_with_current_names`, `legacy_screenshot_mode_deserializes_as_region`, and the `CaptureMode`-based `interactive_launch_options_round_trip_json` / `interactive_launch_options_ignore_obsolete_field` / `fps_change_does_not_affect_initial_mode`. Replace with:
+In `crates/rollshot-capture/src/types.rs` tests: delete
+`capture_modes_round_trip_with_current_names` and
+`legacy_screenshot_mode_deserializes_as_region`; rewrite the
+`CaptureMode`-based launch-option tests for `initial_request`. Keep the
+unrelated-obsolete-field behavior covered, and rename
+`fps_change_does_not_affect_initial_mode` to
+`fps_change_does_not_affect_initial_request`. The core replacements are:
 
 ```rust
 #[test]
@@ -401,10 +466,37 @@ fn interactive_launch_options_default_initial_request() {
 }
 ```
 
+Also retain `interactive_launch_options_ignore_obsolete_field`, changing only
+its assertion to `decoded.initial_request ==
+CaptureRequest::scrolling_region()`, and update the renamed FPS-independence
+test the same way.
+
+In `crates/rollshot-app/src/launch.rs`, replace the old fullscreen/legacy
+payload tests with:
+
+- `fullscreen_capture_request_payload_parses`
+- `legacy_initial_mode_payload_is_rejected_clearly`
+- `unsupported_scrolling_fullscreen_payload_is_rejected`
+
+The legacy-key case must assert that the returned message names
+`initial_mode` and `initial_request`; Serde otherwise ignores the unknown old
+field and silently applies the new scrolling-region default. The unsupported
+case must assert that the returned message names both `scrolling` and
+`fullscreen`; it must not silently default or route to direct capture.
+
+In `crates/rollshot-cli/src/cmd_capture_launcher.rs`, extend
+`app_args_include_capture_flag_and_json_payload` to deserialize the payload
+back into `InteractiveLaunchOptions` and assert
+`initial_request == CaptureRequest::scrolling_region()`.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `rtk cargo test -p rollshot-capture types::interactive_launch`
-Expected: FAIL — `InteractiveLaunchOptions` has no field `initial_request`.
+
+Run: `rtk cargo test -p rollshot-app launch::tests::`
+
+Expected: FAIL — `InteractiveLaunchOptions` has no field `initial_request`,
+and the launch parser does not yet reject the unsupported combination.
 
 - [ ] **Step 3: Migrate the payload field**
 
@@ -452,7 +544,20 @@ Update the CLI test asserting the field (`launch_options_keep_only_interactive_f
 
 - [ ] **Step 5: Remove the bridge at the app boundary**
 
-In `crates/rollshot-app` wherever `OverlayConfig` is built from the payload, replace `request: options.initial_mode.into()` with `request: options.initial_request` (direct, no conversion). `cargo build -p rollshot-app` flags the site(s).
+In `crates/rollshot-app/src/main.rs`, replace
+`request: options.initial_mode.into()` with `request:
+options.initial_request`, and change the structured launch field from
+`initial_mode = ?options.initial_mode` to `workflow =
+?options.initial_request.workflow, scope = ?options.initial_request.scope`.
+
+In `crates/rollshot-app/src/launch.rs`, parse the payload once into
+`serde_json::Value`, reject a present legacy `initial_mode` key with a clear
+"use initial_request" error, then deserialize the value into
+`InteractiveLaunchOptions`. Reject `!options.initial_request.is_supported()`
+with a clear error before returning `LaunchMode::Capture`. Update all remaining
+tests/imports to the new request type. This is the user-facing validation
+boundary for externally supplied JSON while preserving the existing behavior
+of ignoring unrelated obsolete fields.
 
 - [ ] **Step 6: Build + test the payload path**
 
@@ -462,7 +567,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-rtk git add crates/rollshot-capture crates/rollshot-cli crates/rollshot-app
+rtk git add crates/rollshot-capture/src/types.rs crates/rollshot-cli/src/cmd_capture_launcher.rs crates/rollshot-app/src/launch.rs crates/rollshot-app/src/main.rs
 rtk git commit -m "refactor(capture): launch payload carries CaptureRequest
 
 initial_mode: CaptureMode -> initial_request: CaptureRequest; drop the legacy
@@ -482,12 +587,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Confirm there are no non-bridge references left**
 
-Run: `rtk grep -rn "CaptureMode" crates/ --include="*.rs"`
-Expected: only the `CaptureMode` definition, `From<CaptureMode> for CaptureRequest`, and `to_legacy_mode` (all in `types.rs`), plus its `lib.rs` re-export. If anything else appears, migrate it with the substitution rule before continuing.
+Run: `rtk rg -n "CaptureMode" crates --glob '*.rs'`
+Expected: only the `CaptureMode` definition and
+`From<CaptureMode> for CaptureRequest` in `types.rs`, plus its `lib.rs`
+re-export. If anything else appears, migrate it with the substitution rule
+before continuing.
 
 - [ ] **Step 2: Delete the type and the bridge**
 
-In `crates/rollshot-capture/src/types.rs`: delete the `CaptureMode` enum, its `#[cfg(test)]` round-trip tests (already replaced in Task 3), the `impl From<CaptureMode> for CaptureRequest`, and `CaptureRequest::to_legacy_mode`. Delete the `legacy_capture_mode_maps_to_request` and `request_round_trips_through_legacy_mode` tests added in Task 1 (they test the now-deleted bridge).
+In `crates/rollshot-capture/src/types.rs`: delete the `CaptureMode` enum, its
+`#[cfg(test)]` round-trip tests (already replaced in Task 3), and the `impl
+From<CaptureMode> for CaptureRequest`. Delete the
+`legacy_capture_mode_maps_to_request` test added in Task 1.
 
 In `crates/rollshot-capture/src/lib.rs`: remove `CaptureMode` from the `pub use types::{...}` re-export.
 
@@ -505,14 +616,201 @@ Expected: clean.
 Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 Expected: no warnings.
 
+Run on Linux:
+
+```bash
+rtk cargo run -p rollshot-cli -- capture
+rtk cargo run -p rollshot-app -- --capture '{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"region"}}'
+rtk cargo run -p rollshot-app -- --capture '{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"fullscreen"}}'
+```
+
+The commands exercise scrolling-region, screenshot-region, and
+screenshot-fullscreen respectively. Confirm the toolbar still switches only
+between Screenshot and Scrolling workflows and that fullscreen bypasses the
+overlay.
+
+Run the equivalent three-flow smoke test on macOS. Linux verification cannot
+stand in for the active ScreenCaptureKit/macOS iced path; record any unchecked
+platform explicitly before commit.
+
 - [ ] **Step 4: Commit**
 
 ```bash
-rtk git add crates/rollshot-capture
+rtk git add crates/rollshot-capture/src/types.rs crates/rollshot-capture/src/lib.rs
 rtk git commit -m "refactor(capture): remove CaptureMode in favor of Workflow x CaptureScope
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
+
+---
+
+## Engineering Review Lock-In
+
+### Step 0: Scope Challenge
+
+- **Goal alignment:** All four tasks directly support the type split and
+  behavior-preserving migration. No feature work or new artifact is mixed in.
+- **Minimum viable plan:** Keep Tasks 1–4; each is required to keep intermediate
+  commits green. Scope was reduced by deleting the unused, lossy
+  `CaptureRequest::to_legacy_mode()` bridge.
+- **Complexity check:** 0 new files, 0 new crates/modules, 4 tasks. The
+  complexity smell threshold does not trigger.
+- **Search check:** Rust's standard conversion guidance supports the one-way
+  infallible `From<CaptureMode>` bridge. Serde ignores unknown JSON fields by
+  default and applies `#[serde(default)]` to a missing field, so Task 3 now
+  explicitly rejects the legacy `initial_mode` key instead of silently
+  launching scrolling-region.
+- **Completeness/distribution:** This is an internal refactor, not a new
+  distributable artifact. Both platform paths and externally supplied launch
+  JSON now have explicit verification.
+- **Blast radius:** The code graph reports 15 affected execution flows across
+  CLI launch, Linux routing, macOS product/component startup, fullscreen
+  completion, and toolbar/workspace switching; targeted tests plus both-platform
+  smoke checks are justified.
+
+### What Already Exists
+
+| Existing code/flow | Reuse decision |
+|---|---|
+| `CaptureMode` and `InteractiveLaunchOptions` in `rollshot-capture::types` | Replaced in place; no duplicate compatibility module. |
+| `RegionMode::{Manual, PortalPicker, FullSource}` | Reused unchanged as the backend-level scope representation. |
+| Linux `run_initial_path` and macOS `initial_capture_path` | Reused as the scope-routing boundaries. |
+| Shared `fullscreen::capture` completion | Reused by both platforms; guard and diagram migrate to `CaptureRequest`. |
+| Existing resource-factory, workspace, toolbar, fullscreen, launch, and macOS product tests | Updated as characterization coverage rather than rebuilt. |
+
+### Architecture Review
+
+1. **One-way migration bridge:** Removed `to_legacy_mode()` because no caller
+   needs it and it cannot faithfully represent `Scrolling × Fullscreen`.
+2. **Consistent acquisition boundary:** Linux and macOS `acquire_resource`
+   helpers both take `Workflow`; scope is handled before active overlay state.
+3. **Explicit overlay invariant:** Runtime toolbar switching constructs
+   `CaptureScope::Region` directly; no speculative `scope_or_region()` helper.
+4. **Unsupported requests:** Launch parsing and Linux initial routing reject
+   unsupported combinations; shared fullscreen capture also rejects any request
+   other than screenshot-fullscreen.
+5. **macOS component invariant:** Public `Component::new` explicitly rejects
+   fullscreen scope before resource acquisition, replacing the protection lost
+   when the old `CaptureMode::Fullscreen` match arm is deleted.
+6. **Platform truthfulness:** Linux commands no longer claim to compile or test
+   macOS-gated capture code; macOS verification is an explicit required step.
+7. **Diagram maintenance:** The existing `fullscreen.rs` ASCII flow diagram is
+   updated in the same task as the type migration.
+
+### Plan Structure + Code Quality Review
+
+1. `crates/rollshot-app/src/main.rs` is now explicitly listed in Tasks 2–3;
+   compiler-driven "find remaining sites" remains a backstop, not the file
+   ownership plan.
+2. Task 2 remains a large atomic migration because changing `OverlayConfig`
+   breaks both platform runners and shared overlay state together; splitting it
+   would require a second temporary compatibility shape.
+3. Task 2 starts with characterization tests, and Task 3 adds failing payload
+   tests before changing serialization/validation behavior.
+4. Task 4 uses `rg` and deletes only the temporary one-way bridge.
+
+### Test Flow Diagram
+
+```text
+Task 1: new type tests RED -> add types + From bridge -> capture tests GREEN
+                                  |
+                                  v
+Task 2: characterization GREEN -> migrate overlay/platform paths
+                                  -> Linux tests GREEN + macOS-host tests GREEN
+                                  |
+                                  v
+Task 3: payload/validation tests RED -> migrate JSON + CLI/app boundary
+                                  -> capture/CLI/app tests GREEN
+                                  |
+                                  v
+Task 4: delete legacy type -> workspace fmt/clippy/test GREEN
+                                  -> Linux + macOS three-flow smoke checks
+```
+
+### Test Coverage
+
+| Task / behavior | Unit | Integ | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / defaults, constructors, support matrix, serde matrix, old→new mapping | ✓ | — | — | no |
+| Task 2 / workflow resource selection and cancellation | ✓ | ✓ | — | no |
+| Task 2 / scope routes fullscreen direct vs region overlay | ✓ | ✓ | — | no |
+| Task 2 / unsupported request rejected before routing/direct capture | ✓ | ✓ | — | no |
+| Task 2 / toolbar/workspace workflow switching | ✓ | ✓ | — | no |
+| Task 3 / CLI JSON shape and app payload parsing | ✓ | ✓ | — | no |
+| Task 3 / legacy-key and unsupported-combination errors | ✓ | ✓ | — | no |
+| Task 4 / three existing flows on Linux and macOS | — | — | ✓ | yes |
+
+### Failure Modes
+
+| New/changed codepath | Realistic failure | Test + handling | User result |
+|---|---|---|---|
+| `CaptureRequest` launch JSON | Old `initial_mode` is ignored and defaults to scrolling-region | Task 3 Step 1 test; Task 3 Step 5 rejects the key | Clear launch error |
+| Supported-combination validation | `Scrolling × Fullscreen` reaches direct capture | Tasks 1–3 tests; `is_supported()` + routing/fullscreen guards | Clear launch/capture error |
+| Linux scope routing | Fullscreen accidentally enters layer-shell overlay | Existing fullscreen routing test updated in Task 2 | Explicit `OverlayError`, not silent |
+| macOS scope routing | Fullscreen accidentally opens embedded overlay | `initial_capture_path`, `Component::new`, and fullscreen guard tests updated in Task 2 | Explicit error, not silent |
+| Workflow resource acquisition | User cancels one-shot/portal selection | Existing cancellation tests updated in Task 2 | `Ok(None)`, clean cancellation |
+| Runtime workflow switch | Old resource remains alive or wrong resource starts | Existing factory/drop and switching tests updated in Task 2 | Error surfaced or correct replacement |
+
+**Critical gaps:** none after the recommendations above.
+
+### Performance + Resource Review
+
+- No stitching-core algorithm, frame format conversion, buffering policy, or
+  memory ceiling changes; core benchmarks are not required.
+- `CaptureRequest`, `Workflow`, and `CaptureScope` are `Copy` metadata only and
+  add no per-frame allocation.
+- Existing resource replacement/drop tests remain the guard against leaked
+  streaming or one-shot resources during workflow switching.
+- Do not expand this refactor to remove the existing frozen-image clone; that
+  is a separate measured performance change.
+
+### NOT in Scope
+
+- `Workflow::ActionGuide` and Action Guide spec edits: follow-up plan after this
+  refactor lands.
+- `Scrolling × Fullscreen` implementation: represented only so it can be
+  rejected explicitly.
+- Moving workflow types out of `rollshot-capture`: higher churn with no benefit
+  to this behavior-preserving refactor.
+- Persisted-settings migration: the request exists only in ephemeral launch
+  JSON/in-memory state.
+- Toolbar label/icon changes, backend `RegionMode` changes, and stitching-core
+  performance work: unrelated to the goal.
+
+### Execution Strategy
+
+Sequential execution, no parallelization opportunity. Every task depends on the
+previous migration state, and Tasks 1/3/4 share `rollshot-capture::types` while
+Task 2/3 share the app launch boundary. Do not create worktrees.
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| Task 1 | `crates/rollshot-capture/` | — |
+| Task 2 | `crates/rollshot-iced-overlay/`, `crates/rollshot-app/` | Task 1 |
+| Task 3 | `crates/rollshot-capture/`, `crates/rollshot-cli/`, `crates/rollshot-app/` | Task 2 |
+| Task 4 | `crates/rollshot-capture/`, workspace verification | Task 3 |
+
+### Review Completion Summary
+
+```text
+Plan reviewed:           docs/superpowers/plans/2026-06-15-capture-workflow-scope-refactor.md
+Tasks in plan:           4
+Files Create/Modify:     0 create / 14 modify
+
+- Step 0: Scope Challenge   — scope reduced: removed unused inverse bridge
+- Architecture Review:        7 issues resolved
+- Plan Structure + Code Q:    4 issues resolved
+- Test Review:                table produced, 4 gaps resolved
+- Performance Review:         0 blocking issues
+- NOT in scope:               written
+- What already exists:        written
+- Failure modes:              0 critical gaps
+- Parallelization:            sequential, no parallel lanes
+- Unresolved decisions:       0
+```
+
+Plan is locked in. Execute sequentially with
+`superpowers:executing-plans`; do not use parallel subagents or worktrees.
 
 ---
 
@@ -521,21 +819,30 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Spec coverage:**
 - Type model (`Workflow`, `CaptureScope`, `CaptureRequest`, `needs_overlay`, `is_supported`) → Task 1.
 - Old→new 1:1 mapping → Task 1 (`From`) + Task 2/3 construction sites.
-- Acquisition path = f(scope) → Task 2 Step 2 (linux), Step 3 (macOS), Step 7 (`initial_capture_path`).
+- Acquisition path = f(scope) → Task 2 Step 3 (linux), Step 4 (macOS), Step 8 (`initial_capture_path`).
 - Scope → backend `RegionMode` → unchanged downstream (existing `RegionMode` construction preserved); no new code needed (documented in spec).
-- Toolbar rewiring + unchanged labels → Task 2 Steps 4–5.
+- Toolbar rewiring + unchanged labels → Task 2 Steps 5–6.
 - Serialization (ephemeral payload, drop legacy alias) → Task 3.
-- Testing (rewritten serde, mapping, `needs_overlay`, `is_supported`, existing green) → Tasks 1, 3, and the build/test steps.
+- Testing (rewritten serde matrix, mapping, `needs_overlay`, `is_supported`,
+  unsupported-request rejection, existing green, and both-platform smoke
+  checks) → Tasks 1–4.
 - Sequencing (refactor lands first) → this plan; Action Guide plan follows.
 - `is_supported()` rejects `Scrolling × Fullscreen` → Task 1 test.
 
 **Placeholder scan:** No TBD/TODO. Mechanical site-updates are specified by an explicit substitution table + `cargo build` worklist, not hand-waved logic; every logic change (routing, highlight, message mapping, serde) has complete code.
 
-**Type consistency:** `CaptureRequest` / `Workflow` / `CaptureScope`, constructors `screenshot_region()` / `screenshot_fullscreen()` / `scrolling_region()`, `needs_overlay()`, `is_supported()`, `to_legacy_mode()`, and field names (`request`, `initial_request`, `active_workflow`, `state.workflow`) are used consistently across all tasks.
+**Type consistency:** `CaptureRequest` / `Workflow` / `CaptureScope`,
+constructors `screenshot_region()` / `screenshot_fullscreen()` /
+`scrolling_region()`, `needs_overlay()`, `is_supported()`, and field names
+(`request`, `initial_request`, `active_workflow`, `state.workflow`) are used
+consistently across all tasks. The migration bridge is intentionally one-way.
 
 ## Notes
 
-- Branch: land this on `refactor/capture-workflow-scope` (per the spec's sequencing). The Action Guide plan (P0a) builds `Workflow::ActionGuide` on top afterward.
+- Branch: execute on the current non-`main` branch. If this work is split onto a
+  fresh branch, use `feat/capture-workflow-scope`; `refactor/` is not an
+  allowed project branch prefix. Do not create a worktree. The Action Guide
+  plan (P0a) builds `Workflow::ActionGuide` on top afterward.
 - Platform split (AGENTS.md §8): Task 2 explicitly migrates both the Linux (`linux_runner.rs`) and macOS (`macos_capture.rs`, `macos_product.rs`) paths; every build/test step must pass before commit.
 
 ## Handoff: Action Guide spec update (deferred to post-refactor)
