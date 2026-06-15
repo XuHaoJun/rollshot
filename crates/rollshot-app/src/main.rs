@@ -82,7 +82,7 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Resu
         backend: options.backend,
         fps: options.fps,
         show_cursor: options.show_cursor,
-        initial_mode: options.initial_mode,
+        request: options.initial_mode.into(),
         target_output_name: None,
     };
 

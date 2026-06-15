@@ -1,4 +1,4 @@
-use rollshot_capture::CaptureMode;
+use rollshot_capture::Workflow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspacePhase {
@@ -11,7 +11,7 @@ pub enum WorkspacePhase {
 #[allow(dead_code)]
 pub enum WorkspaceEffect {
     None,
-    ActivateMode(CaptureMode),
+    ActivateWorkflow(Workflow),
     StartScrolling,
     FinishScrolling,
     FinishRegion,
@@ -34,17 +34,17 @@ pub enum ToolbarPosition {
 
 pub struct WorkspaceState {
     phase: WorkspacePhase,
-    active_mode: CaptureMode,
+    active_workflow: Workflow,
     toolbar_position: ToolbarPosition,
     auto_hide: ActivityAutoHide,
     crop_valid: bool,
 }
 
 impl WorkspaceState {
-    pub fn new(mode: CaptureMode) -> Self {
+    pub fn new(workflow: Workflow) -> Self {
         Self {
             phase: WorkspacePhase::Selecting,
-            active_mode: mode,
+            active_workflow: workflow,
             toolbar_position: ToolbarPosition::Automatic,
             auto_hide: ActivityAutoHide::new(std::time::Duration::from_millis(500)),
             crop_valid: false,
@@ -56,8 +56,8 @@ impl WorkspaceState {
     }
 
     #[allow(dead_code)]
-    pub fn active_mode(&self) -> CaptureMode {
-        self.active_mode
+    pub fn active_workflow(&self) -> Workflow {
+        self.active_workflow
     }
 
     #[allow(dead_code)]
@@ -78,14 +78,14 @@ impl WorkspaceState {
         WorkspaceEffect::None
     }
 
-    pub fn activate_mode(&mut self, mode: CaptureMode) -> WorkspaceEffect {
-        self.active_mode = mode;
+    pub fn activate_workflow(&mut self, workflow: Workflow) -> WorkspaceEffect {
+        self.active_workflow = workflow;
         self.phase = if self.crop_valid {
             WorkspacePhase::Selected
         } else {
             WorkspacePhase::Selecting
         };
-        WorkspaceEffect::ActivateMode(mode)
+        WorkspaceEffect::ActivateWorkflow(workflow)
     }
 
     pub fn begin_scrolling(&mut self) {
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn region_release_enters_selected_instead_of_finishing() {
-        let mut state = WorkspaceState::new(CaptureMode::Region);
+        let mut state = WorkspaceState::new(Workflow::Screenshot);
         state.set_crop(valid_crop());
         assert_eq!(state.complete_selection(), WorkspaceEffect::None);
         assert_eq!(state.phase(), WorkspacePhase::Selected);
@@ -211,19 +211,19 @@ mod tests {
 
     #[test]
     fn switching_modes_requests_new_workflow_resources() {
-        let mut state = WorkspaceState::new(CaptureMode::Region);
+        let mut state = WorkspaceState::new(Workflow::Screenshot);
         state.set_crop(valid_crop());
         state.complete_selection();
         assert_eq!(
-            state.activate_mode(CaptureMode::Scrolling),
-            WorkspaceEffect::ActivateMode(CaptureMode::Scrolling)
+            state.activate_workflow(Workflow::Scrolling),
+            WorkspaceEffect::ActivateWorkflow(Workflow::Scrolling)
         );
         assert_eq!(state.phase(), WorkspacePhase::Selected);
     }
 
     #[test]
     fn cancel_resets_phase_to_selecting() {
-        let mut state = WorkspaceState::new(CaptureMode::Region);
+        let mut state = WorkspaceState::new(Workflow::Screenshot);
         state.set_crop(valid_crop());
         state.complete_selection();
         assert_eq!(state.phase(), WorkspacePhase::Selected);
@@ -246,7 +246,7 @@ mod tests {
             )
         };
 
-        let mut state = WorkspaceState::new(CaptureMode::Scrolling);
+        let mut state = WorkspaceState::new(Workflow::Scrolling);
         assert_eq!(state.phase(), WorkspacePhase::Selecting);
         assert!(is_capture_phase(state.phase()));
 
@@ -266,7 +266,7 @@ mod tests {
         assert!(is_capture_phase(state.phase()));
 
         // A region finish behaves the same way from Selected.
-        let mut shot = WorkspaceState::new(CaptureMode::Region);
+        let mut shot = WorkspaceState::new(Workflow::Screenshot);
         shot.set_crop(valid_crop());
         shot.complete_selection();
         shot.finish_region();
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn finish_scrolling_requests_finalization() {
-        let mut state = WorkspaceState::new(CaptureMode::Scrolling);
+        let mut state = WorkspaceState::new(Workflow::Scrolling);
         state.set_crop(valid_crop());
         state.complete_selection();
         state.begin_scrolling();

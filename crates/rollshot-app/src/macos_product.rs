@@ -31,7 +31,7 @@ use std::time::Instant;
 use iced::{window, Element, Point, Size, Task};
 use image::RgbaImage;
 
-use rollshot_capture::CaptureMode;
+use rollshot_capture::CaptureScope;
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
 
@@ -50,10 +50,10 @@ enum InitialCapturePath {
     Fullscreen,
 }
 
-fn initial_capture_path(mode: CaptureMode) -> InitialCapturePath {
-    match mode {
-        CaptureMode::Fullscreen => InitialCapturePath::Fullscreen,
-        CaptureMode::Scrolling | CaptureMode::Region => InitialCapturePath::Overlay,
+fn initial_capture_path(scope: CaptureScope) -> InitialCapturePath {
+    match scope {
+        CaptureScope::Fullscreen => InitialCapturePath::Fullscreen,
+        CaptureScope::Region => InitialCapturePath::Overlay,
     }
 }
 
@@ -119,7 +119,7 @@ impl MacosProduct {
     /// cancelled before any capture began (the caller then skips the daemon
     /// entirely), or `Err` if capture setup failed.
     pub fn new(config: OverlayConfig) -> Result<Option<(Self, Task<Message>)>, String> {
-        match initial_capture_path(config.initial_mode) {
+        match initial_capture_path(config.request.scope) {
             InitialCapturePath::Fullscreen => {
                 let result = match rollshot_iced_overlay::fullscreen::capture(&config)
                     .map_err(|error| error.to_string())?
@@ -633,7 +633,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Region,
+            request: rollshot_capture::CaptureRequest::screenshot_region(),
             target_output_name: None,
         };
         // `Component::new` uses test factories under cfg(test), so this builds a
@@ -756,11 +756,11 @@ mod tests {
     #[test]
     fn fullscreen_selects_direct_initial_path() {
         assert_eq!(
-            initial_capture_path(CaptureMode::Fullscreen),
+            initial_capture_path(CaptureScope::Fullscreen),
             InitialCapturePath::Fullscreen
         );
         assert_eq!(
-            initial_capture_path(CaptureMode::Region),
+            initial_capture_path(CaptureScope::Region),
             InitialCapturePath::Overlay
         );
     }

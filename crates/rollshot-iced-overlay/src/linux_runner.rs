@@ -17,7 +17,7 @@ use crate::CaptureResult;
 use crate::OverlayConfig;
 use crate::OverlayError;
 
-use rollshot_capture::CaptureMode;
+use rollshot_capture::{CaptureRequest, CaptureScope, Workflow};
 
 pub(crate) enum CaptureResource {
     Streaming {
@@ -107,13 +107,13 @@ impl std::fmt::Debug for ResourceFactories {
 }
 
 pub(crate) fn acquire_resource(
-    mode: CaptureMode,
+    workflow: Workflow,
     config: &OverlayConfig,
     factories: &ResourceFactories,
 ) -> Result<Option<CaptureResource>, OverlayError> {
-    match mode {
-        CaptureMode::Scrolling => acquire_scrolling_resource(config, factories),
-        CaptureMode::Region => {
+    match workflow {
+        Workflow::Scrolling => acquire_scrolling_resource(config, factories),
+        Workflow::Screenshot => {
             tracing::debug!(target: TARGET_OVERLAY, "acquiring one-shot capture resource");
             let capture = match (factories.one_shot)(config.show_cursor) {
                 Ok(c) => c,
@@ -121,9 +121,6 @@ pub(crate) fn acquire_resource(
                 Err(e) => return Err(OverlayError::Capture(e.to_string())),
             };
             Ok(Some(CaptureResource::OneShot(capture)))
-        }
-        CaptureMode::Fullscreen => {
-            unreachable!("fullscreen is routed before active overlay state")
         }
     }
 }
@@ -211,8 +208,8 @@ static DRIVER_SLOT: Mutex<Option<Driver>> = Mutex::new(None);
 // crop and return the frozen image.
 static ONE_SHOT_SLOT: Mutex<Option<rollshot_capture::OneShotCapture>> = Mutex::new(None);
 
-// Active capture mode, set at startup by `acquire_resource`.
-static CAPTURE_MODE: Mutex<Option<CaptureMode>> = Mutex::new(None);
+// Active capture workflow, set at startup by `acquire_resource`.
+static CAPTURE_WORKFLOW: Mutex<Option<Workflow>> = Mutex::new(None);
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
@@ -257,7 +254,7 @@ fn subscription(state: &Overlay) -> iced::Subscription<Message> {
 /// output than KWin captured — record an explicit mapping error and exit instead
 /// of cropping against the wrong geometry. Returns `Some(exit_task)` on failure.
 fn validate_region_surface_or_exit(state: &Overlay) -> Option<Task<Message>> {
-    if *CAPTURE_MODE.lock().unwrap() != Some(CaptureMode::Region) {
+    if *CAPTURE_WORKFLOW.lock().unwrap() != Some(Workflow::Screenshot) {
         return None;
     }
     let ws = state.window_size?;
@@ -400,8 +397,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 app::OverlayEffect::EnablePassthrough | app::OverlayEffect::DisablePassthrough => {
                     Task::none()
                 }
-                app::OverlayEffect::ActivateMode(new_mode) => {
-                    tracing::info!(target: TARGET_OVERLAY, ?new_mode, "activating capture mode");
+                app::OverlayEffect::ActivateWorkflow(new_workflow) => {
+                    tracing::info!(target: TARGET_OVERLAY, ?new_workflow, "activating capture workflow");
                     // Stop/discard current workflow.
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().take() {
                         driver.cancel();
@@ -413,7 +410,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         backend: "auto".to_string(),
                         fps: 5,
                         show_cursor: false,
-                        initial_mode: new_mode,
+                        request: CaptureRequest {
+                            workflow: new_workflow,
+                            scope: CaptureScope::Region,
+                        },
                         target_output_name: None,
                     };
                     #[cfg(not(test))]
@@ -428,9 +428,9 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         }),
                     };
 
-                    match acquire_resource(new_mode, &config, &factories) {
+                    match acquire_resource(new_workflow, &config, &factories) {
                         Ok(Some(resource)) => {
-                            *CAPTURE_MODE.lock().unwrap() = Some(new_mode);
+                            *CAPTURE_WORKFLOW.lock().unwrap() = Some(new_workflow);
                             state.frozen = frozen_handle_for(&resource);
                             match resource {
                                 CaptureResource::Streaming {
@@ -578,7 +578,12 @@ where
     Direct: FnOnce(&OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>,
     Overlay: FnOnce(OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>,
 {
-    if config.initial_mode == CaptureMode::Fullscreen {
+    if !config.request.is_supported() {
+        return Err(OverlayError::Capture(
+            "unsupported capture request".to_string(),
+        ));
+    }
+    if config.request.scope == CaptureScope::Fullscreen {
         return direct(&config);
     }
     overlay(config)
@@ -589,18 +594,23 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
 }
 
 fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
-    if config.initial_mode == CaptureMode::Fullscreen {
+    if !config.request.is_supported() {
+        return Err(OverlayError::Capture(
+            "unsupported capture request".to_string(),
+        ));
+    }
+    if config.request.scope == CaptureScope::Fullscreen {
         return Err(OverlayError::Capture(
             "fullscreen must not reach the overlay runner".to_string(),
         ));
     }
 
-    tracing::info!(target: TARGET_OVERLAY, mode = ?config.initial_mode, "blocking overlay starting");
+    tracing::info!(target: TARGET_OVERLAY, request = ?config.request, "blocking overlay starting");
     *PREVIEW_RX.lock().unwrap() = None;
     *DRIVER_SLOT.lock().unwrap() = None;
     *ONE_SHOT_SLOT.lock().unwrap() = None;
     *RESULT_SLOT.lock().unwrap() = None;
-    *CAPTURE_MODE.lock().unwrap() = None;
+    *CAPTURE_WORKFLOW.lock().unwrap() = None;
 
     #[cfg(not(test))]
     let factories = real_factories();
@@ -614,7 +624,7 @@ fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, O
         }),
     };
 
-    let resource = acquire_resource(config.initial_mode, &config, &factories)?;
+    let resource = acquire_resource(config.request.workflow, &config, &factories)?;
     let resource = match resource {
         Some(r) => r,
         None => return Ok(None),
@@ -635,13 +645,13 @@ fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, O
         }
     }
 
-    *CAPTURE_MODE.lock().unwrap() = Some(config.initial_mode);
+    *CAPTURE_WORKFLOW.lock().unwrap() = Some(config.request.workflow);
 
     // Build the frozen background handle once. This is the single full-image
     // copy in the two-buffer render model; `view()` clones only the cheap
     // handle per redraw.
     let frozen_handle = frozen_handle_for(&resource);
-    let mode = config.initial_mode;
+    let workflow = config.request.workflow;
 
     let start_mode = start_mode_for(&resource);
 
@@ -656,7 +666,7 @@ fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, O
 
     let run_result = application(
         move || Overlay {
-            mode,
+            workflow,
             frozen: frozen_handle.clone(),
             ..Overlay::default()
         },
@@ -728,7 +738,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Scrolling,
+            request: CaptureRequest::scrolling_region(),
             target_output_name: None,
         }
     }
@@ -793,7 +803,7 @@ mod tests {
             one_shot: fake_one_shot_factory(&ONE_SHOT_COUNT),
         };
 
-        let _ = acquire_resource(CaptureMode::Scrolling, &config, &factories);
+        let _ = acquire_resource(Workflow::Scrolling, &config, &factories);
 
         assert_eq!(STREAMING_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(ONE_SHOT_COUNT.load(Ordering::SeqCst), 0);
@@ -811,7 +821,7 @@ mod tests {
             one_shot: fake_one_shot_factory(&ONE_SHOT_COUNT),
         };
 
-        let _ = acquire_resource(CaptureMode::Scrolling, &config, &factories);
+        let _ = acquire_resource(Workflow::Scrolling, &config, &factories);
 
         assert_eq!(ONE_SHOT_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(STREAMING_COUNT.load(Ordering::SeqCst), 1);
@@ -828,7 +838,7 @@ mod tests {
             one_shot: fake_one_shot_factory(&ONE_SHOT_COUNT),
         };
 
-        let result = acquire_resource(CaptureMode::Region, &config, &factories);
+        let result = acquire_resource(Workflow::Screenshot, &config, &factories);
         assert!(result.unwrap().is_some());
 
         assert_eq!(STREAMING_COUNT.load(Ordering::SeqCst), 0);
@@ -843,7 +853,7 @@ mod tests {
             streaming: Box::new(|_c, _p| Err("first".to_string())),
             one_shot: Box::new(|_| Ok(fake_one_shot_capture())),
         };
-        let result_1 = acquire_resource(CaptureMode::Region, &config, &factories_1)
+        let result_1 = acquire_resource(Workflow::Screenshot, &config, &factories_1)
             .unwrap()
             .unwrap();
         drop(result_1);
@@ -852,7 +862,7 @@ mod tests {
             streaming: Box::new(|_c, _p| Err("second".to_string())),
             one_shot: Box::new(|_| Ok(fake_one_shot_capture())),
         };
-        let result_2 = acquire_resource(CaptureMode::Region, &config, &factories_2)
+        let result_2 = acquire_resource(Workflow::Screenshot, &config, &factories_2)
             .unwrap()
             .unwrap();
         drop(result_2);
@@ -885,7 +895,7 @@ mod tests {
             }),
         };
 
-        let result = acquire_resource(CaptureMode::Region, &config, &factories)
+        let result = acquire_resource(Workflow::Screenshot, &config, &factories)
             .unwrap()
             .unwrap();
 
@@ -911,7 +921,7 @@ mod tests {
             }),
         };
 
-        let result = acquire_resource(CaptureMode::Region, &config, &factories);
+        let result = acquire_resource(Workflow::Screenshot, &config, &factories);
         match result {
             Err(OverlayError::Capture(msg)) => {
                 assert!(msg.contains("empty screen name"), "msg: {msg}");
@@ -947,7 +957,7 @@ mod tests {
             }),
         };
 
-        let result = acquire_resource(CaptureMode::Region, &config, &factories)
+        let result = acquire_resource(Workflow::Screenshot, &config, &factories)
             .unwrap()
             .unwrap();
 
@@ -966,7 +976,7 @@ mod tests {
             one_shot: Box::new(|_| Err(CaptureError::UserCancelled)),
         };
 
-        let result = acquire_resource(CaptureMode::Region, &config, &factories).unwrap();
+        let result = acquire_resource(Workflow::Screenshot, &config, &factories).unwrap();
         assert!(result.is_none(), "expected Ok(None) for cancellation");
     }
 
@@ -978,7 +988,7 @@ mod tests {
             one_shot: Box::new(|_| Ok(fake_one_shot_capture())),
         };
 
-        let result = acquire_resource(CaptureMode::Region, &config, &factories)
+        let result = acquire_resource(Workflow::Screenshot, &config, &factories)
             .unwrap()
             .unwrap();
 
@@ -1010,7 +1020,7 @@ mod tests {
     }
 
     fn clear_region_globals() {
-        *CAPTURE_MODE.lock().unwrap() = None;
+        *CAPTURE_WORKFLOW.lock().unwrap() = None;
         *ONE_SHOT_SLOT.lock().unwrap() = None;
         *RESULT_SLOT.lock().unwrap() = None;
     }
@@ -1018,7 +1028,7 @@ mod tests {
     #[test]
     fn region_surface_validation_accepts_exact_single_output() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Region);
+        *CAPTURE_WORKFLOW.lock().unwrap() = Some(Workflow::Screenshot);
         *RESULT_SLOT.lock().unwrap() = None;
         // 1x portal image: physical == logical, overlay surface matches exactly.
         *ONE_SHOT_SLOT.lock().unwrap() = Some(one_shot_capture((200, 100), (200, 100)));
@@ -1037,7 +1047,7 @@ mod tests {
     #[test]
     fn region_surface_validation_rejects_multi_output_composite() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Region);
+        *CAPTURE_WORKFLOW.lock().unwrap() = Some(Workflow::Screenshot);
         *RESULT_SLOT.lock().unwrap() = None;
         // Portal returned a two-output composite (400x100), but the layer surface
         // opened on a single 200x100 output.
@@ -1060,7 +1070,7 @@ mod tests {
     #[test]
     fn surface_validation_skipped_in_scrolling_mode() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        *CAPTURE_MODE.lock().unwrap() = Some(CaptureMode::Scrolling);
+        *CAPTURE_WORKFLOW.lock().unwrap() = Some(Workflow::Scrolling);
         *RESULT_SLOT.lock().unwrap() = None;
         *ONE_SHOT_SLOT.lock().unwrap() = None;
 
@@ -1077,7 +1087,7 @@ mod tests {
     use iced::Rectangle;
 
     fn scrolling_workspace() -> Overlay {
-        let mut ws = WorkspaceState::new(CaptureMode::Scrolling);
+        let mut ws = WorkspaceState::new(Workflow::Scrolling);
         let crop = Rectangle {
             x: 10.0,
             y: 20.0,
@@ -1213,7 +1223,7 @@ mod tests {
 
         *PREVIEW_RX.lock().unwrap() = None;
 
-        let _result = acquire_resource(CaptureMode::Region, &config, &factories).unwrap();
+        let _result = acquire_resource(Workflow::Screenshot, &config, &factories).unwrap();
 
         assert!(
             PREVIEW_RX.lock().unwrap().is_none(),
@@ -1249,7 +1259,7 @@ mod tests {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Scrolling,
+            request: CaptureRequest::scrolling_region(),
             target_output_name: None,
         }
     }
@@ -1260,7 +1270,7 @@ mod tests {
             target_output_name: None,
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Scrolling,
+            request: CaptureRequest::scrolling_region(),
         }
     }
 
@@ -1308,7 +1318,7 @@ mod tests {
             backend: "linux-portal".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: CaptureMode::Scrolling,
+            request: CaptureRequest::scrolling_region(),
             target_output_name: None,
         };
         let factories = ResourceFactories {
@@ -1431,7 +1441,7 @@ mod tests {
     #[test]
     fn fullscreen_routes_to_direct_capture_before_overlay_startup() {
         let mut config = test_config();
-        config.initial_mode = CaptureMode::Fullscreen;
+        config.request = CaptureRequest::screenshot_fullscreen();
         let direct_calls = std::cell::Cell::new(0);
         let overlay_calls = std::cell::Cell::new(0);
 
@@ -1454,5 +1464,26 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(direct_calls.get(), 1);
         assert_eq!(overlay_calls.get(), 0);
+    }
+
+    #[test]
+    fn unsupported_request_is_rejected_before_routing() {
+        let mut config = test_config();
+        config.request = CaptureRequest {
+            workflow: Workflow::Scrolling,
+            scope: CaptureScope::Fullscreen,
+        };
+        let result = run_initial_path(
+            config,
+            |_| panic!("direct should not be called"),
+            |_| panic!("overlay should not be called"),
+        );
+        assert!(result.is_err());
+        match result {
+            Err(OverlayError::Capture(msg)) => {
+                assert!(msg.contains("unsupported"), "msg: {msg}");
+            }
+            other => panic!("expected Capture error, got {other:?}"),
+        }
     }
 }

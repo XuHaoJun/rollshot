@@ -21,7 +21,7 @@ pub struct OverlayConfig {
     pub backend: String,
     pub fps: u32,
     pub show_cursor: bool,
-    pub initial_mode: rollshot_capture::CaptureMode,
+    pub request: rollshot_capture::CaptureRequest,
     /// Resolved output name from a one-shot probe, forwarded to the streaming driver.
     pub target_output_name: Option<String>,
 }

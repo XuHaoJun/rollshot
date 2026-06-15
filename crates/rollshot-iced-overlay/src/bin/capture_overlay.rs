@@ -19,7 +19,7 @@ fn main() {
         backend,
         fps,
         show_cursor: false,
-        initial_mode: rollshot_capture::CaptureMode::Scrolling,
+        request: rollshot_capture::CaptureRequest::scrolling_region(),
         target_output_name: None,
     };
 

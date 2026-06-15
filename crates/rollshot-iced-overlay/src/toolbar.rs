@@ -1,7 +1,7 @@
 use crate::workspace::{CropRect, WorkspacePhase};
 use iced::widget::{button, container, row, text, tooltip};
 use iced::{Element, Point};
-use rollshot_capture::CaptureMode;
+use rollshot_capture::Workflow;
 use rollshot_overlay_core::chrome_placement::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,12 +81,12 @@ fn action_tooltip(action: ToolbarAction) -> &'static str {
 
 fn action_style_fn(
     action: ToolbarAction,
-    active_mode: CaptureMode,
+    active_workflow: Workflow,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     let is_active = matches!(
-        (action, active_mode),
-        (ToolbarAction::RegionMode, CaptureMode::Region)
-            | (ToolbarAction::ScrollingMode, CaptureMode::Scrolling)
+        (action, active_workflow),
+        (ToolbarAction::RegionMode, Workflow::Screenshot)
+            | (ToolbarAction::ScrollingMode, Workflow::Scrolling)
     );
 
     move |_theme, _status| {
@@ -122,7 +122,7 @@ fn action_style_fn(
 
 pub fn render_toolbar<'a, Message>(
     phase: WorkspacePhase,
-    active_mode: CaptureMode,
+    active_workflow: Workflow,
     on_action: impl Fn(ToolbarAction) -> Message + 'a,
     on_drag_start: Message,
     on_drag_end: Message,
@@ -136,7 +136,7 @@ where
     for action in actions {
         let label = action_label(action);
         let tooltip_text = action_tooltip(action);
-        let style_fn = action_style_fn(action, active_mode);
+        let style_fn = action_style_fn(action, active_workflow);
 
         let btn = button(text(label).size(16))
             .style(style_fn)
