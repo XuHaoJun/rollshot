@@ -13,6 +13,7 @@ tracing = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
+nix = { workspace = true }
 
 [lints]
 workspace = true
