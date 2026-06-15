@@ -3,4 +3,5 @@
 //! never key values, typed text, click coordinates, frame contents, or paths.
 
 pub(crate) const TARGET_ACTION: &str = "rollshot::action";
+pub(crate) const TARGET_DETECTOR: &str = "rollshot::action::detector";
 pub(crate) const TARGET_EXPORT: &str = "rollshot::action::export";

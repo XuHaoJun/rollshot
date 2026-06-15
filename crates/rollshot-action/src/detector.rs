@@ -7,6 +7,7 @@
 //! sessions that classify the settle into Click, Typing, Scroll, or
 //! UiChanged.
 
+use crate::diagnostics::TARGET_DETECTOR;
 use crate::frame_store::AnalysisFrame;
 use crate::metrics::{changed_area_ratio, masked_luma_diff, LumaPlane};
 use crate::models::{
@@ -163,6 +164,24 @@ impl Detector {
             self.baseline = Some(luma.clone());
             self.prev = Some(luma.clone());
             return None;
+        }
+
+        // A change in analysis-plane dimensions (e.g. a mid-recording region
+        // resize) makes the masked diff fall back to "no motion", so visual
+        // detection is degraded until the baseline is re-established. Surface it
+        // once at the transition; re-baseline handling is owned by the app
+        // integration (Plan 2).
+        if let Some(prev) = &self.prev {
+            if prev.width != luma.width || prev.height != luma.height {
+                tracing::debug!(
+                    target: TARGET_DETECTOR,
+                    prev_w = prev.width,
+                    prev_h = prev.height,
+                    new_w = luma.width,
+                    new_h = luma.height,
+                    "analysis frame dimensions changed; visual diff degraded until re-baseline"
+                );
+            }
         }
 
         // --- movement bookkeeping (runs every frame) ---
