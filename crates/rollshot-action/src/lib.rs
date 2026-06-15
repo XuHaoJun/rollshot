@@ -6,6 +6,7 @@
 //! only privacy-filtered data: never raw key codes, typed text, device names,
 //! or device paths. See `docs/superpowers/specs/2026-06-15-action-guide-capture-design.md`.
 
+mod detector;
 mod diagnostics;
 mod error;
 mod events;
@@ -14,6 +15,7 @@ mod input;
 mod metrics;
 mod models;
 
+pub use detector::{CandidateMarker, Detector, DetectorConfig};
 pub use error::{DetectError, ExportError};
 pub use events::EventAggregator;
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
