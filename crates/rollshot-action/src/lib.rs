@@ -14,6 +14,7 @@ mod frame_store;
 mod input;
 mod metrics;
 mod models;
+mod recorder;
 
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
 pub use error::{DetectError, ExportError};
@@ -26,12 +27,4 @@ pub use models::{
     DetectReason, FrameId, FrameRef, GuideStep, InputCapability, InputSourceKind, Millis,
     MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
 };
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds() {
-        // Scaffold smoke test; modules are added by later tasks.
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub use recorder::{ActionRecorder, Recording};
