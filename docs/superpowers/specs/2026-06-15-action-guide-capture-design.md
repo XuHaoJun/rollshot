@@ -58,10 +58,15 @@ warning.
 - Fullscreen or single-window Action Guide recording. Action Guide always
   records a user-selected region. This is deliberate: it bounds memory (worst
   case scales with region area, not screen size) and keeps Action Guide on the
-  shared overlay region-selection path alongside `Region`/`Scrolling`, so it
-  never touches the separate fullscreen overlay-bypass path
-  (`InitialCapturePath::Fullscreen`). Action Guide is not a `CaptureMode`; the
-  three image-acquisition modes (Region, Scrolling, Fullscreen) are unchanged.
+  shared overlay region-selection path — it is always `CaptureScope::Region`
+  (so `CaptureRequest::needs_overlay()` is true), alongside the other
+  region-scope workflows (`Screenshot`/`Scrolling`), and never reaches the
+  fullscreen overlay-bypass path (`CaptureScope::Fullscreen` →
+  `InitialCapturePath::Fullscreen`). Action Guide is `Workflow::ActionGuide`,
+  always `CaptureScope::Region`; the `Screenshot`/`Scrolling` workflows and the
+  `Region`/`Fullscreen` scopes are unchanged. The AG plan should extend
+  `CaptureRequest::is_supported()` to also reject `ActionGuide × Fullscreen`
+  (mirroring the existing `Scrolling × Fullscreen` rejection).
 - Reusing the existing single-image Result Workspace for a multi-step guide.
 
 ## Implementation Increments
@@ -103,11 +108,11 @@ rollshot action-guide
 ```
 
 The CLI launches `rollshot-app` into an app-level Action Guide workflow. Action
-Guide does not become a `CaptureMode` variant because Region, Scrolling, and
-Fullscreen describe image-acquisition workflows, while Action Guide
-coordinates capture, input observation, detection, review, and export — it is a
-separate workflow flag, analogous to KDE Spectacle's `videoMode` being distinct
-from its screenshot capture-mode enum.
+Guide is a first-class `Workflow::ActionGuide` variant (alongside `Screenshot`
+and `Scrolling`), always paired with `CaptureScope::Region`. The `Workflow` axis
+already answers "what we do with the captured frames", so Action Guide —
+coordinating capture, input observation, detection, review, and export — is a
+natural third workflow on that axis rather than a special case.
 
 P0 also adds an in-app GUI entry: an Action Guide button on the capture-overlay
 toolbar (see Toolbar Entry And Recording Controls below). Builds without the
@@ -139,23 +144,24 @@ selection overlay reused for recording with its confirm action changing from
 *Accept* to *Record* (`media-record`); and a centered elapsed-time indicator
 shown while recording with the rest of the capture chrome disabled:
 
-- **Entry button.** Add an Action Guide action to the capture-overlay toolbar
-  as a peer of — but distinct from — the `RegionMode` (📷) / `ScrollingMode`
-  (📜) mode toggles, e.g. `ToolbarAction::ActionGuide` (🎬, tooltip "Action
-  Guide"). It is an action, not a `CaptureMode`: activating it switches the
-  overlay into the Action Guide workflow rather than toggling an
-  image-acquisition mode. This keeps recording discoverable without the CLI,
-  mirroring Spectacle's peer "New Recording" button. The button exists only
-  when the `action-guide` feature is built.
-- **Region selection.** In Action Guide context the Region/Scrolling mode
-  toggles are hidden — switching capture mode mid-Action-Guide is invalid. The
-  confirm action becomes `Start Recording` (⏺) instead of the normal capture
+- **Entry button.** Add an Action Guide action (`ToolbarAction::ActionGuide`,
+  🎬, tooltip "Action Guide") to the capture-overlay toolbar as a peer of the
+  `RegionMode` (📷) / `ScrollingMode` (📜) workflow toggles. The toolbar is
+  already a workflow-switcher: those buttons send `ActivateWorkflow(Workflow)`
+  (📷 → `Screenshot`, 📜 → `Scrolling`), so the 🎬 button is a third peer that
+  activates `Workflow::ActionGuide` through the same `ActivateWorkflow(Workflow)`
+  message. This keeps recording discoverable without the CLI, mirroring
+  Spectacle's peer "New Recording" button. The button exists only when the
+  `action-guide` feature is built.
+- **Region selection.** In Action Guide context the `RegionMode`/`ScrollingMode`
+  workflow toggles are hidden — switching workflow mid-Action-Guide is invalid.
+  The confirm action becomes `Start Recording` (⏺) instead of the normal capture
   confirm; `Cancel` is unchanged. This mirrors Spectacle swapping *Accept* for
   *Record*.
 - **Active recording.** Recording starts immediately on `Start Recording` (no
   countdown, as in Spectacle). The controls then show a recording indicator
   plus elapsed time, the input-capability label (Semantic / Visual-only), and
-  `Finish` / `Cancel`; the mode toggles are disabled while recording. P0 has no
+  `Finish` / `Cancel`; the workflow toggles are disabled while recording. P0 has no
   pause/resume.
 - **Hand-off.** `Finish` runs detection (the brief `Detecting steps…` state,
   analogous to Spectacle's post-recording *Rendering* state) and opens the
@@ -724,7 +730,7 @@ automated tests cannot reliably manipulate Linux device ACLs or macOS TCC.
   scrolling or single-image result flow.
 - The toolbar Action Guide button enters the Action Guide workflow; region
   selection then shows `Start Recording` (not the normal capture confirm) and
-  hides the Region/Scrolling mode toggles. The button is absent when the
+  hides the `RegionMode`/`ScrollingMode` workflow toggles. The button is absent when the
   `action-guide` feature is off.
 - Region selection uses the active Linux and macOS platform paths and returns
   a region without starting the `Stitcher`.
@@ -771,8 +777,9 @@ automated tests cannot reliably manipulate Linux device ACLs or macOS TCC.
 - Deterministic detection and export work offline without an LLM or API key.
 - At least ten representative short workflows can be recorded without
   crashing.
-- Existing Region, Scrolling, Fullscreen, and Result Workspace behavior remains
-  unchanged.
+- Existing capture behavior is unchanged: the `Screenshot`/`Scrolling` workflows,
+  the `Region`/`Fullscreen` scopes, and the Result Workspace all behave as
+  before.
 
 ## Deferred Work
 
