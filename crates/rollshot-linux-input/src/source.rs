@@ -165,6 +165,11 @@ impl EvdevInputSource {
             self.readers.push(handle);
         }
 
+        if self.readers.is_empty() {
+            tracing::warn!(target: TARGET, "no evdev readers could be started");
+            return Err(DegradedReason::SourceStartFailed);
+        }
+
         tracing::info!(target: TARGET, readers = self.readers.len(), "evdev source started");
         Ok(InputCapability::SemanticEvents)
     }
