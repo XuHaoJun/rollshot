@@ -1357,7 +1357,10 @@ mod tests {
         };
         let result = Component::new(&config);
         assert!(result.is_err(), "fullscreen scope must be rejected");
-        let err = result.unwrap_err().to_string();
+        let err = match result {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("fullscreen scope must be rejected"),
+        };
         assert!(
             err.contains("fullscreen"),
             "error must mention fullscreen: {err}"
