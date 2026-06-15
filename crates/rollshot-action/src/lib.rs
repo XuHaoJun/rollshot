@@ -8,9 +8,11 @@
 
 mod diagnostics;
 mod error;
+mod input;
 mod models;
 
 pub use error::{DetectError, ExportError};
+pub use input::{SemanticInputSource, VisualOnlySource};
 pub use models::{
     default_title, CandidateId, CandidateKind, CandidateStep, CaptureRegion, DegradedReason,
     DetectReason, FrameId, FrameRef, GuideStep, InputCapability, InputSourceKind, Millis,
