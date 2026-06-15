@@ -1,0 +1,18 @@
+[package]
+name = "rollshot-linux-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+rollshot-action = { path = "../rollshot-action" }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+
+[lints]
+workspace = true
