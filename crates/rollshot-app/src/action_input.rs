@@ -5,9 +5,6 @@
 //! exercises it through the `action-guide` CLI probe. (See the plan's Scope
 //! Boundary.)
 
-// TODO: removed in Task 10 — the probe launch arm is the reachable host.
-#![allow(dead_code)]
-
 use rollshot_action::{
     ActionRecorder, CaptureRegion, DegradedReason, InputCapability, SemanticInputSource,
     VisualOnlySource,
@@ -89,6 +86,7 @@ impl ActionInputSession {
         self.capability
     }
 
+    #[allow(dead_code)]
     pub fn capability(&self) -> InputCapability {
         self.capability
     }
