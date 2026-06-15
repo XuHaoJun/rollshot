@@ -55,7 +55,42 @@ warning.
   ACL setup.
 - Input injection, macro playback, or macOS Accessibility/PostEvent permission.
 - Making absolute click coordinates required for detection or export.
+- Fullscreen or single-window Action Guide recording. Action Guide always
+  records a user-selected region. This is deliberate: it bounds memory (worst
+  case scales with region area, not screen size) and keeps Action Guide on the
+  shared overlay region-selection path alongside `Region`/`Scrolling`, so it
+  never touches the separate fullscreen overlay-bypass path
+  (`InitialCapturePath::Fullscreen`). Action Guide is not a `CaptureMode`; the
+  three image-acquisition modes (Region, Scrolling, Fullscreen) are unchanged.
 - Reusing the existing single-image Result Workspace for a multi-step guide.
+
+## Implementation Increments
+
+P0 lands in two sequential increments so the first shippable artifact is fully
+CI-testable and free of unsafe FFI and platform permission setup:
+
+- **P0a — Visual-only guide (1 new crate).** `rollshot-action` (models, frame
+  store, deterministic detector, guide model, exporter) plus the `rollshot-app`
+  toolbar Action Guide entry button, recording controls, Action Guide Timeline
+  Workspace, and export. Recording runs in
+  `InputCapability::VisualOnly`. The `SemanticInputSource` trait and a
+  `VisualOnlySource` no-op implementation ship here, so the platform seam is
+  fixed before any platform code exists. No `/dev/input`, no event tap, no
+  TCC/ACL.
+- **P0b — Semantic input (2 new crates).** `rollshot-linux-input` (evdev) and
+  `rollshot-macos-input` (CoreGraphics event tap, unsafe-isolation crate). Each
+  implements the P0a `SemanticInputSource` trait and is wired into the app so
+  detection upgrades from `VisualOnly` to `SemanticEvents` with no change to
+  `rollshot-action`.
+
+The end-state architecture below is identical for both increments; only the
+input-source implementations differ. Platform Input Tests and the manual
+platform-permission verification belong to P0b.
+
+Each increment must extend CI to build, `fmt --check`, clippy
+(`-D warnings`), and test the `action-guide` feature on both Linux and macOS
+hosts (P0b adds the new unsafe-isolation crate to the unsafe-allowed lint
+set). A feature-off build must still compile with no new command exposed.
 
 ## Product Behavior
 
@@ -70,22 +105,61 @@ rollshot action-guide
 The CLI launches `rollshot-app` into an app-level Action Guide workflow. Action
 Guide does not become a `CaptureMode` variant because Region, Scrolling, and
 Fullscreen describe image-acquisition workflows, while Action Guide
-coordinates capture, input observation, detection, review, and export.
-Builds without the Cargo feature expose no new command or app launch intent.
+coordinates capture, input observation, detection, review, and export — it is a
+separate workflow flag, analogous to KDE Spectacle's `videoMode` being distinct
+from its screenshot capture-mode enum.
 
-The recording flow:
+P0 also adds an in-app GUI entry: an Action Guide button on the capture-overlay
+toolbar (see Toolbar Entry And Recording Controls below). Builds without the
+Cargo feature expose no new command, no app launch intent, and no toolbar
+button.
 
-1. Open the existing platform-appropriate region-selection UI.
-2. Let the user select the region to document.
+The recording flow (reached from either the CLI command or the toolbar button):
+
+1. Open the existing platform-appropriate region-selection UI in Action Guide
+   context.
+2. Let the user select the region to document and confirm with `Start
+   Recording`.
 3. Start the frame stream and semantic input source for the selected region.
-4. Show compact recording controls with elapsed time, input capability, and
-   `Finish` / `Cancel`.
-5. On `Finish`, stop both sources and run deterministic detection.
+4. Show compact recording controls with a recording indicator, elapsed time,
+   input capability, and `Finish` / `Cancel`.
+5. On `Finish`, stop both sources and run deterministic detection (controls
+   show a brief `Detecting steps…` state).
 6. Open the Action Guide Timeline Workspace with generated steps.
 
 `Cancel` discards the temporary session and opens no workspace. P0 does not
 define a global hotkey; recording controls remain the authoritative way to
 finish or cancel.
+
+### Toolbar Entry And Recording Controls
+
+Modeled on KDE Spectacle's recording UX — a `RecordingModeMenuButton` that is a
+*peer* of the screenshot button (not a screenshot mode); the rectangular-region
+selection overlay reused for recording with its confirm action changing from
+*Accept* to *Record* (`media-record`); and a centered elapsed-time indicator
+shown while recording with the rest of the capture chrome disabled:
+
+- **Entry button.** Add an Action Guide action to the capture-overlay toolbar
+  as a peer of — but distinct from — the `RegionMode` (📷) / `ScrollingMode`
+  (📜) mode toggles, e.g. `ToolbarAction::ActionGuide` (🎬, tooltip "Action
+  Guide"). It is an action, not a `CaptureMode`: activating it switches the
+  overlay into the Action Guide workflow rather than toggling an
+  image-acquisition mode. This keeps recording discoverable without the CLI,
+  mirroring Spectacle's peer "New Recording" button. The button exists only
+  when the `action-guide` feature is built.
+- **Region selection.** In Action Guide context the Region/Scrolling mode
+  toggles are hidden — switching capture mode mid-Action-Guide is invalid. The
+  confirm action becomes `Start Recording` (⏺) instead of the normal capture
+  confirm; `Cancel` is unchanged. This mirrors Spectacle swapping *Accept* for
+  *Record*.
+- **Active recording.** Recording starts immediately on `Start Recording` (no
+  countdown, as in Spectacle). The controls then show a recording indicator
+  plus elapsed time, the input-capability label (Semantic / Visual-only), and
+  `Finish` / `Cancel`; the mode toggles are disabled while recording. P0 has no
+  pause/resume.
+- **Hand-off.** `Finish` runs detection (the brief `Detecting steps…` state,
+  analogous to Spectacle's post-recording *Rendering* state) and opens the
+  Timeline Workspace.
 
 ### Recording State And Warning
 
@@ -207,11 +281,43 @@ rollshot-app
     Action Guide Timeline Workspace
 ```
 
+### Session Lifecycle
+
+```text
+SelectingRegion
+   | region chosen (+ output/display)
+   v
+Recording  (capability = SemanticEvents | VisualOnly{reason})
+   |  \- frame-source / Screen-Recording failure -> FAIL (fatal, no guide)
+   |  \- semantic-input failure -> stay Recording, capability=VisualOnly
+   |  \- Cancel -> Discarded
+   v  Finish (stop frame + input sources, in that order)
+Detecting
+   |  \- detector error -> Error (session preserved, retry; no partial export)
+   v
+Reviewing  (rename / delete / replace keyframe)
+   |  \- Discard -> Discarded
+   v  Export Guide
+Exporting  (write temp sibling dir, then atomic rename into place)
+   |  \- export error -> back to Reviewing (session intact, retry)
+   v
+Done  (temporary assets deleted)
+```
+
+This state machine should be embedded as a doc-comment on the
+`rollshot-app` Action Guide product type so the transitions stay legible
+alongside the code.
+
 ### `rollshot-action`
 
 Add a platform-neutral crate responsible for:
 
 - Action session, frame, semantic event, candidate, and guide-step models.
+- The `SemanticInputSource` trait and the `VisualOnlySource` no-op
+  implementation (the platform impls live in P0b crates).
+- A push-style frame ingestion API (`RgbaImage` + capture timestamp); it does
+  not depend on `FrameStream` or any capture backend, which keeps it
+  platform-neutral and fixture-testable.
 - A bounded temporary full-resolution frame ring buffer and retained candidate
   windows.
 - A bounded downsampled analysis queue.
@@ -229,7 +335,14 @@ It must be usable with fixture frames and fixture semantic events in tests.
 `rollshot-app` owns the Action Guide product lifecycle:
 
 - Route the app-level Action Guide launch intent.
-- Reuse the active Linux and macOS region-selection paths.
+- Reuse the active Linux and macOS region-selection paths in a stitch-free
+  mode that returns the selected region (and the chosen output/display)
+  without starting the `Stitcher`. The existing overlay couples region pick to
+  `begin_stitch`, so Action Guide needs a region-only result path.
+- Own the frame reader thread: pull `next_frame()` through the reusable
+  `SendFrameStream` wrapper, crop with the existing `crop_frame`, and push the
+  cropped frame into `rollshot-action`. This keeps capture off the analysis
+  path.
 - Start and stop frame and semantic-input sources together.
 - Surface semantic-input capability and degraded warnings.
 - Transition from recording to detection to timeline workspace.
@@ -245,13 +358,22 @@ ordered collection of images and metadata rather than one editable image.
 
 - Reuse existing platform capture backends and `FrameStream`.
 - Supply timestamped RGBA frames for the selected region.
+- Expose a reusable `SendFrameStream` wrapper. `FrameStream` is not `Send` (the
+  Linux PipeWire backend holds `Rc` handles), and `rollshot-iced-overlay`
+  already hand-rolls `#[allow(unsafe_code)] unsafe impl Send` to move it onto a
+  reader thread. Lift that single audited wrapper into `rollshot-capture` so
+  both the scrolling overlay and Action Guide reuse it instead of duplicating
+  the `unsafe` impl.
 - Do not own semantic input events or Action Guide models.
 - Do not start the scrolling stitcher for Action Guide.
 
-The Action Guide consumer must copy or retain frames without blocking the
-capture producer. When processing falls behind, the bounded analysis queue may
-drop intermediate analysis work, while the temporary frame store retains the
-frames required around known event/candidate windows.
+Frame ingestion seam: `rollshot-app` owns the reader thread and *pushes*
+cropped `RgbaImage`s into `rollshot-action`, which never sees `FrameStream`.
+When processing falls behind, the bounded analysis queue drops intermediate
+analysis work, while the temporary frame store retains the frames required
+around known event/candidate windows. Frames are cropped to the selected
+region before the ring buffer, so retained memory scales with region area, not
+screen size.
 
 ### `rollshot-macos-input`
 
@@ -309,11 +431,41 @@ pub enum InputCapability {
     VisualOnly { reason: DegradedReason },
 }
 
+pub enum DegradedReason {
+    /// macOS Input Monitoring denied, or Linux evdev ACL missing.
+    PermissionDenied,
+    /// Linux: no readable `/dev/input/event*` device.
+    NoInputDevice,
+    /// Source could not start (tap creation failed, no reader opened).
+    SourceStartFailed,
+    /// Source started but failed mid-session (null tap, all readers died).
+    RuntimeFailure,
+}
+
+/// Implemented in P0a by `VisualOnlySource`, and in P0b by
+/// `rollshot-linux-input` / `rollshot-macos-input`. Platform impls run their
+/// own listener thread and push privacy-filtered, burst-aggregated
+/// `TimedSemanticAction`s. `rollshot-action` depends only on this trait, never
+/// on a platform crate.
+pub trait SemanticInputSource: Send {
+    /// Start observing for `region`; on `Err` the caller falls back to
+    /// `VisualOnly { reason }` and recording continues.
+    fn start(&mut self, region: CaptureRegion) -> Result<InputCapability, DegradedReason>;
+    /// Drain semantic actions since the last poll. Never returns raw key
+    /// codes, typed text, device names, or device paths.
+    fn poll(&mut self) -> Vec<TimedSemanticAction>;
+    /// Disable the source and release native resources.
+    fn stop(&mut self);
+}
+
 pub struct ActionSession {
     pub capture_region: CaptureRegion,
     pub input_source: InputSourceKind,
     pub input_capability: InputCapability,
-    pub frames: Vec<FrameRef>,
+    // Only the bounded frames retained around candidate windows — NOT every
+    // captured frame. The full-resolution ring buffer (see Frame Pipeline) is
+    // overwritten continuously and is never part of the session.
+    pub retained_frames: Vec<FrameRef>,
     pub semantic_events: Vec<TimedSemanticAction>,
     pub candidates: Vec<CandidateStep>,
     pub guide_steps: Vec<GuideStep>,
@@ -328,6 +480,11 @@ depend on a position being present.
 Raw native events may exist transiently inside a platform source long enough
 to classify them, but they must not enter `ActionSession`, diagnostics, or
 `session.json`.
+
+`FrameRef` points at a retained candidate-window frame in the bounded temporary
+frame store, not at a slot in the live ring buffer. The session never holds the
+complete recording; see Frame Pipeline And Temporary Storage for the fixed
+bounds.
 
 ## Platform Input Sources
 
@@ -440,6 +597,32 @@ must not block or terminate capture.
 Temporary session data is deleted on discard, cancellation, successful export,
 or recoverable cleanup at the next app start after an abnormal termination.
 
+### Fixed Bounds And Capture Rate
+
+The spec mandates explicit bounds; concrete P0 starting values (tune later):
+
+- **Capture rate:** request ~10-15 fps for Action Guide (the scrolling default
+  is 5 fps). The detector windows depend on it — click confirmation
+  `[t-150 ms, t+450 ms]`, typing pause `700 ms`, scroll dwell `500-800 ms`. At
+  5 fps a click window holds only ~3 frames; 10-15 fps gives stable
+  before/peak/after selection without unbounded cost.
+- **Full-res ring buffer:** a rolling window of the most recent ~2-4 s
+  (e.g. 30-60 cropped frames at 15 fps), continuously overwritten.
+- **Analysis queue:** holds downsampled luma only (e.g. 320-480 px wide), not
+  full RGBA; latest-useful-work, drops redundant intermediate frames under load.
+- **Retained candidate window:** a bounded copy of N-before + M-after frames per
+  candidate (e.g. <= ~12) into temporary candidate storage.
+- **Nearby-frame strip:** a small ordered subset (e.g. <= 7) of the retained
+  window.
+- **Max session length:** cap recording (e.g. 90 s) to bound temporary storage
+  and detector work; surface the cap in the recording controls.
+
+Worst-case memory is the ring buffer plus all retained candidate windows — both
+fixed, independent of session length. Because frames are cropped to the
+selected region first, memory scales with region area: a full-1080p region is
+~8 MB/frame, but a typical selected region is far smaller. Ring depth and
+downsample width are the two knobs if the ceiling is too high.
+
 ## Deterministic Detection
 
 P0 uses lightweight visual metrics plus semantic event timing:
@@ -491,6 +674,10 @@ after it for replacement.
   the user can retry or choose another directory.
 - Cancellation or discard removes temporary session assets and produces no
   export.
+- Each new codepath returns a typed error, never a bare bool/`Option` or a
+  swallowed `Result`: semantic-input start/runtime failures map to
+  `DegradedReason`; export uses an `ExportError` (I/O, partial-write rolled
+  back); detection returns a `Result`.
 
 Runtime diagnostics use stable explicit `rollshot::*` targets and structured,
 privacy-safe fields.
@@ -509,6 +696,13 @@ privacy-safe fields.
 - Rename, delete, and keyframe replacement update the final guide model.
 - Markdown references exactly the exported keyframe filenames.
 - `session.json` contains capability/degraded metadata and no raw input fields.
+- Capture is never blocked: a slow fixture detector with a full analysis queue
+  drops intermediate analysis frames while the candidate-window store still
+  retains the frames needed for keyframe selection.
+- Export is atomic: an injected write failure mid-export leaves no
+  `action-guide/` directory and preserves the editable session.
+- A detector failure after recording preserves the session and surfaces an
+  actionable error without writing a partial export folder.
 
 ### Platform Input Tests
 
@@ -528,7 +722,14 @@ automated tests cannot reliably manipulate Linux device ACLs or macOS TCC.
 
 - `rollshot action-guide` launches the Action Guide workflow rather than a
   scrolling or single-image result flow.
-- Region selection uses the active Linux and macOS platform paths.
+- The toolbar Action Guide button enters the Action Guide workflow; region
+  selection then shows `Start Recording` (not the normal capture confirm) and
+  hides the Region/Scrolling mode toggles. The button is absent when the
+  `action-guide` feature is off.
+- Region selection uses the active Linux and macOS platform paths and returns
+  a region without starting the `Stitcher`.
+- The extracted `SendFrameStream` drives both the scrolling overlay and the
+  Action Guide reader (the existing overlay capture test still passes).
 - Recording finish stops frame and input sources before detection.
 - Visual-only advisory remains visible during recording and in the workspace.
 - Selecting a nearby frame replaces the keyframe without opening another
