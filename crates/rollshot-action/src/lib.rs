@@ -9,12 +9,14 @@
 mod diagnostics;
 mod error;
 mod events;
+mod frame_store;
 mod input;
 mod metrics;
 mod models;
 
 pub use error::{DetectError, ExportError};
 pub use events::EventAggregator;
+pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
 pub use input::{SemanticInputSource, VisualOnlySource};
 pub use metrics::{changed_area_ratio, downsample_luma, masked_luma_diff, LumaPlane, Rect};
 pub use models::{
