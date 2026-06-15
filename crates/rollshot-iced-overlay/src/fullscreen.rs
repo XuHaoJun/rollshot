@@ -3,10 +3,10 @@
 //! state on both platforms — this module owns the shared completion; the two
 //! platform entry points only decide whether to call it.
 //!
-//!   launch JSON: initial_mode
+//!   launch JSON: initial_mode → CaptureRequest
 //!          │
-//!          ├─ "fullscreen" ──┐
-//!          │                 ▼
+//!          ├─ scope: Fullscreen ──┐
+//!          │                      ▼
 //!          │   ┌─────────────────────────────────────────────┐
 //!          │   │ Linux:  linux_runner::run_initial_path       │
 //!          │   │ macOS:  MacosProduct::new (initial_capture_  │
@@ -21,10 +21,24 @@
 //!          │       Ok(None)  on UserCancelled                  presentation
 //!          │       Err(..)   on Unsupported / backend error    (Workspace /
 //!          │                                                    thumbnail)
-//!          └─ "region" | "scrolling" ─► overlay session (unchanged)
+//!          └─ scope: Region ─► overlay session (unchanged)
 //!
 use crate::{CaptureResult, OverlayConfig, OverlayError};
-use rollshot_capture::{CaptureError, CaptureMode, OneShotCapture};
+use rollshot_capture::{CaptureError, CaptureScope, OneShotCapture, Workflow};
+
+fn validate_request(config: &OverlayConfig) -> Result<(), OverlayError> {
+    if config.request.scope != CaptureScope::Fullscreen {
+        return Err(OverlayError::Capture(
+            "direct fullscreen completion requires fullscreen scope".to_string(),
+        ));
+    }
+    if config.request.workflow != Workflow::Screenshot {
+        return Err(OverlayError::Capture(
+            "scrolling capture is not supported in fullscreen mode".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 pub(crate) fn capture_with<F>(
     config: &OverlayConfig,
@@ -33,11 +47,7 @@ pub(crate) fn capture_with<F>(
 where
     F: FnOnce(bool) -> Result<OneShotCapture, CaptureError>,
 {
-    if config.initial_mode != CaptureMode::Fullscreen {
-        return Err(OverlayError::Capture(
-            "direct fullscreen completion requires fullscreen mode".to_string(),
-        ));
-    }
+    validate_request(config)?;
 
     match capture_once(config.show_cursor) {
         Ok(capture) => Ok(Some(CaptureResult {
@@ -50,9 +60,10 @@ where
 }
 
 pub fn capture(config: &OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
+    validate_request(config)?;
     tracing::info!(
         target: crate::diagnostics::TARGET_OVERLAY,
-        mode = ?config.initial_mode,
+        request = ?config.request,
         backend = %config.backend,
         show_cursor = config.show_cursor,
         "direct fullscreen capture starting"
@@ -76,15 +87,15 @@ pub fn capture(config: &OverlayConfig) -> Result<Option<CaptureResult>, OverlayE
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
-    use rollshot_capture::{CaptureMode, DisplayTarget, Region, Size};
+    use rollshot_capture::{CaptureRequest, DisplayTarget, Region, Size};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn config(mode: CaptureMode) -> OverlayConfig {
+    fn config(request: CaptureRequest) -> OverlayConfig {
         OverlayConfig {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: mode,
+            request,
             target_output_name: None,
         }
     }
@@ -111,9 +122,11 @@ mod tests {
 
     #[test]
     fn fullscreen_returns_the_unchanged_one_shot_image() {
-        let result = capture_with(&config(CaptureMode::Fullscreen), |_| Ok(one_shot()))
-            .unwrap()
-            .unwrap();
+        let result = capture_with(&config(CaptureRequest::screenshot_fullscreen()), |_| {
+            Ok(one_shot())
+        })
+        .unwrap()
+        .unwrap();
         assert_eq!(result.image.dimensions(), (2, 1));
         assert_eq!(result.image.get_pixel(0, 0).0, [1, 2, 3, 255]);
         assert!(result.stats.is_none());
@@ -123,7 +136,7 @@ mod tests {
     fn fullscreen_invokes_only_one_shot_acquisition() {
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         CALLS.store(0, Ordering::SeqCst);
-        capture_with(&config(CaptureMode::Fullscreen), |_| {
+        capture_with(&config(CaptureRequest::screenshot_fullscreen()), |_| {
             CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(one_shot())
         })
@@ -133,7 +146,7 @@ mod tests {
 
     #[test]
     fn cancellation_produces_no_result() {
-        let result = capture_with(&config(CaptureMode::Fullscreen), |_| {
+        let result = capture_with(&config(CaptureRequest::screenshot_fullscreen()), |_| {
             Err(rollshot_capture::CaptureError::UserCancelled)
         })
         .unwrap();
@@ -142,7 +155,35 @@ mod tests {
 
     #[test]
     fn non_fullscreen_mode_is_rejected() {
-        let err = capture_with(&config(CaptureMode::Region), |_| Ok(one_shot())).unwrap_err();
+        let err = capture_with(&config(CaptureRequest::screenshot_region()), |_| {
+            Ok(one_shot())
+        })
+        .unwrap_err();
         assert!(matches!(err, OverlayError::Capture(_)));
+    }
+
+    #[test]
+    fn unsupported_scrolling_fullscreen_is_rejected() {
+        let request = rollshot_capture::CaptureRequest {
+            workflow: rollshot_capture::Workflow::Scrolling,
+            scope: rollshot_capture::CaptureScope::Fullscreen,
+        };
+        let config = config(request);
+        let err = capture_with(&config, |_| Ok(one_shot())).unwrap_err();
+        assert!(matches!(err, OverlayError::Capture(_)));
+    }
+
+    #[test]
+    fn unsupported_request_is_rejected_before_backend_resolution() {
+        let request = rollshot_capture::CaptureRequest {
+            workflow: rollshot_capture::Workflow::Scrolling,
+            scope: rollshot_capture::CaptureScope::Fullscreen,
+        };
+        let mut config = config(request);
+        config.backend = "invalid-backend".to_string();
+
+        let err = capture(&config).unwrap_err().to_string();
+        assert!(err.contains("scrolling"), "err = {err}");
+        assert!(err.contains("fullscreen"), "err = {err}");
     }
 }

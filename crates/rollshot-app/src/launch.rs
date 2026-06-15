@@ -72,15 +72,35 @@ where
         ));
     }
 
-    let options: InteractiveLaunchOptions = serde_json::from_str(&payload)
+    let value: serde_json::Value = serde_json::from_str(&payload)
         .map_err(|err| format!("invalid --capture JSON payload: {err}"))?;
+
+    if value.get("initial_mode").is_some() {
+        return Err(
+            "the field `initial_mode` is no longer supported; use `initial_request` \
+             with {\"workflow\": \"...\", \"scope\": \"...\"} instead"
+                .to_string(),
+        );
+    }
+
+    let options: InteractiveLaunchOptions = serde_json::from_value(value)
+        .map_err(|err| format!("invalid --capture JSON payload: {err}"))?;
+
+    if !options.initial_request.is_supported() {
+        return Err(
+            "unsupported capture combination: scrolling + fullscreen is not wired; \
+             use scrolling + region or screenshot + fullscreen"
+                .to_string(),
+        );
+    }
+
     Ok(LaunchMode::Capture(options))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{extract_logging_args, parse_launch_args, LaunchMode};
-    use rollshot_capture::CaptureMode;
+    use rollshot_capture::CaptureRequest;
     use std::path::PathBuf;
 
     #[test]
@@ -91,7 +111,7 @@ mod tests {
                 assert_eq!(options.backend, "auto");
                 assert_eq!(options.fps, 5);
                 assert!(!options.show_cursor);
-                assert_eq!(options.initial_mode, CaptureMode::Scrolling);
+                assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
         }
     }
@@ -108,7 +128,7 @@ mod tests {
         match mode {
             LaunchMode::Capture(options) => {
                 assert_eq!(options.backend, "macos-sck");
-                assert_eq!(options.initial_mode, CaptureMode::Scrolling);
+                assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
         }
     }
@@ -185,30 +205,40 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_capture_payload_parses() {
+    fn fullscreen_capture_request_payload_parses() {
         let mode = parse_launch_args([
             "rollshot-app",
             "--capture",
-            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"fullscreen"}"#,
+            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"fullscreen"}}"#,
         ])
         .unwrap();
         assert!(matches!(
             mode,
-            LaunchMode::Capture(options) if options.initial_mode == CaptureMode::Fullscreen
+            LaunchMode::Capture(options) if options.initial_request == CaptureRequest::screenshot_fullscreen()
         ));
     }
 
     #[test]
-    fn legacy_screenshot_payload_parses_as_region() {
-        let mode = parse_launch_args([
+    fn legacy_initial_mode_payload_is_rejected_clearly() {
+        let err = parse_launch_args([
             "rollshot-app",
             "--capture",
-            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"screenshot"}"#,
+            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"region"}"#,
         ])
-        .unwrap();
-        assert!(matches!(
-            mode,
-            LaunchMode::Capture(options) if options.initial_mode == CaptureMode::Region
-        ));
+        .expect_err("legacy initial_mode should be rejected");
+        assert!(err.contains("initial_mode"), "err = {err}");
+        assert!(err.contains("initial_request"), "err = {err}");
+    }
+
+    #[test]
+    fn unsupported_scrolling_fullscreen_payload_is_rejected() {
+        let err = parse_launch_args([
+            "rollshot-app",
+            "--capture",
+            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"scrolling","scope":"fullscreen"}}"#,
+        ])
+        .expect_err("scrolling+fullscreen should be rejected");
+        assert!(err.contains("scrolling"), "err = {err}");
+        assert!(err.contains("fullscreen"), "err = {err}");
     }
 }

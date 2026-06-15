@@ -68,7 +68,8 @@ fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
                 backend = options.backend.as_str(),
                 fps = options.fps,
                 show_cursor = options.show_cursor,
-                initial_mode = ?options.initial_mode,
+                workflow = ?options.initial_request.workflow,
+                scope = ?options.initial_request.scope,
                 file_logging,
                 "capture session started"
             );
@@ -82,7 +83,7 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Resu
         backend: options.backend,
         fps: options.fps,
         show_cursor: options.show_cursor,
-        initial_mode: options.initial_mode,
+        request: options.initial_request,
         target_output_name: None,
     };
 

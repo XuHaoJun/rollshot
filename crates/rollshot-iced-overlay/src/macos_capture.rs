@@ -24,7 +24,7 @@ use crate::driver::{Driver, LiveOverlayEvent};
 use crate::workspace::WorkspacePhase;
 use crate::{CaptureResult, OverlayConfig, OverlayError};
 
-use rollshot_capture::CaptureMode;
+use rollshot_capture::{CaptureRequest, CaptureScope, Workflow};
 
 pub(crate) enum CaptureResource {
     Streaming(Driver),
@@ -70,27 +70,24 @@ static PREVIEW_RX: Mutex<
 > = Mutex::new(None);
 
 pub(crate) fn acquire_resource(
-    mode: CaptureMode,
+    workflow: Workflow,
     config: &OverlayConfig,
     factories: &ResourceFactories,
 ) -> Result<Option<(CaptureResource, Option<PreviewReceiver>)>, OverlayError> {
-    match mode {
-        CaptureMode::Scrolling => {
+    match workflow {
+        Workflow::Scrolling => {
             let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
             let driver =
                 (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
             Ok(Some((CaptureResource::Streaming(driver), Some(preview_rx))))
         }
-        CaptureMode::Region => {
+        Workflow::Screenshot => {
             let capture = match (factories.one_shot)(config.show_cursor) {
                 Ok(c) => c,
                 Err(rollshot_capture::CaptureError::UserCancelled) => return Ok(None),
                 Err(e) => return Err(OverlayError::Capture(e.to_string())),
             };
             Ok(Some((CaptureResource::OneShot(capture), None)))
-        }
-        CaptureMode::Fullscreen => {
-            unreachable!("fullscreen is routed before active overlay state")
         }
     }
 }
@@ -213,8 +210,8 @@ pub struct Component {
     driver: Option<Driver>,
     one_shot: Option<rollshot_capture::OneShotCapture>,
     preview_rx: Option<PreviewReceiver>,
-    /// Active capture mode, used by the region surface-mapping gate.
-    capture_mode: Option<CaptureMode>,
+    /// Active capture workflow, used by the region surface-mapping gate.
+    active_workflow: Option<Workflow>,
     /// A terminal outcome staged while mouse passthrough is being disabled
     /// (scrolling finish or cancel during scrolling). The original runner
     /// disabled passthrough on the overlay window *before* finishing, to avoid
@@ -236,13 +233,18 @@ impl Component {
     /// picker dismissed). The host opens the overlay window and feeds the boot
     /// task returned by [`Component::boot`].
     pub fn new(config: &OverlayConfig) -> Result<Option<Self>, OverlayError> {
-        tracing::info!(target: TARGET_OVERLAY, mode = ?config.initial_mode, "macos capture component starting");
+        if config.request.scope != CaptureScope::Region {
+            return Err(OverlayError::Overlay(
+                "fullscreen must not reach the macOS capture component".to_string(),
+            ));
+        }
+        tracing::info!(target: TARGET_OVERLAY, request = ?config.request, "macos capture component starting");
         #[cfg(not(test))]
         let factories = real_factories();
         #[cfg(test)]
         let factories = test_factories();
 
-        let acquired = acquire_resource(config.initial_mode, config, &factories)?;
+        let acquired = acquire_resource(config.request.workflow, config, &factories)?;
         let (resource, preview_rx) = match acquired {
             Some(r) => r,
             None => return Ok(None),
@@ -261,7 +263,7 @@ impl Component {
         };
 
         let overlay = OverlayState {
-            mode: config.initial_mode,
+            workflow: config.request.workflow,
             frozen,
             ..OverlayState::default()
         };
@@ -280,7 +282,7 @@ impl Component {
             driver,
             one_shot,
             preview_rx,
-            capture_mode: Some(config.initial_mode),
+            active_workflow: Some(config.request.workflow),
             pending_finish: None,
         }))
     }
@@ -471,7 +473,7 @@ impl Component {
         if Some(window) == self.controls_window {
             let toolbar = crate::toolbar::render_toolbar(
                 self.overlay.workspace.phase(),
-                self.overlay.mode,
+                self.overlay.workflow,
                 |action| {
                     Message(InternalMessage::Overlay(OverlayMessage::ToolbarAction(
                         action,
@@ -498,7 +500,7 @@ impl Component {
     /// Linux runner gate). On mismatch, report `Fatal` instead of cropping
     /// against the wrong geometry.
     fn validate_region_surface(&self) -> Option<HostEffect> {
-        if self.capture_mode != Some(CaptureMode::Region) {
+        if self.active_workflow != Some(Workflow::Screenshot) {
             return None;
         }
         let ws = self.overlay.window_size?;
@@ -719,8 +721,8 @@ impl Component {
                     }
                 }
             }
-            OverlayEffect::ActivateMode(new_mode) => {
-                self.activate_mode(new_mode);
+            OverlayEffect::ActivateWorkflow(new_workflow) => {
+                self.activate_workflow(new_workflow);
                 EffectOutcome::Task(Task::none())
             }
             OverlayEffect::Cancel => {
@@ -764,8 +766,8 @@ impl Component {
         }
     }
 
-    fn activate_mode(&mut self, new_mode: CaptureMode) {
-        tracing::info!(target: TARGET_OVERLAY, ?new_mode, "activating capture mode");
+    fn activate_workflow(&mut self, new_workflow: Workflow) {
+        tracing::info!(target: TARGET_OVERLAY, ?new_workflow, "activating capture workflow");
         if let Some(driver) = self.driver.take() {
             driver.cancel();
         }
@@ -776,7 +778,10 @@ impl Component {
             backend: "auto".to_string(),
             fps: 5,
             show_cursor: false,
-            initial_mode: new_mode,
+            request: CaptureRequest {
+                workflow: new_workflow,
+                scope: CaptureScope::Region,
+            },
             target_output_name: None,
         };
         #[cfg(not(test))]
@@ -784,9 +789,9 @@ impl Component {
         #[cfg(test)]
         let factories = test_factories();
 
-        match acquire_resource(new_mode, &config, &factories) {
+        match acquire_resource(new_workflow, &config, &factories) {
             Ok(Some((resource, preview_rx))) => {
-                self.capture_mode = Some(new_mode);
+                self.active_workflow = Some(new_workflow);
                 self.preview_rx = preview_rx;
                 match resource {
                     CaptureResource::Streaming(mut driver) => {
@@ -1071,7 +1076,7 @@ mod tests {
             driver: None,
             one_shot: None,
             preview_rx: None,
-            capture_mode: Some(CaptureMode::Region),
+            active_workflow: Some(Workflow::Screenshot),
             pending_finish: None,
         }
     }
@@ -1081,7 +1086,7 @@ mod tests {
     fn capture_component_with_one_shot() -> Component {
         let mut c = capture_component();
         c.one_shot = Some(fake_one_shot_capture());
-        c.overlay.mode = CaptureMode::Region;
+        c.overlay.workflow = Workflow::Screenshot;
         c.overlay.window_size = Some(iced::Size::new(1920.0, 1080.0));
         c.overlay.crop = Some(iced::Rectangle {
             x: 10.0,
@@ -1099,7 +1104,7 @@ mod tests {
     /// `FinishScrolling` handler with `mouse_passthrough_active`).
     fn capture_component_with_active_passthrough() -> Component {
         let mut c = capture_component();
-        c.overlay.mode = CaptureMode::Scrolling;
+        c.overlay.workflow = Workflow::Scrolling;
         c.overlay.window_id = Some(window::Id::unique());
         c.overlay.mouse_passthrough_active = true;
         // Stage a pending completion directly to model the post-finalize state,
@@ -1338,6 +1343,27 @@ mod tests {
                 WorkspacePhase::ScrollingCapture
             ),
             PassthroughAction::Noop
+        );
+    }
+
+    #[test]
+    fn component_rejects_fullscreen_scope_before_acquisition() {
+        let config = OverlayConfig {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+            request: rollshot_capture::CaptureRequest::screenshot_fullscreen(),
+            target_output_name: None,
+        };
+        let result = Component::new(&config);
+        assert!(result.is_err(), "fullscreen scope must be rejected");
+        let err = match result {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("fullscreen scope must be rejected"),
+        };
+        assert!(
+            err.contains("fullscreen"),
+            "error must mention fullscreen: {err}"
         );
     }
 
