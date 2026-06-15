@@ -1,3 +1,5 @@
+#[cfg(feature = "action-guide")]
+mod action_input;
 mod diagnostics;
 mod launch;
 
