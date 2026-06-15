@@ -47,6 +47,75 @@ pub enum CaptureMode {
     Fullscreen,
 }
 
+/// WHAT we do with the captured frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Workflow {
+    Screenshot,
+    #[default]
+    Scrolling,
+}
+
+/// WHAT AREA we capture. Resolves down to the backend `RegionMode`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureScope {
+    #[default]
+    Region,
+    Fullscreen,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CaptureRequest {
+    pub workflow: Workflow,
+    pub scope: CaptureScope,
+}
+
+impl CaptureRequest {
+    pub const fn screenshot_region() -> Self {
+        Self {
+            workflow: Workflow::Screenshot,
+            scope: CaptureScope::Region,
+        }
+    }
+    pub const fn screenshot_fullscreen() -> Self {
+        Self {
+            workflow: Workflow::Screenshot,
+            scope: CaptureScope::Fullscreen,
+        }
+    }
+    pub const fn scrolling_region() -> Self {
+        Self {
+            workflow: Workflow::Scrolling,
+            scope: CaptureScope::Region,
+        }
+    }
+
+    /// Region scope uses the selection overlay; Fullscreen captures directly.
+    pub fn needs_overlay(&self) -> bool {
+        matches!(self.scope, CaptureScope::Region)
+    }
+
+    /// `Scrolling × Fullscreen` is expressible but not wired in this refactor.
+    pub fn is_supported(&self) -> bool {
+        !matches!(
+            (self.workflow, self.scope),
+            (Workflow::Scrolling, CaptureScope::Fullscreen)
+        )
+    }
+}
+
+// --- Temporary migration bridge. Removed in Task 4. ---
+impl From<CaptureMode> for CaptureRequest {
+    fn from(mode: CaptureMode) -> Self {
+        match mode {
+            CaptureMode::Region => Self::screenshot_region(),
+            CaptureMode::Fullscreen => Self::screenshot_fullscreen(),
+            CaptureMode::Scrolling => Self::scrolling_region(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InteractiveLaunchOptions {
     pub backend: String,
@@ -207,5 +276,85 @@ mod tests {
     #[test]
     fn capture_options_default_has_no_target_output_name() {
         assert_eq!(CaptureOptions::default().target_output_name, None);
+    }
+
+    use super::{CaptureRequest, CaptureScope, Workflow};
+
+    #[test]
+    fn capture_request_default_is_scrolling_region() {
+        let r = CaptureRequest::default();
+        assert_eq!(r.workflow, Workflow::Scrolling);
+        assert_eq!(r.scope, CaptureScope::Region);
+    }
+
+    #[test]
+    fn needs_overlay_matches_region_scope() {
+        assert!(CaptureRequest::screenshot_region().needs_overlay());
+        assert!(CaptureRequest::scrolling_region().needs_overlay());
+        assert!(!CaptureRequest::screenshot_fullscreen().needs_overlay());
+    }
+
+    #[test]
+    fn is_supported_rejects_scrolling_fullscreen() {
+        let bad = CaptureRequest {
+            workflow: Workflow::Scrolling,
+            scope: CaptureScope::Fullscreen,
+        };
+        assert!(!bad.is_supported());
+        for r in [
+            CaptureRequest::screenshot_region(),
+            CaptureRequest::screenshot_fullscreen(),
+            CaptureRequest::scrolling_region(),
+        ] {
+            assert!(r.is_supported());
+        }
+    }
+
+    #[test]
+    fn legacy_capture_mode_maps_to_request() {
+        assert_eq!(
+            CaptureRequest::from(CaptureMode::Region),
+            CaptureRequest::screenshot_region()
+        );
+        assert_eq!(
+            CaptureRequest::from(CaptureMode::Fullscreen),
+            CaptureRequest::screenshot_fullscreen()
+        );
+        assert_eq!(
+            CaptureRequest::from(CaptureMode::Scrolling),
+            CaptureRequest::scrolling_region()
+        );
+    }
+
+    #[test]
+    fn capture_request_serde_round_trips_all_combinations() {
+        for (request, expected) in [
+            (
+                CaptureRequest::screenshot_region(),
+                r#"{"workflow":"screenshot","scope":"region"}"#,
+            ),
+            (
+                CaptureRequest::screenshot_fullscreen(),
+                r#"{"workflow":"screenshot","scope":"fullscreen"}"#,
+            ),
+            (
+                CaptureRequest::scrolling_region(),
+                r#"{"workflow":"scrolling","scope":"region"}"#,
+            ),
+            (
+                CaptureRequest {
+                    workflow: Workflow::Scrolling,
+                    scope: CaptureScope::Fullscreen,
+                },
+                r#"{"workflow":"scrolling","scope":"fullscreen"}"#,
+            ),
+        ] {
+            let json = serde_json::to_string(&request).unwrap();
+            assert_eq!(json, expected);
+            assert_eq!(
+                serde_json::from_str::<CaptureRequest>(&json).unwrap(),
+                request
+            );
+        }
     }
 }
