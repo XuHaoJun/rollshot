@@ -35,8 +35,8 @@ pub use one_shot::{
     OneShotBackendKind, OneShotCapture, OneShotCaptureBackend, MAX_ONE_SHOT_PIXELS,
 };
 pub use types::{
-    CaptureMode, CaptureOptions, CaptureProbe, CaptureRequest, CaptureScope, CapturedFrame,
-    FrameMetadata, InteractiveLaunchOptions, PixelFormat, Region, RegionMode, Size, Workflow,
+    CaptureOptions, CaptureProbe, CaptureRequest, CaptureScope, CapturedFrame, FrameMetadata,
+    InteractiveLaunchOptions, PixelFormat, Region, RegionMode, Size, Workflow,
 };
 
 #[cfg(test)]

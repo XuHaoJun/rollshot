@@ -37,16 +37,6 @@ impl Default for CaptureOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptureMode {
-    #[default]
-    Scrolling,
-    #[serde(alias = "screenshot")]
-    Region,
-    Fullscreen,
-}
-
 /// WHAT we do with the captured frames.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -102,17 +92,6 @@ impl CaptureRequest {
             (self.workflow, self.scope),
             (Workflow::Scrolling, CaptureScope::Fullscreen)
         )
-    }
-}
-
-// --- Temporary migration bridge. Removed in Task 4. ---
-impl From<CaptureMode> for CaptureRequest {
-    fn from(mode: CaptureMode) -> Self {
-        match mode {
-            CaptureMode::Region => Self::screenshot_region(),
-            CaptureMode::Fullscreen => Self::screenshot_fullscreen(),
-            CaptureMode::Scrolling => Self::scrolling_region(),
-        }
     }
 }
 
@@ -207,7 +186,7 @@ pub enum PixelFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureMode, CaptureOptions, CaptureRequest, InteractiveLaunchOptions};
+    use super::{CaptureOptions, CaptureRequest, InteractiveLaunchOptions};
 
     #[test]
     fn interactive_launch_options_round_trip_json() {
@@ -287,22 +266,6 @@ mod tests {
         ] {
             assert!(r.is_supported());
         }
-    }
-
-    #[test]
-    fn legacy_capture_mode_maps_to_request() {
-        assert_eq!(
-            CaptureRequest::from(CaptureMode::Region),
-            CaptureRequest::screenshot_region()
-        );
-        assert_eq!(
-            CaptureRequest::from(CaptureMode::Fullscreen),
-            CaptureRequest::screenshot_fullscreen()
-        );
-        assert_eq!(
-            CaptureRequest::from(CaptureMode::Scrolling),
-            CaptureRequest::scrolling_region()
-        );
     }
 
     #[test]
