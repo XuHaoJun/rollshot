@@ -24,7 +24,7 @@
 //!          └─ scope: Region ─► overlay session (unchanged)
 //!
 use crate::{CaptureResult, OverlayConfig, OverlayError};
-use rollshot_capture::{CaptureError, CaptureScope, OneShotCapture};
+use rollshot_capture::{CaptureError, CaptureScope, OneShotCapture, Workflow};
 
 pub(crate) fn capture_with<F>(
     config: &OverlayConfig,
@@ -36,6 +36,11 @@ where
     if config.request.scope != CaptureScope::Fullscreen {
         return Err(OverlayError::Capture(
             "direct fullscreen completion requires fullscreen scope".to_string(),
+        ));
+    }
+    if config.request.workflow != Workflow::Screenshot {
+        return Err(OverlayError::Capture(
+            "scrolling capture is not supported in fullscreen mode".to_string(),
         ));
     }
 
@@ -148,6 +153,17 @@ mod tests {
             Ok(one_shot())
         })
         .unwrap_err();
+        assert!(matches!(err, OverlayError::Capture(_)));
+    }
+
+    #[test]
+    fn unsupported_scrolling_fullscreen_is_rejected() {
+        let request = rollshot_capture::CaptureRequest {
+            workflow: rollshot_capture::Workflow::Scrolling,
+            scope: rollshot_capture::CaptureScope::Fullscreen,
+        };
+        let config = config(request);
+        let err = capture_with(&config, |_| Ok(one_shot())).unwrap_err();
         assert!(matches!(err, OverlayError::Capture(_)));
     }
 }

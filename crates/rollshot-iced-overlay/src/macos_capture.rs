@@ -1347,6 +1347,24 @@ mod tests {
     }
 
     #[test]
+    fn component_rejects_fullscreen_scope_before_acquisition() {
+        let config = OverlayConfig {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+            request: rollshot_capture::CaptureRequest::screenshot_fullscreen(),
+            target_output_name: None,
+        };
+        let result = Component::new(&config);
+        assert!(result.is_err(), "fullscreen scope must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("fullscreen"),
+            "error must mention fullscreen: {err}"
+        );
+    }
+
+    #[test]
     fn controls_cursor_coordinates_are_mapped_to_overlay() {
         let message = controls_message_to_overlay(
             OverlayMessage::IcedEvent(Event::Mouse(iced::mouse::Event::CursorMoved {
