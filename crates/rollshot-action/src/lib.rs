@@ -6,8 +6,11 @@
 //! only privacy-filtered data: never raw key codes, typed text, device names,
 //! or device paths. See `docs/superpowers/specs/2026-06-15-action-guide-capture-design.md`.
 
+mod diagnostics;
+mod error;
 mod models;
 
+pub use error::{DetectError, ExportError};
 pub use models::{
     default_title, CandidateId, CandidateKind, CandidateStep, CaptureRegion, DegradedReason,
     DetectReason, FrameId, FrameRef, GuideStep, InputCapability, InputSourceKind, Millis,

@@ -1,0 +1,59 @@
+//! Typed errors for the Action Guide engine. Detection and export return
+//! `Result` so the app can preserve the session and surface an actionable error
+//! instead of writing a partial export.
+
+/// Detection failure. Reserved so `ActionRecorder::finish`-style entry points
+/// can return `Result` in the app integration without a breaking change; the
+/// P0a in-process detector does not currently produce these, but the type fixes
+/// the seam (spec §Failure Handling: "detection returns a `Result`").
+#[derive(Debug, thiserror::Error)]
+pub enum DetectError {
+    #[error("detection failed: {message}")]
+    Failed { message: String },
+}
+
+/// Export failure. On any error, the exporter leaves no partial `action-guide/`
+/// directory and the editable session stays intact (spec §Export).
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    #[error("export I/O error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to encode PNG at {path}: {source}")]
+    Encode {
+        path: String,
+        #[source]
+        source: image::ImageError,
+    },
+    #[error("cannot export a guide with no steps")]
+    Empty,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_error_messages_are_descriptive() {
+        let io = ExportError::Io {
+            path: "out/steps.md".into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(io.to_string().contains("out/steps.md"), "{io}");
+        assert_eq!(
+            ExportError::Empty.to_string(),
+            "cannot export a guide with no steps"
+        );
+    }
+
+    #[test]
+    fn detect_error_message_is_actionable() {
+        let err = DetectError::Failed {
+            message: "frame decode failed".to_string(),
+        };
+        assert_eq!(err.to_string(), "detection failed: frame decode failed");
+    }
+}
