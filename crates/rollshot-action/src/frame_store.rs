@@ -142,6 +142,11 @@ impl FrameStore {
         self.retained.get(&id)
     }
 
+    #[cfg(test)]
+    pub fn retained_ids_for_test(&self) -> Vec<crate::models::FrameId> {
+        self.retained.keys().copied().collect()
+    }
+
     /// A bounded, time-ordered subset of `window` (size <= `nearby_max`)
     /// centered on `keyframe`, for the replacement strip.
     pub fn nearby(&self, window: &[FrameId], keyframe: FrameId) -> Vec<FrameId> {
