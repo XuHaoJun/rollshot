@@ -205,7 +205,31 @@ mod tests {
         }
     }
 
+    // Pin the process-global tracing max level so a thread-local capture
+    // subscriber reliably sees its events. `tracing` consults a process-global
+    // `MAX_LEVEL` fast path before dispatching to the current thread's
+    // subscriber, and that value is recomputed by `rebuild_interest_cache`
+    // whenever any dispatcher is registered/dropped. Under parallel test
+    // execution another test can churn dispatchers concurrently (on macOS the
+    // scap/ScreenCaptureKit probe does), transiently dropping `MAX_LEVEL` below
+    // WARN and silently filtering out our captured event. A permanent global
+    // no-op subscriber keeps `MAX_LEVEL` pinned at TRACE so the recompute can
+    // never filter below the level our capture subscriber asks for.
+    fn pin_global_tracing_level() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::TRACE)
+                    .with_writer(std::io::sink)
+                    .finish(),
+            );
+        });
+    }
+
     fn capture_logs(run: impl FnOnce()) -> String {
+        pin_global_tracing_level();
         let writer = LogWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
