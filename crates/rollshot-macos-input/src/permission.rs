@@ -29,9 +29,9 @@ pub fn open_input_monitoring_settings() {}
 
 #[cfg(target_os = "macos")]
 pub fn input_monitoring_status() -> InputMonitoringStatus {
-    // SAFETY: CGPreflightListenEventAccess takes no arguments and returns a
-    // Boolean; it has no ownership side effects.
-    let granted = unsafe { objc2_core_graphics::CGPreflightListenEventAccess() };
+    // CGPreflightListenEventAccess takes no arguments, returns a Boolean, and is
+    // a safe binding in objc2-core-graphics.
+    let granted = objc2_core_graphics::CGPreflightListenEventAccess();
     if granted {
         InputMonitoringStatus::Granted
     } else {
@@ -43,9 +43,9 @@ pub fn input_monitoring_status() -> InputMonitoringStatus {
 
 #[cfg(target_os = "macos")]
 pub fn request_input_monitoring() -> InputMonitoringStatus {
-    // SAFETY: CGRequestListenEventAccess prompts (once) and returns whether
-    // access is now granted; no ownership side effects.
-    let granted = unsafe { objc2_core_graphics::CGRequestListenEventAccess() };
+    // CGRequestListenEventAccess prompts (once) and returns whether access is
+    // now granted; it is a safe binding in objc2-core-graphics.
+    let granted = objc2_core_graphics::CGRequestListenEventAccess();
     if granted {
         InputMonitoringStatus::Granted
     } else {

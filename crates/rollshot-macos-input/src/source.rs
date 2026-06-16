@@ -82,6 +82,15 @@ impl SemanticInputSource for MacosInputSource {
     }
 }
 
+impl Drop for MacosInputSource {
+    /// Stop the tap if the caller dropped the source without calling `stop`
+    /// (e.g. a panic between `start` and `stop`), so input is never observed
+    /// past the session by construction. `stop` is idempotent.
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 impl MacosInputSource {
     fn start_platform(
@@ -179,6 +188,8 @@ mod macos {
         CGEventType,
     };
 
+    use crate::classify::RawCgKind;
+
     use super::{Shared, TARGET};
 
     /// A `Send` handle to the tap thread's run loop, used only to stop it.
@@ -242,7 +253,13 @@ mod macos {
     }
 
     /// The tap callback. Listen-only, so the returned event pointer is ignored
-    /// by the system; we return it unchanged. The body is kept panic-free.
+    /// by the system; we return it unchanged.
+    ///
+    /// The `extern "C-unwind"` ABI is required to match the objc2
+    /// `CGEventTapCallBack` binding, so a panic here would unwind into
+    /// CoreFoundation's C frames (UB). The body is written panic-free, and the
+    /// `catch_unwind` below is defense-in-depth so a future edit can never cross
+    /// the FFI boundary.
     ///
     /// # Safety
     /// `user_info` is the `*mut CallbackCtx` we passed to `CGEventTapCreate`,
@@ -253,26 +270,32 @@ mod macos {
         event: NonNull<CGEvent>,
         user_info: *mut std::ffi::c_void,
     ) -> *mut CGEvent {
-        let ctx = &*(user_info as *const CallbackCtx);
+        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let ctx = &*(user_info as *const CallbackCtx);
 
-        // Re-enable after an inactivity timeout (the OS disables the tap). The
-        // spec requires this; the tap handle was stored into ctx after creation.
-        if matches!(event_type, CGEventType::TapDisabledByTimeout) {
-            if let Some(tap) = ctx.tap.get() {
-                // SAFETY: `tap` is the live mach port for this very tap.
-                CGEvent::tap_enable(tap, true);
+            // Re-enable after an inactivity timeout (the OS disables the tap).
+            // The spec requires this; the tap handle was stored into ctx after
+            // creation.
+            if matches!(event_type, CGEventType::TapDisabledByTimeout) {
+                if let Some(tap) = ctx.tap.get() {
+                    // SAFETY: `tap` is the live mach port for this very tap.
+                    CGEvent::tap_enable(tap, true);
+                }
+                tracing::debug!(target: TARGET, "tap re-enabled after timeout");
+                return;
             }
-            tracing::debug!(target: TARGET, "tap re-enabled after timeout");
-            return event.as_ptr();
-        }
 
-        let kind = kind_of(event_type);
-        if !matches!(kind, RawCgKind::Other) {
-            let raw = reduce(kind, event);
-            if let Some(action) = crate::classify::classify_cg(raw) {
-                let at_ms = ctx.started_at.elapsed().as_millis() as u64;
-                ctx.shared.push(TimedSemanticAction { action, at_ms });
+            let kind = kind_of(event_type);
+            if !matches!(kind, RawCgKind::Other) {
+                let raw = reduce(kind, event);
+                if let Some(action) = crate::classify::classify_cg(raw) {
+                    let at_ms = ctx.started_at.elapsed().as_millis() as u64;
+                    ctx.shared.push(TimedSemanticAction { action, at_ms });
+                }
             }
+        }));
+        if handled.is_err() {
+            tracing::error!(target: TARGET, "tap callback panicked; event ignored");
         }
         event.as_ptr()
     }
@@ -345,8 +368,9 @@ mod macos {
             return;
         }
 
-        // SAFETY: blocks until CFRunLoopStop is called via RunLoopHandle::stop.
-        unsafe { CFRunLoop::run() };
+        // Blocks until CFRunLoopStop is called via RunLoopHandle::stop. This is
+        // a safe binding in objc2-core-foundation.
+        CFRunLoop::run();
 
         // Teardown: disable the tap and free the callback context.
         // SAFETY: tap is still valid; ctx came from Box::into_raw.

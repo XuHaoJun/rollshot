@@ -17,6 +17,9 @@ const TARGET: &str = "rollshot::action::linux_input";
 
 /// Hard cap on buffered actions, so a stalled consumer cannot grow memory
 /// without bound. Drop-oldest preserves recency (spec: explicit fixed bounds).
+// `push`/`MAX_QUEUED` are exercised by the Linux reader threads and the unit
+// test; on non-Linux hosts the plain lib build sees neither, so allow dead code.
+#[allow(dead_code)]
 const MAX_QUEUED: usize = 4096;
 
 #[derive(Default)]
@@ -25,6 +28,7 @@ struct Shared {
 }
 
 impl Shared {
+    #[allow(dead_code)]
     fn push(&self, ev: TimedSemanticAction) {
         if let Ok(mut q) = self.queue.lock() {
             if q.len() >= MAX_QUEUED {
@@ -78,6 +82,16 @@ impl SemanticInputSource for EvdevInputSource {
             let _ = handle.join();
         }
         tracing::debug!(target: TARGET, "evdev source stopped");
+    }
+}
+
+impl Drop for EvdevInputSource {
+    /// Stop observing if the caller dropped the source without calling `stop`
+    /// (e.g. a panic between `start` and `stop`). This keeps the spec's "input
+    /// observed only between start and stop" guarantee true by construction,
+    /// not just on the happy path. `stop` is idempotent.
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
