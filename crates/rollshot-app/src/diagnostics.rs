@@ -160,28 +160,38 @@ pub(crate) fn classify_app_error(error: &str) -> &'static str {
 
 #[cfg(test)]
 pub(crate) fn capture_test_logs(run: impl FnOnce()) -> String {
+    use std::cell::RefCell;
     use std::io::Write;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
     use tracing_subscriber::fmt::MakeWriter;
 
-    // Serialize capture scopes. `tracing::subscriber::with_default` mutates
-    // tracing's process-global state (max-level hint and callsite interest) on
-    // scope enter/exit, so two overlapping capture scopes on different test
-    // threads can transiently suppress each other's events — observed as a
-    // dropped "save success" line while "save start" survived. Holding this lock
-    // for the whole scope guarantees only one capture is ever active. Recover
-    // from a poisoned lock so a panic in one capturing test does not cascade.
-    static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
-    let _serialize = CAPTURE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    // tracing caches each callsite's interest process-globally, registered once
+    // by whichever thread reaches it first. A scoped `with_default` subscriber
+    // does not reliably override that: if a non-capturing test hits a
+    // `rollshot::*` callsite first under the default `NoSubscriber`, the callsite
+    // is cached as `Interest::never` and stays disabled, so a concurrent capture
+    // silently drops that event (observed as a missing "save success" line while
+    // "save start" survived).
+    //
+    // Fix the root cause instead of serializing captures: install one
+    // process-global INFO subscriber for the whole test binary so a capturing
+    // subscriber is always present when callsites register (never poisoned to
+    // `never`), and route each event to a per-thread buffer so a capture sees
+    // only its own thread's logs regardless of what runs concurrently.
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
 
-    #[derive(Clone, Default)]
-    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+    enum Sink {
+        Buffer(Arc<Mutex<Vec<u8>>>),
+        Discard,
+    }
 
-    struct LogGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for LogGuard {
+    impl Write for Sink {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            if let Sink::Buffer(target) = self {
+                target.lock().unwrap().extend_from_slice(buf);
+            }
             Ok(buf.len())
         }
 
@@ -190,23 +200,37 @@ pub(crate) fn capture_test_logs(run: impl FnOnce()) -> String {
         }
     }
 
-    impl<'a> MakeWriter<'a> for LogWriter {
-        type Writer = LogGuard;
+    struct PerThreadWriter;
+
+    impl<'a> MakeWriter<'a> for PerThreadWriter {
+        type Writer = Sink;
 
         fn make_writer(&'a self) -> Self::Writer {
-            LogGuard(Arc::clone(&self.0))
+            ACTIVE.with(|active| match active.borrow().as_ref() {
+                Some(buffer) => Sink::Buffer(Arc::clone(buffer)),
+                None => Sink::Discard,
+            })
         }
     }
 
-    let writer = LogWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(writer.clone())
-        .finish();
-    tracing::subscriber::with_default(subscriber, run);
-    let bytes = writer.0.lock().unwrap().clone();
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(PerThreadWriter)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("install global test subscriber");
+    });
+
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    ACTIVE.with(|active| *active.borrow_mut() = Some(Arc::clone(&buffer)));
+    run();
+    ACTIVE.with(|active| *active.borrow_mut() = None);
+
+    let bytes = buffer.lock().unwrap().clone();
     String::from_utf8(bytes).unwrap()
 }
 
