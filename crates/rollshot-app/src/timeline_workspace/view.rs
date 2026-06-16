@@ -40,6 +40,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         button(text("Discard"))
             .on_press(Message::DiscardRequested)
             .style(button::secondary),
+        button(text("Export GIF"))
+            .on_press(Message::ExportGifRequested)
+            .style(button::secondary),
         button(text("Export Guide"))
             .on_press(Message::ExportRequested)
             .style(button::primary),

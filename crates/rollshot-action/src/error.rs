@@ -32,6 +32,27 @@ pub enum ExportError {
     Empty,
 }
 
+/// Summary-GIF export failure. On any error, no file is left at the target path
+/// and the editable session stays intact.
+#[derive(Debug, thiserror::Error)]
+pub enum GifError {
+    #[error("cannot export a GIF for a guide with no steps")]
+    Empty,
+    #[error("step {index} keyframe pixels were not retained")]
+    KeyframeMissing { index: usize },
+    #[error("failed to encode GIF: {source}")]
+    Encode {
+        #[source]
+        source: image::ImageError,
+    },
+    #[error("GIF I/O error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +76,15 @@ mod tests {
             message: "frame decode failed".to_string(),
         };
         assert_eq!(err.to_string(), "detection failed: frame decode failed");
+    }
+
+    #[test]
+    fn gif_error_messages_are_descriptive() {
+        assert_eq!(
+            GifError::Empty.to_string(),
+            "cannot export a GIF for a guide with no steps"
+        );
+        let missing = GifError::KeyframeMissing { index: 2 };
+        assert!(missing.to_string().contains("step 2"), "{missing}");
     }
 }
