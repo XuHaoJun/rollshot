@@ -1,11 +1,9 @@
 #[cfg(feature = "action-guide")]
-mod action_export;
-#[cfg(feature = "action-guide")]
 mod action_input;
-#[cfg(feature = "action-guide")]
-mod timeline_workspace;
 mod diagnostics;
 mod launch;
+#[cfg(feature = "action-guide")]
+mod timeline_workspace;
 
 use launch::LaunchMode;
 use std::process::ExitCode;

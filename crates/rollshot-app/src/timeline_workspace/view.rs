@@ -54,7 +54,7 @@ fn message_row(state: &TimelineWorkspace) -> Element<'_, Message> {
         Some(msg) => container(
             row![
                 text(msg.clone()).width(Length::Fill),
-                button(text("Dismiss")).on_press(Message::DismissMessage),
+                button(text("Dismiss")).on_press(Message::DismissBanner),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -146,8 +146,9 @@ fn strip_row(state: &TimelineWorkspace) -> Element<'_, Message> {
         );
     }
     container(
-        scrollable(strip)
-            .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())),
+        scrollable(strip).direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new(),
+        )),
     )
     .height(Length::Fixed(120.0))
     .into()
@@ -207,7 +208,12 @@ mod tests {
     fn ws(recording: rollshot_action::Recording, capability: InputCapability) -> TimelineWorkspace {
         TimelineWorkspace::new(
             recording,
-            CaptureRegion { x: 0, y: 0, width: 32, height: 32 },
+            CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
             capability,
             InputSourceKind::LinuxEvdev,
         )

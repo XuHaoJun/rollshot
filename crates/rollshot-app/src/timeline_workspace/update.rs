@@ -17,7 +17,7 @@ pub enum Message {
     ConfirmDiscard,
     ExportRequested,
     ExportDirChosen(Option<PathBuf>),
-    DismissMessage,
+    DismissBanner,
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -67,7 +67,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::ExportRequested => {
             state.message = None;
-            Task::perform(pick_export_dir(picker_default_dir()), Message::ExportDirChosen)
+            Task::perform(
+                pick_export_dir(picker_default_dir()),
+                Message::ExportDirChosen,
+            )
         }
         Message::ExportDirChosen(None) => Task::none(),
         Message::ExportDirChosen(Some(dir)) => match export_to(state, &dir) {
@@ -90,7 +93,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 Task::none()
             }
         },
-        Message::DismissMessage => {
+        Message::DismissBanner => {
             state.message = None;
             Task::none()
         }
@@ -137,7 +140,12 @@ mod tests {
     fn ws(recording: rollshot_action::Recording) -> TimelineWorkspace {
         TimelineWorkspace::new(
             recording,
-            CaptureRegion { x: 0, y: 0, width: 32, height: 32 },
+            CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
         )
@@ -160,7 +168,10 @@ mod tests {
     #[test]
     fn title_changed_renames_selected_step() {
         let mut state = ws(synthetic_recording(2));
-        let _ = update(&mut state, Message::TitleChanged("Open Preferences".to_string()));
+        let _ = update(
+            &mut state,
+            Message::TitleChanged("Open Preferences".to_string()),
+        );
         assert_eq!(state.selected_step().unwrap().title, "Open Preferences");
     }
 
@@ -252,19 +263,34 @@ mod tests {
         let mut state = ws(recording_from_frames());
         state.message = Some("stale".to_string());
         let tmp = tempfile::tempdir().unwrap();
-        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.path().to_path_buf())));
+        let _ = update(
+            &mut state,
+            Message::ExportDirChosen(Some(tmp.path().to_path_buf())),
+        );
         assert!(tmp.path().join("action-guide/steps.md").exists());
         assert!(tmp.path().join("action-guide/session.json").exists());
-        assert!(state.message.is_none(), "successful export clears the banner");
+        assert!(
+            state.message.is_none(),
+            "successful export clears the banner"
+        );
     }
 
     #[test]
     fn export_empty_guide_sets_error_and_writes_nothing() {
         let mut state = ws(synthetic_recording(0));
         let tmp = tempfile::tempdir().unwrap();
-        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.path().to_path_buf())));
-        assert!(!tmp.path().join("action-guide").exists(), "empty guide must not write a folder");
-        assert!(state.message.is_some(), "export failure surfaces an inline message");
+        let _ = update(
+            &mut state,
+            Message::ExportDirChosen(Some(tmp.path().to_path_buf())),
+        );
+        assert!(
+            !tmp.path().join("action-guide").exists(),
+            "empty guide must not write a folder"
+        );
+        assert!(
+            state.message.is_some(),
+            "export failure surfaces an inline message"
+        );
     }
 
     #[test]

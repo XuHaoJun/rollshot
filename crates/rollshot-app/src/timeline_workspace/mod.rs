@@ -145,7 +145,12 @@ pub fn run(
 ) -> Result<(), String> {
     use std::sync::{Arc, Mutex};
 
-    let boot_data = Arc::new(Mutex::new(Some((recording, region, capability, source_kind))));
+    let boot_data = Arc::new(Mutex::new(Some((
+        recording,
+        region,
+        capability,
+        source_kind,
+    ))));
     let boot = move || {
         let (recording, region, capability, source_kind) = boot_data
             .lock()
@@ -185,7 +190,12 @@ mod tests {
     };
 
     fn region_32() -> CaptureRegion {
-        CaptureRegion { x: 0, y: 0, width: 32, height: 32 }
+        CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+        }
     }
 
     fn black_32() -> RgbaImage {
