@@ -659,7 +659,7 @@ mod tests {
             None,
         )
         .expect("component new")
-            .expect("test component");
+        .expect("test component");
         MacosProduct {
             phase: Phase::Capture(component),
             document: None,

@@ -101,7 +101,9 @@ pub(crate) struct OverlayState {
     pub(crate) toolbar_drag_grab: Option<iced::Vector>,
     pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
     pub(crate) transient_error: Option<String>,
+    #[cfg(feature = "action-guide")]
     pub(crate) recording_started: Option<std::time::Instant>,
+    #[cfg(feature = "action-guide")]
     pub(crate) recording_capability: Option<rollshot_capture::InputCapabilityLabel>,
 }
 
@@ -125,7 +127,9 @@ impl Default for OverlayState {
             toolbar_drag_grab: None,
             toolbar_position: crate::workspace::ToolbarPosition::Automatic,
             transient_error: None,
+            #[cfg(feature = "action-guide")]
             recording_started: None,
+            #[cfg(feature = "action-guide")]
             recording_capability: None,
         }
     }
@@ -139,6 +143,8 @@ impl OverlayState {
     }
 }
 
+#[cfg(feature = "action-guide")]
+#[allow(dead_code)]
 pub(crate) fn elapsed_label(started: Option<std::time::Instant>) -> String {
     match started {
         Some(start) => {
@@ -1488,6 +1494,7 @@ mod tests {
         assert!(super::recovery_edge_line(crop, CapturedEdge::Unknown).is_none());
     }
 
+    #[cfg(feature = "action-guide")]
     #[test]
     fn elapsed_label_formats_mm_ss() {
         assert_eq!(super::elapsed_label(None), "00:00");

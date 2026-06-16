@@ -504,9 +504,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             width: 0.0,
                             height: 0.0,
                         });
-                        let ws = state
-                            .window_size
-                            .unwrap_or(iced::Size::new(1920.0, 1080.0));
+                        let ws = state.window_size.unwrap_or(iced::Size::new(1920.0, 1080.0));
                         let source_size = driver.source_size();
                         let region = crate::coords::map_crop_to_frame(
                             crate::coords::LogicalRect {
@@ -528,11 +526,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             height: region.height,
                         };
                         *ACTION_REGION_SLOT.lock().unwrap() = Some(action_region);
-                        let source = ACTION_INPUT_SLOT
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .unwrap_or_else(|| {
+                        let source =
+                            ACTION_INPUT_SLOT.lock().unwrap().take().unwrap_or_else(|| {
                                 Box::new(rollshot_action::VisualOnlySource::new(
                                     rollshot_action::DegradedReason::SourceStartFailed,
                                 ))
@@ -706,16 +701,17 @@ pub fn run_action_guide(
         .take()
         .unwrap_or(Ok(None))
         .map_err(OverlayError::Capture)?;
-    let region = ACTION_REGION_SLOT
-        .lock()
-        .unwrap()
-        .take()
-        .unwrap_or(rollshot_action::CaptureRegion {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        });
+    let region =
+        ACTION_REGION_SLOT
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
     Ok(result.map(|(recording, capability)| (recording, capability, region)))
 }
 
