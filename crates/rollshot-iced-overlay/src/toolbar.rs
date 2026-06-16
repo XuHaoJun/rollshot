@@ -8,6 +8,7 @@ use rollshot_overlay_core::chrome_placement::Rect;
 pub enum ToolbarAction {
     RegionMode,
     ScrollingMode,
+    ActionGuide,
     Finish,
     Cancel,
 }
@@ -29,11 +30,13 @@ pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
         WorkspacePhase::Selecting => vec![
             ToolbarAction::RegionMode,
             ToolbarAction::ScrollingMode,
+            ToolbarAction::ActionGuide,
             ToolbarAction::Cancel,
         ],
         WorkspacePhase::Selected => vec![
             ToolbarAction::RegionMode,
             ToolbarAction::ScrollingMode,
+            ToolbarAction::ActionGuide,
             ToolbarAction::Finish,
             ToolbarAction::Cancel,
         ],
@@ -43,10 +46,7 @@ pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
             ToolbarAction::Finish,
             ToolbarAction::Cancel,
         ],
-        WorkspacePhase::Recording => vec![
-            ToolbarAction::Finish,
-            ToolbarAction::Cancel,
-        ],
+        WorkspacePhase::Recording => vec![ToolbarAction::Finish, ToolbarAction::Cancel],
     }
 }
 
@@ -69,6 +69,7 @@ fn action_label(action: ToolbarAction) -> &'static str {
     match action {
         ToolbarAction::RegionMode => "📷",
         ToolbarAction::ScrollingMode => "📜",
+        ToolbarAction::ActionGuide => "🎬",
         ToolbarAction::Finish => "✓",
         ToolbarAction::Cancel => "✕",
     }
@@ -78,6 +79,7 @@ fn action_tooltip(action: ToolbarAction) -> &'static str {
     match action {
         ToolbarAction::RegionMode => "Region Mode",
         ToolbarAction::ScrollingMode => "Scrolling Mode",
+        ToolbarAction::ActionGuide => "Action Guide",
         ToolbarAction::Finish => "Finish Capture",
         ToolbarAction::Cancel => "Cancel",
     }
@@ -91,6 +93,7 @@ fn action_style_fn(
         (action, active_workflow),
         (ToolbarAction::RegionMode, Workflow::Screenshot)
             | (ToolbarAction::ScrollingMode, Workflow::Scrolling)
+            | (ToolbarAction::ActionGuide, Workflow::ActionGuide)
     );
 
     move |_theme, _status| {
@@ -207,6 +210,7 @@ mod tests {
             vec![
                 ToolbarAction::RegionMode,
                 ToolbarAction::ScrollingMode,
+                ToolbarAction::ActionGuide,
                 ToolbarAction::Finish,
                 ToolbarAction::Cancel,
             ]
@@ -216,6 +220,22 @@ mod tests {
     #[test]
     fn scrolling_toolbar_includes_finish() {
         assert!(actions_for(WorkspacePhase::ScrollingCapture).contains(&ToolbarAction::Finish));
+    }
+
+    #[test]
+    fn selecting_offers_action_guide_entry() {
+        let actions = actions_for(WorkspacePhase::Selecting);
+        assert!(actions.contains(&ToolbarAction::ActionGuide));
+        assert!(actions.contains(&ToolbarAction::RegionMode));
+        assert!(actions.contains(&ToolbarAction::ScrollingMode));
+    }
+
+    #[test]
+    fn recording_phase_shows_only_finish_and_cancel() {
+        assert_eq!(
+            actions_for(WorkspacePhase::Recording),
+            vec![ToolbarAction::Finish, ToolbarAction::Cancel]
+        );
     }
 
     #[test]
