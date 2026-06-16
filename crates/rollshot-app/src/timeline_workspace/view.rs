@@ -92,7 +92,7 @@ fn step_list(state: &TimelineWorkspace) -> Element<'_, Message> {
         );
     }
     container(scrollable(col))
-        .width(Length::FillPortion(2))
+        .width(Length::FillPortion(1))
         .height(Length::Fill)
         .into()
 }
@@ -108,7 +108,8 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 container(keyframe)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .align_x(Alignment::Center),
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
                 text_input("Step title", &step.title).on_input(Message::TitleChanged),
                 button(text("Delete step"))
                     .on_press(Message::DeleteStep)
@@ -125,7 +126,7 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
             .into(),
     };
     container(content)
-        .width(Length::FillPortion(3))
+        .width(Length::FillPortion(4))
         .height(Length::Fill)
         .into()
 }

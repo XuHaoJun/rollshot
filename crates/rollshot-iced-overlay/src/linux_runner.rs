@@ -123,7 +123,7 @@ pub(crate) fn acquire_resource(
             Ok(Some(CaptureResource::OneShot(capture)))
         }
         Workflow::ActionGuide => {
-            /* wired in Task 5 */
+            // Records from the same live stream as scrolling capture.
             acquire_scrolling_resource(config, factories)
         }
     }
@@ -622,8 +622,10 @@ fn view(state: &Overlay) -> iced::Element<'_, Message> {
 
 fn input_region_for(state: &Overlay) -> Option<(i32, i32, i32, i32)> {
     use crate::workspace::WorkspacePhase;
-    if state.workspace.phase() != WorkspacePhase::ScrollingCapture
-        || !app::toolbar_is_visible(state)
+    if !matches!(
+        state.workspace.phase(),
+        WorkspacePhase::ScrollingCapture | WorkspacePhase::Recording
+    ) || !app::toolbar_is_visible(state)
     {
         return None;
     }
@@ -640,7 +642,12 @@ fn input_region_for(state: &Overlay) -> Option<(i32, i32, i32, i32)> {
 fn input_mode_for(phase: crate::workspace::WorkspacePhase) -> app::InputRegionMode {
     use crate::workspace::WorkspacePhase;
     match phase {
-        WorkspacePhase::ScrollingCapture => app::InputRegionMode::ToolbarOnly,
+        // Scrolling capture and Action Guide recording both let the user drive
+        // the underlying app; the overlay claims only the toolbar rect so all
+        // other pointer input passes through to the window below.
+        WorkspacePhase::ScrollingCapture | WorkspacePhase::Recording => {
+            app::InputRegionMode::ToolbarOnly
+        }
         _ => app::InputRegionMode::FullOverlay,
     }
 }
@@ -745,9 +752,12 @@ fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, O
     *CAPTURE_WORKFLOW.lock().unwrap() = None;
     #[cfg(feature = "action-guide")]
     {
+        // Reset only this session's *output* slots. ACTION_INPUT_SLOT holds the
+        // semantic input source handed in by `run_action_guide` before it called
+        // `run`; clearing it here would drop the real evdev source and force
+        // `StartRecording` to fall back to a visual-only source.
         *ACTION_RESULT_SLOT.lock().unwrap() = None;
         *ACTION_REGION_SLOT.lock().unwrap() = None;
-        *ACTION_INPUT_SLOT.lock().unwrap() = None;
     }
 
     #[cfg(not(test))]
@@ -1249,6 +1259,31 @@ mod tests {
         }
     }
 
+    fn recording_workspace() -> Overlay {
+        let mut ws = WorkspaceState::new(Workflow::ActionGuide);
+        let crop = Rectangle {
+            x: 10.0,
+            y: 20.0,
+            width: 260.0,
+            height: 200.0,
+        };
+        let window_size = iced::Size::new(800.0, 600.0);
+        ws.set_crop(Some(CropRect {
+            x: crop.x,
+            y: crop.y,
+            width: crop.width,
+            height: crop.height,
+        }));
+        ws.complete_selection();
+        ws.begin_recording();
+        Overlay {
+            workspace: ws,
+            crop: Some(crop),
+            window_size: Some(window_size),
+            ..Overlay::default()
+        }
+    }
+
     fn workspace_with_visible_toolbar() -> Overlay {
         let mut state = scrolling_workspace();
         state
@@ -1307,6 +1342,31 @@ mod tests {
         assert_eq!(
             input_mode_for(WorkspacePhase::Selected),
             app::InputRegionMode::FullOverlay
+        );
+    }
+
+    #[test]
+    fn recording_uses_toolbar_only_input_so_underlying_app_is_interactive() {
+        // Action Guide recording must let the user drive the real app below;
+        // a full-overlay input region would swallow every click and keypress.
+        assert_eq!(
+            input_mode_for(WorkspacePhase::Recording),
+            app::InputRegionMode::ToolbarOnly
+        );
+    }
+
+    #[test]
+    fn recording_input_region_only_contains_visible_toolbar() {
+        let state = recording_workspace();
+        let rect = app::toolbar_rect_for(&state).expect("toolbar rect");
+        assert_eq!(
+            input_region_for(&state),
+            Some((
+                rect.x as i32,
+                rect.y as i32,
+                rect.width as i32,
+                rect.height as i32
+            ))
         );
     }
 
