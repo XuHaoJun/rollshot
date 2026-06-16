@@ -1,4 +1,7 @@
+use std::path::{Path, PathBuf};
+
 use iced::Task;
+use rollshot_action::export_guide;
 
 use super::TimelineWorkspace;
 
@@ -8,6 +11,12 @@ pub enum Message {
     TitleChanged(String),
     DeleteStep,
     ReplaceKeyframe(rollshot_action::FrameId),
+    DiscardRequested,
+    CloseRequested,
+    CancelDiscard,
+    ConfirmDiscard,
+    ExportRequested,
+    ExportDirChosen(Option<PathBuf>),
     DismissMessage,
 }
 
@@ -44,6 +53,43 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             Task::none()
         }
+        Message::DiscardRequested | Message::CloseRequested => {
+            state.pending_discard = true;
+            Task::none()
+        }
+        Message::CancelDiscard => {
+            state.pending_discard = false;
+            Task::none()
+        }
+        Message::ConfirmDiscard => {
+            state.pending_discard = false;
+            iced::exit()
+        }
+        Message::ExportRequested => {
+            state.message = None;
+            Task::perform(pick_export_dir(picker_default_dir()), Message::ExportDirChosen)
+        }
+        Message::ExportDirChosen(None) => Task::none(),
+        Message::ExportDirChosen(Some(dir)) => match export_to(state, &dir) {
+            Ok(out) => {
+                tracing::info!(
+                    target: "rollshot::action::export",
+                    path = %out.display(),
+                    "guide exported"
+                );
+                state.message = None;
+                iced::exit()
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "rollshot::action::export",
+                    %error,
+                    "guide export failed"
+                );
+                state.message = Some(error);
+                Task::none()
+            }
+        },
         Message::DismissMessage => {
             state.message = None;
             Task::none()
@@ -52,7 +98,33 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
 }
 
 pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
-    iced::Subscription::none()
+    iced::window::close_requests().map(|_id| Message::CloseRequested)
+}
+
+/// Export the (possibly edited) guide into `out_dir/action-guide/`.
+fn export_to(state: &TimelineWorkspace, out_dir: &Path) -> Result<PathBuf, String> {
+    export_guide(
+        &state.guide,
+        &state.store,
+        state.region,
+        state.capability,
+        state.source_kind,
+        out_dir,
+    )
+    .map_err(|e| format!("export failed: {e}"))
+}
+
+/// Initial directory for the folder picker: the user's Pictures dir, or temp.
+fn picker_default_dir() -> PathBuf {
+    dirs::picture_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+async fn pick_export_dir(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
 }
 
 #[cfg(test)]
@@ -148,5 +220,57 @@ mod tests {
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::DeleteStep);
         // No assertion on handle contents (opaque); reaching here = no panic.
+    }
+
+    #[test]
+    fn discard_requested_shows_modal_then_cancel_clears_it() {
+        let mut state = ws(synthetic_recording(2));
+        let _ = update(&mut state, Message::DiscardRequested);
+        assert!(state.pending_discard);
+        let _ = update(&mut state, Message::CancelDiscard);
+        assert!(!state.pending_discard);
+    }
+
+    #[test]
+    fn confirm_discard_clears_pending_flag() {
+        let mut state = ws(synthetic_recording(1));
+        let _ = update(&mut state, Message::DiscardRequested);
+        assert!(state.pending_discard);
+        let _ = update(&mut state, Message::ConfirmDiscard);
+        assert!(!state.pending_discard);
+    }
+
+    #[test]
+    fn close_requested_also_prompts_discard() {
+        let mut state = ws(synthetic_recording(1));
+        let _ = update(&mut state, Message::CloseRequested);
+        assert!(state.pending_discard);
+    }
+
+    #[test]
+    fn export_dir_chosen_writes_guide_folder_and_clears_message() {
+        let mut state = ws(recording_from_frames());
+        state.message = Some("stale".to_string());
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.path().to_path_buf())));
+        assert!(tmp.path().join("action-guide/steps.md").exists());
+        assert!(tmp.path().join("action-guide/session.json").exists());
+        assert!(state.message.is_none(), "successful export clears the banner");
+    }
+
+    #[test]
+    fn export_empty_guide_sets_error_and_writes_nothing() {
+        let mut state = ws(synthetic_recording(0));
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.path().to_path_buf())));
+        assert!(!tmp.path().join("action-guide").exists(), "empty guide must not write a folder");
+        assert!(state.message.is_some(), "export failure surfaces an inline message");
+    }
+
+    #[test]
+    fn export_cancelled_picker_is_a_no_op() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportDirChosen(None));
+        assert!(state.message.is_none());
     }
 }
