@@ -90,10 +90,10 @@ pub(crate) fn acquire_resource(
             Ok(Some((CaptureResource::OneShot(capture), None)))
         }
         Workflow::ActionGuide => {
-            /* wired in Task 5 */
-            Err(OverlayError::Overlay(
-                "ActionGuide not yet wired on macOS".to_string(),
-            ))
+            let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+            let driver =
+                (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+            Ok(Some((CaptureResource::Streaming(driver), Some(preview_rx))))
         }
     }
 }
@@ -203,6 +203,12 @@ pub enum HostEffect {
     None,
     Task(iced::Task<Message>),
     Completed(CaptureResult),
+    #[cfg(feature = "action-guide")]
+    ActionRecorded(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    ),
     Cancelled,
     Fatal(String),
 }
@@ -224,6 +230,8 @@ pub struct Component {
     /// leaving a ghost input-absorbing region; this stages the same handshake,
     /// reported once passthrough is off via the `PassthroughDisabled` message.
     pending_finish: Option<PendingFinish>,
+    #[cfg(feature = "action-guide")]
+    action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>,
 }
 
 /// Terminal outcome staged behind a passthrough-disable handshake. Mutually
@@ -238,7 +246,11 @@ impl Component {
     /// `Ok(None)` when the user cancelled before any capture began (e.g. portal
     /// picker dismissed). The host opens the overlay window and feeds the boot
     /// task returned by [`Component::boot`].
-    pub fn new(config: &OverlayConfig) -> Result<Option<Self>, OverlayError> {
+    pub fn new(
+        config: &OverlayConfig,
+        #[cfg(feature = "action-guide")]
+        action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>,
+    ) -> Result<Option<Self>, OverlayError> {
         if config.request.scope != CaptureScope::Region {
             return Err(OverlayError::Overlay(
                 "fullscreen must not reach the macOS capture component".to_string(),
@@ -290,6 +302,8 @@ impl Component {
             preview_rx,
             active_workflow: Some(config.request.workflow),
             pending_finish: None,
+            #[cfg(feature = "action-guide")]
+            action_input_source,
         }))
     }
 
@@ -769,16 +783,71 @@ impl Component {
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
+            #[cfg(feature = "action-guide")]
             OverlayEffect::StartRecording => {
                 tracing::info!(target: TARGET_OVERLAY, "start recording requested");
+                if let Some(driver) = self.driver.as_mut() {
+                    let crop = self.overlay.crop.unwrap_or(iced::Rectangle { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+                    let ws = self.overlay.window_size.unwrap_or(iced::Size::new(1920.0, 1080.0));
+                    let source_size = driver.source_size();
+                    let region = crate::coords::map_crop_to_frame(
+                        crate::coords::LogicalRect { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
+                        rollshot_capture::Size { width: ws.width as u32, height: ws.height as u32 },
+                        source_size,
+                    );
+                    let action_region = rollshot_action::CaptureRegion {
+                        x: region.x,
+                        y: region.y,
+                        width: region.width,
+                        height: region.height,
+                    };
+                    let source = self.action_input_source.take()
+                        .unwrap_or_else(|| Box::new(rollshot_action::VisualOnlySource::new(rollshot_action::DegradedReason::SourceStartFailed)));
+                    driver.begin_action_recording(action_region, source);
+                }
                 self.overlay.recording_started = Some(std::time::Instant::now());
-                self.overlay.recording_capability = Some(rollshot_capture::InputCapabilityLabel::Semantic);
                 EffectOutcome::Task(Task::none())
             }
+            #[cfg(feature = "action-guide")]
             OverlayEffect::FinishRecording => {
                 tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
-                self.overlay.recording_started = None;
-                self.overlay.recording_capability = None;
+                match self.driver.take() {
+                    Some(driver) => match driver.finalize_action() {
+                        Ok((recording, capability)) => {
+                            let crop = self.overlay.crop.unwrap_or(iced::Rectangle { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+                            let ws = self.overlay.window_size.unwrap_or(iced::Size::new(1920.0, 1080.0));
+                            let source_size = driver.source_size();
+                            let region = crate::coords::map_crop_to_frame(
+                                crate::coords::LogicalRect { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
+                                rollshot_capture::Size { width: ws.width as u32, height: ws.height as u32 },
+                                source_size,
+                            );
+                            let action_region = rollshot_action::CaptureRegion {
+                                x: region.x,
+                                y: region.y,
+                                width: region.width,
+                                height: region.height,
+                            };
+                            self.overlay.recording_started = None;
+                            self.overlay.recording_capability = None;
+                            EffectOutcome::Terminal(HostEffect::ActionRecorded(recording, capability, action_region))
+                        }
+                        Err(e) => {
+                            self.overlay.transient_error = Some(e);
+                            EffectOutcome::Task(Task::none())
+                        }
+                    },
+                    None => EffectOutcome::Terminal(HostEffect::Cancelled),
+                }
+            }
+            #[cfg(not(feature = "action-guide"))]
+            OverlayEffect::StartRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "start recording requested (no action-guide feature)");
+                EffectOutcome::Task(Task::none())
+            }
+            #[cfg(not(feature = "action-guide"))]
+            OverlayEffect::FinishRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "finish recording requested (no action-guide feature)");
                 EffectOutcome::Task(Task::none())
             }
         }
@@ -1096,6 +1165,8 @@ mod tests {
             preview_rx: None,
             active_workflow: Some(Workflow::Screenshot),
             pending_finish: None,
+            #[cfg(feature = "action-guide")]
+            action_input_source: None,
         }
     }
 
@@ -1373,7 +1444,11 @@ mod tests {
             request: rollshot_capture::CaptureRequest::screenshot_fullscreen(),
             target_output_name: None,
         };
-        let result = Component::new(&config);
+        let result = Component::new(
+            &config,
+            #[cfg(feature = "action-guide")]
+            None,
+        );
         assert!(result.is_err(), "fullscreen scope must be rejected");
         let err = match result {
             Err(err) => err.to_string(),

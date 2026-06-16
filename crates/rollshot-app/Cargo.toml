@@ -11,7 +11,7 @@ name = "rollshot-app"
 path = "src/main.rs"
 
 [features]
-action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot-macos-input"]
+action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot-macos-input", "rollshot-iced-overlay/action-guide"]
 
 [dependencies]
 arboard = "3.4"
