@@ -88,3 +88,18 @@ pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, Overl
         Err(OverlayError::Unsupported)
     }
 }
+
+#[cfg(all(target_os = "linux", feature = "action-guide"))]
+pub fn run_action_guide(
+    config: OverlayConfig,
+    input_source: Box<dyn rollshot_action::SemanticInputSource>,
+) -> Result<
+    Option<(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    )>,
+    OverlayError,
+> {
+    linux_runner::run_action_guide(config, input_source)
+}
