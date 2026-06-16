@@ -573,8 +573,7 @@ impl Driver {
 #[allow(dead_code)]
 pub(crate) struct ActionRecording {
     recorder: rollshot_action::ActionRecorder,
-    source: Box<dyn rollshot_action::SemanticInputSource>,
-    capability: rollshot_action::InputCapability,
+    input: rollshot_action::StartedSemanticInput,
 }
 
 #[cfg(feature = "action-guide")]
@@ -582,23 +581,19 @@ pub(crate) struct ActionRecording {
 impl ActionRecording {
     pub(crate) fn start(
         region: rollshot_action::CaptureRegion,
-        mut source: Box<dyn rollshot_action::SemanticInputSource>,
+        source: Box<dyn rollshot_action::SemanticInputSource>,
     ) -> Self {
         use rollshot_action::{DetectorConfig, StoreConfig};
-        let capability =
-            source
-                .start(region)
-                .unwrap_or(rollshot_action::InputCapability::VisualOnly {
-                    reason: rollshot_action::DegradedReason::SourceStartFailed,
-                });
         Self {
             recorder: rollshot_action::ActionRecorder::new(
                 region,
                 StoreConfig::default(),
                 DetectorConfig::default(),
             ),
-            source,
-            capability,
+            // Shared start/fallback/poll/stop semantics: on start failure the
+            // source is swapped to a started VisualOnlySource carrying the real
+            // reason (see `rollshot_action::StartedSemanticInput`).
+            input: rollshot_action::StartedSemanticInput::start(source, region),
         }
     }
 
@@ -608,17 +603,15 @@ impl ActionRecording {
     }
 
     pub(crate) fn poll_input(&mut self) {
-        for ev in self.source.poll() {
-            self.recorder.ingest_event(ev);
-        }
+        self.input.poll_into(&mut self.recorder);
     }
 
     pub(crate) fn capability(&self) -> rollshot_action::InputCapability {
-        self.capability
+        self.input.capability()
     }
 
     pub(crate) fn finalize(mut self) -> rollshot_action::Recording {
-        self.source.stop();
+        self.input.stop();
         self.recorder.finish()
     }
 }
