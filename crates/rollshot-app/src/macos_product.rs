@@ -133,7 +133,16 @@ impl MacosProduct {
                 Ok(Some((product, open_task)))
             }
             InitialCapturePath::Overlay => {
-                let component = match Component::new(&config).map_err(|error| error.to_string())? {
+                #[cfg(feature = "action-guide")]
+                let action_input_source = Some(crate::action_input::create_input_source());
+
+                let component = match Component::new(
+                    &config,
+                    #[cfg(feature = "action-guide")]
+                    action_input_source,
+                )
+                .map_err(|error| error.to_string())?
+                {
                     Some(component) => component,
                     None => return Ok(None),
                 };
@@ -308,6 +317,35 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 HostEffect::None => Task::none(),
                 HostEffect::Task(task) => task.map(Message::Capture),
                 HostEffect::Completed(result) => complete_capture(product, result),
+                #[cfg(feature = "action-guide")]
+                HostEffect::ActionRecorded(recording, capability, region) => {
+                    tracing::info!(target: "rollshot::action::export", "recording complete, exporting...");
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let source_kind = match capability {
+                        rollshot_action::InputCapability::VisualOnly { .. } => {
+                            rollshot_action::InputSourceKind::VisualOnly
+                        }
+                        _ => rollshot_action::InputSourceKind::MacosCgEvent,
+                    };
+                    match crate::action_export::export_recording(
+                        recording,
+                        region,
+                        capability,
+                        source_kind,
+                        &crate::action_export::default_out_dir(now_ms),
+                    ) {
+                        Ok(out) => {
+                            tracing::info!(target: "rollshot::action::export", path = %out.display(), "guide exported");
+                        }
+                        Err(error) => {
+                            tracing::error!(target: "rollshot::action::export", %error, "guide export failed");
+                        }
+                    }
+                    iced::exit()
+                }
                 HostEffect::Cancelled => iced::exit(),
                 HostEffect::Fatal(error) => {
                     tracing::error!(target: TARGET_APP, %error, "capture fatal");
@@ -638,9 +676,13 @@ mod tests {
         };
         // `Component::new` uses test factories under cfg(test), so this builds a
         // bare component without touching real capture.
-        let component = Component::new(&config)
-            .expect("component new")
-            .expect("test component");
+        let component = Component::new(
+            &config,
+            #[cfg(feature = "action-guide")]
+            None,
+        )
+        .expect("component new")
+        .expect("test component");
         MacosProduct {
             phase: Phase::Capture(component),
             document: None,

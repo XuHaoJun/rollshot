@@ -44,6 +44,7 @@ pub enum Workflow {
     Screenshot,
     #[default]
     Scrolling,
+    ActionGuide,
 }
 
 /// WHAT AREA we capture. Resolves down to the backend `RegionMode`.
@@ -80,17 +81,25 @@ impl CaptureRequest {
             scope: CaptureScope::Region,
         }
     }
+    pub const fn action_guide_region() -> Self {
+        Self {
+            workflow: Workflow::ActionGuide,
+            scope: CaptureScope::Region,
+        }
+    }
 
     /// Region scope uses the selection overlay; Fullscreen captures directly.
     pub fn needs_overlay(&self) -> bool {
         matches!(self.scope, CaptureScope::Region)
     }
 
-    /// `Scrolling × Fullscreen` is expressible but not wired in this refactor.
+    /// `Scrolling × Fullscreen` and `ActionGuide × Fullscreen` are expressible
+    /// but not wired in this refactor.
     pub fn is_supported(&self) -> bool {
         !matches!(
             (self.workflow, self.scope),
             (Workflow::Scrolling, CaptureScope::Fullscreen)
+                | (Workflow::ActionGuide, CaptureScope::Fullscreen)
         )
     }
 }
@@ -184,6 +193,12 @@ pub enum PixelFormat {
     Rgb,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputCapabilityLabel {
+    Semantic,
+    VisualOnly,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CaptureOptions, CaptureRequest, InteractiveLaunchOptions};
@@ -237,6 +252,32 @@ mod tests {
     }
 
     use super::{CaptureScope, Workflow};
+
+    #[test]
+    fn action_guide_region_is_supported_and_needs_overlay() {
+        let r = CaptureRequest::action_guide_region();
+        assert_eq!(r.workflow, Workflow::ActionGuide);
+        assert_eq!(r.scope, CaptureScope::Region);
+        assert!(r.is_supported());
+        assert!(r.needs_overlay());
+    }
+
+    #[test]
+    fn action_guide_fullscreen_is_unsupported() {
+        let r = CaptureRequest {
+            workflow: Workflow::ActionGuide,
+            scope: CaptureScope::Fullscreen,
+        };
+        assert!(!r.is_supported());
+    }
+
+    #[test]
+    fn action_guide_serde_roundtrip_kebab() {
+        let json = serde_json::to_string(&Workflow::ActionGuide).unwrap();
+        assert_eq!(json, "\"action-guide\"");
+        let back: Workflow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Workflow::ActionGuide);
+    }
 
     #[test]
     fn capture_request_default_is_scrolling_region() {

@@ -4606,6 +4606,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
+ "rollshot-action",
  "rollshot-capture",
  "rollshot-core",
  "rollshot-overlay-core",

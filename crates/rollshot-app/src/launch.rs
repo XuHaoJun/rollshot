@@ -6,6 +6,8 @@ pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
+    #[cfg(feature = "action-guide")]
+    ActionGuide,
 }
 
 #[allow(dead_code)]
@@ -59,6 +61,11 @@ where
             InteractiveLaunchOptions::default_capture(),
         ));
     };
+
+    #[cfg(feature = "action-guide")]
+    if flag == "--action-guide" {
+        return Ok(LaunchMode::ActionGuide);
+    }
 
     #[cfg(feature = "action-guide")]
     if flag == "--action-guide-probe" {
@@ -122,6 +129,8 @@ mod tests {
             }
             #[cfg(feature = "action-guide")]
             LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
+            #[cfg(feature = "action-guide")]
+            LaunchMode::ActionGuide => unreachable!("test expects Capture mode"),
         }
     }
 
@@ -141,6 +150,8 @@ mod tests {
             }
             #[cfg(feature = "action-guide")]
             LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
+            #[cfg(feature = "action-guide")]
+            LaunchMode::ActionGuide => unreachable!("test expects Capture mode"),
         }
     }
 

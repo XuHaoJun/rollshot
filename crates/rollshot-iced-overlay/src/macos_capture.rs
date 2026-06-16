@@ -89,6 +89,12 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some((CaptureResource::OneShot(capture), None)))
         }
+        Workflow::ActionGuide => {
+            let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+            let driver =
+                (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+            Ok(Some((CaptureResource::Streaming(driver), Some(preview_rx))))
+        }
     }
 }
 
@@ -120,16 +126,21 @@ fn controls_window_action(
     }
 }
 
+/// Phases where the overlay window is passthrough and its controls live in the
+/// separate controls window: the user interacts with the app underneath while
+/// only the Finish/Cancel toolbar stays clickable. Action-guide recording
+/// behaves exactly like scrolling capture here.
+fn is_capture_phase(phase: WorkspacePhase) -> bool {
+    matches!(
+        phase,
+        WorkspacePhase::ScrollingCapture | WorkspacePhase::Recording
+    )
+}
+
 fn passthrough_action(old_phase: WorkspacePhase, new_phase: WorkspacePhase) -> PassthroughAction {
-    match (old_phase, new_phase) {
-        (_, WorkspacePhase::ScrollingCapture) if old_phase != WorkspacePhase::ScrollingCapture => {
-            PassthroughAction::Enable
-        }
-        (WorkspacePhase::ScrollingCapture, new_phase)
-            if new_phase != WorkspacePhase::ScrollingCapture =>
-        {
-            PassthroughAction::Disable
-        }
+    match (is_capture_phase(old_phase), is_capture_phase(new_phase)) {
+        (false, true) => PassthroughAction::Enable,
+        (true, false) => PassthroughAction::Disable,
         _ => PassthroughAction::Noop,
     }
 }
@@ -162,7 +173,7 @@ fn controls_global_rect(rect: LogicalRect, overlay_origin: Point) -> LogicalRect
 }
 
 fn render_overlay_toolbar(phase: WorkspacePhase) -> bool {
-    phase != WorkspacePhase::ScrollingCapture
+    !is_capture_phase(phase)
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +208,12 @@ pub enum HostEffect {
     None,
     Task(iced::Task<Message>),
     Completed(CaptureResult),
+    #[cfg(feature = "action-guide")]
+    ActionRecorded(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    ),
     Cancelled,
     Fatal(String),
 }
@@ -218,6 +235,8 @@ pub struct Component {
     /// leaving a ghost input-absorbing region; this stages the same handshake,
     /// reported once passthrough is off via the `PassthroughDisabled` message.
     pending_finish: Option<PendingFinish>,
+    #[cfg(feature = "action-guide")]
+    action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>,
 }
 
 /// Terminal outcome staged behind a passthrough-disable handshake. Mutually
@@ -232,7 +251,12 @@ impl Component {
     /// `Ok(None)` when the user cancelled before any capture began (e.g. portal
     /// picker dismissed). The host opens the overlay window and feeds the boot
     /// task returned by [`Component::boot`].
-    pub fn new(config: &OverlayConfig) -> Result<Option<Self>, OverlayError> {
+    pub fn new(
+        config: &OverlayConfig,
+        #[cfg(feature = "action-guide")] action_input_source: Option<
+            Box<dyn rollshot_action::SemanticInputSource>,
+        >,
+    ) -> Result<Option<Self>, OverlayError> {
         if config.request.scope != CaptureScope::Region {
             return Err(OverlayError::Overlay(
                 "fullscreen must not reach the macOS capture component".to_string(),
@@ -284,6 +308,8 @@ impl Component {
             preview_rx,
             active_workflow: Some(config.request.workflow),
             pending_finish: None,
+            #[cfg(feature = "action-guide")]
+            action_input_source,
         }))
     }
 
@@ -461,6 +487,14 @@ impl Component {
         let mut subs = vec![event::listen_with(overlay_event_message)];
         if self.overlay.workspace.phase() == WorkspacePhase::ScrollingCapture {
             subs.push(preview_stream());
+            subs.push(
+                iced::time::every(Duration::from_millis(250))
+                    .map(|_| Message(InternalMessage::Overlay(OverlayMessage::Tick))),
+            );
+        }
+        // Tick during recording so the elapsed-time label re-renders.
+        #[cfg(feature = "action-guide")]
+        if self.overlay.workspace.phase() == WorkspacePhase::Recording {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Message(InternalMessage::Overlay(OverlayMessage::Tick))),
@@ -763,6 +797,118 @@ impl Component {
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
+            #[cfg(feature = "action-guide")]
+            OverlayEffect::StartRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "start recording requested");
+                let mut capability = None;
+                if let Some(driver) = self.driver.as_mut() {
+                    let crop = self.overlay.crop.unwrap_or(iced::Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    });
+                    let ws = self
+                        .overlay
+                        .window_size
+                        .unwrap_or(iced::Size::new(1920.0, 1080.0));
+                    let source_size = driver.source_size();
+                    let region = crate::coords::map_crop_to_frame(
+                        crate::coords::LogicalRect {
+                            x: crop.x,
+                            y: crop.y,
+                            width: crop.width,
+                            height: crop.height,
+                        },
+                        rollshot_capture::Size {
+                            width: ws.width as u32,
+                            height: ws.height as u32,
+                        },
+                        source_size,
+                    );
+                    let action_region = rollshot_action::CaptureRegion {
+                        x: region.x,
+                        y: region.y,
+                        width: region.width,
+                        height: region.height,
+                    };
+                    let source = self.action_input_source.take().unwrap_or_else(|| {
+                        Box::new(rollshot_action::VisualOnlySource::new(
+                            rollshot_action::DegradedReason::SourceStartFailed,
+                        ))
+                    });
+                    capability = Some(driver.begin_action_recording(action_region, source));
+                }
+                self.overlay.recording_started = Some(std::time::Instant::now());
+                self.overlay.recording_capability = capability.map(crate::app::capability_label);
+                EffectOutcome::Task(Task::none())
+            }
+            #[cfg(feature = "action-guide")]
+            OverlayEffect::FinishRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
+                match self.driver.take() {
+                    Some(driver) => {
+                        // Resolve the region before `finalize_action` consumes
+                        // the driver (it owns `source_size`).
+                        let crop = self.overlay.crop.unwrap_or(iced::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        });
+                        let ws = self
+                            .overlay
+                            .window_size
+                            .unwrap_or(iced::Size::new(1920.0, 1080.0));
+                        let source_size = driver.source_size();
+                        let region = crate::coords::map_crop_to_frame(
+                            crate::coords::LogicalRect {
+                                x: crop.x,
+                                y: crop.y,
+                                width: crop.width,
+                                height: crop.height,
+                            },
+                            rollshot_capture::Size {
+                                width: ws.width as u32,
+                                height: ws.height as u32,
+                            },
+                            source_size,
+                        );
+                        let action_region = rollshot_action::CaptureRegion {
+                            x: region.x,
+                            y: region.y,
+                            width: region.width,
+                            height: region.height,
+                        };
+                        match driver.finalize_action() {
+                            Ok((recording, capability)) => {
+                                self.overlay.recording_started = None;
+                                self.overlay.recording_capability = None;
+                                EffectOutcome::Terminal(HostEffect::ActionRecorded(
+                                    recording,
+                                    capability,
+                                    action_region,
+                                ))
+                            }
+                            Err(e) => {
+                                self.overlay.transient_error = Some(e);
+                                EffectOutcome::Task(Task::none())
+                            }
+                        }
+                    }
+                    None => EffectOutcome::Terminal(HostEffect::Cancelled),
+                }
+            }
+            #[cfg(not(feature = "action-guide"))]
+            OverlayEffect::StartRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "start recording requested (no action-guide feature)");
+                EffectOutcome::Task(Task::none())
+            }
+            #[cfg(not(feature = "action-guide"))]
+            OverlayEffect::FinishRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "finish recording requested (no action-guide feature)");
+                EffectOutcome::Task(Task::none())
+            }
         }
     }
 
@@ -875,7 +1021,7 @@ impl Component {
     }
 
     fn visible_toolbar_rect(&self) -> Option<LogicalRect> {
-        if self.overlay.workspace.phase() != WorkspacePhase::ScrollingCapture {
+        if !is_capture_phase(self.overlay.workspace.phase()) {
             return None;
         }
         if !app::toolbar_is_visible(&self.overlay) {
@@ -1078,6 +1224,8 @@ mod tests {
             preview_rx: None,
             active_workflow: Some(Workflow::Screenshot),
             pending_finish: None,
+            #[cfg(feature = "action-guide")]
+            action_input_source: None,
         }
     }
 
@@ -1355,7 +1503,11 @@ mod tests {
             request: rollshot_capture::CaptureRequest::screenshot_fullscreen(),
             target_output_name: None,
         };
-        let result = Component::new(&config);
+        let result = Component::new(
+            &config,
+            #[cfg(feature = "action-guide")]
+            None,
+        );
         assert!(result.is_err(), "fullscreen scope must be rejected");
         let err = match result {
             Err(err) => err.to_string(),

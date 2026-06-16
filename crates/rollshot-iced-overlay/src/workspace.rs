@@ -5,6 +5,7 @@ pub enum WorkspacePhase {
     Selecting,
     Selected,
     ScrollingCapture,
+    Recording,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,8 @@ pub enum WorkspaceEffect {
     StartScrolling,
     FinishScrolling,
     FinishRegion,
+    StartRecording,
+    FinishRecording,
     Cancel,
 }
 
@@ -95,6 +98,16 @@ impl WorkspaceState {
 
     pub fn finish_scrolling(&mut self) -> WorkspaceEffect {
         WorkspaceEffect::FinishScrolling
+    }
+
+    pub fn begin_recording(&mut self) -> WorkspaceEffect {
+        self.phase = WorkspacePhase::Recording;
+        self.auto_hide.accepted_frame(std::time::Instant::now());
+        WorkspaceEffect::StartRecording
+    }
+
+    pub fn finish_recording(&mut self) -> WorkspaceEffect {
+        WorkspaceEffect::FinishRecording
     }
 
     pub fn finish_region(&mut self) -> WorkspaceEffect {
@@ -243,6 +256,7 @@ mod tests {
                 WorkspacePhase::Selecting
                     | WorkspacePhase::Selected
                     | WorkspacePhase::ScrollingCapture
+                    | WorkspacePhase::Recording
             )
         };
 
@@ -282,5 +296,48 @@ mod tests {
         state.begin_scrolling();
         assert_eq!(state.finish_scrolling(), WorkspaceEffect::FinishScrolling);
         assert_eq!(state.phase(), WorkspacePhase::ScrollingCapture);
+    }
+
+    #[test]
+    fn activate_action_guide_enters_selecting_when_no_crop() {
+        let mut state = WorkspaceState::new(Workflow::Screenshot);
+        let effect = state.activate_workflow(Workflow::ActionGuide);
+        assert_eq!(
+            effect,
+            WorkspaceEffect::ActivateWorkflow(Workflow::ActionGuide)
+        );
+        assert_eq!(state.phase(), WorkspacePhase::Selecting);
+        assert_eq!(state.active_workflow(), Workflow::ActionGuide);
+    }
+
+    #[test]
+    fn begin_recording_moves_to_recording_phase() {
+        let mut state = WorkspaceState::new(Workflow::ActionGuide);
+        state.set_crop(Some(CropRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        }));
+        state.complete_selection();
+        assert_eq!(state.phase(), WorkspacePhase::Selected);
+        let effect = state.begin_recording();
+        assert_eq!(effect, WorkspaceEffect::StartRecording);
+        assert_eq!(state.phase(), WorkspacePhase::Recording);
+    }
+
+    #[test]
+    fn finish_recording_returns_finish_effect() {
+        let mut state = WorkspaceState::new(Workflow::ActionGuide);
+        state.set_crop(Some(CropRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        }));
+        state.complete_selection();
+        state.begin_recording();
+        let effect = state.finish_recording();
+        assert_eq!(effect, WorkspaceEffect::FinishRecording);
     }
 }

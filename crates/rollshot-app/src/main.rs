@@ -1,4 +1,6 @@
 #[cfg(feature = "action-guide")]
+mod action_export;
+#[cfg(feature = "action-guide")]
 mod action_input;
 mod diagnostics;
 mod launch;
@@ -79,6 +81,8 @@ fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
         }
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
+        #[cfg(feature = "action-guide")]
+        LaunchMode::ActionGuide => run_action_guide_record(),
     }
 }
 
@@ -124,6 +128,54 @@ fn run_action_guide_probe() -> Result<(), String> {
     session.stop();
     println!("Action Guide input probe finished.");
     Ok(())
+}
+
+#[cfg(all(feature = "action-guide", target_os = "linux"))]
+fn run_action_guide_record() -> Result<(), String> {
+    use rollshot_capture::CaptureRequest;
+    let config = rollshot_iced_overlay::OverlayConfig {
+        backend: "auto".to_string(),
+        fps: 5,
+        show_cursor: false,
+        request: CaptureRequest::action_guide_region(),
+        target_output_name: None,
+    };
+    let source = crate::action_input::create_input_source();
+    match rollshot_iced_overlay::run_action_guide(config, source).map_err(|e| e.to_string())? {
+        Some((recording, capability, region)) => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let source_kind = match capability {
+                rollshot_action::InputCapability::VisualOnly { .. } => {
+                    rollshot_action::InputSourceKind::VisualOnly
+                }
+                #[cfg(target_os = "linux")]
+                _ => rollshot_action::InputSourceKind::LinuxEvdev,
+                #[cfg(target_os = "macos")]
+                _ => rollshot_action::InputSourceKind::MacosCgEvent,
+            };
+            let out = crate::action_export::export_recording(
+                recording,
+                region,
+                capability,
+                source_kind,
+                &crate::action_export::default_out_dir(now_ms),
+            )?;
+            tracing::info!(target: "rollshot::action::export", path = %out.display(), "guide exported");
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+#[cfg(all(feature = "action-guide", target_os = "macos"))]
+fn run_action_guide_record() -> Result<(), String> {
+    Err(
+        "Action Guide recording not yet wired on macOS via launch.rs; use macos_product path"
+            .to_string(),
+    )
 }
 
 fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Result<(), String> {

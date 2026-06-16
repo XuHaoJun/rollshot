@@ -42,6 +42,8 @@ pub(crate) enum OverlayEffect {
     BeginStitch,
     FinishScrolling,
     FinishRegion,
+    StartRecording,
+    FinishRecording,
     Cancel,
     EnablePassthrough,
     DisablePassthrough,
@@ -99,6 +101,10 @@ pub(crate) struct OverlayState {
     pub(crate) toolbar_drag_grab: Option<iced::Vector>,
     pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
     pub(crate) transient_error: Option<String>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) recording_started: Option<std::time::Instant>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) recording_capability: Option<rollshot_capture::InputCapabilityLabel>,
 }
 
 impl Default for OverlayState {
@@ -121,6 +127,10 @@ impl Default for OverlayState {
             toolbar_drag_grab: None,
             toolbar_position: crate::workspace::ToolbarPosition::Automatic,
             transient_error: None,
+            #[cfg(feature = "action-guide")]
+            recording_started: None,
+            #[cfg(feature = "action-guide")]
+            recording_capability: None,
         }
     }
 }
@@ -131,6 +141,71 @@ impl OverlayState {
         self.capture_miss_warn
             .then_some(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING)
     }
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) fn elapsed_label(started: Option<std::time::Instant>) -> String {
+    match started {
+        Some(start) => {
+            let elapsed = start.elapsed().as_secs();
+            format!("{:02}:{:02}", elapsed / 60, elapsed % 60)
+        }
+        None => "00:00".to_string(),
+    }
+}
+
+/// Map the resolved input capability to the display-only label the overlay
+/// renders during recording.
+#[cfg(feature = "action-guide")]
+pub(crate) fn capability_label(
+    capability: rollshot_action::InputCapability,
+) -> rollshot_capture::InputCapabilityLabel {
+    match capability {
+        rollshot_action::InputCapability::SemanticEvents => {
+            rollshot_capture::InputCapabilityLabel::Semantic
+        }
+        rollshot_action::InputCapability::VisualOnly { .. } => {
+            rollshot_capture::InputCapabilityLabel::VisualOnly
+        }
+    }
+}
+
+/// Recording-phase status banner: a `●` indicator, the elapsed `mm:ss`, the
+/// resolved capability label, and an amber advisory when degraded to
+/// visual-only detection.
+#[cfg(feature = "action-guide")]
+fn recording_controls(state: &OverlayState) -> Element<'_, OverlayMessage> {
+    use iced::widget::column;
+
+    let elapsed = elapsed_label(state.recording_started);
+    let (capability_text, visual_only) = match state.recording_capability {
+        Some(rollshot_capture::InputCapabilityLabel::Semantic) => ("Semantic input enabled", false),
+        Some(rollshot_capture::InputCapabilityLabel::VisualOnly) => ("Visual-only detection", true),
+        None => ("", false),
+    };
+
+    let header = text(format!("\u{25CF} {elapsed}    {capability_text}")).size(14);
+    let mut content = column![header].spacing(6);
+    if visual_only {
+        content = content.push(
+            text("Input permissions unavailable - steps are detected from on-screen changes only.")
+                .size(12),
+        );
+    }
+
+    container(content)
+        .padding(8)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(
+                120.0 / 255.0,
+                53.0 / 255.0,
+                15.0 / 255.0,
+                0.94,
+            ))),
+            text_color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn clear_capture_miss_ui(state: &mut OverlayState) {
@@ -504,6 +579,18 @@ pub(crate) fn view_with_toolbar(
                 );
             }
 
+            #[cfg(feature = "action-guide")]
+            if state.workspace.phase() == crate::workspace::WorkspacePhase::Recording {
+                chrome_stack = chrome_stack.push(
+                    container(recording_controls(state))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::Start)
+                        .padding(16),
+                );
+            }
+
             if state.workspace.phase() == crate::workspace::WorkspacePhase::ScrollingCapture {
                 if let Some(handle) = &state.preview {
                     if let Some(preview_rect) = placement.preview_rect() {
@@ -671,6 +758,10 @@ pub(crate) fn update(
                         state.workspace.begin_scrolling();
                         OverlayEffect::BeginStitch
                     }
+                    Workflow::ActionGuide => {
+                        /* wired in Task 5 */
+                        OverlayEffect::None
+                    }
                 };
                 (effect, InputRegionMode::None)
             } else {
@@ -713,6 +804,10 @@ pub(crate) fn update(
                     state.workspace.begin_scrolling();
                     OverlayEffect::BeginStitch
                 }
+                Workflow::ActionGuide => {
+                    /* wired in Task 5 */
+                    OverlayEffect::None
+                }
             };
             (effect, InputRegionMode::None)
         }
@@ -736,6 +831,11 @@ pub(crate) fn update(
                         return (OverlayEffect::FinishRegion, InputRegionMode::None);
                     }
                     // Scrolling in Selected: the runner calls begin_scrolling.
+                    (OverlayEffect::None, InputRegionMode::None)
+                }
+                WorkspacePhase::Recording => {
+                    state.workspace.finish_recording();
+                    // FinishRecording wired in Task 5
                     (OverlayEffect::None, InputRegionMode::None)
                 }
                 WorkspacePhase::Selecting => {
@@ -764,6 +864,10 @@ pub(crate) fn update(
                             OverlayEffect::FinishRegion
                         }
                         Workflow::Scrolling => OverlayEffect::BeginStitch,
+                        Workflow::ActionGuide => {
+                            /* wired in Task 5 */
+                            OverlayEffect::None
+                        }
                     };
                     (effect, InputRegionMode::None)
                 }
@@ -777,6 +881,10 @@ pub(crate) fn update(
             let region = match workflow {
                 Workflow::Scrolling => InputRegionMode::ToolbarOnly,
                 Workflow::Screenshot => InputRegionMode::None,
+                Workflow::ActionGuide => {
+                    /* wired in Task 5 */
+                    InputRegionMode::None
+                }
             };
             (OverlayEffect::ActivateWorkflow(workflow), region)
         }
@@ -837,11 +945,28 @@ pub(crate) fn update(
                     state.workspace.finish_region();
                     (OverlayEffect::FinishRegion, InputRegionMode::None)
                 }
+                WorkspacePhase::Selected if state.workflow == Workflow::ActionGuide => {
+                    state.workspace.begin_recording();
+                    (OverlayEffect::StartRecording, InputRegionMode::None)
+                }
+                WorkspacePhase::Recording => {
+                    state.workspace.finish_recording();
+                    (OverlayEffect::FinishRecording, InputRegionMode::None)
+                }
                 _ => (OverlayEffect::None, InputRegionMode::None),
             },
             crate::toolbar::ToolbarAction::Cancel => {
                 state.workspace.cancel();
                 (OverlayEffect::Cancel, InputRegionMode::None)
+            }
+            crate::toolbar::ToolbarAction::ActionGuide => {
+                state.workflow = Workflow::ActionGuide;
+                state.workspace.activate_workflow(Workflow::ActionGuide);
+                clear_capture_miss_ui(state);
+                (
+                    OverlayEffect::ActivateWorkflow(Workflow::ActionGuide),
+                    InputRegionMode::None,
+                )
             }
         },
         OverlayMessage::DragStart => {
@@ -1432,5 +1557,11 @@ mod tests {
 
         // Unknown returns None
         assert!(super::recovery_edge_line(crop, CapturedEdge::Unknown).is_none());
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn elapsed_label_formats_mm_ss() {
+        assert_eq!(super::elapsed_label(None), "00:00");
     }
 }

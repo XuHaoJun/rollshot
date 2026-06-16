@@ -9,7 +9,11 @@ image = { version = "0.25", features = ["png"] }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-core = { path = "../rollshot-core" }
 rollshot-overlay-core = { path = "../rollshot-overlay-core" }
+rollshot-action = { path = "../rollshot-action", optional = true }
 tracing = { workspace = true }
+
+[features]
+action-guide = ["dep:rollshot-action"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }

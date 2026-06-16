@@ -122,6 +122,10 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some(CaptureResource::OneShot(capture)))
         }
+        Workflow::ActionGuide => {
+            /* wired in Task 5 */
+            acquire_scrolling_resource(config, factories)
+        }
     }
 }
 
@@ -196,6 +200,17 @@ static PREVIEW_RX: Mutex<
 > = Mutex::new(None);
 static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex::new(None);
 
+#[cfg(feature = "action-guide")]
+#[allow(clippy::type_complexity)]
+static ACTION_RESULT_SLOT: Mutex<
+    Option<Result<Option<(rollshot_action::Recording, rollshot_action::InputCapability)>, String>>,
+> = Mutex::new(None);
+#[cfg(feature = "action-guide")]
+static ACTION_REGION_SLOT: Mutex<Option<rollshot_action::CaptureRegion>> = Mutex::new(None);
+#[cfg(feature = "action-guide")]
+static ACTION_INPUT_SLOT: Mutex<Option<Box<dyn rollshot_action::SemanticInputSource>>> =
+    Mutex::new(None);
+
 // Capture starts in `run()` before the overlay surface exists, so the portal
 // screen-share picker dialog appears + dismisses on a clean desktop and never
 // lands in a captured frame. The live Driver is stashed here for the update fn
@@ -239,6 +254,14 @@ fn subscription(state: &Overlay) -> iced::Subscription<Message> {
         vec![event::listen().map(|e| Message::Overlay(app::OverlayMessage::IcedEvent(e)))];
     if state.workspace.phase() == WorkspacePhase::ScrollingCapture {
         subs.push(preview_stream());
+        subs.push(
+            iced::time::every(std::time::Duration::from_millis(250))
+                .map(|_| Message::Overlay(app::OverlayMessage::Tick)),
+        );
+    }
+    // Tick during recording so the elapsed-time label re-renders.
+    #[cfg(feature = "action-guide")]
+    if state.workspace.phase() == WorkspacePhase::Recording {
         subs.push(
             iced::time::every(std::time::Duration::from_millis(250))
                 .map(|_| Message::Overlay(app::OverlayMessage::Tick)),
@@ -479,6 +502,79 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         }
                     }
                 }
+                #[cfg(feature = "action-guide")]
+                app::OverlayEffect::StartRecording => {
+                    tracing::info!(target: TARGET_OVERLAY, "start recording requested");
+                    let mut capability = None;
+                    if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
+                        let crop = state.crop.unwrap_or(iced::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        });
+                        let ws = state.window_size.unwrap_or(iced::Size::new(1920.0, 1080.0));
+                        let source_size = driver.source_size();
+                        let region = crate::coords::map_crop_to_frame(
+                            crate::coords::LogicalRect {
+                                x: crop.x,
+                                y: crop.y,
+                                width: crop.width,
+                                height: crop.height,
+                            },
+                            rollshot_capture::Size {
+                                width: ws.width as u32,
+                                height: ws.height as u32,
+                            },
+                            source_size,
+                        );
+                        let action_region = rollshot_action::CaptureRegion {
+                            x: region.x,
+                            y: region.y,
+                            width: region.width,
+                            height: region.height,
+                        };
+                        *ACTION_REGION_SLOT.lock().unwrap() = Some(action_region);
+                        let source =
+                            ACTION_INPUT_SLOT.lock().unwrap().take().unwrap_or_else(|| {
+                                Box::new(rollshot_action::VisualOnlySource::new(
+                                    rollshot_action::DegradedReason::SourceStartFailed,
+                                ))
+                            });
+                        capability = Some(driver.begin_action_recording(action_region, source));
+                    }
+                    state.recording_started = Some(std::time::Instant::now());
+                    state.recording_capability = capability.map(crate::app::capability_label);
+                    Task::none()
+                }
+                #[cfg(feature = "action-guide")]
+                app::OverlayEffect::FinishRecording => {
+                    tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
+                    let outcome = match DRIVER_SLOT.lock().unwrap().take() {
+                        Some(driver) => driver.finalize_action().map(Some),
+                        None => Err("no driver for action recording".to_string()),
+                    };
+                    *ACTION_RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    state.recording_started = None;
+                    state.recording_capability = None;
+                    iced::exit()
+                }
+                #[cfg(not(feature = "action-guide"))]
+                app::OverlayEffect::StartRecording => {
+                    tracing::info!(
+                        target: TARGET_OVERLAY,
+                        "start recording requested (no action-guide feature)"
+                    );
+                    Task::none()
+                }
+                #[cfg(not(feature = "action-guide"))]
+                app::OverlayEffect::FinishRecording => {
+                    tracing::info!(
+                        target: TARGET_OVERLAY,
+                        "finish recording requested (no action-guide feature)"
+                    );
+                    Task::none()
+                }
             };
 
             // Apply input region based on workspace phase.
@@ -593,6 +689,42 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
     run_initial_path(config, crate::fullscreen::capture, run_overlay_session)
 }
 
+#[cfg(feature = "action-guide")]
+pub fn run_action_guide(
+    config: OverlayConfig,
+    input_source: Box<dyn rollshot_action::SemanticInputSource>,
+) -> Result<
+    Option<(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    )>,
+    OverlayError,
+> {
+    *ACTION_INPUT_SLOT.lock().unwrap() = Some(input_source);
+    *ACTION_REGION_SLOT.lock().unwrap() = None;
+    *ACTION_RESULT_SLOT.lock().unwrap() = None;
+    run(config)?;
+    let result = ACTION_RESULT_SLOT
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or(Ok(None))
+        .map_err(OverlayError::Capture)?;
+    let region =
+        ACTION_REGION_SLOT
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
+    Ok(result.map(|(recording, capability)| (recording, capability, region)))
+}
+
 fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {
     if !config.request.is_supported() {
         return Err(OverlayError::Capture(
@@ -611,6 +743,12 @@ fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, O
     *ONE_SHOT_SLOT.lock().unwrap() = None;
     *RESULT_SLOT.lock().unwrap() = None;
     *CAPTURE_WORKFLOW.lock().unwrap() = None;
+    #[cfg(feature = "action-guide")]
+    {
+        *ACTION_RESULT_SLOT.lock().unwrap() = None;
+        *ACTION_REGION_SLOT.lock().unwrap() = None;
+        *ACTION_INPUT_SLOT.lock().unwrap() = None;
+    }
 
     #[cfg(not(test))]
     let factories = real_factories();
