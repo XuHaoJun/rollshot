@@ -745,9 +745,12 @@ fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, O
     *CAPTURE_WORKFLOW.lock().unwrap() = None;
     #[cfg(feature = "action-guide")]
     {
+        // Reset only this session's *output* slots. ACTION_INPUT_SLOT holds the
+        // semantic input source handed in by `run_action_guide` before it called
+        // `run`; clearing it here would drop the real evdev source and force
+        // `StartRecording` to fall back to a visual-only source.
         *ACTION_RESULT_SLOT.lock().unwrap() = None;
         *ACTION_REGION_SLOT.lock().unwrap() = None;
-        *ACTION_INPUT_SLOT.lock().unwrap() = None;
     }
 
     #[cfg(not(test))]
