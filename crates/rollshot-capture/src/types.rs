@@ -193,6 +193,12 @@ pub enum PixelFormat {
     Rgb,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputCapabilityLabel {
+    Semantic,
+    VisualOnly,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CaptureOptions, CaptureRequest, InteractiveLaunchOptions};

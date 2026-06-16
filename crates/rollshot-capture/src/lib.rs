@@ -36,7 +36,7 @@ pub use one_shot::{
 };
 pub use types::{
     CaptureOptions, CaptureProbe, CaptureRequest, CaptureScope, CapturedFrame, FrameMetadata,
-    InteractiveLaunchOptions, PixelFormat, Region, RegionMode, Size, Workflow,
+    InputCapabilityLabel, InteractiveLaunchOptions, PixelFormat, Region, RegionMode, Size, Workflow,
 };
 
 #[cfg(test)]

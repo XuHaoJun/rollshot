@@ -42,6 +42,8 @@ pub(crate) enum OverlayEffect {
     BeginStitch,
     FinishScrolling,
     FinishRegion,
+    StartRecording,
+    FinishRecording,
     Cancel,
     EnablePassthrough,
     DisablePassthrough,
@@ -99,6 +101,8 @@ pub(crate) struct OverlayState {
     pub(crate) toolbar_drag_grab: Option<iced::Vector>,
     pub(crate) toolbar_position: crate::workspace::ToolbarPosition,
     pub(crate) transient_error: Option<String>,
+    pub(crate) recording_started: Option<std::time::Instant>,
+    pub(crate) recording_capability: Option<rollshot_capture::InputCapabilityLabel>,
 }
 
 impl Default for OverlayState {
@@ -121,6 +125,8 @@ impl Default for OverlayState {
             toolbar_drag_grab: None,
             toolbar_position: crate::workspace::ToolbarPosition::Automatic,
             transient_error: None,
+            recording_started: None,
+            recording_capability: None,
         }
     }
 }
@@ -130,6 +136,16 @@ impl OverlayState {
     pub(crate) fn warning(&self) -> Option<&str> {
         self.capture_miss_warn
             .then_some(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING)
+    }
+}
+
+pub(crate) fn elapsed_label(started: Option<std::time::Instant>) -> String {
+    match started {
+        Some(start) => {
+            let elapsed = start.elapsed().as_secs();
+            format!("{:02}:{:02}", elapsed / 60, elapsed % 60)
+        }
+        None => "00:00".to_string(),
     }
 }
 
@@ -858,6 +874,14 @@ pub(crate) fn update(
                     state.workspace.finish_region();
                     (OverlayEffect::FinishRegion, InputRegionMode::None)
                 }
+                WorkspacePhase::Selected if state.workflow == Workflow::ActionGuide => {
+                    state.workspace.begin_recording();
+                    (OverlayEffect::StartRecording, InputRegionMode::None)
+                }
+                WorkspacePhase::Recording => {
+                    state.workspace.finish_recording();
+                    (OverlayEffect::FinishRecording, InputRegionMode::None)
+                }
                 _ => (OverlayEffect::None, InputRegionMode::None),
             },
             crate::toolbar::ToolbarAction::Cancel => {
@@ -1462,5 +1486,10 @@ mod tests {
 
         // Unknown returns None
         assert!(super::recovery_edge_line(crop, CapturedEdge::Unknown).is_none());
+    }
+
+    #[test]
+    fn elapsed_label_formats_mm_ss() {
+        assert_eq!(super::elapsed_label(None), "00:00");
     }
 }

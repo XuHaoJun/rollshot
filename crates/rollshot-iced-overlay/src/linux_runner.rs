@@ -122,7 +122,10 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some(CaptureResource::OneShot(capture)))
         }
-        Workflow::ActionGuide => { /* wired in Task 5 */ acquire_scrolling_resource(config, factories) }
+        Workflow::ActionGuide => {
+            /* wired in Task 5 */
+            acquire_scrolling_resource(config, factories)
+        }
     }
 }
 
@@ -479,6 +482,18 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                             Task::none()
                         }
                     }
+                }
+                app::OverlayEffect::StartRecording => {
+                    tracing::info!(target: TARGET_OVERLAY, "start recording requested");
+                    state.recording_started = Some(std::time::Instant::now());
+                    state.recording_capability = Some(rollshot_capture::InputCapabilityLabel::Semantic);
+                    Task::none()
+                }
+                app::OverlayEffect::FinishRecording => {
+                    tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
+                    state.recording_started = None;
+                    state.recording_capability = None;
+                    Task::none()
                 }
             };
 

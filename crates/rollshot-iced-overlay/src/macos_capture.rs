@@ -89,7 +89,12 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some((CaptureResource::OneShot(capture), None)))
         }
-        Workflow::ActionGuide => { /* wired in Task 5 */ Err(OverlayError::Overlay("ActionGuide not yet wired on macOS".to_string())) }
+        Workflow::ActionGuide => {
+            /* wired in Task 5 */
+            Err(OverlayError::Overlay(
+                "ActionGuide not yet wired on macOS".to_string(),
+            ))
+        }
     }
 }
 
@@ -764,6 +769,18 @@ impl Component {
                 ),
                 None => EffectOutcome::Task(Task::none()),
             },
+            OverlayEffect::StartRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "start recording requested");
+                self.overlay.recording_started = Some(std::time::Instant::now());
+                self.overlay.recording_capability = Some(rollshot_capture::InputCapabilityLabel::Semantic);
+                EffectOutcome::Task(Task::none())
+            }
+            OverlayEffect::FinishRecording => {
+                tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
+                self.overlay.recording_started = None;
+                self.overlay.recording_capability = None;
+                EffectOutcome::Task(Task::none())
+            }
         }
     }
 
