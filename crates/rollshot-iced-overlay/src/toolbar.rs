@@ -43,6 +43,10 @@ pub fn actions_for(phase: WorkspacePhase) -> Vec<ToolbarAction> {
             ToolbarAction::Finish,
             ToolbarAction::Cancel,
         ],
+        WorkspacePhase::Recording => vec![
+            ToolbarAction::Finish,
+            ToolbarAction::Cancel,
+        ],
     }
 }
 

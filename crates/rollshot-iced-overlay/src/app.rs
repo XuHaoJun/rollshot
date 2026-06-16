@@ -740,6 +740,11 @@ pub(crate) fn update(
                     // Scrolling in Selected: the runner calls begin_scrolling.
                     (OverlayEffect::None, InputRegionMode::None)
                 }
+                WorkspacePhase::Recording => {
+                    state.workspace.finish_recording();
+                    // FinishRecording wired in Task 5
+                    (OverlayEffect::None, InputRegionMode::None)
+                }
                 WorkspacePhase::Selecting => {
                     // Require a non-empty crop; otherwise keep selecting.
                     if !state
