@@ -55,7 +55,6 @@ pub(crate) enum OverlayEffect {
 pub(crate) enum OverlayMessage {
     IcedEvent(iced::Event),
     WindowOpened { id: window::Id, size: Size },
-    Finish,
     FinishCapture,
     Cancel,
     LiveEvent(crate::driver::LiveOverlayEvent),
@@ -132,14 +131,6 @@ impl Default for OverlayState {
             #[cfg(feature = "action-guide")]
             recording_capability: None,
         }
-    }
-}
-
-impl OverlayState {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn warning(&self) -> Option<&str> {
-        self.capture_miss_warn
-            .then_some(rollshot_overlay_core::capture_miss::CAPTURE_MISS_WARNING)
     }
 }
 
@@ -821,63 +812,6 @@ pub(crate) fn update(
                 (OverlayEffect::None, InputRegionMode::None)
             }
         }
-        OverlayMessage::Finish => {
-            match state.workspace.phase() {
-                WorkspacePhase::ScrollingCapture => {
-                    state.workspace.finish_scrolling();
-                    (OverlayEffect::FinishScrolling, InputRegionMode::None)
-                }
-                WorkspacePhase::Selected => {
-                    if state.workflow == Workflow::Screenshot {
-                        state.workspace.finish_region();
-                        return (OverlayEffect::FinishRegion, InputRegionMode::None);
-                    }
-                    // Scrolling in Selected: the runner calls begin_scrolling.
-                    (OverlayEffect::None, InputRegionMode::None)
-                }
-                WorkspacePhase::Recording => {
-                    // The product Finish control is ToolbarAction::Finish (which
-                    // returns FinishRecording); this OverlayMessage::Finish path
-                    // is exercised only by tests.
-                    state.workspace.finish_recording();
-                    (OverlayEffect::None, InputRegionMode::None)
-                }
-                WorkspacePhase::Selecting => {
-                    // Require a non-empty crop; otherwise keep selecting.
-                    if !state
-                        .crop
-                        .is_some_and(|c| c.width >= 1.0 && c.height >= 1.0)
-                    {
-                        state.capture_miss_warn = true;
-                        state.capture_miss_message_expires_at =
-                            Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-                        return (OverlayEffect::None, InputRegionMode::None);
-                    }
-                    let crop = state.crop.unwrap();
-                    let crop_rect = crate::workspace::CropRect {
-                        x: crop.x,
-                        y: crop.y,
-                        width: crop.width,
-                        height: crop.height,
-                    };
-                    state.workspace.set_crop(Some(crop_rect));
-                    state.workspace.complete_selection();
-                    let effect = match state.workflow {
-                        Workflow::Screenshot => {
-                            state.workspace.finish_region();
-                            OverlayEffect::FinishRegion
-                        }
-                        Workflow::Scrolling => OverlayEffect::BeginStitch,
-                        Workflow::ActionGuide => {
-                            // Recording is driven by the toolbar ✓ control, not
-                            // by committing the selection.
-                            OverlayEffect::None
-                        }
-                    };
-                    (effect, InputRegionMode::None)
-                }
-            }
-        }
         OverlayMessage::ActivateWorkflow(workflow) => {
             state.workflow = workflow;
             state.workspace.activate_workflow(workflow);
@@ -1133,14 +1067,6 @@ mod tests {
     }
 
     #[test]
-    fn finish_without_crop_requests_warning_not_effect() {
-        let mut state = OverlayState::default();
-        let (effect, _region) = super::update(&mut state, OverlayMessage::Finish);
-        assert_eq!(effect, super::OverlayEffect::None);
-        assert!(state.warning().is_some());
-    }
-
-    #[test]
     fn window_opened_records_window_id_and_size() {
         let mut state = OverlayState::default();
         let id = iced::window::Id::unique();
@@ -1170,16 +1096,6 @@ mod tests {
         let (effect, _region) = super::update(&mut state, OverlayMessage::FinishCapture);
 
         assert_eq!(effect, super::OverlayEffect::FinishScrolling);
-    }
-
-    #[test]
-    fn selection_finish_still_validates_empty_crop() {
-        let mut state = OverlayState::default();
-
-        let (effect, _region) = super::update(&mut state, OverlayMessage::Finish);
-
-        assert_eq!(effect, super::OverlayEffect::None);
-        assert!(state.warning().is_some());
     }
 
     #[test]
