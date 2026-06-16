@@ -545,18 +545,12 @@ git commit -m "feat(app): timeline workspace select/rename/delete/replace-keyfra
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to the `tests` module in `update.rs`:
+Add to the `tests` module in `update.rs`. The export tests use
+`tempfile::tempdir()` (already a `rollshot-app` dev-dependency) — it creates a
+collision-free directory and removes it on drop, so no manual create/cleanup and
+no parallel-test races:
 
 ```rust
-    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}"))
-    }
-
     #[test]
     fn discard_requested_shows_modal_then_cancel_clears_it() {
         let mut state = ws(synthetic_recording(2));
@@ -577,24 +571,20 @@ Add to the `tests` module in `update.rs`:
     fn export_dir_chosen_writes_guide_folder_and_clears_message() {
         let mut state = ws(recording_from_frames());
         state.message = Some("stale".to_string());
-        let tmp = unique_temp_dir("rollshot-timeline-export-ok");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.clone())));
-        assert!(tmp.join("action-guide/steps.md").exists());
-        assert!(tmp.join("action-guide/session.json").exists());
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.path().to_path_buf())));
+        assert!(tmp.path().join("action-guide/steps.md").exists());
+        assert!(tmp.path().join("action-guide/session.json").exists());
         assert!(state.message.is_none(), "successful export clears the banner");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn export_empty_guide_sets_error_and_writes_nothing() {
         let mut state = ws(synthetic_recording(0));
-        let tmp = unique_temp_dir("rollshot-timeline-export-empty");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.clone())));
-        assert!(!tmp.join("action-guide").exists(), "empty guide must not write a folder");
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.path().to_path_buf())));
+        assert!(!tmp.path().join("action-guide").exists(), "empty guide must not write a folder");
         assert!(state.message.is_some(), "export failure surfaces an inline message");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1375,7 +1365,7 @@ The following changes were made to the original plan during review to reduce bug
    - Replaced `container(...).center(...)` / `.center_x(...)` with `.width(...).height(...).align_x(Alignment::Center)` etc.
    - Replaced `scrollable::Scrollbar::default()` with `scrollable::Scrollbar::new()`.
    - Updated `discard_modal` to use the official iced modal pattern (`opaque` scrim + `mouse::Interaction::Idle`) so the base UI is fully blocked while the modal is open.
-3. **Test isolation:** Export tests now use unique temp directories (PID + nanosecond timestamp) instead of hardcoded paths to avoid parallel-test collisions.
+3. **Test isolation:** Export tests use `tempfile::tempdir()` (already a `rollshot-app` dev-dependency) instead of hardcoded paths — collision-free across parallel test threads and auto-removed on drop (no manual create/cleanup, no leak on panic).
 4. **Performance note:** Added a comment on `build_handle` noting that it clones raw pixel bytes and that this is acceptable because it only runs on selection/keyframe change, not per-frame.
 
 ## Review Outputs
