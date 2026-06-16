@@ -671,6 +671,7 @@ pub(crate) fn update(
                         state.workspace.begin_scrolling();
                         OverlayEffect::BeginStitch
                     }
+                    Workflow::ActionGuide => { /* wired in Task 5 */ OverlayEffect::None }
                 };
                 (effect, InputRegionMode::None)
             } else {
@@ -713,6 +714,7 @@ pub(crate) fn update(
                     state.workspace.begin_scrolling();
                     OverlayEffect::BeginStitch
                 }
+                Workflow::ActionGuide => { /* wired in Task 5 */ OverlayEffect::None }
             };
             (effect, InputRegionMode::None)
         }
@@ -764,6 +766,7 @@ pub(crate) fn update(
                             OverlayEffect::FinishRegion
                         }
                         Workflow::Scrolling => OverlayEffect::BeginStitch,
+                        Workflow::ActionGuide => { /* wired in Task 5 */ OverlayEffect::None }
                     };
                     (effect, InputRegionMode::None)
                 }
@@ -777,6 +780,7 @@ pub(crate) fn update(
             let region = match workflow {
                 Workflow::Scrolling => InputRegionMode::ToolbarOnly,
                 Workflow::Screenshot => InputRegionMode::None,
+                Workflow::ActionGuide => { /* wired in Task 5 */ InputRegionMode::None }
             };
             (OverlayEffect::ActivateWorkflow(workflow), region)
         }

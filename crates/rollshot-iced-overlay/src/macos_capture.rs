@@ -89,6 +89,7 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some((CaptureResource::OneShot(capture), None)))
         }
+        Workflow::ActionGuide => { /* wired in Task 5 */ Err(OverlayError::Overlay("ActionGuide not yet wired on macOS".to_string())) }
     }
 }
 

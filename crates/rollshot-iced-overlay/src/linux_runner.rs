@@ -122,6 +122,7 @@ pub(crate) fn acquire_resource(
             };
             Ok(Some(CaptureResource::OneShot(capture)))
         }
+        Workflow::ActionGuide => { /* wired in Task 5 */ acquire_scrolling_resource(config, factories) }
     }
 }
 
