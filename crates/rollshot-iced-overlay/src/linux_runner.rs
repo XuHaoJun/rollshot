@@ -123,7 +123,7 @@ pub(crate) fn acquire_resource(
             Ok(Some(CaptureResource::OneShot(capture)))
         }
         Workflow::ActionGuide => {
-            /* wired in Task 5 */
+            // Records from the same live stream as scrolling capture.
             acquire_scrolling_resource(config, factories)
         }
     }

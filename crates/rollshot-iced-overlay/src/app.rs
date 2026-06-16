@@ -759,7 +759,8 @@ pub(crate) fn update(
                         OverlayEffect::BeginStitch
                     }
                     Workflow::ActionGuide => {
-                        /* wired in Task 5 */
+                        // Recording is driven by the toolbar ✓ control, not by
+                        // committing the selection.
                         OverlayEffect::None
                     }
                 };
@@ -805,7 +806,8 @@ pub(crate) fn update(
                     OverlayEffect::BeginStitch
                 }
                 Workflow::ActionGuide => {
-                    /* wired in Task 5 */
+                    // Recording is driven by the toolbar ✓ control, not by
+                    // committing the selection.
                     OverlayEffect::None
                 }
             };
@@ -834,8 +836,10 @@ pub(crate) fn update(
                     (OverlayEffect::None, InputRegionMode::None)
                 }
                 WorkspacePhase::Recording => {
+                    // The product Finish control is ToolbarAction::Finish (which
+                    // returns FinishRecording); this OverlayMessage::Finish path
+                    // is exercised only by tests.
                     state.workspace.finish_recording();
-                    // FinishRecording wired in Task 5
                     (OverlayEffect::None, InputRegionMode::None)
                 }
                 WorkspacePhase::Selecting => {
@@ -865,7 +869,8 @@ pub(crate) fn update(
                         }
                         Workflow::Scrolling => OverlayEffect::BeginStitch,
                         Workflow::ActionGuide => {
-                            /* wired in Task 5 */
+                            // Recording is driven by the toolbar ✓ control, not
+                            // by committing the selection.
                             OverlayEffect::None
                         }
                     };
@@ -882,7 +887,7 @@ pub(crate) fn update(
                 Workflow::Scrolling => InputRegionMode::ToolbarOnly,
                 Workflow::Screenshot => InputRegionMode::None,
                 Workflow::ActionGuide => {
-                    /* wired in Task 5 */
+                    // Selection runs with the full-overlay input region.
                     InputRegionMode::None
                 }
             };
