@@ -256,7 +256,7 @@ Add methods on `WorkspaceState` (next to `begin_scrolling`/`finish_scrolling`):
 ```rust
     pub fn begin_recording(&mut self) -> WorkspaceEffect {
         self.phase = WorkspacePhase::Recording;
-        self.auto_hide.accepted_frame();
+        self.auto_hide.accepted_frame(std::time::Instant::now());
         WorkspaceEffect::StartRecording
     }
 
@@ -631,7 +631,10 @@ mod action_tests {
     #[test]
     fn finalize_action_produces_candidates_from_changing_frames() {
         let region = CaptureRegion { x: 0, y: 0, width: 64, height: 64 };
-        let mut rec = ActionRecording::start(region, Box::new(VisualOnlySource::default()));
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(rollshot_action::DegradedReason::SourceStartFailed)),
+        );
         // Push two visually different frames far enough apart in time.
         let mut a = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]));
         let b = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
@@ -640,8 +643,26 @@ mod action_tests {
         // a second black frame to settle:
         a = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]));
         rec.push_frame(a, 1500);
+        assert!(
+            matches!(rec.capability(), rollshot_action::InputCapability::VisualOnly { .. }),
+            "capability is captured from the source start"
+        );
         let recording = rec.finalize();
         assert!(!recording.candidates.is_empty(), "expected at least one candidate");
+    }
+
+    #[test]
+    fn cancel_action_recording_finishes_without_panic() {
+        let region = CaptureRegion { x: 0, y: 0, width: 64, height: 64 };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(rollshot_action::DegradedReason::PermissionDenied)),
+        );
+        rec.push_frame(RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255])), 0);
+        // finalize() stops the source and returns a Recording even if no steps
+        // were detected.
+        let recording = rec.finalize();
+        assert!(recording.candidates.is_empty());
     }
 }
 ```
@@ -666,6 +687,7 @@ In `crates/rollshot-iced-overlay/src/driver.rs`, add (feature-gated):
 pub(crate) struct ActionRecording {
     recorder: rollshot_action::ActionRecorder,
     source: Box<dyn rollshot_action::SemanticInputSource>,
+    capability: rollshot_action::InputCapability,
     session_started: Option<std::time::SystemTime>,
 }
 
@@ -676,7 +698,7 @@ impl ActionRecording {
         mut source: Box<dyn rollshot_action::SemanticInputSource>,
     ) -> Self {
         use rollshot_action::{DetectorConfig, StoreConfig};
-        let _capability = source.start(region);
+        let capability = source.start(region);
         Self {
             recorder: rollshot_action::ActionRecorder::new(
                 region,
@@ -684,6 +706,7 @@ impl ActionRecording {
                 DetectorConfig::default(),
             ),
             source,
+            capability,
             session_started: None,
         }
     }
@@ -699,6 +722,10 @@ impl ActionRecording {
         }
     }
 
+    pub(crate) fn capability(&self) -> rollshot_action::InputCapability {
+        self.capability
+    }
+
     pub(crate) fn finalize(mut self) -> rollshot_action::Recording {
         self.source.stop();
         self.recorder.finish()
@@ -712,7 +739,25 @@ impl ActionRecording {
 > exactly what `action_input.rs::poll_into` does.
 
 Add the threaded driver entry points (feature-gated) modeled on
-`begin_stitch`/`finalize`:
+`begin_stitch`/`finalize`. The recording pipeline is a parallel consumer of the
+same `Shared.latest` slot used by the stitcher:
+
+```text
+┌─────────────────┐     ┌─────────────┐     ┌─────────────────────┐
+│  reader thread  │────▶│ Shared.latest│────▶│  action consumer    │
+│ (existing)      │     │ (latest-wins)│     │  thread (new)       │
+└─────────────────┘     └─────────────┘     │  - ActionRecording  │
+                                            │  - SystemTime→ms    │
+                                            │  - poll semantic in │
+                                            └──────────┬──────────┘
+                                                       │
+                                                       ▼
+                                            ┌─────────────────────┐
+                                            │ (Recording,         │
+                                            │  InputCapability,   │
+                                            │  CaptureRegion)     │
+                                            └─────────────────────┘
+```
 
 ```rust
 #[cfg(feature = "action-guide")]
@@ -745,6 +790,10 @@ impl Driver {
                             .unwrap_or(0);
                         let cropped = match crop_frame(&frame, region_to_capture_region(region)) {
                             Ok(c) => c.image,
+                            // Fall back to the uncropped frame only when the
+                            // selected region is outside the source; the
+                            // detector still runs, but the manifest should
+                            // record the effective region mismatch.
                             Err(_) => frame.image,
                         };
                         rec.push_frame(cropped, at_ms);
@@ -753,31 +802,39 @@ impl Driver {
                 rec.poll_input();
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            let _ = tx.send(rec.finalize());
+            let capability = rec.capability();
+            let _ = tx.send((rec.finalize(), capability));
         }));
     }
 
-    /// Signal the action thread to stop and collect the finished Recording.
-    pub(crate) fn finalize_action(mut self) -> Result<rollshot_action::Recording, String> {
+    /// Signal the action thread to stop and collect the finished Recording plus
+    /// the resolved input capability (threaded into the export manifest).
+    pub(crate) fn finalize_action(
+        mut self,
+    ) -> Result<(rollshot_action::Recording, rollshot_action::InputCapability), String> {
         self.action_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.action_thread.take() {
             let _ = handle.join();
         }
-        self.action_result
+        let (recording, capability) = self
+            .action_result
             .take()
             .and_then(|rx| rx.recv().ok())
-            .ok_or_else(|| "action recording produced no result".to_string())
+            .ok_or_else(|| "action recording produced no result".to_string())?;
+        Ok((recording, capability))
     }
 }
 ```
 
 > Add the fields `action_stop: Arc<AtomicBool>`, `action_thread:
-> Option<JoinHandle<()>>`, `action_result: Option<Receiver<Recording>>` to
-> `Driver`, all feature-gated, initialized in `start_capture`. Reuse the existing
-> `crop_frame` helper; `region_to_capture_region` is a tiny adapter between the
-> overlay’s region rect type and `rollshot_action::CaptureRegion` (define it
-> locally). If the crop region for Action Guide is the full selected region,
-> pass that rect.
+> Option<JoinHandle<()>>`, `action_result: Option<Receiver<(Recording, InputCapability)>>>` to
+> `Driver`, all feature-gated, initialized in `start_capture`. Extend
+> `Driver::stop_and_join()` to set `action_stop` and join `action_thread` when
+> the feature is on, so `cancel()` correctly tears down an in-progress action
+> recording. Reuse the existing `crop_frame` helper; `region_to_capture_region`
+> is a tiny adapter between the overlay’s region rect type and
+> `rollshot_action::CaptureRegion` (define it locally). If the crop region for
+> Action Guide is the full selected region, pass that rect.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -832,8 +889,29 @@ In `linux_runner.rs`, add a static slot beside `RESULT_SLOT` (feature-gated):
 
 ```rust
 #[cfg(feature = "action-guide")]
-static ACTION_RESULT_SLOT: Mutex<Option<Result<Option<rollshot_action::Recording>, String>>> =
-    Mutex::new(None);
+static ACTION_RESULT_SLOT: Mutex<
+    Option<Result<Option<(rollshot_action::Recording, rollshot_action::InputCapability)>, String>>,
+> = Mutex::new(None);
+#[cfg(feature = "action-guide")]
+static ACTION_REGION_SLOT: Mutex<Option<rollshot_action::CaptureRegion>> = Mutex::new(None);
+```
+
+Extend `acquire_resource` to treat `Workflow::ActionGuide` like `Scrolling` (it
+needs a streaming driver, not a one-shot):
+
+```rust
+pub(crate) fn acquire_resource(
+    workflow: Workflow,
+    config: &OverlayConfig,
+    factories: &ResourceFactories,
+) -> Result<Option<CaptureResource>, OverlayError> {
+    match workflow {
+        Workflow::Scrolling | Workflow::ActionGuide => acquire_scrolling_resource(config, factories),
+        Workflow::Screenshot => {
+            // ... existing one-shot path ...
+        }
+    }
+}
 ```
 
 Handle the new effects in the runner’s `update` match (feature-gated arms):
@@ -843,6 +921,7 @@ Handle the new effects in the runner’s `update` match (feature-gated arms):
     app::OverlayEffect::StartRecording => {
         if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
             let region = action_region_from(state); // selected crop -> CaptureRegion
+            *ACTION_REGION_SLOT.lock().unwrap() = Some(region);
             let source = take_action_input_source();  // set before run; see Step 4
             driver.begin_action_recording(region, source);
         }
@@ -879,15 +958,19 @@ In `linux_runner.rs`:
 pub fn run_action_guide(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
-) -> Result<Option<rollshot_action::Recording>, OverlayError> {
+) -> Result<Option<(rollshot_action::Recording, rollshot_action::InputCapability, rollshot_action::CaptureRegion)>, OverlayError> {
     *ACTION_INPUT_SLOT.lock().unwrap() = Some(input_source);
+    *ACTION_REGION_SLOT.lock().unwrap() = None;
     run(config)?; // same overlay loop; ActionGuide workflow drives recording
-    ACTION_RESULT_SLOT
+    let result = ACTION_RESULT_SLOT
         .lock()
         .unwrap()
         .take()
         .unwrap_or(Ok(None))
-        .map_err(OverlayError::Capture)
+        .map_err(OverlayError::Capture)?;
+    let region = ACTION_REGION_SLOT.lock().unwrap().take()
+        .unwrap_or_else(|| rollshot_action::CaptureRegion { x: 0, y: 0, width: 1920, height: 1080 });
+    Ok(result.map(|(recording, capability)| (recording, capability, region)))
 }
 ```
 
@@ -898,7 +981,7 @@ In `lib.rs`, expose it (feature-gated, Linux):
 pub fn run_action_guide(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
-) -> Result<Option<rollshot_action::Recording>, OverlayError> {
+) -> Result<Option<(rollshot_action::Recording, rollshot_action::InputCapability, rollshot_action::CaptureRegion)>, OverlayError> {
     linux_runner::run_action_guide(config, input_source)
 }
 ```
@@ -949,7 +1032,30 @@ Expected: FAIL — `HostEffect::ActionRecorded` undefined.
 
 - [ ] **Step 3: Add the HostEffect variant and effect handling**
 
-In `macos_capture.rs`, extend `HostEffect` (feature-gated variant):
+In `macos_capture.rs`, extend `acquire_resource` so `Workflow::ActionGuide` uses
+a streaming driver (like `Scrolling`):
+
+```rust
+pub(crate) fn acquire_resource(
+    workflow: Workflow,
+    config: &OverlayConfig,
+    factories: &ResourceFactories,
+) -> Result<Option<(CaptureResource, Option<PreviewReceiver>)>, OverlayError> {
+    match workflow {
+        Workflow::Scrolling | Workflow::ActionGuide => {
+            let (preview_tx, preview_rx) = iced::futures::channel::mpsc::unbounded();
+            let driver =
+                (factories.streaming)(config, preview_tx).map_err(OverlayError::Capture)?;
+            Ok(Some((CaptureResource::Streaming(driver), Some(preview_rx))))
+        }
+        Workflow::Screenshot => {
+            // ... existing one-shot path ...
+        }
+    }
+}
+```
+
+Extend `HostEffect` (feature-gated variant):
 
 ```rust
 pub enum HostEffect {
@@ -957,11 +1063,42 @@ pub enum HostEffect {
     Task(iced::Task<Message>),
     Completed(CaptureResult),
     #[cfg(feature = "action-guide")]
-    ActionRecorded(rollshot_action::Recording),
+    ActionRecorded(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    ),
     Cancelled,
     Fatal(String),
 }
 ```
+
+Add `action_input_source` to `Component` and pass it into `Component::new` as a
+separate parameter (not via `OverlayConfig`, so `OverlayConfig` keeps its `Clone`
+derive):
+
+```rust
+pub struct Component {
+    // ... existing fields ...
+    action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>,
+}
+```
+
+Change `Component::new` to accept the source:
+
+```rust
+pub fn new(
+    config: &OverlayConfig,
+    #[cfg(feature = "action-guide")]
+    action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>,
+) -> Result<Option<Self>, OverlayError> {
+    // ... existing body ...
+}
+```
+
+`activate_workflow` for `ActionGuide` is not supported (mode switching during a
+recording session is out of scope for P0c-1), so the input source only needs to
+be threaded through the initial `new` path.
 
 Add to `apply_effect`:
 
@@ -971,7 +1108,11 @@ Add to `apply_effect`:
         if let Some(driver) = self.driver.as_mut() {
             let region = self.action_region();
             let source = self.action_input_source.take()
-                .unwrap_or_else(|| Box::new(rollshot_action::VisualOnlySource::default()));
+                .unwrap_or_else(|| {
+                    Box::new(rollshot_action::VisualOnlySource::new(
+                        rollshot_action::DegradedReason::SourceStartFailed,
+                    ))
+                });
             driver.begin_action_recording(region, source);
         }
         EffectOutcome::Task(Task::none())
@@ -980,7 +1121,10 @@ Add to `apply_effect`:
     OverlayEffect::FinishRecording => {
         match self.driver.take() {
             Some(driver) => match driver.finalize_action() {
-                Ok(recording) => EffectOutcome::Terminal(HostEffect::ActionRecorded(recording)),
+                Ok((recording, capability)) => {
+                    let region = self.action_region();
+                    EffectOutcome::Terminal(HostEffect::ActionRecorded(recording, capability, region))
+                }
                 Err(e) => { self.overlay.transient_error = Some(e); EffectOutcome::Task(Task::none()) }
             },
             None => EffectOutcome::Terminal(HostEffect::Cancelled),
@@ -988,8 +1132,6 @@ Add to `apply_effect`:
     }
 ```
 
-> Add `action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>`
-> to `Component`, set by `Component::new` from a config field the app fills.
 > `action_region()` mirrors the Linux `action_region_from` crop→`CaptureRegion`
 > conversion. Recording-phase `Cancel` already drops `self.driver`; ensure the
 > action thread is stopped (call a `driver.cancel()` that also sets
@@ -1001,11 +1143,12 @@ the rect during `WorkspacePhase::Recording` (currently only
 
 - [ ] **Step 4: Handle `ActionRecorded` in the macOS daemon**
 
-In `macos_product.rs`, in the daemon `update` where `HostEffect` is handled, add
-(feature-gated) an arm that takes the `Recording` and calls the shared export
+In `macos_product.rs`, change `MacosProduct::new` to accept an optional
+`Box<dyn SemanticInputSource>` and pass it to `Component::new`. In the daemon
+`update` where `HostEffect` is handled, add (feature-gated) an arm that takes the
+`Recording` + `InputCapability` + `CaptureRegion` and calls the shared export
 handler from Task 9 (`action_export::export_recording`), logging the resulting
-path, then exits or returns to idle. (P0c-2 will instead transition to
-`Phase::Timeline`.)
+path, then exits. (P0c-2 will instead transition to `Phase::Timeline`.)
 
 - [ ] **Step 5: Run tests**
 
@@ -1052,7 +1195,13 @@ mod tests {
         let tmp = std::env::temp_dir().join("rollshot-action-export-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let out = export_recording(recording, region, &tmp).unwrap();
+        let out = export_recording(
+            recording,
+            region,
+            rollshot_action::InputCapability::SemanticEvents,
+            rollshot_action::InputSourceKind::LinuxEvdev,
+            &tmp,
+        ).unwrap();
         assert!(out.join("steps.md").exists());
         assert!(out.join("session.json").exists());
     }
@@ -1084,43 +1233,31 @@ const TARGET: &str = "rollshot::action::export";
 pub fn export_recording(
     recording: Recording,
     region: CaptureRegion,
+    capability: InputCapability,
+    source_kind: InputSourceKind,
     out_dir: &Path,
 ) -> Result<PathBuf, String> {
     let Recording { candidates, store } = recording;
     let guide = Guide::from_candidates(candidates);
-    export_guide(
-        &guide,
-        &store,
-        region,
-        // P0c-1 has no review; capability/source are recorded for the manifest.
-        InputCapability::VisualOnly { reason: rollshot_action::DegradedReason::SourceStartFailed },
-        InputSourceKind::default(),
-        out_dir,
-    )
-    .map_err(|e| format!("export failed: {e}"))
+    export_guide(&guide, &store, region, capability, source_kind, out_dir)
+        .map_err(|e| format!("export failed: {e}"))
 }
 
-/// Default output directory: a timestamped sibling under the OS pictures/temp dir.
+/// Default output directory: a timestamped sibling under the OS pictures dir,
+/// falling back to temp if unavailable.
 pub fn default_out_dir(now_ms: u64) -> PathBuf {
-    let base = dirs_pictures().unwrap_or_else(std::env::temp_dir);
+    let base = dirs::picture_dir().unwrap_or_else(std::env::temp_dir);
     base.join(format!("rollshot-action-{now_ms}"))
-}
-
-fn dirs_pictures() -> Option<PathBuf> {
-    // Reuse whatever the result_workspace auto-save uses for a base dir; if none,
-    // fall back to temp. Keep this minimal for P0c-1.
-    None
 }
 ```
 
-> Confirm `InputSourceKind` has a `Default` (or pick the visual-only variant
-> explicitly). Confirm `export_guide`’s `capability`/`source` parameter order and
-> types against `rollshot-action/src/export.rs`. The capability passed here is a
-> placeholder; P0c-2 threads the real `InputCapability` from the session. Wire
-> `default_out_dir`’s base to the same helper `result_workspace`/`post_capture`
-> uses for auto-save so output lands in a sensible place; `now_ms` is passed in
-> by the caller (avoid `SystemTime::now()` deep in the call tree — read it once at
-> the call site).
+> Confirm `export_guide`’s parameter order and types against
+> `rollshot-action/src/export.rs`. The `source_kind` should reflect the actual
+> platform source (`LinuxEvdev`, `MacosCgEvent`, or `VisualOnly` when degraded).
+> `default_out_dir` uses `dirs::picture_dir()` so the guide folder lands in the
+> user’s Pictures directory; fall back to temp if unavailable. `now_ms` is passed
+> in by the caller (avoid `SystemTime::now()` deep in the call tree — read it
+> once at the call site).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1165,14 +1302,35 @@ with:
 #[cfg(all(feature = "action-guide", target_os = "linux"))]
 fn run_action_guide_record() -> Result<(), String> {
     use rollshot_capture::CaptureRequest;
-    let config = /* build OverlayConfig with request = action_guide_region() */;
+    let config = rollshot_iced_overlay::OverlayConfig {
+        backend: "auto".to_string(),
+        fps: 5,
+        show_cursor: false,
+        request: CaptureRequest::action_guide_region(),
+        target_output_name: None,
+    };
     let source = crate::action_input::create_input_source();
     match rollshot_iced_overlay::run_action_guide(config, source).map_err(|e| e.to_string())? {
-        Some(recording) => {
-            let region = /* region from config/result */;
-            let now_ms = /* read once here */;
+        Some((recording, capability, region)) => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let source_kind = match capability {
+                rollshot_action::InputCapability::VisualOnly { .. } => {
+                    rollshot_action::InputSourceKind::VisualOnly
+                }
+                #[cfg(target_os = "linux")]
+                _ => rollshot_action::InputSourceKind::LinuxEvdev,
+                #[cfg(target_os = "macos")]
+                _ => rollshot_action::InputSourceKind::MacosCgEvent,
+            };
             let out = crate::action_export::export_recording(
-                recording, region, &crate::action_export::default_out_dir(now_ms),
+                recording,
+                region,
+                capability,
+                source_kind,
+                &crate::action_export::default_out_dir(now_ms),
             )?;
             tracing::info!(target: "rollshot::action::export", path = %out.display(), "guide exported");
             Ok(())
@@ -1182,11 +1340,19 @@ fn run_action_guide_record() -> Result<(), String> {
 }
 ```
 
-On **macOS**, route `LaunchMode::ActionGuide` into `macos_product::run` with the
-`OverlayConfig.request = action_guide_region()` so the daemon boots the capture
-Component in Action Guide mode; the `HostEffect::ActionRecorded` arm (Task 8)
-calls `action_export::export_recording`. Register the `action_export` module in
-`main.rs` (`#[cfg(feature = "action-guide")] mod action_export;`).
+> On macOS the region is already stored in `Component::action_region()` and is
+> passed to `ActionRecording::start`; thread it through `HostEffect::ActionRecorded`
+> along with the recording and capability.
+
+On **macOS**, route `LaunchMode::ActionGuide` into a new
+`macos_product::run_with_source(config, source)` entry point (or extend
+`macos_product::run` to accept the source) with `OverlayConfig.request =
+action_guide_region()`. Pass the source created by
+`crate::action_input::create_input_source()` through `MacosProduct::new` down to
+`Component::new` (Task 8). The `HostEffect::ActionRecorded` arm then calls
+`action_export::export_recording(recording, capability, source_kind, ...)`.
+Register the `action_export` module in `main.rs`
+(`#[cfg(feature = "action-guide")] mod action_export;`).
 
 - [ ] **Step 6: Point the CLI at record mode**
 
@@ -1263,13 +1429,14 @@ git commit -m "chore(action-guide): satisfy fmt/clippy and feature-off gates"
 - **Spec coverage:** toolbar entry (Task 4), region→Start Recording (Task 5),
   Recording controls + capability label + advisory (Task 5), recording lifecycle
   + detection (Tasks 6–8), export to `action-guide/` folder (Task 9), both
-  platforms (Tasks 7 & 8), feature-off compile (Task 10). Deferred to P0c-2:
-  Timeline Workspace review/edit, output-dir picker, real capability threading
-  into the manifest.
+  platforms (Tasks 7 & 8), feature-off compile (Task 10). Capability + source
+  kind are threaded from the input session through to the export manifest in
+  P0c-1 (not deferred). Deferred to P0c-2: Timeline Workspace review/edit,
+  output-dir picker.
 - **Signatures to re-confirm during execution** (verify against code, fix inline
   if drifted): `SemanticInputSource::poll` return type; `CropRect` field names;
-  `InputSourceKind::default`/variants; `export_guide` parameter order;
-  `crop_frame` signature and region type; the `OverlayState` test constructor.
+  `InputSourceKind` variants; `export_guide` parameter order; `crop_frame`
+  signature and region type; the `OverlayState` test constructor.
 - **Type consistency:** `Workflow::ActionGuide`, `WorkspacePhase::Recording`,
   `WorkspaceEffect::{StartRecording,FinishRecording}`,
   `OverlayEffect::{StartRecording,FinishRecording}`,
@@ -1278,6 +1445,81 @@ git commit -m "chore(action-guide): satisfy fmt/clippy and feature-off gates"
   `ActionRecording::{start,push_frame,poll_input,finalize}`,
   `action_export::{export_recording, default_out_dir}` — names used identically
   across tasks.
+
+## Review Outputs
+
+### NOT in scope
+
+- Timeline Workspace review/edit UI (P0c-2).
+- Output-directory picker; P0c-1 uses a timestamped default under Pictures.
+- Realtime preview of the recording strip / keyframe scrubber (P0c-2).
+- GIF/HTML/MP4/WebM export, OCR/a11y/LLM, global hotkey, cross-platform absolute
+  pointer position (original spec deferred work).
+- Memory ceiling / frame-store paging for arbitrarily long recordings; FrameStore
+  retains all frames for P0c-1.
+
+### What already exists
+
+- `rollshot-action` engine: `ActionRecorder`, `Guide`, `export_guide`, detector,
+  `VisualOnlySource` — reused via new feature-gated overlay dependency.
+- `rollshot-app/src/action_input.rs`: `create_input_source()` and
+  `ActionInputSession` lifecycle — reused; the overlay now drives the session
+  inline instead of going through `ActionInputSession` to avoid a circular
+  overlay→app dependency.
+- `Driver` reader thread + `Shared.latest` slot — reused for the action consumer
+  thread instead of building a second frame stream.
+- Linux `run_overlay` static-slot pattern (`RESULT_SLOT`, `DRIVER_SLOT`,
+  `ONE_SHOT_SLOT`) — mirrored for `ACTION_RESULT_SLOT` / `ACTION_REGION_SLOT` /
+  `ACTION_INPUT_SLOT`.
+- macOS `macos_capture::Component` + `HostEffect` terminal protocol — extended
+  with `ActionRecorded` rather than rebuilt.
+
+### Failure modes
+
+| New codepath | Realistic failure | Test coverage | Error handling | User-visible? |
+|---|---|---|---|---|
+| `Workflow::ActionGuide` variant | `ActionGuide × Fullscreen` is constructed and rejected | Task 1 / `action_guide_fullscreen_is_unsupported` | `is_supported()` returns `false`; `fullscreen.rs` rejects | Yes (probe/launcher error) |
+| Action input source start | Permission denied / no input device → visual-only | Task 6 uses `VisualOnlySource` | `ActionRecording::start` stores degraded capability; UI shows amber advisory | Yes (advisory label) |
+| Action consumer thread | `crop_frame` fails (region outside source) | None planned | Falls back to uncropped frame; manifest records effective region | Silent visual mismatch |
+| Action finalize | Thread panics or returns no result | None planned | `finalize_action()` returns `Err("action recording produced no result")` | Yes (transient error / exit) |
+| Linux `run_action_guide` | User cancels during recording | Task 7 unit test shape | `Ok(None)` returned | No (clean cancel) |
+| Export handler | Output dir not writable / disk full | None planned | `export_recording` returns `Err`; Linux logs, macOS exits | Yes (log / failure) |
+
+**Critical gap:** `crop_frame` failure in the action consumer thread has no test
+and no explicit error path; it silently falls back to the full frame. Add a test
+in Task 6 and consider logging a warning or surfacing a degraded advisory.
+
+### Worktree / subagent parallelization strategy
+
+Sequential execution, no parallelization opportunity. Every task touches either
+`crates/rollshot-iced-overlay/src/` (shared by both platforms) or
+`crates/rollshot-app/src/` / `crates/rollshot-cli/`, and the type additions in
+Task 1 are prerequisites for all downstream overlay/app work. The plan is
+ordered by dependency:
+
+1. Tasks 1–4: foundational types and overlay UI phases (must land first).
+2. Task 5: shared overlay effects and state (depends on Tasks 3–4).
+3. Task 6: driver consumer core (depends on Task 2 dependency + Task 5 effects).
+4. Tasks 7–8: platform handoffs (depend on Task 6).
+5. Task 9: app export + CLI launch wiring (depends on Tasks 7–8).
+6. Task 10: verification gates (depends on all prior tasks).
+
+### Completion summary
+
+Plan reviewed:           `docs/superpowers/plans/2026-06-16-action-guide-p0c1-recording-lifecycle.md`
+Tasks in plan:           10
+Files Create/Modify:     1 create / 15 modify
+
+- Step 0: Scope Challenge   — accepted as-is (1 new file, 0 new crates, 10 tasks)
+- Architecture Review:        3 issues addressed (capability threading, Component input-source wiring, ActionGuide resource acquisition)
+- Plan Structure + Code Q:    4 issues addressed (accepted_frame API, VisualOnlySource::default, InputSourceKind::default placeholder, default_out_dir helper)
+- Test Review:                table produced, 1 gap flagged (crop_frame failure fallback)
+- Performance Review:         0 issues (per-frame clone matches existing stitch path; memory ceiling deferred)
+- NOT in scope:               written
+- What already exists:        written
+- Failure modes:              1 critical gap flagged
+- Parallelization:            sequential, no parallel lanes
+- Unresolved decisions:       0
 
 ## Definition of Done (P0c-1)
 
