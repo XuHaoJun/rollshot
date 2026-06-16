@@ -17,8 +17,10 @@
 //! ```
 
 mod update;
+mod view;
 
 pub use update::{subscription, update, Message};
+pub use view::view;
 
 use rollshot_action::{
     CaptureRegion, FrameId, FrameStore, Guide, GuideStep, InputCapability, InputSourceKind,
@@ -130,6 +132,47 @@ pub(crate) fn source_kind_for(
             crate::storage::Platform::Macos => InputSourceKind::MacosCgEvent,
         },
     }
+}
+
+/// Boot the timeline workspace as a standalone iced app (Linux). Blocks until
+/// the user exports (then exits) or discards/closes (then exits).
+#[cfg(target_os = "linux")]
+pub fn run(
+    recording: Recording,
+    region: CaptureRegion,
+    capability: InputCapability,
+    source_kind: InputSourceKind,
+) -> Result<(), String> {
+    use std::sync::{Arc, Mutex};
+
+    let boot_data = Arc::new(Mutex::new(Some((recording, region, capability, source_kind))));
+    let boot = move || {
+        let (recording, region, capability, source_kind) = boot_data
+            .lock()
+            .unwrap()
+            .take()
+            .expect("timeline workspace boot data already consumed");
+        (
+            TimelineWorkspace::new(recording, region, capability, source_kind),
+            iced::Task::none(),
+        )
+    };
+
+    iced::application(boot, update, view)
+        .title("Rollshot — Action Guide")
+        .font(rollshot_image_document::style::FONT_REGULAR_BYTES)
+        .font(rollshot_image_document::style::FONT_BOLD_BYTES)
+        .subscription(subscription)
+        .window(iced::window::Settings {
+            size: iced::Size::new(1100.0, 760.0),
+            min_size: Some(iced::Size::new(640.0, 420.0)),
+            decorations: true,
+            resizable: true,
+            exit_on_close_request: false,
+            ..Default::default()
+        })
+        .run()
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
