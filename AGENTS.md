@@ -163,6 +163,14 @@ behavior against code before relying on them.
 - `crates/rollshot-overlay-core`: framework-neutral overlay logic shared by active
   overlay components, including preview viewport logic, capture-miss state, and
   crop visual tokens.
+- **iced UI work** (`rollshot-iced-overlay`, `rollshot-app`,
+  `rollshot-overlay-core`): the workspace pins iced `0.14` (canvas, image,
+  tokio). For building, modifying, or debugging any of these UIs — custom
+  widgets, overlays, Canvas drawing, theming, subscriptions — invoke the
+  `iced-rs` skill first; it carries the full 0.14 API reference and 0.14-correct
+  upstream examples (0.13 signatures differ). The skill does **not** cover
+  `iced_layershell` 0.18 (the Linux layer-shell layer) — for that, cross-ref
+  `learn-projects/exwlshelleventloop` (§10).
 - `scripts/bench`: benchmark JSONL summarization and before/after comparison.
 - `README.md`: user-facing setup and manual testing notes. Treat command
   examples as documentation to verify against code, not as implementation
