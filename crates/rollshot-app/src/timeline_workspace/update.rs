@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::Task;
-use rollshot_action::export_guide;
+use rollshot_action::{export_gif, export_guide, GifOptions};
 
 use super::TimelineWorkspace;
 
@@ -17,6 +17,8 @@ pub enum Message {
     ConfirmDiscard,
     ExportRequested,
     ExportDirChosen(Option<PathBuf>),
+    ExportGifRequested,
+    ExportGifPathChosen(Option<PathBuf>),
     DismissBanner,
 }
 
@@ -93,6 +95,37 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 Task::none()
             }
         },
+        Message::ExportGifRequested => {
+            state.message = None;
+            Task::perform(
+                pick_gif_save_path(picker_default_dir()),
+                Message::ExportGifPathChosen,
+            )
+        }
+        Message::ExportGifPathChosen(None) => Task::none(),
+        Message::ExportGifPathChosen(Some(path)) => {
+            match export_gif(&state.guide, &state.store, GifOptions::default(), &path) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "rollshot::action::export",
+                        path = %path.display(),
+                        "gif exported"
+                    );
+                    state.message = Some(format!("GIF saved to {}", path.display()));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::action::export",
+                        %error,
+                        "gif export failed"
+                    );
+                    state.message = Some(format!("GIF export failed: {error}"));
+                }
+            }
+            // Unlike guide export, GIF export does NOT exit — the user can still
+            // Export Guide afterwards.
+            Task::none()
+        }
         Message::DismissBanner => {
             state.message = None;
             Task::none()
@@ -126,6 +159,16 @@ async fn pick_export_dir(default_dir: PathBuf) -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .set_directory(default_dir)
         .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+async fn pick_gif_save_path(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .set_file_name("summary.gif")
+        .add_filter("GIF image", &["gif"])
+        .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
 }
@@ -297,6 +340,43 @@ mod tests {
     fn export_cancelled_picker_is_a_no_op() {
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::ExportDirChosen(None));
+        assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn export_gif_path_chosen_writes_file_and_keeps_window_open() {
+        let mut state = ws(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("summary.gif");
+        let _ = update(&mut state, Message::ExportGifPathChosen(Some(path.clone())));
+        assert!(path.exists(), "GIF file should be written");
+        assert!(
+            state
+                .message
+                .as_ref()
+                .is_some_and(|m| m.contains("GIF saved")),
+            "success banner expected, got {:?}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn export_gif_empty_guide_sets_error_and_writes_nothing() {
+        let mut state = ws(synthetic_recording(0));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("summary.gif");
+        let _ = update(&mut state, Message::ExportGifPathChosen(Some(path.clone())));
+        assert!(!path.exists(), "empty guide must not write a file");
+        assert!(
+            state.message.is_some(),
+            "failure surfaces an inline message"
+        );
+    }
+
+    #[test]
+    fn export_gif_cancelled_picker_is_a_no_op() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportGifPathChosen(None));
         assert!(state.message.is_none());
     }
 }
