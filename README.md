@@ -359,6 +359,69 @@ commands. If `probe` reports missing Screen Recording permission, run a capture
 command once to trigger the permission prompt, grant access, restart the
 terminal, and rerun `probe`.
 
+## Action Guide input access (optional)
+
+Action Guide works in **visual-only** mode out of the box. Granting temporary
+input-device access upgrades it to **semantic** detection (clicks, scroll,
+typing, Enter/Tab improve step timing). Input is observed **only** while an
+Action Guide recording is active, and Rollshot never persists raw key codes,
+typed text, device names, or device paths.
+
+### Linux (KDE Wayland and others)
+
+Rollshot reads kernel input devices directly via evdev; it does **not** use
+`sudo`, `pkexec`, Polkit, or a privileged daemon. You grant your own user
+temporary read access with an ACL.
+
+> ⚠️ **Security warning:** read access to `/dev/input/event*` lets *any* process
+> running as your user observe **all** keyboard and pointer activity, including
+> passwords typed into other applications. Grant it only while you need it and
+> remove it afterward. ACLs may disappear after a reboot or when a device is
+> recreated (e.g. replugging a keyboard), and may need to be reapplied.
+
+1. **Identify your input devices:**
+
+   ```bash
+   cat /proc/bus/input/devices   # find your keyboard/mouse "Handlers=... eventN"
+   # or:
+   ls -l /dev/input/by-id/
+   ```
+
+2. **Grant your user temporary read access** (replace `eventN`):
+
+   ```bash
+   sudo setfacl -m u:$USER:r /dev/input/eventN
+   ```
+
+3. **Verify access:**
+
+   ```bash
+   getfacl /dev/input/eventN     # should list user:<you>:r--
+   # quick read test (Ctrl-C to stop):
+   head -c 1 /dev/input/eventN >/dev/null && echo "readable"
+   ```
+
+4. **Remove the ACL when done:**
+
+   ```bash
+   sudo setfacl -x u:$USER /dev/input/eventN
+   ```
+
+If no device is readable, Action Guide stays in visual-only mode and shows a
+persistent advisory — recording, detection, review, and export still work.
+
+### macOS
+
+Semantic input uses **Input Monitoring** (System Settings → Privacy & Security →
+Input Monitoring). Rollshot requests it just-in-time when an Action Guide
+recording starts; it never requests Accessibility or input injection. If you
+deny it, Action Guide stays in visual-only mode with an advisory and an **Open
+System Settings** shortcut. macOS may require restarting Rollshot before a newly
+granted permission takes effect.
+
+**Screen Recording** permission is separate and **required** to capture frames —
+denying it is a capture failure, not a visual-only degradation.
+
 ## Manual Self-Hosted Workflow
 
 `.github/workflows/real-capture.yml` reserves the manual smoke-test path for

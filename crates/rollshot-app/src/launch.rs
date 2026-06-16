@@ -4,6 +4,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
+    #[cfg(feature = "action-guide")]
+    ActionGuideProbe,
 }
 
 #[allow(dead_code)]
@@ -57,6 +59,11 @@ where
             InteractiveLaunchOptions::default_capture(),
         ));
     };
+
+    #[cfg(feature = "action-guide")]
+    if flag == "--action-guide-probe" {
+        return Ok(LaunchMode::ActionGuideProbe);
+    }
 
     if flag != "--capture" {
         return Err(format!("unknown rollshot-app argument '{flag}'"));
@@ -113,6 +120,8 @@ mod tests {
                 assert!(!options.show_cursor);
                 assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
+            #[cfg(feature = "action-guide")]
+            LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
         }
     }
 
@@ -130,6 +139,8 @@ mod tests {
                 assert_eq!(options.backend, "macos-sck");
                 assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
+            #[cfg(feature = "action-guide")]
+            LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
         }
     }
 

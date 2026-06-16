@@ -114,7 +114,7 @@ fn reject_headless_only_flags(args: &CaptureArgs) -> Result<(), CliError> {
     }
 }
 
-fn resolve_app_binary() -> Result<PathBuf, CliError> {
+pub(crate) fn resolve_app_binary() -> Result<PathBuf, CliError> {
     let current_exe = std::env::current_exe()
         .map_err(|err| CliError::new(format!("failed to locate rollshot binary: {err}"), 1))?;
     resolve_app_binary_from_env_and_exe(std::env::var_os(APP_ENV), &current_exe)

@@ -1,3 +1,5 @@
+#[cfg(feature = "action-guide")]
+mod action_input;
 mod diagnostics;
 mod launch;
 
@@ -75,7 +77,53 @@ fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
             );
             run_iced_capture(options)
         }
+        #[cfg(feature = "action-guide")]
+        LaunchMode::ActionGuideProbe => run_action_guide_probe(),
     }
+}
+
+#[cfg(feature = "action-guide")]
+fn run_action_guide_probe() -> Result<(), String> {
+    use crate::action_input::{create_input_source, degraded_advisory, ActionInputSession};
+    use rollshot_action::{
+        ActionRecorder, CaptureRegion, DetectorConfig, InputCapability, StoreConfig,
+    };
+
+    // P0b probe: no overlay region picker yet (deferred to the app-integration
+    // plan). Observe the full virtual region as a placeholder.
+    let region = CaptureRegion {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let mut session = ActionInputSession::new(create_input_source());
+    let capability = session.start(region);
+
+    match capability {
+        InputCapability::SemanticEvents => {
+            tracing::info!(target: "rollshot::action::probe", "semantic input enabled");
+            println!("Action Guide input probe: Semantic input enabled.");
+        }
+        InputCapability::VisualOnly { reason } => {
+            tracing::warn!(target: "rollshot::action::probe", ?reason, "visual-only");
+            println!("Action Guide input probe: Visual-only detection.");
+            println!("{}", degraded_advisory(reason));
+        }
+    }
+
+    // Poll for ~3 seconds into a throwaway recorder so semantic events are
+    // observed only during this active probe, then stop.
+    let mut recorder =
+        ActionRecorder::new(region, StoreConfig::default(), DetectorConfig::default());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        session.poll_into(&mut recorder);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    session.stop();
+    println!("Action Guide input probe finished.");
+    Ok(())
 }
 
 fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Result<(), String> {

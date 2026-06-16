@@ -10,6 +10,9 @@ rust-version.workspace = true
 name = "rollshot-app"
 path = "src/main.rs"
 
+[features]
+action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot-macos-input"]
+
 [dependencies]
 arboard = "3.4"
 chrono = "0.4"
@@ -17,6 +20,7 @@ dirs = "6"
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
+rollshot-action = { path = "../rollshot-action", optional = true }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 rollshot-image-document = { path = "../rollshot-image-document" }
@@ -30,8 +34,10 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 raw-window-handle = "0.6"
+rollshot-macos-input = { path = "../rollshot-macos-input", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rollshot-linux-input = { path = "../rollshot-linux-input", optional = true }
 url = { workspace = true }
 zbus = { workspace = true }
 

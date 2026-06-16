@@ -3,6 +3,8 @@ members = [
     "crates/rollshot-core",
     "crates/rollshot-image-document",
     "crates/rollshot-action",
+    "crates/rollshot-linux-input",
+    "crates/rollshot-macos-input",
     "crates/rollshot-capture",
     "crates/rollshot-cli",
     "crates/rollshot-app",

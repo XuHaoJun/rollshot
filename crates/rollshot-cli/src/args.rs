@@ -22,6 +22,10 @@ pub enum Command {
     /// Stitch a directory of pre-recorded frames without going through a
     /// capture backend. Useful for iterating on the matcher.
     StitchFolder(StitchFolderArgs),
+
+    /// Record a desktop workflow into an Action Guide (P0b: input-capability probe).
+    #[cfg(feature = "action-guide")]
+    ActionGuide(ActionGuideArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -87,6 +91,10 @@ pub struct ProbeArgs {
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
+
+#[cfg(feature = "action-guide")]
+#[derive(Debug, clap::Args)]
+pub struct ActionGuideArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct StitchFolderArgs {
