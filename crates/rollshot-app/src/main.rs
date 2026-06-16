@@ -88,9 +88,10 @@ fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
 
 #[cfg(feature = "action-guide")]
 fn run_action_guide_probe() -> Result<(), String> {
-    use crate::action_input::{create_input_source, degraded_advisory, ActionInputSession};
+    use crate::action_input::{create_input_source, degraded_advisory};
     use rollshot_action::{
-        ActionRecorder, CaptureRegion, DetectorConfig, InputCapability, StoreConfig,
+        ActionRecorder, CaptureRegion, DetectorConfig, InputCapability, StartedSemanticInput,
+        StoreConfig,
     };
 
     // P0b probe: no overlay region picker yet (deferred to the app-integration
@@ -101,8 +102,8 @@ fn run_action_guide_probe() -> Result<(), String> {
         width: 1920,
         height: 1080,
     };
-    let mut session = ActionInputSession::new(create_input_source());
-    let capability = session.start(region);
+    let mut input = StartedSemanticInput::start(create_input_source(), region);
+    let capability = input.capability();
 
     match capability {
         InputCapability::SemanticEvents => {
@@ -122,10 +123,10 @@ fn run_action_guide_probe() -> Result<(), String> {
         ActionRecorder::new(region, StoreConfig::default(), DetectorConfig::default());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        session.poll_into(&mut recorder);
+        input.poll_into(&mut recorder);
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    session.stop();
+    input.stop();
     println!("Action Guide input probe finished.");
     Ok(())
 }

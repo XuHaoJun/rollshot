@@ -24,7 +24,7 @@ pub use events::EventAggregator;
 pub use export::{export_guide, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
 pub use guide::Guide;
-pub use input::{SemanticInputSource, VisualOnlySource};
+pub use input::{SemanticInputSource, StartedSemanticInput, VisualOnlySource};
 pub use metrics::{changed_area_ratio, downsample_luma, masked_luma_diff, LumaPlane, Rect};
 pub use models::{
     default_title, CandidateId, CandidateKind, CandidateStep, CaptureRegion, DegradedReason,
