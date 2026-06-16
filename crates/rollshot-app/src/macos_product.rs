@@ -41,6 +41,8 @@ use crate::macos_thumbnail::{self, release_action, ThumbnailAction, ThumbnailSta
 use crate::post_capture::{select_presentation, Presentation};
 use crate::result_workspace::{self, ResultDocument, ResultWorkspace};
 use crate::storage::{self, Platform};
+#[cfg(feature = "action-guide")]
+use crate::timeline_workspace::{self, TimelineWorkspace};
 
 /// Whether fullscreen mode bypasses the overlay entirely or the overlay session
 /// is needed (Region / Scrolling).
@@ -71,6 +73,9 @@ pub enum Message {
     Capture(rollshot_iced_overlay::macos_capture::Message),
     /// A Result Workspace message.
     Workspace(result_workspace::Message),
+    /// A Timeline Workspace (Action Guide) message.
+    #[cfg(feature = "action-guide")]
+    Timeline(timeline_workspace::Message),
     /// Thumbnail pressed (button down).
     ThumbnailPressed,
     /// Thumbnail released (button up): click vs. native-drag decision.
@@ -99,6 +104,8 @@ pub enum Phase {
     Capture(Component),
     Thumbnail(ThumbnailState),
     Workspace(ResultWorkspace),
+    #[cfg(feature = "action-guide")]
+    Timeline(TimelineWorkspace),
 }
 
 /// The single daemon state.
@@ -319,32 +326,7 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 HostEffect::Completed(result) => complete_capture(product, result),
                 #[cfg(feature = "action-guide")]
                 HostEffect::ActionRecorded(recording, capability, region) => {
-                    tracing::info!(target: "rollshot::action::export", "recording complete, exporting...");
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let source_kind = match capability {
-                        rollshot_action::InputCapability::VisualOnly { .. } => {
-                            rollshot_action::InputSourceKind::VisualOnly
-                        }
-                        _ => rollshot_action::InputSourceKind::MacosCgEvent,
-                    };
-                    match crate::action_export::export_recording(
-                        recording,
-                        region,
-                        capability,
-                        source_kind,
-                        &crate::action_export::default_out_dir(now_ms),
-                    ) {
-                        Ok(out) => {
-                            tracing::info!(target: "rollshot::action::export", path = %out.display(), "guide exported");
-                        }
-                        Err(error) => {
-                            tracing::error!(target: "rollshot::action::export", %error, "guide export failed");
-                        }
-                    }
-                    iced::exit()
+                    complete_action_recording(product, recording, capability, region)
                 }
                 HostEffect::Cancelled => iced::exit(),
                 HostEffect::Fatal(error) => {
@@ -358,6 +340,13 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 return Task::none();
             };
             result_workspace::update(workspace, msg).map(Message::Workspace)
+        }
+        #[cfg(feature = "action-guide")]
+        Message::Timeline(msg) => {
+            let Phase::Timeline(workspace) = &mut product.phase else {
+                return Task::none();
+            };
+            timeline_workspace::update(workspace, msg).map(Message::Timeline)
         }
         Message::ThumbnailCursorMoved(position) => {
             product.thumbnail_cursor = position;
@@ -489,6 +478,42 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
     Task::batch(close_tasks)
 }
 
+/// Close the capture-owned windows, build the Timeline Workspace from the
+/// finished recording, enter `Phase::Timeline`, and open the workspace window —
+/// all inside the one daemon (mirrors `complete_capture`).
+#[cfg(feature = "action-guide")]
+fn complete_action_recording(
+    product: &mut MacosProduct,
+    recording: rollshot_action::Recording,
+    capability: rollshot_action::InputCapability,
+    region: rollshot_action::CaptureRegion,
+) -> Task<Message> {
+    let mut close_tasks = Vec::new();
+    if let Phase::Capture(component) = &mut product.phase {
+        if let Some(id) = component.overlay_window() {
+            close_tasks.push(window::close(id));
+        }
+        if let Some(id) = component.controls_window() {
+            close_tasks.push(window::close(id));
+        }
+        component.shutdown();
+    }
+
+    let source_kind =
+        crate::timeline_workspace::source_kind_for(capability, crate::storage::Platform::Macos);
+    product.phase = Phase::Timeline(TimelineWorkspace::new(
+        recording,
+        region,
+        capability,
+        source_kind,
+    ));
+
+    let (id, open) = window::open(workspace_window_settings());
+    product.workspace_window = Some(id);
+    close_tasks.push(open.map(Message::WorkspaceWindowReady));
+    Task::batch(close_tasks)
+}
+
 /// Open the window for the current presentation phase (thumbnail or workspace),
 /// recording the window id on `product`. On thumbnail-settings failure the
 /// durable saved file remains (spec §13), so this returns `iced::exit()` after
@@ -507,6 +532,15 @@ fn open_presentation_window(product: &mut MacosProduct) -> Task<Message> {
             }
         },
         Phase::Workspace(_) => {
+            let (id, open) = window::open(workspace_window_settings());
+            product.workspace_window = Some(id);
+            open.map(Message::WorkspaceWindowReady)
+        }
+        #[cfg(feature = "action-guide")]
+        Phase::Timeline(_) => {
+            // Defensive parallel to Phase::Workspace: the Timeline workspace
+            // window is normally opened by complete_action_recording, so this
+            // arm is not reached in the standard flow.
             let (id, open) = window::open(workspace_window_settings());
             product.workspace_window = Some(id);
             open.map(Message::WorkspaceWindowReady)
@@ -577,6 +611,8 @@ fn view(product: &MacosProduct, window: window::Id) -> Element<'_, Message> {
         }
         Phase::Thumbnail(state) => macos_thumbnail::view(state),
         Phase::Workspace(workspace) => result_workspace::view(workspace).map(Message::Workspace),
+        #[cfg(feature = "action-guide")]
+        Phase::Timeline(workspace) => timeline_workspace::view(workspace).map(Message::Timeline),
         // A window event arriving for a phase that no longer owns it: render
         // nothing rather than panic.
         Phase::Capture(_) => iced::widget::container(iced::widget::Space::new()).into(),
@@ -600,6 +636,10 @@ fn subscription(product: &MacosProduct) -> iced::Subscription<Message> {
         }
         Phase::Workspace(workspace) => {
             result_workspace::subscription(workspace).map(Message::Workspace)
+        }
+        #[cfg(feature = "action-guide")]
+        Phase::Timeline(workspace) => {
+            timeline_workspace::subscription(workspace).map(Message::Timeline)
         }
     }
 }
@@ -818,5 +858,46 @@ mod tests {
     fn fullscreen_auto_save_failure_bootstraps_existing_workspace_phase() {
         let product = MacosProduct::from_completed_image(image(), Err("disk full".to_string()));
         assert!(matches!(product.phase, Phase::Workspace(_)));
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn complete_action_recording_enters_timeline_phase() {
+        use image::{Rgba, RgbaImage};
+        use rollshot_action::{ActionRecorder, CaptureRegion, DetectorConfig, StoreConfig};
+
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+        };
+        let det = DetectorConfig {
+            diff_threshold: 0.01,
+            area_threshold: 0.05,
+            cooldown_ms: 0,
+            ..DetectorConfig::default()
+        };
+        let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
+        rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+        for i in 1..=6 {
+            let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                }
+            }
+            rec.ingest_frame(img, i * 100);
+        }
+        let recording = rec.finish();
+
+        let mut product = product_in_capture_phase();
+        let _ = complete_action_recording(
+            &mut product,
+            recording,
+            rollshot_action::InputCapability::SemanticEvents,
+            region,
+        );
+        assert!(matches!(product.phase, Phase::Timeline(_)));
     }
 }

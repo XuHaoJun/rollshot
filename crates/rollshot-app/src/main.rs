@@ -1,9 +1,9 @@
 #[cfg(feature = "action-guide")]
-mod action_export;
-#[cfg(feature = "action-guide")]
 mod action_input;
 mod diagnostics;
 mod launch;
+#[cfg(feature = "action-guide")]
+mod timeline_workspace;
 
 use launch::LaunchMode;
 use std::process::ExitCode;
@@ -143,28 +143,11 @@ fn run_action_guide_record() -> Result<(), String> {
     let source = crate::action_input::create_input_source();
     match rollshot_iced_overlay::run_action_guide(config, source).map_err(|e| e.to_string())? {
         Some((recording, capability, region)) => {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let source_kind = match capability {
-                rollshot_action::InputCapability::VisualOnly { .. } => {
-                    rollshot_action::InputSourceKind::VisualOnly
-                }
-                #[cfg(target_os = "linux")]
-                _ => rollshot_action::InputSourceKind::LinuxEvdev,
-                #[cfg(target_os = "macos")]
-                _ => rollshot_action::InputSourceKind::MacosCgEvent,
-            };
-            let out = crate::action_export::export_recording(
-                recording,
-                region,
+            let source_kind = crate::timeline_workspace::source_kind_for(
                 capability,
-                source_kind,
-                &crate::action_export::default_out_dir(now_ms),
-            )?;
-            tracing::info!(target: "rollshot::action::export", path = %out.display(), "guide exported");
-            Ok(())
+                crate::storage::Platform::Linux,
+            );
+            crate::timeline_workspace::run(recording, region, capability, source_kind)
         }
         None => Ok(()),
     }
