@@ -2,6 +2,8 @@
 mod action_export;
 #[cfg(feature = "action-guide")]
 mod action_input;
+#[cfg(feature = "action-guide")]
+mod timeline_workspace;
 mod diagnostics;
 mod launch;
 
