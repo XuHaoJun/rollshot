@@ -186,6 +186,14 @@ pub struct Driver {
     target_output_name: Option<String>,
     capture_backend: &'static str,
     preview_tx: UnboundedSender<LiveOverlayEvent>,
+    #[cfg(feature = "action-guide")]
+    action_stop: Arc<AtomicBool>,
+    #[cfg(feature = "action-guide")]
+    action_thread: Option<JoinHandle<()>>,
+    #[cfg(feature = "action-guide")]
+    action_result: Option<
+        std::sync::mpsc::Receiver<(rollshot_action::Recording, rollshot_action::InputCapability)>,
+    >,
 }
 
 #[allow(dead_code)]
@@ -278,6 +286,12 @@ impl Driver {
             target_output_name,
             capture_backend,
             preview_tx,
+            #[cfg(feature = "action-guide")]
+            action_stop: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "action-guide")]
+            action_thread: None,
+            #[cfg(feature = "action-guide")]
+            action_result: None,
         })
     }
 
@@ -410,9 +424,17 @@ impl Driver {
     /// Signal both threads to stop and join them.
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        #[cfg(feature = "action-guide")]
+        self.action_stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.stitch.take() {
             if h.join().is_err() {
                 tracing::warn!(target: TARGET_STITCH, "stitch thread panicked");
+            }
+        }
+        #[cfg(feature = "action-guide")]
+        if let Some(h) = self.action_thread.take() {
+            if h.join().is_err() {
+                tracing::warn!(target: TARGET_STITCH, "action thread panicked");
             }
         }
         if let Some(h) = self.reader.take() {
@@ -458,6 +480,118 @@ impl Driver {
             image,
             stats: Some(stats),
         })
+    }
+}
+
+#[cfg(feature = "action-guide")]
+#[allow(dead_code)]
+impl Driver {
+    /// Spawn the action consumer thread: tee each new captured frame into the
+    /// recorder (converting SystemTime -> session-relative ms) and poll input.
+    pub(crate) fn begin_action_recording(
+        &mut self,
+        region: rollshot_action::CaptureRegion,
+        source: Box<dyn rollshot_action::SemanticInputSource>,
+    ) {
+        let shared = self.shared.clone();
+        let action_stop = self.action_stop.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.action_result = Some(rx);
+        self.action_thread = Some(std::thread::spawn(move || {
+            let mut rec = ActionRecording::start(region, source);
+            let mut last_seq = shared.seq.load(Ordering::Relaxed);
+            let mut t0: Option<std::time::SystemTime> = None;
+            while !action_stop.load(Ordering::Relaxed) {
+                let seq = shared.seq.load(Ordering::Relaxed);
+                if seq != last_seq {
+                    last_seq = seq;
+                    if let Some(frame) = shared.latest.lock().ok().and_then(|s| s.clone()) {
+                        let base = *t0.get_or_insert(frame.timestamp);
+                        let at_ms = frame
+                            .timestamp
+                            .duration_since(base)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        rec.push_frame(frame.image, at_ms);
+                    }
+                }
+                rec.poll_input();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let capability = rec.capability();
+            let _ = tx.send((rec.finalize(), capability));
+        }));
+    }
+
+    /// Signal the action thread to stop and collect the finished Recording plus
+    /// the resolved input capability.
+    pub(crate) fn finalize_action(
+        mut self,
+    ) -> Result<(rollshot_action::Recording, rollshot_action::InputCapability), String> {
+        self.action_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.action_thread.take() {
+            let _ = handle.join();
+        }
+        let (recording, capability) = self
+            .action_result
+            .take()
+            .and_then(|rx| rx.recv().ok())
+            .ok_or_else(|| "action recording produced no result".to_string())?;
+        Ok((recording, capability))
+    }
+}
+
+#[cfg(feature = "action-guide")]
+#[allow(dead_code)]
+pub(crate) struct ActionRecording {
+    recorder: rollshot_action::ActionRecorder,
+    source: Box<dyn rollshot_action::SemanticInputSource>,
+    capability: rollshot_action::InputCapability,
+}
+
+#[cfg(feature = "action-guide")]
+#[allow(dead_code)]
+impl ActionRecording {
+    pub(crate) fn start(
+        region: rollshot_action::CaptureRegion,
+        mut source: Box<dyn rollshot_action::SemanticInputSource>,
+    ) -> Self {
+        use rollshot_action::{DetectorConfig, StoreConfig};
+        let capability =
+            source
+                .start(region)
+                .unwrap_or(rollshot_action::InputCapability::VisualOnly {
+                    reason: rollshot_action::DegradedReason::SourceStartFailed,
+                });
+        Self {
+            recorder: rollshot_action::ActionRecorder::new(
+                region,
+                StoreConfig::default(),
+                DetectorConfig::default(),
+            ),
+            source,
+            capability,
+        }
+    }
+
+    /// `at_ms` is session-relative milliseconds (monotonic from 0).
+    pub(crate) fn push_frame(&mut self, image: image::RgbaImage, at_ms: u64) {
+        self.recorder.ingest_frame(image, at_ms);
+    }
+
+    pub(crate) fn poll_input(&mut self) {
+        for ev in self.source.poll() {
+            self.recorder.ingest_event(ev);
+        }
+    }
+
+    pub(crate) fn capability(&self) -> rollshot_action::InputCapability {
+        self.capability
+    }
+
+    pub(crate) fn finalize(mut self) -> rollshot_action::Recording {
+        self.source.stop();
+        self.recorder.finish()
     }
 }
 
@@ -533,6 +667,66 @@ fn preview_handle(
         },
     )?;
     Some(ImageHandle::from_rgba(view.width, view.height, view.pixels))
+}
+
+#[cfg(all(test, feature = "action-guide"))]
+mod action_tests {
+    use super::*;
+    use image::RgbaImage;
+    use rollshot_action::{CaptureRegion, DegradedReason, VisualOnlySource};
+
+    #[test]
+    fn finalize_action_produces_candidates_from_changing_frames() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+        );
+        let black = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]));
+        let white = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+        rec.push_frame(black, 0);
+        // Multiple white frames to satisfy stable_frames settle.
+        rec.push_frame(white.clone(), 500);
+        rec.push_frame(white.clone(), 600);
+        rec.push_frame(white, 700);
+        assert!(
+            matches!(
+                rec.capability(),
+                rollshot_action::InputCapability::VisualOnly { .. }
+            ),
+            "capability is captured from the source start"
+        );
+        let recording = rec.finalize();
+        assert!(
+            !recording.candidates.is_empty(),
+            "expected at least one candidate"
+        );
+    }
+
+    #[test]
+    fn cancel_action_recording_finishes_without_panic() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::PermissionDenied)),
+        );
+        rec.push_frame(
+            RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255])),
+            0,
+        );
+        let recording = rec.finalize();
+        assert!(recording.candidates.is_empty());
+    }
 }
 
 #[cfg(test)]
