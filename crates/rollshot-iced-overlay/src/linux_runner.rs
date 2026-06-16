@@ -259,6 +259,14 @@ fn subscription(state: &Overlay) -> iced::Subscription<Message> {
                 .map(|_| Message::Overlay(app::OverlayMessage::Tick)),
         );
     }
+    // Tick during recording so the elapsed-time label re-renders.
+    #[cfg(feature = "action-guide")]
+    if state.workspace.phase() == WorkspacePhase::Recording {
+        subs.push(
+            iced::time::every(std::time::Duration::from_millis(250))
+                .map(|_| Message::Overlay(app::OverlayMessage::Tick)),
+        );
+    }
     iced::Subscription::batch(subs)
 }
 
@@ -497,6 +505,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 #[cfg(feature = "action-guide")]
                 app::OverlayEffect::StartRecording => {
                     tracing::info!(target: TARGET_OVERLAY, "start recording requested");
+                    let mut capability = None;
                     if let Some(driver) = DRIVER_SLOT.lock().unwrap().as_mut() {
                         let crop = state.crop.unwrap_or(iced::Rectangle {
                             x: 0.0,
@@ -532,9 +541,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                                     rollshot_action::DegradedReason::SourceStartFailed,
                                 ))
                             });
-                        driver.begin_action_recording(action_region, source);
+                        capability = Some(driver.begin_action_recording(action_region, source));
                     }
                     state.recording_started = Some(std::time::Instant::now());
+                    state.recording_capability = capability.map(crate::app::capability_label);
                     Task::none()
                 }
                 #[cfg(feature = "action-guide")]

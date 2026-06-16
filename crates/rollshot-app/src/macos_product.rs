@@ -318,9 +318,32 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 HostEffect::Task(task) => task.map(Message::Capture),
                 HostEffect::Completed(result) => complete_capture(product, result),
                 #[cfg(feature = "action-guide")]
-                HostEffect::ActionRecorded(_recording, _capability, _region) => {
+                HostEffect::ActionRecorded(recording, capability, region) => {
                     tracing::info!(target: "rollshot::action::export", "recording complete, exporting...");
-                    // For now, just log. Task 9 wires the actual export.
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let source_kind = match capability {
+                        rollshot_action::InputCapability::VisualOnly { .. } => {
+                            rollshot_action::InputSourceKind::VisualOnly
+                        }
+                        _ => rollshot_action::InputSourceKind::MacosCgEvent,
+                    };
+                    match crate::action_export::export_recording(
+                        recording,
+                        region,
+                        capability,
+                        source_kind,
+                        &crate::action_export::default_out_dir(now_ms),
+                    ) {
+                        Ok(out) => {
+                            tracing::info!(target: "rollshot::action::export", path = %out.display(), "guide exported");
+                        }
+                        Err(error) => {
+                            tracing::error!(target: "rollshot::action::export", %error, "guide export failed");
+                        }
+                    }
                     iced::exit()
                 }
                 HostEffect::Cancelled => iced::exit(),

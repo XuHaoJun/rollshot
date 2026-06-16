@@ -144,7 +144,6 @@ impl OverlayState {
 }
 
 #[cfg(feature = "action-guide")]
-#[allow(dead_code)]
 pub(crate) fn elapsed_label(started: Option<std::time::Instant>) -> String {
     match started {
         Some(start) => {
@@ -153,6 +152,60 @@ pub(crate) fn elapsed_label(started: Option<std::time::Instant>) -> String {
         }
         None => "00:00".to_string(),
     }
+}
+
+/// Map the resolved input capability to the display-only label the overlay
+/// renders during recording.
+#[cfg(feature = "action-guide")]
+pub(crate) fn capability_label(
+    capability: rollshot_action::InputCapability,
+) -> rollshot_capture::InputCapabilityLabel {
+    match capability {
+        rollshot_action::InputCapability::SemanticEvents => {
+            rollshot_capture::InputCapabilityLabel::Semantic
+        }
+        rollshot_action::InputCapability::VisualOnly { .. } => {
+            rollshot_capture::InputCapabilityLabel::VisualOnly
+        }
+    }
+}
+
+/// Recording-phase status banner: a `●` indicator, the elapsed `mm:ss`, the
+/// resolved capability label, and an amber advisory when degraded to
+/// visual-only detection.
+#[cfg(feature = "action-guide")]
+fn recording_controls(state: &OverlayState) -> Element<'_, OverlayMessage> {
+    use iced::widget::column;
+
+    let elapsed = elapsed_label(state.recording_started);
+    let (capability_text, visual_only) = match state.recording_capability {
+        Some(rollshot_capture::InputCapabilityLabel::Semantic) => ("Semantic input enabled", false),
+        Some(rollshot_capture::InputCapabilityLabel::VisualOnly) => ("Visual-only detection", true),
+        None => ("", false),
+    };
+
+    let header = text(format!("\u{25CF} {elapsed}    {capability_text}")).size(14);
+    let mut content = column![header].spacing(6);
+    if visual_only {
+        content = content.push(
+            text("Input permissions unavailable - steps are detected from on-screen changes only.")
+                .size(12),
+        );
+    }
+
+    container(content)
+        .padding(8)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(
+                120.0 / 255.0,
+                53.0 / 255.0,
+                15.0 / 255.0,
+                0.94,
+            ))),
+            text_color: Some(Color::from_rgb(1.0, 251.0 / 255.0, 235.0 / 255.0)),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn clear_capture_miss_ui(state: &mut OverlayState) {
@@ -522,6 +575,18 @@ pub(crate) fn view_with_toolbar(
                         .height(Length::Fill)
                         .align_x(iced::Alignment::Center)
                         .align_y(iced::Alignment::End)
+                        .padding(16),
+                );
+            }
+
+            #[cfg(feature = "action-guide")]
+            if state.workspace.phase() == crate::workspace::WorkspacePhase::Recording {
+                chrome_stack = chrome_stack.push(
+                    container(recording_controls(state))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::Start)
                         .padding(16),
                 );
             }

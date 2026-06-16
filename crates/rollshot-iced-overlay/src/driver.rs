@@ -492,13 +492,27 @@ impl Driver {
         &mut self,
         region: rollshot_action::CaptureRegion,
         source: Box<dyn rollshot_action::SemanticInputSource>,
-    ) {
+    ) -> rollshot_action::InputCapability {
         let shared = self.shared.clone();
         let action_stop = self.action_stop.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.action_result = Some(rx);
+        // Capture is `RegionMode::FullSource`, so frames in `Shared.latest` are
+        // whole-source; crop them to the selected region before handing them to
+        // the recorder, which expects pre-cropped frames (see
+        // `ActionRecorder::ingest_frame`).
+        let crop_region = Region {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        };
+        // Start the source synchronously so the resolved capability is known
+        // immediately (the UI surfaces it as a label/advisory); then hand the
+        // started recording to the consumer thread.
+        let mut rec = ActionRecording::start(region, source);
+        let capability = rec.capability();
         self.action_thread = Some(std::thread::spawn(move || {
-            let mut rec = ActionRecording::start(region, source);
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
             let mut t0: Option<std::time::SystemTime> = None;
             while !action_stop.load(Ordering::Relaxed) {
@@ -512,7 +526,20 @@ impl Driver {
                             .duration_since(base)
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0);
-                        rec.push_frame(frame.image, at_ms);
+                        let image = match crop_frame(&frame, crop_region) {
+                            Ok(cropped) => cropped.image,
+                            // Region outside the source: fall back to the
+                            // uncropped frame so detection still runs.
+                            Err(err) => {
+                                tracing::warn!(
+                                    target: TARGET_CAPTURE,
+                                    %err,
+                                    "action crop failed; using uncropped frame"
+                                );
+                                frame.image
+                            }
+                        };
+                        rec.push_frame(image, at_ms);
                     }
                 }
                 rec.poll_input();
@@ -521,6 +548,7 @@ impl Driver {
             let capability = rec.capability();
             let _ = tx.send((rec.finalize(), capability));
         }));
+        capability
     }
 
     /// Signal the action thread to stop and collect the finished Recording plus
