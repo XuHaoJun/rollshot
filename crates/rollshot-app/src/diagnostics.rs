@@ -164,6 +164,16 @@ pub(crate) fn capture_test_logs(run: impl FnOnce()) -> String {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
+    // Serialize capture scopes. `tracing::subscriber::with_default` mutates
+    // tracing's process-global state (max-level hint and callsite interest) on
+    // scope enter/exit, so two overlapping capture scopes on different test
+    // threads can transiently suppress each other's events — observed as a
+    // dropped "save success" line while "save start" survived. Holding this lock
+    // for the whole scope guarantees only one capture is ever active. Recover
+    // from a poisoned lock so a panic in one capturing test does not cascade.
+    static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+    let _serialize = CAPTURE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+
     #[derive(Clone, Default)]
     struct LogWriter(Arc<Mutex<Vec<u8>>>);
 
