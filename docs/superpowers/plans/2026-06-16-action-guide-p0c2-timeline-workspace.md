@@ -333,8 +333,28 @@ impl TimelineWorkspace {
 }
 
 /// Build an iced image handle from a retained RGBA frame.
+///
+/// NOTE: this clones the raw pixel bytes into the handle. It is only called
+/// when the selection or keyframe changes (not per-frame), so the copy is
+/// acceptable for the P0c-2 workspace. For very large captures the first
+/// selection may briefly block the UI; revisit if profiling shows a problem.
 pub(crate) fn build_handle(image: &image::RgbaImage) -> iced::widget::image::Handle {
     iced::widget::image::Handle::from_rgba(image.width(), image.height(), image.as_raw().clone())
+}
+
+/// Map the recorded input capability to the source kind we record in the export
+/// manifest. This keeps the Linux and macOS handoffs DRY.
+pub(crate) fn source_kind_for(
+    capability: InputCapability,
+    platform: crate::storage::Platform,
+) -> InputSourceKind {
+    match capability {
+        InputCapability::VisualOnly { .. } => InputSourceKind::VisualOnly,
+        _ => match platform {
+            crate::storage::Platform::Linux => InputSourceKind::LinuxEvdev,
+            crate::storage::Platform::Macos => InputSourceKind::MacosCgEvent,
+        },
+    }
 }
 ```
 
@@ -528,6 +548,15 @@ git commit -m "feat(app): timeline workspace select/rename/delete/replace-keyfra
 Add to the `tests` module in `update.rs`:
 
 ```rust
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}"))
+    }
+
     #[test]
     fn discard_requested_shows_modal_then_cancel_clears_it() {
         let mut state = ws(synthetic_recording(2));
@@ -548,8 +577,7 @@ Add to the `tests` module in `update.rs`:
     fn export_dir_chosen_writes_guide_folder_and_clears_message() {
         let mut state = ws(recording_from_frames());
         state.message = Some("stale".to_string());
-        let tmp = std::env::temp_dir().join("rollshot-timeline-export-ok");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = unique_temp_dir("rollshot-timeline-export-ok");
         std::fs::create_dir_all(&tmp).unwrap();
         let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.clone())));
         assert!(tmp.join("action-guide/steps.md").exists());
@@ -561,8 +589,7 @@ Add to the `tests` module in `update.rs`:
     #[test]
     fn export_empty_guide_sets_error_and_writes_nothing() {
         let mut state = ws(synthetic_recording(0));
-        let tmp = std::env::temp_dir().join("rollshot-timeline-export-empty");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = unique_temp_dir("rollshot-timeline-export-empty");
         std::fs::create_dir_all(&tmp).unwrap();
         let _ = update(&mut state, Message::ExportDirChosen(Some(tmp.clone())));
         assert!(!tmp.join("action-guide").exists(), "empty guide must not write a folder");
@@ -719,10 +746,10 @@ Create `crates/rollshot-app/src/timeline_workspace/view.rs`:
 
 ```rust
 use iced::widget::{
-    button, column, container, horizontal_space, image, mouse_area, row, scrollable, stack, text,
-    text_input, Space,
+    button, column, container, horizontal_space, image, mouse_area, opaque, row, scrollable, stack,
+    text, text_input, Space,
 };
-use iced::{Alignment, Color, Element, Length, Theme};
+use iced::{mouse, Alignment, Color, Element, Length, Theme};
 
 use super::{Message, TimelineWorkspace};
 
@@ -749,7 +776,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         rollshot_action::InputCapability::VisualOnly { .. } => {
             text("Visual-only detection.").size(13).into()
         }
-        rollshot_action::InputCapability::SemanticEvents => Space::new().into(),
+        rollshot_action::InputCapability::SemanticEvents => {
+            Space::new().width(Length::Shrink).height(Length::Shrink).into()
+        }
     };
     row![
         advisory,
@@ -778,7 +807,10 @@ fn message_row(state: &TimelineWorkspace) -> Element<'_, Message> {
         )
         .padding(8)
         .into(),
-        None => Space::new().into(),
+        None => Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into(),
     }
 }
 
@@ -819,7 +851,10 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 None => text("(keyframe unavailable)").into(),
             };
             column![
-                container(keyframe).height(Length::Fill).center_x(Length::Fill),
+                container(keyframe)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center),
                 text_input("Step title", &step.title).on_input(Message::TitleChanged),
                 button(text("Delete step"))
                     .on_press(Message::DeleteStep)
@@ -829,7 +864,10 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
             .into()
         }
         None => container(text("No steps detected."))
-            .center(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
             .into(),
     };
     container(content)
@@ -855,7 +893,7 @@ fn strip_row(state: &TimelineWorkspace) -> Element<'_, Message> {
     }
     container(
         scrollable(strip)
-            .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default())),
+            .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())),
     )
     .height(Length::Fixed(120.0))
     .into()
@@ -874,26 +912,33 @@ fn discard_modal(base: Element<'_, Message>) -> Element<'_, Message> {
             ]
             .spacing(8),
         ]
-        .spacing(12),
+        .spacing(12)
+        .align_x(Alignment::Center),
     )
     .padding(20)
     .style(container::rounded_box);
 
-    let scrim = mouse_area(
-        container(dialog)
-            .center(Length::Fill)
-            .style(|_theme: &Theme| container::Style {
-                background: Some(
-                    Color {
-                        a: 0.8,
-                        ..Color::BLACK
-                    }
-                    .into(),
-                ),
-                ..container::Style::default()
-            }),
-    )
-    .on_press(Message::CancelDiscard);
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::CancelDiscard),
+    );
 
     stack![base, scrim].into()
 }
@@ -1015,12 +1060,10 @@ fn run_action_guide_record() -> Result<(), String> {
     let source = crate::action_input::create_input_source();
     match rollshot_iced_overlay::run_action_guide(config, source).map_err(|e| e.to_string())? {
         Some((recording, capability, region)) => {
-            let source_kind = match capability {
-                rollshot_action::InputCapability::VisualOnly { .. } => {
-                    rollshot_action::InputSourceKind::VisualOnly
-                }
-                _ => rollshot_action::InputSourceKind::LinuxEvdev,
-            };
+            let source_kind = crate::timeline_workspace::source_kind_for(
+                capability,
+                crate::storage::Platform::Linux,
+            );
             crate::timeline_workspace::run(recording, region, capability, source_kind)
         }
         None => Ok(()),
@@ -1157,12 +1200,10 @@ fn complete_action_recording(
         component.shutdown();
     }
 
-    let source_kind = match capability {
-        rollshot_action::InputCapability::VisualOnly { .. } => {
-            rollshot_action::InputSourceKind::VisualOnly
-        }
-        _ => rollshot_action::InputSourceKind::MacosCgEvent,
-    };
+    let source_kind = crate::timeline_workspace::source_kind_for(
+        capability,
+        crate::storage::Platform::Macos,
+    );
     product.phase = Phase::Timeline(TimelineWorkspace::new(
         recording,
         region,
@@ -1323,6 +1364,19 @@ git commit -m "chore(action-guide): remove superseded action_export; fmt/clippy/
 - **Placeholder scan:** no `TODO`/`TBD`/"implement later"; every code step shows full code. The only forward references are the documented transient warnings resolved at Task 6. ✓
 - **Type consistency:** identical names across tasks — `TimelineWorkspace`, `StripFrame`, `Message::{SelectStep,TitleChanged,DeleteStep,ReplaceKeyframe,DiscardRequested,CloseRequested,CancelDiscard,ConfirmDiscard,ExportRequested,ExportDirChosen,DismissMessage}`, `update`, `subscription`, `view`, `run`, `build_handle`, `rebuild_selection_handles`, `selected_step`, `export_to`, `picker_default_dir`, `pick_export_dir`, `Phase::Timeline`, `Message::Timeline`, `complete_action_recording`. The `Message` enum grows across Tasks 1→2→3 (variants added, never renamed). ✓
 - **Signatures re-confirmed against code** (commit `7008fc8`): `Guide::{steps,rename,delete,replace_keyframe,is_empty,from_candidates}`; `FrameStore::retained`; `RetainedFrame.image`; `export_guide(&Guide,&FrameStore,CaptureRegion,InputCapability,InputSourceKind,&Path)`; `iced::widget::image::Handle::from_rgba`; `iced::window::close_requests`; `rfd::AsyncFileDialog::pick_folder`; macOS `Phase`/`Message`/`update`/`view`/`subscription`/`complete_capture`/`workspace_window_settings`/`Component::{overlay_window,controls_window,shutdown}`. View-only 0.14 widget/style fns are flagged for `iced-rs`-skill confirmation in Task 4.
+
+## Reviewer Amendments (applied)
+
+The following changes were made to the original plan during review to reduce bug risk and keep the implementation DRY:
+
+1. **DRY source-kind mapping:** Added `timeline_workspace::source_kind_for(capability, platform)` and updated both the Linux `run_action_guide_record` and macOS `complete_action_recording` to use it.
+2. **iced 0.14 view corrections** (verified against `result_workspace/view.rs`):
+   - Replaced invalid `Space::new().into()` placeholders with explicit dimensions.
+   - Replaced `container(...).center(...)` / `.center_x(...)` with `.width(...).height(...).align_x(Alignment::Center)` etc.
+   - Replaced `scrollable::Scrollbar::default()` with `scrollable::Scrollbar::new()`.
+   - Updated `discard_modal` to use the official iced modal pattern (`opaque` scrim + `mouse::Interaction::Idle`) so the base UI is fully blocked while the modal is open.
+3. **Test isolation:** Export tests now use unique temp directories (PID + nanosecond timestamp) instead of hardcoded paths to avoid parallel-test collisions.
+4. **Performance note:** Added a comment on `build_handle` noting that it clones raw pixel bytes and that this is acceptable because it only runs on selection/keyframe change, not per-frame.
 
 ## Review Outputs
 
