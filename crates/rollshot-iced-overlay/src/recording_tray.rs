@@ -27,7 +27,7 @@ impl RecordingTray for Box<dyn RecordingTray> {
 /// the session bus (KDE Plasma always has one). Used as a hard precondition so
 /// the runner errors out *before* acquiring any capture resource.
 pub(crate) fn sni_host_available() -> bool {
-    use zbus::blocking::Connection;
+    use zbus::blocking::{Connection, Proxy};
     let Ok(conn) = Connection::session() else {
         tracing::warn!(target: TARGET_TRAY, "no session bus; treating tray as unavailable");
         return false;
@@ -36,24 +36,16 @@ pub(crate) fn sni_host_available() -> bool {
         "org.kde.StatusNotifierWatcher",
         "org.freedesktop.StatusNotifierWatcher",
     ] {
-        let result = conn.call_method(
-            Some(service),
-            "/StatusNotifierWatcher",
-            Some(service),
-            "Get",
-            &(
-                "org.freedesktop.DBus.Properties",
-                "IsStatusNotifierHostRegistered",
-            ),
-        );
-        match result {
-            Ok(reply) => {
-                if let Ok(true) = reply.body().deserialize::<bool>() {
-                    tracing::debug!(target: TARGET_TRAY, service, "SNI host registered");
-                    return true;
-                }
-            }
-            Err(_) => continue,
+        // `IsStatusNotifierHostRegistered` is a property on the watcher
+        // interface; `Proxy::get_property` issues the
+        // `org.freedesktop.DBus.Properties.Get` call and unwraps the returned
+        // variant for us.
+        let Ok(proxy) = Proxy::new(&conn, service, "/StatusNotifierWatcher", service) else {
+            continue;
+        };
+        if let Ok(true) = proxy.get_property::<bool>("IsStatusNotifierHostRegistered") {
+            tracing::debug!(target: TARGET_TRAY, service, "SNI host registered");
+            return true;
         }
     }
     tracing::warn!(target: TARGET_TRAY, "no registered StatusNotifierHost found");
