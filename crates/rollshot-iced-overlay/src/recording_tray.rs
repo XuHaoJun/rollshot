@@ -132,8 +132,8 @@ pub(crate) fn notify_recording_started() {
         .summary("Rollshot is recording")
         .body("Click the tray icon to finish recording.")
         .icon("media-record")
-        .hint(Hint::Resident(true))
-        .timeout(Timeout::Never)
+        .hint(Hint::Transient(true))
+        .timeout(Timeout::Milliseconds(4000))
         .show();
     if let Err(err) = result {
         tracing::warn!(target: TARGET_TRAY, %err, "recording notification failed (continuing)");
