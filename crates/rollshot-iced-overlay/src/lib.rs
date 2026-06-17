@@ -66,6 +66,9 @@ mod linux_runner;
 pub mod macos_capture;
 #[cfg(target_os = "macos")]
 mod macos_window;
+#[cfg(all(target_os = "linux", feature = "action-guide"))]
+#[allow(dead_code)] // Items will be consumed by the Action Guide runner in a future task.
+mod recording_tray;
 pub mod region;
 
 /// Run the blocking capture overlay, blocking the calling thread until the user
