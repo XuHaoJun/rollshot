@@ -139,9 +139,10 @@ behavior against code before relying on them.
   canvas, verifier, or stitcher paths usually need core tests and the benchmark
   checks listed above.
 - `crates/rollshot-capture`: capture traits, frame metadata, fixture capture,
-  Linux portal/PipeWire capture, and the macOS ScreenCaptureKit backend
-  (`macos-sck`) — `scap` for streaming, `rollshot-macos-oneshot` for one-shot
-  screenshots.
+  Linux portal/PipeWire and KWin-native capture (`linux-portal`, `linux-kwin`),
+  and the macOS ScreenCaptureKit backend (`macos-sck`) — `scap` for streaming,
+  `rollshot-macos-oneshot` for one-shot screenshots. `KNOWN_BACKEND_NAMES` in
+  `src/backend.rs` is the source of truth for backend flags.
 - `crates/rollshot-macos-oneshot`: unsafe-isolation crate for macOS
   ScreenCaptureKit one-shot capture (Objective-C FFI via `objc2`). Public API
   is safe; the rest of the workspace keeps `unsafe_code = "forbid"`. Used by
@@ -163,6 +164,16 @@ behavior against code before relying on them.
 - `crates/rollshot-overlay-core`: framework-neutral overlay logic shared by active
   overlay components, including preview viewport logic, capture-miss state, and
   crop visual tokens.
+- **Action Guide crates** (built behind the non-default `action-guide` Cargo
+  feature on `rollshot-cli` / `rollshot-app`):
+  - `crates/rollshot-action`: platform-neutral Action Guide engine — frame
+    ingestion, deterministic step detection, the editable guide model, and
+    export. Owns no windows, permissions, native event APIs, or capture
+    backend; driven by pushed frames plus privacy-filtered semantic events.
+  - `crates/rollshot-linux-input` / `crates/rollshot-macos-input`: listen-only
+    semantic-input sources (Linux evdev, macOS `CGEventTap`). Emit only
+    privacy-filtered semantic actions — no raw key persistence or input
+    injection.
 - **iced UI work** (`rollshot-iced-overlay`, `rollshot-app`,
   `rollshot-overlay-core`): the workspace pins iced `0.14` (canvas, image,
   tokio). For building, modifying, or debugging any of these UIs — custom
@@ -187,6 +198,7 @@ learn-projects results when needed.
 
 | Project | Remote | Relationship to rollshot |
 |---------|--------|--------------------------|
+| `CrossMacro` | alper-han/CrossMacro | Cross-platform desktop automation app for recording/editing/replaying input macros. Reference for Action Guide input recording and step-editing workflows (`rollshot-action`, `rollshot-{linux,macos}-input`). |
 | `exwlshelleventloop` | waycrate/exwlshelleventloop | Upstream repo of the `iced_layershell` crate, a direct dependency of `rollshot-iced-overlay`'s Linux layer-shell runner. |
 | `flameshot` | flameshot-org/flameshot | Same category: screenshot tool with in-place annotation editor (C++/Qt). Reference for annotation/editing UX relevant to `rollshot-image-document` and `rollshot-app`. |
 | `mark-shot` | jswysnemc/mark-shot | Same category: screenshot annotation/markup tool (Qt), by the wayscrollshot author. Reference for annotation workflows. |
