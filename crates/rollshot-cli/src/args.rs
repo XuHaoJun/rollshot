@@ -94,7 +94,12 @@ pub struct ProbeArgs {
 
 #[cfg(feature = "action-guide")]
 #[derive(Debug, clap::Args)]
-pub struct ActionGuideArgs {}
+pub struct ActionGuideArgs {
+    /// Record the whole display instead of selecting a region. The recording is
+    /// stopped by clicking the temporary system-tray icon (Linux/KDE only).
+    #[arg(long, default_value_t = false)]
+    pub fullscreen: bool,
+}
 
 #[derive(Debug, clap::Args)]
 pub struct StitchFolderArgs {

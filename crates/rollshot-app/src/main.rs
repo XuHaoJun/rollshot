@@ -82,7 +82,7 @@ fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
         #[cfg(feature = "action-guide")]
-        LaunchMode::ActionGuide => run_action_guide_record(),
+        LaunchMode::ActionGuide { .. } => run_action_guide_record(),
     }
 }
 
