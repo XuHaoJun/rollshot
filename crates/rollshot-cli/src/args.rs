@@ -38,7 +38,7 @@ pub struct CaptureArgs {
     #[arg(
         long,
         default_value = "auto",
-        value_parser = ["auto", "fixture", "linux-kwin", "linux-portal", "macos-sck"],
+        value_parser = rollshot_capture::KNOWN_BACKEND_NAMES,
     )]
     pub backend: String,
 

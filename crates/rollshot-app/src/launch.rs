@@ -56,7 +56,7 @@ pub struct CaptureArgs {
     #[arg(
         long,
         default_value = "auto",
-        value_parser = ["auto", "fixture", "linux-kwin", "linux-portal", "macos-sck"],
+        value_parser = rollshot_capture::KNOWN_BACKEND_NAMES,
     )]
     pub backend: String,
 
@@ -125,7 +125,7 @@ pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode,
             if !request.is_supported() {
                 return Err(
                     "unsupported capture combination: scrolling + fullscreen is not wired; \
-                     use scrolling + region or screenshot + fullscreen"
+                     use scrolling + region, screenshot + region, or screenshot + fullscreen"
                         .to_string(),
                 );
             }
@@ -218,6 +218,24 @@ mod tests {
             mode,
             LaunchMode::Capture(options)
                 if options.initial_request == CaptureRequest::screenshot_fullscreen()
+        ));
+    }
+
+    #[test]
+    fn capture_screenshot_region() {
+        let mode = parse(&[
+            "rollshot-app",
+            "capture",
+            "--workflow",
+            "screenshot",
+            "--scope",
+            "region",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            mode,
+            LaunchMode::Capture(options)
+                if options.initial_request == CaptureRequest::screenshot_region()
         ));
     }
 

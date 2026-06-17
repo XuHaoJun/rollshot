@@ -3,7 +3,7 @@
 //! state on both platforms — this module owns the shared completion; the two
 //! platform entry points only decide whether to call it.
 //!
-//!   launch JSON: initial_mode → CaptureRequest
+//!   launch surface: workflow + scope → CaptureRequest
 //!          │
 //!          ├─ scope: Fullscreen ──┐
 //!          │                      ▼

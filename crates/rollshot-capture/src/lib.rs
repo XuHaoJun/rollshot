@@ -14,7 +14,7 @@ pub mod macos;
 
 pub use backend::{
     backend_for_flag, default_backend, default_backend_for, BackendKind, CaptureBackend,
-    FrameStream,
+    FrameStream, KNOWN_BACKEND_NAMES,
 };
 pub use crop::{crop_frame, crop_image};
 pub use error::CaptureError;

@@ -22,6 +22,10 @@ pub enum BackendKind {
     Unsupported,
 }
 
+/// User-facing backend flags accepted by the interactive launch surface.
+pub const KNOWN_BACKEND_NAMES: [&str; 5] =
+    ["auto", "fixture", "linux-kwin", "linux-portal", "macos-sck"];
+
 impl BackendKind {
     pub fn as_flag(self) -> &'static str {
         match self {
@@ -154,7 +158,8 @@ pub fn backend_for_flag(
         "macos-sck" => Ok(BackendKind::MacosScreenCaptureKit),
         other => Err(CaptureError::InvalidConfig {
             message: format!(
-                "unknown backend '{other}'; expected one of: auto, fixture, linux-kwin, linux-portal, macos-sck"
+                "unknown backend '{other}'; expected one of: {}",
+                KNOWN_BACKEND_NAMES.join(", ")
             ),
         }),
     }
