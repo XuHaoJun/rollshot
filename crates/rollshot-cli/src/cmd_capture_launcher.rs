@@ -58,19 +58,27 @@ fn build_app_command(
         {
             let mut cmd = Command::new("cmd.exe");
             cmd.arg("/c").arg(app_path);
-            cmd.args(app_args(options)?);
+            cmd.args(app_args(options));
             return Ok(cmd);
         }
     }
     let mut cmd = Command::new(app_path);
-    cmd.args(app_args(options)?);
+    cmd.args(app_args(options));
     Ok(cmd)
 }
 
-fn app_args(options: &InteractiveLaunchOptions) -> Result<Vec<OsString>, CliError> {
-    let payload = serde_json::to_string(options)
-        .map_err(|err| CliError::new(format!("failed to encode GUI launch options: {err}"), 1))?;
-    Ok(vec![OsString::from("--capture"), OsString::from(payload)])
+fn app_args(options: &InteractiveLaunchOptions) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("capture"),
+        OsString::from("--backend"),
+        OsString::from(&options.backend),
+        OsString::from("--fps"),
+        OsString::from(options.fps.to_string()),
+    ];
+    if options.show_cursor {
+        args.push(OsString::from("--show-cursor"));
+    }
+    args
 }
 
 fn reject_headless_only_flags(args: &CaptureArgs) -> Result<(), CliError> {
@@ -234,21 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn app_args_include_capture_flag_and_json_payload() {
+    fn app_args_uses_capture_subcommand_with_flags() {
         let args = base_args();
         let options = launch_options(&args);
 
-        let app_args = app_args(&options).expect("build app args");
-        assert_eq!(app_args[0], OsString::from("--capture"));
-
-        let payload = app_args[1].to_string_lossy();
-        assert!(payload.contains("\"backend\":\"linux-portal\""));
-        assert!(payload.contains("\"fps\":7"));
-        assert!(payload.contains("\"show_cursor\":true"));
-
-        let decoded: rollshot_capture::InteractiveLaunchOptions =
-            serde_json::from_str(&payload).expect("deserialize payload");
-        assert_eq!(decoded.initial_request, CaptureRequest::scrolling_region());
+        let args = app_args(&options);
+        assert_eq!(args[0], OsString::from("capture"));
+        assert_eq!(args[1], OsString::from("--backend"));
+        assert_eq!(args[2], OsString::from("linux-portal"));
+        assert_eq!(args[3], OsString::from("--fps"));
+        assert_eq!(args[4], OsString::from("7"));
+        assert_eq!(args[5], OsString::from("--show-cursor"));
     }
 
     #[test]
