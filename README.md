@@ -422,6 +422,12 @@ granted permission takes effect.
 **Screen Recording** permission is separate and **required** to capture frames —
 denying it is a capture failure, not a visual-only degradation.
 
+### Fullscreen recording (Linux/KDE)
+
+`rollshot action-guide --fullscreen` records the whole display. Click the
+temporary system-tray icon to finish recording. Requires a system tray
+(StatusNotifierItem host); KDE Plasma provides one.
+
 ## Manual Self-Hosted Workflow
 
 `.github/workflows/real-capture.yml` reserves the manual smoke-test path for
