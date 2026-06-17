@@ -1,4 +1,5 @@
-use rollshot_capture::InteractiveLaunchOptions;
+use clap::{Parser, Subcommand, ValueEnum};
+use rollshot_capture::{CaptureRequest, CaptureScope, InteractiveLaunchOptions, Workflow};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,126 +13,152 @@ pub enum LaunchMode {
     },
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoggingArgs {
+/// Top-level launch parser for the interactive capture app. Running with no
+/// subcommand is equivalent to `capture` with all defaults.
+#[derive(Debug, Parser)]
+#[command(
+    name = "rollshot-app",
+    version,
+    about = "rollshot interactive capture app"
+)]
+pub struct LaunchCli {
+    /// Write the diagnostic session to a JSONL file alongside console output.
+    #[arg(long, global = true)]
     pub log_file: Option<PathBuf>,
-    pub remaining: Vec<String>,
+
+    #[command(subcommand)]
+    pub command: Option<LaunchCommand>,
 }
 
-#[allow(dead_code)]
-pub fn extract_logging_args<I, S>(args: I) -> Result<LoggingArgs, String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let mut input = args.into_iter().map(Into::into);
-    let program = input.next().unwrap_or_else(|| "rollshot-app".to_string());
-    let mut remaining = vec![program];
-    let mut log_file = None;
+#[derive(Debug, Subcommand)]
+pub enum LaunchCommand {
+    /// Capture a screenshot or scrolling capture (default when no subcommand).
+    Capture(CaptureArgs),
 
-    while let Some(arg) = input.next() {
-        if arg == "--log-file" {
-            if log_file.is_some() {
-                return Err("--log-file may only be specified once".to_string());
-            }
-            let path = input
-                .next()
-                .ok_or_else(|| "--log-file requires a path".to_string())?;
-            log_file = Some(PathBuf::from(path));
-        } else {
-            remaining.push(arg);
+    /// Record a desktop workflow into an Action Guide.
+    #[cfg(feature = "action-guide")]
+    ActionGuide {
+        /// Record the whole display instead of selecting a region. The
+        /// recording is stopped by clicking the temporary system-tray icon
+        /// (Linux/KDE only).
+        #[arg(long, default_value_t = false)]
+        fullscreen: bool,
+    },
+
+    /// Probe Action Guide input capability and exit.
+    #[cfg(feature = "action-guide")]
+    ActionGuideProbe,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CaptureArgs {
+    /// Which capture backend to use.
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "fixture", "linux-kwin", "linux-portal", "macos-sck"],
+    )]
+    pub backend: String,
+
+    /// Capture frame rate (used by real backends).
+    #[arg(long, default_value_t = 5)]
+    pub fps: u32,
+
+    /// Include the cursor in captured frames.
+    #[arg(long, default_value_t = false)]
+    pub show_cursor: bool,
+
+    /// What to do with the captured frames.
+    #[arg(long, value_enum, default_value_t = WorkflowArg::Scrolling)]
+    pub workflow: WorkflowArg,
+
+    /// What area to capture.
+    #[arg(long, value_enum, default_value_t = ScopeArg::Region)]
+    pub scope: ScopeArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum WorkflowArg {
+    Screenshot,
+    Scrolling,
+}
+
+impl From<WorkflowArg> for Workflow {
+    fn from(value: WorkflowArg) -> Self {
+        match value {
+            WorkflowArg::Screenshot => Workflow::Screenshot,
+            WorkflowArg::Scrolling => Workflow::Scrolling,
         }
     }
-
-    Ok(LoggingArgs {
-        log_file,
-        remaining,
-    })
 }
 
-pub fn parse_launch_args<I, S>(args: I) -> Result<LaunchMode, String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let mut args = args.into_iter().map(Into::into);
-    let _program = args.next();
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ScopeArg {
+    Region,
+    Fullscreen,
+}
 
-    let Some(flag) = args.next() else {
-        return Ok(LaunchMode::Capture(
+impl From<ScopeArg> for CaptureScope {
+    fn from(value: ScopeArg) -> Self {
+        match value {
+            ScopeArg::Region => CaptureScope::Region,
+            ScopeArg::Fullscreen => CaptureScope::Fullscreen,
+        }
+    }
+}
+
+/// Lower a parsed launch command into a `LaunchMode`. `None` (no subcommand)
+/// resolves to the default capture options. Rejects the unwired
+/// `scrolling + fullscreen` capture combination with a clear message.
+pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode, String> {
+    match command {
+        None => Ok(LaunchMode::Capture(
             InteractiveLaunchOptions::default_capture(),
-        ));
-    };
-
-    #[cfg(feature = "action-guide")]
-    if flag == "--action-guide" {
-        let fullscreen = match args.next() {
-            None => false,
-            Some(next) if next == "--fullscreen" => true,
-            Some(other) => {
-                return Err(format!("unknown argument after --action-guide: '{other}'"));
+        )),
+        Some(LaunchCommand::Capture(args)) => {
+            let request = CaptureRequest {
+                workflow: args.workflow.into(),
+                scope: args.scope.into(),
+            };
+            if !request.is_supported() {
+                return Err(
+                    "unsupported capture combination: scrolling + fullscreen is not wired; \
+                     use scrolling + region or screenshot + fullscreen"
+                        .to_string(),
+                );
             }
-        };
-        if let Some(extra) = args.next() {
-            return Err(format!("unexpected argument after --fullscreen: '{extra}'"));
+            Ok(LaunchMode::Capture(InteractiveLaunchOptions {
+                backend: args.backend,
+                fps: args.fps,
+                show_cursor: args.show_cursor,
+                initial_request: request,
+            }))
         }
-        return Ok(LaunchMode::ActionGuide { fullscreen });
+        #[cfg(feature = "action-guide")]
+        Some(LaunchCommand::ActionGuide { fullscreen }) => {
+            Ok(LaunchMode::ActionGuide { fullscreen })
+        }
+        #[cfg(feature = "action-guide")]
+        Some(LaunchCommand::ActionGuideProbe) => Ok(LaunchMode::ActionGuideProbe),
     }
-
-    #[cfg(feature = "action-guide")]
-    if flag == "--action-guide-probe" {
-        return Ok(LaunchMode::ActionGuideProbe);
-    }
-
-    if flag != "--capture" {
-        return Err(format!("unknown rollshot-app argument '{flag}'"));
-    }
-
-    let Some(payload) = args.next() else {
-        return Err("--capture requires a JSON payload".to_string());
-    };
-
-    if let Some(extra) = args.next() {
-        return Err(format!(
-            "unexpected argument after capture payload: '{extra}'"
-        ));
-    }
-
-    let value: serde_json::Value = serde_json::from_str(&payload)
-        .map_err(|err| format!("invalid --capture JSON payload: {err}"))?;
-
-    if value.get("initial_mode").is_some() {
-        return Err(
-            "the field `initial_mode` is no longer supported; use `initial_request` \
-             with {\"workflow\": \"...\", \"scope\": \"...\"} instead"
-                .to_string(),
-        );
-    }
-
-    let options: InteractiveLaunchOptions = serde_json::from_value(value)
-        .map_err(|err| format!("invalid --capture JSON payload: {err}"))?;
-
-    if !options.initial_request.is_supported() {
-        return Err(
-            "unsupported capture combination: scrolling + fullscreen is not wired; \
-             use scrolling + region or screenshot + fullscreen"
-                .to_string(),
-        );
-    }
-
-    Ok(LaunchMode::Capture(options))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_logging_args, parse_launch_args, LaunchMode};
+    use super::{resolve_launch_mode, LaunchCli, LaunchMode};
+    use clap::Parser;
     use rollshot_capture::CaptureRequest;
-    use std::path::PathBuf;
+
+    fn parse(args: &[&str]) -> Result<LaunchMode, String> {
+        let cli = LaunchCli::try_parse_from(args).map_err(|e| e.to_string())?;
+        resolve_launch_mode(cli.command)
+    }
 
     #[test]
-    fn no_args_uses_defaults() {
-        let mode = parse_launch_args(["rollshot-app"]).expect("no args should succeed");
+    fn no_subcommand_uses_defaults() {
+        let mode = parse(&["rollshot-app"]).expect("no args should succeed");
         match mode {
             LaunchMode::Capture(options) => {
                 assert_eq!(options.backend, "auto");
@@ -140,146 +167,119 @@ mod tests {
                 assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
             #[cfg(feature = "action-guide")]
-            LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
-            #[cfg(feature = "action-guide")]
-            LaunchMode::ActionGuide { .. } => unreachable!("test expects Capture mode"),
+            _ => unreachable!("test expects Capture mode"),
         }
     }
 
     #[test]
-    fn ignores_obsolete_capture_option() {
-        let obsolete_field = concat!("overlay", "_mode");
-        let payload = format!(
-            r#"{{"backend":"macos-sck","fps":30,"show_cursor":false,"{obsolete_field}":"legacy"}}"#
-        );
-        let mode = parse_launch_args(["rollshot-app", "--capture", payload.as_str()])
-            .expect("parse launch args");
-
+    fn capture_backend_and_fps_flags() {
+        let mode = parse(&[
+            "rollshot-app",
+            "capture",
+            "--backend",
+            "macos-sck",
+            "--fps",
+            "30",
+        ])
+        .expect("parse capture flags");
         match mode {
             LaunchMode::Capture(options) => {
                 assert_eq!(options.backend, "macos-sck");
+                assert_eq!(options.fps, 30);
                 assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
             #[cfg(feature = "action-guide")]
-            LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
-            #[cfg(feature = "action-guide")]
-            LaunchMode::ActionGuide { .. } => unreachable!("test expects Capture mode"),
+            _ => unreachable!("test expects Capture mode"),
         }
     }
 
     #[test]
-    fn save_dialog_temp_mode_is_rejected() {
-        let err = parse_launch_args(["rollshot-app", "--save-dialog-temp", "/tmp/rollshot.png"])
-            .expect_err("save-dialog-temp should be rejected");
-        assert!(err.contains("unknown rollshot-app argument"), "err = {err}");
+    fn capture_show_cursor_flag() {
+        let mode = parse(&["rollshot-app", "capture", "--show-cursor"]).expect("parse");
+        match mode {
+            LaunchMode::Capture(options) => assert!(options.show_cursor),
+            #[cfg(feature = "action-guide")]
+            _ => unreachable!("test expects Capture mode"),
+        }
     }
 
     #[test]
-    fn rejects_unknown_flag() {
-        let err = parse_launch_args(["rollshot-app", "--bogus"]).expect_err("unknown arg");
-        assert!(err.contains("unknown rollshot-app argument"), "err = {err}");
-    }
-
-    #[test]
-    fn rejects_missing_capture_payload() {
-        let err = parse_launch_args(["rollshot-app", "--capture"]).expect_err("missing payload");
-        assert!(
-            err.contains("--capture requires a JSON payload"),
-            "err = {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_json() {
-        let err =
-            parse_launch_args(["rollshot-app", "--capture", "not-json"]).expect_err("invalid json");
-        assert!(
-            err.contains("invalid --capture JSON payload"),
-            "err = {err}"
-        );
-    }
-
-    #[test]
-    fn extracts_log_file_before_capture_args() {
-        let extracted = extract_logging_args([
+    fn capture_screenshot_fullscreen() {
+        let mode = parse(&[
             "rollshot-app",
-            "--log-file",
-            "/tmp/rollshot.jsonl",
-            "--capture",
-            r#"{"backend":"auto","fps":5,"show_cursor":false}"#,
+            "capture",
+            "--workflow",
+            "screenshot",
+            "--scope",
+            "fullscreen",
         ])
-        .expect("extract logging args");
-
-        assert_eq!(
-            extracted.log_file,
-            Some(PathBuf::from("/tmp/rollshot.jsonl"))
-        );
-        assert_eq!(extracted.remaining[0], "rollshot-app");
-        assert_eq!(extracted.remaining[1], "--capture");
-    }
-
-    #[test]
-    fn rejects_missing_log_file_path() {
-        let err = extract_logging_args(["rollshot-app", "--log-file"])
-            .expect_err("missing path must fail");
-        assert_eq!(err, "--log-file requires a path");
-    }
-
-    #[test]
-    fn rejects_duplicate_log_file() {
-        let err = extract_logging_args([
-            "rollshot-app",
-            "--log-file",
-            "a.jsonl",
-            "--log-file",
-            "b.jsonl",
-        ])
-        .expect_err("duplicate option must fail");
-        assert_eq!(err, "--log-file may only be specified once");
-    }
-
-    #[test]
-    fn fullscreen_capture_request_payload_parses() {
-        let mode = parse_launch_args([
-            "rollshot-app",
-            "--capture",
-            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"fullscreen"}}"#,
-        ])
-        .unwrap();
+        .expect("parse");
         assert!(matches!(
             mode,
-            LaunchMode::Capture(options) if options.initial_request == CaptureRequest::screenshot_fullscreen()
+            LaunchMode::Capture(options)
+                if options.initial_request == CaptureRequest::screenshot_fullscreen()
         ));
     }
 
     #[test]
-    fn legacy_initial_mode_payload_is_rejected_clearly() {
-        let err = parse_launch_args([
-            "rollshot-app",
-            "--capture",
-            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_mode":"region"}"#,
-        ])
-        .expect_err("legacy initial_mode should be rejected");
-        assert!(err.contains("initial_mode"), "err = {err}");
-        assert!(err.contains("initial_request"), "err = {err}");
+    fn scrolling_fullscreen_is_rejected() {
+        let err = parse(&["rollshot-app", "capture", "--scope", "fullscreen"])
+            .expect_err("scrolling + fullscreen should be rejected");
+        assert!(err.contains("scrolling"), "err = {err}");
+        assert!(err.contains("fullscreen"), "err = {err}");
     }
 
     #[test]
-    fn unsupported_scrolling_fullscreen_payload_is_rejected() {
-        let err = parse_launch_args([
+    fn unknown_flag_is_rejected() {
+        let err = parse(&["rollshot-app", "capture", "--bogus"]).expect_err("unknown flag");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn unknown_subcommand_is_rejected() {
+        let err = parse(&["rollshot-app", "bogus"]).expect_err("unknown subcommand");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn save_dialog_temp_is_rejected() {
+        let err = parse(&["rollshot-app", "--save-dialog-temp", "/tmp/rollshot.png"])
+            .expect_err("save-dialog-temp should be rejected");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn log_file_global_before_subcommand() {
+        let cli = LaunchCli::try_parse_from(["rollshot-app", "--log-file", "/tmp/x.jsonl"])
+            .expect("parse log-file");
+        assert_eq!(
+            cli.log_file.as_deref(),
+            Some(std::path::Path::new("/tmp/x.jsonl"))
+        );
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn log_file_global_after_subcommand() {
+        let cli = LaunchCli::try_parse_from([
             "rollshot-app",
-            "--capture",
-            r#"{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"scrolling","scope":"fullscreen"}}"#,
+            "capture",
+            "--log-file",
+            "/tmp/x.jsonl",
+            "--backend",
+            "auto",
         ])
-        .expect_err("scrolling+fullscreen should be rejected");
-        assert!(err.contains("scrolling"), "err = {err}");
-        assert!(err.contains("fullscreen"), "err = {err}");
+        .expect("parse log-file after subcommand");
+        assert_eq!(
+            cli.log_file.as_deref(),
+            Some(std::path::Path::new("/tmp/x.jsonl"))
+        );
     }
 
     #[cfg(feature = "action-guide")]
     #[test]
     fn action_guide_without_fullscreen() {
-        let mode = parse_launch_args(["rollshot-app", "--action-guide"]).expect("parse");
+        let mode = parse(&["rollshot-app", "action-guide"]).expect("parse");
         assert!(matches!(
             mode,
             LaunchMode::ActionGuide { fullscreen: false }
@@ -289,16 +289,14 @@ mod tests {
     #[cfg(feature = "action-guide")]
     #[test]
     fn action_guide_with_fullscreen() {
-        let mode =
-            parse_launch_args(["rollshot-app", "--action-guide", "--fullscreen"]).expect("parse");
+        let mode = parse(&["rollshot-app", "action-guide", "--fullscreen"]).expect("parse");
         assert!(matches!(mode, LaunchMode::ActionGuide { fullscreen: true }));
     }
 
     #[cfg(feature = "action-guide")]
     #[test]
-    fn action_guide_rejects_unknown_trailing_flag() {
-        let err = parse_launch_args(["rollshot-app", "--action-guide", "--bogus"])
-            .expect_err("unknown trailing flag");
-        assert!(err.contains("unknown"), "err = {err}");
+    fn action_guide_probe_mode() {
+        let mode = parse(&["rollshot-app", "action-guide-probe"]).expect("parse");
+        assert!(matches!(mode, LaunchMode::ActionGuideProbe));
     }
 }

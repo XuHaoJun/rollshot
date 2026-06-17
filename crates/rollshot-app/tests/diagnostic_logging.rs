@@ -1,23 +1,26 @@
 use std::process::Command;
 
+fn unsupported_backend() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "macos-sck"
+    } else {
+        "linux-portal"
+    }
+}
+
 #[test]
 fn failing_launch_flushes_json_log_and_keeps_console_output() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rollshot.jsonl");
-    let backend = if cfg!(target_os = "linux") {
-        "macos-sck"
-    } else {
-        "linux-portal"
-    };
-    let payload = format!(r#"{{"backend":"{}","fps":5,"show_cursor":false}}"#, backend);
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot-app"))
         .env("RUST_LOG", "warn,rollshot=debug")
         .args([
             "--log-file",
             log_path.to_str().unwrap(),
-            "--capture",
-            &payload,
+            "capture",
+            "--backend",
+            unsupported_backend(),
         ])
         .output()
         .expect("run rollshot-app");
@@ -42,20 +45,15 @@ fn failing_launch_flushes_json_log_and_keeps_console_output() {
 fn error_filter_omits_debug_session_event_but_includes_final_error() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rollshot.jsonl");
-    let backend = if cfg!(target_os = "linux") {
-        "macos-sck"
-    } else {
-        "linux-portal"
-    };
-    let payload = format!(r#"{{"backend":"{}","fps":5,"show_cursor":false}}"#, backend);
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot-app"))
         .env("RUST_LOG", "error")
         .args([
             "--log-file",
             log_path.to_str().unwrap(),
-            "--capture",
-            &payload,
+            "capture",
+            "--backend",
+            unsupported_backend(),
         ])
         .output()
         .expect("run rollshot-app");
@@ -77,20 +75,15 @@ fn error_filter_omits_debug_session_event_but_includes_final_error() {
 fn invalid_directives_warn_and_still_launch() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rollshot.jsonl");
-    let backend = if cfg!(target_os = "linux") {
-        "macos-sck"
-    } else {
-        "linux-portal"
-    };
-    let payload = format!(r#"{{"backend":"{}","fps":5,"show_cursor":false}}"#, backend);
 
     let output = Command::new(env!("CARGO_BIN_EXE_rollshot-app"))
         .env("RUST_LOG", "warn,rollshot::app=debug,not valid")
         .args([
             "--log-file",
             log_path.to_str().unwrap(),
-            "--capture",
-            &payload,
+            "capture",
+            "--backend",
+            unsupported_backend(),
         ])
         .output()
         .expect("run rollshot-app");

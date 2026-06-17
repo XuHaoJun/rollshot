@@ -24,7 +24,7 @@ rollshot-action = { path = "../rollshot-action", optional = true }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 rollshot-image-document = { path = "../rollshot-image-document" }
-serde_json = { workspace = true }
+clap = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
