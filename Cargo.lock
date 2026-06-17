@@ -4577,6 +4577,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",
+ "clap",
  "dirs",
  "iced",
  "image",
@@ -4591,7 +4592,6 @@ dependencies = [
  "rollshot-image-document",
  "rollshot-linux-input",
  "rollshot-macos-input",
- "serde_json",
  "tempfile",
  "tracing",
  "tracing-appender",
