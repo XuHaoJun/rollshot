@@ -282,9 +282,9 @@ not honor a portal-picked region.
 **Verification commands** (after local install):
 
 ```bash
-~/.local/bin/rollshot-app --capture '{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"scrolling","scope":"region"}}'
-~/.local/bin/rollshot-app --capture '{"backend":"linux-kwin","fps":5,"show_cursor":false,"initial_request":{"workflow":"scrolling","scope":"region"}}'
-~/.local/bin/rollshot-app --capture '{"backend":"linux-portal","fps":5,"show_cursor":false,"initial_request":{"workflow":"scrolling","scope":"region"}}'
+~/.local/bin/rollshot-app capture --backend auto --fps 5
+~/.local/bin/rollshot-app capture --backend linux-kwin --fps 5
+~/.local/bin/rollshot-app capture --backend linux-portal --fps 5
 ```
 
 **One-shot dev run.** This single command builds the release binary, installs
@@ -298,31 +298,32 @@ cargo build --release -p rollshot-app \
   && sed "s|^Exec=.*|Exec=$HOME/.local/bin/rollshot-app|" packaging/linux/dev.rollshot.io.desktop \
        > ~/.local/share/applications/dev.rollshot.io.desktop \
   && update-desktop-database ~/.local/share/applications 2>/dev/null; \
-  ~/.local/bin/rollshot-app --capture '{"backend":"auto","fps":30,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"region"}}'
+   ~/.local/bin/rollshot-app capture --backend auto --fps 30 --workflow screenshot --scope region
 ```
 
-#### `initial_request` JSON
+#### `--workflow` and `--scope`
 
-Interactive launch options accept an `initial_request` field with two orthogonal
-axes — **workflow** (what we do with the frames) and **scope** (what area we
-capture):
+`rollshot-app capture` takes two orthogonal axes — **workflow** (what we do with
+the frames) and **scope** (what area we capture):
 
-```json
-{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"scrolling","scope":"region"}}
-{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"region"}}
-{"backend":"auto","fps":5,"show_cursor":false,"initial_request":{"workflow":"screenshot","scope":"fullscreen"}}
+- `--workflow <screenshot|scrolling>` (default `scrolling`)
+- `--scope <region|fullscreen>` (default `region`)
+
+```bash
+rollshot-app capture --backend auto --fps 5 --workflow scrolling --scope region
+rollshot-app capture --backend auto --fps 5 --workflow screenshot --scope region
+rollshot-app capture --backend auto --fps 5 --workflow screenshot --scope fullscreen
 ```
 
-The default is `{"workflow":"scrolling","scope":"region"}` when the field is
-omitted.
+The default is `--workflow scrolling --scope region`; running `rollshot-app`
+with no subcommand uses these defaults.
 
-`Scrolling × Fullscreen` is expressible but not wired — passing it returns an
-error.
+`--workflow scrolling --scope fullscreen` is expressible but not wired — passing
+it returns an error.
 
 Fullscreen scope captures the display containing the pointer, skipping the
 selection overlay. It is supported on macOS and KDE/KWin. On other Linux
-environments without portal fallback, fullscreen returns an `Unsupported`
-error.
+environments without portal fallback, fullscreen returns an `Unsupported` error.
 
 #### Non-KDE portal region-mode limitations
 

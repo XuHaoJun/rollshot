@@ -5,7 +5,8 @@ mod launch;
 #[cfg(feature = "action-guide")]
 mod timeline_workspace;
 
-use launch::LaunchMode;
+use clap::Parser;
+use launch::{LaunchCommand, LaunchMode};
 use std::process::ExitCode;
 
 // Registered on every target so the portable thumbnail timer + interaction
@@ -21,16 +22,10 @@ mod result_workspace;
 mod storage;
 
 fn main() -> ExitCode {
-    let logging = match launch::extract_logging_args(std::env::args()) {
-        Ok(logging) => logging,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let cli = launch::LaunchCli::parse();
 
     let selected = diagnostics::select_filter(std::env::var("RUST_LOG").ok().as_deref());
-    let _diagnostics = match diagnostics::init(logging.log_file.as_deref(), &selected) {
+    let _diagnostics = match diagnostics::init(cli.log_file.as_deref(), &selected) {
         Ok(guard) => guard,
         Err(message) => {
             eprintln!("{message}");
@@ -46,7 +41,7 @@ fn main() -> ExitCode {
         );
     }
 
-    match run(logging.remaining, logging.log_file.is_some()) {
+    match run(cli.command, cli.log_file.is_some()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(
@@ -59,8 +54,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
-    let launch_mode = launch::parse_launch_args(args)?;
+fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String> {
+    let launch_mode = launch::resolve_launch_mode(command)?;
 
     match launch_mode {
         LaunchMode::Capture(options) => {
@@ -220,27 +215,11 @@ fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn save_dialog_temp_mode_is_no_longer_accepted() {
-        assert!(
-            launch::parse_launch_args(["rollshot-app", "--save-dialog-temp", "/tmp/a.png"])
-                .is_err()
-        );
-    }
-
     #[test]
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn run_returns_error_for_unsupported_platform() {
-        let err = run(
-            vec![
-                "rollshot-app".to_string(),
-                "--capture".to_string(),
-                r#"{"backend":"auto","fps":5,"show_cursor":false}"#.to_string(),
-            ],
-            false,
-        );
+        // `None` resolves to default capture, which reaches the platform guard.
+        let err = super::run(None, false);
         assert!(err.is_err());
     }
 }
