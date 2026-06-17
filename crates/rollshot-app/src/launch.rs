@@ -7,7 +7,9 @@ pub enum LaunchMode {
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
     #[cfg(feature = "action-guide")]
-    ActionGuide,
+    ActionGuide {
+        fullscreen: bool,
+    },
 }
 
 #[allow(dead_code)]
@@ -64,7 +66,17 @@ where
 
     #[cfg(feature = "action-guide")]
     if flag == "--action-guide" {
-        return Ok(LaunchMode::ActionGuide);
+        let fullscreen = match args.next() {
+            None => false,
+            Some(next) if next == "--fullscreen" => true,
+            Some(other) => {
+                return Err(format!("unknown argument after --action-guide: '{other}'"));
+            }
+        };
+        if let Some(extra) = args.next() {
+            return Err(format!("unexpected argument after --fullscreen: '{extra}'"));
+        }
+        return Ok(LaunchMode::ActionGuide { fullscreen });
     }
 
     #[cfg(feature = "action-guide")]
@@ -130,7 +142,7 @@ mod tests {
             #[cfg(feature = "action-guide")]
             LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
             #[cfg(feature = "action-guide")]
-            LaunchMode::ActionGuide => unreachable!("test expects Capture mode"),
+            LaunchMode::ActionGuide { .. } => unreachable!("test expects Capture mode"),
         }
     }
 
@@ -151,7 +163,7 @@ mod tests {
             #[cfg(feature = "action-guide")]
             LaunchMode::ActionGuideProbe => unreachable!("test expects Capture mode"),
             #[cfg(feature = "action-guide")]
-            LaunchMode::ActionGuide => unreachable!("test expects Capture mode"),
+            LaunchMode::ActionGuide { .. } => unreachable!("test expects Capture mode"),
         }
     }
 
@@ -262,5 +274,31 @@ mod tests {
         .expect_err("scrolling+fullscreen should be rejected");
         assert!(err.contains("scrolling"), "err = {err}");
         assert!(err.contains("fullscreen"), "err = {err}");
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_without_fullscreen() {
+        let mode = parse_launch_args(["rollshot-app", "--action-guide"]).expect("parse");
+        assert!(matches!(
+            mode,
+            LaunchMode::ActionGuide { fullscreen: false }
+        ));
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_with_fullscreen() {
+        let mode =
+            parse_launch_args(["rollshot-app", "--action-guide", "--fullscreen"]).expect("parse");
+        assert!(matches!(mode, LaunchMode::ActionGuide { fullscreen: true }));
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_rejects_unknown_trailing_flag() {
+        let err = parse_launch_args(["rollshot-app", "--action-guide", "--bogus"])
+            .expect_err("unknown trailing flag");
+        assert!(err.contains("unknown"), "err = {err}");
     }
 }

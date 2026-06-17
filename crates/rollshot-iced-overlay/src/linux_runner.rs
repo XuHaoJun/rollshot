@@ -696,6 +696,103 @@ pub fn run(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError>
     run_initial_path(config, crate::fullscreen::capture, run_overlay_session)
 }
 
+/// Fullscreen Action Guide orchestration. Ordering contract:
+/// `make_tray` runs first (so an SNI-host-absent error happens before any
+/// capture resource is acquired); `notify` is best-effort; `record` does the
+/// acquire → begin → wait → finalize work. The tray is dropped on every exit
+/// path (RAII), giving guaranteed cleanup. Closure-based so CI can unit-test
+/// it with fakes (mirrors `run_initial_path`).
+#[cfg(feature = "action-guide")]
+fn orchestrate_fullscreen<R>(
+    make_tray: impl FnOnce() -> Result<Box<dyn crate::recording_tray::RecordingTray>, OverlayError>,
+    notify: impl FnOnce(),
+    record: impl FnOnce(&dyn crate::recording_tray::RecordingTray) -> Result<Option<R>, OverlayError>,
+) -> Result<Option<R>, OverlayError> {
+    let tray = make_tray()?;
+    notify();
+    record(&*tray)
+    // `tray` dropped here on all paths.
+}
+
+/// Headless fullscreen Action Guide runner. No layer-shell overlay, no iced
+/// Application: owns the `Driver` locally and blocks on the tray-click channel.
+#[cfg(feature = "action-guide")]
+pub fn run_action_guide_fullscreen(
+    config: OverlayConfig,
+    input_source: Box<dyn rollshot_action::SemanticInputSource>,
+) -> Result<
+    Option<(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    )>,
+    OverlayError,
+> {
+    if !config.request.is_supported() {
+        return Err(OverlayError::Capture(
+            "unsupported capture request".to_string(),
+        ));
+    }
+    tracing::info!(target: TARGET_OVERLAY, "fullscreen action guide starting (headless)");
+
+    orchestrate_fullscreen(
+        crate::recording_tray::create_recording_tray,
+        crate::recording_tray::notify_recording_started,
+        move |_tray| {
+            // Reuse the exact scrolling acquisition (KWin probe → output-bound
+            // stream, or portal with auto-fallback). Returns the live Driver.
+            #[cfg(not(test))]
+            let factories = real_factories();
+            #[cfg(test)]
+            let factories = ResourceFactories {
+                streaming: Box::new(|_cfg, _preview_tx| Err("test mode".to_string())),
+                one_shot: Box::new(|_| {
+                    Err(rollshot_capture::CaptureError::Unsupported {
+                        message: "test mode".to_string(),
+                    })
+                }),
+            };
+            let resource = acquire_resource(Workflow::ActionGuide, &config, &factories)?;
+            let mut driver = match resource {
+                // Portal picker dismissed → no resource → cancel cleanly.
+                None => {
+                    tracing::info!(target: TARGET_OVERLAY, "capture cancelled before recording");
+                    return Ok(None);
+                }
+                Some(CaptureResource::Streaming { driver, .. }) => driver,
+                Some(CaptureResource::OneShot(_)) => {
+                    return Err(OverlayError::Capture(
+                        "fullscreen action guide expected a streaming resource".to_string(),
+                    ));
+                }
+            };
+
+            let size = driver.source_size();
+            let region = rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: size.width,
+                height: size.height,
+            };
+            tracing::info!(
+                target: TARGET_OVERLAY,
+                width = size.width,
+                height = size.height,
+                "recording full display"
+            );
+
+            let _capability = driver.begin_action_recording(region, input_source);
+
+            // Block until the user clicks the tray icon.
+            _tray.wait_for_finish();
+
+            let (recording, capability) =
+                driver.finalize_action().map_err(OverlayError::Capture)?;
+            Ok(Some((recording, capability, region)))
+        },
+    )
+}
+
 #[cfg(feature = "action-guide")]
 pub fn run_action_guide(
     config: OverlayConfig,
@@ -1683,5 +1780,74 @@ mod tests {
             }
             other => panic!("expected Capture error, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "action-guide"))]
+mod fullscreen_orchestration_tests {
+    use super::orchestrate_fullscreen;
+    use crate::recording_tray::RecordingTray;
+    use crate::OverlayError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct FakeTray {
+        dropped: Arc<AtomicBool>,
+    }
+    impl RecordingTray for FakeTray {
+        fn wait_for_finish(&self) {}
+    }
+    impl Drop for FakeTray {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn tray_failure_skips_capture_and_notify() {
+        let notified = Arc::new(AtomicBool::new(false));
+        let recorded = Arc::new(AtomicBool::new(false));
+        let n = notified.clone();
+        let r = recorded.clone();
+        let out: Result<Option<()>, OverlayError> = orchestrate_fullscreen(
+            || Err(OverlayError::Capture("no tray".into())),
+            || n.store(true, Ordering::SeqCst),
+            |_tray| {
+                r.store(true, Ordering::SeqCst);
+                Ok(Some(()))
+            },
+        );
+        assert!(matches!(out, Err(OverlayError::Capture(_))));
+        assert!(!notified.load(Ordering::SeqCst), "notify must not run");
+        assert!(!recorded.load(Ordering::SeqCst), "capture must not run");
+    }
+
+    #[test]
+    fn record_error_still_drops_tray() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let d = dropped.clone();
+        let out: Result<Option<()>, OverlayError> = orchestrate_fullscreen(
+            move || Ok(Box::new(FakeTray { dropped: d.clone() }) as Box<dyn RecordingTray>),
+            || {},
+            |_tray| Err(OverlayError::Capture("stream failed".into())),
+        );
+        assert!(matches!(out, Err(OverlayError::Capture(_))));
+        assert!(dropped.load(Ordering::SeqCst), "tray dropped on error path");
+    }
+
+    #[test]
+    fn happy_path_returns_result_and_drops_tray() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let d = dropped.clone();
+        let out: Result<Option<u8>, OverlayError> = orchestrate_fullscreen(
+            move || Ok(Box::new(FakeTray { dropped: d.clone() }) as Box<dyn RecordingTray>),
+            || {},
+            |_tray| Ok(Some(7u8)),
+        );
+        assert_eq!(out.unwrap(), Some(7u8));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "tray dropped on success path"
+        );
     }
 }

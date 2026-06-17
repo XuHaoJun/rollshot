@@ -87,19 +87,24 @@ impl CaptureRequest {
             scope: CaptureScope::Region,
         }
     }
+    pub const fn action_guide_fullscreen() -> Self {
+        Self {
+            workflow: Workflow::ActionGuide,
+            scope: CaptureScope::Fullscreen,
+        }
+    }
 
     /// Region scope uses the selection overlay; Fullscreen captures directly.
     pub fn needs_overlay(&self) -> bool {
         matches!(self.scope, CaptureScope::Region)
     }
 
-    /// `Scrolling × Fullscreen` and `ActionGuide × Fullscreen` are expressible
-    /// but not wired in this refactor.
+    /// `Scrolling × Fullscreen` is expressible but not wired. `ActionGuide ×
+    /// Fullscreen` is supported via the headless fullscreen runner.
     pub fn is_supported(&self) -> bool {
         !matches!(
             (self.workflow, self.scope),
             (Workflow::Scrolling, CaptureScope::Fullscreen)
-                | (Workflow::ActionGuide, CaptureScope::Fullscreen)
         )
     }
 }
@@ -263,12 +268,29 @@ mod tests {
     }
 
     #[test]
-    fn action_guide_fullscreen_is_unsupported() {
-        let r = CaptureRequest {
-            workflow: Workflow::ActionGuide,
+    fn action_guide_fullscreen_request_shape() {
+        let req = CaptureRequest::action_guide_fullscreen();
+        assert_eq!(req.workflow, Workflow::ActionGuide);
+        assert_eq!(req.scope, CaptureScope::Fullscreen);
+    }
+
+    #[test]
+    fn action_guide_fullscreen_is_supported() {
+        assert!(CaptureRequest::action_guide_fullscreen().is_supported());
+    }
+
+    #[test]
+    fn action_guide_fullscreen_needs_no_overlay() {
+        assert!(!CaptureRequest::action_guide_fullscreen().needs_overlay());
+    }
+
+    #[test]
+    fn scrolling_fullscreen_still_unsupported() {
+        let req = CaptureRequest {
+            workflow: Workflow::Scrolling,
             scope: CaptureScope::Fullscreen,
         };
-        assert!(!r.is_supported());
+        assert!(!req.is_supported());
     }
 
     #[test]

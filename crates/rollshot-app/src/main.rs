@@ -82,7 +82,7 @@ fn run(args: Vec<String>, file_logging: bool) -> Result<(), String> {
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
         #[cfg(feature = "action-guide")]
-        LaunchMode::ActionGuide => run_action_guide_record(),
+        LaunchMode::ActionGuide { fullscreen } => run_action_guide_record(fullscreen),
     }
 }
 
@@ -132,17 +132,28 @@ fn run_action_guide_probe() -> Result<(), String> {
 }
 
 #[cfg(all(feature = "action-guide", target_os = "linux"))]
-fn run_action_guide_record() -> Result<(), String> {
+fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
     use rollshot_capture::CaptureRequest;
+    let request = if fullscreen {
+        CaptureRequest::action_guide_fullscreen()
+    } else {
+        CaptureRequest::action_guide_region()
+    };
     let config = rollshot_iced_overlay::OverlayConfig {
         backend: "auto".to_string(),
         fps: 5,
         show_cursor: false,
-        request: CaptureRequest::action_guide_region(),
+        request,
         target_output_name: None,
     };
     let source = crate::action_input::create_input_source();
-    match rollshot_iced_overlay::run_action_guide(config, source).map_err(|e| e.to_string())? {
+    let outcome = if fullscreen {
+        rollshot_iced_overlay::run_action_guide_fullscreen(config, source)
+    } else {
+        rollshot_iced_overlay::run_action_guide(config, source)
+    }
+    .map_err(|e| e.to_string())?;
+    match outcome {
         Some((recording, capability, region)) => {
             let source_kind = crate::timeline_workspace::source_kind_for(
                 capability,
@@ -155,7 +166,7 @@ fn run_action_guide_record() -> Result<(), String> {
 }
 
 #[cfg(all(feature = "action-guide", target_os = "macos"))]
-fn run_action_guide_record() -> Result<(), String> {
+fn run_action_guide_record(_fullscreen: bool) -> Result<(), String> {
     Err(
         "Action Guide recording not yet wired on macOS via launch.rs; use macos_product path"
             .to_string(),
