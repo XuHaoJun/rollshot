@@ -17,6 +17,12 @@ pub(crate) trait RecordingTray: Send {
     fn wait_for_finish(&self);
 }
 
+impl RecordingTray for Box<dyn RecordingTray> {
+    fn wait_for_finish(&self) {
+        (**self).wait_for_finish()
+    }
+}
+
 /// Returns true if a StatusNotifierWatcher with a registered host is present on
 /// the session bus (KDE Plasma always has one). Used as a hard precondition so
 /// the runner errors out *before* acquiring any capture resource.

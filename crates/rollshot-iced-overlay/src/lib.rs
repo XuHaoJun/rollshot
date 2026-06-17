@@ -67,7 +67,6 @@ pub mod macos_capture;
 #[cfg(target_os = "macos")]
 mod macos_window;
 #[cfg(all(target_os = "linux", feature = "action-guide"))]
-#[allow(dead_code)] // Items will be consumed by the Action Guide runner in a future task.
 mod recording_tray;
 pub mod region;
 
@@ -105,4 +104,19 @@ pub fn run_action_guide(
     OverlayError,
 > {
     linux_runner::run_action_guide(config, input_source)
+}
+
+#[cfg(all(target_os = "linux", feature = "action-guide"))]
+pub fn run_action_guide_fullscreen(
+    config: OverlayConfig,
+    input_source: Box<dyn rollshot_action::SemanticInputSource>,
+) -> Result<
+    Option<(
+        rollshot_action::Recording,
+        rollshot_action::InputCapability,
+        rollshot_action::CaptureRegion,
+    )>,
+    OverlayError,
+> {
+    linux_runner::run_action_guide_fullscreen(config, input_source)
 }
