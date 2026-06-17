@@ -1,7 +1,7 @@
 # rollshot
 
 `rollshot` is a Rust rewrite of the long screenshot workflow described in
-`rollshot_mvp_design.md`. The project has a platform-independent stitching
+`docs/rollshot_mvp_design.md`. The project has a platform-independent stitching
 core, fixture-backed capture tests, and a macOS ScreenCaptureKit backend
 (platform-default on macOS) built through a `scap`-compatible crate. The
 Linux Wayland portal backend is available on systems with ScreenCast portal
@@ -29,11 +29,20 @@ and PipeWire support.
 
 ## Workspace
 
-- `crates/rollshot-core`: platform-independent stitching concepts
-- `crates/rollshot-capture`: capture traits and frame metadata
+- `crates/rollshot-core`: platform-independent stitching (matcher, canvas,
+  verifier, metrics, `Stitcher`)
+- `crates/rollshot-capture`: capture traits, frame metadata, and the Linux
+  portal/PipeWire/KWin and macOS ScreenCaptureKit backends
 - `crates/rollshot-cli`: command-line interface
-- `crates/rollshot-app`: iced interactive capture app
+- `crates/rollshot-app`: iced interactive capture app and post-capture result
+  workspace
 - `crates/rollshot-iced-overlay`: iced capture overlay renderer used by `rollshot-app`
+- `crates/rollshot-overlay-core`: framework-neutral overlay logic shared by the overlay crates
+- `crates/rollshot-image-document`: headless non-destructive image/annotation document engine
+- `crates/rollshot-macos-oneshot`: isolated macOS ScreenCaptureKit one-shot capture (Objective-C FFI)
+- `crates/rollshot-action`, `crates/rollshot-linux-input`, `crates/rollshot-macos-input`:
+  Action Guide recording and platform input observation (built behind the
+  `action-guide` feature)
 
 ## Local Development
 
@@ -43,12 +52,15 @@ On Ubuntu, install the system packages required by the PipeWire and D-Bus
 dependencies:
 
 ```bash
-sudo apt-get install -y pkg-config libpipewire-0.3-dev libspa-0.2-dev libclang-18-dev
+sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-18-dev \
+  libdbus-1-dev libxkbcommon-dev
 ```
 
 `libclang-18-dev` provides the `libclang.so` symlink that `bindgen` (used by
 the `pipewire` crate) needs. Without it, set `LIBCLANG_PATH=/usr/lib/llvm-18/lib`
-before building.
+before building. `libdbus-1-dev` and `libxkbcommon-dev` are required by the iced
+desktop app on Linux. (CI installs `libclang-dev`, which pulls the distro
+default LLVM; `libclang-18-dev` pins version 18.)
 
 ### Build & Test
 
@@ -138,6 +150,7 @@ directives to enable diagnostics for specific subsystems:
 | `rollshot::overlay` | Shared iced overlay lifecycle and interaction state |
 | `rollshot::capture` | Backend-independent capture decisions and outcomes |
 | `rollshot::capture::linux::portal` | Linux portal lifecycle and negotiation |
+| `rollshot::capture::linux::kwin` | Linux KWin native screencast authorization and capture |
 | `rollshot::capture::linux::pipewire` | Linux PipeWire stream and frame handling |
 | `rollshot::capture::macos::sck` | macOS ScreenCaptureKit capture behavior |
 | `rollshot::stitch` | Stitch session lifecycle and outcomes |
@@ -165,9 +178,19 @@ backend names, enum variants, counts, durations, scores, and error categories.
 It installs PipeWire/D-Bus development packages on the Ubuntu runner, then runs:
 
 ```bash
+./scripts/check-tracing-targets.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+It then repeats clippy and the test suite with the `action-guide` feature
+enabled, and runs per-crate `cargo check` for the macOS-specific crates on the
+macOS runner:
+
+```bash
+cargo clippy --workspace --all-targets --features rollshot-cli/action-guide,rollshot-app/action-guide -- -D warnings
+cargo test --workspace --features rollshot-cli/action-guide,rollshot-app/action-guide
 ```
 
 `.github/workflows/matcher-perf.yml` is manual-only and runs the release-mode
@@ -361,6 +384,16 @@ command once to trigger the permission prompt, grant access, restart the
 terminal, and rerun `probe`.
 
 ## Action Guide input access (optional)
+
+Action Guide is gated behind a non-default `action-guide` Cargo feature. The
+`action-guide` subcommands (`rollshot action-guide`, `rollshot-app
+action-guide`) only exist in builds compiled with it:
+
+```bash
+cargo build --release -p rollshot-app --features action-guide
+# or, for the CLI:
+cargo run -p rollshot-cli --features action-guide -- action-guide
+```
 
 Action Guide works in **visual-only** mode out of the box. Granting temporary
 input-device access upgrades it to **semantic** detection (clicks, scroll,
