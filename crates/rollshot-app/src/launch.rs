@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
+    Daemon,
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
     #[cfg(feature = "action-guide")]
@@ -34,6 +35,9 @@ pub struct LaunchCli {
 pub enum LaunchCommand {
     /// Capture a screenshot or scrolling capture (default when no subcommand).
     Capture(CaptureArgs),
+
+    /// Run Rollshot in the system tray and listen for the capture shortcut.
+    Daemon,
 
     /// Record a desktop workflow into an Action Guide.
     #[cfg(feature = "action-guide")]
@@ -136,6 +140,7 @@ pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode,
                 initial_request: request,
             }))
         }
+        Some(LaunchCommand::Daemon) => Ok(LaunchMode::Daemon),
         #[cfg(feature = "action-guide")]
         Some(LaunchCommand::ActionGuide { fullscreen }) => {
             Ok(LaunchMode::ActionGuide { fullscreen })
@@ -166,7 +171,6 @@ mod tests {
                 assert!(!options.show_cursor);
                 assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
-            #[cfg(feature = "action-guide")]
             _ => unreachable!("test expects Capture mode"),
         }
     }
@@ -188,7 +192,6 @@ mod tests {
                 assert_eq!(options.fps, 30);
                 assert_eq!(options.initial_request, CaptureRequest::scrolling_region());
             }
-            #[cfg(feature = "action-guide")]
             _ => unreachable!("test expects Capture mode"),
         }
     }
@@ -198,7 +201,6 @@ mod tests {
         let mode = parse(&["rollshot-app", "capture", "--show-cursor"]).expect("parse");
         match mode {
             LaunchMode::Capture(options) => assert!(options.show_cursor),
-            #[cfg(feature = "action-guide")]
             _ => unreachable!("test expects Capture mode"),
         }
     }
@@ -316,5 +318,17 @@ mod tests {
     fn action_guide_probe_mode() {
         let mode = parse(&["rollshot-app", "action-guide-probe"]).expect("parse");
         assert!(matches!(mode, LaunchMode::ActionGuideProbe));
+    }
+
+    #[test]
+    fn daemon_subcommand_selects_daemon_mode() {
+        let mode = parse(&["rollshot-app", "daemon"]).expect("parse daemon");
+        assert!(matches!(mode, LaunchMode::Daemon));
+    }
+
+    #[test]
+    fn no_subcommand_still_selects_default_capture() {
+        let mode = parse(&["rollshot-app"]).expect("parse default");
+        assert!(matches!(mode, LaunchMode::Capture(_)));
     }
 }
