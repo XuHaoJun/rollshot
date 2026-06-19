@@ -209,7 +209,7 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo fmt --all -- --check` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace` passes.
-- [ ] `cargo run -p rollshot-dev -- probe` prints the version, OS, and real capture status.
+- [ ] `cargo run -p rollshot-dev -- probe` prints the OS and real capture status.
 - [ ] `mkdir -p target/test-artifacts`.
 - [ ] `cargo run -p rollshot-dev -- stitch-folder crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames --output target/test-artifacts/stitch-folder.png` writes a PNG.
 
