@@ -1,0 +1,16 @@
+[package]
+name = "rollshot-linux-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", features = ["blocking"] }
+
+[lints]
+workspace = true

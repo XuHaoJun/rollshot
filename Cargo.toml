@@ -11,6 +11,7 @@ members = [
     "crates/rollshot-iced-overlay",
     "crates/rollshot-overlay-core",
     "crates/rollshot-macos-oneshot",
+    "crates/rollshot-linux-desktop",
 ]
 resolver = "2"
 
@@ -28,11 +29,13 @@ clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "1.1"
 scap = { package = "zed-scap", version = "0.0.8-zed", default-features = false }
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
 pipewire = "0.10"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-nix = { version = "0.29", features = ["fs", "poll"] }
+nix = { version = "0.29", features = ["fs", "poll", "signal"] }
 rayon = "1.10"
 url = "2"
 zbus = "4.4"
@@ -43,6 +46,7 @@ wide = "1.4.0"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+fs4 = "1.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

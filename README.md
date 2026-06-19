@@ -360,6 +360,52 @@ captures. This mode has two restrictions:
   Passing `show_cursor = true` returns an `Unsupported` error. Use
   `show_cursor = false` (the default).
 
+### System tray daemon (KDE Plasma 6)
+
+Start the daemon:
+
+```bash
+rollshot-app daemon
+```
+
+The tray provides **Capture Region** and **Quit Rollshot**. The default KDE
+global shortcut request is `Alt+Shift+6`; KDE may ask you to approve or replace
+it. Region capture starts in Screenshot mode, and the capture toolbar can
+switch the selected crop to Scrolling mode.
+
+Optional configuration:
+
+```toml
+[daemon]
+capture_region_hotkey = "Alt+Shift+6"
+```
+
+Save it as `$XDG_CONFIG_HOME/rollshot/config.toml` (normally
+`~/.config/rollshot/config.toml`) and restart the daemon. The first release
+targets KDE Plasma 6 on Wayland. If portal shortcut registration fails, the
+tray remains usable. Version 1 shortcut syntax requires at least one modifier
+and an ASCII letter/digit or `F1`–`F24` base key.
+
+### System tray daemon (macOS)
+
+Run `rollshot-app daemon` to start a menu-bar status item (no Dock icon). The
+item's menu has two actions:
+
+- **Capture Region** — opens region selection in Screenshot mode (switch to
+  Scrolling from the overlay toolbar after selecting a crop).
+- **Quit Rollshot** — terminates any active capture and exits the daemon.
+
+The global shortcut defaults to **Command+Shift+6**. Override it in
+`~/Library/Application Support/rollshot/config.toml`:
+
+    [daemon]
+    capture_region_hotkey = "Command+Shift+6"
+
+If the shortcut cannot be registered (e.g. another app owns it), the daemon
+logs a warning and keeps working through the menu. Starting a second daemon
+exits immediately without a second menu item. The shortcut uses Carbon hotkey
+registration and does not require Accessibility permission.
+
 ## Manual Testing: macOS ScreenCaptureKit Capture
 
 Use this checklist after changing the macOS `macos-sck` backend or before

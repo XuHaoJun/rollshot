@@ -147,11 +147,17 @@ behavior against code before relying on them.
   ScreenCaptureKit one-shot capture (Objective-C FFI via `objc2`). Public API
   is safe; the rest of the workspace keeps `unsafe_code = "forbid"`. Used by
   `rollshot-capture`.
+- `crates/rollshot-linux-desktop`: small Linux desktop integration helper
+  shared by the daemon and Action Guide SNI paths (StatusNotifierItem host
+  detection).
 - `crates/rollshot-cli`: command-line entry points. `src/args.rs` is the source
   of truth for subcommands and flags; `cmd_*` modules hold behavior.
 - `crates/rollshot-app`: Rust-only iced product app. It owns launch parsing,
   overlay selection, iced capture delegation, the macOS product flow, and the
   post-capture result workspace (annotation editing, storage, save handoff).
+  The daemon now has a macOS adapter (`daemon/macos*`, winit + `tray-icon` +
+  `global-hotkey`) alongside the Linux KDE adapter, both driving the shared
+  `daemon/core.rs`.
 - `crates/rollshot-image-document`: headless, framework-neutral,
   non-destructive image document and editing engine — annotation graph,
   history, geometry, hit-testing, and flattened rendering. No UI, windowing,

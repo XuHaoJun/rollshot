@@ -17,6 +17,7 @@ action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot
 arboard = "3.4"
 chrono = "0.4"
 dirs = "6"
+fs4 = { workspace = true }
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
@@ -24,20 +25,32 @@ rollshot-action = { path = "../rollshot-action", optional = true }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 rollshot-image-document = { path = "../rollshot-image-document" }
+serde = { workspace = true }
+toml = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey = "0.8"
+nix = { workspace = true }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 raw-window-handle = "0.6"
 rollshot-macos-input = { path = "../rollshot-macos-input", optional = true }
+tray-icon = "0.24"
+winit = "0.30"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true }
+futures-util = { workspace = true }
+ksni = { version = "0.3", features = ["blocking"] }
+nix = { workspace = true }
+rollshot-linux-desktop = { path = "../rollshot-linux-desktop" }
 rollshot-linux-input = { path = "../rollshot-linux-input", optional = true }
+tokio = { workspace = true }
 url = { workspace = true }
 zbus = { workspace = true }
 

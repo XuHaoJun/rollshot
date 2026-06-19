@@ -1,5 +1,6 @@
 #[cfg(feature = "action-guide")]
 mod action_input;
+pub mod daemon;
 mod diagnostics;
 mod launch;
 #[cfg(feature = "action-guide")]
@@ -74,6 +75,7 @@ fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String>
             );
             run_iced_capture(options)
         }
+        LaunchMode::Daemon => daemon::run(),
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
         #[cfg(feature = "action-guide")]

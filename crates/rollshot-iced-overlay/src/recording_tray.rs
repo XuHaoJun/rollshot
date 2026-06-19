@@ -23,35 +23,6 @@ impl RecordingTray for Box<dyn RecordingTray> {
     }
 }
 
-/// Returns true if a StatusNotifierWatcher with a registered host is present on
-/// the session bus (KDE Plasma always has one). Used as a hard precondition so
-/// the runner errors out *before* acquiring any capture resource.
-pub(crate) fn sni_host_available() -> bool {
-    use zbus::blocking::{Connection, Proxy};
-    let Ok(conn) = Connection::session() else {
-        tracing::warn!(target: TARGET_TRAY, "no session bus; treating tray as unavailable");
-        return false;
-    };
-    for service in [
-        "org.kde.StatusNotifierWatcher",
-        "org.freedesktop.StatusNotifierWatcher",
-    ] {
-        // `IsStatusNotifierHostRegistered` is a property on the watcher
-        // interface; `Proxy::get_property` issues the
-        // `org.freedesktop.DBus.Properties.Get` call and unwraps the returned
-        // variant for us.
-        let Ok(proxy) = Proxy::new(&conn, service, "/StatusNotifierWatcher", service) else {
-            continue;
-        };
-        if let Ok(true) = proxy.get_property::<bool>("IsStatusNotifierHostRegistered") {
-            tracing::debug!(target: TARGET_TRAY, service, "SNI host registered");
-            return true;
-        }
-    }
-    tracing::warn!(target: TARGET_TRAY, "no registered StatusNotifierHost found");
-    false
-}
-
 /// The ksni-backed tray item. `activate` (click) fires the finish channel.
 struct RecordingItem {
     finish_tx: Sender<()>,
@@ -102,7 +73,7 @@ impl Drop for KsniTray {
 
 /// Create and register the temporary recording tray item.
 pub(crate) fn create_recording_tray() -> Result<Box<dyn RecordingTray>, OverlayError> {
-    if !sni_host_available() {
+    if !rollshot_linux_desktop::sni_host_available() {
         return Err(OverlayError::Capture(
             "Fullscreen Action Guide requires a system tray. \
              This environment does not support tray icons."
