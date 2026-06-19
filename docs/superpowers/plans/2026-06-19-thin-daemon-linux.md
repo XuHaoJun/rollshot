@@ -54,8 +54,109 @@ for those boundaries remains in
 - `crates/rollshot-app/src/launch.rs`: `daemon` CLI mode.
 - `crates/rollshot-app/src/main.rs`: dispatch daemon mode.
 - `README.md`: KDE daemon usage, configuration, and limitations.
+- `AGENTS.md`: project-map entry for the shared Linux desktop helper.
 - `docs/superpowers/specs/2026-06-19-thin-daemon-design.md`: no edits; it is
   the approved source of truth for this implementation.
+
+## Engineering review lock-in
+
+### Step 0: scope challenge
+
+- Goal and tasks are aligned: every task contributes to the KDE 6 daemon or
+  protects an existing Action Guide path affected by shared SNI code.
+- Complexity is acceptable: 10 net-new source/manifest files, one new internal
+  crate, one new top-level app module, and nine tasks. This stays below the
+  review thresholds of 12 files, two new top-level boundaries, and ten tasks.
+- The minimum viable delivery is Tasks 1–9. Task 5 is not optional because
+  copying the existing SNI-host probe into the daemon would create two
+  independently drifting KDE integration paths.
+- No new distributable artifact is introduced. `rollshot-app daemon` is a new
+  mode of the existing packaged binary, so release packaging remains unchanged.
+- Existing macOS CI must continue to compile the workspace, but macOS daemon
+  behavior remains explicitly deferred.
+
+### What already exists
+
+| Existing code or flow | Reuse decision |
+|---|---|
+| `LaunchCli -> resolve_launch_mode -> run` in `rollshot-app` | Extend with one `Daemon` variant; do not create another binary. |
+| Region overlay toolbar workflow switching | Reuse unchanged; the daemon always starts Screenshot/Region and the toolbar may switch to Scrolling. |
+| Action Guide `ksni` tray and SNI-host probe | Reuse the proven SNI protocol and extract only host detection into `rollshot-linux-desktop`. |
+| Workspace `ashpd` 0.9 dependency | Reuse its GlobalShortcuts session, bind, and activation APIs. |
+| Existing tracing initialization and target checker | Reuse; all daemon events use explicit `rollshot::daemon::*` targets. |
+| Existing Linux/macOS CI matrix | Reuse to catch target-gating and workspace dependency regressions. |
+| Existing KDE 6 self-hosted real-capture workflow | Use as runtime environment context; shortcut approval and tray interaction remain manual because they require a desktop user session. |
+
+### Runtime data flow
+
+```text
+ KDE SNI menu ───────────────┐
+                             ├── DaemonEvent::CaptureRegion ──┐
+ XDG GlobalShortcuts portal ─┘                                │
+                                                              v
+                         ┌────────────────────────────────────────────┐
+ daemon.lock ───────────>│ DaemonCore: Idle <-> Capturing -> Exiting │
+                         └────────────────────────────────────────────┘
+                                      │                  │
+                                      │ spawn            │ Quit
+                                      v                  v
+                         current_exe capture       SIGTERM process group
+                         screenshot + region       wait 2s, then SIGKILL
+                                      │
+                                      └── CaptureExited(id, success)
+```
+
+### Ownership and shutdown order
+
+```text
+InstanceGuard
+  └── LinuxPlatform
+       ├── TrayGuard (ksni service)
+       └── ShortcutGuard (thread + tokio runtime + portal session)
+  └── DaemonCore
+       └── ProcessGroupCapture
+
+Quit:
+DaemonCore terminates/reaps capture
+  -> ShortcutGuard closes portal session and joins thread
+  -> TrayGuard shuts down SNI service
+  -> InstanceGuard drops and releases file lock
+```
+
+The implementation must preserve this order. Portal setup is asynchronous:
+`ShortcutGuard::start` means the worker thread was created, not that KDE
+accepted a binding. Portal failure is logged by the worker and leaves the
+already-running tray usable.
+
+### API assumptions verified
+
+- Rust provides safe Unix process-group creation through
+  [`CommandExt::process_group`](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group).
+- The portal lifecycle and signal names follow the
+  [XDG GlobalShortcuts specification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html).
+- The pinned `ashpd` 0.9 API exposes `create_session`, `bind_shortcuts`, and
+  `receive_activated` in its
+  [GlobalShortcuts module](https://docs.rs/ashpd/0.9.3/ashpd/desktop/global_shortcuts/);
+  implementation must use the checked-in Cargo version, not examples from
+  newer ashpd releases.
+- File locking uses the cross-platform
+  [`fs4::FileExt::try_lock`](https://docs.rs/fs4/1.1.0/fs4/trait.FileExt.html#tymethod.try_lock)
+  API and distinguishes contention from real I/O failure.
+
+### NOT in scope
+
+- macOS tray/global-hotkey adapter: deferred to the dedicated macOS plan because
+  it has different main-thread event-loop ownership.
+- GNOME and other Wayland desktops: deferred until their portal/tray behavior
+  is tested rather than inferred from KDE.
+- X11 fallback: deferred to avoid a second shortcut implementation in the
+  first slice.
+- Autostart and launch-at-login: packaging policy, not daemon runtime behavior.
+- Settings UI and live reload: the first version reads one TOML value at
+  startup.
+- Multiple actions or arbitrary command bindings: would turn the daemon into a
+  generic launcher rather than a Rollshot entry point.
+- Changes to release packaging: the existing `rollshot-app` binary is reused.
 
 ### Task 1: Parse daemon configuration and shortcut syntax
 
@@ -134,6 +235,38 @@ mod tests {
     }
 
     #[test]
+    fn empty_shortcut_component_falls_back_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"Alt++6\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
+        assert!(loaded.warning.unwrap().contains("shortcut"));
+    }
+
+    #[test]
+    fn bare_key_falls_back_instead_of_hijacking_normal_typing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"6\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
+        assert!(loaded.warning.unwrap().contains("modifier"));
+    }
+
+    #[test]
     fn unreadable_path_falls_back_with_warning() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_from(dir.path(), Platform::Linux);
@@ -146,6 +279,13 @@ mod tests {
     fn linux_portal_trigger_uses_xdg_modifier_names() {
         let shortcut: Shortcut = "Command+Control+Alt+Shift+6".parse().unwrap();
         assert_eq!(shortcut.portal_trigger(), "CTRL+ALT+SHIFT+LOGO+6");
+    }
+
+    #[test]
+    fn duplicate_alias_and_out_of_range_function_keys_are_rejected() {
+        for invalid in ["Alt+Alt+6", "Command+Super+6", "Alt+F25"] {
+            assert!(invalid.parse::<Shortcut>().is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -254,10 +394,15 @@ impl FromStr for Shortcut {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim().is_empty()
+            || value.split('+').any(|part| part.trim().is_empty())
+        {
+            return Err("shortcut contains an empty component".into());
+        }
         let mut modifiers = Vec::new();
         let mut key = None;
 
-        for part in value.split('+').map(str::trim).filter(|part| !part.is_empty()) {
+        for part in value.split('+').map(str::trim) {
             let modifier = match part.to_ascii_lowercase().as_str() {
                 "control" | "ctrl" => Some(Modifier::Control),
                 "alt" | "option" => Some(Modifier::Alt),
@@ -278,14 +423,30 @@ impl FromStr for Shortcut {
         }
 
         let key = key.ok_or_else(|| "shortcut must contain one base key".to_string())?;
-        if !key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-            return Err("shortcut base key must be alphanumeric or underscore".into());
+        if modifiers.is_empty() {
+            return Err("global shortcut must contain at least one modifier".into());
+        }
+        let function_key = key
+            .strip_prefix('F')
+            .and_then(|number| number.parse::<u8>().ok())
+            .is_some_and(|number| (1..=24).contains(&number));
+        if !(key.len() == 1 && key.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            && !function_key
+        {
+            return Err(
+                "shortcut base key must be one ASCII letter/digit or F1-F24".into(),
+            );
         }
         if modifiers.contains(&Modifier::Command)
             && modifiers.contains(&Modifier::Super)
         {
             return Err("Command and Super name the same platform modifier".into());
         }
+        let key = if key.len() == 1 {
+            key.to_ascii_lowercase()
+        } else {
+            key
+        };
         Ok(Self { modifiers, key })
     }
 }
@@ -328,8 +489,13 @@ impl fmt::Display for Shortcut {
 }
 
 pub fn config_path() -> Result<PathBuf, String> {
+    rollshot_config_dir()
+        .map(|dir| dir.join("config.toml"))
+}
+
+pub fn rollshot_config_dir() -> Result<PathBuf, String> {
     dirs::config_dir()
-        .map(|dir| dir.join("rollshot").join("config.toml"))
+        .map(|dir| dir.join("rollshot"))
         .ok_or_else(|| "platform configuration directory is unavailable".to_string())
 }
 
@@ -387,7 +553,7 @@ Run:
 rtk cargo test -p rollshot-app daemon::config::tests
 ```
 
-Expected: all five configuration tests pass.
+Expected: all configuration tests pass.
 
 - [ ] **Step 6: Format and commit**
 
@@ -489,9 +655,8 @@ pub enum AcquireResult {
 }
 
 pub fn lock_path() -> Result<PathBuf, String> {
-    dirs::config_dir()
-        .map(|dir| dir.join("rollshot").join("daemon.lock"))
-        .ok_or_else(|| "platform configuration directory is unavailable".to_string())
+    crate::daemon::config::rollshot_config_dir()
+        .map(|dir| dir.join("daemon.lock"))
 }
 
 pub fn acquire_at(path: &Path) -> Result<AcquireResult, String> {
@@ -741,6 +906,16 @@ struct RunningCapture {
     process: Box<dyn ActiveCapture>,
 }
 
+/// Product state, independent of tray and portal implementations.
+///
+/// ```text
+/// Idle --CaptureRegion--> Capturing --CaptureExited(current id)--> Idle
+///   \                         |
+///    +-------- Quit ----------+-------------------------------> Exit
+/// ```
+///
+/// A stale `CaptureExited` cannot clear a newer capture because every launch
+/// receives a monotonically increasing `CaptureId`.
 pub struct DaemonCore<L: CaptureLauncher> {
     launcher: L,
     events: Sender<DaemonEvent>,
@@ -902,6 +1077,63 @@ mod tests {
                 success: true
             }
         ));
+    }
+
+    #[test]
+    fn termination_reaches_descendant_processes_in_the_group() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let mut command = std::process::Command::new("sh");
+        command
+            .env("ROLLSHOT_TEST_PID_FILE", &pid_file)
+            .arg("-c")
+            .arg("sleep 60 & echo $! > \"$ROLLSHOT_TEST_PID_FILE\"; wait")
+            .process_group(0);
+        let child = command.spawn().unwrap();
+        let pgid = Pid::from_raw(child.id() as i32);
+        let completed = std::sync::Arc::new((
+            std::sync::Mutex::new(false),
+            std::sync::Condvar::new(),
+        ));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        spawn_watcher(CaptureId(9), child, completed.clone(), tx);
+        let mut capture = ProcessGroupCapture { pgid, completed };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !pid_file.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !pid_file.exists() {
+            let _ = capture.terminate(std::time::Duration::from_secs(1));
+            panic!("descendant process did not publish its pid");
+        }
+        let descendant: i32 = match std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+        {
+            Some(pid) => pid,
+            None => {
+                let _ = capture.terminate(std::time::Duration::from_secs(1));
+                panic!("descendant pid file was invalid");
+            }
+        };
+
+        capture
+            .terminate(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match nix::sys::signal::kill(Pid::from_raw(descendant), None) {
+                Err(nix::errno::Errno::ESRCH) => break,
+                Ok(()) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => panic!("descendant process survived group shutdown: {result:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1124,6 +1356,10 @@ rtk cargo test -p rollshot-app daemon::core::tests
 
 Expected: both suites pass.
 
+The descendant-process test is Linux-only and exercises the real
+`process_group(0) -> killpg` boundary. It must not be replaced with only a fake
+signal assertion.
+
 - [ ] **Step 6: Commit**
 
 ```bash
@@ -1143,7 +1379,18 @@ rtk git commit -m "feat(daemon): manage capture child process"
 - Modify: `crates/rollshot-iced-overlay/src/recording_tray.rs`
 - Modify: `crates/rollshot-app/Cargo.toml`
 
-- [ ] **Step 1: Create the focused shared crate**
+- [ ] **Step 1: Record the pre-refactor baseline**
+
+Run:
+
+```bash
+rtk cargo test -p rollshot-iced-overlay --features action-guide recording_tray
+```
+
+Expected: the existing recording-tray tests pass before moving SNI-host
+detection.
+
+- [ ] **Step 2: Create the focused shared crate**
 
 Add `crates/rollshot-linux-desktop` to workspace members. Its manifest is:
 
@@ -1158,17 +1405,22 @@ rust-version.workspace = true
 
 [dependencies]
 tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", features = ["blocking"] }
 
 [lints]
 workspace = true
 ```
 
-Implement only SNI host detection in `src/lib.rs`:
+Implement only SNI host detection in `src/lib.rs`, target-gated so the new
+workspace member remains buildable in the existing macOS CI job:
 
 ```rust
+#[cfg(target_os = "linux")]
 const TARGET_SNI: &str = "rollshot::linux_desktop::sni";
 
+#[cfg(target_os = "linux")]
 pub fn sni_host_available() -> bool {
     use zbus::blocking::{Connection, Proxy};
 
@@ -1198,7 +1450,11 @@ pub fn sni_host_available() -> bool {
 }
 ```
 
-- [ ] **Step 2: Replace the Action Guide duplicate**
+Do not add a non-Linux stub: all consumers must keep this dependency and call
+behind their existing Linux target gates. This makes accidental cross-platform
+use a compile-time error.
+
+- [ ] **Step 3: Replace the Action Guide duplicate**
 
 Add `rollshot-linux-desktop` as an optional Linux dependency of
 `rollshot-iced-overlay`, include it in the `action-guide` feature, delete the
@@ -1220,7 +1476,7 @@ D-Bus probing dependency.
 
 Add `rollshot-linux-desktop` as a Linux dependency of `rollshot-app`.
 
-- [ ] **Step 3: Verify Action Guide and default builds**
+- [ ] **Step 4: Verify Action Guide and default builds**
 
 Run:
 
@@ -1232,7 +1488,7 @@ rtk cargo test -p rollshot-app
 
 Expected: all pass; the existing recording tray behavior remains unchanged.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 rtk cargo fmt --all
@@ -1442,6 +1698,32 @@ mod tests {
         let shortcut: Shortcut = "Alt+Shift+6".parse().unwrap();
         assert_eq!(preferred_trigger(&shortcut), "ALT+SHIFT+6");
     }
+
+    #[test]
+    fn missing_capture_binding_is_detected() {
+        assert!(contains_capture_binding(["capture-region"]));
+        assert!(!contains_capture_binding(["other"]));
+        assert!(!contains_capture_binding(std::iter::empty::<&str>()));
+    }
+
+    #[test]
+    fn pending_portal_operation_is_cancelled_by_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (shutdown, mut receiver) = tokio::sync::watch::channel(false);
+        shutdown.send(true).unwrap();
+
+        let result = runtime
+            .block_on(cancellable(
+                futures_util::future::pending::<Result<(), &'static str>>(),
+                &mut receiver,
+            ))
+            .unwrap();
+
+        assert!(result.is_none());
+    }
 }
 ```
 
@@ -1483,8 +1765,11 @@ current-thread tokio runtime and the complete portal session:
 ```rust
 use crate::daemon::config::Shortcut;
 use crate::daemon::core::DaemonEvent;
+use std::future::Future;
+use std::time::Duration;
 
 const SHORTCUT_ID: &str = "capture-region";
+const PORTAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct ShortcutGuard {
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -1497,6 +1782,12 @@ pub fn is_capture_shortcut(id: &str) -> bool {
 
 pub fn preferred_trigger(shortcut: &Shortcut) -> String {
     shortcut.portal_trigger()
+}
+
+fn contains_capture_binding<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    ids.into_iter().any(is_capture_shortcut)
 }
 
 impl ShortcutGuard {
@@ -1556,9 +1847,29 @@ impl Drop for ShortcutGuard {
         }
     }
 }
+
+async fn cancellable<T, E, F>(
+    future: F,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<Option<T>, String>
+where
+    E: std::fmt::Display,
+    F: Future<Output = Result<T, E>>,
+{
+    tokio::select! {
+        result = future => result
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        changed = shutdown.changed() => {
+            let _ = changed;
+            Ok(None)
+        },
+    }
+}
 ```
 
-Define `run_portal` with this signature and sequence:
+Define `run_portal` so every potentially blocking portal await is cancellable,
+and close the session on success, failure, cancellation, and stream EOF:
 
 ```rust
 async fn run_portal(
@@ -1566,70 +1877,90 @@ async fn run_portal(
     preferred: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let portal = ashpd::desktop::global_shortcuts::GlobalShortcuts::new()
-        .await
-        .map_err(|error| error.to_string())?;
-    let session = portal
-        .create_session()
-        .await
-        .map_err(|error| error.to_string())?;
-    let shortcut = ashpd::desktop::global_shortcuts::NewShortcut::new(
-        SHORTCUT_ID,
-        "Capture a Rollshot region",
+    let Some(portal) = cancellable(
+        ashpd::desktop::global_shortcuts::GlobalShortcuts::new(),
+        &mut shutdown,
     )
-    .preferred_trigger(Some(preferred.as_str()));
-    let shortcuts = [shortcut];
-    let parent = ashpd::WindowIdentifier::default();
-    let request = tokio::select! {
-        request = portal.bind_shortcuts(
-            &session,
-            &shortcuts,
-            &parent,
-        ) => {
-            request.map_err(|error| error.to_string())?
-        },
-        changed = shutdown.changed() => {
-            let _ = changed;
-            session.close().await.map_err(|error| error.to_string())?;
-            return Ok(());
-        },
+    .await?
+    else {
+        return Ok(());
     };
-    let response = request.response().map_err(|error| error.to_string())?;
+    let Some(session) = cancellable(portal.create_session(), &mut shutdown).await?
+    else {
+        return Ok(());
+    };
 
-    if !response
-        .shortcuts()
-        .iter()
-        .any(|shortcut| shortcut.id() == SHORTCUT_ID)
-    {
-        return Err("portal did not bind capture-region".into());
-    }
+    let result = async {
+        let shortcut = ashpd::desktop::global_shortcuts::NewShortcut::new(
+            SHORTCUT_ID,
+            "Capture a Rollshot region",
+        )
+        .preferred_trigger(Some(preferred.as_str()));
+        let shortcuts = [shortcut];
+        let parent = ashpd::WindowIdentifier::default();
+        let Some(request) = cancellable(
+            portal.bind_shortcuts(&session, &shortcuts, &parent),
+            &mut shutdown,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        let response = request.response().map_err(|error| error.to_string())?;
 
-    let mut activated = portal
-        .receive_activated()
-        .await
-        .map_err(|error| error.to_string())?;
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                let _ = changed;
-                let _ = session.close().await;
-                return Ok(());
-            },
-            event = futures_util::StreamExt::next(&mut activated) => {
-                let Some(event) = event else {
-                    return Err("global shortcut activation stream closed".into());
-                };
-                if is_capture_shortcut(event.shortcut_id()) {
-                    let _ = events.send(DaemonEvent::CaptureRegion);
+        if !contains_capture_binding(
+            response.shortcuts().iter().map(|shortcut| shortcut.id()),
+        ) {
+            return Err("portal did not bind capture-region".into());
+        }
+
+        let Some(mut activated) =
+            cancellable(portal.receive_activated(), &mut shutdown).await?
+        else {
+            return Ok(());
+        };
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    let _ = changed;
+                    return Ok(());
+                },
+                event = futures_util::StreamExt::next(&mut activated) => {
+                    let Some(event) = event else {
+                        return Err(
+                            "global shortcut activation stream closed".into()
+                        );
+                    };
+                    if is_capture_shortcut(event.shortcut_id()) {
+                        let _ = events.send(DaemonEvent::CaptureRegion);
+                    }
                 }
-            },
+            }
         }
     }
+    .await;
+
+    match tokio::time::timeout(PORTAL_CLOSE_TIMEOUT, session.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(
+            target: "rollshot::daemon::shortcut",
+            %error,
+            "failed to close global shortcut session"
+        ),
+        Err(_) => tracing::warn!(
+            target: "rollshot::daemon::shortcut",
+            "timed out closing global shortcut session"
+        ),
+    };
+    result
 }
 ```
 
-The thread exits after logging and does not stop the daemon. Do not log raw key
-events.
+`ShortcutGuard::start` reports only thread creation. Portal rejection,
+unavailability, and stream failure happen asynchronously, are logged by the
+worker, and leave the tray operational. `Drop` signals shutdown; cancellation
+plus the one-second close timeout bound the subsequent thread join. Do not log
+raw key events.
 
 - [ ] **Step 5: Add platform startup fallback tests**
 
@@ -1665,7 +1996,7 @@ fn tray_failure_aborts_platform_startup() {
 }
 
 #[test]
-fn shortcut_failure_keeps_tray_alive() {
+fn shortcut_worker_start_failure_keeps_tray_alive() {
     let (tray, shortcut) =
         start_parts(|| Ok(7), || Err::<(), _>("denied".into())).unwrap();
     assert_eq!(tray, 7);
@@ -1676,13 +2007,18 @@ fn shortcut_failure_keeps_tray_alive() {
 `LinuxPlatform::start` calls `TrayGuard::start` first, then
 `ShortcutGuard::start`, and stores both guards.
 
+This injected failure represents failure to create the worker thread. Actual
+portal errors occur inside the successfully created worker and are handled by
+`run_portal`; do not claim that `LinuxPlatform::start` synchronously knows
+whether KDE accepted the binding.
+
 ```rust
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::core::DaemonEvent;
 
 pub struct LinuxPlatform {
-    _tray: tray::TrayGuard,
     _shortcut: Option<shortcut::ShortcutGuard>,
+    _tray: tray::TrayGuard,
 }
 
 impl LinuxPlatform {
@@ -1698,12 +2034,15 @@ impl LinuxPlatform {
             ),
         )?;
         Ok(Self {
-            _tray: tray,
             _shortcut: shortcut,
+            _tray: tray,
         })
     }
 }
 ```
+
+Keep `_shortcut` declared before `_tray`: Rust drops struct fields in
+declaration order, so the portal worker stops before the tray disappears.
 
 - [ ] **Step 6: Run portal and platform tests**
 
@@ -1825,7 +2164,10 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
 
     tracing::info!(
         target: "rollshot::daemon::core",
-        "Rollshot daemon ready"
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        preferred_shortcut = %loaded.config.capture_region_hotkey,
+        "Rollshot tray daemon ready; portal shortcut setup runs asynchronously"
     );
     while let Ok(event) = receiver.recv() {
         if core.handle(event) == core::LoopAction::Exit {
@@ -1835,6 +2177,10 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     Err("daemon event channel closed unexpectedly".into())
 }
 ```
+
+Keep `_platform` declared before `core`: local variables drop in reverse
+declaration order, guaranteeing capture termination before shortcut/tray
+shutdown, while `_instance` remains alive until the function returns.
 
 Guard this Linux implementation with `#[cfg(target_os = "linux")]`. For other
 targets, provide:
@@ -1927,7 +2273,8 @@ capture_region_hotkey = "Alt+Shift+6"
 Save it as `$XDG_CONFIG_HOME/rollshot/config.toml` (normally
 `~/.config/rollshot/config.toml`) and restart the daemon. The first release
 targets KDE Plasma 6 on Wayland. If portal shortcut registration fails, the
-tray remains usable.
+tray remains usable. Version 1 shortcut syntax requires at least one modifier
+and an ASCII letter/digit or `F1`–`F24` base key.
 ````
 
 Do not document autostart, GNOME, X11, or macOS daemon support.
@@ -1943,13 +2290,18 @@ Guide SNI paths.
 Run:
 
 ```bash
+rtk ./scripts/check-tracing-targets.sh
 rtk cargo test
 rtk cargo fmt --check
 rtk cargo clippy --workspace --all-targets -- -D warnings
+rtk cargo test --workspace --features rollshot-cli/action-guide,rollshot-app/action-guide
+rtk cargo clippy --workspace --all-targets --features rollshot-cli/action-guide,rollshot-app/action-guide -- -D warnings
 ```
 
 Expected: every command exits 0 with no test failures, formatting differences,
-or clippy warnings.
+invalid tracing targets, or clippy warnings. These commands mirror both sides of
+the existing Ubuntu/macOS CI matrix and protect the Action Guide tray path
+changed in Task 5.
 
 - [ ] **Step 4: Run KDE Plasma 6 manual verification**
 
@@ -1980,8 +2332,8 @@ remaining runtime-verification gap; do not claim KDE runtime verification.
 Run:
 
 ```bash
-rtk git diff 15b1ad1 --stat
-rtk git diff 15b1ad1 -- crates/rollshot-app crates/rollshot-linux-desktop crates/rollshot-iced-overlay README.md AGENTS.md
+rtk git diff 15b1ad1 --stat -- Cargo.toml Cargo.lock crates/rollshot-app crates/rollshot-linux-desktop crates/rollshot-iced-overlay README.md AGENTS.md
+rtk git diff 15b1ad1 -- Cargo.toml crates/rollshot-app crates/rollshot-linux-desktop crates/rollshot-iced-overlay README.md AGENTS.md
 ```
 
 Confirm every changed line maps to the approved daemon design and no macOS
@@ -1994,6 +2346,155 @@ rtk git add README.md AGENTS.md
 rtk git commit -m "docs(daemon): document KDE tray mode"
 ```
 
+## Test strategy
+
+### Test flow
+
+```text
+Pure unit tests (no desktop session)
+  ├── config parser + fallback
+  ├── file-lock ownership
+  ├── daemon state transitions
+  ├── portal trigger/routing + cancellation helper
+  ├── tray menu semantic events
+  └── injected startup degradation
+          |
+          v
+Linux process integration tests
+  ├── current-executable argument contract
+  ├── child exit watcher
+  └── real process-group descendant termination
+          |
+          v
+Workspace verification
+  ├── default features on Ubuntu + macOS CI
+  └── Action Guide features on Ubuntu + macOS CI
+          |
+          v
+KDE Plasma 6 manual runtime verification
+  ├── SNI host and menu
+  ├── portal approval/activation
+  ├── screenshot -> scrolling switch
+  ├── single active child
+  └── Quit cleanup
+```
+
+### Coverage table
+
+| Task / behavior | Unit | Integration | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / defaults, valid override, malformed/unreadable config | ✓ | — | — | no |
+| Task 1 / malformed components and bare-key safety | ✓ | — | — | no |
+| Task 1 / XDG trigger translation and macOS default contract | ✓ | — | — | no |
+| Task 2 / lock contention and release-on-drop | ✓ | filesystem | — | no |
+| Task 3 / idle, busy, exit, stale ID, spawn failure, Quit, Drop | ✓ | — | — | no |
+| Task 4 / exact child arguments and exit event | ✓ | process | — | no |
+| Task 4 / SIGTERM then SIGKILL escalation | ✓ | process | — | no |
+| Task 4 / descendant receives process-group termination | — | ✓ | — | no |
+| Task 5 / Action Guide still uses shared SNI detection | existing | workspace build/test | CI | KDE host availability |
+| Task 6 / exact tray menu and semantic event routing | ✓ | — | — | SNI registration |
+| Task 7 / shortcut ID, preferred trigger, shutdown cancellation | ✓ | async runtime | — | portal dialog/binding |
+| Task 7 / worker-start failure preserves tray | ✓ | — | — | portal backend failure |
+| Task 8 / CLI compatibility and duplicate-daemon fast exit | ✓ | — | — | no |
+| Task 8 / full event loop and resource drop order | partial | — | — | ✓ |
+| Task 9 / screenshot crop switched to scrolling | existing | existing | real capture workflow | ✓ |
+
+No automated test should require a real SNI host, portal permission dialog, or
+screen capture. The only sleeps are bounded waits around real child-process
+state; tests must use deadlines and fail with explicit diagnostics.
+
+## Failure-mode audit
+
+| New code path | Production failure | Planned test | Handling | User-visible result |
+|---|---|---|---|---|
+| Config path lookup | Platform config directory unavailable | Task 8 startup error path through `Result` | `config_path()` returns `Err` | daemon exits; main logs application failure |
+| Config read/parse | Permission denied, malformed TOML, malformed shortcut | Task 1 Step 1 | warning + platform default | tray starts with default; warning in diagnostics |
+| Instance lock | Another daemon owns lock | Task 2 Step 1; Task 8 Step 6 | `AlreadyRunning` returns success | no duplicate tray; info log |
+| Instance lock | Directory/file cannot be created | Task 2 `Result` path | startup error | daemon exits with logged error |
+| Capture spawn | binary cannot spawn | Task 3 failing launcher | error + remain Idle | tray stays available |
+| Capture exit | cancellation or non-zero status | Task 3 non-zero exit | clear active state | next capture works; status logged |
+| Capture watcher | `wait()` fails | Task 4 explicit warning branch | emit failed exit state and notify completion | daemon returns Idle with warning |
+| Process-group shutdown | SIGTERM ignored | Task 4 escalation test | wait two seconds, SIGKILL | Quit delayed up to grace period |
+| Descendant cleanup | child spawns helper processes | Task 4 real process-group test | signal entire PGID | no orphan capture process |
+| SNI host probe | session bus or StatusNotifierHost absent | Task 6 startup `Result`; manual KDE check | fatal tray initialization error | daemon exits; no hidden background process |
+| SNI service | registration fails or host disappears | Task 6 guard structure; existing ksni behavior | registration is fatal; Drop waits on ksni shutdown (API exposes no shutdown error) | explicit startup error; process exit is final cleanup fallback |
+| Shortcut worker thread | OS refuses thread creation | Task 7 injected start failure | keep tray, no shortcut guard | tray-only operation |
+| Portal connection/session | portal absent or D-Bus error | Task 7 cancellable/error result | worker logs and exits | tray-only operation |
+| Portal bind | user rejects or binds nothing | Task 7 no-bound-shortcut branch; manual KDE check | close session, log warning | tray-only operation |
+| Portal bind | user leaves dialog open then quits | Task 7 cancellation helper | shutdown cancels await and closes session | Quit remains bounded |
+| Activation stream | backend closes session/stream | Task 7 EOF branch | worker logs and exits | tray-only operation |
+| Event channel | receiver disappears during callback | sender results intentionally ignored | daemon is already exiting | no panic |
+| Duplicate trigger | shortcut/menu pressed during capture | Task 3 busy test | ignore at debug level | only one capture UI |
+| Main event loop | unexpected channel closure | Task 8 explicit `Err` branch | fatal daemon error after guards drop | logged failure |
+
+No critical failure mode is both silent and unhandled. Portal degradation is
+intentionally visible only in diagnostics because the tray remains a complete
+fallback control surface; ksni shutdown exposes no error result, and process
+exit is the final cleanup boundary.
+
+## Performance and resource review
+
+- Event volume is human-scale; unbounded `std::sync::mpsc` is acceptable because
+  only tray clicks, shortcut activations, child exits, and Quit are produced.
+- Exactly one shortcut worker thread exists for the daemon lifetime.
+- Exactly one blocking watcher thread exists while a capture child is active;
+  the busy-state gate prevents unbounded watcher growth.
+- Child waiting is blocking and allocation-free; there is no polling hot loop.
+- Portal session, SNI service, child process group, and file lock each have an
+  explicit owning guard.
+- Shutdown has a two-second SIGTERM grace period, a SIGKILL escalation, and a
+  one-second portal-close timeout, preventing an indefinite Quit path.
+- This change does not touch frame buffers, stitching, pixel conversion, or
+  other performance-sensitive capture loops; no stitching benchmark is needed.
+
+## Task dependency and execution strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| 1. Configuration | workspace manifest, `rollshot-app/daemon` | — |
+| 2. Single instance | workspace manifest, `rollshot-app/daemon` | 1 |
+| 3. State machine | `rollshot-app/daemon` | 1 |
+| 4. Child process | workspace manifest, `rollshot-app/daemon` | 3 |
+| 5. Shared SNI probe | workspace manifest, `rollshot-linux-desktop`, `rollshot-iced-overlay` | 1 |
+| 6. KDE tray | `rollshot-app/daemon`, `rollshot-linux-desktop` | 3, 5 |
+| 7. Portal shortcut | workspace manifest, `rollshot-app/daemon` | 1, 3 |
+| 8. End-to-end dispatch | `rollshot-app` | 2, 4, 6, 7 |
+| 9. Docs and verification | README, AGENTS, whole workspace | 8 |
+
+Sequential execution is required. Tasks 1, 2, 4, 5, and 7 all modify the root
+workspace manifest, while Tasks 1–8 share `crates/rollshot-app/src/daemon/`.
+Parallel worktrees would create more merge coordination than useful
+concurrency. Execute Tasks 1 through 9 in order in the current feature branch.
+
+## Engineering review summary
+
+Plan reviewed: `docs/superpowers/plans/2026-06-19-thin-daemon-linux.md`
+
+- Tasks in plan: 9
+- Files: 10 create / 8 modify
+- Step 0 scope challenge: accepted as-is
+- Architecture review: 4 issues corrected
+  - explicit async portal readiness semantics;
+  - cancellation and bounded portal shutdown;
+  - real process-group descendant verification;
+  - macOS-safe target gating for the shared Linux crate.
+- Plan structure and code quality: 4 issues corrected
+  - shared config directory helper;
+  - stricter shortcut syntax;
+  - state/ownership diagrams;
+  - accurate worker-start versus portal-runtime failure terminology.
+- Test review: 4 gaps corrected
+  - cancellation test;
+  - descendant process test;
+  - full default/action-guide CI command parity;
+  - coverage and failure-mode matrices.
+- Performance/resource review: no hot-path concerns; two shutdown bounds made
+  explicit.
+- Critical silent gaps: 0
+- Parallelization: sequential; no safe independent lane after manifest/module
+  conflicts are considered.
+- Unresolved decisions: 0
+
 ## Completion criteria
 
 - `rollshot-app daemon` is accepted while no-argument behavior remains the
@@ -2002,11 +2503,16 @@ rtk git commit -m "docs(daemon): document KDE tray mode"
 - KDE SNI tray offers only `Capture Region` and `Quit Rollshot`.
 - XDG portal shortcut defaults to `ALT+SHIFT+6` and failure degrades to
   tray-only.
+- Every portal await is shutdown-cancellable and portal-session close is
+  timeout-bounded.
 - One capture child runs at a time using the current executable.
 - Quit terminates the capture process group before daemon resources drop.
+- A Linux integration test proves descendant processes receive group
+  termination.
 - Config fallback behavior is covered by tests.
 - State transitions and platform fallback are covered without requiring a GUI
   in CI.
-- Full test, format, and clippy commands pass.
+- Default and Action Guide test/clippy matrices, formatting, and tracing-target
+  checks pass.
 - KDE Plasma 6 manual results are recorded honestly.
 - macOS remains explicitly deferred.
