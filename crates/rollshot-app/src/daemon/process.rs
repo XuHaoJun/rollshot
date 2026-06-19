@@ -15,7 +15,7 @@ pub(crate) struct ProcessGroupCapture {
     completed: Arc<(Mutex<bool>, Condvar)>,
 }
 
-pub fn capture_args() -> [&'static str; 5] {
+pub(crate) fn capture_args() -> [&'static str; 5] {
     ["capture", "--workflow", "screenshot", "--scope", "region"]
 }
 
