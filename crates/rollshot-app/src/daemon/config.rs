@@ -95,7 +95,7 @@ impl FromStr for Shortcut {
             .strip_prefix('F')
             .and_then(|number| number.parse::<u8>().ok())
             .is_some_and(|number| (1..=24).contains(&number));
-        if !(key.len() == 1 && key.chars().all(|ch| ch.is_ascii_alphanumeric())) && !function_key {
+        if !(function_key || key.len() == 1 && key.chars().all(|ch| ch.is_ascii_alphanumeric())) {
             return Err("shortcut base key must be one ASCII letter/digit or F1-F24".into());
         }
         if modifiers.contains(&Modifier::Command) && modifiers.contains(&Modifier::Super) {
