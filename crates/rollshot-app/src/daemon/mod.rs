@@ -64,7 +64,28 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     Err("daemon event channel closed unexpectedly".into())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
+    let config_path = config::config_path()?;
+    let loaded = config::load_from(&config_path, config::Platform::Macos);
+    if let Some(warning) = loaded.warning {
+        tracing::warn!(
+            target: "rollshot::daemon::config",
+            %warning,
+            "using default daemon configuration"
+        );
+    }
+
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve Rollshot executable: {error}"))?;
+    let (events, receiver) = std::sync::mpsc::channel();
+    let launcher = process::CurrentExeLauncher::new(executable);
+    let core = core::DaemonCore::new(launcher, events);
+
+    macos::run(core, receiver, &loaded.config)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     Err("daemon mode is not implemented on this platform yet".into())
 }
@@ -74,7 +95,6 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
 /// tray-only with a warning). Used by both the Linux and macOS adapters so the
 /// fatal/non-fatal contract cannot drift between platforms.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[allow(dead_code)] // macOS adapter (Task 5) will call this; Linux adapter already does.
 pub(crate) fn start_parts<T, S>(
     start_tray: impl FnOnce() -> Result<T, String>,
     start_shortcut: impl FnOnce() -> Result<S, String>,
