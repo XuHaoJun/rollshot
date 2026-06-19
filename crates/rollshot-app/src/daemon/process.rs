@@ -3,8 +3,8 @@ use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
-use std::sync::{mpsc::Sender, Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 pub struct CurrentExeLauncher {
     executable: std::path::PathBuf,
@@ -12,7 +12,6 @@ pub struct CurrentExeLauncher {
 
 pub(crate) struct ProcessGroupCapture {
     pgid: Pid,
-    completed: Arc<(Mutex<bool>, Condvar)>,
 }
 
 pub(crate) fn capture_args() -> [&'static str; 5] {
@@ -37,18 +36,12 @@ impl CaptureLauncher for CurrentExeLauncher {
             .spawn()
             .map_err(|error| format!("failed to spawn capture child: {error}"))?;
         let pgid = Pid::from_raw(child.id() as i32);
-        let completed = Arc::new((Mutex::new(false), Condvar::new()));
-        spawn_watcher(id, child, completed.clone(), events);
-        Ok(Box::new(ProcessGroupCapture { pgid, completed }))
+        spawn_watcher(id, child, events);
+        Ok(Box::new(ProcessGroupCapture { pgid }))
     }
 }
 
-pub(crate) fn spawn_watcher(
-    id: CaptureId,
-    mut child: Child,
-    completed: Arc<(Mutex<bool>, Condvar)>,
-    events: Sender<DaemonEvent>,
-) {
+pub(crate) fn spawn_watcher(id: CaptureId, mut child: Child, events: Sender<DaemonEvent>) {
     std::thread::spawn(move || {
         let success = match child.wait() {
             Ok(status) => status.success(),
@@ -61,56 +54,63 @@ pub(crate) fn spawn_watcher(
                 false
             }
         };
-        let (lock, condition) = &*completed;
-        *lock.lock().unwrap() = true;
-        condition.notify_all();
         let _ = events.send(DaemonEvent::CaptureExited { id, success });
     });
 }
 
 impl ActiveCapture for ProcessGroupCapture {
     fn terminate(&mut self, grace: Duration) -> Result<(), String> {
-        terminate_with(&self.completed, grace, |signal| {
-            match killpg(self.pgid, signal) {
+        terminate_with(
+            grace,
+            |signal| match killpg(self.pgid, signal) {
                 Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
                 Err(error) => Err(format!(
                     "failed to signal capture process group with {signal:?}: {error}"
                 )),
-            }
-        })
+            },
+            || match killpg(self.pgid, None) {
+                Ok(()) => Ok(true),
+                Err(nix::errno::Errno::ESRCH) => Ok(false),
+                Err(error) => Err(format!("failed to inspect capture process group: {error}")),
+            },
+        )
     }
 }
 
 pub(crate) fn terminate_with(
-    completed: &Arc<(Mutex<bool>, Condvar)>,
     grace: Duration,
     mut signal: impl FnMut(Signal) -> Result<(), String>,
+    mut group_exists: impl FnMut() -> Result<bool, String>,
 ) -> Result<(), String> {
-    let (lock, condition) = &**completed;
-    if *lock.lock().unwrap() {
+    if !group_exists()? {
         return Ok(());
     }
     signal(Signal::SIGTERM)?;
-    let completed = lock.lock().unwrap();
-    let (completed, _) = condition
-        .wait_timeout_while(completed, grace, |completed| !*completed)
-        .map_err(|_| "capture completion lock was poisoned".to_string())?;
-    if *completed {
+    if wait_for_group_exit(grace, &mut group_exists)? {
         return Ok(());
     }
-    drop(completed);
 
     signal(Signal::SIGKILL)?;
-    let (completed, _) = condition
-        .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(1), |completed| {
-            !*completed
-        })
-        .map_err(|_| "capture completion lock was poisoned".to_string())?;
-    if *completed {
+    if wait_for_group_exit(Duration::from_secs(1), &mut group_exists)? {
         Ok(())
     } else {
         Err("capture process group did not exit after SIGKILL".into())
     }
+}
+
+fn wait_for_group_exit(
+    timeout: Duration,
+    group_exists: &mut impl FnMut() -> Result<bool, String>,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    while group_exists()? {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -133,9 +133,7 @@ mod tests {
             .arg("exit 0")
             .spawn()
             .unwrap();
-        let completed =
-            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        spawn_watcher(CaptureId(7), child, completed, tx);
+        spawn_watcher(CaptureId(7), child, tx);
 
         assert!(matches!(
             rx.recv().unwrap(),
@@ -160,11 +158,9 @@ mod tests {
             .process_group(0);
         let child = command.spawn().unwrap();
         let pgid = Pid::from_raw(child.id() as i32);
-        let completed =
-            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let (tx, _rx) = std::sync::mpsc::channel();
-        spawn_watcher(CaptureId(9), child, completed.clone(), tx);
-        let mut capture = ProcessGroupCapture { pgid, completed };
+        spawn_watcher(CaptureId(9), child, tx);
+        let mut capture = ProcessGroupCapture { pgid };
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !pid_file.exists() && std::time::Instant::now() < deadline {
@@ -202,22 +198,61 @@ mod tests {
     }
 
     #[test]
-    fn graceful_completion_needs_only_sigterm() {
-        let completed =
-            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let notify = completed.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let (lock, condition) = &*notify;
-            *lock.lock().unwrap() = true;
-            condition.notify_all();
-        });
-        let signals = std::sync::Mutex::new(Vec::new());
+    fn completed_leader_does_not_hide_surviving_process_group() {
+        use std::os::unix::process::CommandExt;
 
-        terminate_with(&completed, std::time::Duration::from_secs(1), |signal| {
-            signals.lock().unwrap().push(signal);
-            Ok(())
-        })
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let mut command = std::process::Command::new("sh");
+        command
+            .env("ROLLSHOT_TEST_PID_FILE", &pid_file)
+            .arg("-c")
+            .arg("trap '' TERM; sleep 60 & echo $! > \"$ROLLSHOT_TEST_PID_FILE\"; exit 0")
+            .process_group(0);
+        let child = command.spawn().unwrap();
+        let pgid = Pid::from_raw(child.id() as i32);
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_watcher(CaptureId(10), child, tx);
+        let mut capture = ProcessGroupCapture { pgid };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !pid_file.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !pid_file.exists() {
+            let _ = killpg(pgid, Signal::SIGKILL);
+            panic!("descendant process did not publish its pid");
+        }
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("group leader did not exit");
+
+        capture
+            .terminate(std::time::Duration::from_millis(10))
+            .unwrap();
+
+        let group_survived = killpg(pgid, None).is_ok();
+        if group_survived {
+            let _ = killpg(pgid, Signal::SIGKILL);
+        }
+        assert!(!group_survived, "process group survived daemon shutdown");
+    }
+
+    #[test]
+    fn graceful_completion_needs_only_sigterm() {
+        let signals = std::sync::Mutex::new(Vec::new());
+        let checks = std::cell::Cell::new(0);
+
+        terminate_with(
+            std::time::Duration::from_secs(1),
+            |signal| {
+                signals.lock().unwrap().push(signal);
+                Ok(())
+            },
+            || {
+                checks.set(checks.get() + 1);
+                Ok(checks.get() < 3)
+            },
+        )
         .unwrap();
 
         assert_eq!(*signals.lock().unwrap(), vec![Signal::SIGTERM]);
@@ -225,19 +260,20 @@ mod tests {
 
     #[test]
     fn timeout_escalates_to_sigkill() {
-        let completed =
-            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let signals = std::sync::Mutex::new(Vec::new());
+        let killed = std::cell::Cell::new(false);
 
-        terminate_with(&completed, std::time::Duration::from_millis(1), |signal| {
-            signals.lock().unwrap().push(signal);
-            if signal == Signal::SIGKILL {
-                let (lock, condition) = &*completed;
-                *lock.lock().unwrap() = true;
-                condition.notify_all();
-            }
-            Ok(())
-        })
+        terminate_with(
+            std::time::Duration::from_millis(1),
+            |signal| {
+                signals.lock().unwrap().push(signal);
+                if signal == Signal::SIGKILL {
+                    killed.set(true);
+                }
+                Ok(())
+            },
+            || Ok(!killed.get()),
+        )
         .unwrap();
 
         assert_eq!(
