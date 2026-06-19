@@ -220,62 +220,6 @@ fn rollshot_dev_stitch_folder_writes_debug_report() {
 }
 
 #[test]
-fn rollshot_dev_capture_fixture_writes_debug_report() {
-    let tempdir = tempdir_for_test("rollshot-capture-debug");
-    let frames_dir = tempdir.join("frames");
-    std::fs::create_dir_all(&frames_dir).expect("create frames dir");
-
-    let canvas = make_scroll_canvas(160, 600);
-    for (idx, y) in [0u32, 40, 80].iter().enumerate() {
-        let frame = imageops::crop_imm(&canvas, 0, *y, canvas.width(), 160).to_image();
-        frame
-            .save(frames_dir.join(format!("frame_{idx:03}.png")))
-            .expect("save frame");
-    }
-
-    let output_png = tempdir.join("captured.png");
-    let report_json = tempdir.join("capture-report.json");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
-        .arg("capture")
-        .arg("--headless")
-        .arg("--backend")
-        .arg("fixture")
-        .arg("--fixture")
-        .arg(&frames_dir)
-        .arg("--max-frames")
-        .arg("3")
-        .arg("--output")
-        .arg(&output_png)
-        .arg("--debug-match-report")
-        .arg(&report_json)
-        .output()
-        .expect("run rollshot-dev capture fixture");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report = std::fs::read_to_string(&report_json).expect("read report");
-    assert!(report.contains("\"frames\""), "report = {report}");
-    assert!(
-        report.contains("\"capture_interval_ms\""),
-        "report = {report}"
-    );
-    assert!(
-        report.contains("\"stitch_elapsed_ms\""),
-        "report = {report}"
-    );
-    assert!(
-        report.contains("\"outcome\": \"Appended\""),
-        "report = {report}"
-    );
-
-    let _ = std::fs::remove_dir_all(&tempdir);
-}
-
-#[test]
 fn rollshot_dev_stitch_folder_dumps_axis_changed_overlap_debug() {
     let tempdir = tempdir_for_test("rollshot-stitch-folder-axis-debug");
     let frames_dir = tempdir.join("frames");
@@ -363,6 +307,25 @@ fn rollshot_dev_stitch_folder_default_uses_fast_hnsw() {
     );
 
     let _ = std::fs::remove_dir_all(&tempdir);
+}
+
+#[test]
+fn help_lists_only_developer_commands() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
+        .arg("--help")
+        .output()
+        .expect("run rollshot-dev --help");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(stdout.contains("probe"), "stdout = {stdout}");
+    assert!(stdout.contains("stitch-folder"), "stdout = {stdout}");
+    assert!(!stdout.contains("capture"), "stdout = {stdout}");
+    assert!(!stdout.contains("action-guide"), "stdout = {stdout}");
 }
 
 #[test]
