@@ -4602,6 +4602,7 @@ dependencies = [
  "rollshot-capture",
  "rollshot-iced-overlay",
  "rollshot-image-document",
+ "rollshot-linux-desktop",
  "rollshot-linux-input",
  "rollshot-macos-input",
  "serde",
@@ -4681,9 +4682,9 @@ dependencies = [
  "rollshot-action",
  "rollshot-capture",
  "rollshot-core",
+ "rollshot-linux-desktop",
  "rollshot-overlay-core",
  "tracing",
- "zbus 5.16.0",
 ]
 
 [[package]]
@@ -4693,6 +4694,14 @@ dependencies = [
  "cosmic-text",
  "image",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rollshot-linux-desktop"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "zbus 5.16.0",
 ]
 
 [[package]]

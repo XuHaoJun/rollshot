@@ -41,6 +41,7 @@ rollshot-macos-input = { path = "../rollshot-macos-input", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
+rollshot-linux-desktop = { path = "../rollshot-linux-desktop" }
 rollshot-linux-input = { path = "../rollshot-linux-input", optional = true }
 url = { workspace = true }
 zbus = { workspace = true }

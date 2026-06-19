@@ -10,17 +10,17 @@ rollshot-capture = { path = "../rollshot-capture" }
 rollshot-core = { path = "../rollshot-core" }
 rollshot-overlay-core = { path = "../rollshot-overlay-core" }
 rollshot-action = { path = "../rollshot-action", optional = true }
+rollshot-linux-desktop = { path = "../rollshot-linux-desktop", optional = true }
 tracing = { workspace = true }
 
 [features]
-action-guide = ["dep:rollshot-action", "dep:ksni", "dep:notify-rust", "dep:zbus"]
+action-guide = ["dep:rollshot-action", "dep:ksni", "dep:notify-rust", "dep:rollshot-linux-desktop"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 iced_layershell = "0.18"
 ksni = { version = "0.3", optional = true, features = ["blocking"] }
 notify-rust = { version = "4", optional = true }
-zbus = { version = "5", optional = true, features = ["blocking"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
