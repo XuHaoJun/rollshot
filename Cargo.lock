@@ -4586,10 +4586,12 @@ name = "rollshot-app"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "ashpd 0.9.3",
  "chrono",
  "clap",
  "dirs",
  "fs4",
+ "futures-util",
  "iced",
  "image",
  "ksni",
@@ -4608,6 +4610,7 @@ dependencies = [
  "rollshot-macos-input",
  "serde",
  "tempfile",
+ "tokio",
  "toml",
  "tracing",
  "tracing-appender",
