@@ -33,7 +33,7 @@ scap = { package = "zed-scap", version = "0.0.8-zed", default-features = false }
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
 pipewire = "0.10"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-nix = { version = "0.29", features = ["fs", "poll"] }
+nix = { version = "0.29", features = ["fs", "poll", "signal"] }
 rayon = "1.10"
 url = "2"
 zbus = "4.4"
