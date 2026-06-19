@@ -287,6 +287,7 @@ Make the already-shipped platform-neutral daemon modules compile and run on macO
 - Modify: `crates/rollshot-app/Cargo.toml`
 - Modify: `crates/rollshot-app/src/daemon/mod.rs`
 - Modify: `crates/rollshot-app/src/daemon/config.rs`
+- Modify: `crates/rollshot-app/src/daemon/linux.rs` (refactor only: call the hoisted `start_parts`; no behavior change — see Step 7)
 
 **Interfaces:**
 - Consumes: `DaemonConfig`, `Shortcut`, `Platform::Macos`, `config_path`, `load_from` (existing); `CurrentExeLauncher`, `DaemonCore` (existing).
@@ -294,10 +295,11 @@ Make the already-shipped platform-neutral daemon modules compile and run on macO
   - `pub enum Modifier { Control, Alt, Shift, Command, Super }` (now public) in `daemon/config.rs`.
   - `impl Shortcut { pub fn modifiers(&self) -> &[Modifier]; pub fn key(&self) -> &str }`.
   - `crate::daemon::process` available under `#[cfg(any(target_os = "linux", target_os = "macos"))]`, exporting `CurrentExeLauncher` on macOS.
+  - `pub(crate) fn daemon::start_parts(...)` — the shared tray-fatal/shortcut-non-fatal startup policy, hoisted out of `linux.rs` so the macOS adapter reuses the *same* helper instead of copying it (see Step 7).
 
 - [ ] **Step 1: Add the macOS daemon dependencies**
 
-In `crates/rollshot-app/Cargo.toml`, extend the existing `[target.'cfg(target_os = "macos")'.dependencies]` block (keep the existing entries) with:
+In `crates/rollshot-app/Cargo.toml`, ensure the `[target.'cfg(target_os = "macos")'.dependencies]` block contains the following four entries (keep the existing `objc2*`/`raw-window-handle`/`rollshot-macos-input` entries untouched). **If Task 1 ran, `winit`/`tray-icon`/`global-hotkey` are already present from the spike — do not re-add them or `cargo` will reject duplicate keys; add only `nix`. If Task 1 was skipped, add all four.** The end state of the block must include exactly:
 
 ```toml
 winit = "0.30"
@@ -307,6 +309,8 @@ nix = { workspace = true }
 ```
 
 Rationale: `nix` is currently only under the Linux target block, but `process.rs` (now compiled on macOS) uses `nix::sys::signal`. `winit`/`tray-icon`/`global-hotkey` back the macOS adapter (Tasks 3–5). All are macOS-gated, so Linux builds are unaffected.
+
+> **Version alignment (verified against `crates/rollshot-app/Cargo.toml`):** the macOS block already pins `objc2 = "0.6"`, `objc2-app-kit = "0.3"`, `objc2-foundation = "0.3"`. `tray-icon 0.24` and `global-hotkey 0.8` both build on `objc2 0.6`, and iced 0.14's `winit 0.30` also uses `objc2 0.6` — so a single `objc2 0.6` and a single `winit 0.30.x` should unify across the tree. The direct `winit = "0.30"` must resolve to the **same** `winit 0.30.x` iced already pulls (one copy, one `EventLoop` type). The Task 1 spike build is the gate that confirms no duplicate-major `objc2`/`winit` conflict; if one appears, pin to the exact versions the spike accepted.
 
 - [ ] **Step 2: Write the failing config-accessor test**
 
@@ -390,19 +394,57 @@ To make `#[cfg(target_os = "macos")] pub mod macos;` resolve, create `crates/rol
 
 Task 3 adds the `tray` submodule, Task 4 the `shortcut` submodule, Task 5 the loop. The placeholder keeps macOS compiling at every task boundary.
 
-- [ ] **Step 7: Verify the shared core compiles and tests pass on macOS**
+- [ ] **Step 7: Hoist the shared `start_parts` startup policy into `mod.rs`**
+
+The tray-fatal/shortcut-non-fatal startup policy is platform-neutral and is currently duplicated in `linux.rs:7`. Rather than copy it a second time into the macOS adapter (the original plan did this in Task 5), make it the single shared helper both adapters call — this is the same anti-drift principle the rest of the slice follows for `DaemonCore`/`config`/`process`.
+
+In `crates/rollshot-app/src/daemon/mod.rs`, add (gated to the two platforms that have adapters, so non-adapter targets don't warn on dead code):
+
+```rust
+/// Shared daemon startup policy: the tray is required (its failure aborts
+/// startup), the global shortcut is best-effort (its failure degrades to
+/// tray-only with a warning). Used by both the Linux and macOS adapters so the
+/// fatal/non-fatal contract cannot drift between platforms.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn start_parts<T, S>(
+    start_tray: impl FnOnce() -> Result<T, String>,
+    start_shortcut: impl FnOnce() -> Result<S, String>,
+) -> Result<(T, Option<S>), String> {
+    let tray = start_tray()?;
+    let shortcut = match start_shortcut() {
+        Ok(shortcut) => Some(shortcut),
+        Err(error) => {
+            tracing::warn!(
+                target: "rollshot::daemon::shortcut",
+                %error,
+                "global shortcut unavailable; continuing with tray only"
+            );
+            None
+        }
+    };
+    Ok((tray, shortcut))
+}
+```
+
+Move the two policy tests (`tray_failure_aborts_platform_startup`, `shortcut_worker_start_failure_keeps_tray_alive`) from `linux.rs` into the `#[cfg(test)] mod tests` in `mod.rs` (the existing `existing_instance_exits_successfully_without_starting_platform` test stays). Gate the moved tests with `#[cfg(any(target_os = "linux", target_os = "macos"))]` so they run on both adapter platforms.
+
+Then in `crates/rollshot-app/src/daemon/linux.rs`, delete the local `start_parts` fn and its two tests, and change `LinuxPlatform::start` to call `super::start_parts(...)` (or `crate::daemon::start_parts`). No behavior change — the helper is byte-identical to the one removed.
+
+> **Reviewer note / decision worth your scrutiny:** this is the one change that touches the otherwise-frozen Linux adapter. It is a pure, test-covered refactor (≈18 lines + one duplicate test removed) and removes the *new* duplication this plan would otherwise introduce. If you prefer to keep `linux.rs` strictly untouched in this macOS PR, the alternative is to leave Linux's copy as-is and still place the shared helper in `mod.rs` for macOS only — accepting a temporary second copy in `linux.rs` to be migrated in a follow-up. The hoist is recommended (DRY + literal shared policy); the lighter option trades that for zero Linux churn.
+
+- [ ] **Step 8: Verify the shared core compiles and tests pass on macOS**
 
 Run on macOS: `rtk cargo test -p rollshot-app --lib daemon::`
 Expected: PASS — including the existing `daemon::process::tests::*` (process-group termination, watcher exit) now running on macOS, the `daemon::core::tests::*` state-machine tests, the `daemon::instance::tests::*` lock tests, and the new config accessor test.
 
 On Linux, run the same command to confirm no regression:
 Run: `rtk cargo test -p rollshot-app --lib daemon::`
-Expected: PASS (macOS module is cfg-gated out; `process`/`core`/`instance`/`config` unchanged behavior).
+Expected: PASS (macOS module is cfg-gated out; `process`/`core`/`instance`/`config` unchanged behavior; the `start_parts` policy tests now run from `daemon::tests` and `linux.rs` calls the hoisted helper — same behavior).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add crates/rollshot-app/Cargo.toml crates/rollshot-app/src/daemon/mod.rs crates/rollshot-app/src/daemon/config.rs crates/rollshot-app/src/daemon/macos.rs
+git add crates/rollshot-app/Cargo.toml crates/rollshot-app/src/daemon/mod.rs crates/rollshot-app/src/daemon/config.rs crates/rollshot-app/src/daemon/linux.rs crates/rollshot-app/src/daemon/macos.rs
 git commit -m "feat(daemon): enable shared core on macOS"
 ```
 
@@ -720,57 +762,14 @@ Compose the adapter: build the winit event loop with `Accessory` policy, create 
 - Consumes: `tray::TrayGuard`, `shortcut::ShortcutGuard` (Tasks 3–4); `DaemonCore`, `DaemonEvent`, `LoopAction` (`core.rs`); `CurrentExeLauncher` (`process.rs`); `DaemonConfig` (`config.rs`).
 - Produces: `pub fn macos::run(core: DaemonCore<CurrentExeLauncher>, capture_exits: std::sync::mpsc::Receiver<DaemonEvent>, config: &DaemonConfig) -> Result<(), String>`; and a `#[cfg(target_os = "macos")]` `run_primary` calling it.
 
-- [ ] **Step 1: Write a failing test for the tray-only degrade decision**
+- [ ] **Step 1: Confirm the shared startup policy is in place (no new test here)**
 
-The composition's startup policy (tray fatal, shortcut non-fatal) is the unit-testable seam, mirroring the Linux `start_parts` test. Add this pure helper and test to `crates/rollshot-app/src/daemon/macos.rs` (below the module declarations):
+The tray-fatal/shortcut-non-fatal seam — `start_parts` — was hoisted into `daemon/mod.rs` and unit-tested in Task 2 Step 7 (`daemon::tests::tray_failure_aborts_platform_startup`, `daemon::tests::shortcut_worker_start_failure_keeps_tray_alive`). The macOS adapter **reuses that shared helper**; it does not define its own. No new test is added in this task for the policy — verify the Task 2 tests exist and pass:
 
-```rust
-/// Startup policy shared by the real loop and tests: the tray is required; the
-/// shortcut is best-effort. Returns the tray result and an optional shortcut,
-/// logging when the shortcut degrades to tray-only.
-fn start_parts<T, S>(
-    start_tray: impl FnOnce() -> Result<T, String>,
-    start_shortcut: impl FnOnce() -> Result<S, String>,
-) -> Result<(T, Option<S>), String> {
-    let tray = start_tray()?;
-    let shortcut = match start_shortcut() {
-        Ok(shortcut) => Some(shortcut),
-        Err(error) => {
-            tracing::warn!(
-                target: "rollshot::daemon::shortcut",
-                %error,
-                "global shortcut unavailable; continuing with tray only"
-            );
-            None
-        }
-    };
-    Ok((tray, shortcut))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tray_failure_aborts_platform_startup() {
-        assert!(start_parts::<(), ()>(|| Err("no tray".into()), || Ok(())).is_err());
-    }
-
-    #[test]
-    fn shortcut_failure_keeps_tray_alive() {
-        let (tray, shortcut) = start_parts(|| Ok(7), || Err::<(), _>("denied".into())).unwrap();
-        assert_eq!(tray, 7);
-        assert!(shortcut.is_none());
-    }
-}
-```
-
-- [ ] **Step 2: Run the tests and confirm they pass**
-
-Run on macOS: `rtk cargo test -p rollshot-app --lib daemon::macos::tests`
+Run on macOS: `rtk cargo test -p rollshot-app --lib daemon::tests`
 Expected: PASS.
 
-- [ ] **Step 3: Add the event loop and `run` composition**
+- [ ] **Step 2: Add the event loop and `run` composition**
 
 Add to `crates/rollshot-app/src/daemon/macos.rs` (the full module head plus the loop). The final top of the file is:
 
@@ -782,6 +781,7 @@ pub(crate) mod tray;
 use crate::daemon::config::{DaemonConfig, Shortcut};
 use crate::daemon::core::{DaemonCore, DaemonEvent, LoopAction};
 use crate::daemon::process::CurrentExeLauncher;
+use crate::daemon::start_parts;
 use std::sync::mpsc::Receiver;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -790,18 +790,25 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 ```
 
-Then add the `start_parts` helper from Step 1 (keep it), and below it:
+Call the shared `start_parts` (imported above; defined and tested in Task 2 Step 7) from `resumed` — do **not** redefine it here. Below the imports add:
 
 ```rust
 /// The daemon's winit application. Holds the shared core plus the platform
 /// guards; the guards are created in `resumed` (after the NSApplication has
 /// launched) and dropped when the loop exits.
+///
+/// Field declaration order **is** the drop order and must match the documented
+/// teardown (see "Ownership and shutdown order"): `core` first (so an active
+/// capture group is terminated before any UI resource is torn down), then
+/// `shortcut`, then `tray`. The shortcut/tray order is functionally immaterial
+/// (independent process-global handlers), but is kept consistent with the
+/// diagram so the doc never drifts from the code.
 struct DaemonApp {
     core: DaemonCore<CurrentExeLauncher>,
     hotkey: Shortcut,
     proxy: EventLoopProxy<DaemonEvent>,
-    tray: Option<tray::TrayGuard>,
     shortcut: Option<shortcut::ShortcutGuard>,
+    tray: Option<tray::TrayGuard>,
     started: bool,
     startup_error: Option<String>,
 }
@@ -904,7 +911,7 @@ pub fn run(
 
 > If the spike recorded that `run_app` does **not** return on macOS (older winit behavior), the teardown must instead happen inside `user_event` before `exit()` (explicitly drop the guards there) — record that in the task notes and adjust. With winit 0.30 `run_app`, the return path above is expected.
 
-- [ ] **Step 4: Add the macOS `run_primary` and narrow the fallback**
+- [ ] **Step 3: Add the macOS `run_primary` and narrow the fallback**
 
 In `crates/rollshot-app/src/daemon/mod.rs`, first narrow the existing unimplemented fallback so it no longer claims macOS (this and the new macOS `run_primary` must land together — otherwise macOS has either no `run_primary` or two):
 
@@ -940,17 +947,17 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 5: Build and run the existing daemon unit tests on macOS**
+- [ ] **Step 4: Build and run the existing daemon unit tests on macOS**
 
 Run on macOS: `rtk cargo test -p rollshot-app --lib daemon::`
-Expected: PASS — all of `daemon::config`, `daemon::core`, `daemon::instance`, `daemon::process`, `daemon::macos::tray`, `daemon::macos::shortcut`, and `daemon::macos::tests`.
+Expected: PASS — all of `daemon::config`, `daemon::core`, `daemon::instance`, `daemon::process`, `daemon::tests` (shared `start_parts` policy), `daemon::macos::tray`, and `daemon::macos::shortcut`. (There is no `daemon::macos::tests` module — the startup-policy tests live in `daemon::tests` after the Task 2 hoist.)
 
-- [ ] **Step 6: Build the binary on macOS**
+- [ ] **Step 5: Build the binary on macOS**
 
 Run on macOS: `rtk cargo build -p rollshot-app`
-Expected: builds cleanly (confirms `tray-icon`/`global-hotkey`/`winit` resolve with the workspace's existing `objc2` versions; if a duplicate `objc2` major causes a conflict, pin to the versions the spike confirmed).
+Expected: builds cleanly (confirms `tray-icon`/`global-hotkey`/`winit` resolve against the workspace's existing `objc2 = "0.6"` / `objc2-app-kit = "0.3"` / `objc2-foundation = "0.3"`; if a duplicate `objc2` *or* `winit` major causes a conflict, pin to the versions the Task 1 spike confirmed).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/rollshot-app/src/daemon/macos.rs crates/rollshot-app/src/daemon/mod.rs
@@ -1045,11 +1052,13 @@ git commit -m "docs(daemon): document macOS tray daemon"
 | Child process: success, non-zero exit, spawn failure, graceful + forced termination, descendant cleanup | Reused, now also run on macOS | `daemon/process.rs` tests |
 | Tray menu id → semantic event | New (Task 3) | `daemon::macos::tray::tests` |
 | Shortcut translation (default, letters, function keys, Super→Command) | New (Task 4) | `daemon::macos::shortcut::tests` |
-| Platform orchestration: tray failure aborts; shortcut failure preserves tray | New (Task 5) | `daemon::macos::tests` (`start_parts`) |
+| Platform orchestration: tray failure aborts; shortcut failure preserves tray | Hoisted to shared helper (Task 2 Step 7); now covers both adapters | `daemon::tests` (`start_parts`) |
 
 ### Manual (macOS hardware required)
 
 Live `NSStatusItem` visibility, real hotkey activation, single-instance behavior with a real lock, child-process termination, and compatibility with the existing macOS capture/Result-Workspace flow — covered by Task 6 Step 4. These mirror exactly the manual items the Linux slice deferred to a desktop session, because they require a logged-in macOS GUI session.
+
+The **watcher→proxy forwarder thread** (`macos::run`) has no isolated unit test: an `EventLoopProxy<DaemonEvent>` only exists once the winit loop is built, so the forward path is not unit-constructible. It is exercised end-to-end by Task 6 Step 4's "capture exits → daemon returns to idle" and "Quit while capturing" observations. The underlying contract it relies on — `spawn_watcher` emitting `CaptureExited` and the core consuming it — *is* unit-tested in `daemon::process::tests` and `daemon::core::tests`, so only the one-line proxy hand-off is manual-only.
 
 ## Failure-mode audit
 
