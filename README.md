@@ -23,9 +23,10 @@ and PipeWire support.
 - **Result workflow**: completed captures are auto-saved as PNG files and opened
   in a result workspace with zoom, pan, Save As, and reveal-in-file-manager
   controls. macOS also presents a draggable floating thumbnail after capture.
-- **Headless and debugging CLI**: capture and stitch without the GUI, inspect
-  backend availability with `probe`, stitch pre-recorded frame folders, dump
-  captured frames, and write matcher debug reports.
+- **Developer diagnostics and offline stitching**: the internal `rollshot-dev`
+  tool inspects backend availability with `probe` and stitches pre-recorded
+  frame folders for matcher development. Product capture remains in
+  `rollshot-app`.
 
 ## Workspace
 
@@ -33,7 +34,8 @@ and PipeWire support.
   verifier, metrics, `Stitcher`)
 - `crates/rollshot-capture`: capture traits, frame metadata, and the Linux
   portal/PipeWire/KWin and macOS ScreenCaptureKit backends
-- `crates/rollshot-cli`: command-line interface
+- `crates/rollshot-dev`: internal developer diagnostics and offline
+  `stitch-folder` tooling
 - `crates/rollshot-app`: iced interactive capture app and post-capture result
   workspace
 - `crates/rollshot-iced-overlay`: iced capture overlay renderer used by `rollshot-app`
@@ -70,20 +72,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Useful smoke commands:
+Useful developer-tool commands:
 
 ```bash
-cargo run -p rollshot-cli -- probe
+cargo run -p rollshot-dev -- probe
 mkdir -p target/test-artifacts
-cargo run -p rollshot-cli -- stitch-folder \
+cargo run -p rollshot-dev -- stitch-folder \
   crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames \
   --output target/test-artifacts/stitch-folder.png
 ```
 
-`rollshot capture` prints per-frame progress to stderr by default:
-`frame N/MAX: OUTCOME elapsed=SECONDS`. The final capture summary and output
-path remain on stdout. Pass `--quiet` to suppress progress output when stderr
-must stay empty for scripts.
+`rollshot-dev` is not a product entry point and does not start capture.
+`stitch-folder` works only with existing image frames.
 
 `stitch-folder` stitches pre-recorded frames without using a capture backend,
 which makes it useful for matcher and stitching iteration. Core golden fixtures
@@ -189,8 +189,8 @@ enabled, and runs per-crate `cargo check` for the macOS-specific crates on the
 macOS runner:
 
 ```bash
-cargo clippy --workspace --all-targets --features rollshot-cli/action-guide,rollshot-app/action-guide -- -D warnings
-cargo test --workspace --features rollshot-cli/action-guide,rollshot-app/action-guide
+cargo clippy --workspace --all-targets --features rollshot-app/action-guide -- -D warnings
+cargo test --workspace --features rollshot-app/action-guide
 ```
 
 `.github/workflows/matcher-perf.yml` is manual-only and runs the release-mode
@@ -209,9 +209,9 @@ Use this checklist after changing workspace, CI, or crate wiring:
 - [ ] `cargo fmt --all -- --check` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace` passes.
-- [ ] `cargo run -p rollshot-cli -- probe` prints the version, OS, and real capture status.
+- [ ] `cargo run -p rollshot-dev -- probe` prints the OS and real capture status.
 - [ ] `mkdir -p target/test-artifacts`.
-- [ ] `cargo run -p rollshot-cli -- stitch-folder crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames --output target/test-artifacts/stitch-folder.png` writes a PNG.
+- [ ] `cargo run -p rollshot-dev -- stitch-folder crates/rollshot-core/tests/fixtures/linearscroll_v2/linear_vertical_down/frames --output target/test-artifacts/stitch-folder.png` writes a PNG.
 
 
 ## Manual Testing: Linux Wayland Portal Capture
@@ -240,11 +240,8 @@ Manual checks:
 - [ ] PipeWire and WirePlumber are running.
 - [ ] `xdg-desktop-portal` is running.
 - [ ] On KDE, `xdg-desktop-portal-kde` is running.
-- [ ] `cargo run -p rollshot-cli -- probe --json` reports `linux-portal` availability.
-- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region portal --max-frames 3 --output target/test-artifacts/linux_portal.png` opens the portal picker and writes a PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region full --max-frames 3 --output target/test-artifacts/linux_full.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region "0,0 900x700" --max-frames 3 --output target/test-artifacts/linux_manual.png` writes a locally cropped PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend linux-portal --region portal --max-frames 3 --dump-frames target/test-artifacts/linux-frames --output target/test-artifacts/linux_dumped.png` writes frame dumps.
+- [ ] `cargo run -p rollshot-dev -- probe --json` reports `linux-portal` availability.
+- [ ] `cargo run -p rollshot-app -- capture --backend linux-portal --workflow scrolling --scope region` opens the portal picker and writes a PNG.
 - [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test linux_portal_smoke -- --ignored --nocapture` captures at least three frames and writes `target/test-artifacts/linux_portal_first_frame.png`.
 
 The smoke test requires a live human-driven desktop session because the portal
@@ -417,10 +414,8 @@ validating a release on macOS:
   `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
 - [ ] Main display is visible and unlocked.
 - [ ] `mkdir -p target/test-artifacts` creates the artifact directory.
-- [ ] `cargo run -p rollshot-cli -- probe --json` reports `macos-sck`.
-- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region full --max-frames 3 --output target/test-artifacts/macos_full.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --output target/test-artifacts/macos_region.png` writes a PNG.
-- [ ] `cargo run -p rollshot-cli -- capture --backend macos-sck --region "0,0 320x240" --max-frames 3 --dump-frames target/test-artifacts/macos_frames --output target/test-artifacts/macos_region_stitched.png` writes frame dumps.
+- [ ] `cargo run -p rollshot-dev -- probe --json` reports `macos-sck`.
+- [ ] `cargo run -p rollshot-app -- capture --backend macos-sck --workflow scrolling --scope region` writes a PNG.
 - [ ] `ROLLSHOT_REAL_CAPTURE=1 cargo test -p rollshot-capture --test macos_sck_smoke -- --ignored --nocapture` passes.
 - [ ] `target/test-artifacts/macos_sck_first_frame.png` exists and is visually plausible.
 
@@ -431,14 +426,12 @@ terminal, and rerun `probe`.
 
 ## Action Guide input access (optional)
 
-Action Guide is gated behind a non-default `action-guide` Cargo feature. The
-`action-guide` subcommands (`rollshot action-guide`, `rollshot-app
-action-guide`) only exist in builds compiled with it:
+Action Guide is gated behind the non-default `action-guide` Cargo feature on
+`rollshot-app`:
 
 ```bash
 cargo build --release -p rollshot-app --features action-guide
-# or, for the CLI:
-cargo run -p rollshot-cli --features action-guide -- action-guide
+cargo run -p rollshot-app --features action-guide -- action-guide
 ```
 
 Action Guide works in **visual-only** mode out of the box. Granting temporary
@@ -504,7 +497,7 @@ denying it is a capture failure, not a visual-only degradation.
 
 ### Fullscreen recording (Linux/KDE)
 
-`rollshot action-guide --fullscreen` records the whole display. Click the
+`rollshot-app action-guide --fullscreen` records the whole display. Click the
 temporary system-tray icon to finish recording. Requires a system tray
 (StatusNotifierItem host); KDE Plasma provides one.
 

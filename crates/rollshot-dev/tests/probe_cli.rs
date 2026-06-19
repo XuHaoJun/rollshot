@@ -2,10 +2,10 @@ use std::process::Command;
 
 #[test]
 fn probe_text_includes_os_and_default_backend() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("probe")
         .output()
-        .expect("run rollshot probe");
+        .expect("run rollshot-dev probe");
 
     assert!(
         output.status.success(),
@@ -21,11 +21,11 @@ fn probe_text_includes_os_and_default_backend() {
 
 #[test]
 fn probe_json_parses_and_has_expected_shape() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("probe")
         .arg("--json")
         .output()
-        .expect("run rollshot probe --json");
+        .expect("run rollshot-dev probe --json");
 
     assert!(
         output.status.success(),
@@ -54,11 +54,11 @@ fn probe_json_parses_and_has_expected_shape() {
 
 #[cfg(target_os = "linux")]
 fn run_probe_json() -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("probe")
         .arg("--json")
         .output()
-        .expect("run rollshot probe --json");
+        .expect("run rollshot-dev probe --json");
     assert!(
         output.status.success(),
         "stderr: {}",

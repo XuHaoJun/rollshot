@@ -1,9 +1,9 @@
 use std::process::ExitCode;
 
-use rollshot_cli::cli_error::Stream;
+use rollshot_dev::cli_error::Stream;
 
 fn main() -> ExitCode {
-    match rollshot_cli::run(std::env::args_os()) {
+    match rollshot_dev::run(std::env::args_os()) {
         Ok(output) => {
             print!("{output}");
             ExitCode::SUCCESS
