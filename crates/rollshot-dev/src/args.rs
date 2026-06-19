@@ -5,7 +5,11 @@ use clap::{Parser, Subcommand};
 pub const MAX_FRAMES_DEFAULT: u32 = 200;
 
 #[derive(Debug, Parser)]
-#[command(name = "rollshot", version, about = "rollshot: scrollshot stitcher")]
+#[command(
+    name = "rollshot-dev",
+    version,
+    about = "Rollshot developer diagnostics and offline stitching"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

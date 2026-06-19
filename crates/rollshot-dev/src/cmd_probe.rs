@@ -91,7 +91,7 @@ fn build_report() -> ProbeReport {
 
 fn render_text(report: &ProbeReport) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "rollshot probe");
+    let _ = writeln!(out, "rollshot-dev probe");
     let _ = writeln!(out, "  os: {}", report.os);
     let _ = writeln!(out, "  session_type: {}", report.session_type);
     let _ = writeln!(out, "  desktop: {}", report.desktop);

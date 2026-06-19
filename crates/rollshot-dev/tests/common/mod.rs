@@ -17,7 +17,7 @@ pub fn temp_dir(label: &str) -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let path = std::env::temp_dir().join(format!(
-        "rollshot-cli-{label}-{nanos}-{}",
+        "rollshot-dev-{label}-{nanos}-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&path).expect("create temp dir");

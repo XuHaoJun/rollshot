@@ -5095,19 +5095,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rollshot-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "image",
- "rollshot-capture",
- "rollshot-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "rollshot-core"
 version = "0.1.0"
 dependencies = [
@@ -5119,6 +5106,19 @@ dependencies = [
  "serde_json",
  "tracing",
  "wide 1.4.0",
+]
+
+[[package]]
+name = "rollshot-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "rollshot-capture",
+ "rollshot-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

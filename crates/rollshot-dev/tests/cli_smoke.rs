@@ -4,11 +4,11 @@ use std::process::Command;
 use image::{imageops, Rgba, RgbaImage};
 
 #[test]
-fn rollshot_probe_binary_runs() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+fn rollshot_dev_probe_binary_runs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("probe")
         .output()
-        .expect("run rollshot probe");
+        .expect("run rollshot-dev probe");
 
     assert!(
         output.status.success(),
@@ -20,7 +20,7 @@ fn rollshot_probe_binary_runs() {
 }
 
 #[test]
-fn rollshot_stitch_folder_writes_png() {
+fn rollshot_dev_stitch_folder_writes_png() {
     let tempdir = tempdir_for_test("rollshot-stitch-folder");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -34,13 +34,13 @@ fn rollshot_stitch_folder_writes_png() {
 
     let output_png = tempdir.join("stitched.png");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("stitch-folder")
         .arg(&frames_dir)
         .arg("--output")
         .arg(&output_png)
         .output()
-        .expect("run rollshot stitch-folder");
+        .expect("run rollshot-dev stitch-folder");
 
     assert!(
         output.status.success(),
@@ -154,7 +154,7 @@ fn make_feature_fallback_smoke_canvas(width: u32, height: u32) -> RgbaImage {
 }
 
 #[test]
-fn rollshot_stitch_folder_writes_debug_report() {
+fn rollshot_dev_stitch_folder_writes_debug_report() {
     let tempdir = tempdir_for_test("rollshot-stitch-folder-debug");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -171,7 +171,7 @@ fn rollshot_stitch_folder_writes_debug_report() {
     let report_json = tempdir.join("report.json");
     let debug_dir = tempdir.join("debug");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("stitch-folder")
         .arg(&frames_dir)
         .arg("--output")
@@ -181,7 +181,7 @@ fn rollshot_stitch_folder_writes_debug_report() {
         .arg("--dump-overlap-debug")
         .arg(&debug_dir)
         .output()
-        .expect("run rollshot stitch-folder");
+        .expect("run rollshot-dev stitch-folder");
 
     assert!(
         output.status.success(),
@@ -220,7 +220,7 @@ fn rollshot_stitch_folder_writes_debug_report() {
 }
 
 #[test]
-fn rollshot_capture_fixture_writes_debug_report() {
+fn rollshot_dev_capture_fixture_writes_debug_report() {
     let tempdir = tempdir_for_test("rollshot-capture-debug");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -236,7 +236,7 @@ fn rollshot_capture_fixture_writes_debug_report() {
     let output_png = tempdir.join("captured.png");
     let report_json = tempdir.join("capture-report.json");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .arg("--backend")
@@ -250,7 +250,7 @@ fn rollshot_capture_fixture_writes_debug_report() {
         .arg("--debug-match-report")
         .arg(&report_json)
         .output()
-        .expect("run rollshot capture fixture");
+        .expect("run rollshot-dev capture fixture");
 
     assert!(
         output.status.success(),
@@ -276,7 +276,7 @@ fn rollshot_capture_fixture_writes_debug_report() {
 }
 
 #[test]
-fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
+fn rollshot_dev_stitch_folder_dumps_axis_changed_overlap_debug() {
     let tempdir = tempdir_for_test("rollshot-stitch-folder-axis-debug");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -293,7 +293,7 @@ fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
     let report_json = tempdir.join("report.json");
     let debug_dir = tempdir.join("debug");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("stitch-folder")
         .arg(&frames_dir)
         .arg("--output")
@@ -303,7 +303,7 @@ fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
         .arg("--dump-overlap-debug")
         .arg(&debug_dir)
         .output()
-        .expect("run rollshot stitch-folder");
+        .expect("run rollshot-dev stitch-folder");
 
     assert!(
         output.status.success(),
@@ -325,7 +325,7 @@ fn rollshot_stitch_folder_dumps_axis_changed_overlap_debug() {
 }
 
 #[test]
-fn rollshot_stitch_folder_default_uses_fast_hnsw() {
+fn rollshot_dev_stitch_folder_default_uses_fast_hnsw() {
     let tempdir = tempdir_for_test("rollshot-stitch-fast-hnsw");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -341,7 +341,7 @@ fn rollshot_stitch_folder_default_uses_fast_hnsw() {
     let output_png = tempdir.join("stitched.png");
     let report_json = tempdir.join("report.json");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("stitch-folder")
         .arg(&frames_dir)
         .arg("--output")
@@ -349,7 +349,7 @@ fn rollshot_stitch_folder_default_uses_fast_hnsw() {
         .arg("--debug-match-report")
         .arg(&report_json)
         .output()
-        .expect("run rollshot stitch-folder");
+        .expect("run rollshot-dev stitch-folder");
 
     assert!(
         output.status.success(),
@@ -366,7 +366,7 @@ fn rollshot_stitch_folder_default_uses_fast_hnsw() {
 }
 
 #[test]
-fn rollshot_stitch_folder_disable_feature_fallback_makes_no_match() {
+fn rollshot_dev_stitch_folder_disable_feature_fallback_makes_no_match() {
     let tempdir = tempdir_for_test("rollshot-stitch-disable-fallback");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -382,7 +382,7 @@ fn rollshot_stitch_folder_disable_feature_fallback_makes_no_match() {
     let output_png = tempdir.join("stitched.png");
     let report_json = tempdir.join("report.json");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("stitch-folder")
         .arg(&frames_dir)
         .arg("--output")
@@ -391,7 +391,7 @@ fn rollshot_stitch_folder_disable_feature_fallback_makes_no_match() {
         .arg(&report_json)
         .arg("--disable-feature-fallback")
         .output()
-        .expect("run rollshot stitch-folder");
+        .expect("run rollshot-dev stitch-folder");
 
     assert!(
         output.status.success(),

@@ -6,7 +6,7 @@ members = [
     "crates/rollshot-linux-input",
     "crates/rollshot-macos-input",
     "crates/rollshot-capture",
-    "crates/rollshot-cli",
+    "crates/rollshot-dev",
     "crates/rollshot-app",
     "crates/rollshot-iced-overlay",
     "crates/rollshot-overlay-core",

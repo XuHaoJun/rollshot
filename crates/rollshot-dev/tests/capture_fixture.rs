@@ -5,14 +5,14 @@ use std::process::Command;
 use common::{temp_dir, write_scroll_fixture};
 
 #[test]
-fn rollshot_capture_fixture_writes_png() {
+fn rollshot_dev_capture_fixture_writes_png() {
     let tempdir = temp_dir("fixture-flow");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -21,7 +21,7 @@ fn rollshot_capture_fixture_writes_png() {
         .args(["--output"])
         .arg(&output_png)
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -45,18 +45,18 @@ fn rollshot_capture_fixture_writes_png() {
 }
 
 #[test]
-fn rollshot_capture_fixture_requires_fixture_path() {
+fn rollshot_dev_capture_fixture_requires_fixture_path() {
     let tempdir = temp_dir("missing-fixture-path");
     let output_png = tempdir.join("out.png");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
         .args(["--output"])
         .arg(&output_png)
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -66,7 +66,7 @@ fn rollshot_capture_fixture_requires_fixture_path() {
 }
 
 #[test]
-fn rollshot_capture_dump_frames_writes_each_frame() {
+fn rollshot_dev_capture_dump_frames_writes_each_frame() {
     let tempdir = temp_dir("dump-frames");
     let frames_dir = tempdir.join("frames");
     let dump_dir = tempdir.join("dump");
@@ -76,7 +76,7 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
 
     let output_png = tempdir.join("stitched.png");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -87,7 +87,7 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
         .args(["--dump-frames"])
         .arg(&dump_dir)
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -115,7 +115,7 @@ fn rollshot_capture_dump_frames_writes_each_frame() {
 }
 
 #[test]
-fn rollshot_capture_respects_max_frames() {
+fn rollshot_dev_capture_respects_max_frames() {
     let tempdir = temp_dir("max-frames");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
@@ -125,7 +125,7 @@ fn rollshot_capture_respects_max_frames() {
     let dump_dir = tempdir.join("dump");
     std::fs::create_dir_all(&dump_dir).expect("create dump dir");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -137,7 +137,7 @@ fn rollshot_capture_respects_max_frames() {
         .arg(&dump_dir)
         .args(["--max-frames", "2"])
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -155,14 +155,14 @@ fn rollshot_capture_respects_max_frames() {
 }
 
 #[test]
-fn rollshot_capture_accepts_manual_region_string() {
+fn rollshot_dev_capture_accepts_manual_region_string() {
     let tempdir = temp_dir("region-manual");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -172,7 +172,7 @@ fn rollshot_capture_accepts_manual_region_string() {
         .arg(&output_png)
         .args(["--region", "10,20 100x200"])
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -184,14 +184,14 @@ fn rollshot_capture_accepts_manual_region_string() {
 }
 
 #[test]
-fn rollshot_capture_rejects_garbage_region() {
+fn rollshot_dev_capture_rejects_garbage_region() {
     let tempdir = temp_dir("region-garbage");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -201,7 +201,7 @@ fn rollshot_capture_rejects_garbage_region() {
         .arg(&output_png)
         .args(["--region", "totally bogus"])
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -211,14 +211,14 @@ fn rollshot_capture_rejects_garbage_region() {
 }
 
 #[test]
-fn rollshot_capture_rejects_portal_region_for_fixture_backend() {
+fn rollshot_dev_capture_rejects_portal_region_for_fixture_backend() {
     let tempdir = temp_dir("region-portal-fixture");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -228,7 +228,7 @@ fn rollshot_capture_rejects_portal_region_for_fixture_backend() {
         .arg(&output_png)
         .args(["--region", "portal"])
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -239,14 +239,14 @@ fn rollshot_capture_rejects_portal_region_for_fixture_backend() {
 }
 
 #[test]
-fn rollshot_capture_prints_default_progress_to_stderr() {
+fn rollshot_dev_capture_prints_default_progress_to_stderr() {
     let tempdir = temp_dir("progress-stderr");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -256,7 +256,7 @@ fn rollshot_capture_prints_default_progress_to_stderr() {
         .arg(&output_png)
         .args(["--max-frames", "2"])
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -283,14 +283,14 @@ fn rollshot_capture_prints_default_progress_to_stderr() {
 }
 
 #[test]
-fn rollshot_capture_quiet_suppresses_progress_stderr() {
+fn rollshot_dev_capture_quiet_suppresses_progress_stderr() {
     let tempdir = temp_dir("progress-quiet");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -301,7 +301,7 @@ fn rollshot_capture_quiet_suppresses_progress_stderr() {
         .args(["--max-frames", "2"])
         .arg("--quiet")
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -316,14 +316,14 @@ fn rollshot_capture_quiet_suppresses_progress_stderr() {
 }
 
 #[test]
-fn rollshot_capture_fixture_prints_diagnostics_summary() {
+fn rollshot_dev_capture_fixture_prints_diagnostics_summary() {
     let tempdir = temp_dir("diagnostics-summary");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -332,7 +332,7 @@ fn rollshot_capture_fixture_prints_diagnostics_summary() {
         .args(["--output"])
         .arg(&output_png)
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),
@@ -358,14 +358,14 @@ fn rollshot_capture_fixture_prints_diagnostics_summary() {
 }
 
 #[test]
-fn rollshot_capture_quiet_suppresses_diagnostics() {
+fn rollshot_dev_capture_quiet_suppresses_diagnostics() {
     let tempdir = temp_dir("diagnostics-quiet");
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
     write_scroll_fixture(&frames_dir);
 
     let output_png = tempdir.join("stitched.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_rollshot"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"))
         .arg("capture")
         .arg("--headless")
         .args(["--backend", "fixture"])
@@ -375,7 +375,7 @@ fn rollshot_capture_quiet_suppresses_diagnostics() {
         .arg(&output_png)
         .arg("--quiet")
         .output()
-        .expect("run rollshot capture");
+        .expect("run rollshot-dev capture");
 
     assert!(
         output.status.success(),

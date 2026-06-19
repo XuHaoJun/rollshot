@@ -11,7 +11,7 @@ fn capture_without_output_launches_interactive_app() {
     let marker = tempdir.join("marker.txt");
     let fake_app = write_fake_app(&tempdir);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"));
     command
         .arg("capture")
         .args(["--backend", "linux-portal"])
@@ -39,7 +39,7 @@ fn headless_capture_requires_output() {
     let frames_dir = tempdir.join("frames");
     std::fs::create_dir_all(&frames_dir).expect("create frames dir");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"));
     command
         .arg("capture")
         .arg("--headless")
@@ -64,7 +64,7 @@ fn interactive_capture_rejects_headless_only_flags() {
     let tempdir = temp_dir("interactive-rejects-headless-flags");
     let dump_dir = tempdir.join("dump");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"));
     command
         .arg("capture")
         .args(["--dump-frames"])
@@ -88,7 +88,7 @@ fn capture_interactive_forwards_app_failure() {
     let tempdir = temp_dir("interactive-app-failure");
     let fake_app = write_failing_fake_app(&tempdir);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rollshot-dev"));
     command
         .arg("capture")
         .args(["--backend", "linux-portal"])

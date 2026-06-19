@@ -1,5 +1,5 @@
 [package]
-name = "rollshot-cli"
+name = "rollshot-dev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "rollshot"
+name = "rollshot-dev"
 path = "src/main.rs"
 
 [dependencies]
