@@ -147,6 +147,9 @@ behavior against code before relying on them.
   ScreenCaptureKit one-shot capture (Objective-C FFI via `objc2`). Public API
   is safe; the rest of the workspace keeps `unsafe_code = "forbid"`. Used by
   `rollshot-capture`.
+- `crates/rollshot-linux-desktop`: small Linux desktop integration helper
+  shared by the daemon and Action Guide SNI paths (StatusNotifierItem host
+  detection).
 - `crates/rollshot-cli`: command-line entry points. `src/args.rs` is the source
   of truth for subcommands and flags; `cmd_*` modules hold behavior.
 - `crates/rollshot-app`: Rust-only iced product app. It owns launch parsing,
