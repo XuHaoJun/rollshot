@@ -40,6 +40,7 @@ raw-window-handle = "0.6"
 rollshot-macos-input = { path = "../rollshot-macos-input", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
 nix = { workspace = true }
 rollshot-linux-desktop = { path = "../rollshot-linux-desktop" }
 rollshot-linux-input = { path = "../rollshot-linux-input", optional = true }
