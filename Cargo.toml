@@ -44,6 +44,7 @@ wide = "1.4.0"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+fs4 = "1.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -17,6 +17,7 @@ action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot
 arboard = "3.4"
 chrono = "0.4"
 dirs = "6"
+fs4 = { workspace = true }
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
