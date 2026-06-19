@@ -10,7 +10,7 @@ pub enum Platform {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Modifier {
+pub enum Modifier {
     Control,
     Alt,
     Shift,
@@ -111,6 +111,18 @@ impl FromStr for Shortcut {
 }
 
 impl Shortcut {
+    /// Platform-neutral modifiers, for adapters that translate into a native
+    /// registration format (the macOS `global-hotkey` adapter).
+    pub fn modifiers(&self) -> &[Modifier] {
+        &self.modifiers
+    }
+
+    /// The single base key, normalized: one lowercase ASCII letter/digit, or
+    /// `F1`..`F24`.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
     pub fn portal_trigger(&self) -> String {
         let mut parts = Vec::new();
         for (modifier, name) in [
@@ -302,6 +314,15 @@ mod tests {
         for invalid in ["Alt+Alt+6", "Command+Super+6", "Alt+F25"] {
             assert!(invalid.parse::<Shortcut>().is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn shortcut_exposes_modifiers_and_key_for_adapters() {
+        let shortcut: Shortcut = "Command+Shift+6".parse().unwrap();
+        assert_eq!(shortcut.key(), "6");
+        assert!(shortcut.modifiers().contains(&Modifier::Command));
+        assert!(shortcut.modifiers().contains(&Modifier::Shift));
+        assert!(!shortcut.modifiers().contains(&Modifier::Control));
     }
 
     #[test]

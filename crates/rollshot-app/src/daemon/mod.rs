@@ -3,7 +3,9 @@ pub mod core;
 pub mod instance;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod process;
 
 pub fn run() -> Result<(), String> {
@@ -67,6 +69,31 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     Err("daemon mode is not implemented on this platform yet".into())
 }
 
+/// Shared daemon startup policy: the tray is required (its failure aborts
+/// startup), the global shortcut is best-effort (its failure degrades to
+/// tray-only with a warning). Used by both the Linux and macOS adapters so the
+/// fatal/non-fatal contract cannot drift between platforms.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)] // macOS adapter (Task 5) will call this; Linux adapter already does.
+pub(crate) fn start_parts<T, S>(
+    start_tray: impl FnOnce() -> Result<T, String>,
+    start_shortcut: impl FnOnce() -> Result<S, String>,
+) -> Result<(T, Option<S>), String> {
+    let tray = start_tray()?;
+    let shortcut = match start_shortcut() {
+        Ok(shortcut) => Some(shortcut),
+        Err(error) => {
+            tracing::warn!(
+                target: "rollshot::daemon::shortcut",
+                %error,
+                "global shortcut unavailable; continuing with tray only"
+            );
+            None
+        }
+    };
+    Ok((tray, shortcut))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +109,19 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(!started.get());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn tray_failure_aborts_platform_startup() {
+        assert!(start_parts::<(), ()>(|| Err("no tray".into()), || Ok(())).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn shortcut_worker_start_failure_keeps_tray_alive() {
+        let (tray, shortcut) = start_parts(|| Ok(7), || Err::<(), _>("denied".into())).unwrap();
+        assert_eq!(tray, 7);
+        assert!(shortcut.is_none());
     }
 }
