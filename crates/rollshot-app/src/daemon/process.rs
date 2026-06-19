@@ -68,12 +68,16 @@ impl ActiveCapture for ProcessGroupCapture {
                     "failed to signal capture process group with {signal:?}: {error}"
                 )),
             },
-            || match killpg(self.pgid, None) {
-                Ok(()) => Ok(true),
-                Err(nix::errno::Errno::ESRCH) => Ok(false),
-                Err(error) => Err(format!("failed to inspect capture process group: {error}")),
-            },
+            || process_group_exists(killpg(self.pgid, None)),
         )
+    }
+}
+
+fn process_group_exists(probe: Result<(), nix::errno::Errno>) -> Result<bool, String> {
+    match probe {
+        Ok(()) | Err(nix::errno::Errno::EPERM) => Ok(true),
+        Err(nix::errno::Errno::ESRCH) => Ok(false),
+        Err(error) => Err(format!("failed to inspect capture process group: {error}")),
     }
 }
 
@@ -123,6 +127,11 @@ mod tests {
             capture_args(),
             ["capture", "--workflow", "screenshot", "--scope", "region"]
         );
+    }
+
+    #[test]
+    fn permission_denied_probe_still_means_process_group_exists() {
+        assert!(process_group_exists(Err(nix::errno::Errno::EPERM)).unwrap());
     }
 
     #[test]
