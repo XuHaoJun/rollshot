@@ -16,19 +16,19 @@ pub(crate) fn to_hotkey(shortcut: &Shortcut) -> Result<HotKey, String> {
 }
 
 fn key_to_code(key: &str) -> Result<Code, String> {
-    let name = if key.starts_with('F') && key.len() >= 2 && key[1..].chars().all(|c| c.is_ascii_digit())
-    {
-        key.to_string()
-    } else if key.len() == 1 {
-        let ch = key.chars().next().expect("len == 1");
-        if ch.is_ascii_digit() {
-            format!("Digit{ch}")
+    let name =
+        if key.starts_with('F') && key.len() >= 2 && key[1..].chars().all(|c| c.is_ascii_digit()) {
+            key.to_string()
+        } else if key.len() == 1 {
+            let ch = key.chars().next().expect("len == 1");
+            if ch.is_ascii_digit() {
+                format!("Digit{ch}")
+            } else {
+                format!("Key{}", ch.to_ascii_uppercase())
+            }
         } else {
-            format!("Key{}", ch.to_ascii_uppercase())
-        }
-    } else {
-        return Err(format!("unsupported shortcut key: {key}"));
-    };
+            return Err(format!("unsupported shortcut key: {key}"));
+        };
     name.parse::<Code>()
         .map_err(|_| format!("unsupported shortcut key: {key}"))
 }
