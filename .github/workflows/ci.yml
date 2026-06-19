@@ -43,16 +43,16 @@ jobs:
         run: cargo test --workspace
 
       - name: Clippy (action-guide feature)
-        run: cargo clippy --workspace --all-targets --features rollshot-cli/action-guide,rollshot-app/action-guide -- -D warnings
+        run: cargo clippy --workspace --all-targets --features rollshot-app/action-guide -- -D warnings
 
       - name: Test (action-guide feature)
-        run: cargo test --workspace --features rollshot-cli/action-guide,rollshot-app/action-guide
+        run: cargo test --workspace --features rollshot-app/action-guide
 
       - name: Check macOS targets
         if: runner.os == 'macOS'
         run: |
           cargo check -p rollshot-capture --all-targets
-          cargo check -p rollshot-cli --all-targets
+          cargo check -p rollshot-dev --all-targets
           cargo check -p rollshot-iced-overlay --all-targets
           cargo check -p rollshot-app --all-targets
           cargo check -p rollshot-macos-oneshot --all-targets
