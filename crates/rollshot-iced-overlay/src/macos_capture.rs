@@ -237,6 +237,10 @@ pub struct Component {
     pending_finish: Option<PendingFinish>,
     #[cfg(feature = "action-guide")]
     action_input_source: Option<Box<dyn rollshot_action::SemanticInputSource>>,
+    #[cfg(feature = "action-guide")]
+    fullscreen_action_guide: bool,
+    #[cfg(feature = "action-guide")]
+    fullscreen_action_guide_started: bool,
 }
 
 /// Terminal outcome staged behind a passthrough-disable handshake. Mutually
@@ -257,7 +261,9 @@ impl Component {
             Box<dyn rollshot_action::SemanticInputSource>,
         >,
     ) -> Result<Option<Self>, OverlayError> {
-        if config.request.scope != CaptureScope::Region {
+        let fullscreen_action_guide = config.request.scope == CaptureScope::Fullscreen
+            && config.request.workflow == Workflow::ActionGuide;
+        if config.request.scope != CaptureScope::Region && !fullscreen_action_guide {
             return Err(OverlayError::Overlay(
                 "fullscreen must not reach the macOS capture component".to_string(),
             ));
@@ -310,6 +316,10 @@ impl Component {
             pending_finish: None,
             #[cfg(feature = "action-guide")]
             action_input_source,
+            #[cfg(feature = "action-guide")]
+            fullscreen_action_guide,
+            #[cfg(feature = "action-guide")]
+            fullscreen_action_guide_started: false,
         }))
     }
 
@@ -522,6 +532,14 @@ impl Component {
                 .into();
         }
 
+        #[cfg(feature = "action-guide")]
+        if self.fullscreen_action_guide {
+            return iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
+
         crate::app::view_with_toolbar(
             &self.overlay,
             render_overlay_toolbar(self.overlay.workspace.phase()),
@@ -564,6 +582,35 @@ impl Component {
                     app::update(&mut self.overlay, OverlayMessage::WindowOpened { id, size });
                     if let Some(effect) = self.validate_region_surface() {
                         return effect;
+                    }
+                    #[cfg(feature = "action-guide")]
+                    if self.fullscreen_action_guide && !self.fullscreen_action_guide_started {
+                        self.fullscreen_action_guide_started = true;
+                        let crop = iced::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: size.width,
+                            height: size.height,
+                        };
+                        self.overlay.crop = Some(crop);
+                        self.overlay
+                            .workspace
+                            .set_crop(Some(crate::workspace::CropRect {
+                                x: crop.x,
+                                y: crop.y,
+                                width: crop.width,
+                                height: crop.height,
+                            }));
+                        self.overlay.workspace.complete_selection();
+                        let start = self.update_overlay(OverlayMessage::ToolbarAction(
+                            crate::toolbar::ToolbarAction::Finish,
+                        ));
+                        return match start {
+                            HostEffect::Task(start_task) => {
+                                HostEffect::Task(Task::batch([patch, start_task]))
+                            }
+                            terminal => terminal,
+                        };
                     }
                 }
                 HostEffect::Task(patch)
@@ -627,6 +674,13 @@ impl Component {
         }
         let passthrough = passthrough_action(old_phase, new_phase);
         let visible_rect = self.visible_toolbar_rect();
+        #[cfg(feature = "action-guide")]
+        let controls = if self.fullscreen_action_guide {
+            ControlsWindowAction::Noop
+        } else {
+            controls_window_action(self.controls_rect, visible_rect)
+        };
+        #[cfg(not(feature = "action-guide"))]
         let controls = controls_window_action(self.controls_rect, visible_rect);
 
         if passthrough == PassthroughAction::Enable {
@@ -1036,6 +1090,20 @@ impl Component {
         })
     }
 
+    #[cfg(feature = "action-guide")]
+    pub fn finish_action_recording(&mut self) -> HostEffect {
+        self.update_overlay(OverlayMessage::ToolbarAction(
+            crate::toolbar::ToolbarAction::Finish,
+        ))
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub fn cancel_action_recording(&mut self) -> HostEffect {
+        self.update_overlay(OverlayMessage::ToolbarAction(
+            crate::toolbar::ToolbarAction::Cancel,
+        ))
+    }
+
     /// Host-facing convenience for driving the component from an `OverlayEffect`
     /// directly (used by lifecycle tests and host adapters that synthesize
     /// effects). Mirrors `update_overlay`'s effect handling without an
@@ -1226,6 +1294,10 @@ mod tests {
             pending_finish: None,
             #[cfg(feature = "action-guide")]
             action_input_source: None,
+            #[cfg(feature = "action-guide")]
+            fullscreen_action_guide: false,
+            #[cfg(feature = "action-guide")]
+            fullscreen_action_guide_started: false,
         }
     }
 
@@ -1517,6 +1589,23 @@ mod tests {
             err.contains("fullscreen"),
             "error must mention fullscreen: {err}"
         );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn component_accepts_fullscreen_action_guide_before_acquisition() {
+        let config = OverlayConfig {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+            request: rollshot_capture::CaptureRequest::action_guide_fullscreen(),
+            target_output_name: None,
+        };
+        let err = match Component::new(&config, None) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("test factory must reject streaming acquisition"),
+        };
+        assert_eq!(err, "capture error: test mode");
     }
 
     #[test]

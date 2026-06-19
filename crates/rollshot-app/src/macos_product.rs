@@ -31,7 +31,7 @@ use std::time::Instant;
 use iced::{window, Element, Point, Size, Task};
 use image::RgbaImage;
 
-use rollshot_capture::CaptureScope;
+use rollshot_capture::{CaptureScope, Workflow};
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
 
@@ -76,6 +76,8 @@ pub enum Message {
     /// A Timeline Workspace (Action Guide) message.
     #[cfg(feature = "action-guide")]
     Timeline(timeline_workspace::Message),
+    #[cfg(feature = "action-guide")]
+    RecordingTray(crate::macos_recording_tray::Event),
     /// Thumbnail pressed (button down).
     ThumbnailPressed,
     /// Thumbnail released (button up): click vs. native-drag decision.
@@ -118,6 +120,8 @@ pub struct MacosProduct {
     workspace_window: Option<window::Id>,
     /// Latest known cursor position over the thumbnail window.
     thumbnail_cursor: Point,
+    #[cfg(feature = "action-guide")]
+    recording_tray: Option<crate::macos_recording_tray::Guard>,
 }
 
 impl MacosProduct {
@@ -126,7 +130,12 @@ impl MacosProduct {
     /// cancelled before any capture began (the caller then skips the daemon
     /// entirely), or `Err` if capture setup failed.
     pub fn new(config: OverlayConfig) -> Result<Option<(Self, Task<Message>)>, String> {
-        match initial_capture_path(config.request.scope) {
+        let initial_path = if config.request.workflow == Workflow::ActionGuide {
+            InitialCapturePath::Overlay
+        } else {
+            initial_capture_path(config.request.scope)
+        };
+        match initial_path {
             InitialCapturePath::Fullscreen => {
                 let result = match rollshot_iced_overlay::fullscreen::capture(&config)
                     .map_err(|error| error.to_string())?
@@ -154,6 +163,11 @@ impl MacosProduct {
                     None => return Ok(None),
                 };
                 let (component, open_task) = open_capture_window(component, &config)?;
+                #[cfg(feature = "action-guide")]
+                let recording_tray = (config.request
+                    == rollshot_capture::CaptureRequest::action_guide_fullscreen())
+                .then(crate::macos_recording_tray::Guard::start)
+                .transpose()?;
                 Ok(Some((
                     MacosProduct {
                         phase: Phase::Capture(component),
@@ -161,6 +175,8 @@ impl MacosProduct {
                         thumbnail_window: None,
                         workspace_window: None,
                         thumbnail_cursor: Point::ORIGIN,
+                        #[cfg(feature = "action-guide")]
+                        recording_tray,
                     },
                     open_task,
                 )))
@@ -202,6 +218,8 @@ impl MacosProduct {
             thumbnail_window: None,
             workspace_window: None,
             thumbnail_cursor: Point::ORIGIN,
+            #[cfg(feature = "action-guide")]
+            recording_tray: None,
         }
     }
 
@@ -320,20 +338,8 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             let Phase::Capture(component) = &mut product.phase else {
                 return Task::none();
             };
-            match component.update(msg) {
-                HostEffect::None => Task::none(),
-                HostEffect::Task(task) => task.map(Message::Capture),
-                HostEffect::Completed(result) => complete_capture(product, result),
-                #[cfg(feature = "action-guide")]
-                HostEffect::ActionRecorded(recording, capability, region) => {
-                    complete_action_recording(product, recording, capability, region)
-                }
-                HostEffect::Cancelled => iced::exit(),
-                HostEffect::Fatal(error) => {
-                    tracing::error!(target: TARGET_APP, %error, "capture fatal");
-                    iced::exit()
-                }
-            }
+            let effect = component.update(msg);
+            apply_capture_host_effect(product, effect)
         }
         Message::Workspace(msg) => {
             let Phase::Workspace(workspace) = &mut product.phase else {
@@ -347,6 +353,17 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 return Task::none();
             };
             timeline_workspace::update(workspace, msg).map(Message::Timeline)
+        }
+        #[cfg(feature = "action-guide")]
+        Message::RecordingTray(event) => {
+            let Phase::Capture(component) = &mut product.phase else {
+                return Task::none();
+            };
+            let effect = match event {
+                crate::macos_recording_tray::Event::Finish => component.finish_action_recording(),
+                crate::macos_recording_tray::Event::Cancel => component.cancel_action_recording(),
+            };
+            apply_capture_host_effect(product, effect)
         }
         Message::ThumbnailCursorMoved(position) => {
             product.thumbnail_cursor = position;
@@ -453,6 +470,33 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
     }
 }
 
+fn apply_capture_host_effect(product: &mut MacosProduct, effect: HostEffect) -> Task<Message> {
+    match effect {
+        HostEffect::None => Task::none(),
+        HostEffect::Task(task) => task.map(Message::Capture),
+        HostEffect::Completed(result) => complete_capture(product, result),
+        #[cfg(feature = "action-guide")]
+        HostEffect::ActionRecorded(recording, capability, region) => {
+            complete_action_recording(product, recording, capability, region)
+        }
+        HostEffect::Cancelled => {
+            #[cfg(feature = "action-guide")]
+            {
+                product.recording_tray = None;
+            }
+            iced::exit()
+        }
+        HostEffect::Fatal(error) => {
+            #[cfg(feature = "action-guide")]
+            {
+                product.recording_tray = None;
+            }
+            tracing::error!(target: TARGET_APP, %error, "capture fatal");
+            iced::exit()
+        }
+    }
+}
+
 /// Close the capture-owned windows, keep the captured image in memory, auto-save
 /// it, select the macOS presentation, and open the resulting window — all inside
 /// the one daemon.
@@ -488,6 +532,7 @@ fn complete_action_recording(
     capability: rollshot_action::InputCapability,
     region: rollshot_action::CaptureRegion,
 ) -> Task<Message> {
+    product.recording_tray = None;
     let mut close_tasks = Vec::new();
     if let Phase::Capture(component) = &mut product.phase {
         if let Some(id) = component.overlay_window() {
@@ -620,7 +665,7 @@ fn view(product: &MacosProduct, window: window::Id) -> Element<'_, Message> {
 }
 
 fn subscription(product: &MacosProduct) -> iced::Subscription<Message> {
-    match &product.phase {
+    let phase = match &product.phase {
         Phase::Capture(component) => component.subscription().map(Message::Capture),
         Phase::Thumbnail(_) => {
             let tick = iced::time::every(std::time::Duration::from_millis(250))
@@ -641,7 +686,15 @@ fn subscription(product: &MacosProduct) -> iced::Subscription<Message> {
         Phase::Timeline(workspace) => {
             timeline_workspace::subscription(workspace).map(Message::Timeline)
         }
+    };
+    #[cfg(feature = "action-guide")]
+    if product.recording_tray.is_some() {
+        return iced::Subscription::batch([
+            phase,
+            crate::macos_recording_tray::subscription().map(Message::RecordingTray),
+        ]);
     }
+    phase
 }
 
 fn theme(product: &MacosProduct, window: window::Id) -> iced::Theme {
@@ -729,6 +782,8 @@ mod tests {
             thumbnail_window: None,
             workspace_window: None,
             thumbnail_cursor: Point::ORIGIN,
+            #[cfg(feature = "action-guide")]
+            recording_tray: None,
         }
     }
 
@@ -744,6 +799,8 @@ mod tests {
             thumbnail_window: None,
             workspace_window: None,
             thumbnail_cursor: Point::ORIGIN,
+            #[cfg(feature = "action-guide")]
+            recording_tray: None,
         }
     }
 
