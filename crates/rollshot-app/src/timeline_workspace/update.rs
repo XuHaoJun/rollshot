@@ -19,6 +19,8 @@ pub enum Message {
     ExportDirChosen(Option<PathBuf>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
+    #[cfg(target_os = "macos")]
+    OpenInputMonitoringSettings,
     DismissBanner,
 }
 
@@ -124,6 +126,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             // Unlike guide export, GIF export does NOT exit — the user can still
             // Export Guide afterwards.
+            Task::none()
+        }
+        #[cfg(target_os = "macos")]
+        Message::OpenInputMonitoringSettings => {
+            rollshot_macos_input::open_input_monitoring_settings();
+            state.message = Some("Grant Input Monitoring, then restart Rollshot.".to_string());
             Task::none()
         }
         Message::DismissBanner => {

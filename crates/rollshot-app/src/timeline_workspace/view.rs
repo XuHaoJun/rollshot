@@ -27,7 +27,22 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
 fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
     let advisory: Element<Message> = match state.capability {
         rollshot_action::InputCapability::VisualOnly { .. } => {
-            text("Visual-only detection.").size(13).into()
+            #[cfg(target_os = "macos")]
+            {
+                row![
+                    text("Visual-only detection.").size(13),
+                    button(text("Open System Settings"))
+                        .on_press(Message::OpenInputMonitoringSettings)
+                        .style(button::secondary),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                text("Visual-only detection.").size(13).into()
+            }
         }
         rollshot_action::InputCapability::SemanticEvents => Space::new()
             .width(Length::Shrink)

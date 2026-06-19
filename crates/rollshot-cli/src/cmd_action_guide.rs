@@ -6,7 +6,7 @@ use crate::cli_error::CliError;
 
 /// Flags forwarded to the `rollshot-app` binary for this invocation.
 fn extra_args(args: &ActionGuideArgs) -> Vec<String> {
-    let mut out = vec!["--action-guide".to_string()];
+    let mut out = vec!["action-guide".to_string()];
     if args.fullscreen {
         out.push("--fullscreen".to_string());
     }
@@ -35,7 +35,7 @@ mod tests {
     #[test]
     fn region_mode_passes_only_action_guide() {
         let args = ActionGuideArgs { fullscreen: false };
-        assert_eq!(extra_args(&args), vec!["--action-guide".to_string()]);
+        assert_eq!(extra_args(&args), vec!["action-guide".to_string()]);
     }
 
     #[test]
@@ -43,7 +43,7 @@ mod tests {
         let args = ActionGuideArgs { fullscreen: true };
         assert_eq!(
             extra_args(&args),
-            vec!["--action-guide".to_string(), "--fullscreen".to_string()]
+            vec!["action-guide".to_string(), "--fullscreen".to_string()]
         );
     }
 }

@@ -14,6 +14,8 @@ use std::process::ExitCode;
 // helpers compile and unit-test on Linux. Only its `view` is macOS-gated.
 #[cfg(target_os = "macos")]
 mod macos_product;
+#[cfg(all(target_os = "macos", feature = "action-guide"))]
+mod macos_recording_tray;
 // Registered on every target so the pure drag placement/result helpers compile
 // and unit-test on Linux; the AppKit bridge inside it is macOS-gated.
 mod macos_native_drag;
@@ -163,11 +165,21 @@ fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
 }
 
 #[cfg(all(feature = "action-guide", target_os = "macos"))]
-fn run_action_guide_record(_fullscreen: bool) -> Result<(), String> {
-    Err(
-        "Action Guide recording not yet wired on macOS via launch.rs; use macos_product path"
-            .to_string(),
-    )
+fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
+    use rollshot_capture::CaptureRequest;
+
+    let request = if fullscreen {
+        CaptureRequest::action_guide_fullscreen()
+    } else {
+        CaptureRequest::action_guide_region()
+    };
+    macos_product::run(rollshot_iced_overlay::OverlayConfig {
+        backend: "auto".to_string(),
+        fps: 5,
+        show_cursor: false,
+        request,
+        target_output_name: None,
+    })
 }
 
 fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Result<(), String> {
