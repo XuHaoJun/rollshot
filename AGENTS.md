@@ -150,8 +150,9 @@ behavior against code before relying on them.
 - `crates/rollshot-linux-desktop`: small Linux desktop integration helper
   shared by the daemon and Action Guide SNI paths (StatusNotifierItem host
   detection).
-- `crates/rollshot-cli`: command-line entry points. `src/args.rs` is the source
-  of truth for subcommands and flags; `cmd_*` modules hold behavior.
+- `crates/rollshot-dev`: internal developer tooling. `src/args.rs` is the
+  source of truth for its two subcommands: `probe` and `stitch-folder`. It does
+  not start capture or launch `rollshot-app`.
 - `crates/rollshot-app`: Rust-only iced product app. It owns launch parsing,
   overlay selection, iced capture delegation, the macOS product flow, and the
   post-capture result workspace (annotation editing, storage, save handoff).
@@ -171,7 +172,7 @@ behavior against code before relying on them.
   overlay components, including preview viewport logic, capture-miss state, and
   crop visual tokens.
 - **Action Guide crates** (built behind the non-default `action-guide` Cargo
-  feature on `rollshot-cli` / `rollshot-app`):
+  feature on `rollshot-app`):
   - `crates/rollshot-action`: platform-neutral Action Guide engine — frame
     ingestion, deterministic step detection, the editable guide model, and
     export. Owns no windows, permissions, native event APIs, or capture
