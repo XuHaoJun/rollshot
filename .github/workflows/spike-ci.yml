@@ -1,6 +1,13 @@
 name: Spike CI
 
 on:
+  # pull_request runs on the open PR (#60) when spike files change, so macOS
+  # results are available on the feature branch (workflow_dispatch only works
+  # once the workflow is on the default branch). Push to the branch -> CI runs.
+  pull_request:
+    paths:
+      - 'spikes/**'
+      - '.github/workflows/spike-ci.yml'
   workflow_dispatch:
 
 jobs:

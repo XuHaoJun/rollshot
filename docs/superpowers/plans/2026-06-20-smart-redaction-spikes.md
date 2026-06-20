@@ -15,7 +15,7 @@ These apply to **every** task. Values copied verbatim from the design spec, the 
 - **Spike isolation (rollshot-run-spike skill):** Every spike lives in `spikes/<topic>/` as a standalone crate whose `Cargo.toml` contains an empty `[workspace]` table. NEVER add a spike crate to the root `Cargo.toml` `members`. Production crates stay unchanged; any temporary production edit must be recorded in `FINDINGS.md` and reverted before commit.
 - **Spike output is evidence, not code:** primary deliverable is `spikes/<topic>/FINDINGS.md` (from `.claude/skills/rollshot-run-spike/references/findings-template.md`). Record exact environment + command, evidence level (`compile` / `automated` / `runtime` / `hardware`), and result (`PASS` / `FAIL` / `MITIGATED` / `UNTESTED`) per milestone. **Never promote compile success into a runtime claim.**
 - **Highest-risk gate first.** Stop at a failed **hard** gate and record the fallback instead of building on an invalid assumption.
-- **Platform / CI policy (this environment):** The dev host is a **headless Ubuntu remote server**. All Linux build/test runs locally here. **macOS and any real-display GUI verification run only in CI**, and CI is triggered **manually by the user** (permissions). Whenever a step needs a macOS or real-display result, the executor MUST **stop and notify the user** with the exact branch + workflow to dispatch, then resume when results are reported. Mark platform/hardware checks that cannot be obtained as `UNTESTED`.
+- **Platform / CI policy (this environment — VERIFIED 2026-06-20):** The dev host is a **headless Ubuntu remote server**; `gh` CLI is **not installed** (`curl` is). All Linux build/test runs locally here. **macOS and any real-display GUI verification run only in CI.** Mechanism: an open PR (**#60**, `feat/smart-redaction-agent-workbench` → `main`) exists, so `spike-ci.yml` triggers on `pull_request` (paths-filtered to `spikes/**`). **`workflow_dispatch` alone does NOT work on a feature branch** — GitHub only exposes dispatchable workflows from the default branch — which is why the `pull_request` trigger is required. Flow per the user's instruction: the **controller** (not the implementer subagent) pushes at each macOS gate, then asks the user to paste the macOS job results back (the user approves/triggers the run on their side — "權限問題, 人工處理"). Implementer subagents do only the **Linux-local** steps and STOP before any "notify the user / wait for CI / wait for API key / wait for display" step. Mark platform/hardware checks that cannot be obtained as `UNTESTED`.
 - **MSRV reality (VERIFIED 2026-06-20 — supersedes the spec's 1.85 assumption):** The workspace `Cargo.toml:23` declares `rust-version = "1.85"`, **but this is already stale.** The resolved `Cargo.lock` pins `iced 0.14.0` (declares `rust-version = "1.88"`, `edition = "2024"`) and `image 0.25.10` (declares `rust-version = "1.88.0"`). So the workspace's **true current floor is ≥1.88** and it does **not** build on 1.85 today. CI hides this by running unpinned `dtolnay/rust-toolchain@stable`. Consequences for this plan:
   - `rquickjs` 0.12.x (declares `rust-version` 1.87, to be confirmed by the probe) is **below** the existing 1.88 floor → adopting it adds **zero** MSRV cost. The spec's "1.85 vs 1.87" worry is moot.
   - The real MSRV questions are: (a) confirm the **true** current floor (baseline experiment); (b) confirm every chosen dependency (rquickjs, the picked parser, rig) builds at that floor; (c) flag any candidate whose latest version pushes the floor **above 1.88** (e.g. latest `oxc` requires ~1.94) as a real cost to weigh; (d) recommend **correcting the stale declared `rust-version`** to the true max of pinned deps.
@@ -97,6 +97,13 @@ Create `.github/workflows/spike-ci.yml`. It is `workflow_dispatch`-only (never a
 name: Spike CI
 
 on:
+  # pull_request runs on the open PR (#60) when spike files change, so macOS
+  # results are available on the feature branch. workflow_dispatch alone only
+  # works once the workflow is on the default branch. Push to branch -> CI runs.
+  pull_request:
+    paths:
+      - 'spikes/**'
+      - '.github/workflows/spike-ci.yml'
   workflow_dispatch:
 
 jobs:
@@ -163,21 +170,18 @@ jobs:
           done
 ```
 
-- [ ] **Step 4: Validate and verify the workflow registers**
+- [ ] **Step 4: Validate and commit**
 
-YAML lint catches syntax but not Actions-schema errors; since the user dispatches this manually, confirm it actually registers.
+YAML lint catches syntax but not Actions-schema errors. `gh` is not installed here, and `workflow_dispatch` would not list from a feature branch anyway — instead the `pull_request` trigger runs `Spike CI` on PR #60 when `spikes/**` changes, so the first real run happens when a spike crate is pushed (Task 2 onward). Validation here is YAML lint + commit; the controller confirms the run on the PR at the first macOS gate.
 
 Run: `rtk python3 -c "import yaml; yaml.safe_load(open('.github/workflows/spike-ci.yml')); print('yaml ok')"`
 Expected: `yaml ok`
 
 ```bash
 rtk git add spikes/README.md .gitignore .github/workflows/spike-ci.yml
-rtk git commit -m "chore(spike): add isolated spikes harness and manual macOS/floor CI bridge"
+rtk git commit -m "chore(spike): add isolated spikes harness and PR-triggered macOS/floor CI bridge"
 rtk git push -u origin feat/smart-redaction-agent-workbench
 ```
-
-Run: `rtk gh workflow list`
-Expected: **`Spike CI`** appears in the list (proves it registered with no Actions-schema error). If it is absent, the YAML is schema-invalid — fix before proceeding.
 
 ---
 
@@ -461,7 +465,7 @@ rtk bash -c "cd spikes/js-frontend && cargo build --release --features oxc && ls
 Record per candidate:
 - **MSRV imposed:** does the pinned version build on 1.88 (≤ floor, free) or require more (e.g. oxc may demand ~1.94 → raises the floor — a real cost)? If a `cargo +1.88.0 build` fails with a `rust-version` resolver error, that named version IS the candidate's MSRV.
 - **License:** oxc=MIT, swc=Apache-2.0, tree-sitter=MIT(+C), boa=Unlicense/MIT.
-- **Maintenance activity:** latest crates.io release date + a quick repo-activity signal (last commit / release cadence) per candidate (e.g. `rtk gh api repos/oxc-project/oxc/releases/latest --jq .published_at`). This is §13.1's "Maintenance activity" dimension.
+- **Maintenance activity:** latest crates.io release date + a quick repo-activity signal (last commit / release cadence) per candidate. `gh` is not installed; use `curl` against the crates.io API, e.g. `rtk curl -s https://crates.io/api/v1/crates/oxc_parser | rtk python3 -c "import json,sys; d=json.load(sys.stdin)['crate']; print(d['updated_at'], d['max_stable_version'])"`. This is §13.1's "Maintenance activity" dimension.
 - **Binary + dep-tree size.**
 
 Note: "pure Rust" and "low MSRV" are **orthogonal** — at latest versions, the C-based `tree-sitter` (MSRV ~1.77) is the lowest-MSRV candidate, while the pure-Rust ones impose ≥1.88 (oxc the highest). Do not conflate them.
