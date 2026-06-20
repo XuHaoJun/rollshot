@@ -153,6 +153,26 @@ to confirm --features treesitter builds. Pure-Rust candidates need no macOS chec
 Do NOT presume any specific MSRV target -- that is Task 6's call.
 Per-candidate MSRV recorded above as evidence.
 
+### Evidence Caveats (reviewer-noted, do not overstate)
+
+These do not change the matrix conclusions but bound the precision of the evidence:
+- **oxc spans:** byte-exact and precise, but fixtures were parsed wrapped in
+  `function __spike__() { ... }`, so reported line:col is relative to the wrapper,
+  not the original fixture. Production would account for the offset. Span QUALITY
+  (byte-exact) stands.
+- **SWC spans:** the spike's display path normalizes SWC's 1-based `BytePos` and
+  then subtracts 1 again, so SWC's printed line:col is off by one char. SWC is
+  not shortlisted; this reinforces (does not change) the "poor span ergonomics"
+  verdict.
+- **recursion fixture:** rejected because §5.2 disallows user function
+  declarations wholesale (the walker rejects any `function` declaration), not via
+  self-call detection specifically. This is correct enforcement for §5.2; self-call
+  detection per se was not separately proven (and is not required by §5.2).
+- **boa escaping-closure / tree-sitter `var`:** boa emits a 0:0 span for the
+  escaping-closure case (consistent with its other statement-span gaps);
+  tree-sitter detects `var` via node-text prefix rather than the `kind` field
+  (works for the fixture; production should use `child_by_field_name("kind")`).
+
 ### Rejected Alternatives
 
 - boa_engine (full runtime): boa_parser/boa_ast sufficient for parse-only use.

@@ -6,8 +6,11 @@ publish = false
 
 [workspace]
 
+# default = treesitter so `cargo build`/CI exercises tree-sitter's C grammar build
+# (the only macOS-relevant candidate; oxc/swc/boa are pure Rust, measured on Linux).
+# Other candidates are built locally with explicit --features <name>.
 [features]
-default = []
+default = ["treesitter"]
 oxc = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_ast"]
 swc = ["dep:swc_common", "dep:swc_ecma_parser", "dep:swc_ecma_ast"]
 treesitter = ["dep:tree-sitter", "dep:tree-sitter-javascript"]
