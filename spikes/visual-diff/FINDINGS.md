@@ -196,7 +196,7 @@ Fallback triggers:
 
 Remaining risks:
 - GPU/interaction latency: needs real-display run. Risk: LOW.
-- macOS compile parity: UNTESTED.
+- macOS compile parity: CONFIRMED — Spike CI on commit d57c8ce (PR #60) PASS.
 - Tall-image texture upload: existing display_downscale_scale mitigates >8192 px
   limit; candidates don't change this risk.
 
