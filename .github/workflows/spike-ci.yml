@@ -26,25 +26,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev
-      - name: Build all targets + run tests for every spike crate
+      - name: Build all targets + run tests for this plan's spike crates
         shell: bash
         run: |
-          set -euxo pipefail
-          shopt -s nullglob
-          found=0
-          for d in spikes/*/; do
-            if [ -f "$d/Cargo.toml" ]; then
-              found=1
-              echo "::group::$d"
-              # build benches/tests/bins, but do NOT execute harness=false benches under `cargo test`
-              (cd "$d" && cargo build --all-targets && cargo test)
-              echo "::endgroup::"
+          # Only THIS plan's spikes — NOT spikes/layershell-feasibility (an unrelated
+          # pre-existing spike needing Wayland/glib system libs, impossible on macOS).
+          # No `set -e`: attempt every crate, then fail at the end if any failed, so one
+          # crate cannot hide the others.
+          set -uxo pipefail
+          fail=0
+          for name in sandbox-executor js-frontend rig-agent visual-diff; do
+            d="spikes/$name"
+            [ -d "$d" ] || { echo "skip $d (not present yet)"; continue; }
+            echo "::group::$d"
+            # build benches/tests/bins, but do NOT execute harness=false benches under `cargo test`
+            if (cd "$d" && cargo build --all-targets && cargo test); then
+              echo "$d: OK"
+            else
+              echo "$d: FAILED"; fail=1
             fi
+            echo "::endgroup::"
           done
-          if [ "$found" = 0 ]; then echo "no spike crates yet"; fi
+          exit $fail
 
   floor-check:
-    name: Floor check (Rust 1.88, ${{ matrix.os }})
+    name: Floor check (Rust 1.89, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,23 +58,24 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.89.0
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev
-      - name: Build every spike crate on the workspace floor (1.88)
+      - name: Build this plan's spike crates on the workspace floor (1.89)
         shell: bash
         run: |
+          # 1.89 = verified true workspace floor (wide@1.4.0 needs 1.89). Only this
+          # plan's spikes; layershell-feasibility excluded.
           set -uxo pipefail
-          shopt -s nullglob
-          for d in spikes/*/; do
-            if [ -f "$d/Cargo.toml" ]; then
-              echo "::group::$d (1.88)"
-              # step-level: a build FAILURE here is EVIDENCE (candidate needs > 1.88),
-              # not a pipeline failure. Read the log, not the dot.
-              (cd "$d" && cargo +1.88.0 build) || echo "FLOOR-CHECK-FAILED: $d (this is evidence, read log above)"
-              echo "::endgroup::"
-            fi
+          for name in sandbox-executor js-frontend rig-agent visual-diff; do
+            d="spikes/$name"
+            [ -d "$d" ] || { echo "skip $d (not present yet)"; continue; }
+            echo "::group::$d (1.89)"
+            # step-level: a build FAILURE here is EVIDENCE (candidate needs > floor),
+            # not a pipeline failure. Read the log, not the dot.
+            (cd "$d" && cargo +1.89.0 build) || echo "FLOOR-CHECK-FAILED: $d (this is evidence, read log above)"
+            echo "::endgroup::"
           done
