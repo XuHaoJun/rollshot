@@ -50,7 +50,7 @@ Specific sub-questions:
 | CPU before/after diff at 1000 candidates (tall) | soft < 2ms | automated | PASS | 1.76 us (real churn: ~20% added/removed/~60% kept) |
 | iced 0.14 prototype compiles (overlay + toggle + source-diff + IR pane) | hard | compile | PASS | cargo build succeeded in ~30 s |
 | Headless GUI run (interactive/GPU latency) | soft | runtime | UNTESTED | no xvfb; winit panicked: no DISPLAY set |
-| macOS compile parity | soft | compile | UNTESTED | pending controller CI (Step 5 not performed) |
+| macOS compile parity | soft | compile | PASS | Spike CI on commit d57c8ce (PR #60): `Spikes (macos-14)` built spikes/visual-diff (iced 0.14 native macOS path) + `Floor check (1.89, macos-14)` PASS |
 
 ## Observations
 
@@ -161,8 +161,10 @@ No new data-structure work needed for the cull path.
 
 Pending / not spike-measured:
 - GPU/interaction latency on a real display: NOT obtainable on this headless host.
-  Recommend a manual run before shipping. Risk is LOW given CPU numbers.
-- macOS compile parity: UNTESTED — pending controller CI.
+  Recommend a manual run before shipping. Risk is LOW given CPU numbers. (User did
+  not supply a display machine during the spike; carried forward as a remaining risk.)
+- macOS compile parity: CONFIRMED — Spike CI on commit d57c8ce (PR #60) built
+  spikes/visual-diff on macos-14 (iced 0.14 native path) + Floor check (1.89) PASS.
 
 ### Design recommendation (NOT spike-tested — design reasoning only)
 
