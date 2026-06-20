@@ -28,3 +28,6 @@
 [submodule "learn-projects/CrossMacro"]
 	path = learn-projects/CrossMacro
 	url = https://github.com/alper-han/CrossMacro.git
+[submodule "learn-projects/rig"]
+	path = learn-projects/rig
+	url = https://github.com/0xplaygrounds/rig

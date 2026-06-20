@@ -1,0 +1,19 @@
+[package]
+name = "spike-rig-agent"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rig-core = "0.39"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "test-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken is unconditional in tokio-util 0.7 (no `sync` feature exists)

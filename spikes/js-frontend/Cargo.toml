@@ -1,0 +1,39 @@
+[package]
+name = "spike-js-frontend"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# default = treesitter so `cargo build`/CI exercises tree-sitter's C grammar build
+# (the only macOS-relevant candidate; oxc/swc/boa are pure Rust, measured on Linux).
+# Other candidates are built locally with explicit --features <name>.
+[features]
+default = ["treesitter"]
+oxc = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_ast"]
+swc = ["dep:swc_common", "dep:swc_ecma_parser", "dep:swc_ecma_ast"]
+treesitter = ["dep:tree-sitter", "dep:tree-sitter-javascript"]
+boa = ["dep:boa_parser", "dep:boa_ast", "dep:boa_interner"]
+
+[dependencies]
+# oxc 0.137.0 — MSRV 1.94.0 (per crates.io rust_version field)
+oxc_allocator = { version = "0.137.0", optional = true }
+oxc_parser    = { version = "0.137.0", optional = true }
+oxc_span      = { version = "0.137.0", optional = true }
+oxc_ast       = { version = "0.137.0", optional = true }
+
+# swc — no rust_version declared; use latest known-compatible set
+swc_common        = { version = "23.0.2", optional = true }
+swc_ecma_parser   = { version = "41.1.1", optional = true }
+swc_ecma_ast      = { version = "25.0.0", optional = true }
+
+# tree-sitter 0.26.9 — MSRV 1.77 (per crates.io)
+tree-sitter             = { version = "0.26.9", optional = true }
+tree-sitter-javascript  = { version = "0.25.0", optional = true }
+
+# boa_parser / boa_ast 0.21.1 — MSRV 1.88.0
+# Using boa_parser + boa_ast + boa_interner directly (lighter than full boa_engine)
+boa_parser   = { version = "0.21.1", optional = true }
+boa_ast      = { version = "0.21.1", optional = true }
+boa_interner = { version = "0.21.1", optional = true }

@@ -1,0 +1,12 @@
+[package]
+name = "spike-sandbox-executor"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rquickjs = "0.12"
+tracing = "0.1"
+tracing-subscriber = "0.3"
