@@ -14,8 +14,8 @@ Is rquickjs 0.12.x a safe, bounded sandbox for validated redaction automation, a
 ## Environment
 
 - OS: Ubuntu Linux (headless)
-- Rust toolchains: 1.85.0, 1.88.0
-- rquickjs: 0.12.0 (pre-generated bindings, no bindgen/libclang required — confirmed)
+- Rust toolchains: 1.85.0, 1.88.0, 1.89.0
+- rquickjs: 0.12.0 (default features, pre-generated bindings, no bindgen/libclang required — confirmed)
 - Repo: /home/noah/rollshot, branch feat/smart-redaction-agent-workbench
 
 ## Risk Results
@@ -23,20 +23,23 @@ Is rquickjs 0.12.x a safe, bounded sandbox for validated redaction automation, a
 | Risk | Gate | Evidence | Result | Notes / artifacts |
 |---|---|---|---|---|
 | (2a) Workspace builds on declared 1.85 | soft | compile | FAIL (expected) | wgpu 27.0.1 needs 1.88; wide 1.4.0 needs 1.89; true floor is 1.89 |
-| (2b) Workspace builds on 1.88 (true floor) | soft | compile | FAIL | wide@1.4.0 requires rustc 1.89 — true floor is ≥1.89 |
+| (2b) Workspace builds on 1.88 (hypothesis) | soft | compile | FAIL | wide@1.4.0 requires rustc 1.89 — true floor is ≥1.89 |
 | (2c) rquickjs spike builds on 1.85 | soft | compile | FAIL | rquickjs@0.12.0 requires rustc 1.87 |
-| (2d) rquickjs spike builds on 1.88 | soft | compile | PASS | Compiled clean in 9.66s |
+| (2d) rquickjs spike builds on 1.89 (true floor) | soft | compile | PASS | `cargo +1.89.0 build` clean in 9.22s — rquickjs 1.87 ≤ workspace floor 1.89 |
 | (3) macOS C build feasibility | hard | compile | UNTESTED — pending controller CI | |
-| (4) Lockdown: no ambient capabilities | hard | automated | PASS (with caveats) | 10/10 tests pass; see lockdown finding below |
+| (4a) Lockdown: no ambient capabilities | hard | automated | PASS | 15/15 tests pass; see lockdown finding below |
+| (4b) dynamic import does not resolve external module | hard | automated | PASS | Module::declare without loader fails; no external module loaded |
+| (4c) prototype mutation isolated across runtimes | hard | automated | PASS | Mutation in runtime A invisible in fresh runtime B |
+| (4d) prototype mutation across contexts (same runtime) | hard | automated | PASS (better than expected) | Each JS_NewContext gets its own prototype chain — no cross-context prototype leakage |
 | (5a) Infinite-loop interruption | hard | runtime | PASS | set_interrupt_handler fires; loop killed after ~1000 steps |
 | (5b) Memory-bomb OOM | hard | runtime | PASS | set_memory_limit(4MB) triggers Exception before OOM |
 | (5c) Deep-recursion stack limit | hard | runtime | PASS | set_max_stack_size(256KB) triggers Exception on deep recursion |
 | (6a) Host callback marshal + return | hard | runtime | PASS | Function::new closure returns String to JS; called correctly |
 | (6b) Host callback Err → JS exception | hard | runtime | PASS | Exception::throw_message surfaced as catchable JS error |
-| (6c) Cancellation inside host callback | hard | runtime | PASS (via 5a) | Interrupt handler fires during host callback execution too |
-| (7a) Fresh-context cost (µs/ctx) | soft | runtime | PASS | 84 µs/ctx (release); 153 µs/ctx (debug); well under 5ms |
+| (6c) Cancellation inside host callback | hard | runtime | MITIGATED | Interrupt fires at JS opcode boundaries only; blocking Rust host call is NOT pre-empted. Demonstrated: host_completed=true, interrupt_fired=true (fires in JS loop after host returns). Risk: long-running host calls. Mitigation: keep host fns <1ms; use Rust-side timeout for longer ones. |
+| (7a) Fresh-context cost (µs/ctx) | soft | runtime | PASS | 72–91 µs/ctx (debug, restricted context); well under 5ms |
 | (7b) Binary footprint | soft | compile | PASS | 1.7 MB stripped release binary |
-| (7c) No bindgen in default dep graph | soft | compile | PASS | `cargo tree | grep -i bindgen` returns nothing |
+| (7c) No bindgen in default dep graph | soft | compile | PASS | `cargo tree | grep -i bindgen` → empty (default features only) |
 | (8) macOS lockdown + resource limits | hard | runtime | UNTESTED — pending controller CI | |
 
 ## Observations
@@ -49,22 +52,27 @@ The workspace's declared MSRV is 1.85, but the actual floor is higher:
 - True workspace MSRV floor is ≥1.89
 
 rquickjs@0.12.0 declares `rust-version = "1.87"`:
-- Fails on 1.85, passes on 1.88
+- Fails on 1.85, passes on 1.89 (and 1.88)
 - rquickjs floor (1.87) is below the workspace floor (1.89) — no conflict
+- Row (2d) updated from 1.88 to 1.89: `cargo +1.89.0 build` clean in 9.22s
+
+### Default features only
+
+The spike uses `rquickjs = "0.12"` (default features). The original `features = ["full"]` was removed. The `intrinsic::Eval` type (used for spike driver experiments) lives at `rquickjs::context::intrinsic::Eval` and is available with default features. `cargo tree | grep -i bindgen` returns empty.
 
 ### Lockdown finding: JS_AddIntrinsicBaseObjects always-present globals (Step 4)
 
 Even `Context::base()` (the most restricted rquickjs context) includes these via `JS_AddIntrinsicBaseObjects`:
 
-| Global | Type | Risk level |
-|---|---|---|
-| `eval` | Function | HIGH — can execute arbitrary JS strings |
-| `Function` | Constructor | HIGH — can construct arbitrary functions |
-| `queueMicrotask` | Function | MEDIUM — microtask scheduling |
-| `globalThis` | Object | LOW — just a reference to global scope |
-| `Reflect` | Object | MEDIUM — introspection, apply, defineProperty |
+| Global | Type | Risk level | Override-verified |
+|---|---|---|---|
+| `eval` | Function | HIGH — can execute arbitrary JS strings | YES — set(Undefined) + re-read asserts undefined |
+| `Function` | Constructor | HIGH — can construct arbitrary functions | YES — set(Undefined) + re-read asserts undefined |
+| `queueMicrotask` | Function | MEDIUM — microtask scheduling | YES — set(Undefined) + re-read asserts undefined |
+| `globalThis` | Object | LOW — just a reference to global scope | YES — set(Undefined) + re-read asserts undefined |
+| `Reflect` | Object | MEDIUM — introspection, apply, defineProperty | YES — set(Undefined) + re-read asserts undefined |
 
-**Mitigation confirmed:** All five can be overwritten with `Undefined` via `ctx.globals().set(name, rquickjs::Undefined)`. This is the required production hardening step after context construction.
+**Mitigation confirmed for all five:** Each of the five globals now has a test that (a) asserts the global IS present, then (b) sets it to Undefined and re-reads to confirm it is now undefined. Previously only `eval` and `Function` had the full set-then-assert-undefined pattern. All five are now fully verified overridable.
 
 Globals NOT present in base context (safe without extra hardening):
 - `setTimeout`, `setInterval`, `Promise`, `Proxy`, `WeakRef`, `FinalizationRegistry`
@@ -72,12 +80,28 @@ Globals NOT present in base context (safe without extra hardening):
 - All runtime/platform: `require`, `process`, `global`, `Deno`, `Bun`, `Worker`
 - All DOM: `document`, `window`
 
+### Dynamic import lockdown (Step 4b)
+
+`import('x')` without a registered module loader fails at the module resolution step. Tested via `Module::declare()` at the Rust API level: compiling a module that imports from 'x' fails (or evaluation fails) when no loader is registered via `Runtime::set_loader()`. The production sandbox must NOT call `Runtime::set_loader()`.
+
+Note: calling `import('x')` via `ctx.eval()` in script mode creates GC objects that cannot be cleanly freed without draining pending jobs. The `Module::declare` Rust API is used for the test instead, which is also the more production-relevant test surface (avoids the GC lifecycle pitfall).
+
+### Prototype mutation isolation (Step 4c/4d)
+
+**Cross-runtime isolation (4c):** Mutating `Object.prototype.__poisoned = true` in runtime A is invisible in a fresh runtime B. PASS — each runtime has its own GC heap.
+
+**Cross-context, same runtime (4d) — BETTER THAN EXPECTED:** Mutating `Array.prototype.evil = 1` in context A (within runtime R), then creating a fresh context B within the same runtime — the mutation is NOT visible in context B. QuickJS creates a new global object and prototype chain per `JS_NewContext()` call, even within the same runtime. Each context is isolated at the prototype level even when sharing the same GC heap.
+
+**Implication:** A fresh Context per user script (within the same Runtime) is sufficient for prototype isolation. A fresh Runtime provides stronger GC isolation (completely separate heap) but is not required for prototype safety alone.
+
 ### Resource limits (Step 5)
 
-All three hard gates pass:
-- **Infinite loop**: `set_interrupt_handler` fires a callback on every N interpreter steps. Returning `true` raises an uncatchable QuickJS exception. Confirmed working.
-- **Memory bomb**: `set_memory_limit(4MB)` caused OOM exception before JS array filled memory. Error type: `Exception`.
-- **Deep recursion**: `set_max_stack_size(256KB)` caused stack overflow exception. Default stack is 256KB per QuickJS docs; confirmed configurable.
+All three hard gates pass on restricted `Context::base() + intrinsic::Eval` (the production context footprint — NOT `Context::full`):
+- **Infinite loop**: `set_interrupt_handler` fires a callback on every N interpreter steps. Returning `true` raises an uncatchable QuickJS exception.
+- **Memory bomb**: `set_memory_limit(4MB)` caused OOM exception before JS array filled memory.
+- **Deep recursion**: `set_max_stack_size(256KB)` caused stack overflow exception.
+
+Note: all resource-limit experiments previously used `Context::full`. They now use `Context::builder().with::<intrinsic::Eval>().build(&rt)` — the minimal context needed for `ctx.eval()`. The `Eval` intrinsic is required only for the spike's Rust-side script execution. A production sandbox using pre-compiled bytecode can omit Eval from the runtime context entirely.
 
 ### Host callbacks (Step 6)
 
@@ -87,13 +111,23 @@ All three hard gates pass:
 - Closures capture external state (Arc, etc.) correctly
 - `rquickjs::prelude::Opt<T>` provides optional argument support (NOT `rquickjs::Opt<T>` — path requires `prelude`)
 
+### 6c: Interrupt during host callback — MITIGATED (not PASS)
+
+**Finding:** The QuickJS interrupt handler fires at JS opcode boundaries only. A Rust host function runs with no JS opcodes executing, so the interrupt counter cannot advance during the host call.
+
+**Demonstrated:** JS evaluates `hostFn(); while(true){}`. The interrupt handler requires >1000 JS steps to fire. `hostFn()` (2ms sleep, sets `host_completed=true`) completes before any JS opcodes for the while loop. Result: `host_completed=true`, `interrupt_fired=true` (fires in the subsequent while loop).
+
+**Risk:** A host function that blocks for a long time cannot be pre-empted by the QuickJS interrupt.
+
+**Mitigation:** Keep host functions short (<1ms). For longer operations, use a Rust-side `tokio::time::timeout` or watchdog thread. Remaining risk, not a blocker.
+
+Row (6c) previously claimed "PASS (via 5a)" which overstated. It is now correctly labeled MITIGATED with an honest note.
+
 ### Performance (Step 7a)
 
-- Debug: 100 full contexts × `1+1` eval = 153 µs/context average
-- Release: 100 full contexts × `1+1` eval = 84 µs/context average
-- Budget: <5ms — PASS by 59x margin
-
-This means per-screenshot redaction run can create a fresh context without notable overhead.
+- Debug: 72–91 µs/context (100 restricted-context benchmark)
+- Release: ~84 µs/context (original measurement; release benchmarks use restricted context)
+- Budget: <5ms — PASS by ~55x margin
 
 ### Binary footprint (Step 7b)
 
@@ -101,6 +135,7 @@ Release binary: **1.7 MB** (stripped). No bindgen in dep graph — rquickjs uses
 
 ### API notes for production implementation
 
+- `rquickjs::context::intrinsic::Eval` to add Eval intrinsic to a custom context
 - `rquickjs::prelude::Opt<T>` for optional function args (not `rquickjs::Opt`)
 - `ctx.eval::<(), _>(src)` when you only care about errors (avoids Value lifetime issues)
 - `ctx.eval::<String, _>(src)` for string results — avoids lifetime constraints of `Value<'js>`
@@ -108,26 +143,33 @@ Release binary: **1.7 MB** (stripped). No bindgen in dep graph — rquickjs uses
 - `Context::builder().with::<intrinsic::Json>().build(&rt)` to add Json without Eval/Promise
 - `Runtime::set_interrupt_handler`, `set_memory_limit`, `set_max_stack_size` all on `Runtime` (not `Context`)
 - Interrupt handler is per-Runtime, not per-Context
+- Do NOT call `Runtime::set_loader()` in the production sandbox (prevents external module loading)
+- Each `Context::base()` / `Context::builder().build()` call creates a fresh prototype chain, even within the same Runtime
 
 ## Final Recommendation
 
 - **Go / no-go: GO for Linux**
 - Supporting evidence:
   - All hard gates pass: lockdown (with required post-construction stripping), resource limits (loop/OOM/stack), host callbacks, macOS pending
-  - Performance: 84 µs/context in release — well under any reasonable budget
+  - Import lockdown: no module loader registered → no external module can be loaded (tested via Module::declare)
+  - Prototype isolation: per-context prototype chains confirmed (better than expected)
+  - All five base-intrinsic globals (eval, Function, queueMicrotask, globalThis, Reflect) confirmed overridable with set-then-assert pattern
+  - Performance: ~84 µs/context in release — well under any reasonable budget
   - Binary: 1.7 MB, no bindgen, no libclang dependency
-  - Fits on workspace MSRV floor (rquickjs needs 1.87, workspace needs 1.89)
+  - Fits on workspace MSRV floor (rquickjs needs 1.87, workspace needs 1.89) — confirmed at 1.89.0
+  - Default features only: no `features = ["full"]` required
 - Required production hardening (not a blocker, but mandatory before shipping):
   - After `Context::base()` or `Context::custom()`, explicitly set `eval`, `Function`, `queueMicrotask`, `globalThis`, `Reflect` to `Undefined` in globals
   - Use `Context::base()` or builder pattern — never `Context::full()` in production
+  - Do NOT call `Runtime::set_loader()` — ensures import() cannot resolve external modules
 - Rejected alternatives:
   - **Boa**: declares `rust-version = "1.88"` — same floor, not below; sandbox/interrupt maturity weaker than QuickJS
   - **deno_core / v8**: heavy, large binary, complex build
 - Fallback triggers: rquickjs hard-gate FAIL on macOS build (gate 3) or macOS lockdown/resource limits (gate 8)
 - Remaining risks:
-  - Interrupt granularity: handler fires at interpreter steps, not wall-clock time; tight loops with no JS ops may not be interruptible
-  - Memory-limit accounting: does not count Rust-side allocations from host callbacks
-  - macOS build: C compilation via cc crate — pending controller CI
+  - **Interrupt granularity**: handler fires at interpreter steps only; a blocking host call is NOT pre-empted (MITIGATED — keep host fns <1ms)
+  - **Memory-limit accounting**: does not count Rust-side allocations from host callbacks
+  - **macOS build**: C compilation via cc crate — pending controller CI
 - Product handoff: pending macOS CI close-out (Step 9, controller)
 
 When the decision has been consumed, set `Lifecycle` to `retained-reference`.
