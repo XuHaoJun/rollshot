@@ -15,3 +15,7 @@ bench-results/*.jsonl
 bench-results/*.run.md
 bench-results/*.summary.md
 crates/**/bench-results/
+
+# Spike build artifacts (isolated crates under spikes/). Cargo.lock is kept as
+# frozen decision-time evidence; only target/ is ignored.
+spikes/*/target/
