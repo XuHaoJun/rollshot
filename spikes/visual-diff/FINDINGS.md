@@ -2,8 +2,8 @@
 
 ## Status
 
-- Lifecycle: active
-- Decision owner: TBD
+- Lifecycle: retained-reference
+- Decision owner: Task 5
 - Started: 2026-06-20
 - Last updated: 2026-06-20
 

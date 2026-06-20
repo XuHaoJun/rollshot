@@ -2,7 +2,7 @@
 
 ## Status
 
-- Lifecycle: active
+- Lifecycle: retained-reference
 - Decision owner: Task 2
 - Started: 2026-06-20
 - Last updated: 2026-06-20
