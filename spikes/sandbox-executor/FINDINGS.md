@@ -26,7 +26,7 @@ Is rquickjs 0.12.x a safe, bounded sandbox for validated redaction automation, a
 | (2b) Workspace builds on 1.88 (hypothesis) | soft | compile | FAIL | wide@1.4.0 requires rustc 1.89 — true floor is ≥1.89 |
 | (2c) rquickjs spike builds on 1.85 | soft | compile | FAIL | rquickjs@0.12.0 requires rustc 1.87 |
 | (2d) rquickjs spike builds on 1.89 (true floor) | soft | compile | PASS | `cargo +1.89.0 build` clean in 9.22s — rquickjs 1.87 ≤ workspace floor 1.89 |
-| (3) macOS C build feasibility | hard | compile | UNTESTED — pending controller CI | |
+| (3) macOS C build feasibility | hard | compile | PASS | Spike CI `Spikes (macos-14)` on commit 2b9e9ac (PR #60): `cargo build --all-targets` for spikes/sandbox-executor succeeded — quickjs C build via cc works on aarch64-apple-darwin |
 | (4a) Lockdown: no ambient capabilities | hard | automated | PASS | 15/15 tests pass; see lockdown finding below |
 | (4b) dynamic import does not resolve external module | hard | automated | PASS | Module::declare without loader fails; no external module loaded |
 | (4c) prototype mutation isolated across runtimes | hard | automated | PASS | Mutation in runtime A invisible in fresh runtime B |
@@ -40,7 +40,7 @@ Is rquickjs 0.12.x a safe, bounded sandbox for validated redaction automation, a
 | (7a) Fresh-context cost (µs/ctx) | soft | runtime | PASS | 72–91 µs/ctx (debug, restricted context); well under 5ms |
 | (7b) Binary footprint | soft | compile | PASS | 1.7 MB stripped release binary |
 | (7c) No bindgen in default dep graph | soft | compile | PASS | `cargo tree | grep -i bindgen` → empty (default features only) |
-| (8) macOS lockdown + resource limits | hard | runtime | UNTESTED — pending controller CI | |
+| (8) macOS lockdown + resource limits | hard | runtime | PASS | Spike CI `Spikes (macos-14)` on commit 2b9e9ac (PR #60): `cargo test` (incl. lockdown 15/15) passed on macOS — CPU-only sandbox behavior parity confirmed; `Floor check (Rust 1.89, macos-14)` also PASS |
 
 ## Observations
 
@@ -146,11 +146,20 @@ Release binary: **1.7 MB** (stripped). No bindgen in dep graph — rquickjs uses
 - Do NOT call `Runtime::set_loader()` in the production sandbox (prevents external module loading)
 - Each `Context::base()` / `Context::builder().build()` call creates a fresh prototype chain, even within the same Runtime
 
+### macOS verification (Step 3 + Step 8) — CI on commit 2b9e9ac (PR #60)
+
+The corrected Spike CI (which scopes to this plan's spikes and excludes the unrelated `spikes/layershell-feasibility`) ran green on both runners:
+- `Spikes (macos-14)`: `spikes/sandbox-executor` `cargo build --all-targets` + `cargo test` (lockdown 15/15) PASS → macOS quickjs C build (gate 3) and macOS CPU-runtime parity for lockdown + resource limits (gate 8) both confirmed.
+- `Spikes (ubuntu-24.04)`: PASS.
+- `Floor check (Rust 1.89, macos-14 + ubuntu-24.04)`: PASS — builds at the true workspace floor on both platforms.
+
+(The earlier red run was the globbed loop hitting `layershell-feasibility`'s Wayland/glib system-lib needs, unrelated to this spike.)
+
 ## Final Recommendation
 
-- **Go / no-go: GO for Linux**
+- **Go / no-go: GO (Linux + macOS confirmed)**
 - Supporting evidence:
-  - All hard gates pass: lockdown (with required post-construction stripping), resource limits (loop/OOM/stack), host callbacks, macOS pending
+  - All hard gates pass on Linux AND macOS: lockdown (with required post-construction stripping), resource limits (loop/OOM/stack), host callbacks, macOS C-build + CPU-runtime parity (gates 3 & 8, CI 2b9e9ac)
   - Import lockdown: no module loader registered → no external module can be loaded (tested via Module::declare)
   - Prototype isolation: per-context prototype chains confirmed (better than expected)
   - All five base-intrinsic globals (eval, Function, queueMicrotask, globalThis, Reflect) confirmed overridable with set-then-assert pattern
@@ -165,12 +174,12 @@ Release binary: **1.7 MB** (stripped). No bindgen in dep graph — rquickjs uses
 - Rejected alternatives:
   - **Boa**: declares `rust-version = "1.88"` — same floor, not below; sandbox/interrupt maturity weaker than QuickJS
   - **deno_core / v8**: heavy, large binary, complex build
-- Fallback triggers: rquickjs hard-gate FAIL on macOS build (gate 3) or macOS lockdown/resource limits (gate 8)
-- Remaining risks:
-  - **Interrupt granularity**: handler fires at interpreter steps only; a blocking host call is NOT pre-empted (MITIGATED — keep host fns <1ms)
-  - **Memory-limit accounting**: does not count Rust-side allocations from host callbacks
-  - **macOS build**: C compilation via cc crate — pending controller CI
-- Product handoff: pending macOS CI close-out (Step 9, controller)
+- Fallback triggers (none tripped): would have been rquickjs hard-gate FAIL on macOS build (gate 3) or macOS lockdown/resource limits (gate 8) — both PASSED on CI 2b9e9ac.
+- Remaining risks (carry forward to the automation-frontend / executor subproject):
+  - **Interrupt granularity**: handler fires at interpreter steps only; a blocking host call is NOT pre-empted (MITIGATED — keep host fns <1ms; Rust-side watchdog/timeout for longer ones)
+  - **Memory-limit accounting**: `set_memory_limit` does not count Rust-side allocations made by host callbacks — host capabilities must bound their own allocations
+  - **Production hardening is mandatory**: strip the 5 base-intrinsic globals; never `Context::full()`; never `Runtime::set_loader()`
+- Product handoff: GO confirmed. The executor subproject should adopt rquickjs 0.12.x with the required hardening above; MSRV is a non-issue (1.87 ≤ workspace floor 1.89). Recommend correcting the stale `Cargo.toml` `rust-version = "1.85"` → `1.89` (tracked in Task 6 MSRV resolution).
 
 When the decision has been consumed, set `Lifecycle` to `retained-reference`.
 Retained spikes are historical evidence, not source of truth or production dependencies.
