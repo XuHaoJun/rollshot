@@ -37,8 +37,8 @@ facade with budgets/cancellation/usage accounting, at the workspace MSRV floor
 | rig MSRV — Rust 1.89 (workspace floor) | soft | compile | **PASS** | Full build succeeds at workspace floor — no conflict |
 | Privacy-safe tracing — no prompt/response content leak | soft | automated | **PASS** | At `RUST_LOG=trace`, rig's `AgentRun` emits **zero** tracing events. No prompt or response text leaks. |
 | `RollshotModel` facade — provider swap at runtime | soft | automated | **PASS** | Two scripted providers swap behind `dyn RollshotModel`; different args per provider confirmed |
-| Live vision round-trip (provider-specific tool + image) | soft | — | **UNTESTED (optional/manual)** | Requires API key and user consent; Step 8 not executed |
-| macOS parity (build + CI) | soft | — | **UNTESTED — pending controller CI** | Linux evidence only |
+| Live vision round-trip (provider-specific tool + image) | soft | — | **UNTESTED (optional/manual)** | User declined the optional API-key run; provider-specific tool behavior carried forward as OPEN to the agent-core subproject (recorded fixture / live test) |
+| macOS parity (build + CI) | soft | compile | **PASS** | Spike CI on commit b00c768 (PR #60): `Spikes (macos-14)` + `Floor check (1.89, macos-14)` both PASS for spikes/rig-agent — rig 0.39 (pure async Rust) builds on aarch64-apple-darwin at the floor |
 
 ## Observations
 
@@ -192,8 +192,9 @@ inherits rig's normalisation for free.
    providers correctly encode `ToolDefinition` JSON schemas and parse tool-call wire format
    responses is not confirmed. The downstream agent-core subproject must close this gap via
    a recorded fixture (spec §11.6) or live test (Step 8). Status: OPEN.
-2. **macOS parity: UNTESTED.** All probes ran on Linux. The workspace floor check on
-   `macos-14` CI must confirm rig 0.39 builds there. Status: UNTESTED — pending controller CI.
+2. **macOS parity: CONFIRMED.** Spike CI on commit b00c768 (PR #60) built `spikes/rig-agent`
+   on `macos-14` (Spikes job) and on the 1.89 floor — both PASS. rig 0.39 (pure async Rust)
+   has no macOS-specific build risk. Status: RESOLVED.
 3. **rig minor release MSRV drift.** rig has no published `rust-version` field. Measured
    1.88 is a point-in-time result against 0.39.0. Pin `rig-core = "=0.39.0"` in production
    until MSRV stability is confirmed across minor releases.
