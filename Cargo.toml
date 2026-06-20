@@ -12,6 +12,7 @@ members = [
     "crates/rollshot-overlay-core",
     "crates/rollshot-macos-oneshot",
     "crates/rollshot-linux-desktop",
+    "crates/rollshot-edit-proposal",
 ]
 resolver = "2"
 
