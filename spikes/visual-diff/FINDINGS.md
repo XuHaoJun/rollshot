@@ -46,8 +46,8 @@ Specific sub-questions:
 | CPU frustum cull at 1000 candidates (tall 4000x12000) | soft < 2ms | automated | PASS | 689 ns — 2900x margin |
 | CPU hit-test at 1000 candidates (ordinary) | soft < 2ms | automated | PASS | 427 ns |
 | CPU hit-test at 1000 candidates (tall) | soft < 2ms | automated | PASS | 393 ns |
-| CPU before/after diff at 1000 candidates (ordinary) | soft < 2ms | automated | PASS | 1.05 us |
-| CPU before/after diff at 1000 candidates (tall) | soft < 2ms | automated | PASS | 1.28 us |
+| CPU before/after diff at 1000 candidates (ordinary) | soft < 2ms | automated | PASS | 1.97 us (real churn: ~20% added/removed/~60% kept) |
+| CPU before/after diff at 1000 candidates (tall) | soft < 2ms | automated | PASS | 1.76 us (real churn: ~20% added/removed/~60% kept) |
 | iced 0.14 prototype compiles (overlay + toggle + source-diff + IR pane) | hard | compile | PASS | cargo build succeeded in ~30 s |
 | Headless GUI run (interactive/GPU latency) | soft | runtime | UNTESTED | no xvfb; winit panicked: no DISPLAY set |
 | macOS compile parity | soft | compile | UNTESTED | pending controller CI (Step 5 not performed) |
@@ -81,16 +81,36 @@ O(n) scan with early-exit on first hit. Passes soft gate with >4000x margin.
 
 #### (c) Before/after diff (overlay_cull/diff) — median
 
+Numbers reflect real add/remove/keep churn (~20% removed, ~20% added, ~60% kept).
+The diff bench now exercises all three branches of the sorted-merge loop.
+
 | Candidates | ordinary 1920x1080 | tall 4000x12000 |
 |---|---|---|
-| 100 | 247 ns | 237 ns |
-| 500 | 609 ns | 620 ns |
-| 1000 | 1.05 us | 1.28 us |
+| 100 | 429 ns | 387 ns |
+| 500 | 1.04 us | 898 ns |
+| 1000 | 1.97 us | 1.76 us |
 
-O(n+m) sorted-index merge. Most expensive operation but still ~1.3 us at 1000
-candidates — 12,000x below the 16.6 ms frame budget.
+O(n+m) sorted-id merge. Most expensive operation but still ~2.0 us at 1000
+candidates — ~8,000x below the 16.6 ms frame budget.
+
+Note: earlier numbers (1.05 us / 1.28 us at 1000) were from an identical-set
+benchmark (zero churn, all "kept") — the realistic-churn numbers above are ~1.5–2x
+higher but remain well within gate.
 
 Soft gate: all three operations PASS at 1000 candidates on both image sizes.
+
+#### (d) Frustum culling mid-document scroll (overlay_cull/frustum) — median
+
+Tall image, viewport at y≈img_h/2 (scroll position mid-document):
+
+| Candidates | tall_4000x12000 (mid) |
+|---|---|
+| 100 | 41 ns |
+| 500 | 374 ns |
+| 1000 | 748 ns |
+
+Slightly higher than top-of-document (candidates distributed across full height;
+mid-viewport hits a different density slice). Still negligible — well under 2 ms.
 
 ### Step 3: iced 0.14 prototype compile
 
