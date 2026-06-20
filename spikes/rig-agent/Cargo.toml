@@ -16,4 +16,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "test-util", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt", "sync"] }  # sync: CancellationToken (was relying on transitive propagation)
+tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken is unconditional in tokio-util 0.7 (no `sync` feature exists)
