@@ -103,10 +103,12 @@ Binary size + dep tree (release build):
 - tree-sitter 0.26.9: 1.0 MiB, ~30 cargo tree lines
 - boa 0.21.1: 3.6 MiB, ~126 cargo tree lines
 
-### Step 7: macOS C-Build
+### Step 7: macOS C-Build — PASS
 
-tree-sitter IS a finalist. Controller must run macOS CI (Spikes macos-14)
-to confirm --features treesitter builds. Pure-Rust candidates need no macOS check.
+tree-sitter IS a finalist. Confirmed via Spike CI on commit dbf75fe (PR #60):
+`Spikes (macos-14)` built `spikes/js-frontend` (treesitter default → tree-sitter
+C grammar) and tests passed; `Floor check (Rust 1.89, macos-14)` PASS. tree-sitter's
+C grammar builds cleanly on aarch64-apple-darwin. Pure-Rust candidates need no macOS check.
 
 ## Final Recommendation
 
@@ -184,7 +186,8 @@ These do not change the matrix conclusions but bound the precision of the eviden
 - tree-sitter macOS C-build fails: SWC.
 - All pure-Rust <= 1.89 options ruled out: revisit oxc with floor bump.
 
-### Controller Action Required
+### Controller Action — DONE
 
-tree-sitter IS a finalist. Controller must run macOS CI Step 7 to confirm
-spikes/js-frontend builds with --features treesitter on macos-14.
+tree-sitter macOS C-build confirmed via Spike CI (commit dbf75fe, PR #60):
+`Spikes (macos-14)` + `Floor check (1.89, macos-14)` both PASS. No blocker remains
+for tree-sitter on macOS. Final parser pick deferred to Task 6 (MSRV resolution).
