@@ -48,7 +48,7 @@ and PipeWire support.
 
 ## Local Development
 
-Install Rust 1.85 or newer with `rustup`.
+Install Rust 1.94 or newer with `rustup`.
 
 On Ubuntu, install the system packages required by the PipeWire and D-Bus
 dependencies:
@@ -409,7 +409,7 @@ Use this checklist after changing the macOS `macos-sck` backend or before
 validating a release on macOS:
 
 - [ ] Test machine is running macOS 12.3 or newer.
-- [ ] Rust 1.85 or newer is installed.
+- [ ] Rust 1.94 or newer is installed.
 - [ ] The terminal or test binary has Screen Recording permission:
   `System Settings -> Privacy & Security -> Screen & System Audio Recording`.
 - [ ] Main display is visible and unlocked.

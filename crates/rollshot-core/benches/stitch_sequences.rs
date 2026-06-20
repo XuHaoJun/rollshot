@@ -487,7 +487,7 @@ fn process_and_emit(
     let metrics = stitcher.last_metrics();
     let rec = BenchRecord::Frame(make_frame_record(scenario_name, run, metrics));
     writeln!(out, "{}", serde_json::to_string(&rec).unwrap())?;
-    if idx % 10 == 0 {
+    if idx.is_multiple_of(10) {
         *rss_peak = (*rss_peak).max(rss::read_rss_kb());
     }
     Ok(())

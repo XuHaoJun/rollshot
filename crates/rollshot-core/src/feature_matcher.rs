@@ -78,7 +78,7 @@ impl FeatureFallbackOutcome {
 /// clamping — corners too close to an edge are dropped at the call
 /// site).
 fn compute_descriptor(gray: &GrayImage, x: u32, y: u32, patch: usize) -> Option<[f32; 8]> {
-    if patch % 2 == 0 || patch < 3 {
+    if patch.is_multiple_of(2) || patch < 3 {
         return None;
     }
     let half = (patch / 2) as i32;
@@ -293,7 +293,7 @@ fn compute_median_residual(translations: &[(i32, i32)], dx: i32, dy: i32) -> f32
         .collect();
     residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = residuals.len() / 2;
-    if residuals.len() % 2 == 0 {
+    if residuals.len().is_multiple_of(2) {
         (residuals[mid - 1] + residuals[mid]) * 0.5
     } else {
         residuals[mid]

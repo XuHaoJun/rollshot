@@ -20,7 +20,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/xuhaojun/rollshot"
-rust-version = "1.85"
+rust-version = "1.94"
 
 [workspace.dependencies]
 anyhow = "1"

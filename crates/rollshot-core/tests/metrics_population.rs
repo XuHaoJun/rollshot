@@ -50,7 +50,7 @@ fn make_rich_texture_frame(width: u32, height: u32, offset_x: i32, offset_y: i32
             .wrapping_add(py.wrapping_mul(1013904223))
             & 0xFF) as u8;
         // Add fine-grained stripe structure so edge detectors fire.
-        let stripe = if (px / 4 + py / 4) % 2 == 0 {
+        let stripe = if (px / 4 + py / 4).is_multiple_of(2) {
             v
         } else {
             255 - v

@@ -1792,12 +1792,12 @@ mod tests {
                 hc ^= hc >> 31;
                 hc = hc.wrapping_mul(0x94D0_49BB_1331_11EB);
                 // Bright bg ~248-254 with ~4% dark "text" pixels at 40.
-                let pv = if (hp >> 8) % 25 == 0 {
+                let pv = if (hp >> 8).is_multiple_of(25) {
                     40
                 } else {
                     248 + (hp as u8 % 7)
                 };
-                let cv = if (hc >> 8) % 25 == 0 {
+                let cv = if (hc >> 8).is_multiple_of(25) {
                     40
                 } else {
                     248 + (hc as u8 % 7)
