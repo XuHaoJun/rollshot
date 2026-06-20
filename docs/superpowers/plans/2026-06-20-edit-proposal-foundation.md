@@ -243,6 +243,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> ImageRect {
 #[test]
 fn apply_batch_of_adds_is_one_undo_entry() {
     let mut d = test_doc();
+    let s_before = d.state_id();
     let out = d
         .apply_batch(vec![
             EditOp::AddRedaction { bounds: rect(0.0, 0.0, 10.0, 10.0) },
@@ -252,9 +253,12 @@ fn apply_batch_of_adds_is_one_undo_entry() {
         .expect("valid batch");
     assert_eq!(out.added_ids.len(), 3);
     assert_eq!(d.annotations().len(), 3);
-    // ONE undo restores the empty pre-batch state.
+    assert_eq!(d.state_id(), s_before + 1, "exactly one commit for the whole batch");
+    // ONE undo restores the EXACT pre-batch state (annotations + next_number + state_id).
     assert!(d.undo());
     assert_eq!(d.annotations().len(), 0);
+    assert_eq!(d.next_number(), 1, "next_number restored");
+    assert_eq!(d.state_id(), 0, "state_id restored to pre-batch");
     assert!(!d.can_undo());
 }
 
@@ -315,11 +319,15 @@ fn apply_batch_crud_and_callout_renumber_in_one_entry() {
     ])
     .expect("crud batch");
     // Remaining callout renumbered to 1.
-    let remaining_number = d.annotations().iter().find_map(|a| match a {
-        Annotation::NumberCallout { number, .. } => Some(*number),
-        _ => None,
-    });
-    assert_eq!(remaining_number, Some(1));
+    let remaining_numbers: Vec<u32> = d
+        .annotations()
+        .iter()
+        .filter_map(|a| match a {
+            Annotation::NumberCallout { number, .. } => Some(*number),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(remaining_numbers, vec![1], "exactly one callout, renumbered to 1");
     // One undo reverts BOTH the delete and the update.
     assert!(d.undo());
     assert_eq!(d.annotations().len(), 3);
@@ -343,6 +351,93 @@ fn apply_batch_wrong_kind_rejected() {
         .unwrap_err();
     assert_eq!(err, EditError::WrongKind);
     assert_eq!(d.annotations().len(), 1, "no mutation on reject");
+}
+
+#[test]
+fn apply_batch_added_ids_follow_op_order() {
+    let mut d = test_doc();
+    let out = d
+        .apply_batch(vec![
+            EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) },
+            EditOp::AddTextNote { position: ImagePoint::new(2.0, 2.0), text: "a".into() },
+            EditOp::AddNumberCallout { tip: ImagePoint::new(3.0, 3.0), bubble: ImagePoint::new(4.0, 4.0) },
+        ])
+        .expect("valid mixed adds");
+    let live: Vec<_> = d.annotations().iter().map(|a| a.id()).collect();
+    assert_eq!(out.added_ids, live, "added_ids match created annotations in op order");
+    assert!(out.added_ids[0] < out.added_ids[1] && out.added_ids[1] < out.added_ids[2]);
+}
+
+#[test]
+fn apply_batch_rejects_empty_text_atomically() {
+    let mut d = test_doc();
+    let err = d
+        .apply_batch(vec![
+            EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) },
+            EditOp::AddTextNote { position: ImagePoint::new(1.0, 1.0), text: "   ".into() },
+        ])
+        .unwrap_err();
+    assert_eq!(err, EditError::EmptyText);
+    assert_eq!(d.annotations().len(), 0, "whole batch rolled back");
+    assert!(!d.can_undo());
+}
+
+#[test]
+fn apply_batch_update_text_empty_rejected() {
+    let mut d = test_doc();
+    let id = d.add_text_note(ImagePoint::new(2.0, 2.0), "orig".into()).unwrap();
+    let err = d.apply_batch(vec![EditOp::UpdateText { id, text: "  ".into() }]).unwrap_err();
+    assert_eq!(err, EditError::EmptyText);
+    match d.annotation(id).unwrap() {
+        Annotation::TextNote { text, .. } => assert_eq!(text, "orig"),
+        _ => panic!("wrong kind"),
+    }
+}
+
+#[test]
+fn apply_batch_add_callout_rejects_non_finite() {
+    let mut d = test_doc();
+    let err = d
+        .apply_batch(vec![EditOp::AddNumberCallout {
+            tip: ImagePoint::new(f32::INFINITY, 1.0),
+            bubble: ImagePoint::new(2.0, 2.0),
+        }])
+        .unwrap_err();
+    assert_eq!(err, EditError::NonFiniteCoordinate);
+    assert_eq!(d.annotations().len(), 0);
+}
+
+#[test]
+fn apply_batch_exercises_text_and_callout_update_paths() {
+    let mut d = test_doc();
+    let seed = d
+        .apply_batch(vec![
+            EditOp::AddTextNote { position: ImagePoint::new(5.0, 5.0), text: "old".into() },
+            EditOp::AddNumberCallout { tip: ImagePoint::new(1.0, 1.0), bubble: ImagePoint::new(2.0, 2.0) },
+        ])
+        .expect("seed");
+    let text_id = seed.added_ids[0];
+    let callout_id = seed.added_ids[1];
+    d.apply_batch(vec![
+        EditOp::UpdateText { id: text_id, text: "new".into() },
+        EditOp::UpdateTextPosition { id: text_id, position: ImagePoint::new(9.0, 9.0) },
+        EditOp::UpdateNumberPoints { id: callout_id, tip: ImagePoint::new(7.0, 7.0), bubble: ImagePoint::new(8.0, 8.0) },
+    ])
+    .expect("updates");
+    match d.annotation(text_id).unwrap() {
+        Annotation::TextNote { text, position } => {
+            assert_eq!(text, "new");
+            assert_eq!(*position, ImagePoint::new(9.0, 9.0));
+        }
+        _ => panic!("wrong kind"),
+    }
+    match d.annotation(callout_id).unwrap() {
+        Annotation::NumberCallout { tip, bubble, .. } => {
+            assert_eq!(*tip, ImagePoint::new(7.0, 7.0));
+            assert_eq!(*bubble, ImagePoint::new(8.0, 8.0));
+        }
+        _ => panic!("wrong kind"),
+    }
 }
 ```
 
@@ -378,6 +473,23 @@ Add these methods inside `impl ImageDocument` (next to the other mutation method
     /// op is invalid the whole batch is rolled back — no mutation, no commit,
     /// no `state_id` change. Update*/Delete reference annotations existing
     /// before the batch. An empty batch is a no-op with no history entry.
+    ///
+    /// ```text
+    /// ops.is_empty()? --yes--> Ok(BatchOutcome::default)   (no snapshot/commit)
+    ///        | no
+    ///        v
+    ///   snapshot(before) once
+    ///        v
+    ///   for op in ops: apply_one(op)
+    ///        |                       \
+    ///     all Ok                    first Err(e)
+    ///        v                            v
+    ///   (callout deleted? renumber)  restore(before)   (no commit; state_id unchanged)
+    ///        v                            v
+    ///   commit(before) once            Err(e)
+    ///        v
+    ///   Ok(BatchOutcome { added_ids })
+    /// ```
     pub fn apply_batch(&mut self, ops: Vec<EditOp>) -> Result<BatchOutcome, EditError> {
         if ops.is_empty() {
             return Ok(BatchOutcome::default());
@@ -500,7 +612,7 @@ Add these methods inside `impl ImageDocument` (next to the other mutation method
     }
 ```
 
-Atomicity note: `apply_one` validates each op before mutating for that op; if a later op fails, `restore(before)` rolls back any earlier ops' mutations. `next_id` advances for any allocated ids even on rollback — acceptable, ids are monotonic and never reused.
+Atomicity note: `apply_one` validates each op before mutating for that op; if a later op fails, `restore(before)` rolls back any earlier ops' mutations. `next_number` is captured in the snapshot, so `restore()` rolls it back correctly. Only `next_id` advances for any allocated ids even on rollback — acceptable, ids are monotonic and never reused (matches the existing id-stability invariant).
 
 - [ ] **Step 4: Run tests — verify pass**
 
@@ -545,7 +657,12 @@ rust-version.workspace = true
 rollshot-image-document = { path = "../rollshot-image-document", features = ["serde"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true
 ```
+
+(`[lints] workspace = true` matches every other workspace crate — it opts the new crate into the workspace lint policy, incl. `unsafe_code = "forbid"`; without it the Task 5 `cargo clippy --workspace` gate would silently skip it.)
 
 - [ ] **Step 2: Register the crate in the workspace**
 
@@ -603,6 +720,47 @@ mod tests {
         assert_eq!(back.id, proposal.id);
         assert_eq!(back.candidates.len(), 1);
     }
+
+    #[test]
+    fn confidence_summary_empty_slice_is_zeros() {
+        let s = ConfidenceSummary::from_confidences(&[]);
+        assert_eq!(s, ConfidenceSummary { min: 0.0, max: 0.0, mean: 0.0, count: 0 });
+    }
+
+    #[test]
+    fn proposed_edit_lowers_remaining_variants() {
+        use rollshot_image_document::AnnotationId;
+        let p = ImagePoint::new(1.0, 2.0);
+        let r = ImageRect::from_corners(ImagePoint::new(0.0, 0.0), ImagePoint::new(8.0, 8.0));
+        assert_eq!(
+            ProposedEdit::AddTextNote { position: p, text: "x".into() }.to_edit_op(),
+            EditOp::AddTextNote { position: p, text: "x".into() }
+        );
+        assert_eq!(
+            ProposedEdit::AddNumberCallout { tip: p, bubble: p }.to_edit_op(),
+            EditOp::AddNumberCallout { tip: p, bubble: p }
+        );
+        assert_eq!(
+            ProposedEdit::UpdateRedactionBounds { id: AnnotationId(1), bounds: r }.to_edit_op(),
+            EditOp::UpdateRedactionBounds { id: AnnotationId(1), bounds: r }
+        );
+        assert_eq!(
+            ProposedEdit::UpdateTextPosition { id: AnnotationId(2), position: p }.to_edit_op(),
+            EditOp::UpdateTextPosition { id: AnnotationId(2), position: p }
+        );
+        assert_eq!(
+            ProposedEdit::UpdateText { id: AnnotationId(3), text: "y".into() }.to_edit_op(),
+            EditOp::UpdateText { id: AnnotationId(3), text: "y".into() }
+        );
+        assert_eq!(
+            ProposedEdit::UpdateNumberPoints { id: AnnotationId(4), tip: p, bubble: p }.to_edit_op(),
+            EditOp::UpdateNumberPoints { id: AnnotationId(4), tip: p, bubble: p }
+        );
+        assert_eq!(
+            ProposedEdit::Delete { id: AnnotationId(5) }.to_edit_op(),
+            EditOp::Delete { id: AnnotationId(5) }
+        );
+    }
 }
 ```
 
@@ -616,7 +774,7 @@ serde_json = { workspace = true }
 - [ ] **Step 4: Run the test — verify it fails**
 
 Run: `rtk cargo test -p rollshot-edit-proposal`
-Expected: FAIL to compile — types not found.
+Expected: FAIL to compile — `ProposedEdit`/`ConfidenceSummary`/`EditProposal`/`ProposedCandidate`/`Provenance`/`ProvenanceSource`/`CandidateId`/`ProposalId` not found in scope (the test module references types not yet defined in `proposal.rs`; they are prepended in Step 5).
 
 - [ ] **Step 5: Implement the proposal types**
 
@@ -848,6 +1006,37 @@ mod tests {
         let ops = lower(&p, &decision);
         assert_eq!(ops, vec![EditOp::AddRedaction { bounds: rect(30.0, 30.0, 9.0, 9.0) }]);
     }
+
+    #[test]
+    fn lower_skips_unknown_accepted_and_unaccepted_modified() {
+        let p = proposal(vec![candidate(1, ProposedEdit::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) })]);
+        let decision = ReviewDecision {
+            proposal_id: ProposalId(1),
+            accepted: vec![CandidateId(1), CandidateId(99)], // 99 absent from proposal -> skipped
+            rejected: vec![],
+            modified: vec![(CandidateId(2), ProposedEdit::AddRedaction { bounds: rect(9.0, 9.0, 1.0, 1.0) })], // id not accepted -> ignored
+            resulting_document_state_id: 0,
+        };
+        assert_eq!(lower(&p, &decision), vec![EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) }]);
+    }
+
+    #[test]
+    fn review_decision_serde_round_trip() {
+        use rollshot_image_document::AnnotationId;
+        let decision = ReviewDecision {
+            proposal_id: ProposalId(3),
+            accepted: vec![CandidateId(1), CandidateId(2)],
+            rejected: vec![CandidateId(9)],
+            modified: vec![(
+                CandidateId(2),
+                ProposedEdit::UpdateRedactionBounds { id: AnnotationId(7), bounds: rect(1.0, 1.0, 4.0, 4.0) },
+            )],
+            resulting_document_state_id: 11,
+        };
+        let json = serde_json::to_string(&decision).unwrap();
+        let back: ReviewDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, decision);
+    }
 }
 ```
 
@@ -1017,6 +1206,14 @@ Prepend to `crates/rollshot-edit-proposal/src/policy.rs`:
 //! Product-policy validation for a proposed candidate set (spec §9.4 limits).
 //! Geometric per-op validity (zero-area, non-finite, kind) is the document
 //! layer's job; this layer enforces count / total-area / out-of-bounds policy.
+//!
+//! Area accounting is a deliberate CONSERVATIVE upper bound: each redaction's
+//! raw (un-clamped) width*height is summed independently, so overlapping
+//! candidates are double-counted and off-image extent is included, and the
+//! resulting fraction may exceed 1.0. This never under-reports coverage (the
+//! safe direction for a redaction limit); it is NOT the exact painted-pixel
+//! fraction. Geometric clamping / zero-area rejection stays the document
+//! layer's job (see the §6 validation split).
 
 use rollshot_image_document::ImageRect;
 use serde::{Deserialize, Serialize};
@@ -1138,9 +1335,9 @@ rtk git commit -m "feat(edit-proposal): validate_policy (count/area/out-of-bound
 - §4.3 `EditError::NonFiniteCoordinate` → Task 1 Step 5.
 - §5 `rollshot-edit-proposal` types (`EditProposal`/`ProposedCandidate`/`ProposedEdit`/`Provenance`/`ConfidenceSummary`) → Task 3.
 - §5.1 `lower()` → Task 4. §5.2 `validate_policy`/`PolicyLimits`/`PolicyError` → Task 5.
-- §6 validation split (geometry in document `EditError`; count/area/out-of-bounds in proposal `validate_policy`) → Tasks 2 + 5.
+- §6 validation split (geometry in document `EditError`; count/area/out-of-bounds in proposal `validate_policy`) → Tasks 2 + 5. The area limit is a deliberate conservative raw/overlap-inclusive upper bound (documented on `validate_policy`), not the exact painted-pixel fraction.
 - §8 decisions (crate split, full CRUD, atomic, pre-batch ids, clamp-at-document, one-undo-via-single-commit) → reflected throughout.
-- §9 tests (one-undo-entry, atomicity, CRUD, renumber-on-delete, added_ids, empty batch, non-finite; lower accepted/modified/rejected/order; policy count/area/bounds; ConfidenceSummary; serde round-trip) → covered across Tasks 1–5.
+- §9 tests → covered across Tasks 1–5, incl. (post eng-review) the previously-missing cases: one-undo restores `next_number` + `state_id` (exactly one commit); `added_ids` order on a mixed Add* batch; EmptyText atomicity in a batch (`AddTextNote` + `UpdateText`); the `AddNumberCallout`/`UpdateText`/`UpdateTextPosition`/`UpdateNumberPoints` batch paths; `ConfidenceSummary` empty-slice; all seven non-`AddRedaction` `to_edit_op` arms; `lower` infallible-projection contract (unknown accepted / unaccepted modified skipped); and `ReviewDecision` serde round-trip (exercises `AnnotationId` serde).
 - §2.2 out-of-scope (UI/agent/persistence/app-wiring) → not implemented here. Correct.
 
 **Placeholder scan:** every code step has complete code; commands have expected output. `ImagePoint`/`ImageRect` field visibility was verified `pub` in `geometry.rs`, so no verify-and-adjust hedges remain. The one remaining judgement call — whether `mod`/`pub use` lines land beside existing ones in `lib.rs` — is a placement instruction, not a placeholder.
