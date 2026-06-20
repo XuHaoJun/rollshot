@@ -43,7 +43,10 @@ pub struct ImageRect {
 
 impl ImageRect {
     pub fn is_finite(&self) -> bool {
-        self.x.is_finite() && self.y.is_finite() && self.width.is_finite() && self.height.is_finite()
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
     }
 
     /// Normalized rect spanning two corners (handles inverted drags).

@@ -5121,6 +5121,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rollshot-edit-proposal"
+version = "0.1.0"
+dependencies = [
+ "rollshot-image-document",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "rollshot-iced-overlay"
 version = "0.1.0"
 dependencies = [
@@ -5147,6 +5157,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "image",
+ "serde",
  "thiserror 1.0.69",
 ]
 

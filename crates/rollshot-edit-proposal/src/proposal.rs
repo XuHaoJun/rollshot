@@ -34,7 +34,12 @@ impl ConfidenceSummary {
     /// Aggregate a candidate set's confidences. An empty slice yields zeros.
     pub fn from_confidences(values: &[f32]) -> Self {
         if values.is_empty() {
-            return Self { min: 0.0, max: 0.0, mean: 0.0, count: 0 };
+            return Self {
+                min: 0.0,
+                max: 0.0,
+                mean: 0.0,
+                count: 0,
+            };
         }
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
@@ -44,7 +49,12 @@ impl ConfidenceSummary {
             max = max.max(v);
             sum += v;
         }
-        Self { min, max, mean: sum / values.len() as f32, count: values.len() as u32 }
+        Self {
+            min,
+            max,
+            mean: sum / values.len() as f32,
+            count: values.len() as u32,
+        }
     }
 }
 
@@ -52,14 +62,37 @@ impl ConfidenceSummary {
 /// produces `AddRedaction`. Lowers to `EditOp` via `to_edit_op`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEdit {
-    AddRedaction { bounds: ImageRect },
-    AddTextNote { position: ImagePoint, text: String },
-    AddNumberCallout { tip: ImagePoint, bubble: ImagePoint },
-    UpdateRedactionBounds { id: AnnotationId, bounds: ImageRect },
-    UpdateTextPosition { id: AnnotationId, position: ImagePoint },
-    UpdateText { id: AnnotationId, text: String },
-    UpdateNumberPoints { id: AnnotationId, tip: ImagePoint, bubble: ImagePoint },
-    Delete { id: AnnotationId },
+    AddRedaction {
+        bounds: ImageRect,
+    },
+    AddTextNote {
+        position: ImagePoint,
+        text: String,
+    },
+    AddNumberCallout {
+        tip: ImagePoint,
+        bubble: ImagePoint,
+    },
+    UpdateRedactionBounds {
+        id: AnnotationId,
+        bounds: ImageRect,
+    },
+    UpdateTextPosition {
+        id: AnnotationId,
+        position: ImagePoint,
+    },
+    UpdateText {
+        id: AnnotationId,
+        text: String,
+    },
+    UpdateNumberPoints {
+        id: AnnotationId,
+        tip: ImagePoint,
+        bubble: ImagePoint,
+    },
+    Delete {
+        id: AnnotationId,
+    },
 }
 
 impl ProposedEdit {
@@ -67,24 +100,31 @@ impl ProposedEdit {
     pub fn to_edit_op(&self) -> EditOp {
         match self {
             ProposedEdit::AddRedaction { bounds } => EditOp::AddRedaction { bounds: *bounds },
-            ProposedEdit::AddTextNote { position, text } => {
-                EditOp::AddTextNote { position: *position, text: text.clone() }
-            }
-            ProposedEdit::AddNumberCallout { tip, bubble } => {
-                EditOp::AddNumberCallout { tip: *tip, bubble: *bubble }
-            }
-            ProposedEdit::UpdateRedactionBounds { id, bounds } => {
-                EditOp::UpdateRedactionBounds { id: *id, bounds: *bounds }
-            }
-            ProposedEdit::UpdateTextPosition { id, position } => {
-                EditOp::UpdateTextPosition { id: *id, position: *position }
-            }
-            ProposedEdit::UpdateText { id, text } => {
-                EditOp::UpdateText { id: *id, text: text.clone() }
-            }
-            ProposedEdit::UpdateNumberPoints { id, tip, bubble } => {
-                EditOp::UpdateNumberPoints { id: *id, tip: *tip, bubble: *bubble }
-            }
+            ProposedEdit::AddTextNote { position, text } => EditOp::AddTextNote {
+                position: *position,
+                text: text.clone(),
+            },
+            ProposedEdit::AddNumberCallout { tip, bubble } => EditOp::AddNumberCallout {
+                tip: *tip,
+                bubble: *bubble,
+            },
+            ProposedEdit::UpdateRedactionBounds { id, bounds } => EditOp::UpdateRedactionBounds {
+                id: *id,
+                bounds: *bounds,
+            },
+            ProposedEdit::UpdateTextPosition { id, position } => EditOp::UpdateTextPosition {
+                id: *id,
+                position: *position,
+            },
+            ProposedEdit::UpdateText { id, text } => EditOp::UpdateText {
+                id: *id,
+                text: text.clone(),
+            },
+            ProposedEdit::UpdateNumberPoints { id, tip, bubble } => EditOp::UpdateNumberPoints {
+                id: *id,
+                tip: *tip,
+                bubble: *bubble,
+            },
             ProposedEdit::Delete { id } => EditOp::Delete { id: *id },
         }
     }
@@ -143,11 +183,15 @@ mod tests {
                 edit: ProposedEdit::AddRedaction { bounds: r },
                 confidence: 0.9,
                 rationale: Some("matches email pattern".into()),
-                provenance: Provenance { source: ProvenanceSource::Agent { run_id: 42 } },
+                provenance: Provenance {
+                    source: ProvenanceSource::Agent { run_id: 42 },
+                },
             }],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 42 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 42 },
+            },
         };
         let json = serde_json::to_string(&proposal).unwrap();
         let back: EditProposal = serde_json::from_str(&json).unwrap();
@@ -158,7 +202,15 @@ mod tests {
     #[test]
     fn confidence_summary_empty_slice_is_zeros() {
         let s = ConfidenceSummary::from_confidences(&[]);
-        assert_eq!(s, ConfidenceSummary { min: 0.0, max: 0.0, mean: 0.0, count: 0 });
+        assert_eq!(
+            s,
+            ConfidenceSummary {
+                min: 0.0,
+                max: 0.0,
+                mean: 0.0,
+                count: 0
+            }
+        );
     }
 
     #[test]
@@ -167,32 +219,74 @@ mod tests {
         let p = ImagePoint::new(1.0, 2.0);
         let r = ImageRect::from_corners(ImagePoint::new(0.0, 0.0), ImagePoint::new(8.0, 8.0));
         assert_eq!(
-            ProposedEdit::AddTextNote { position: p, text: "x".into() }.to_edit_op(),
-            EditOp::AddTextNote { position: p, text: "x".into() }
+            ProposedEdit::AddTextNote {
+                position: p,
+                text: "x".into()
+            }
+            .to_edit_op(),
+            EditOp::AddTextNote {
+                position: p,
+                text: "x".into()
+            }
         );
         assert_eq!(
             ProposedEdit::AddNumberCallout { tip: p, bubble: p }.to_edit_op(),
             EditOp::AddNumberCallout { tip: p, bubble: p }
         );
         assert_eq!(
-            ProposedEdit::UpdateRedactionBounds { id: AnnotationId(1), bounds: r }.to_edit_op(),
-            EditOp::UpdateRedactionBounds { id: AnnotationId(1), bounds: r }
+            ProposedEdit::UpdateRedactionBounds {
+                id: AnnotationId(1),
+                bounds: r
+            }
+            .to_edit_op(),
+            EditOp::UpdateRedactionBounds {
+                id: AnnotationId(1),
+                bounds: r
+            }
         );
         assert_eq!(
-            ProposedEdit::UpdateTextPosition { id: AnnotationId(2), position: p }.to_edit_op(),
-            EditOp::UpdateTextPosition { id: AnnotationId(2), position: p }
+            ProposedEdit::UpdateTextPosition {
+                id: AnnotationId(2),
+                position: p
+            }
+            .to_edit_op(),
+            EditOp::UpdateTextPosition {
+                id: AnnotationId(2),
+                position: p
+            }
         );
         assert_eq!(
-            ProposedEdit::UpdateText { id: AnnotationId(3), text: "y".into() }.to_edit_op(),
-            EditOp::UpdateText { id: AnnotationId(3), text: "y".into() }
+            ProposedEdit::UpdateText {
+                id: AnnotationId(3),
+                text: "y".into()
+            }
+            .to_edit_op(),
+            EditOp::UpdateText {
+                id: AnnotationId(3),
+                text: "y".into()
+            }
         );
         assert_eq!(
-            ProposedEdit::UpdateNumberPoints { id: AnnotationId(4), tip: p, bubble: p }.to_edit_op(),
-            EditOp::UpdateNumberPoints { id: AnnotationId(4), tip: p, bubble: p }
+            ProposedEdit::UpdateNumberPoints {
+                id: AnnotationId(4),
+                tip: p,
+                bubble: p
+            }
+            .to_edit_op(),
+            EditOp::UpdateNumberPoints {
+                id: AnnotationId(4),
+                tip: p,
+                bubble: p
+            }
         );
         assert_eq!(
-            ProposedEdit::Delete { id: AnnotationId(5) }.to_edit_op(),
-            EditOp::Delete { id: AnnotationId(5) }
+            ProposedEdit::Delete {
+                id: AnnotationId(5)
+            }
+            .to_edit_op(),
+            EditOp::Delete {
+                id: AnnotationId(5)
+            }
         );
     }
 }

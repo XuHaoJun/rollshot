@@ -15,11 +15,19 @@ use crate::navigator::NavigatorItem;
 pub const HISTORY_LIMIT: usize = 100;
 
 fn ensure_point_finite(p: &ImagePoint) -> Result<(), EditError> {
-    if p.is_finite() { Ok(()) } else { Err(EditError::NonFiniteCoordinate) }
+    if p.is_finite() {
+        Ok(())
+    } else {
+        Err(EditError::NonFiniteCoordinate)
+    }
 }
 
 fn ensure_rect_finite(r: &ImageRect) -> Result<(), EditError> {
-    if r.is_finite() { Ok(()) } else { Err(EditError::NonFiniteCoordinate) }
+    if r.is_finite() {
+        Ok(())
+    } else {
+        Err(EditError::NonFiniteCoordinate)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -393,7 +401,10 @@ impl ImageDocument {
                     return Err(EditError::ZeroArea);
                 }
                 let id = self.allocate_id();
-                self.annotations.push(Annotation::OpaqueRedaction { id, bounds: clamped });
+                self.annotations.push(Annotation::OpaqueRedaction {
+                    id,
+                    bounds: clamped,
+                });
                 added_ids.push(id);
             }
             EditOp::AddTextNote { position, text } => {
@@ -402,7 +413,11 @@ impl ImageDocument {
                     return Err(EditError::EmptyText);
                 }
                 let id = self.allocate_id();
-                self.annotations.push(Annotation::TextNote { id, position: position.clamp_to(w, h), text });
+                self.annotations.push(Annotation::TextNote {
+                    id,
+                    position: position.clamp_to(w, h),
+                    text,
+                });
                 added_ids.push(id);
             }
             EditOp::AddNumberCallout { tip, bubble } => {
@@ -454,7 +469,9 @@ impl ImageDocument {
                 ensure_point_finite(&bubble)?;
                 let index = self.annotation_index(id)?;
                 match &mut self.annotations[index] {
-                    Annotation::NumberCallout { tip: t, bubble: b, .. } => {
+                    Annotation::NumberCallout {
+                        tip: t, bubble: b, ..
+                    } => {
                         *t = tip.clamp_to(w, h);
                         *b = bubble.clamp_to(w, h);
                     }
@@ -829,7 +846,9 @@ mod tests {
         };
         let b = a.clone();
         assert_eq!(a, b);
-        let outcome = BatchOutcome { added_ids: vec![AnnotationId(1)] };
+        let outcome = BatchOutcome {
+            added_ids: vec![AnnotationId(1)],
+        };
         assert_eq!(outcome.added_ids, vec![AnnotationId(1)]);
     }
 
@@ -847,7 +866,12 @@ mod tests {
         assert!(!ImagePoint::new(f32::NAN, 2.0).is_finite());
         let good = ImageRect::from_corners(ImagePoint::new(0.0, 0.0), ImagePoint::new(4.0, 4.0));
         assert!(good.is_finite());
-        let bad = ImageRect { x: 0.0, y: 0.0, width: f32::INFINITY, height: 4.0 };
+        let bad = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: f32::INFINITY,
+            height: 4.0,
+        };
         assert!(!bad.is_finite());
     }
 
@@ -881,14 +905,24 @@ mod tests {
         let s_before = d.state_id();
         let out = d
             .apply_batch(vec![
-                EditOp::AddRedaction { bounds: rect(0.0, 0.0, 10.0, 10.0) },
-                EditOp::AddRedaction { bounds: rect(20.0, 20.0, 10.0, 10.0) },
-                EditOp::AddRedaction { bounds: rect(40.0, 40.0, 10.0, 10.0) },
+                EditOp::AddRedaction {
+                    bounds: rect(0.0, 0.0, 10.0, 10.0),
+                },
+                EditOp::AddRedaction {
+                    bounds: rect(20.0, 20.0, 10.0, 10.0),
+                },
+                EditOp::AddRedaction {
+                    bounds: rect(40.0, 40.0, 10.0, 10.0),
+                },
             ])
             .expect("valid batch");
         assert_eq!(out.added_ids.len(), 3);
         assert_eq!(d.annotations().len(), 3);
-        assert_eq!(d.state_id(), s_before + 1, "exactly one commit for the whole batch");
+        assert_eq!(
+            d.state_id(),
+            s_before + 1,
+            "exactly one commit for the whole batch"
+        );
         // ONE undo restores the EXACT pre-batch state (annotations + next_number + state_id).
         assert!(d.undo());
         assert_eq!(d.annotations().len(), 0);
@@ -903,8 +937,12 @@ mod tests {
         let state_before = d.state_id();
         let err = d
             .apply_batch(vec![
-                EditOp::AddRedaction { bounds: rect(0.0, 0.0, 10.0, 10.0) },
-                EditOp::AddRedaction { bounds: rect(0.0, 0.0, 0.0, 0.0) }, // zero area -> reject whole batch
+                EditOp::AddRedaction {
+                    bounds: rect(0.0, 0.0, 10.0, 10.0),
+                },
+                EditOp::AddRedaction {
+                    bounds: rect(0.0, 0.0, 0.0, 0.0),
+                }, // zero area -> reject whole batch
             ])
             .unwrap_err();
         assert_eq!(err, EditError::ZeroArea);
@@ -918,7 +956,12 @@ mod tests {
         let mut d = test_doc();
         let err = d
             .apply_batch(vec![EditOp::AddRedaction {
-                bounds: ImageRect { x: f32::NAN, y: 0.0, width: 5.0, height: 5.0 },
+                bounds: ImageRect {
+                    x: f32::NAN,
+                    y: 0.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
             }])
             .unwrap_err();
         assert_eq!(err, EditError::NonFiniteCoordinate);
@@ -940,9 +983,17 @@ mod tests {
         // Seed two callouts (numbers 1, 2) and one redaction via the batch path.
         let seed = d
             .apply_batch(vec![
-                EditOp::AddNumberCallout { tip: ImagePoint::new(1.0, 1.0), bubble: ImagePoint::new(2.0, 2.0) },
-                EditOp::AddNumberCallout { tip: ImagePoint::new(3.0, 3.0), bubble: ImagePoint::new(4.0, 4.0) },
-                EditOp::AddRedaction { bounds: rect(5.0, 5.0, 5.0, 5.0) },
+                EditOp::AddNumberCallout {
+                    tip: ImagePoint::new(1.0, 1.0),
+                    bubble: ImagePoint::new(2.0, 2.0),
+                },
+                EditOp::AddNumberCallout {
+                    tip: ImagePoint::new(3.0, 3.0),
+                    bubble: ImagePoint::new(4.0, 4.0),
+                },
+                EditOp::AddRedaction {
+                    bounds: rect(5.0, 5.0, 5.0, 5.0),
+                },
             ])
             .expect("seed");
         let callout1 = seed.added_ids[0];
@@ -950,7 +1001,10 @@ mod tests {
         // Batch: delete callout #1 (forces renumber) + move the redaction. One entry.
         d.apply_batch(vec![
             EditOp::Delete { id: callout1 },
-            EditOp::UpdateRedactionBounds { id: red, bounds: rect(50.0, 50.0, 8.0, 8.0) },
+            EditOp::UpdateRedactionBounds {
+                id: red,
+                bounds: rect(50.0, 50.0, 8.0, 8.0),
+            },
         ])
         .expect("crud batch");
         // Remaining callout renumbered to 1.
@@ -962,7 +1016,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(remaining_numbers, vec![1], "exactly one callout, renumbered to 1");
+        assert_eq!(
+            remaining_numbers,
+            vec![1],
+            "exactly one callout, renumbered to 1"
+        );
         // One undo reverts BOTH the delete and the update.
         assert!(d.undo());
         assert_eq!(d.annotations().len(), 3);
@@ -972,7 +1030,9 @@ mod tests {
     fn apply_batch_unknown_id_rejected() {
         let mut d = test_doc();
         let err = d
-            .apply_batch(vec![EditOp::Delete { id: AnnotationId(999) }])
+            .apply_batch(vec![EditOp::Delete {
+                id: AnnotationId(999),
+            }])
             .unwrap_err();
         assert_eq!(err, EditError::UnknownAnnotation);
     }
@@ -982,7 +1042,10 @@ mod tests {
         let mut d = test_doc();
         let id = d.add_redaction(rect(0.0, 0.0, 5.0, 5.0)).unwrap();
         let err = d
-            .apply_batch(vec![EditOp::UpdateText { id, text: "x".into() }])
+            .apply_batch(vec![EditOp::UpdateText {
+                id,
+                text: "x".into(),
+            }])
             .unwrap_err();
         assert_eq!(err, EditError::WrongKind);
         assert_eq!(d.annotations().len(), 1, "no mutation on reject");
@@ -993,13 +1056,24 @@ mod tests {
         let mut d = test_doc();
         let out = d
             .apply_batch(vec![
-                EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) },
-                EditOp::AddTextNote { position: ImagePoint::new(2.0, 2.0), text: "a".into() },
-                EditOp::AddNumberCallout { tip: ImagePoint::new(3.0, 3.0), bubble: ImagePoint::new(4.0, 4.0) },
+                EditOp::AddRedaction {
+                    bounds: rect(0.0, 0.0, 5.0, 5.0),
+                },
+                EditOp::AddTextNote {
+                    position: ImagePoint::new(2.0, 2.0),
+                    text: "a".into(),
+                },
+                EditOp::AddNumberCallout {
+                    tip: ImagePoint::new(3.0, 3.0),
+                    bubble: ImagePoint::new(4.0, 4.0),
+                },
             ])
             .expect("valid mixed adds");
         let live: Vec<_> = d.annotations().iter().map(|a| a.id()).collect();
-        assert_eq!(out.added_ids, live, "added_ids match created annotations in op order");
+        assert_eq!(
+            out.added_ids, live,
+            "added_ids match created annotations in op order"
+        );
         assert!(out.added_ids[0] < out.added_ids[1] && out.added_ids[1] < out.added_ids[2]);
     }
 
@@ -1008,8 +1082,13 @@ mod tests {
         let mut d = test_doc();
         let err = d
             .apply_batch(vec![
-                EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) },
-                EditOp::AddTextNote { position: ImagePoint::new(1.0, 1.0), text: "   ".into() },
+                EditOp::AddRedaction {
+                    bounds: rect(0.0, 0.0, 5.0, 5.0),
+                },
+                EditOp::AddTextNote {
+                    position: ImagePoint::new(1.0, 1.0),
+                    text: "   ".into(),
+                },
             ])
             .unwrap_err();
         assert_eq!(err, EditError::EmptyText);
@@ -1020,8 +1099,15 @@ mod tests {
     #[test]
     fn apply_batch_update_text_empty_rejected() {
         let mut d = test_doc();
-        let id = d.add_text_note(ImagePoint::new(2.0, 2.0), "orig".into()).unwrap();
-        let err = d.apply_batch(vec![EditOp::UpdateText { id, text: "  ".into() }]).unwrap_err();
+        let id = d
+            .add_text_note(ImagePoint::new(2.0, 2.0), "orig".into())
+            .unwrap();
+        let err = d
+            .apply_batch(vec![EditOp::UpdateText {
+                id,
+                text: "  ".into(),
+            }])
+            .unwrap_err();
         assert_eq!(err, EditError::EmptyText);
         match d.annotation(id).unwrap() {
             Annotation::TextNote { text, .. } => assert_eq!(text, "orig"),
@@ -1047,16 +1133,32 @@ mod tests {
         let mut d = test_doc();
         let seed = d
             .apply_batch(vec![
-                EditOp::AddTextNote { position: ImagePoint::new(5.0, 5.0), text: "old".into() },
-                EditOp::AddNumberCallout { tip: ImagePoint::new(1.0, 1.0), bubble: ImagePoint::new(2.0, 2.0) },
+                EditOp::AddTextNote {
+                    position: ImagePoint::new(5.0, 5.0),
+                    text: "old".into(),
+                },
+                EditOp::AddNumberCallout {
+                    tip: ImagePoint::new(1.0, 1.0),
+                    bubble: ImagePoint::new(2.0, 2.0),
+                },
             ])
             .expect("seed");
         let text_id = seed.added_ids[0];
         let callout_id = seed.added_ids[1];
         d.apply_batch(vec![
-            EditOp::UpdateText { id: text_id, text: "new".into() },
-            EditOp::UpdateTextPosition { id: text_id, position: ImagePoint::new(9.0, 9.0) },
-            EditOp::UpdateNumberPoints { id: callout_id, tip: ImagePoint::new(7.0, 7.0), bubble: ImagePoint::new(8.0, 8.0) },
+            EditOp::UpdateText {
+                id: text_id,
+                text: "new".into(),
+            },
+            EditOp::UpdateTextPosition {
+                id: text_id,
+                position: ImagePoint::new(9.0, 9.0),
+            },
+            EditOp::UpdateNumberPoints {
+                id: callout_id,
+                tip: ImagePoint::new(7.0, 7.0),
+                bubble: ImagePoint::new(8.0, 8.0),
+            },
         ])
         .expect("updates");
         match d.annotation(text_id).unwrap() {

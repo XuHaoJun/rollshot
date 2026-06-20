@@ -8,14 +8,37 @@ use crate::geometry::{ImagePoint, ImageRect};
 /// annotations that exist BEFORE the batch is applied.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditOp {
-    AddRedaction { bounds: ImageRect },
-    AddTextNote { position: ImagePoint, text: String },
-    AddNumberCallout { tip: ImagePoint, bubble: ImagePoint },
-    UpdateRedactionBounds { id: AnnotationId, bounds: ImageRect },
-    UpdateTextPosition { id: AnnotationId, position: ImagePoint },
-    UpdateText { id: AnnotationId, text: String },
-    UpdateNumberPoints { id: AnnotationId, tip: ImagePoint, bubble: ImagePoint },
-    Delete { id: AnnotationId },
+    AddRedaction {
+        bounds: ImageRect,
+    },
+    AddTextNote {
+        position: ImagePoint,
+        text: String,
+    },
+    AddNumberCallout {
+        tip: ImagePoint,
+        bubble: ImagePoint,
+    },
+    UpdateRedactionBounds {
+        id: AnnotationId,
+        bounds: ImageRect,
+    },
+    UpdateTextPosition {
+        id: AnnotationId,
+        position: ImagePoint,
+    },
+    UpdateText {
+        id: AnnotationId,
+        text: String,
+    },
+    UpdateNumberPoints {
+        id: AnnotationId,
+        tip: ImagePoint,
+        bubble: ImagePoint,
+    },
+    Delete {
+        id: AnnotationId,
+    },
 }
 
 /// Result of a successful `apply_batch`: ids allocated for the Add* ops, in the

@@ -40,7 +40,10 @@ pub fn lower(proposal: &EditProposal, decision: &ReviewDecision) -> Vec<EditOp> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CandidateId, ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate, ProposedEdit, Provenance, ProvenanceSource};
+    use crate::{
+        CandidateId, ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate, ProposedEdit,
+        Provenance, ProvenanceSource,
+    };
     use rollshot_image_document::{EditOp, ImagePoint, ImageRect};
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> ImageRect {
@@ -52,7 +55,9 @@ mod tests {
             edit,
             confidence: 0.9,
             rationale: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 1 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 1 },
+            },
         }
     }
     fn proposal(cands: Vec<ProposedCandidate>) -> EditProposal {
@@ -62,16 +67,33 @@ mod tests {
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 1 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 1 },
+            },
         }
     }
 
     #[test]
     fn lower_includes_accepted_drops_rejected_preserves_order() {
         let p = proposal(vec![
-            candidate(1, ProposedEdit::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) }),
-            candidate(2, ProposedEdit::AddRedaction { bounds: rect(10.0, 10.0, 5.0, 5.0) }),
-            candidate(3, ProposedEdit::AddRedaction { bounds: rect(20.0, 20.0, 5.0, 5.0) }),
+            candidate(
+                1,
+                ProposedEdit::AddRedaction {
+                    bounds: rect(0.0, 0.0, 5.0, 5.0),
+                },
+            ),
+            candidate(
+                2,
+                ProposedEdit::AddRedaction {
+                    bounds: rect(10.0, 10.0, 5.0, 5.0),
+                },
+            ),
+            candidate(
+                3,
+                ProposedEdit::AddRedaction {
+                    bounds: rect(20.0, 20.0, 5.0, 5.0),
+                },
+            ),
         ]);
         let decision = ReviewDecision {
             proposal_id: ProposalId(1),
@@ -84,37 +106,71 @@ mod tests {
         assert_eq!(
             ops,
             vec![
-                EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) },
-                EditOp::AddRedaction { bounds: rect(20.0, 20.0, 5.0, 5.0) },
+                EditOp::AddRedaction {
+                    bounds: rect(0.0, 0.0, 5.0, 5.0)
+                },
+                EditOp::AddRedaction {
+                    bounds: rect(20.0, 20.0, 5.0, 5.0)
+                },
             ]
         );
     }
 
     #[test]
     fn lower_applies_modified_override() {
-        let p = proposal(vec![candidate(1, ProposedEdit::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) })]);
+        let p = proposal(vec![candidate(
+            1,
+            ProposedEdit::AddRedaction {
+                bounds: rect(0.0, 0.0, 5.0, 5.0),
+            },
+        )]);
         let decision = ReviewDecision {
             proposal_id: ProposalId(1),
             accepted: vec![CandidateId(1)],
             rejected: vec![],
-            modified: vec![(CandidateId(1), ProposedEdit::AddRedaction { bounds: rect(30.0, 30.0, 9.0, 9.0) })],
+            modified: vec![(
+                CandidateId(1),
+                ProposedEdit::AddRedaction {
+                    bounds: rect(30.0, 30.0, 9.0, 9.0),
+                },
+            )],
             resulting_document_state_id: 0,
         };
         let ops = lower(&p, &decision);
-        assert_eq!(ops, vec![EditOp::AddRedaction { bounds: rect(30.0, 30.0, 9.0, 9.0) }]);
+        assert_eq!(
+            ops,
+            vec![EditOp::AddRedaction {
+                bounds: rect(30.0, 30.0, 9.0, 9.0)
+            }]
+        );
     }
 
     #[test]
     fn lower_skips_unknown_accepted_and_unaccepted_modified() {
-        let p = proposal(vec![candidate(1, ProposedEdit::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) })]);
+        let p = proposal(vec![candidate(
+            1,
+            ProposedEdit::AddRedaction {
+                bounds: rect(0.0, 0.0, 5.0, 5.0),
+            },
+        )]);
         let decision = ReviewDecision {
             proposal_id: ProposalId(1),
             accepted: vec![CandidateId(1), CandidateId(99)], // 99 absent from proposal -> skipped
             rejected: vec![],
-            modified: vec![(CandidateId(2), ProposedEdit::AddRedaction { bounds: rect(9.0, 9.0, 1.0, 1.0) })], // id not accepted -> ignored
+            modified: vec![(
+                CandidateId(2),
+                ProposedEdit::AddRedaction {
+                    bounds: rect(9.0, 9.0, 1.0, 1.0),
+                },
+            )], // id not accepted -> ignored
             resulting_document_state_id: 0,
         };
-        assert_eq!(lower(&p, &decision), vec![EditOp::AddRedaction { bounds: rect(0.0, 0.0, 5.0, 5.0) }]);
+        assert_eq!(
+            lower(&p, &decision),
+            vec![EditOp::AddRedaction {
+                bounds: rect(0.0, 0.0, 5.0, 5.0)
+            }]
+        );
     }
 
     #[test]
@@ -126,7 +182,10 @@ mod tests {
             rejected: vec![CandidateId(9)],
             modified: vec![(
                 CandidateId(2),
-                ProposedEdit::UpdateRedactionBounds { id: AnnotationId(7), bounds: rect(1.0, 1.0, 4.0, 4.0) },
+                ProposedEdit::UpdateRedactionBounds {
+                    id: AnnotationId(7),
+                    bounds: rect(1.0, 1.0, 4.0, 4.0),
+                },
             )],
             resulting_document_state_id: 11,
         };
