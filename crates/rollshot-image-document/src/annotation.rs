@@ -5,6 +5,7 @@ use crate::geometry::{ImagePoint, ImageRect};
 
 /// Stable annotation identity, never reused within a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnotationId(pub u64);
 
 #[derive(Debug, Clone, PartialEq)]

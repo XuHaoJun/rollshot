@@ -23,6 +23,8 @@ pub enum EditError {
     UnknownAnnotation,
     #[error("operation does not apply to this annotation kind")]
     WrongKind,
+    #[error("coordinates must be finite")]
+    NonFiniteCoordinate,
 }
 
 /// One restorable history state (mark-shot pattern: graph + counters).
@@ -345,6 +347,7 @@ impl ImageDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit_op::{BatchOutcome, EditOp};
     use crate::geometry::{ImagePoint, ImageRect};
     use image::{Rgba, RgbaImage};
 
@@ -667,6 +670,35 @@ mod tests {
             two,
             "identity preserved through undo"
         );
+    }
+
+    #[test]
+    fn edit_op_variants_construct_and_compare() {
+        let a = EditOp::AddRedaction {
+            bounds: ImageRect::from_corners(ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+        let outcome = BatchOutcome { added_ids: vec![AnnotationId(1)] };
+        assert_eq!(outcome.added_ids, vec![AnnotationId(1)]);
+    }
+
+    #[test]
+    fn non_finite_coordinate_error_has_message() {
+        assert_eq!(
+            EditError::NonFiniteCoordinate.to_string(),
+            "coordinates must be finite"
+        );
+    }
+
+    #[test]
+    fn is_finite_detects_nan_and_infinity() {
+        assert!(ImagePoint::new(1.0, 2.0).is_finite());
+        assert!(!ImagePoint::new(f32::NAN, 2.0).is_finite());
+        let good = ImageRect::from_corners(ImagePoint::new(0.0, 0.0), ImagePoint::new(4.0, 4.0));
+        assert!(good.is_finite());
+        let bad = ImageRect { x: 0.0, y: 0.0, width: f32::INFINITY, height: 4.0 };
+        assert!(!bad.is_finite());
     }
 
     #[test]
