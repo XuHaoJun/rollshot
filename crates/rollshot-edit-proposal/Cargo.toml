@@ -1,5 +1,5 @@
 [package]
-name = "rollshot-image-document"
+name = "rollshot-edit-proposal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,13 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-image = { workspace = true }
-cosmic-text = "0.15"
+rollshot-image-document = { path = "../rollshot-image-document", features = ["serde"] }
+serde = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true, optional = true }
 
-[features]
-serde = ["dep:serde"]
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

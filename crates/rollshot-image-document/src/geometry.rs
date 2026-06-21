@@ -3,6 +3,7 @@
 
 /// A point in full-resolution image coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImagePoint {
     pub x: f32,
     pub y: f32,
@@ -11,6 +12,10 @@ pub struct ImagePoint {
 impl ImagePoint {
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
+    }
+
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
     }
 
     pub fn distance(self, other: Self) -> f32 {
@@ -28,6 +33,7 @@ impl ImagePoint {
 
 /// An axis-aligned rectangle in full-resolution image coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImageRect {
     pub x: f32,
     pub y: f32,
@@ -36,6 +42,13 @@ pub struct ImageRect {
 }
 
 impl ImageRect {
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+    }
+
     /// Normalized rect spanning two corners (handles inverted drags).
     pub fn from_corners(a: ImagePoint, b: ImagePoint) -> Self {
         let x = a.x.min(b.x);

@@ -5,6 +5,7 @@
 
 mod annotation;
 mod document;
+mod edit_op;
 mod flatten;
 mod geometry;
 mod hit;
@@ -16,6 +17,7 @@ mod text;
 
 pub use annotation::{Annotation, AnnotationId};
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
+pub use edit_op::{BatchOutcome, EditOp};
 pub use geometry::{ImagePoint, ImageRect, Rgba8};
 pub use hit::{hit_test_annotation, redaction_handles, Hit, HitPart, ResizeHandle};
 pub use navigator::NavigatorItem;
