@@ -176,7 +176,8 @@ fn validate_helper_signature(
     }
 }
 
-const ALLOWED_ROLLSHOT_CAPABILITIES: &[&str] = &["ocr", "layout", "regionFeatures", "templateMatch"];
+const ALLOWED_ROLLSHOT_CAPABILITIES: &[&str] =
+    &["ocr", "layout", "regionFeatures", "templateMatch"];
 const ALLOWED_MATH_METHODS: &[&str] = &[
     "abs", "ceil", "floor", "round", "trunc", "min", "max", "sqrt", "hypot",
 ];
@@ -194,9 +195,15 @@ enum ArrowPosition {
     ArrayCallback,
 }
 
-struct FunctionFacts {
-    name: String,
-    calls: Vec<(String, oxc_span::Span)>,
+pub(super) struct FunctionFacts {
+    pub name: String,
+    pub calls: Vec<(String, oxc_span::Span)>,
+}
+
+pub(super) struct ValidationFacts {
+    pub ast_nodes: u32,
+    pub literal_bytes: usize,
+    pub functions: Vec<FunctionFacts>,
 }
 
 struct BodyValidator<'a> {
@@ -273,7 +280,12 @@ impl<'a> BodyValidator<'a> {
                     self.ast_nodes += 1;
                     if let Some(init) = &declarator.init {
                         self.visit_expression(
-                            init, kind, params, locals, facts, ArrowPosition::NotCallback,
+                            init,
+                            kind,
+                            params,
+                            locals,
+                            facts,
+                            ArrowPosition::NotCallback,
                         );
                     }
                     match &declarator.id {
@@ -294,7 +306,12 @@ impl<'a> BodyValidator<'a> {
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.visit_expression(
-                        arg, kind, params, locals, facts, ArrowPosition::NotCallback,
+                        arg,
+                        kind,
+                        params,
+                        locals,
+                        facts,
+                        ArrowPosition::NotCallback,
                     );
                 }
             }
@@ -372,7 +389,12 @@ impl<'a> BodyValidator<'a> {
 
             Expression::StaticMemberExpression(member) => {
                 self.visit_expression(
-                    &member.object, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &member.object,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
             }
 
@@ -477,7 +499,12 @@ impl<'a> BodyValidator<'a> {
                                 continue;
                             }
                             self.visit_expression(
-                                &prop.value, kind, params, locals, facts, ArrowPosition::NotCallback,
+                                &prop.value,
+                                kind,
+                                params,
+                                locals,
+                                facts,
+                                ArrowPosition::NotCallback,
                             );
                         }
                     }
@@ -507,7 +534,12 @@ impl<'a> BodyValidator<'a> {
                         _ => {
                             if let Some(expr) = element.as_expression() {
                                 self.visit_expression(
-                                    expr, kind, params, locals, facts, ArrowPosition::NotCallback,
+                                    expr,
+                                    kind,
+                                    params,
+                                    locals,
+                                    facts,
+                                    ArrowPosition::NotCallback,
                                 );
                             }
                         }
@@ -517,50 +549,100 @@ impl<'a> BodyValidator<'a> {
 
             Expression::BinaryExpression(binary) => {
                 self.visit_expression(
-                    &binary.left, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &binary.left,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
                 self.visit_expression(
-                    &binary.right, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &binary.right,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
             }
 
             Expression::UnaryExpression(unary) => {
                 self.visit_expression(
-                    &unary.argument, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &unary.argument,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
             }
 
             Expression::LogicalExpression(logical) => {
                 self.visit_expression(
-                    &logical.left, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &logical.left,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
                 self.visit_expression(
-                    &logical.right, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &logical.right,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
             }
 
             Expression::ConditionalExpression(cond) => {
                 self.visit_expression(
-                    &cond.test, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &cond.test,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
                 self.visit_expression(
-                    &cond.consequent, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &cond.consequent,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
                 self.visit_expression(
-                    &cond.alternate, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &cond.alternate,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
             }
 
             Expression::ParenthesizedExpression(paren) => {
                 self.visit_expression(
-                    &paren.expression, kind, params, locals, facts, ArrowPosition::NotCallback,
+                    &paren.expression,
+                    kind,
+                    params,
+                    locals,
+                    facts,
+                    ArrowPosition::NotCallback,
                 );
             }
 
             Expression::SequenceExpression(seq) => {
                 for e in &seq.expressions {
                     self.visit_expression(
-                        e, kind, params, locals, facts, ArrowPosition::NotCallback,
+                        e,
+                        kind,
+                        params,
+                        locals,
+                        facts,
+                        ArrowPosition::NotCallback,
                     );
                 }
             }
@@ -656,7 +738,9 @@ impl<'a> BodyValidator<'a> {
                                     DiagnosticCode::UnsupportedSyntax,
                                     call.span.start,
                                     call.span.end,
-                                    &format!("rollshot.{method_name} is not a supported capability"),
+                                    &format!(
+                                        "rollshot.{method_name} is not a supported capability"
+                                    ),
                                 );
                                 return;
                             }
@@ -684,7 +768,12 @@ impl<'a> BodyValidator<'a> {
                             // Local variable method call
                             if ALLOWED_ARRAY_CALLBACK_METHODS.contains(&method_name) {
                                 self.visit_arguments_with_arrow_pos(
-                                    &call.arguments, kind, params, locals, facts, ArrowPosition::ArrayCallback,
+                                    &call.arguments,
+                                    kind,
+                                    params,
+                                    locals,
+                                    facts,
+                                    ArrowPosition::ArrayCallback,
                                 );
                             } else {
                                 self.emit(
@@ -698,7 +787,12 @@ impl<'a> BodyValidator<'a> {
                         } else {
                             // Unknown object - emit UnknownIdentifier for the object
                             self.visit_expression(
-                                &member.object, kind, params, locals, facts, ArrowPosition::NotCallback,
+                                &member.object,
+                                kind,
+                                params,
+                                locals,
+                                facts,
+                                ArrowPosition::NotCallback,
                             );
                             self.visit_arguments(&call.arguments, kind, params, locals, facts);
                         }
@@ -708,7 +802,12 @@ impl<'a> BodyValidator<'a> {
                         self.visit_call(inner_call, kind, params, locals, facts);
                         if ALLOWED_ARRAY_CALLBACK_METHODS.contains(&method_name) {
                             self.visit_arguments_with_arrow_pos(
-                                &call.arguments, kind, params, locals, facts, ArrowPosition::ArrayCallback,
+                                &call.arguments,
+                                kind,
+                                params,
+                                locals,
+                                facts,
+                                ArrowPosition::ArrayCallback,
                             );
                         } else {
                             // Disallowed method on chained result
@@ -727,11 +826,21 @@ impl<'a> BodyValidator<'a> {
                         // Other callee base (e.g. ArrayExpression for [].sort(), [].reduce(...))
                         // Visit the callee object first
                         self.visit_expression(
-                            &member.object, kind, params, locals, facts, ArrowPosition::NotCallback,
+                            &member.object,
+                            kind,
+                            params,
+                            locals,
+                            facts,
+                            ArrowPosition::NotCallback,
                         );
                         if ALLOWED_ARRAY_CALLBACK_METHODS.contains(&method_name) {
                             self.visit_arguments_with_arrow_pos(
-                                &call.arguments, kind, params, locals, facts, ArrowPosition::ArrayCallback,
+                                &call.arguments,
+                                kind,
+                                params,
+                                locals,
+                                facts,
+                                ArrowPosition::ArrayCallback,
                             );
                         } else {
                             // Disallowed method
@@ -810,7 +919,14 @@ impl<'a> BodyValidator<'a> {
         locals: &BTreeSet<String>,
         facts: &mut FunctionFacts,
     ) {
-        self.visit_arguments_with_arrow_pos(arguments, kind, params, locals, facts, ArrowPosition::NotCallback);
+        self.visit_arguments_with_arrow_pos(
+            arguments,
+            kind,
+            params,
+            locals,
+            facts,
+            ArrowPosition::NotCallback,
+        );
     }
 
     fn visit_arguments_with_arrow_pos(
@@ -890,11 +1006,7 @@ impl<'a> BodyValidator<'a> {
     }
 }
 
-fn detect_cycles(
-    source: &str,
-    facts: &[FunctionFacts],
-    diagnostics: &mut Vec<SourceDiagnostic>,
-) {
+fn detect_cycles(source: &str, facts: &[FunctionFacts], diagnostics: &mut Vec<SourceDiagnostic>) {
     let graph: BTreeMap<_, _> = facts
         .iter()
         .map(|fact| {
@@ -957,7 +1069,7 @@ pub(super) fn validate_bodies(
     program: &oxc_ast::ast::Program<'_>,
     function_names: &[String],
     limits: &ValidationLimits,
-) -> Vec<SourceDiagnostic> {
+) -> (Vec<SourceDiagnostic>, ValidationFacts) {
     let helper_names: BTreeSet<String> = function_names
         .iter()
         .filter(|name| name.as_str() != "main")
@@ -999,7 +1111,13 @@ pub(super) fn validate_bodies(
 
     detect_cycles(source, &validator.facts, &mut validator.diagnostics);
 
-    validator.diagnostics
+    let facts = ValidationFacts {
+        ast_nodes: validator.ast_nodes,
+        literal_bytes: validator.literal_bytes,
+        functions: validator.facts,
+    };
+
+    (validator.diagnostics, facts)
 }
 
 fn error(

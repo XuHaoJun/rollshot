@@ -1,6 +1,6 @@
 use rollshot_automation::{
-    CapabilityApiVersion, IrSchemaVersion, LanguageSchemaVersion, OutputSchemaVersion,
-    CAPABILITY_API_V1, IR_SCHEMA_V1, LANGUAGE_SCHEMA_V1, OUTPUT_SCHEMA_V1,
+    CapabilityApiVersion, CapabilityName, IrNodeKind, IrSchemaVersion, LanguageSchemaVersion,
+    OutputSchemaVersion, CAPABILITY_API_V1, IR_SCHEMA_V1, LANGUAGE_SCHEMA_V1, OUTPUT_SCHEMA_V1,
 };
 
 #[test]
@@ -158,8 +158,14 @@ fn rejects_non_function_top_level_statement() {
 
 #[test]
 fn rejects_mutation_loops_dynamic_access_and_ambient_globals() {
-    assert_has_code(&fixture("reject_mutation.js"), DiagnosticCode::UnsupportedSyntax);
-    assert_has_code(&fixture("reject_loop.js"), DiagnosticCode::UnsupportedSyntax);
+    assert_has_code(
+        &fixture("reject_mutation.js"),
+        DiagnosticCode::UnsupportedSyntax,
+    );
+    assert_has_code(
+        &fixture("reject_loop.js"),
+        DiagnosticCode::UnsupportedSyntax,
+    );
     assert_has_code(
         &fixture("reject_dynamic_access.js"),
         DiagnosticCode::UnsupportedSyntax,
@@ -231,4 +237,36 @@ fn language_schema_v1_denylist_is_complete() {
     for (source, code) in cases {
         assert_has_code(source, code);
     }
+}
+
+#[test]
+fn valid_source_normalizes_to_deterministic_ir_and_costs() {
+    let source = fixture("valid_main.js");
+    let first = validate_source(&source, &ValidationLimits::default()).unwrap();
+    let second = validate_source(&source, &ValidationLimits::default()).unwrap();
+    assert_eq!(first.workflow_ir, second.workflow_ir);
+    assert!(first
+        .workflow_ir
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, IrNodeKind::CapabilityCall(_))));
+    assert!(first
+        .workflow_ir
+        .capability_manifest
+        .calls
+        .iter()
+        .any(|call| call.capability == CapabilityName::Ocr));
+    assert_eq!(first.workflow_ir.static_cost.max_output_candidates, 10);
+}
+
+#[test]
+fn rejects_collection_without_provable_bound() {
+    let source = r#"
+function main(input) {
+  return {
+    candidates: input.unknown.map((value) => value),
+  };
+}
+"#;
+    assert_has_code(source, DiagnosticCode::UnboundedCollection);
 }
