@@ -1,9 +1,17 @@
+mod capability;
 mod diagnostic;
+mod host;
+mod input;
+mod policy;
 mod version;
 
+pub use capability::*;
 pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, RelatedDiagnostic, SourceDiagnostic, SourceSpan,
 };
+pub use host::{AutomationHost, CapabilityError, FakeAutomationHost};
+pub use input::{AnnotationDescriptor, AutomationInput};
+pub use policy::{ExecutionPolicy, ProposalContext, ProposedEditKind, ValidationLimits};
 pub use version::{
     CapabilityApiVersion, IrSchemaVersion, LanguageSchemaVersion, OutputSchemaVersion,
     CAPABILITY_API_V1, IR_SCHEMA_V1, LANGUAGE_SCHEMA_V1, OUTPUT_SCHEMA_V1,
