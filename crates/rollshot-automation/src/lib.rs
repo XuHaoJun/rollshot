@@ -1,5 +1,6 @@
 mod capability;
 mod diagnostic;
+mod frontend;
 mod host;
 mod input;
 mod policy;
@@ -9,6 +10,7 @@ pub use capability::*;
 pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, RelatedDiagnostic, SourceDiagnostic, SourceSpan,
 };
+pub use frontend::{validate_source, ValidatedAutomation};
 pub use host::{AutomationHost, CapabilityError, FakeAutomationHost};
 pub use input::{AnnotationDescriptor, AutomationInput};
 pub use policy::{ExecutionPolicy, ProposalContext, ProposedEditKind, ValidationLimits};

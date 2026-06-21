@@ -110,3 +110,48 @@ fn automation_input_carries_string_safe_annotation_ids() {
     );
     assert_eq!(value["region"]["kind"], "rect");
 }
+
+use rollshot_automation::{validate_source, DiagnosticCode, ValidationLimits};
+
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+fn assert_has_code(source: &str, expected: DiagnosticCode) {
+    let diagnostics = validate_source(source, &ValidationLimits::default()).unwrap_err();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == expected),
+        "missing {expected:?}: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn accepts_explicit_main_and_pure_helper_shape() {
+    let validated =
+        validate_source(&fixture("valid_main.js"), &ValidationLimits::default()).unwrap();
+    assert_eq!(validated.source, fixture("valid_main.js"));
+}
+
+#[test]
+fn rejects_missing_duplicate_and_malformed_main() {
+    assert_has_code(&fixture("missing_main.js"), DiagnosticCode::MissingMain);
+    assert_has_code(&fixture("duplicate_main.js"), DiagnosticCode::DuplicateMain);
+    assert_has_code(
+        &fixture("invalid_main_signature.js"),
+        DiagnosticCode::InvalidMainSignature,
+    );
+}
+
+#[test]
+fn rejects_non_function_top_level_statement() {
+    assert_has_code(
+        &fixture("invalid_top_level.js"),
+        DiagnosticCode::InvalidTopLevel,
+    );
+}

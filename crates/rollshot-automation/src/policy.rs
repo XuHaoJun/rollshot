@@ -34,6 +34,23 @@ pub struct ValidationLimits {
     pub max_input_annotations: u32,
 }
 
+impl Default for ValidationLimits {
+    fn default() -> Self {
+        Self {
+            max_source_bytes: 64 * 1024,
+            max_ast_nodes: 10_000,
+            max_literal_bytes: 32 * 1024,
+            max_helpers: 32,
+            max_helper_call_depth: 16,
+            max_capability_calls: 32,
+            max_collection_traversals: 64,
+            max_candidates: 1_000,
+            max_output_bytes: 1024 * 1024,
+            max_input_annotations: 1_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionPolicy {
     pub max_wall_time: Duration,
