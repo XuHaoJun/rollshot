@@ -933,7 +933,9 @@ Recommended sequence:
    - Source diagnostics.
    - Workflow IR and semantic diff.
    - Replaceable executor interface and selected runtime.
+   - **Implemented:** `docs/superpowers/handoffs/2026-06-21-automation-frontend-runtime.md`
 4. **Bounded agent core**
+   - **Next phase after subproject 3.**
    - Rollshot model facade.
    - Agent session/run domain model.
    - Tool registry, budgets, cancellation, and terminal states.
