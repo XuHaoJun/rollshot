@@ -6,6 +6,7 @@ mod frontend;
 mod host;
 mod input;
 pub mod ir;
+mod output;
 mod policy;
 mod version;
 
@@ -18,6 +19,7 @@ pub use executor::{ensure_compatible, CompatibilityError};
 pub use frontend::{validate_source, ValidatedAutomation, ValidationSummary};
 pub use host::{AutomationHost, CapabilityError, FakeAutomationHost};
 pub use input::{AnnotationDescriptor, AutomationInput};
+pub use output::{decode_proposal, OutputError};
 pub use ir::{CapabilityCallIr, CollectionIr, EmitCandidatesIr, IrNodeKind, WorkflowIr};
 pub use policy::{ExecutionPolicy, ProposalContext, ProposedEditKind, ValidationLimits};
 pub use version::{
