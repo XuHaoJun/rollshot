@@ -661,8 +661,18 @@ impl<'a> BodyValidator<'a> {
                                 return;
                             }
                             self.visit_arguments(&call.arguments, kind, params, locals, facts);
-                        } else if obj_name == "Math" && ALLOWED_MATH_METHODS.contains(&method_name) {
-                            self.visit_arguments(&call.arguments, kind, params, locals, facts);
+                        } else if obj_name == "Math" {
+                            if ALLOWED_MATH_METHODS.contains(&method_name) {
+                                self.visit_arguments(&call.arguments, kind, params, locals, facts);
+                            } else {
+                                self.emit(
+                                    DiagnosticCode::UnsupportedSyntax,
+                                    call.span.start,
+                                    call.span.end,
+                                    &format!("Math.{method_name} is not allowed"),
+                                );
+                                self.visit_arguments(&call.arguments, kind, params, locals, facts);
+                            }
                         } else if self.helper_names.contains(obj_name) {
                             self.emit(
                                 DiagnosticCode::UnsupportedSyntax,
@@ -677,6 +687,12 @@ impl<'a> BodyValidator<'a> {
                                     &call.arguments, kind, params, locals, facts, ArrowPosition::ArrayCallback,
                                 );
                             } else {
+                                self.emit(
+                                    DiagnosticCode::UnsupportedSyntax,
+                                    call.span.start,
+                                    call.span.end,
+                                    &format!("method .{method_name}() is not allowed"),
+                                );
                                 self.visit_arguments(&call.arguments, kind, params, locals, facts);
                             }
                         } else {

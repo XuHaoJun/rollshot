@@ -225,6 +225,8 @@ fn language_schema_v1_denylist_is_complete() {
         ("function main(input){ return { candidates: [].sort() }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ return { candidates: helper.call(null, input) }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ return unknownGlobal; }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return Math.random(); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ const arr = []; arr.push(1); return { candidates: arr }; }", DiagnosticCode::UnsupportedSyntax),
     ];
     for (source, code) in cases {
         assert_has_code(source, code);
