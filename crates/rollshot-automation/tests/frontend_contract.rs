@@ -221,6 +221,7 @@ fn language_schema_v1_denylist_is_complete() {
         ("function main(input){ return new Array(); }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ try { return { candidates: [] }; } catch (error) { return { candidates: [] }; } }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ for (;;) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ while (true) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ do {} while (true); return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ for (const value of []) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ const { region } = input; return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
@@ -231,6 +232,8 @@ fn language_schema_v1_denylist_is_complete() {
         ("function main(input){ return { candidates: [].flatMap((x) => x) }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ return { candidates: [].sort() }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ return { candidates: helper.call(null, input) }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: helper.apply(null, [input]) }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: helper.bind(null, input)() }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ return unknownGlobal; }", DiagnosticCode::UnknownIdentifier),
         ("function main(input){ return Math.random(); }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ const arr = []; arr.push(1); return { candidates: arr }; }", DiagnosticCode::UnsupportedSyntax),
@@ -328,5 +331,31 @@ fn incompatible_schema_is_rejected_before_execution() {
             installed: LANGUAGE_SCHEMA_V1,
             artifact: LanguageSchemaVersion(99),
         })
+    );
+}
+
+#[test]
+fn dependency_contract_versions_are_locked() {
+    assert_eq!(LANGUAGE_SCHEMA_V1.0, 1);
+    assert_eq!(IR_SCHEMA_V1.0, 1);
+    assert_eq!(CAPABILITY_API_V1.0, 1);
+    assert_eq!(OUTPUT_SCHEMA_V1.0, 1);
+}
+
+#[test]
+fn validated_automation_round_trips_with_ir_and_versions() {
+    let validated =
+        validate_source(&fixture("valid_main.js"), &ValidationLimits::default()).unwrap();
+    let json = serde_json::to_string_pretty(&validated).unwrap();
+    let decoded: rollshot_automation::ValidatedAutomation = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, validated);
+    assert_eq!(decoded.language_schema_version, LANGUAGE_SCHEMA_V1);
+    assert_eq!(decoded.workflow_ir.ir_schema_version, IR_SCHEMA_V1);
+    assert_eq!(
+        decoded
+            .workflow_ir
+            .capability_manifest
+            .capability_api_version,
+        CAPABILITY_API_V1
     );
 }
