@@ -219,6 +219,7 @@ fn language_schema_v1_denylist_is_complete() {
         ("function* main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
         ("class X {} function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
         ("function main(input){ return new Array(); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return new Object(); }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ try { return { candidates: [] }; } catch (error) { return { candidates: [] }; } }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ for (;;) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ while (true) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
