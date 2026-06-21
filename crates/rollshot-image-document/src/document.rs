@@ -363,6 +363,21 @@ impl ImageDocument {
         if ops.is_empty() {
             return Ok(BatchOutcome::default());
         }
+        for op in &ops {
+            let referenced_id = match op {
+                EditOp::UpdateRedactionBounds { id, .. }
+                | EditOp::UpdateTextPosition { id, .. }
+                | EditOp::UpdateText { id, .. }
+                | EditOp::UpdateNumberPoints { id, .. }
+                | EditOp::Delete { id } => Some(*id),
+                EditOp::AddRedaction { .. }
+                | EditOp::AddTextNote { .. }
+                | EditOp::AddNumberCallout { .. } => None,
+            };
+            if referenced_id.is_some_and(|id| self.annotation(id).is_none()) {
+                return Err(EditError::UnknownAnnotation);
+            }
+        }
         let (w, h) = self.source.dimensions();
         let before = self.snapshot();
         let mut added_ids = Vec::new();
@@ -1035,6 +1050,28 @@ mod tests {
             }])
             .unwrap_err();
         assert_eq!(err, EditError::UnknownAnnotation);
+    }
+
+    #[test]
+    fn apply_batch_rejects_reference_to_id_added_in_same_batch() {
+        let mut d = test_doc();
+        let state_before = d.state_id();
+        let err = d
+            .apply_batch(vec![
+                EditOp::AddTextNote {
+                    position: ImagePoint::new(1.0, 1.0),
+                    text: "original".into(),
+                },
+                EditOp::UpdateText {
+                    id: AnnotationId(1),
+                    text: "updated".into(),
+                },
+            ])
+            .unwrap_err();
+        assert_eq!(err, EditError::UnknownAnnotation);
+        assert!(d.annotations().is_empty(), "whole batch must be rejected");
+        assert_eq!(d.state_id(), state_before);
+        assert!(!d.can_undo());
     }
 
     #[test]
