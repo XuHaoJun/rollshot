@@ -15,12 +15,15 @@ pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, RelatedDiagnostic, SourceDiagnostic, SourceSpan,
 };
 pub use diff::{semantic_diff, semantic_summary, SemanticChange, SemanticDiff, SemanticSummary};
-pub use executor::{ensure_compatible, CompatibilityError};
+pub use executor::{
+    ensure_compatible, execute_to_proposal, AutomationExecution, AutomationExecutor,
+    CancellationFlag, CompatibilityError, ExecutionError, ExecutionMetrics, SandboxError,
+};
 pub use frontend::{validate_source, ValidatedAutomation, ValidationSummary};
 pub use host::{AutomationHost, CapabilityError, FakeAutomationHost};
 pub use input::{AnnotationDescriptor, AutomationInput};
-pub use output::{decode_proposal, OutputError};
 pub use ir::{CapabilityCallIr, CollectionIr, EmitCandidatesIr, IrNodeKind, WorkflowIr};
+pub use output::{decode_proposal, OutputError};
 pub use policy::{ExecutionPolicy, ProposalContext, ProposedEditKind, ValidationLimits};
 pub use version::{
     CapabilityApiVersion, IrSchemaVersion, LanguageSchemaVersion, OutputSchemaVersion,

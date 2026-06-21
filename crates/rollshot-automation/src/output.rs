@@ -227,7 +227,9 @@ fn decode_one_candidate(raw: &serde_json::Value) -> Result<DecodedCandidate, Out
     let kind = raw
         .get("kind")
         .and_then(|v| v.as_str())
-        .ok_or(OutputError::Malformed { code: "missing_kind" })?;
+        .ok_or(OutputError::Malformed {
+            code: "missing_kind",
+        })?;
 
     match kind {
         "addRedaction" => {
@@ -322,10 +324,7 @@ fn decode_one_candidate(raw: &serde_json::Value) -> Result<DecodedCandidate, Out
                 return Err(OutputError::Malformed { code: "empty_text" });
             }
             Ok(DecodedCandidate::Update(
-                ProposedEdit::UpdateText {
-                    id,
-                    text: w.text,
-                },
+                ProposedEdit::UpdateText { id, text: w.text },
                 id,
                 w.confidence,
                 w.label,

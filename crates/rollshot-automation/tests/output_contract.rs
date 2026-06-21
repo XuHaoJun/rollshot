@@ -89,7 +89,8 @@ fn rejects_unknown_fields_and_noncanonical_annotation_ids() {
 
 #[test]
 fn rejects_unauthorized_edit_kind_and_annotation_id() {
-    let delete = r#"{"candidates":[{"kind":"delete","annotationId":"42","confidence":0.5,"label":"x"}]}"#;
+    let delete =
+        r#"{"candidates":[{"kind":"delete","annotationId":"42","confidence":0.5,"label":"x"}]}"#;
     let redaction_only = ExecutionPolicy::smart_redaction_default(
         Duration::from_secs(1),
         8 * 1024 * 1024,
