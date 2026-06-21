@@ -765,16 +765,15 @@ impl<'a> Normalizer<'a> {
             Expression::StaticMemberExpression(member) => match &member.object {
                 Expression::Identifier(obj) => {
                     if obj.name == "rollshot" {
+                        let cap = ROLLSHOT_CAPABILITIES
+                            .iter()
+                            .find(|(name, _)| *name == member.property.name.as_str())
+                            .map(|(_, cap)| *cap)?;
                         self.nodes
                                 .iter()
                                 .find(|n| {
                                     matches!(&n.kind, IrNodeKind::CapabilityCall(c) if
-                                        c.capability
-                                            == ROLLSHOT_CAPABILITIES
-                                                .iter()
-                                                .find(|(name, _)| *name == member.property.name.as_str())
-                                                .map(|(_, cap)| *cap)
-                                                .unwrap_or(CapabilityName::Ocr))
+                                        c.capability == cap)
                                 })
                                 .map(|n| n.id)
                     } else {
