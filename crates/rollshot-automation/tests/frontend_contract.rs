@@ -155,3 +155,78 @@ fn rejects_non_function_top_level_statement() {
         DiagnosticCode::InvalidTopLevel,
     );
 }
+
+#[test]
+fn rejects_mutation_loops_dynamic_access_and_ambient_globals() {
+    assert_has_code(&fixture("reject_mutation.js"), DiagnosticCode::UnsupportedSyntax);
+    assert_has_code(&fixture("reject_loop.js"), DiagnosticCode::UnsupportedSyntax);
+    assert_has_code(
+        &fixture("reject_dynamic_access.js"),
+        DiagnosticCode::UnsupportedSyntax,
+    );
+    assert_has_code(
+        &fixture("reject_ambient.js"),
+        DiagnosticCode::UnknownIdentifier,
+    );
+}
+
+#[test]
+fn rejects_impure_recursive_and_escaping_helpers() {
+    assert_has_code(
+        &fixture("reject_helper_capability.js"),
+        DiagnosticCode::HelperImpurity,
+    );
+    assert_has_code(
+        &fixture("reject_indirect_recursion.js"),
+        DiagnosticCode::RecursiveHelper,
+    );
+    assert_has_code(
+        &fixture("reject_escaping_closure.js"),
+        DiagnosticCode::EscapingClosure,
+    );
+}
+
+#[test]
+fn rejects_duplicate_object_keys_before_runtime() {
+    assert_has_code(
+        &fixture("reject_duplicate_key.js"),
+        DiagnosticCode::DuplicateObjectKey,
+    );
+}
+
+#[test]
+fn language_schema_v1_denylist_is_complete() {
+    let cases = [
+        ("function main(input){ return eval('1'); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return Function('return 1')(); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return Reflect.get(input, 'region'); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return new Proxy({}, {}); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return input?.region; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return input['region']; }", DiagnosticCode::UnsupportedSyntax),
+        ("import value from 'x'; function main(input){ return value; }", DiagnosticCode::InvalidTopLevel),
+        ("export function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
+        ("function main(input){ return import('x'); }", DiagnosticCode::UnsupportedSyntax),
+        ("async function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
+        ("function main(input){ return Promise.resolve([]); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ setTimeout(() => {}, 1); return { candidates: [] }; }", DiagnosticCode::UnknownIdentifier),
+        ("function* main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
+        ("class X {} function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
+        ("function main(input){ return new Array(); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ try { return { candidates: [] }; } catch (error) { return { candidates: [] }; } }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ for (;;) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ do {} while (true); return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ for (const value of []) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ const { region } = input; return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { ...input, candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function helper(...values){ return values; } function main(input){ return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function helper(value = 1){ return value; } function main(input){ return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: [].reduce((a,b) => a, []) }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: [].flatMap((x) => x) }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: [].sort() }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: helper.call(null, input) }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return unknownGlobal; }", DiagnosticCode::UnknownIdentifier),
+    ];
+    for (source, code) in cases {
+        assert_has_code(source, code);
+    }
+}

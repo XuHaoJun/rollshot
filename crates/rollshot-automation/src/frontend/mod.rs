@@ -23,8 +23,11 @@ pub fn validate_source(
     limits: &ValidationLimits,
 ) -> Result<ValidatedAutomation, Vec<SourceDiagnostic>> {
     parse::with_program(source, |program| {
-        let result = validate::validate_shape(source, program, limits);
-        if result.diagnostics.is_empty() {
+        let shape = validate::validate_shape(source, program, limits);
+        let body = validate::validate_bodies(source, program, &shape.function_names, limits);
+        let mut diagnostics = shape.diagnostics;
+        diagnostics.extend(body);
+        if diagnostics.is_empty() {
             Ok(ValidatedAutomation {
                 source: source.into(),
                 language_schema_version: LANGUAGE_SCHEMA_V1,
@@ -33,7 +36,7 @@ pub fn validate_source(
                 output_schema_version: OUTPUT_SCHEMA_V1,
             })
         } else {
-            Err(result.diagnostics)
+            Err(diagnostics)
         }
     })?
 }
