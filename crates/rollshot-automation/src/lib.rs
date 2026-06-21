@@ -1,5 +1,7 @@
 mod capability;
 mod diagnostic;
+mod diff;
+mod executor;
 mod frontend;
 mod host;
 mod input;
@@ -11,6 +13,8 @@ pub use capability::*;
 pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, RelatedDiagnostic, SourceDiagnostic, SourceSpan,
 };
+pub use diff::{semantic_diff, semantic_summary, SemanticChange, SemanticDiff, SemanticSummary};
+pub use executor::{ensure_compatible, CompatibilityError};
 pub use frontend::{validate_source, ValidatedAutomation, ValidationSummary};
 pub use host::{AutomationHost, CapabilityError, FakeAutomationHost};
 pub use input::{AnnotationDescriptor, AutomationInput};

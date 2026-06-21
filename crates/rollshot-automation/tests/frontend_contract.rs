@@ -1,6 +1,7 @@
 use rollshot_automation::{
-    CapabilityApiVersion, CapabilityName, IrNodeKind, IrSchemaVersion, LanguageSchemaVersion,
-    OutputSchemaVersion, CAPABILITY_API_V1, IR_SCHEMA_V1, LANGUAGE_SCHEMA_V1, OUTPUT_SCHEMA_V1,
+    ensure_compatible, semantic_diff, semantic_summary, CapabilityApiVersion, CapabilityName,
+    CompatibilityError, IrNodeKind, IrSchemaVersion, LanguageSchemaVersion, OutputSchemaVersion,
+    SemanticChange, CAPABILITY_API_V1, IR_SCHEMA_V1, LANGUAGE_SCHEMA_V1, OUTPUT_SCHEMA_V1,
 };
 
 #[test]
@@ -269,4 +270,63 @@ function main(input) {
 }
 "#;
     assert_has_code(source, DiagnosticCode::UnboundedCollection);
+}
+
+#[test]
+fn semantic_diff_reports_capability_limit_change() {
+    let before = validate_source(
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 10 }); return { candidates: x }; }",
+        &ValidationLimits::default(),
+    )
+    .unwrap();
+    let after = validate_source(
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 20 }); return { candidates: x }; }",
+        &ValidationLimits::default(),
+    )
+    .unwrap();
+    let diff = semantic_diff(&before.workflow_ir, &after.workflow_ir);
+    assert!(diff.changes.iter().any(|change| matches!(
+        change,
+        SemanticChange::CapabilityLimitChanged {
+            before: 10,
+            after: 20,
+            ..
+        }
+    )));
+    assert!(semantic_summary(&after.workflow_ir)
+        .lines
+        .iter()
+        .any(|line| line.contains("ocr") && line.contains("20")));
+}
+
+#[test]
+fn semantic_diff_reports_threshold_change() {
+    let before = validate_source(
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 10 }).filter((m) => m.confidence > 0.8); return { candidates: x }; }",
+        &ValidationLimits::default(),
+    )
+    .unwrap();
+    let after = validate_source(
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 10 }).filter((m) => m.confidence > 0.9); return { candidates: x }; }",
+        &ValidationLimits::default(),
+    )
+    .unwrap();
+    assert!(semantic_diff(&before.workflow_ir, &after.workflow_ir)
+        .changes
+        .iter()
+        .any(|change| matches!(change, SemanticChange::TransformChanged { .. })));
+}
+
+#[test]
+fn incompatible_schema_is_rejected_before_execution() {
+    let mut automation =
+        validate_source(&fixture("valid_main.js"), &ValidationLimits::default()).unwrap();
+    automation.language_schema_version = LanguageSchemaVersion(99);
+    assert_eq!(
+        ensure_compatible(&automation),
+        Err(CompatibilityError::Language {
+            installed: LANGUAGE_SCHEMA_V1,
+            artifact: LanguageSchemaVersion(99),
+        })
+    );
 }

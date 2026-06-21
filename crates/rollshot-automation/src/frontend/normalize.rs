@@ -275,11 +275,16 @@ impl<'a> Normalizer<'a> {
             | Expression::NumericLiteral(_)
             | Expression::BooleanLiteral(_)
             | Expression::NullLiteral(_) => {
+                let summary = if let Expression::NumericLiteral(n) = expr {
+                    format!("literal({})", n.value)
+                } else {
+                    "literal".into()
+                };
                 let node_id = self.alloc_node();
                 self.push_node(IrNode {
                     id: node_id,
                     kind: IrNodeKind::Transform(TransformIr {
-                        expression_summary: "literal".into(),
+                        expression_summary: summary,
                     }),
                     source_span: self.span_for_expr(expr),
                     max_cardinality: 1,
@@ -294,7 +299,7 @@ impl<'a> Normalizer<'a> {
                 self.push_node(IrNode {
                     id: node_id,
                     kind: IrNodeKind::Transform(TransformIr {
-                        expression_summary: "binary".into(),
+                        expression_summary: format!("binary({:?})", binary.operator),
                     }),
                     source_span: self.span_for_expr(expr),
                     max_cardinality: 1,
@@ -770,12 +775,12 @@ impl<'a> Normalizer<'a> {
                             .find(|(name, _)| *name == member.property.name.as_str())
                             .map(|(_, cap)| *cap)?;
                         self.nodes
-                                .iter()
-                                .find(|n| {
-                                    matches!(&n.kind, IrNodeKind::CapabilityCall(c) if
+                            .iter()
+                            .find(|n| {
+                                matches!(&n.kind, IrNodeKind::CapabilityCall(c) if
                                         c.capability == cap)
-                                })
-                                .map(|n| n.id)
+                            })
+                            .map(|n| n.id)
                     } else {
                         var_nodes.get(obj.name.as_str()).copied()
                     }
