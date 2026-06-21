@@ -12,11 +12,12 @@ thread_local! {
 
 static NEXT_BRIDGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Inner state for the bridge, stored in thread-local storage.
+/// Inner state for the bridge, stored in thread-local storage via raw pointer.
 ///
 /// # Safety
 /// `host` and `policy` are raw pointers that are valid for the duration of
-/// the `execute` call. `register()` and `unregister()` bracket all JS execution.
+/// the `execute` call. `BridgeGuard` owns the allocation (via `Box::into_raw`)
+/// and frees it in `Drop` after removing the TLS entry.
 pub(crate) struct BridgeStateInner {
     host: *mut dyn AutomationHost,
     policy: *const ExecutionPolicy,
@@ -29,7 +30,7 @@ pub(crate) struct BridgeStateInner {
 /// RAII guard that registers/unregisters bridge state in thread-local storage.
 pub(crate) struct BridgeGuard {
     id: u64,
-    inner: Box<BridgeStateInner>,
+    ptr: *mut BridgeStateInner,
 }
 
 impl BridgeGuard {
@@ -56,7 +57,8 @@ impl BridgeGuard {
             host_allocation_bytes: 0,
             pending_error: None,
         });
-        Self { id, inner }
+        let ptr = Box::into_raw(inner);
+        Self { id, ptr }
     }
 
     pub fn id(&self) -> u64 {
@@ -65,19 +67,19 @@ impl BridgeGuard {
 
     pub fn register(&self) {
         BRIDGE_STATES.with(|states| {
-            states.borrow_mut().insert(
-                self.id,
-                &*self.inner as *const BridgeStateInner as *mut BridgeStateInner,
-            );
+            states.borrow_mut().insert(self.id, self.ptr);
         });
     }
 
     pub fn inner(&self) -> &BridgeStateInner {
-        &self.inner
+        // SAFETY: ptr comes from Box::into_raw in `new()`, the guard owns it,
+        // and it is only accessed through this guard during its lifetime.
+        unsafe { &*self.ptr }
     }
 
     pub fn inner_mut(&mut self) -> &mut BridgeStateInner {
-        &mut self.inner
+        // SAFETY: same as inner() — exclusive access via &mut self.
+        unsafe { &mut *self.ptr }
     }
 }
 
@@ -86,6 +88,9 @@ impl Drop for BridgeGuard {
         BRIDGE_STATES.with(|states| {
             states.borrow_mut().remove(&self.id);
         });
+        // SAFETY: ptr was created via Box::into_raw in `new()` and is only
+        // freed here. The TLS entry was just removed, so no dangling refs.
+        drop(unsafe { Box::from_raw(self.ptr) });
     }
 }
 
@@ -99,8 +104,8 @@ where
             .get(&id)
             .expect("bridge state not registered");
         // SAFETY: ptr was inserted by `register()` and points to a valid
-        // BridgeStateInner that lives in BridgeGuard::inner (a Box).
-        // The guard is not dropped during JS execution.
+        // BridgeStateInner allocated via Box::into_raw. The guard removes the
+        // TLS entry in its Drop before freeing the allocation.
         let state = unsafe { &mut *ptr };
         f(state)
     })

@@ -22,10 +22,7 @@ fn classify_rquickjs_error(err: rquickjs::Error, ctx: &rquickjs::Ctx<'_>) -> San
                     let msg = ex.message().unwrap_or_default();
                     if msg.contains("stack") || msg.contains("RangeError") {
                         SandboxError::StackLimit
-                    } else if msg.contains("out of memory")
-                        || msg.contains("memory")
-                        || msg.contains("alloc")
-                    {
+                    } else if msg.contains("out of memory") {
                         SandboxError::MemoryLimit
                     } else {
                         SandboxError::Evaluation { code: "exception" }

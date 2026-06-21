@@ -5406,6 +5406,7 @@ version = "0.1.0"
 dependencies = [
  "rollshot-automation",
  "rollshot-edit-proposal",
+ "rollshot-image-document",
  "rquickjs",
  "serde_json",
  "thiserror 1.0.69",
