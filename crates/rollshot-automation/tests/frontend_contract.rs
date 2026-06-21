@@ -238,6 +238,7 @@ fn language_schema_v1_denylist_is_complete() {
         ("function main(input){ return unknownGlobal; }", DiagnosticCode::UnknownIdentifier),
         ("function main(input){ return Math.random(); }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ const arr = []; arr.push(1); return { candidates: arr }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return (rollshot.ocr({region:input.region,limit:1}), {candidates:[]}); }", DiagnosticCode::UnsupportedSyntax),
     ];
     for (source, code) in cases {
         assert_has_code(source, code);

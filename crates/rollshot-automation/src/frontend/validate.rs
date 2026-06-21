@@ -634,17 +634,13 @@ impl<'a> BodyValidator<'a> {
                 );
             }
 
-            Expression::SequenceExpression(seq) => {
-                for e in &seq.expressions {
-                    self.visit_expression(
-                        e,
-                        kind,
-                        params,
-                        locals,
-                        facts,
-                        ArrowPosition::NotCallback,
-                    );
-                }
+            Expression::SequenceExpression(_) => {
+                self.emit(
+                    DiagnosticCode::UnsupportedSyntax,
+                    expr.span().start,
+                    expr.span().end,
+                    "comma operator (sequence expression) is not allowed",
+                );
             }
 
             Expression::TemplateLiteral(_) => {
