@@ -164,6 +164,22 @@ behavior against code before relying on them.
   history, geometry, hit-testing, and flattened rendering. No UI, windowing,
   clipboard, or capture code. Used by `rollshot-app` for annotations,
   redactions, and callouts.
+- `crates/rollshot-edit-proposal`: framework-neutral candidate-edit proposal,
+  policy-validation, review-decision, and `ImageDocument` operation-lowering
+  contracts. Automation and later agent/UI work produce proposals; this crate
+  does not execute automation or mutate documents directly.
+- `crates/rollshot-automation`: restricted-JavaScript frontend and runtime-
+  independent automation contracts — oxc parsing, Language Schema validation,
+  Workflow IR/static cost, capability APIs, strict output decoding, and
+  `AutomationHost` / `AutomationExecutor` traits. Validated artifacts are
+  revalidated before execution. Changes to the language, IR, output, or
+  compatibility boundaries require the frontend, output, and executor contract
+  suites.
+- `crates/rollshot-automation-rquickjs`: hardened rquickjs implementation of
+  `AutomationExecutor`. It owns fresh-context lockdown, frozen input/host
+  bridges, manifest and resource enforcement, cancellation, and adversarial
+  sandbox tests. This is an unsafe-isolation crate; do not expose rquickjs types
+  through `rollshot-automation` or product-facing models.
 - `crates/rollshot-iced-overlay`: iced overlay renderer. Both platform runners
   are active product paths: Linux uses the layer-shell runner
   (`linux_runner.rs`), macOS uses the capture-wired runner

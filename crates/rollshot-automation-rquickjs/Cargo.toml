@@ -1,0 +1,21 @@
+[package]
+name = "rollshot-automation-rquickjs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rquickjs = { workspace = true }
+rollshot-automation = { path = "../rollshot-automation" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rollshot-edit-proposal = { path = "../rollshot-edit-proposal" }
+rollshot-image-document = { path = "../rollshot-image-document" }
+
+[lints.rust]
+unsafe_code = "allow"

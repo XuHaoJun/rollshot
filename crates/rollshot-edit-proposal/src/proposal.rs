@@ -135,6 +135,7 @@ pub struct ProposedCandidate {
     pub id: CandidateId,
     pub edit: ProposedEdit,
     pub confidence: f32,
+    pub label: String,
     pub rationale: Option<String>,
     pub provenance: Provenance,
 }
@@ -182,6 +183,7 @@ mod tests {
                 id: CandidateId(1),
                 edit: ProposedEdit::AddRedaction { bounds: r },
                 confidence: 0.9,
+                label: "email".into(),
                 rationale: Some("matches email pattern".into()),
                 provenance: Provenance {
                     source: ProvenanceSource::Agent { run_id: 42 },
@@ -197,6 +199,7 @@ mod tests {
         let back: EditProposal = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, proposal.id);
         assert_eq!(back.candidates.len(), 1);
+        assert_eq!(back.candidates[0].label, "email");
     }
 
     #[test]

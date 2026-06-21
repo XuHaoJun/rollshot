@@ -41,6 +41,12 @@ and PipeWire support.
 - `crates/rollshot-iced-overlay`: iced capture overlay renderer used by `rollshot-app`
 - `crates/rollshot-overlay-core`: framework-neutral overlay logic shared by the overlay crates
 - `crates/rollshot-image-document`: headless non-destructive image/annotation document engine
+- `crates/rollshot-edit-proposal`: typed candidate-edit proposals, review decisions,
+  and lowering to image-document operations
+- `crates/rollshot-automation`: restricted-JavaScript validation, Workflow IR,
+  capability contracts, and strict proposal decoding
+- `crates/rollshot-automation-rquickjs`: hardened QuickJS executor for validated
+  automation; currently internal infrastructure and not yet wired into the product UI
 - `crates/rollshot-macos-oneshot`: isolated macOS ScreenCaptureKit one-shot capture (Objective-C FFI)
 - `crates/rollshot-action`, `crates/rollshot-linux-input`, `crates/rollshot-macos-input`:
   Action Guide recording and platform input observation (built behind the

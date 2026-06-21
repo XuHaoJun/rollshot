@@ -54,6 +54,7 @@ mod tests {
             id: CandidateId(id),
             edit,
             confidence: 0.9,
+            label: "test".into(),
             rationale: None,
             provenance: Provenance {
                 source: ProvenanceSource::Agent { run_id: 1 },
