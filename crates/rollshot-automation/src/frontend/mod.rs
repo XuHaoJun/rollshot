@@ -14,6 +14,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidatedAutomation {
     pub source: String,
+    pub validation_limits: ValidationLimits,
     pub language_schema_version: LanguageSchemaVersion,
     pub ir_schema_version: IrSchemaVersion,
     pub capability_api_version: CapabilityApiVersion,
@@ -59,6 +60,7 @@ pub fn validate_source(
 
         Ok(ValidatedAutomation {
             source: source.into(),
+            validation_limits: limits.clone(),
             language_schema_version: LANGUAGE_SCHEMA_V1,
             ir_schema_version: IR_SCHEMA_V1,
             capability_api_version: CAPABILITY_API_V1,

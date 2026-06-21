@@ -32,6 +32,8 @@ pub enum CompatibilityError {
         installed: OutputSchemaVersion,
         artifact: OutputSchemaVersion,
     },
+    #[error("validated automation contents do not match canonical source")]
+    ArtifactMismatch,
 }
 
 pub fn ensure_compatible(automation: &ValidatedAutomation) -> Result<(), CompatibilityError> {
@@ -58,6 +60,11 @@ pub fn ensure_compatible(automation: &ValidatedAutomation) -> Result<(), Compati
             installed: OUTPUT_SCHEMA_V1,
             artifact: automation.output_schema_version,
         });
+    }
+    let rebuilt = crate::validate_source(&automation.source, &automation.validation_limits)
+        .map_err(|_| CompatibilityError::ArtifactMismatch)?;
+    if rebuilt != *automation {
+        return Err(CompatibilityError::ArtifactMismatch);
     }
     Ok(())
 }
@@ -145,11 +152,6 @@ pub fn execute_to_proposal(
     cancellation: &CancellationFlag,
 ) -> Result<(rollshot_edit_proposal::EditProposal, ExecutionMetrics), ExecutionError> {
     let execution = executor.execute(automation, input, proposal, host, policy, cancellation)?;
-    let edit_proposal = crate::decode_proposal(
-        &execution.output_json,
-        (input.image_width, input.image_height),
-        proposal,
-        policy,
-    )?;
+    let edit_proposal = crate::decode_proposal(&execution.output_json, input, proposal, policy)?;
     Ok((edit_proposal, execution.metrics))
 }

@@ -132,6 +132,16 @@ fn assert_has_code(source: &str, expected: DiagnosticCode) {
     );
 }
 
+fn assert_has_code_with_limits(source: &str, limits: &ValidationLimits, expected: DiagnosticCode) {
+    let diagnostics = validate_source(source, limits).unwrap_err();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == expected),
+        "missing {expected:?}: {diagnostics:#?}"
+    );
+}
+
 #[test]
 fn accepts_explicit_main_and_pure_helper_shape() {
     let validated =
@@ -239,6 +249,8 @@ fn language_schema_v1_denylist_is_complete() {
         ("function main(input){ return Math.random(); }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ const arr = []; arr.push(1); return { candidates: arr }; }", DiagnosticCode::UnsupportedSyntax),
         ("function main(input){ return (rollshot.ocr({region:input.region,limit:1}), {candidates:[]}); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return 1n; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return /secret/; }", DiagnosticCode::UnsupportedSyntax),
     ];
     for (source, code) in cases {
         assert_has_code(source, code);
@@ -263,6 +275,81 @@ fn valid_source_normalizes_to_deterministic_ir_and_costs() {
         .iter()
         .any(|call| call.capability == CapabilityName::Ocr));
     assert_eq!(first.workflow_ir.static_cost.max_output_candidates, 10);
+}
+
+#[test]
+fn helper_return_preserves_collection_cardinality() {
+    let source = r#"
+function emit(matches) {
+  return matches.map((match) => ({
+    kind: "addRedaction",
+    bounds: match.bounds,
+    confidence: match.confidence,
+    label: "match",
+  }));
+}
+
+function main(input) {
+  const matches = rollshot.ocr({ region: input.region, limit: 5 });
+  return { candidates: emit(matches) };
+}
+"#;
+    let validated = validate_source(source, &ValidationLimits::default()).unwrap();
+    assert_eq!(
+        validated.workflow_ir.static_cost.max_output_candidates, 5,
+        "{:#?}",
+        validated.workflow_ir
+    );
+}
+
+#[test]
+fn validation_limits_reject_static_cost_overages() {
+    let source = r#"
+function main(input) {
+  const first = rollshot.ocr({ region: input.region, limit: 5 });
+  const second = rollshot.layout({ region: input.region, limit: 5 });
+  return {
+    candidates: first.map((match) => ({
+      kind: "addRedaction",
+      bounds: match.bounds,
+      confidence: match.confidence,
+      label: "match",
+    })),
+  };
+}
+"#;
+
+    for configure in [
+        |limits: &mut ValidationLimits| limits.max_capability_calls = 1,
+        |limits: &mut ValidationLimits| limits.max_collection_traversals = 0,
+        |limits: &mut ValidationLimits| limits.max_candidates = 4,
+        |limits: &mut ValidationLimits| limits.max_output_bytes = 1,
+    ] {
+        let mut limits = ValidationLimits::default();
+        configure(&mut limits);
+        assert_has_code_with_limits(source, &limits, DiagnosticCode::StaticLimitExceeded);
+    }
+}
+
+#[test]
+fn capability_limit_must_be_a_positive_bounded_integer_literal() {
+    for source in [
+        "function main(input) { const x = rollshot.ocr({ region: input.region }); return { candidates: x }; }",
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 0 }); return { candidates: x }; }",
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 1.5 }); return { candidates: x }; }",
+    ] {
+        assert_has_code(source, DiagnosticCode::StaticLimitExceeded);
+    }
+
+    let limits = ValidationLimits {
+        max_candidates: 4,
+        ..ValidationLimits::default()
+    };
+    assert_has_code_with_limits(
+        "function main(input) { const x = rollshot.ocr({ region: input.region, limit: 5 }); return { candidates: x }; }",
+        &limits,
+        DiagnosticCode::StaticLimitExceeded,
+    );
 }
 
 #[test]

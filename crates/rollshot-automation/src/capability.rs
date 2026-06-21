@@ -23,6 +23,7 @@ pub enum Region {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct OcrQuery {
     pub region: Region,
     pub limit: u32,
@@ -38,6 +39,7 @@ pub struct OcrMatch {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct LayoutQuery {
     pub region: Region,
     pub limit: u32,
@@ -53,6 +55,7 @@ pub struct LayoutRegion {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct RegionFeaturesQuery {
     pub region: Region,
     pub limit: u32,
@@ -68,6 +71,7 @@ pub struct RegionFeatures {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct TemplateMatchQuery {
     pub template_handle: String,
     pub region: Region,

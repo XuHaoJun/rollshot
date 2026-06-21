@@ -45,7 +45,23 @@ impl AutomationExecutor for crate::QuickJsExecutor {
         policy: &ExecutionPolicy,
         cancellation: &CancellationFlag,
     ) -> Result<AutomationExecution, ExecutionError> {
-        ensure_compatible(automation).map_err(ExecutionError::Compatibility)?;
+        self.execute_inner(automation, input, host, policy, cancellation, true)
+    }
+}
+
+impl crate::QuickJsExecutor {
+    fn execute_inner(
+        &self,
+        automation: &ValidatedAutomation,
+        input: &AutomationInput,
+        host: &mut dyn AutomationHost,
+        policy: &ExecutionPolicy,
+        cancellation: &CancellationFlag,
+        verify_automation: bool,
+    ) -> Result<AutomationExecution, ExecutionError> {
+        if verify_automation {
+            ensure_compatible(automation).map_err(ExecutionError::Compatibility)?;
+        }
         if cancellation.is_cancelled() {
             return Err(ExecutionError::Cancelled);
         }
@@ -68,7 +84,7 @@ impl AutomationExecutor for crate::QuickJsExecutor {
                 should_stop
             })));
 
-        let mut guard = BridgeGuard::new(host, policy);
+        let mut guard = BridgeGuard::new(host, policy, automation);
         guard.register();
         let bridge_id = guard.id();
 
@@ -148,5 +164,178 @@ impl AutomationExecutor for crate::QuickJsExecutor {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rollshot_automation::{
+        validate_source, AutomationInput, CancellationFlag, ExecutionError, ExecutionPolicy,
+        FakeAutomationHost, SandboxError, ValidationLimits,
+    };
+
+    use crate::QuickJsExecutor;
+
+    fn input() -> AutomationInput {
+        AutomationInput {
+            image_width: 10,
+            image_height: 10,
+            region: None,
+            annotations: Vec::new(),
+            capability_handles: Default::default(),
+        }
+    }
+
+    fn policy() -> ExecutionPolicy {
+        ExecutionPolicy::smart_redaction_default(
+            Duration::from_millis(25),
+            4 * 1024 * 1024,
+            128 * 1024,
+        )
+    }
+
+    fn runtime_payload(source: &str) -> rollshot_automation::ValidatedAutomation {
+        let mut automation = validate_source(
+            "function main(input) { return { candidates: [] }; }",
+            &ValidationLimits::default(),
+        )
+        .unwrap();
+        automation.source = source.into();
+        automation
+    }
+
+    fn execute_unchecked(
+        source: &str,
+        policy: &ExecutionPolicy,
+        cancellation: &CancellationFlag,
+    ) -> Result<rollshot_automation::AutomationExecution, ExecutionError> {
+        QuickJsExecutor.execute_inner(
+            &runtime_payload(source),
+            &input(),
+            &mut FakeAutomationHost::default(),
+            policy,
+            cancellation,
+            false,
+        )
+    }
+
+    #[test]
+    fn interrupt_stops_infinite_runtime_payload() {
+        let result = execute_unchecked(
+            "function main(input) { while (true) {} }",
+            &policy(),
+            &CancellationFlag::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(ExecutionError::Sandbox(SandboxError::Timeout))
+                | Err(ExecutionError::Sandbox(SandboxError::Interrupted))
+        ));
+    }
+
+    #[test]
+    fn memory_limit_stops_runtime_allocation() {
+        let mut limits = policy();
+        limits.max_wall_time = Duration::from_secs(1);
+        limits.max_memory_bytes = 1024 * 1024;
+        assert_eq!(
+            execute_unchecked(
+                "function main(input) { const a = []; while (true) { a.push(new Array(1000).fill(1)); } }",
+                &limits,
+                &CancellationFlag::new(),
+            ),
+            Err(ExecutionError::Sandbox(SandboxError::MemoryLimit))
+        );
+    }
+
+    #[test]
+    fn stack_limit_stops_runtime_recursion() {
+        assert_eq!(
+            execute_unchecked(
+                "function recurse() { return recurse(); } function main(input) { return recurse(); }",
+                &policy(),
+                &CancellationFlag::new(),
+            ),
+            Err(ExecutionError::Sandbox(SandboxError::StackLimit))
+        );
+    }
+
+    #[test]
+    fn fresh_execution_does_not_observe_prior_global_state() {
+        let executor = QuickJsExecutor;
+        let cancellation = CancellationFlag::new();
+        let first = executor.execute_inner(
+            &runtime_payload(
+                "var __rollshot_marker = 1; function main(input) { return { candidates: [] }; }",
+            ),
+            &input(),
+            &mut FakeAutomationHost::default(),
+            &policy(),
+            &cancellation,
+            false,
+        );
+        assert!(first.is_ok());
+
+        let second = executor
+            .execute_inner(
+                &runtime_payload(
+                    "function main(input) { return { candidates: typeof __rollshot_marker === 'undefined' ? [] : [{ kind: 'delete', annotationId: '1', confidence: 1, label: 'leak' }] }; }",
+                ),
+                &input(),
+                &mut FakeAutomationHost::default(),
+                &policy(),
+                &cancellation,
+                false,
+            )
+            .unwrap();
+        assert_eq!(second.output_json, r#"{"candidates":[]}"#);
+    }
+
+    #[test]
+    fn in_flight_cancellation_interrupts_execution() {
+        let cancellation = CancellationFlag::new();
+        let canceller = cancellation.clone();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..1_000_000 {
+                std::hint::spin_loop();
+            }
+            canceller.cancel();
+        });
+        let mut limits = policy();
+        limits.max_wall_time = Duration::from_secs(5);
+        let result = execute_unchecked(
+            "function main(input) { while (true) {} }",
+            &limits,
+            &cancellation,
+        );
+        handle.join().unwrap();
+        assert_eq!(result, Err(ExecutionError::Cancelled));
+    }
+
+    #[test]
+    fn bridge_rejects_query_limit_above_validated_manifest() {
+        let mut automation = validate_source(
+            "function main(input) { rollshot.ocr({ region: { kind: 'full' }, limit: 1 }); return { candidates: [] }; }",
+            &ValidationLimits::default(),
+        )
+        .unwrap();
+        automation.source = "function main(input) { rollshot.ocr({ region: { kind: 'full' }, limit: 2 }); return { candidates: [] }; }".into();
+        assert_eq!(
+            QuickJsExecutor.execute_inner(
+                &automation,
+                &input(),
+                &mut FakeAutomationHost::default(),
+                &policy(),
+                &CancellationFlag::new(),
+                false,
+            ),
+            Err(ExecutionError::Capability(
+                rollshot_automation::CapabilityError::InvalidInput {
+                    code: "limit_exceeds_manifest"
+                }
+            ))
+        );
     }
 }

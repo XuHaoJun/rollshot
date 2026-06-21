@@ -354,10 +354,16 @@ impl<'a> BodyValidator<'a> {
             Expression::NumericLiteral(lit) => {
                 self.literal_bytes += lit.value.to_string().len();
             }
-            Expression::BooleanLiteral(_)
-            | Expression::NullLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::RegExpLiteral(_) => {}
+            Expression::BooleanLiteral(_) | Expression::NullLiteral(_) => {}
+
+            Expression::BigIntLiteral(_) | Expression::RegExpLiteral(_) => {
+                self.emit(
+                    DiagnosticCode::UnsupportedSyntax,
+                    expr.span().start,
+                    expr.span().end,
+                    "literal kind is not allowed",
+                );
+            }
 
             Expression::Identifier(ident) => {
                 let name = ident.name.as_str();

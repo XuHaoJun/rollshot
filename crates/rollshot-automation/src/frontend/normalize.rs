@@ -21,6 +21,7 @@ const ROLLSHOT_CAPABILITIES: &[(&str, CapabilityName)] = &[
     ("regionFeatures", CapabilityName::RegionFeatures),
     ("templateMatch", CapabilityName::TemplateMatch),
 ];
+const MAX_CAPABILITY_RESULTS_PER_CALL: f64 = 1_000.0;
 
 type CollectionKindFactory = fn(CollectionIr) -> IrNodeKind;
 
@@ -39,7 +40,9 @@ struct FunctionNorm {
 
 struct Normalizer<'a> {
     source: &'a str,
+    limits: &'a ValidationLimits,
     helper_names: BTreeSet<String>,
+    helper_functions: BTreeMap<String, &'a ast::Function<'a>>,
     next_node_id: NodeId,
     functions: Vec<FunctionNorm>,
     nodes: Vec<IrNode>,
@@ -91,7 +94,13 @@ pub(super) fn normalize(
 
     let mut normalizer = Normalizer {
         source,
+        limits,
         helper_names,
+        helper_functions: func_order
+            .iter()
+            .filter(|(name, _)| name != "main")
+            .map(|(name, function)| (name.clone(), function.as_ref()))
+            .collect(),
         next_node_id: 1,
         functions: Vec::new(),
         nodes: Vec::new(),
@@ -123,15 +132,16 @@ pub(super) fn normalize(
         if let Some(body) = &function.body {
             let mut var_nodes: BTreeMap<String, NodeId> = BTreeMap::new();
             for stmt in &body.statements {
-                normalizer.normalize_statement(stmt, &mut var_nodes);
+                if !matches!(stmt, Statement::ReturnStatement(_)) {
+                    normalizer.normalize_statement(stmt, &mut var_nodes);
+                }
             }
 
             let func_id = func_index as FunctionId;
-            if normalizer.functions[func_id as usize].name == "main" {
-                if let Some(Statement::ReturnStatement(ret)) = body.statements.last() {
-                    if let Some(arg) = &ret.argument {
-                        let (output_id, cardinality) =
-                            normalizer.normalize_expression(arg, &var_nodes);
+            if let Some(Statement::ReturnStatement(ret)) = body.statements.last() {
+                if let Some(arg) = &ret.argument {
+                    let (output_id, cardinality) = normalizer.normalize_expression(arg, &var_nodes);
+                    if normalizer.functions[func_id as usize].name == "main" {
                         normalizer.output = output_id;
                         normalizer.max_output_candidates = cardinality;
                     }
@@ -186,8 +196,41 @@ pub(super) fn normalize(
         max_aggregate_capability_results: max_aggregate_results,
         max_collection_traversals: normalizer.max_collection_traversals,
         max_output_candidates: normalizer.max_output_candidates,
-        max_output_bytes: 0,
+        max_output_bytes: estimate_output_bytes(normalizer.max_output_candidates),
     };
+
+    let mut limit_diagnostics = Vec::new();
+    for (exceeded, message) in [
+        (
+            static_cost.max_capability_calls > limits.max_capability_calls,
+            "capability call count exceeds the configured limit",
+        ),
+        (
+            static_cost.max_collection_traversals > limits.max_collection_traversals,
+            "collection traversal count exceeds the configured limit",
+        ),
+        (
+            static_cost.max_output_candidates > limits.max_candidates,
+            "output candidate count exceeds the configured limit",
+        ),
+        (
+            static_cost.max_output_bytes > limits.max_output_bytes,
+            "output byte bound exceeds the configured limit",
+        ),
+    ] {
+        if exceeded {
+            limit_diagnostics.push(SourceDiagnostic {
+                code: DiagnosticCode::StaticLimitExceeded,
+                severity: DiagnosticSeverity::Error,
+                message: message.into(),
+                primary_span: SourceSpan::from_offsets(source, 0, source.len() as u32),
+                related: Vec::new(),
+            });
+        }
+    }
+    if !limit_diagnostics.is_empty() {
+        return Err(limit_diagnostics);
+    }
 
     Ok(WorkflowIr {
         ir_schema_version: IR_SCHEMA_V1,
@@ -255,8 +298,14 @@ impl<'a> Normalizer<'a> {
             Expression::CallExpression(call) => self.normalize_call(call, var_nodes),
             Expression::ObjectExpression(obj) => self.normalize_object(obj, var_nodes),
             Expression::Identifier(ident) => {
-                let id = if let Some(&node_id) = var_nodes.get(ident.name.as_str()) {
-                    node_id
+                let (id, cardinality) = if let Some(&node_id) = var_nodes.get(ident.name.as_str()) {
+                    let cardinality = self
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == node_id)
+                        .map(|node| node.max_cardinality)
+                        .unwrap_or(1);
+                    (node_id, cardinality)
                 } else {
                     let node_id = self.alloc_node();
                     self.push_node(IrNode {
@@ -267,9 +316,9 @@ impl<'a> Normalizer<'a> {
                         source_span: self.span_for_expr(expr),
                         max_cardinality: 1,
                     });
-                    node_id
+                    (node_id, 1)
                 };
-                (id, 1)
+                (id, cardinality)
             }
             Expression::StringLiteral(_)
             | Expression::NumericLiteral(_)
@@ -374,7 +423,12 @@ impl<'a> Normalizer<'a> {
                 let node_id = self.alloc_node();
                 let is_input_derived =
                     matches!(&member.object, Expression::Identifier(id) if id.name == "input");
-                if is_input_derived {
+                let cardinality = if is_input_derived && member.property.name == "annotations" {
+                    self.limits.max_input_annotations
+                } else {
+                    1
+                };
+                if is_input_derived && member.property.name != "annotations" {
                     self.unbounded_nodes.insert(node_id);
                 }
                 self.push_node(IrNode {
@@ -383,9 +437,9 @@ impl<'a> Normalizer<'a> {
                         expression_summary: "member_access".into(),
                     }),
                     source_span: self.span_for_expr(expr),
-                    max_cardinality: 1,
+                    max_cardinality: cardinality,
                 });
-                (node_id, 1)
+                (node_id, cardinality)
             }
             _ => {
                 let node_id = self.alloc_node();
@@ -505,8 +559,16 @@ impl<'a> Normalizer<'a> {
             return (node_id, 1);
         };
 
-        let literal_limit = self.extract_literal_limit(call);
-        let limit = literal_limit.unwrap_or(1);
+        let limit = self.extract_literal_limit(call).unwrap_or_else(|| {
+            self.diagnostics.push(SourceDiagnostic {
+                code: DiagnosticCode::StaticLimitExceeded,
+                severity: DiagnosticSeverity::Error,
+                message: "capability limit must be a positive bounded integer literal".into(),
+                primary_span: SourceSpan::from_offsets(self.source, call.span.start, call.span.end),
+                related: Vec::new(),
+            });
+            1
+        });
 
         for arg in &call.arguments {
             if let Some(expr) = arg.as_expression() {
@@ -541,11 +603,18 @@ impl<'a> Normalizer<'a> {
         call: &CallExpression<'a>,
         var_nodes: &BTreeMap<String, NodeId>,
     ) -> (NodeId, u32) {
+        let mut argument_cardinalities = Vec::new();
         for arg in &call.arguments {
             if let Some(expr) = arg.as_expression() {
-                let (_, _) = self.normalize_expression(expr, var_nodes);
+                let (_, cardinality) = self.normalize_expression(expr, var_nodes);
+                argument_cardinalities.push(cardinality);
             }
         }
+        let cardinality = self.infer_helper_cardinality(
+            helper_name,
+            &argument_cardinalities,
+            &mut BTreeSet::new(),
+        );
 
         let node_id = self.alloc_node();
         self.push_node(IrNode {
@@ -554,10 +623,10 @@ impl<'a> Normalizer<'a> {
                 helper: helper_name.to_string(),
             }),
             source_span: SourceSpan::from_offsets(self.source, call.span.start, call.span.end),
-            max_cardinality: 1,
+            max_cardinality: cardinality,
         });
 
-        (node_id, 1)
+        (node_id, cardinality)
     }
 
     fn normalize_collection_call(
@@ -801,9 +870,12 @@ impl<'a> Normalizer<'a> {
                         if let PropertyKey::StaticIdentifier(key) = &prop.key {
                             if key.name == "limit" {
                                 if let Expression::NumericLiteral(lit) = &prop.value {
-                                    let val = lit.value as u32;
-                                    if val > 0 {
-                                        return Some(val);
+                                    if lit.value.is_finite()
+                                        && lit.value.fract() == 0.0
+                                        && lit.value > 0.0
+                                        && lit.value <= MAX_CAPABILITY_RESULTS_PER_CALL
+                                    {
+                                        return Some(lit.value as u32);
                                     }
                                 }
                             }
@@ -814,6 +886,132 @@ impl<'a> Normalizer<'a> {
         }
         None
     }
+
+    fn infer_helper_cardinality(
+        &self,
+        helper_name: &str,
+        argument_cardinalities: &[u32],
+        visiting: &mut BTreeSet<String>,
+    ) -> u32 {
+        if !visiting.insert(helper_name.to_string()) {
+            return 0;
+        }
+        let Some(function) = self.helper_functions.get(helper_name) else {
+            visiting.remove(helper_name);
+            return 1;
+        };
+        let mut variables = BTreeMap::new();
+        for (parameter, cardinality) in function
+            .params
+            .items
+            .iter()
+            .zip(argument_cardinalities.iter().copied())
+        {
+            if let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern {
+                variables.insert(identifier.name.to_string(), cardinality);
+            }
+        }
+        let mut result = 1;
+        if let Some(body) = &function.body {
+            for statement in &body.statements {
+                match statement {
+                    Statement::VariableDeclaration(declaration) => {
+                        for declarator in &declaration.declarations {
+                            if let (BindingPattern::BindingIdentifier(identifier), Some(value)) =
+                                (&declarator.id, &declarator.init)
+                            {
+                                let cardinality =
+                                    self.infer_expression_cardinality(value, &variables, visiting);
+                                variables.insert(identifier.name.to_string(), cardinality);
+                            }
+                        }
+                    }
+                    Statement::ReturnStatement(return_statement) => {
+                        if let Some(value) = &return_statement.argument {
+                            result = self.infer_expression_cardinality(value, &variables, visiting);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        visiting.remove(helper_name);
+        result
+    }
+
+    fn infer_expression_cardinality(
+        &self,
+        expression: &Expression<'a>,
+        variables: &BTreeMap<String, u32>,
+        visiting: &mut BTreeSet<String>,
+    ) -> u32 {
+        match expression {
+            Expression::Identifier(identifier) => variables
+                .get(identifier.name.as_str())
+                .copied()
+                .unwrap_or(1),
+            Expression::ArrayExpression(array) => array.elements.len() as u32,
+            Expression::ParenthesizedExpression(parenthesized) => {
+                self.infer_expression_cardinality(&parenthesized.expression, variables, visiting)
+            }
+            Expression::ConditionalExpression(conditional) => self
+                .infer_expression_cardinality(&conditional.consequent, variables, visiting)
+                .max(self.infer_expression_cardinality(
+                    &conditional.alternate,
+                    variables,
+                    visiting,
+                )),
+            Expression::StaticMemberExpression(member) => {
+                if matches!(&member.object, Expression::Identifier(id) if id.name == "input")
+                    && member.property.name == "annotations"
+                {
+                    self.limits.max_input_annotations
+                } else {
+                    1
+                }
+            }
+            Expression::CallExpression(call) => match &call.callee {
+                Expression::Identifier(identifier)
+                    if self.helper_functions.contains_key(identifier.name.as_str()) =>
+                {
+                    let argument_cardinalities = call
+                        .arguments
+                        .iter()
+                        .filter_map(Argument::as_expression)
+                        .map(|argument| {
+                            self.infer_expression_cardinality(argument, variables, visiting)
+                        })
+                        .collect::<Vec<_>>();
+                    self.infer_helper_cardinality(
+                        identifier.name.as_str(),
+                        &argument_cardinalities,
+                        visiting,
+                    )
+                }
+                Expression::StaticMemberExpression(member)
+                    if COLLECTION_METHODS
+                        .iter()
+                        .any(|(method, _)| *method == member.property.name.as_str()) =>
+                {
+                    if matches!(member.property.name.as_str(), "some" | "every") {
+                        1
+                    } else {
+                        self.infer_expression_cardinality(&member.object, variables, visiting)
+                    }
+                }
+                _ => 1,
+            },
+            _ => 1,
+        }
+    }
+}
+
+fn estimate_output_bytes(max_candidates: u32) -> usize {
+    let candidate_bytes = crate::output::MAX_LABEL_BYTES
+        .saturating_add(crate::output::MAX_RATIONALE_BYTES)
+        .saturating_add(crate::output::MAX_TEXT_BYTES)
+        .saturating_add(crate::output::MAX_CANDIDATE_STRUCTURAL_BYTES);
+    32_usize.saturating_add((max_candidates as usize).saturating_mul(candidate_bytes))
 }
 
 fn compute_max_call_depth(functions: &[super::validate::FunctionFacts]) -> u32 {

@@ -4,7 +4,12 @@ use rollshot_edit_proposal::{
 use rollshot_image_document::{AnnotationId, ImagePoint, ImageRect};
 use serde::Deserialize;
 
-use crate::{ExecutionPolicy, ProposalContext, ProposedEditKind};
+use crate::{AutomationInput, ExecutionPolicy, ProposalContext, ProposedEditKind};
+
+pub(crate) const MAX_LABEL_BYTES: usize = 128;
+pub(crate) const MAX_RATIONALE_BYTES: usize = 2_048;
+pub(crate) const MAX_TEXT_BYTES: usize = 2_048;
+pub(crate) const MAX_CANDIDATE_STRUCTURAL_BYTES: usize = 384;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum OutputError {
@@ -204,14 +209,26 @@ fn validate_metadata(
             field: "confidence",
         });
     }
-    if label.trim().is_empty() || label.len() > 128 {
+    if label.trim().is_empty() || label.len() > MAX_LABEL_BYTES {
         return Err(OutputError::Malformed {
             code: "invalid_label",
         });
     }
-    if rationale.is_some_and(|text| text.len() > 2_048) {
+    if rationale.is_some_and(|text| text.len() > MAX_RATIONALE_BYTES) {
         return Err(OutputError::Malformed {
             code: "rationale_too_long",
+        });
+    }
+    Ok(())
+}
+
+fn validate_text(text: &str) -> Result<(), OutputError> {
+    if text.is_empty() {
+        return Err(OutputError::Malformed { code: "empty_text" });
+    }
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(OutputError::Malformed {
+            code: "text_too_long",
         });
     }
     Ok(())
@@ -253,9 +270,7 @@ fn decode_one_candidate(raw: &serde_json::Value) -> Result<DecodedCandidate, Out
                 })?;
             validate_metadata(w.confidence, &w.label, w.rationale.as_deref())?;
             let position = point(w.position)?;
-            if w.text.is_empty() {
-                return Err(OutputError::Malformed { code: "empty_text" });
-            }
+            validate_text(&w.text)?;
             Ok(DecodedCandidate::Add(
                 ProposedEdit::AddTextNote {
                     position,
@@ -320,9 +335,7 @@ fn decode_one_candidate(raw: &serde_json::Value) -> Result<DecodedCandidate, Out
                 })?;
             validate_metadata(w.confidence, &w.label, w.rationale.as_deref())?;
             let id = parse_annotation_id(&w.annotation_id)?;
-            if w.text.is_empty() {
-                return Err(OutputError::Malformed { code: "empty_text" });
-            }
+            validate_text(&w.text)?;
             Ok(DecodedCandidate::Update(
                 ProposedEdit::UpdateText { id, text: w.text },
                 id,
@@ -397,7 +410,7 @@ fn annotation_id_for_candidate(cand: &DecodedCandidate) -> Option<AnnotationId> 
 
 pub fn decode_proposal(
     json: &str,
-    image_dims: (u32, u32),
+    input: &AutomationInput,
     context: &ProposalContext,
     policy: &ExecutionPolicy,
 ) -> Result<EditProposal, OutputError> {
@@ -415,13 +428,18 @@ pub fn decode_proposal(
         decoded.push(decode_one_candidate(raw)?);
     }
 
+    let input_annotation_ids = input
+        .annotations
+        .iter()
+        .map(|annotation| annotation.id)
+        .collect::<std::collections::BTreeSet<_>>();
     for cand in &decoded {
         let kind = kind_for_candidate(cand);
         if !policy.allowed_edit_kinds.contains(&kind) {
             return Err(OutputError::EditKindDenied { kind });
         }
         if let Some(id) = annotation_id_for_candidate(cand) {
-            if !policy.allowed_annotation_ids.contains(&id) {
+            if !policy.allowed_annotation_ids.contains(&id) || !input_annotation_ids.contains(&id) {
                 return Err(OutputError::AnnotationDenied { id });
             }
         }
@@ -451,7 +469,11 @@ pub fn decode_proposal(
         });
     }
 
-    validate_policy(&candidates, &policy.proposal_limits, image_dims)?;
+    validate_policy(
+        &candidates,
+        &policy.proposal_limits,
+        (input.image_width, input.image_height),
+    )?;
 
     Ok(EditProposal {
         id: context.proposal_id,

@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use rollshot_automation::{
-    AutomationHost, AutomationInput, CapabilityError, CapabilityName, ExecutionPolicy,
+    AutomationHost, AutomationInput, CapabilityError, CapabilityName, ExecutionPolicy, Region,
+    ValidatedAutomation,
 };
 use rquickjs::{Ctx, Function, Object, Value};
 
@@ -23,6 +24,7 @@ pub(crate) struct BridgeStateInner {
     policy: *const ExecutionPolicy,
     pub capability_calls: u32,
     pub calls_by_capability: BTreeMap<CapabilityName, u32>,
+    max_results_by_capability: BTreeMap<CapabilityName, u32>,
     pub host_allocation_bytes: usize,
     pub pending_error: Option<CapabilityError>,
 }
@@ -34,7 +36,11 @@ pub(crate) struct BridgeGuard {
 }
 
 impl BridgeGuard {
-    pub fn new(host: &mut dyn AutomationHost, policy: &ExecutionPolicy) -> Self {
+    pub fn new(
+        host: &mut dyn AutomationHost,
+        policy: &ExecutionPolicy,
+        automation: &ValidatedAutomation,
+    ) -> Self {
         let id = NEXT_BRIDGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // SAFETY: `host` and `policy` are valid for the duration of `execute`.
@@ -54,6 +60,20 @@ impl BridgeGuard {
             policy: policy_ptr,
             capability_calls: 0,
             calls_by_capability: BTreeMap::new(),
+            max_results_by_capability: automation
+                .workflow_ir
+                .capability_manifest
+                .calls
+                .iter()
+                .fold(BTreeMap::new(), |mut limits, call| {
+                    limits
+                        .entry(call.capability)
+                        .and_modify(|limit| {
+                            *limit = (*limit).max(call.max_results_per_call);
+                        })
+                        .or_insert(call.max_results_per_call);
+                    limits
+                }),
             host_allocation_bytes: 0,
             pending_error: None,
         });
@@ -146,11 +166,32 @@ fn store_error_and_throw(ctx: &Ctx<'_>, id: u64, error: CapabilityError) -> rqui
 
 fn charge_host_allocation(id: u64, bytes: usize) -> Result<(), CapabilityError> {
     with_state(id, |s| {
-        s.host_allocation_bytes += bytes;
+        s.host_allocation_bytes = s.host_allocation_bytes.saturating_add(bytes);
         // SAFETY: policy pointer is valid for the duration of execute.
         let limit = unsafe { &*s.policy }.max_host_allocation_bytes;
         if s.host_allocation_bytes > limit {
             Err(CapabilityError::LimitExceeded)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn validate_query_limit(
+    id: u64,
+    capability: CapabilityName,
+    limit: u32,
+) -> Result<(), CapabilityError> {
+    with_state(id, |state| {
+        let allowed = state
+            .max_results_by_capability
+            .get(&capability)
+            .copied()
+            .unwrap_or(0);
+        if limit == 0 || limit > allowed {
+            Err(CapabilityError::InvalidInput {
+                code: "limit_exceeds_manifest",
+            })
         } else {
             Ok(())
         }
@@ -198,8 +239,17 @@ unsafe fn cast_value_lifetime<'a, 'b>(value: Value<'a>) -> Value<'b> {
     std::mem::transmute(value)
 }
 
+fn valid_region(region: Region) -> bool {
+    match region {
+        Region::Full => true,
+        Region::Rect { bounds } => {
+            bounds.is_finite() && bounds.width >= 0.0 && bounds.height >= 0.0
+        }
+    }
+}
+
 macro_rules! capability_fn {
-    ($ctx:expr, $bridge_id:expr, $capability:expr, $query_type:ty, $host_method:ident, $validate:expr) => {{
+    ($ctx:expr, $bridge_id:expr, $capability:expr, $query_type:ty, $host_method:ident, $validate_query:expr, $validate_item:expr) => {{
         let bridge_id = $bridge_id;
         Function::new(
             $ctx.clone(),
@@ -207,13 +257,26 @@ macro_rules! capability_fn {
                 let json_str = js_object_to_json(&query)?;
                 let q: $query_type =
                     serde_json::from_str(&json_str).map_err(|_| rquickjs::Error::Exception)?;
+                if !$validate_query(&q) {
+                    return Err(store_error_and_throw(
+                        &ctx,
+                        bridge_id,
+                        CapabilityError::InvalidInput {
+                            code: "invalid_query",
+                        },
+                    ));
+                }
+                validate_query_limit(bridge_id, $capability, q.limit)
+                    .map_err(|error| store_error_and_throw(&ctx, bridge_id, error))?;
+                let result_limit = q.limit as usize;
                 charge_capability_calls(bridge_id, $capability)
                     .map_err(|e| store_error_and_throw(&ctx, bridge_id, e))?;
                 // SAFETY: host pointer is valid for the duration of execute.
                 let result = with_state(bridge_id, |s| unsafe { &mut *s.host }.$host_method(q));
-                let items = result.map_err(|e| store_error_and_throw(&ctx, bridge_id, e))?;
+                let mut items = result.map_err(|e| store_error_and_throw(&ctx, bridge_id, e))?;
+                items.truncate(result_limit);
                 for item in &items {
-                    if !$validate(item) {
+                    if !$validate_item(item) {
                         return Err(store_error_and_throw(
                             &ctx,
                             bridge_id,
@@ -251,7 +314,13 @@ pub(crate) fn install_rollshot<'js>(
         CapabilityName::Ocr,
         rollshot_automation::OcrQuery,
         ocr,
-        |m: &rollshot_automation::OcrMatch| m.confidence.is_finite()
+        |q: &rollshot_automation::OcrQuery| q.limit > 0 && valid_region(q.region),
+        |m: &rollshot_automation::OcrMatch| {
+            m.bounds.is_finite()
+                && m.bounds.width >= 0.0
+                && m.bounds.height >= 0.0
+                && m.confidence.is_finite()
+        }
     );
     rollshot.set("ocr", ocr_fn)?;
 
@@ -261,7 +330,13 @@ pub(crate) fn install_rollshot<'js>(
         CapabilityName::Layout,
         rollshot_automation::LayoutQuery,
         layout,
-        |r: &rollshot_automation::LayoutRegion| r.confidence.is_finite()
+        |q: &rollshot_automation::LayoutQuery| q.limit > 0 && valid_region(q.region),
+        |r: &rollshot_automation::LayoutRegion| {
+            r.bounds.is_finite()
+                && r.bounds.width >= 0.0
+                && r.bounds.height >= 0.0
+                && r.confidence.is_finite()
+        }
     );
     rollshot.set("layout", layout_fn)?;
 
@@ -271,7 +346,13 @@ pub(crate) fn install_rollshot<'js>(
         CapabilityName::RegionFeatures,
         rollshot_automation::RegionFeaturesQuery,
         region_features,
-        |f: &rollshot_automation::RegionFeatures| f.edge_density.is_finite()
+        |q: &rollshot_automation::RegionFeaturesQuery| q.limit > 0 && valid_region(q.region),
+        |f: &rollshot_automation::RegionFeatures| {
+            f.bounds.is_finite()
+                && f.bounds.width >= 0.0
+                && f.bounds.height >= 0.0
+                && f.edge_density.is_finite()
+        }
     );
     rollshot.set("regionFeatures", rf_fn)?;
 
@@ -281,7 +362,16 @@ pub(crate) fn install_rollshot<'js>(
         CapabilityName::TemplateMatch,
         rollshot_automation::TemplateMatchQuery,
         template_match,
-        |t: &rollshot_automation::TemplateMatch| t.score.is_finite()
+        |q: &rollshot_automation::TemplateMatchQuery| {
+            q.limit > 0 && !q.template_handle.is_empty() && valid_region(q.region)
+        },
+        |t: &rollshot_automation::TemplateMatch| {
+            t.bounds.is_finite()
+                && t.bounds.width >= 0.0
+                && t.bounds.height >= 0.0
+                && t.anchor.is_finite()
+                && t.score.is_finite()
+        }
     );
     rollshot.set("templateMatch", tm_fn)?;
 

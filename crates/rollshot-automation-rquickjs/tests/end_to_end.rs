@@ -11,6 +11,40 @@ use rollshot_edit_proposal::{
 };
 use rollshot_image_document::{ImagePoint, ImageRect};
 
+struct UnboundedHost {
+    results: Vec<OcrMatch>,
+}
+
+impl rollshot_automation::AutomationHost for UnboundedHost {
+    fn ocr(
+        &mut self,
+        _query: rollshot_automation::OcrQuery,
+    ) -> Result<Vec<OcrMatch>, rollshot_automation::CapabilityError> {
+        Ok(self.results.clone())
+    }
+
+    fn layout(
+        &mut self,
+        _query: rollshot_automation::LayoutQuery,
+    ) -> Result<Vec<LayoutRegion>, rollshot_automation::CapabilityError> {
+        Ok(Vec::new())
+    }
+
+    fn region_features(
+        &mut self,
+        _query: rollshot_automation::RegionFeaturesQuery,
+    ) -> Result<Vec<RegionFeatures>, rollshot_automation::CapabilityError> {
+        Ok(Vec::new())
+    }
+
+    fn template_match(
+        &mut self,
+        _query: rollshot_automation::TemplateMatchQuery,
+    ) -> Result<Vec<TemplateMatch>, rollshot_automation::CapabilityError> {
+        Ok(Vec::new())
+    }
+}
+
 fn run_source(
     source: &str,
     host: &mut FakeAutomationHost,
@@ -264,5 +298,99 @@ function main(input) {
         Err(ExecutionError::Capability(CapabilityError::Failed {
             code: "fixture_failure",
         }))
+    );
+}
+
+#[test]
+fn bridge_truncates_host_results_to_query_limit() {
+    let source = r#"
+function main(input) {
+  const matches = rollshot.ocr({ region: input.region, limit: 1 });
+  return {
+    candidates: matches.map((match) => ({
+      kind: "addRedaction",
+      bounds: match.bounds,
+      confidence: match.confidence,
+      label: "match",
+    })),
+  };
+}
+"#;
+    let bounds = ImageRect::from_corners(ImagePoint::new(1.0, 1.0), ImagePoint::new(2.0, 2.0));
+    let mut host = UnboundedHost {
+        results: vec![
+            OcrMatch {
+                bounds,
+                text: "one".into(),
+                confidence: 1.0,
+            },
+            OcrMatch {
+                bounds,
+                text: "two".into(),
+                confidence: 1.0,
+            },
+        ],
+    };
+    let automation = validate_source(source, &ValidationLimits::default()).unwrap();
+    let input = AutomationInput {
+        image_width: 100,
+        image_height: 100,
+        region: Some(Region::Full),
+        annotations: Vec::new(),
+        capability_handles: Default::default(),
+    };
+    let proposal = ProposalContext {
+        proposal_id: ProposalId(1),
+        base_document_state_id: 0,
+        provenance: Provenance {
+            source: ProvenanceSource::Agent { run_id: 1 },
+        },
+    };
+    let policy = ExecutionPolicy::smart_redaction_default(
+        Duration::from_secs(1),
+        8 * 1024 * 1024,
+        256 * 1024,
+    );
+    let (proposal, _) = execute_to_proposal(
+        &QuickJsExecutor,
+        &automation,
+        &input,
+        &proposal,
+        &mut host,
+        &policy,
+        &CancellationFlag::new(),
+    )
+    .unwrap();
+    assert_eq!(proposal.candidates.len(), 1);
+}
+
+#[test]
+fn bridge_rejects_non_finite_host_geometry() {
+    let source = r#"
+function main(input) {
+  rollshot.ocr({ region: input.region, limit: 1 });
+  return { candidates: [] };
+}
+"#;
+    let mut host = FakeAutomationHost {
+        ocr_results: vec![OcrMatch {
+            bounds: ImageRect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            text: "bad".into(),
+            confidence: 1.0,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        run_source(source, &mut host, ProposedEditKind::AddRedaction),
+        Err(ExecutionError::Capability(
+            rollshot_automation::CapabilityError::Failed {
+                code: "invalid_value"
+            }
+        ))
     );
 }

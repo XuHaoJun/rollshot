@@ -38,7 +38,8 @@ expose rquickjs types.
 ## Subproject 5 handoff
 
 Persist canonical source, Workflow IR, all four schema versions, capability
-manifest, static cost, validation summary, and immutable revision provenance.
+manifest, static cost, validation limits, validation summary, and immutable
+revision provenance.
 Do not persist oxc ASTs, runtime contexts, raw OCR, or raw host results.
 
 ## Subproject 6 handoff
@@ -58,12 +59,15 @@ QuickJS callback and keep host callbacks below 1 ms.
 - QuickJS interrupts do not pre-empt a blocking Rust callback.
 - QuickJS memory limits exclude Rust allocations; host allocation limits are separate.
 - Parser/runtime upgrades require all frontend and adversarial suites.
+- Execution revalidates persisted source against its recorded limits and
+  semantic artifact before creating a runtime.
 
 ## Verification evidence
 
 **Platform:** Linux 6.8.0-124-generic x86_64
 **Compiler:** rustc 1.96.0 (ac68fa20 2026-05-25)
-**Commit:** 8c28df3
+**Base commit:** 830e00a
+**Evidence state:** post-review working tree
 
 ### Crate-level tests
 
@@ -72,10 +76,10 @@ $ rtk cargo test -p rollshot-edit-proposal
 cargo test: 14 passed (2 suites, 0.00s)
 
 $ rtk cargo test -p rollshot-automation
-cargo test: 32 passed (5 suites, 0.00s)
+cargo test: 37 passed (5 suites, 0.00s)
 
 $ rtk cargo test -p rollshot-automation-rquickjs
-cargo test: 20 passed (5 suites, 0.03s)
+cargo test: 24 passed (5 suites, 0.03s)
 ```
 
 ### Workspace formatting and lint
@@ -88,7 +92,7 @@ $ rtk cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy: No issues found
 
 $ rtk cargo test
-cargo test: 992 passed, 5 ignored (52 suites, 25.83s)
+cargo test: 1001 passed, 5 ignored (52 suites, 24.63s)
 ```
 
 ### Dependency pin verification

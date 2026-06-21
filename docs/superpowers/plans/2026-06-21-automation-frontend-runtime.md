@@ -28,6 +28,26 @@ When a plan snippet and the spike disagree on an API detail, **the spike wins**
 **this plan wins**. Do **not** port the spike's string-prefix or partial-traversal
 shortcuts (those were tree-sitter-candidate scaffolding) — only its verified API usage.
 
+### Post-review contract corrections
+
+The following corrections are authoritative over older illustrative snippets
+later in this plan:
+
+- `ValidatedAutomation` persists the exact `ValidationLimits` used to build it.
+  `ensure_compatible` revalidates source with those limits and compares the
+  rebuilt artifact before any runtime is created.
+- Normalization rejects every calculated `ValidationLimits` overage, records a
+  conservative non-zero output-byte bound, and propagates helper return
+  cardinality from call-site argument bounds.
+- `decode_proposal` receives `&AutomationInput`, derives image dimensions from
+  it, and authorizes update/delete IDs only when they occur in both
+  `input.annotations` and `ExecutionPolicy::allowed_annotation_ids`.
+- The QuickJS bridge rejects query limits above the validated manifest,
+  truncates arbitrary host results to the requested limit, and validates all
+  returned geometry and scores before exposing results to JavaScript.
+- BigInt and regular-expression literals are rejected by the Language Schema
+  v1 default-deny validator.
+
 ---
 
 ## File Structure
@@ -1381,6 +1401,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidatedAutomation {
     pub source: String,
+    pub validation_limits: ValidationLimits,
     pub language_schema_version: LanguageSchemaVersion,
     pub ir_schema_version: IrSchemaVersion,
     pub capability_api_version: CapabilityApiVersion,
@@ -2056,6 +2077,7 @@ Change `ValidatedAutomation`:
 ```rust
 pub struct ValidatedAutomation {
     pub source: String,
+    pub validation_limits: ValidationLimits,
     pub language_schema_version: LanguageSchemaVersion,
     pub ir_schema_version: IrSchemaVersion,
     pub capability_api_version: CapabilityApiVersion,
@@ -2481,10 +2503,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use rollshot_automation::{
-    decode_proposal, ExecutionPolicy, OutputError, ProposalContext, ProposedEditKind,
+    decode_proposal, AnnotationDescriptor, AutomationInput, ExecutionPolicy, OutputError,
+    ProposalContext, ProposedEditKind,
 };
 use rollshot_edit_proposal::{ProposalId, ProposedEdit, Provenance, ProvenanceSource};
-use rollshot_image_document::AnnotationId;
+use rollshot_image_document::{AnnotationId, ImagePoint, ImageRect};
 
 fn context() -> ProposalContext {
     ProposalContext {
@@ -2516,6 +2539,23 @@ fn allow_all() -> ExecutionPolicy {
     policy
 }
 
+fn input() -> AutomationInput {
+    AutomationInput {
+        image_width: 100,
+        image_height: 100,
+        region: None,
+        annotations: vec![AnnotationDescriptor {
+            id: AnnotationId(42),
+            kind: "redaction".into(),
+            bounds: Some(ImageRect::from_corners(
+                ImagePoint::new(0.0, 0.0),
+                ImagePoint::new(1.0, 1.0),
+            )),
+        }],
+        capability_handles: Default::default(),
+    }
+}
+
 #[test]
 fn decodes_complete_crud_union_in_output_order() {
     let json = r#"{
@@ -2530,7 +2570,7 @@ fn decodes_complete_crud_union_in_output_order() {
         {"kind":"delete","annotationId":"42","confidence":0.5,"label":"remove"}
       ]
     }"#;
-    let proposal = decode_proposal(json, (100, 100), &context(), &allow_all()).unwrap();
+    let proposal = decode_proposal(json, &input(), &context(), &allow_all()).unwrap();
     assert_eq!(proposal.id, ProposalId(7));
     assert_eq!(proposal.base_document_state_id, 11);
     assert_eq!(proposal.candidates.len(), 8);
@@ -2555,7 +2595,7 @@ Add rejection tests:
 fn rejects_unknown_fields_and_noncanonical_annotation_ids() {
     let unknown = r#"{"candidates":[{"kind":"delete","annotationId":"42","confidence":0.5,"label":"x","extra":true}]}"#;
     assert!(matches!(
-        decode_proposal(unknown, (100, 100), &context(), &allow_all()),
+        decode_proposal(unknown, &input(), &context(), &allow_all()),
         Err(OutputError::Malformed { .. })
     ));
 
@@ -2564,7 +2604,7 @@ fn rejects_unknown_fields_and_noncanonical_annotation_ids() {
             r#"{{"candidates":[{{"kind":"delete","annotationId":"{id}","confidence":0.5,"label":"x"}}]}}"#
         );
         assert!(matches!(
-            decode_proposal(&json, (100, 100), &context(), &allow_all()),
+            decode_proposal(&json, &input(), &context(), &allow_all()),
             Err(OutputError::InvalidAnnotationId { .. })
         ));
     }
@@ -2579,7 +2619,7 @@ fn rejects_unauthorized_edit_kind_and_annotation_id() {
         256 * 1024,
     );
     assert_eq!(
-        decode_proposal(delete, (100, 100), &context(), &redaction_only),
+        decode_proposal(delete, &input(), &context(), &redaction_only),
         Err(OutputError::EditKindDenied {
             kind: ProposedEditKind::Delete,
         })
@@ -2800,7 +2840,7 @@ The function signature is:
 ```rust
 pub fn decode_proposal(
     json: &str,
-    image_dims: (u32, u32),
+    input: &AutomationInput,
     context: &ProposalContext,
     policy: &ExecutionPolicy,
 ) -> Result<EditProposal, OutputError>
@@ -3051,7 +3091,7 @@ pub fn execute_to_proposal(
     )?;
     let edit_proposal = crate::decode_proposal(
         &execution.output_json,
-        (input.image_width, input.image_height),
+        input,
         proposal,
         policy,
     )?;
@@ -4381,7 +4421,7 @@ fn strict_output_schema_rejects_invalid_shapes() {
         r#"{"candidates":[{"kind":"updateText","annotationId":"42","confidence":1,"label":"x"}]}"#,
     ];
     for json in invalid {
-        assert!(decode_proposal(json, (100, 100), &context(), &allow_all()).is_err());
+        assert!(decode_proposal(json, &input(), &context(), &allow_all()).is_err());
     }
 }
 ```

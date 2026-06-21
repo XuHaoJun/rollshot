@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use rollshot_automation::{
-    decode_proposal, ExecutionPolicy, OutputError, ProposalContext, ProposedEditKind,
+    decode_proposal, AnnotationDescriptor, AutomationInput, ExecutionPolicy, OutputError,
+    ProposalContext, ProposedEditKind,
 };
 use rollshot_edit_proposal::{ProposalId, ProposedEdit, Provenance, ProvenanceSource};
-use rollshot_image_document::AnnotationId;
+use rollshot_image_document::{AnnotationId, ImagePoint, ImageRect};
 
 fn context() -> ProposalContext {
     ProposalContext {
@@ -38,6 +39,27 @@ fn allow_all() -> ExecutionPolicy {
     policy
 }
 
+fn input(annotation_ids: &[AnnotationId]) -> AutomationInput {
+    AutomationInput {
+        image_width: 100,
+        image_height: 100,
+        region: None,
+        annotations: annotation_ids
+            .iter()
+            .copied()
+            .map(|id| AnnotationDescriptor {
+                id,
+                kind: "redaction".into(),
+                bounds: Some(ImageRect::from_corners(
+                    ImagePoint::new(0.0, 0.0),
+                    ImagePoint::new(1.0, 1.0),
+                )),
+            })
+            .collect(),
+        capability_handles: Default::default(),
+    }
+}
+
 #[test]
 fn decodes_complete_crud_union_in_output_order() {
     let json = r#"{
@@ -52,7 +74,8 @@ fn decodes_complete_crud_union_in_output_order() {
         {"kind":"delete","annotationId":"42","confidence":0.5,"label":"remove"}
       ]
     }"#;
-    let proposal = decode_proposal(json, (100, 100), &context(), &allow_all()).unwrap();
+    let proposal =
+        decode_proposal(json, &input(&[AnnotationId(42)]), &context(), &allow_all()).unwrap();
     assert_eq!(proposal.id, ProposalId(7));
     assert_eq!(proposal.base_document_state_id, 11);
     assert_eq!(proposal.candidates.len(), 8);
@@ -73,7 +96,12 @@ fn decodes_complete_crud_union_in_output_order() {
 fn rejects_unknown_fields_and_noncanonical_annotation_ids() {
     let unknown = r#"{"candidates":[{"kind":"delete","annotationId":"42","confidence":0.5,"label":"x","extra":true}]}"#;
     assert!(matches!(
-        decode_proposal(unknown, (100, 100), &context(), &allow_all()),
+        decode_proposal(
+            unknown,
+            &input(&[AnnotationId(42)]),
+            &context(),
+            &allow_all()
+        ),
         Err(OutputError::Malformed { .. })
     ));
 
@@ -82,7 +110,7 @@ fn rejects_unknown_fields_and_noncanonical_annotation_ids() {
             r#"{{"candidates":[{{"kind":"delete","annotationId":"{id}","confidence":0.5,"label":"x"}}]}}"#
         );
         assert!(matches!(
-            decode_proposal(&json, (100, 100), &context(), &allow_all()),
+            decode_proposal(&json, &input(&[AnnotationId(42)]), &context(), &allow_all()),
             Err(OutputError::InvalidAnnotationId { .. })
         ));
     }
@@ -98,9 +126,26 @@ fn rejects_unauthorized_edit_kind_and_annotation_id() {
         256 * 1024,
     );
     assert_eq!(
-        decode_proposal(delete, (100, 100), &context(), &redaction_only),
+        decode_proposal(
+            delete,
+            &input(&[AnnotationId(42)]),
+            &context(),
+            &redaction_only
+        ),
         Err(OutputError::EditKindDenied {
             kind: ProposedEditKind::Delete,
+        })
+    );
+}
+
+#[test]
+fn rejects_annotation_id_not_present_in_input_even_when_policy_allows_it() {
+    let delete =
+        r#"{"candidates":[{"kind":"delete","annotationId":"42","confidence":1,"label":"x"}]}"#;
+    assert_eq!(
+        decode_proposal(delete, &input(&[]), &context(), &allow_all()),
+        Err(OutputError::AnnotationDenied {
+            id: AnnotationId(42)
         })
     );
 }
@@ -119,7 +164,7 @@ fn strict_output_schema_rejects_invalid_shapes() {
     ];
     for json in invalid {
         assert!(
-            decode_proposal(json, (100, 100), &context(), &allow_all()).is_err(),
+            decode_proposal(json, &input(&[AnnotationId(42)]), &context(), &allow_all()).is_err(),
             "expected rejection for: {json}"
         );
     }
@@ -133,7 +178,7 @@ fn rejects_label_over_128_bytes() {
         long_label
     );
     assert_eq!(
-        decode_proposal(&json, (100, 100), &context(), &allow_all()),
+        decode_proposal(&json, &input(&[]), &context(), &allow_all()),
         Err(OutputError::Malformed {
             code: "invalid_label"
         })
@@ -148,9 +193,23 @@ fn rejects_rationale_over_2048_bytes() {
         long_rationale
     );
     assert_eq!(
-        decode_proposal(&json, (100, 100), &context(), &allow_all()),
+        decode_proposal(&json, &input(&[]), &context(), &allow_all()),
         Err(OutputError::Malformed {
             code: "rationale_too_long"
+        })
+    );
+}
+
+#[test]
+fn rejects_text_over_the_configured_output_string_limit() {
+    let text = "x".repeat(2_049);
+    let json = format!(
+        r#"{{"candidates":[{{"kind":"addTextNote","position":{{"x":1,"y":1}},"text":"{text}","confidence":1,"label":"note"}}]}}"#
+    );
+    assert_eq!(
+        decode_proposal(&json, &input(&[]), &context(), &allow_all()),
+        Err(OutputError::Malformed {
+            code: "text_too_long"
         })
     );
 }
@@ -160,7 +219,7 @@ fn rejects_out_of_bounds_redaction_when_policy_disallows_it() {
     let json = r#"{"candidates":[{"kind":"addRedaction","bounds":{"x":90,"y":90,"width":30,"height":30},"confidence":1,"label":"oob"}]}"#;
     let policy = allow_all();
     assert!(matches!(
-        decode_proposal(json, (100, 100), &context(), &policy),
+        decode_proposal(json, &input(&[]), &context(), &policy),
         Err(OutputError::Policy(
             rollshot_edit_proposal::PolicyError::OutOfBounds { .. }
         ))
@@ -177,7 +236,7 @@ fn rejects_candidate_count_over_policy_limit() {
         {"kind":"addRedaction","bounds":{"x":4,"y":4,"width":1,"height":1},"confidence":1,"label":"c"}
     ]}"#;
     assert!(matches!(
-        decode_proposal(json, (100, 100), &context(), &policy),
+        decode_proposal(json, &input(&[]), &context(), &policy),
         Err(OutputError::Policy(
             rollshot_edit_proposal::PolicyError::TooManyCandidates { .. }
         ))
@@ -191,7 +250,7 @@ fn rejects_total_redaction_area_over_policy_limit() {
     // 80x80 = 6400 over 100x100 = 10000 -> 0.64 > 0.5
     let json = r#"{"candidates":[{"kind":"addRedaction","bounds":{"x":0,"y":0,"width":80,"height":80},"confidence":1,"label":"big"}]}"#;
     assert!(matches!(
-        decode_proposal(json, (100, 100), &context(), &policy),
+        decode_proposal(json, &input(&[]), &context(), &policy),
         Err(OutputError::Policy(
             rollshot_edit_proposal::PolicyError::ExcessiveTotalArea { .. }
         ))
@@ -202,7 +261,7 @@ fn rejects_total_redaction_area_over_policy_limit() {
 fn rejects_nan_point_in_private_wire_conversion_test() {
     let json = r#"{"candidates":[{"kind":"addTextNote","position":{"x":0,"y":null},"text":"ok","confidence":1,"label":"x"}]}"#;
     assert!(matches!(
-        decode_proposal(json, (100, 100), &context(), &allow_all()),
+        decode_proposal(json, &input(&[]), &context(), &allow_all()),
         Err(OutputError::Malformed { .. })
     ));
 }
@@ -211,7 +270,7 @@ fn rejects_nan_point_in_private_wire_conversion_test() {
 fn rejects_infinite_rect_in_private_wire_conversion_test() {
     let json = r#"{"candidates":[{"kind":"addRedaction","bounds":{"x":0,"y":0,"width":1e309,"height":1},"confidence":1,"label":"x"}]}"#;
     assert!(matches!(
-        decode_proposal(json, (100, 100), &context(), &allow_all()),
+        decode_proposal(json, &input(&[]), &context(), &allow_all()),
         Err(OutputError::Malformed { .. }) | Err(OutputError::InvalidNumber { .. })
     ));
 }
@@ -220,11 +279,17 @@ fn rejects_infinite_rect_in_private_wire_conversion_test() {
 fn accepts_annotation_id_zero() {
     let json =
         r#"{"candidates":[{"kind":"delete","annotationId":"0","confidence":1,"label":"x"}]}"#;
-    assert!(decode_proposal(json, (100, 100), &context(), &allow_all()).is_ok());
+    assert!(decode_proposal(json, &input(&[AnnotationId(0)]), &context(), &allow_all()).is_ok());
 }
 
 #[test]
 fn accepts_annotation_id_u64_max() {
     let json = r#"{"candidates":[{"kind":"delete","annotationId":"18446744073709551615","confidence":1,"label":"x"}]}"#;
-    assert!(decode_proposal(json, (100, 100), &context(), &allow_all()).is_ok());
+    assert!(decode_proposal(
+        json,
+        &input(&[AnnotationId(u64::MAX)]),
+        &context(),
+        &allow_all()
+    )
+    .is_ok());
 }

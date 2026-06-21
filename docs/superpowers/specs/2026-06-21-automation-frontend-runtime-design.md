@@ -328,6 +328,8 @@ The exact query and result structs are Rollshot-owned, serializable, versioned t
 Host requirements:
 
 - enforce the query `limit` independently of JavaScript validation;
+- reject a runtime query limit larger than the matching validated capability
+  manifest bound;
 - enforce host-side allocation and payload-byte limits;
 - return only finite coordinates and scores;
 - avoid blocking work in the QuickJS callback;
@@ -424,6 +426,9 @@ Boundedness rules:
 - a data path whose upper bound cannot be proven is rejected.
 
 Validation fails before execution when any static upper bound exceeds `ValidationLimits`.
+Helper return cardinality is evaluated at each call site from argument bounds;
+it is never assumed to be scalar. The persisted `max_output_bytes` is a
+conservative upper bound, not a placeholder value.
 
 ### 7.4 Semantic summary and diff
 
@@ -445,6 +450,7 @@ Validated automation records:
 ```rust
 pub struct ValidatedAutomation {
     pub source: String,
+    pub validation_limits: ValidationLimits,
     pub language_schema_version: LanguageSchemaVersion,
     pub ir_schema_version: IrSchemaVersion,
     pub capability_api_version: CapabilityApiVersion,
@@ -457,6 +463,12 @@ pub struct ValidatedAutomation {
 All four versions are explicit strongly typed newtypes, not inferred from crate versions.
 
 Execution requires exact installed compatibility for v1. An unsupported language, IR, capability, or output schema version returns a typed `CompatibilityError` before a runtime is created.
+
+Because validated artifacts are serializable and cross persistence boundaries,
+the executor also revalidates canonical source with the artifact's recorded
+`validation_limits` and requires the rebuilt versions, Workflow IR, and
+validation summary to exactly match the supplied artifact. A mismatch returns
+`CompatibilityError::ArtifactMismatch` before a runtime is created.
 
 Ordinary UI use reads persisted Workflow IR without reparsing. Revalidation or migration is an explicit operation owned by a later persistence/upgrade design; this subproject only defines the compatibility checks and rejects unsupported artifacts.
 
@@ -518,6 +530,8 @@ pub struct ExecutionPolicy {
 The automation language supports the complete CRUD surface, but each run explicitly authorizes edit kinds. A Smart Redaction preset normally authorizes only `AddRedaction`; another product flow may authorize more kinds after explicit review-policy configuration.
 
 Update and delete operations may reference only IDs present in both `input.annotations` and `allowed_annotation_ids`.
+Accordingly, strict proposal decoding receives the complete `AutomationInput`,
+not image dimensions alone.
 
 ## 10. rquickjs Sandbox
 
@@ -556,9 +570,11 @@ The executor confirms that `main` exists and is callable after evaluation. Runti
 Capability callbacks:
 
 - validate and decode query objects strictly;
+- compare each runtime query limit with the validated capability manifest;
 - charge the call against global and per-capability budgets before dispatch;
 - call the supplied `AutomationHost`;
-- validate, truncate, and freeze returned data;
+- validate all returned geometry and scores, truncate results to the query
+  limit, and freeze returned data;
 - map host errors to typed execution failures;
 - never expose Rust objects or arbitrary native bindings.
 

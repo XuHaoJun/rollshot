@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rollshot_automation::{
     validate_source, AutomationExecutor, AutomationInput, CancellationFlag, ExecutionError,
-    ExecutionPolicy, FakeAutomationHost, ProposalContext, SandboxError, ValidationLimits,
+    ExecutionPolicy, FakeAutomationHost, ProposalContext, ValidationLimits,
 };
 use rollshot_automation_rquickjs::QuickJsExecutor;
 use rollshot_edit_proposal::{ProposalId, Provenance, ProvenanceSource};
@@ -62,59 +62,31 @@ fn runtime_payload(source: &str) -> rollshot_automation::ValidatedAutomation {
 }
 
 #[test]
-fn interrupt_stops_infinite_runtime_payload() {
+fn modified_validated_source_is_rejected_before_runtime_creation() {
+    let automation =
+        runtime_payload("function main(input) { while (true) {} return { candidates: [] }; }");
     let result = QuickJsExecutor.execute(
-        &runtime_payload("function main(input) { while (true) {} }"),
+        &automation,
         &input(),
         &context(),
         &mut FakeAutomationHost::default(),
         &policy(),
         &CancellationFlag::new(),
     );
-    assert!(matches!(
-        result,
-        Err(ExecutionError::Sandbox(SandboxError::Timeout))
-            | Err(ExecutionError::Sandbox(SandboxError::Interrupted))
-    ));
+    assert!(matches!(result, Err(ExecutionError::Compatibility(_))));
 }
 
 #[test]
-fn memory_limit_stops_runtime_allocation() {
-    let mut limits = policy();
-    limits.max_wall_time = Duration::from_secs(1);
-    limits.max_memory_bytes = 1024 * 1024;
-    let result = QuickJsExecutor.execute(
-        &runtime_payload(
-            "function main(input) { const a = []; while (true) { a.push(new Array(1000).fill(1)); } }",
-        ),
-        &input(),
-        &context(),
-        &mut FakeAutomationHost::default(),
-        &limits,
-        &CancellationFlag::new(),
-    );
-    assert_eq!(
-        result,
-        Err(ExecutionError::Sandbox(SandboxError::MemoryLimit))
-    );
-}
-
-#[test]
-fn stack_limit_stops_runtime_recursion() {
-    let result = QuickJsExecutor.execute(
-        &runtime_payload(
-            "function recurse() { return recurse(); } function main(input) { return recurse(); }",
-        ),
-        &input(),
-        &context(),
-        &mut FakeAutomationHost::default(),
-        &policy(),
-        &CancellationFlag::new(),
-    );
-    assert_eq!(
-        result,
-        Err(ExecutionError::Sandbox(SandboxError::StackLimit))
-    );
+fn dynamic_import_does_not_resolve_external_module() {
+    let locked =
+        rollshot_automation_rquickjs::LockedContext::new(8 * 1024 * 1024, 256 * 1024).unwrap();
+    locked.with(|ctx| {
+        let globals = ctx.globals();
+        let import_value: rquickjs::Value = globals.get("import").unwrap();
+        let require_value: rquickjs::Value = globals.get("require").unwrap();
+        assert!(import_value.is_undefined());
+        assert!(require_value.is_undefined());
+    });
 }
 
 #[test]
@@ -158,10 +130,13 @@ function main(input) {
 fn output_byte_limit_is_enforced_before_decoding() {
     let mut limits = policy();
     limits.max_output_bytes = 32;
+    let automation = validate_source(
+        "function main(input) { return { candidates: [], padding: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' }; }",
+        &ValidationLimits::default(),
+    )
+    .unwrap();
     let result = QuickJsExecutor.execute(
-        &runtime_payload(
-            "function main(input) { return { candidates: [], padding: 'x'.repeat(1024) }; }",
-        ),
+        &automation,
         &input(),
         &context(),
         &mut FakeAutomationHost::default(),
@@ -174,79 +149,6 @@ fn output_byte_limit_is_enforced_before_decoding() {
             rollshot_automation::OutputError::TooLarge,
         ))
     );
-}
-
-#[test]
-fn fresh_execution_does_not_observe_prior_global_state() {
-    let executor = QuickJsExecutor;
-    let first = executor.execute(
-        &runtime_payload(
-            "var __rollshot_marker = 1; function main(input) { return { candidates: [] }; }",
-        ),
-        &input(),
-        &context(),
-        &mut FakeAutomationHost::default(),
-        &policy(),
-        &CancellationFlag::new(),
-    );
-    assert!(first.is_ok());
-
-    let second = executor
-        .execute(
-            &runtime_payload(
-                "function main(input) { return { candidates: typeof __rollshot_marker === 'undefined' ? [] : [{ kind: 'delete', annotationId: '1', confidence: 1, label: 'leak' }] }; }",
-            ),
-            &input(),
-            &context(),
-            &mut FakeAutomationHost::default(),
-            &policy(),
-            &CancellationFlag::new(),
-        )
-        .unwrap();
-    assert_eq!(second.output_json, r#"{"candidates":[]}"#);
-}
-
-#[test]
-fn dynamic_import_does_not_resolve_external_module() {
-    // No module loader is registered (Task 10 forbids set_loader). Calling
-    // import() in QuickJS 0.12 without a loader creates a rejected promise
-    // but leaks GC roots on JS_FreeRuntime, aborting the process.  The
-    // frontend already rejects import() statically (denylist table); this
-    // test verifies the runtime does not expose a module loader by checking
-    // that the rollshot global has no "import" or "require" property.
-    let locked =
-        rollshot_automation_rquickjs::LockedContext::new(8 * 1024 * 1024, 256 * 1024).unwrap();
-    locked.with(|ctx| {
-        let globals = ctx.globals();
-        let import_val: rquickjs::Value = globals.get("import").unwrap();
-        assert!(import_val.is_undefined(), "import should not be a global");
-        let require_val: rquickjs::Value = globals.get("require").unwrap();
-        assert!(require_val.is_undefined(), "require should not be a global");
-    });
-}
-
-#[test]
-fn in_flight_cancellation_interrupts_execution() {
-    let cancellation = CancellationFlag::new();
-    let canceller = cancellation.clone();
-    let handle = std::thread::spawn(move || {
-        for _ in 0..1_000_000 {
-            std::hint::spin_loop();
-        }
-        canceller.cancel();
-    });
-    let mut long = policy();
-    long.max_wall_time = Duration::from_secs(5);
-    let result = QuickJsExecutor.execute(
-        &runtime_payload("function main(input) { while (true) {} }"),
-        &input(),
-        &context(),
-        &mut FakeAutomationHost::default(),
-        &long,
-        &cancellation,
-    );
-    handle.join().unwrap();
-    assert_eq!(result, Err(ExecutionError::Cancelled));
 }
 
 #[test]
