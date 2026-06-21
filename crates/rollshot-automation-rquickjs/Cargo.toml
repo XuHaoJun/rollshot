@@ -15,6 +15,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 rollshot-edit-proposal = { path = "../rollshot-edit-proposal" }
+rollshot-image-document = { path = "../rollshot-image-document" }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "allow"
