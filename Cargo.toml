@@ -13,6 +13,8 @@ members = [
     "crates/rollshot-macos-oneshot",
     "crates/rollshot-linux-desktop",
     "crates/rollshot-edit-proposal",
+    "crates/rollshot-automation",
+    "crates/rollshot-automation-rquickjs",
 ]
 resolver = "2"
 
@@ -48,6 +50,11 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 fs4 = "1.1"
+oxc_allocator = "=0.137.0"
+oxc_ast = "=0.137.0"
+oxc_parser = "=0.137.0"
+oxc_span = "=0.137.0"
+rquickjs = "=0.12.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
