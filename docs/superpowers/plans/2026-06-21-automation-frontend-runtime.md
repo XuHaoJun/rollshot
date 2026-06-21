@@ -8,6 +8,26 @@
 
 **Tech Stack:** Rust 2021, oxc `=0.137.0`, rquickjs `=0.12.0`, serde/serde_json, thiserror, tracing, existing `rollshot-edit-proposal` and `rollshot-image-document`.
 
+**Reference implementations (verified-working spike code — the API source of truth):**
+The inline oxc and rquickjs snippets in this plan are *illustrative*. They sketch
+intent and the public `rollshot-automation` contract, but several use shorthand
+that may not match the exact oxc `0.137.0` / rquickjs `0.12` APIs (e.g. AST node
+shapes, error-inspection helpers, builder methods). Before writing any oxc or
+rquickjs code, read the committed spike crates, which compiled and passed all
+gates against these exact pinned versions on Linux and macOS (PR #60):
+
+- `spikes/js-frontend/` with `--features oxc` — verified oxc `0.137.0` parsing and
+  typed-AST traversal (`Statement::*`, `SourceType::default().with_script(true)`,
+  span extraction). Source of truth for Tasks 4–6.
+- `spikes/sandbox-executor/` — verified rquickjs `0.12` lockdown, `set_interrupt_handler`,
+  `set_memory_limit`, `set_max_stack_size`, host-callback marshalling, and
+  `Err → catchable JS exception`. Source of truth for Tasks 10–11.
+
+When a plan snippet and the spike disagree on an API detail, **the spike wins**
+(it compiled); when they disagree on a *policy* detail (what to allow/reject),
+**this plan wins**. Do **not** port the spike's string-prefix or partial-traversal
+shortcuts (those were tree-sitter-candidate scaffolding) — only its verified API usage.
+
 ---
 
 ## File Structure
@@ -1559,6 +1579,56 @@ fn rejects_duplicate_object_keys_before_runtime() {
 }
 ```
 
+The validator built in Step 4 is the security boundary. It MUST be fully
+test-driven *here*, not retrofitted later. Add the authoritative adversarial
+denylist table now, as a RED test that fails before Step 4 and must stay green
+afterward (Task 12 only re-audits it, it does not introduce it):
+
+```rust
+#[test]
+fn language_schema_v1_denylist_is_complete() {
+    let cases = [
+        ("function main(input){ return eval('1'); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return Function('return 1')(); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return Reflect.get(input, 'region'); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ return new Proxy({}, {}); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return input?.region; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return input['region']; }", DiagnosticCode::UnsupportedSyntax),
+        ("import value from 'x'; function main(input){ return value; }", DiagnosticCode::InvalidTopLevel),
+        ("export function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
+        ("function main(input){ return import('x'); }", DiagnosticCode::UnsupportedSyntax),
+        ("async function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
+        ("function main(input){ return Promise.resolve([]); }", DiagnosticCode::UnknownIdentifier),
+        ("function main(input){ setTimeout(() => {}, 1); return { candidates: [] }; }", DiagnosticCode::UnknownIdentifier),
+        ("function* main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
+        ("class X {} function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
+        ("function main(input){ return new Array(); }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ try { return { candidates: [] }; } catch (error) { return { candidates: [] }; } }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ for (;;) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ do {} while (true); return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ for (const value of []) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ const { region } = input; return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { ...input, candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function helper(...values){ return values; } function main(input){ return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function helper(value = 1){ return value; } function main(input){ return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: [].reduce((a,b) => a, []) }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: [].flatMap((x) => x) }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: [].sort() }; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return { candidates: helper.call(null, input) }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
+        ("function main(input){ return unknownGlobal; }", DiagnosticCode::UnknownIdentifier),
+    ];
+    for (source, code) in cases {
+        assert_has_code(source, code);
+    }
+}
+```
+
+Each `DiagnosticCode` paired above is the *contract*: the implementation in
+Step 4 must make each case fail with that exact code, not merely with some
+error. If a case is genuinely ambiguous (more than one code is defensible),
+fix the expectation here and record the rationale in the commit — do not loosen
+`assert_has_code` to accept any code.
+
 - [ ] **Step 3: Run the new tests and confirm they fail**
 
 Run:
@@ -1595,7 +1665,20 @@ struct BodyValidator<'a> {
 }
 ```
 
-Implement exhaustive statement and expression visitors over the pinned oxc AST. The match arms must:
+Implement exhaustive statement and expression visitors over the pinned oxc AST.
+
+**This is the security boundary — it MUST be allowlist (default-deny), not
+denylist.** Every statement-kind and expression-kind match must end in a
+catch-all arm that emits `DiagnosticCode::UnsupportedSyntax` (or the more
+specific code where one applies) and NEVER a silent `_ => {}` that lets an
+unrecognized node through. A new oxc node kind, or one a developer forgot, must
+fail closed (rejected), never fail open (allowed). The acceptance criterion for
+this step is the `language_schema_v1_denylist_is_complete` table added in Step 2:
+every case must reject with its exact paired `DiagnosticCode`. The bullets below
+enumerate what is *allowed* and the *specific* codes for common rejections;
+they are not the full set of things to reject — the catch-all covers the rest.
+
+The match arms must:
 
 - allow `const` declarations only;
 - reject `let`, `var`, assignment, update expressions, all loop statements, classes, `new`, `this`, `super`, `throw`, `try`, async, generators, spread, destructuring, optional/computed access, imports, exports, and unsupported statements;
@@ -1996,6 +2079,32 @@ pub struct ValidationSummary {
 ```
 
 Update `validate_source` to parse once, run validation, normalize only when diagnostics are empty, and return normalization diagnostics otherwise.
+
+**Lifetime constraint (do not fight the borrow checker here):** the oxc AST is
+allocated in the arena owned by `parse::with_program` and may not escape its
+closure. Both `validate::validate_program` and `normalize::normalize` borrow
+`&Program<'a>`, so **both must run inside the single `with_program` callback** —
+you cannot return `ValidationFacts` or `&Program` out and normalize afterward.
+The callback owns the full decision: validate → if empty, normalize → build
+`ValidatedAutomation`; on diagnostics from either stage, return them. Only owned,
+`'static` values (`ValidatedAutomation`, `Vec<SourceDiagnostic>`) cross the
+closure boundary. Sketch:
+
+```rust
+parse::with_program(source, |program| {
+    let (mut diagnostics, facts) = validate::validate_program(source, program, limits);
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    match normalize::normalize(source, program, &facts, limits) {
+        Ok(workflow_ir) => Ok(ValidatedAutomation { /* source, versions, workflow_ir, summary */ }),
+        Err(mut normalization_diagnostics) => {
+            diagnostics.append(&mut normalization_diagnostics);
+            Err(diagnostics)
+        }
+    }
+})?
+```
 
 - [ ] **Step 7: Run frontend and serialization tests**
 
@@ -3275,16 +3384,28 @@ Create `bridge.rs` with:
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use std::collections::BTreeMap;
+
 use rquickjs::{Ctx, Function, Object, Value};
 use rollshot_automation::{
-    AutomationHost, AutomationInput, CapabilityError, ExecutionPolicy, Region,
+    AutomationHost, AutomationInput, CapabilityError, CapabilityName, ExecutionPolicy, Region,
 };
 
 pub(crate) struct BridgeState<'a> {
     pub host: &'a mut dyn AutomationHost,
     pub policy: &'a ExecutionPolicy,
     pub capability_calls: u32,
+    /// Per-capability call counts, checked against `policy.max_calls_by_capability`.
+    pub calls_by_capability: BTreeMap<CapabilityName, u32>,
     pub host_allocation_bytes: usize,
+    /// Out-of-band typed error. A host callback that fails (capability error,
+    /// host-allocation limit, global/per-capability call limit, cancellation)
+    /// stores the typed Rust error here and then raises a *content-free* JS
+    /// exception to unwind `main`. After `locked.with(...)` returns, the
+    /// executor checks `pending_error` FIRST and maps it to the exact
+    /// `ExecutionError` variant. The JS exception message is never parsed to
+    /// recover the category — that is what this field is for.
+    pub pending_error: Option<CapabilityError>,
 }
 
 pub(crate) fn install_input<'js>(
@@ -3331,7 +3452,16 @@ and:
 Add `install_rollshot` that creates one object and four `Function::new` callbacks. Each callback must:
 
 1. Decode one query object using strict serde types.
-2. Charge the global and per-capability counters before host dispatch.
+2. Charge the global and per-capability counters before host dispatch, and
+   reject when a limit is exceeded.
+   - Global: increment `capability_calls`; reject if it exceeds
+     `policy.max_capability_calls`.
+   - Per-capability: increment `calls_by_capability[name]`; reject if it exceeds
+     `policy.max_calls_by_capability[name]` **when that key is present**. An
+     absent key means "no per-capability cap — global cap only" (the
+     `smart_redaction_default` map is empty, so by default only the global cap
+     applies). Document this empty-map semantics in a doc-comment on
+     `ExecutionPolicy::max_calls_by_capability`.
 3. Reject cancellation before host dispatch.
 4. Call `AutomationHost`.
 5. Validate finite returned values.
@@ -3339,6 +3469,14 @@ Add `install_rollshot` that creates one object and four `Function::new` callback
 7. Reject allocation beyond `policy.max_host_allocation_bytes`.
 8. Parse the result into a JavaScript value.
 9. Recursively freeze the result.
+
+Every rejection in steps 2, 3, 6, and 7 follows the out-of-band protocol: store
+the typed error in `BridgeState.pending_error` (`CapabilityError::LimitExceeded`
+for call-count / host-allocation limits; leave `pending_error` as the
+host-returned error for step 4 failures), then raise a content-free JS exception
+to unwind. Cancellation in step 3 is signalled by an exception too; the executor
+distinguishes it by re-checking the cancellation flag after `locked.with`, ahead
+of `pending_error`.
 
 Use:
 
@@ -3656,7 +3794,9 @@ impl AutomationExecutor for crate::QuickJsExecutor {
             host,
             policy,
             capability_calls: 0,
+            calls_by_capability: std::collections::BTreeMap::new(),
             host_allocation_bytes: 0,
+            pending_error: None,
         }));
 
         let output_json = locked.with(|ctx| {
@@ -3681,10 +3821,24 @@ impl AutomationExecutor for crate::QuickJsExecutor {
         });
 
         let duration = started.elapsed();
+        // Classification ORDER matters — the tests assert exact variants, so the
+        // first matching cause wins. Resolve in this order:
+        //   1. cancellation flag set          → ExecutionError::Cancelled
+        //   2. bridge stored a typed error    → ExecutionError::Capability(..)
+        //   3. interrupt fired + deadline hit  → SandboxError::Timeout
+        //   4. runtime memory/stack exception  → SandboxError::MemoryLimit / StackLimit
+        //   5. any other eval failure          → SandboxError::Evaluation { code }
+        //   6. success                         → check output byte ceiling, then Ok
         if cancellation.is_cancelled() {
             return Err(ExecutionError::Cancelled);
         }
-        if duration >= policy.max_wall_time && output_json.is_err() {
+        if let Some(error) = state.borrow_mut().pending_error.take() {
+            return Err(ExecutionError::Capability(error));
+        }
+        if output_json.is_err()
+            && interrupted.load(Ordering::SeqCst)
+            && duration >= policy.max_wall_time
+        {
             return Err(ExecutionError::Sandbox(SandboxError::Timeout));
         }
         let output_json = output_json?;
@@ -3715,16 +3869,33 @@ impl AutomationExecutor for crate::QuickJsExecutor {
 }
 ```
 
-Refine rquickjs error mapping by inspecting `rquickjs::Error` and runtime exception state:
+The `.map_err(|_| SandboxError::Evaluation { code })` calls inside the closure
+above are a **skeleton, not the final mapping**. As written they collapse memory
+exhaustion, stack overflow, and host-limit rejections all into `Evaluation`,
+which makes `memory_limit_stops_runtime_allocation`,
+`stack_limit_stops_runtime_recursion`, and `host_allocation_limit_rejects_large_capability_result`
+(all of which assert *exact* variants) FAIL. You must replace the generic
+mapping with a typed classification by inspecting `rquickjs::Error` and runtime
+exception state. Cross-reference the verified spike (`spikes/sandbox-executor/`)
+for the exact rquickjs `0.12` error shapes — it already drives memory, stack,
+and interrupt limits to completion.
 
-- cancellation flag set → `ExecutionError::Cancelled`;
-- deadline reached → `SandboxError::Timeout`;
-- allocation failure → `SandboxError::MemoryLimit`;
-- stack overflow exception → `SandboxError::StackLimit`;
-- host bridge stored a `CapabilityError` → `ExecutionError::Capability`;
+Final mapping (the post-closure ordering above resolves 1–3; this list is how to
+detect 4–5 from `rquickjs::Error`):
+
+- cancellation flag set → `ExecutionError::Cancelled` (post-closure check 1);
+- bridge stored a typed error in `pending_error` → `ExecutionError::Capability` (check 2);
+- interrupt fired and deadline reached → `SandboxError::Timeout` (check 3);
+- `rquickjs::Error::Allocation` (memory-limit OOM) → `SandboxError::MemoryLimit`;
+- stack-overflow exception (rquickjs surfaces a `RangeError`-class exception when
+  `set_max_stack_size` is exceeded) → `SandboxError::StackLimit`;
 - all other runtime failures → privacy-safe `SandboxError::Evaluation { code }`.
 
-The bridge must store typed Rust errors out-of-band in `BridgeState`; do not parse exception message text to recover error categories.
+The bridge stores typed Rust errors out-of-band in `BridgeState.pending_error`;
+do not parse exception message text to recover error categories. Memory and
+stack causes are the one exception — they originate inside QuickJS (no Rust
+callback runs), so they must be recovered from `rquickjs::Error` directly, as
+the spike does.
 
 - [ ] **Step 8: Verify runtime compilation has only the required intrinsics**
 
@@ -4035,46 +4206,13 @@ Frontend tests must explicitly cover:
 - unbounded capability query limits;
 - static AST, literal, helper-depth, traversal, candidate, and output limits.
 
-Add a table-driven denylist test with these sources:
-
-```rust
-#[test]
-fn language_schema_v1_denylist_is_complete() {
-    let cases = [
-        ("function main(input){ return eval('1'); }", DiagnosticCode::UnknownIdentifier),
-        ("function main(input){ return Function('return 1')(); }", DiagnosticCode::UnknownIdentifier),
-        ("function main(input){ return Reflect.get(input, 'region'); }", DiagnosticCode::UnknownIdentifier),
-        ("function main(input){ return new Proxy({}, {}); }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return input?.region; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return input['region']; }", DiagnosticCode::UnsupportedSyntax),
-        ("import value from 'x'; function main(input){ return value; }", DiagnosticCode::InvalidTopLevel),
-        ("export function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
-        ("function main(input){ return import('x'); }", DiagnosticCode::UnsupportedSyntax),
-        ("async function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
-        ("function main(input){ return Promise.resolve([]); }", DiagnosticCode::UnknownIdentifier),
-        ("function main(input){ setTimeout(() => {}, 1); return { candidates: [] }; }", DiagnosticCode::UnknownIdentifier),
-        ("function* main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidMainSignature),
-        ("class X {} function main(input){ return { candidates: [] }; }", DiagnosticCode::InvalidTopLevel),
-        ("function main(input){ return new Array(); }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ try { return { candidates: [] }; } catch (error) { return { candidates: [] }; } }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ for (;;) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ do {} while (true); return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ for (const value of []) {} return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ const { region } = input; return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return { ...input, candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function helper(...values){ return values; } function main(input){ return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function helper(value = 1){ return value; } function main(input){ return { candidates: [] }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return { candidates: [].reduce((a,b) => a, []) }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return { candidates: [].flatMap((x) => x) }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return { candidates: [].sort() }; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return { candidates: helper.call(null, input) }; } function helper(x){ return x; }", DiagnosticCode::UnsupportedSyntax),
-        ("function main(input){ return unknownGlobal; }", DiagnosticCode::UnknownIdentifier),
-    ];
-    for (source, code) in cases {
-        assert_has_code(source, code);
-    }
-}
-```
+The authoritative `language_schema_v1_denylist_is_complete` table now lives in
+Task 5 (co-located with the validator it drives). In this task, **do not
+re-introduce it** — instead confirm it still passes after the runtime work, and
+add any frontend adversarial case from the bullet list above that the Task 5
+table does not yet cover (each new case must assert an exact `DiagnosticCode`).
+If you find an uncovered case, add it to the Task 5 table, not here, so the
+denylist stays in one place.
 
 Runtime tests must explicitly cover:
 
@@ -4107,6 +4245,113 @@ global_capability_call_limit_is_enforced
 per_capability_call_limit_is_enforced
 output_byte_limit_is_enforced_before_decoding
 ```
+
+Most of these names already have bodies (Tasks 10–11). Four do **not** and must
+be written here — they are named above but were never implemented, and two are
+the most security-relevant tests in the suite (in-flight cancellation is the
+carry-forward host-call-preemption risk from the spike; the call-count limits
+guard against capability-call amplification). Implement them concretely:
+
+```rust
+#[test]
+fn dynamic_import_does_not_resolve_external_module() {
+    // No loader is ever registered (Task 10 forbids set_loader), so import()
+    // must fail at runtime rather than resolve a module. The frontend already
+    // rejects import() statically; this is the defense-in-depth runtime proof.
+    let result = QuickJsExecutor.execute(
+        &runtime_payload("function main(input) { return import('fs'); }"),
+        &input(),
+        &context(),
+        &mut FakeAutomationHost::default(),
+        &policy(),
+        &CancellationFlag::new(),
+    );
+    assert!(matches!(result, Err(ExecutionError::Sandbox(_))));
+}
+
+#[test]
+fn in_flight_cancellation_interrupts_execution() {
+    // Cancel from another thread while a long-running payload is executing.
+    // The interrupt handler observes the flag at an opcode boundary and aborts;
+    // the post-closure cancellation check maps it to Cancelled.
+    let cancellation = CancellationFlag::new();
+    let canceller = cancellation.clone();
+    let handle = std::thread::spawn(move || {
+        // Busy-wait briefly so execution is in-flight, then cancel. Deterministic
+        // because the payload cannot terminate on its own.
+        for _ in 0..1_000_000 { std::hint::spin_loop(); }
+        canceller.cancel();
+    });
+    let mut long = policy();
+    long.max_wall_time = Duration::from_secs(5); // long enough that cancel wins
+    let result = QuickJsExecutor.execute(
+        &runtime_payload("function main(input) { while (true) {} }"),
+        &input(),
+        &context(),
+        &mut FakeAutomationHost::default(),
+        &long,
+        &cancellation,
+    );
+    handle.join().unwrap();
+    assert_eq!(result, Err(ExecutionError::Cancelled));
+}
+
+#[test]
+fn global_capability_call_limit_is_enforced() {
+    // main() calls ocr in a bounded .map; cap the global budget below the count.
+    let source = r#"
+function main(input) {
+  const a = rollshot.ocr({ region: input.region, limit: 1 });
+  const b = rollshot.ocr({ region: input.region, limit: 1 });
+  const c = rollshot.ocr({ region: input.region, limit: 1 });
+  return { candidates: [] };
+}
+"#;
+    let automation = validate_source(source, &ValidationLimits::default()).unwrap();
+    let mut policy = policy();
+    policy.max_capability_calls = 2;
+    let result = QuickJsExecutor.execute(
+        &automation, &input(), &context(),
+        &mut FakeAutomationHost::default(), &policy, &CancellationFlag::new(),
+    );
+    assert_eq!(
+        result,
+        Err(ExecutionError::Capability(CapabilityError::LimitExceeded))
+    );
+}
+
+#[test]
+fn per_capability_call_limit_is_enforced() {
+    // Global budget is generous; the per-capability cap for Ocr is the binding
+    // constraint. Proves the BTreeMap-keyed limit and the "present key" semantics.
+    let source = r#"
+function main(input) {
+  const a = rollshot.ocr({ region: input.region, limit: 1 });
+  const b = rollshot.ocr({ region: input.region, limit: 1 });
+  return { candidates: [] };
+}
+"#;
+    let automation = validate_source(source, &ValidationLimits::default()).unwrap();
+    let mut policy = policy();
+    policy.max_capability_calls = 16;
+    policy
+        .max_calls_by_capability
+        .insert(rollshot_automation::CapabilityName::Ocr, 1);
+    let result = QuickJsExecutor.execute(
+        &automation, &input(), &context(),
+        &mut FakeAutomationHost::default(), &policy, &CancellationFlag::new(),
+    );
+    assert_eq!(
+        result,
+        Err(ExecutionError::Capability(CapabilityError::LimitExceeded))
+    );
+}
+```
+
+If a chosen interrupt/cancellation timing proves flaky on CI, widen the margins
+(more spin iterations, longer `max_wall_time`) rather than weakening the
+assertion — `in_flight_cancellation_interrupts_execution` must assert exactly
+`ExecutionError::Cancelled`, not a looser `matches!`.
 
 Output tests must explicitly cover:
 
