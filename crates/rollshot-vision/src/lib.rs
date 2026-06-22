@@ -7,11 +7,15 @@ mod error;
 mod host;
 mod index;
 pub mod rect;
+mod self_validation;
 mod template;
 
 pub use error::VisionError;
 pub use host::RealAutomationHost;
 pub use index::VisualIndex;
+pub use self_validation::{
+    self_validate, ExpectedCount, SelfValidationConfig, TemplateDecision, TemplateSelfValidation,
+};
 pub use template::{
     ExportTemplateAssetRecord, LocalTemplateAssetRecord, TemplateAsset, TemplateBytes,
     TemplateBytesRecord, TemplateSensitivity, TemplateSource, TemplateStore, MAX_TEMPLATE_AREA,
