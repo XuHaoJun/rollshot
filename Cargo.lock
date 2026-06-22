@@ -5557,6 +5557,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rollshot-vision"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "imageproc",
+ "rollshot-automation",
+ "rollshot-automation-rquickjs",
+ "rollshot-edit-proposal",
+ "rollshot-image-document",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
