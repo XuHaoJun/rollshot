@@ -3,7 +3,8 @@ name: plan-eng-review
 description: |
   Eng manager-mode plan review. Lock in the execution plan — architecture,
   data flow, diagrams, edge cases, test coverage, performance. Walks through
-  issues interactively with opinionated recommendations. Use when asked to
+  issues interactively, or applies recommendations automatically when explicitly
+  requested. Use when asked to
   "review the architecture", "engineering review", "tech review", or "lock in the plan".
   Proactively suggest when the user has a plan or design doc and is about to
   start coding — to catch architecture issues before implementation.
@@ -20,7 +21,34 @@ allowed-tools:
 
 # Plan Review Mode
 
-Review this plan thoroughly before making any code changes. For every issue or recommendation, explain the concrete tradeoffs, give an opinionated recommendation, and ask for user input before assuming a direction.
+Review this plan thoroughly before making any code changes. For every issue or recommendation, explain the concrete tradeoffs and give an opinionated recommendation. Ask for user input before assuming a direction unless auto mode is active.
+
+## Review modes
+
+Choose the mode from the user's current request:
+
+- **Interactive mode (default):** Use the review section gates and ask the user to decide each issue.
+- **Auto mode:** Activate only when the user explicitly asks for "auto mode", "automatic review", "自動審查", "自動修訂", or an equivalent unambiguous instruction. Do not infer auto mode from a request to review quickly or comprehensively.
+
+### Auto mode behavior
+
+Auto mode overrides every later instruction to call `AskUserQuestion`, pause, wait, or stop after an issue or review section. All review checks, required outputs, issue limits, and decision-brief quality requirements still apply.
+
+1. Complete Step 0 and all four review sections before editing the plan.
+2. For every issue, write the normal decision brief as `Auto decision D<N>`, choose the recommended option, and record the reasoning. Do not call `AskUserQuestion`.
+3. If the complexity check triggers, adopt the recommended minimum viable scope. Move deferred work to `NOT in scope`; never silently delete requirements.
+4. After the complete review, apply all recorded decisions to the plan in one editing pass.
+5. Re-read the revised plan and verify task/file declarations, TDD order, Run/Expected pairs, commit boundaries, required outputs, and internal consistency.
+6. In the completion summary, list every auto decision and summarize the edits made.
+
+Stop and ask the user only when continuing would require guessing:
+
+- no single review target can be identified;
+- the plan cannot be parsed well enough to edit safely;
+- an issue has no defensible recommended option;
+- recommendations conflict and cannot be reconciled without changing the user's stated goal.
+
+Auto mode edits only the reviewed plan. Do not implement product code, create commits, or change unrelated files.
 
 ## Priority hierarchy
 
@@ -143,13 +171,13 @@ Before reviewing any task, answer these questions about the plan as a whole:
 
    If deferred, flag it explicitly in the "NOT in scope" section — don't let it silently drop.
 
-If the complexity check triggers (>12 net-new files OR >2 new top-level modules/crates OR >10 tasks), STOP before any review-section work. Call AskUserQuestion: name what's overbuilt, propose a minimal task subset that achieves the Goal, ask whether to reduce or proceed as-is. The AskUserQuestion call is a tool_use, not prose — call the tool directly.
+If the complexity check triggers (>12 net-new files OR >2 new top-level modules/crates OR >10 tasks), in interactive mode STOP before any review-section work. Call AskUserQuestion: name what's overbuilt, propose a minimal task subset that achieves the Goal, ask whether to reduce or proceed as-is. The AskUserQuestion call is a tool_use, not prose — call the tool directly. In auto mode, record and adopt the recommended minimum viable scope, then continue the review against that decision without editing yet.
 
-**STOP.** Do NOT proceed to Section 1 (Architecture review), edit the plan file with a proposed scope reduction, or call ExitPlanMode until the user responds. Naming the 80% solution in chat prose and continuing is the failure mode this gate exists to prevent.
+**Interactive mode STOP.** Do NOT proceed to Section 1 (Architecture review), edit the plan file with a proposed scope reduction, or call ExitPlanMode until the user responds. Naming the 80% solution in chat prose and continuing is the failure mode this gate exists to prevent.
 
 If the complexity check does not trigger, present your Step 0 findings and proceed directly to Section 1.
 
-Always work through the full interactive review: one section at a time (Architecture → Code Quality → Tests → Performance) with at most 8 top issues per section.
+Always work through the full review (Architecture → Code Quality → Tests → Performance) with at most 8 top issues per section. Interactive mode handles one section at a time; auto mode analyzes all sections before applying edits.
 
 **Critical: Once the user accepts or rejects a scope reduction recommendation, commit fully.** Do not re-argue for smaller scope during later review sections. Do not silently reduce scope or skip planned components.
 
@@ -168,9 +196,9 @@ Walk the plan's `## File Structure` and the code blocks inside each task. Evalua
 * **Distribution / CI:** Is there a task that wires CI (fmt, clippy, test) across all target platforms? If the plan introduces a new artifact, is there a task for build/publish?
 * **Diagrams:** For any non-trivial data flow (frame stream lifecycle, portal handshake, stitcher state machine), would an ASCII diagram in a doc-comment make the design legible? Flag the file(s) that should get one.
 
-For each issue found, call AskUserQuestion individually. One issue per call. Present options, state your recommendation, explain WHY. Do NOT batch multiple issues into one AskUserQuestion. The AskUserQuestion call is a tool_use, not prose — call the tool directly.
+In interactive mode, for each issue found, call AskUserQuestion individually. One issue per call. Present options, state your recommendation, explain WHY. Do NOT batch multiple issues into one AskUserQuestion. The AskUserQuestion call is a tool_use, not prose — call the tool directly. In auto mode, record one `Auto decision D<N>` per issue and continue.
 
-**STOP.** Do NOT proceed to the next review section, edit the plan file with the proposed fix, or call ExitPlanMode until the user responds. An issue with an "obvious fix" is still an issue and still needs explicit user approval before it lands in the plan.
+**Interactive mode STOP.** Do NOT proceed to the next review section, edit the plan file with the proposed fix, or call ExitPlanMode until the user responds. An issue with an "obvious fix" is still an issue and still needs explicit user approval before it lands in the plan.
 
 ### 2. Plan structure & code quality review
 
@@ -184,9 +212,9 @@ This section reviews the **shape of the plan** as much as the code it specifies.
 * **Code shown in steps:** DRY violations across step code blocks, error handling patterns, missing edge cases (especially `unwrap()` on user-influenced input, panicky `expect(...)` in non-test code, swallowed `Result`s).
 * **Over/under-engineering:** Generic traits with one impl, premature abstraction, or — conversely — copy-pasted blocks that should share a helper.
 
-For each issue found, call AskUserQuestion individually. One issue per call.
+In interactive mode, call AskUserQuestion individually for each issue. In auto mode, record one `Auto decision D<N>` per issue and continue.
 
-**STOP** after each AskUserQuestion. Wait for response before proceeding.
+**Interactive mode STOP** after each AskUserQuestion. Wait for response before proceeding.
 
 ### 3. Test review
 
@@ -211,9 +239,9 @@ Then evaluate:
 * **Platform isolation:** For platform-specific code (Wayland, macOS), is the cross-platform CI path covered by fake/synthetic tests so hosted CI can run without the real platform?
 * **Negative tests:** Are error paths (`Err(...)`, `None`, cancelled session, unsupported format) covered, or only the happy path?
 
-For each gap found, call AskUserQuestion individually. One gap per call.
+In interactive mode, call AskUserQuestion individually for each gap. In auto mode, record one `Auto decision D<N>` per gap and continue.
 
-**STOP** after each AskUserQuestion.
+**Interactive mode STOP** after each AskUserQuestion.
 
 ### 4. Performance & resource review
 
@@ -226,13 +254,13 @@ For systems-level / pipeline / streaming code (which rollshot is — frame strea
 * **Resource lifecycle:** Are file descriptors, DBus connections, and PipeWire streams explicitly closed/dropped? Flag any `Box<dyn ...>` that owns a system resource without a `Drop` impl shown.
 * **Memory ceilings:** What's the worst-case memory for the final stitched image? Is there a hard cap or a paging strategy if the user scrolls forever?
 
-For each issue found, call AskUserQuestion individually. One issue per call.
+In interactive mode, call AskUserQuestion individually for each issue. In auto mode, record one `Auto decision D<N>` per issue and continue.
 
-**STOP** after each AskUserQuestion.
+**Interactive mode STOP** after each AskUserQuestion.
 
 ## CRITICAL RULE — How to ask questions
 
-Every AskUserQuestion is a decision brief. Format:
+Every interactive AskUserQuestion and auto decision is a decision brief. Format:
 
 ```
 D<N> — <one-line question title>
@@ -253,7 +281,7 @@ Net: <one-line synthesis of what you're actually trading off>
 
 Rules:
 
-* **One issue = one AskUserQuestion call.** Never combine multiple issues into one question.
+* **One issue = one decision brief.** In interactive mode, use one AskUserQuestion call. In auto mode, label it `Auto decision D<N>` and record the selected recommendation.
 * Describe the problem concretely, with file and line references when applicable.
 * Present 2-3 options, including "do nothing" where that's reasonable.
 * For each option, specify in one line: effort, risk, and maintenance burden. Where effort is involved, label both human-team and AI-assisted time, e.g. `(human: ~2 days / AI: ~30 min)`.
@@ -263,7 +291,7 @@ Rules:
 * **Zero findings:** if a section has zero findings, state "No issues, moving on" and proceed.
 * **Non-ASCII characters — write directly, never \u-escape.** CJK / accented strings go in literal UTF-8. Claude Code's tool parameter pipe is UTF-8 native.
 
-### Self-check before emitting
+### Decision-brief self-check
 
 Before calling AskUserQuestion, verify:
 
@@ -274,7 +302,7 @@ Before calling AskUserQuestion, verify:
 - [ ] Every option has ≥1 ✅ and ≥1 ❌ (or hard-stop escape: `✅ No cons — this is a hard-stop choice`)
 - [ ] (recommended) label on one option
 - [ ] Net line closes the decision
-- [ ] You are calling the tool, not writing prose
+- [ ] Interactive mode: you are calling the tool, not writing prose; auto mode: you are recording an `Auto decision D<N>`
 - [ ] Non-ASCII characters written directly, NOT \u-escaped
 
 ## Required outputs
@@ -349,12 +377,22 @@ Files Create/Modify:     N create / N modify
 
 Then state the next step: "Plan is locked in — run `superpowers:executing-plans` (or `subagent-driven-development` if parallel lanes were identified)" — OR — "Plan needs revision; the unresolved decisions above must be answered before execution."
 
+In auto mode, add:
+
+```
+Auto decisions applied:
+- D<N>: <selected option> — <one-line reason>
+
+Plan edits:
+- <concise description of each material change>
+```
+
 ## Formatting rules
 
 * NUMBER issues (1, 2, 3...) and LETTERS for options (A, B, C...).
 * Label with NUMBER + LETTER (e.g., "3A", "3B").
 * One sentence max per option. Pick in under 5 seconds.
-* After each review section, pause and ask for feedback before moving on.
+* In interactive mode, pause and ask for feedback after each review section. In auto mode, continue through all sections without pausing.
 
 ## Unresolved decisions
 
