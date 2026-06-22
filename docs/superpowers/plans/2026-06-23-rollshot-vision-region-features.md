@@ -64,9 +64,11 @@ use image::{GrayImage, RgbaImage};
 use crate::rect::PixelRect;
 
 /// RGB quantization step. MUST divide 256 (256 / 16 = 16 bins per channel).
+#[allow(dead_code)] // removed in PR2 when RealAutomationHost consumes dominant_rgba
 pub(crate) const QUANTIZE_STEP: u32 = 16;
 
 /// Per-pixel combined-gradient threshold (`|dx| + |dy|`) for counting an edge.
+#[allow(dead_code)] // removed in PR2 when RealAutomationHost consumes edge_density
 pub(crate) const EDGE_THRESHOLD: u16 = 32;
 
 /// Area cap for a regionFeatures query (reuse the template search-area cap).
@@ -93,9 +95,11 @@ pub(crate) fn edge_density(_gray: &GrayImage, _rect: PixelRect) -> f32 {
 
 > The `#[allow(dead_code)]` attributes sit above each item's signature and are
 > preserved when Steps 4 and 8 replace the function *bodies*. They are deleted in
-> Task 2 Step 2 once the host references all three, keeping `-D warnings` green at
-> every PR. `QUANTIZE_STEP` / `EDGE_THRESHOLD` need no attribute — the functions
-> reference them.
+> Task 2 Step 2 once the host references all five, keeping `-D warnings` green at
+> every PR. `QUANTIZE_STEP` and `EDGE_THRESHOLD` also carry the attribute in PR1:
+> in the non-test lib build the only references to these consts live inside the
+> `#[allow(dead_code)]` stub functions, so rustc's reachability pass can flag the
+> consts themselves as dead — the attribute preempts that without affecting PR2.
 
 - [ ] **Step 2: Write the failing tests for `dominant_rgba`**
 
@@ -304,6 +308,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `crates/rollshot-vision/src/rect.rs` (add `Hash` to `PixelRect` derive)
 - Modify: `crates/rollshot-vision/src/host.rs` (key type, prepared cache, stored dims, prepare method, real `region_features` impl)
+- Modify: `crates/rollshot-vision/src/lib.rs` (remove the now-stale `region_features` assertion from `contract_tests::all_unimplemented_capabilities_report_unavailable`)
 - Test: inline `#[cfg(test)] mod tests` in `host.rs` (extend the existing module)
 
 **Interfaces:**
@@ -334,7 +339,7 @@ pub struct PixelRect {
 
 - [ ] **Step 2: Remove the PR1 `#[allow(dead_code)]` attributes, then add the key type, prepared cache, and stored dims to `host.rs`**
 
-First, in `crates/rollshot-vision/src/region_features.rs`, delete the three `#[allow(dead_code)]` lines (above `MAX_REGION_FEATURES_AREA`, `dominant_rgba`, and `edge_density`) — the host now consumes all three.
+First, in `crates/rollshot-vision/src/region_features.rs`, delete the five `#[allow(dead_code)]` lines (above `QUANTIZE_STEP`, `EDGE_THRESHOLD`, `MAX_REGION_FEATURES_AREA`, `dominant_rgba`, and `edge_density`) — the host now consumes all of them.
 
 Then, in `crates/rollshot-vision/src/host.rs`, extend the imports and types. Update the `use` block at the top:
 
@@ -440,12 +445,75 @@ Add these tests to the existing `#[cfg(test)] mod tests` in `host.rs`:
             .unwrap_err();
         assert_eq!(err, CapabilityError::LimitExceeded);
     }
+
+    #[test]
+    fn region_features_rejects_non_finite_region() {
+        // `region_to_pixel_rect` checks finiteness before clamping, so a NaN
+        // endpoint surfaces `non_finite_region` regardless of image size.
+        let index = VisualIndex::build(checkerboard(8)).unwrap();
+        let mut host = RealAutomationHost::new();
+        let bad = Region::Rect {
+            bounds: ImageRect { x: f32::NAN, y: 0.0, width: 8.0, height: 8.0 },
+        };
+        let err = host
+            .prepare_region_features(&index, &RegionFeaturesQuery { region: bad, limit: 1 })
+            .unwrap_err();
+        assert_eq!(err, CapabilityError::InvalidInput { code: "non_finite_region" });
+    }
+
+    #[test]
+    fn region_features_rejects_empty_region() {
+        // A zero-dimension rect is rejected as `empty_region` before any clamping.
+        let index = VisualIndex::build(checkerboard(8)).unwrap();
+        let mut host = RealAutomationHost::new();
+        let bad = Region::Rect {
+            bounds: ImageRect { x: 0.0, y: 0.0, width: 0.0, height: 8.0 },
+        };
+        let err = host
+            .prepare_region_features(&index, &RegionFeaturesQuery { region: bad, limit: 1 })
+            .unwrap_err();
+        assert_eq!(err, CapabilityError::InvalidInput { code: "empty_region" });
+    }
+
+    // Note: `region_too_large` is NOT exercised through `prepare_region_features`
+    // because `to_pixel_rect` clamps to the image *before* the area check — on any
+    // practical test image the clamped rect is far under `MAX_REGION_FEATURES_AREA`
+    // (= MAX_SEARCH_AREA = 8M px). Triggering it would need an >8M-pixel image.
+    // That code path is already pinned by `rect::tests::pixel_rect_rejects_oversized`.
+
+    #[test]
+    fn region_features_returns_clipped_measured_bounds() {
+        // Requested rect extends outside the 8x8 image; the prepared result's
+        // `bounds` must be the clipped measured rect, not the raw requested bounds.
+        let index = VisualIndex::build(checkerboard(8)).unwrap();
+        let mut host = RealAutomationHost::new();
+        host.prepare_region_features(
+            &index,
+            &RegionFeaturesQuery {
+                region: Region::Rect {
+                    bounds: ImageRect { x: -5.0, y: -5.0, width: 20.0, height: 20.0 },
+                },
+                limit: 1,
+            },
+        )
+        .unwrap();
+        let out = host
+            .region_features(RegionFeaturesQuery {
+                region: Region::Rect {
+                    bounds: ImageRect { x: -5.0, y: -5.0, width: 20.0, height: 20.0 },
+                },
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bounds, ImageRect { x: 0.0, y: 0.0, width: 8.0, height: 8.0 });
+    }
 ```
 
 - [ ] **Step 4: Run the tests to verify they fail**
 
-Run: `rtk cargo test -p rollshot-vision --lib host::tests::region_features --lib host::tests::prepared_region_features --lib host::tests::unprepared_region_features`
-Expected: FAIL — `prepare_region_features` does not exist (compile error) and the stub `region_features` returns `capability_unavailable`.
+Run: `rtk cargo test -p rollshot-vision --lib region_features`
+Expected: FAIL — `prepare_region_features` does not exist (compile error) and the stub `region_features` returns `capability_unavailable` rather than the `vision_index_unavailable` / `invalid_query` the new tests expect. The single `region_features` filter substring matches every new host test name (`unprepared_region_features_*`, `prepared_region_features_*`, `region_features_rejects_zero_limit`, `region_features_*`).
 
 - [ ] **Step 5: Implement `prepare_region_features` and the real callback**
 
@@ -525,10 +593,36 @@ Replace the stub `region_features` in `impl AutomationHost for RealAutomationHos
     }
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+Now that `region_features` is implemented, the lib-level contract test
+`contract_tests::all_unimplemented_capabilities_report_unavailable` in
+`crates/rollshot-vision/src/lib.rs` is stale: it currently asserts an
+unprepared `region_features` call returns `capability_unavailable`, but the
+real callback now returns `vision_index_unavailable` (no stored image
+dimensions). Remove the `region_features` assertion block from that test so
+it only covers the still-unimplemented `ocr` and `layout` capabilities. Delete
+these lines from `all_unimplemented_capabilities_report_unavailable`:
 
-Run: `rtk cargo test -p rollshot-vision --lib host`
-Expected: PASS (existing templateMatch host tests + the 4 new regionFeatures tests).
+```rust
+        assert_eq!(
+            host.region_features(RegionFeaturesQuery {
+                region: Region::Full,
+                limit: 1
+            })
+            .unwrap_err(),
+            expected
+        );
+```
+
+(The `unprepared_region_features_query_fails_explicitly` host test already
+pins the new `vision_index_unavailable` behavior, so coverage is preserved.)
+If `RegionFeaturesQuery` / `Region` become unused in `lib.rs` after the
+deletion, also drop them from the `use rollshot_automation::{...}` import in
+the `contract_tests` module to keep `cargo clippy -- -D warnings` green.
+
+- [ ] **Step 6: Run the full lib test suite to verify it passes**
+
+Run: `rtk cargo test -p rollshot-vision --lib`
+Expected: PASS — existing `rect` / `index` / `template` / `self_validation` / `host` tests, the updated `contract_tests` (ocr + layout only), and the 7 new `host::tests` region_features tests (`unprepared_region_features_*`, `region_features_rejects_zero_limit`, `prepared_region_features_*`, `region_features_limit_over_prepared_max_is_limit_exceeded`, `region_features_rejects_non_finite_region`, `region_features_rejects_empty_region`, `region_features_returns_clipped_measured_bounds`). Running the whole lib target (not just the `host` filter) is what catches the contract-test update and confirms the callback swap did not regress anything else.
 
 - [ ] **Step 7: Format and lint**
 
@@ -538,7 +632,7 @@ Expected: no fmt diffs; clippy clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-rtk git add crates/rollshot-vision/src/rect.rs crates/rollshot-vision/src/host.rs
+rtk git add crates/rollshot-vision/src/rect.rs crates/rollshot-vision/src/host.rs crates/rollshot-vision/src/region_features.rs crates/rollshot-vision/src/lib.rs
 rtk git commit -m "feat(vision): regionFeatures prepare + canonical-key callback
 
 PR2/SP2: prepare_region_features computes the single feature for the query's
@@ -546,8 +640,12 @@ clipped pixel rect outside QuickJS and caches it under a canonical
 RegionFeaturesKey{rect: PixelRect}. The callback resolves query.region to the
 same key using stored image dimensions, so Full and an equivalent rect collapse
 to one entry; it only looks up + truncates (no image work). limit==0 ->
-invalid_query, unprepared -> vision_index_unavailable, limit>max -> LimitExceeded.
-PixelRect gains Hash.
+invalid_query, unprepared -> vision_index_unavailable, limit>max -> LimitExceeded,
+non-finite/empty region -> typed errors from region_to_pixel_rect; bounds returns
+the clipped measured rect.
+PixelRect gains Hash. The PR1 #[allow(dead_code)] attributes are removed now
+that the host consumes all five region_features items, and the lib-level
+contract test drops its stale region_features==capability_unavailable assertion.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -758,7 +856,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - §3.1 module layout + key type + PixelRect Hash: Task 1 (file), Task 2 (key + Hash). ✓
 - §3.2 data flow + dynamic-query hard limit: Task 2 (prepare/callback), Task 3 (harness prepares canonical rect; no JS query inference). ✓
 - §4 algorithms (QUANTIZE_STEP divides 256, bin center, tie-break; edge denominator/u64/sub-2px; alpha 255): Task 1 impl + tests. ✓
-- §5 limit semantics + error codes: Task 2 (zero/limit/unprepared tests). ✓
+- §5 limit semantics + error codes: Task 2 (zero/limit/unprepared/non_finite/empty/clipped-bounds tests); stale `region_features` assertion removed from `lib.rs` contract test. `region_too_large` stays covered by `rect::tests`. ✓
 - §6 privacy (aggregate only, no persistence): no serialization/persistence path added; nothing to implement. ✓
 - §7 verification (unit + integration + commands): Task 1/2 unit, Task 3 integration, fmt/clippy steps. ✓
 - §8 PR breakdown (PR1–PR3, handoff per PR): Tasks 1–3, handoff appended in Task 3 Step 7. ✓
