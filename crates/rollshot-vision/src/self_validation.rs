@@ -272,6 +272,14 @@ fn jitter_stable(
     }
     variants.push((image::imageops::grayscale(&jittered), candidate_bounds));
 
+    let mut darkened = candidate_rgba.clone();
+    for p in darkened.pixels_mut() {
+        for c in 0..3 {
+            p.0[c] = ((p.0[c] as f32) * 0.95).min(255.0) as u8;
+        }
+    }
+    variants.push((image::imageops::grayscale(&darkened), candidate_bounds));
+
     let x = candidate_bounds.x.floor() as u32;
     let y = candidate_bounds.y.floor() as u32;
     let w = candidate_bounds.width.round() as u32;
