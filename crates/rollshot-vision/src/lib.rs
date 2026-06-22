@@ -7,10 +7,16 @@ mod error;
 mod host;
 mod index;
 pub mod rect;
+mod template;
 
 pub use error::VisionError;
 pub use host::RealAutomationHost;
 pub use index::VisualIndex;
+pub use template::{
+    ExportTemplateAssetRecord, LocalTemplateAssetRecord, TemplateAsset, TemplateBytes,
+    TemplateBytesRecord, TemplateSensitivity, TemplateSource, TemplateStore, MAX_TEMPLATE_AREA,
+    MAX_TEMPLATE_COUNT, MAX_TEMPLATE_STORE_BYTES,
+};
 
 #[cfg(test)]
 mod contract_tests {
@@ -27,16 +33,27 @@ mod contract_tests {
             code: "capability_unavailable",
         };
         assert_eq!(
-            host.ocr(OcrQuery { region: Region::Full, limit: 1 }).unwrap_err(),
+            host.ocr(OcrQuery {
+                region: Region::Full,
+                limit: 1
+            })
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            host.layout(LayoutQuery { region: Region::Full, limit: 1 }).unwrap_err(),
+            host.layout(LayoutQuery {
+                region: Region::Full,
+                limit: 1
+            })
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            host.region_features(RegionFeaturesQuery { region: Region::Full, limit: 1 })
-                .unwrap_err(),
+            host.region_features(RegionFeaturesQuery {
+                region: Region::Full,
+                limit: 1
+            })
+            .unwrap_err(),
             expected
         );
         assert_eq!(

@@ -21,24 +21,32 @@ impl RealAutomationHost {
 
 impl AutomationHost for RealAutomationHost {
     fn ocr(&mut self, _query: OcrQuery) -> Result<Vec<OcrMatch>, CapabilityError> {
-        Err(CapabilityError::Failed { code: "capability_unavailable" })
+        Err(CapabilityError::Failed {
+            code: "capability_unavailable",
+        })
     }
 
     fn layout(&mut self, _query: LayoutQuery) -> Result<Vec<LayoutRegion>, CapabilityError> {
-        Err(CapabilityError::Failed { code: "capability_unavailable" })
+        Err(CapabilityError::Failed {
+            code: "capability_unavailable",
+        })
     }
 
     fn region_features(
         &mut self,
         _query: RegionFeaturesQuery,
     ) -> Result<Vec<RegionFeatures>, CapabilityError> {
-        Err(CapabilityError::Failed { code: "capability_unavailable" })
+        Err(CapabilityError::Failed {
+            code: "capability_unavailable",
+        })
     }
 
     fn template_match(
         &mut self,
         _query: TemplateMatchQuery,
     ) -> Result<Vec<TemplateMatch>, CapabilityError> {
-        Err(CapabilityError::Failed { code: "capability_unavailable" })
+        Err(CapabilityError::Failed {
+            code: "capability_unavailable",
+        })
     }
 }
