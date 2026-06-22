@@ -7,6 +7,7 @@ mod error;
 mod host;
 mod index;
 pub mod rect;
+mod region_features;
 mod self_validation;
 mod template;
 
