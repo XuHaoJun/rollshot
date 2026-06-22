@@ -858,6 +858,8 @@ CapabilityError::Failed { code: "vision_index_unavailable" }
 
 ## Implementation Plan
 
+> **排序與 sub-project 邊界以「Roadmap — Sub-projects & PRs」為準。** 以下 P0–P6 為設計細節；其中 P4（inspectLayout）已改劃到 **SP4**，P5（OCR）改劃到 **SP5**，regionFeatures 改劃到 **SP2**。Sub-project 1 只取 template 路徑。
+
 ### P0 — Keep Current Automation Boundary
 
 Goal: confirm no design drift.
@@ -992,18 +994,31 @@ Exit criteria:
 - `hide document folders` demo works locally
 - every candidate remains reviewable/editable
 
-## Suggested First PR Stack
+## Roadmap — Sub-projects & PRs
 
-1. `rollshot-vision` crate skeleton
-2. `VisualIndex` + region clipping helpers
-3. `TemplateAsset` / `TemplateStore` + `TemplateSensitivity` metadata
-4. `templateMatch` v0 + NMS
-5. template self-validation（`TemplateSelfValidation`）
-6. `regionFeatures` v0（numeric sanity filter）
-7. role-free fixture tests through `QuickJsExecutor`
-8. author-time `inspectLayout` v0
-9. optional OCR spike branch
-10. optional OpenCV spike branch
+整個 auto-detection 拆成數個**獨立 sub-project**。每個 sub-project = **1 份 spec + 1 份 plan**，plan 內含**可獨立測試 / commit 的 PR phases**，**每個 PR 收尾留一則 handoff note**（不為每個 PR 各寫一份 spec —— 六個 PR 共享同一套互相依賴的型別設計，拆成六份 spec 多半是互相 cross-ref 的空殼；亦吻合 repo 既有 subproject-level spec + `docs/superpowers/handoffs/` 慣例）。
+
+### Sub-project 1 — `rollshot-vision` runtime host（template-first）
+
+agent-independent、現在就能做：用 fixtures + 手寫 template detector 經 `QuickJsExecutor` 驗證。**範圍只含 template 路徑**；`regionFeatures` / author-time `inspectLayout` / OCR / OpenCV 全部 deferred 到後續 sub-project。
+
+| PR | 內容 | 獨立測試 done-state |
+|---|---|---|
+| PR1 | `crates/rollshot-vision` skeleton（crate + workspace 接線 + stub `RealAutomationHost` 實作 `AutomationHost`，回空但合法） | 編譯；capability 回空合法值；無 OCR/OpenCV native dep |
+| PR2 | `VisualIndex` + `ImageRect` clipping/padding helpers（grayscale 預算、clip、pad、IoU、union） | 合成圖上的 deterministic 單元測試 |
+| PR3 | `TemplateAsset` / `TemplateStore` / `TemplateSensitivity`（本機儲存 + 隱私旗標 + serialize gate） | by-handle 載入；missing handle → typed error；`Sensitive` 不進匯出路徑 |
+| PR4 | `templateMatch` v0 + NMS（NCC via `imageproc` 或自有；clip region、score 排序、重疊抑制、limit 生效） | 合成 fixture 找到貼入的 template；重疊去重；limit 生效 |
+| PR5 | `TemplateSelfValidation`（self / peak-margin / false-positive / edge / entropy / jitter → Pass/NeedsConfirm/Reject 的純函式） | 好 template Pass；純色塊 Reject；到處亂中 Reject |
+| PR6 | role-free QuickJS fixture tests（用本 sub-project 的 `RealAutomationHost` 跑兩個已驗證 detector，比對候選框） | `hide bookmarks` / `hide folders` demo 本機過；候選可編輯 |
+
+### 後續 sub-projects（各自 spec / plan / handoff）
+
+- **SP2** `regionFeatures` v0（dominant color + edge density，數值 sanity filter）
+- **SP3** author-time template acquisition pipeline（LLM 粗定位 → snap → 接 self-validation → auto/NeedsUserInput）—— **依賴 bounded agent core**
+- **SP4** author-time `inspectLayout` v0（降精度版面啟發式，僅 author session）
+- **SP5** OCR provider 整合（`NoopOcrProvider`/`FakeOcrProvider` → optional Tesseract / macOS Vision）
+- **SP6** product 接線（把 `RealAutomationHost` 接進 Result Workspace 執行路徑）
+- **(opt)** OpenCV spike（僅在 NCC 不夠時）
 
 Keep each PR independently testable.
 
@@ -1054,23 +1069,9 @@ Do not implement these in the first release:
 
 ## Practical Default Answer
 
-For the current stage, implement this order:
+排序見「Roadmap — Sub-projects & PRs」。Sub-project 1（`rollshot-vision` runtime host，PR1–PR6）是第一個要做、且 agent-independent 的可 demo 切片。
 
-```text
-RealAutomationHost
-→ VisualIndex
-→ TemplateAsset / TemplateStore / sensitivity metadata
-→ templateMatch v0 + NMS
-→ template self-validation
-→ regionFeatures v0
-→ role-free QuickJS fixture tests
-→ author-time inspectLayout v0
-→ fake OCR fixtures
-→ optional real OCR
-→ optional OpenCV spike
-```
-
-This gives Rollshot enough automatic detection to make Smart Redaction feel real while preserving the original product thesis: **teach once, reuse locally, inspect every candidate.**
+這保留了原始產品論點：**teach once, reuse locally, inspect every candidate.**
 
 ## References
 
