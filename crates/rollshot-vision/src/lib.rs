@@ -26,9 +26,7 @@ pub use template::{
 
 #[cfg(test)]
 mod contract_tests {
-    use rollshot_automation::{
-        AutomationHost, LayoutQuery, OcrQuery, Region, RegionFeaturesQuery, TemplateMatchQuery,
-    };
+    use rollshot_automation::{AutomationHost, LayoutQuery, OcrQuery, Region, TemplateMatchQuery};
 
     use crate::RealAutomationHost;
 
@@ -48,14 +46,6 @@ mod contract_tests {
         );
         assert_eq!(
             host.layout(LayoutQuery {
-                region: Region::Full,
-                limit: 1
-            })
-            .unwrap_err(),
-            expected
-        );
-        assert_eq!(
-            host.region_features(RegionFeaturesQuery {
                 region: Region::Full,
                 limit: 1
             })

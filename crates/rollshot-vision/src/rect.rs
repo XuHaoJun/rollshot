@@ -8,7 +8,7 @@ use rollshot_image_document::ImageRect;
 /// Default cap on template search area (pixels). Bounds naive-NCC cost.
 pub const MAX_SEARCH_AREA: u64 = 8_000_000; // ~ 4000x2000
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PixelRect {
     pub x: u32,
     pub y: u32,

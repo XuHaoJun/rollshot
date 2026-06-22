@@ -7,22 +7,16 @@ use image::{GrayImage, RgbaImage};
 use crate::rect::PixelRect;
 
 /// RGB quantization step. MUST divide 256 (256 / 16 = 16 bins per channel).
-#[allow(dead_code)] // removed in PR2 when RealAutomationHost consumes dominant_rgba
 pub(crate) const QUANTIZE_STEP: u32 = 16;
 
 /// Per-pixel combined-gradient threshold (`|dx| + |dy|`) for counting an edge.
-#[allow(dead_code)] // removed in PR2 when RealAutomationHost consumes edge_density
 pub(crate) const EDGE_THRESHOLD: u16 = 32;
 
 /// Area cap for a regionFeatures query (reuse the template search-area cap).
-// `#[allow(dead_code)]` is removed in PR2 once the host consumes these; in PR1
-// they have no non-test consumer, so the lib-target build would flag dead_code.
-#[allow(dead_code)]
 pub(crate) const MAX_REGION_FEATURES_AREA: u64 = crate::rect::MAX_SEARCH_AREA;
 
 /// Dominant quantized color of `rect`, returned as the winning bin's center.
 /// Alpha is fixed at 255 (SP2 assumes screenshot-like opaque input).
-#[allow(dead_code)] // removed in PR2 when RealAutomationHost consumes it
 pub(crate) fn dominant_rgba(image: &RgbaImage, rect: PixelRect) -> [u8; 4] {
     let bins_per_channel = 256 / QUANTIZE_STEP; // 16
     let bin_count = (bins_per_channel * bins_per_channel * bins_per_channel) as usize;
@@ -60,7 +54,6 @@ pub(crate) fn dominant_rgba(image: &RgbaImage, rect: PixelRect) -> [u8; 4] {
 /// Fraction of in-rect pixels (with both a right and a down neighbor) whose
 /// combined gradient exceeds `EDGE_THRESHOLD`. Range [0, 1]; 0.0 if rect is
 /// narrower/shorter than 2 px.
-#[allow(dead_code)] // removed in PR2 when RealAutomationHost consumes it
 pub(crate) fn edge_density(gray: &GrayImage, rect: PixelRect) -> f32 {
     if rect.width < 2 || rect.height < 2 {
         return 0.0;
