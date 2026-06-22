@@ -58,54 +58,91 @@ crates/rollshot-vision/src/
   lib.rs               # 視需要 re-export region_features 常數
 ```
 
-`RealAutomationHost` 新增 `prepared_region_features: Vec<PreparedRegionFeatures>`，與既有 `prepared_template_matches` 對稱：
+`RealAutomationHost` 新增 `prepared_region_features: Vec<PreparedRegionFeatures>`，與既有 `prepared_template_matches` 對稱，但**快取鍵用 canonical pixel rect，不用 raw `Region`**：
 
 ```rust
+// 加在 rect.rs：PixelRect 目前只有 PartialEq, Eq；補上 Hash（u32 欄位，trivially derivable）。
+// #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub struct PixelRect { ... }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RegionFeaturesKey {
+    rect: PixelRect, // 已解析、已 clip 進影像的整數 rect
+}
+
 #[derive(Debug, Clone)]
 struct PreparedRegionFeatures {
-    region: rollshot_automation::Region,
+    key: RegionFeaturesKey,
     max_limit: u32,
     results: Vec<RegionFeatures>, // v0：長度恆為 1
 }
 ```
 
+**為何不用 raw `Region`：** `Region::Rect` 內是 f32 `ImageRect`，直接比 raw region 會踩到浮點表示差、clip 後等價、`Full` vs「等價 full rect」等問題。prepare 與 callback 都先跑同一條 `region_to_pixel_rect(...) -> PixelRect` 收斂成同一 pixel-space 語意，再用 `RegionFeaturesKey` 比對，cache 命中才穩定。
+
+> **SP1 latent 對照（不在 SP2 修）：** SP1 `prepare_template_match` 仍用 raw `Region` 相等比對（`prepared.region != query.region`），有同類脆弱性。SP2 改用 canonical key；SP1 那條屬既有 latent issue，本 spec 不擴散範圍去動它，僅在此記錄。
+
 ### 3.2 Data flow（鏡像 SP1 的 prepared-callback 契約）
+
+prepare 與 callback **跑同一條 region 解析**，再用 canonical key 比對：
 
 ```
 [QuickJS 外，expensive]                         [QuickJS 內，callback 只查快取]
 prepare_region_features(index, query):          region_features(query):
   rect = region_to_pixel_rect(                     limit == 0 → InvalidInput "invalid_query"
-           query.region, w, h,                     找 prepared(region 相符)
-           MAX_REGION_FEATURES_AREA)                 無 → Failed "vision_index_unavailable"
-  edge = edge_density(index.gray(), rect)          limit > max_limit → LimitExceeded
-  dom  = dominant_rgba(index.image(), rect)        回 results.take(limit)（v0 長度恆為 1）
-  cache PreparedRegionFeatures{
-    region, max_limit: query.limit,
-    results: [RegionFeatures{ bounds: rect→ImageRect, dom, edge }] }
+           query.region, w, h,                     rect = region_to_pixel_rect(query.region, w, h,
+           MAX_REGION_FEATURES_AREA)                          MAX_REGION_FEATURES_AREA)?  // 同一條
+  key  = RegionFeaturesKey{ rect }                 key  = RegionFeaturesKey{ rect }
+  edge = edge_density(index.gray(), rect)          找 prepared(key 相符)
+  dom  = dominant_rgba(index.image(), rect)          無 → Failed "vision_index_unavailable"
+  cache PreparedRegionFeatures{                     limit > max_limit → LimitExceeded（見 §5）
+    key, max_limit: query.limit,                    回 results.take(limit)（v0 長度恆為 1）
+    results: [RegionFeatures{
+      bounds: rect→ImageRect,  // clipped measured bounds
+      dom, edge }] }
 ```
 
-QuickJS callback 維持 SP1 invariant：**只 lookup + truncate，不在 callback 做任何影像運算**。prepare 以 `tracing`（`target: "rollshot::vision::region_features"`）記 duration 與 result_count，與 `prepare_template_match` 一致。
+`RegionFeatures.bounds` 回的是 **clip 後的量測 rect**（`PixelRect` 直接 cast 回 `ImageRect`），不是原始 requested bounds。QuickJS callback 維持 SP1 invariant：**只 lookup + truncate，不在 callback 做任何影像運算**（解析 region 成 key 是純整數運算，不碰像素）。prepare 以 `tracing`（`target: "rollshot::vision::region_features"`）記 duration 與 result_count，與 `prepare_template_match` 一致。
 
-> **prepare 何時被呼叫：** 與 SP1 `prepare_template_match` 相同 —— 由呼叫端在進 `QuickJsExecutor` 前準備。query-plan 自動抽取（從 manifest 抽 capability 呼叫的 region 參數）屬 SP6 product 接線；SP2 的整合測試手動 `prepare_region_features`，鏡像 SP1 PR6 的作法。
+> **prepare 何時被呼叫 / SP2 的 dynamic query 硬限制：**
+>
+> SP2 **不從 JavaScript 推斷 `regionFeatures` 的 query。** 每一個 `regionFeatures` 呼叫，在進 `QuickJsExecutor` 前都必須有一個**已 prepare 的對應 canonical pixel rect**；沒有對應 key 的呼叫一律 `vision_index_unavailable`。
+>
+> 像 `input.imageWidth` 這種 dynamic region **允許**，但前提是 caller / test harness 在執行前用影像尺寸建出並 prepare**同一個 canonical query**。自動 query planning（從 manifest 抽 region 參數）是 **SP6**。SP2 整合測試手動 `prepare_region_features`，鏡像 SP1 PR6。
 
 ## 4. 演算法（deterministic、cheap、單次 pass）
 
 常數以 named `const` 定義於 `region_features.rs`；確切數值於 plan 階段定。
 
 - **`dominant_rgba(image: &RgbaImage, rect: PixelRect) -> [u8; 4]`**
-  對 rect 內像素做量化 RGB histogram：每通道量化到固定 bin（`QUANTIZE_STEP`，例如 16 → 每通道 16 bins → 16³ 個）。取累計最多的 bin；回傳該 bin 的代表色（bin 中心值），alpha 固定 `255`（screenshot 不透明）。tie-break：bin index 最小者勝（deterministic）。
+  對 rect 內像素做量化 RGB histogram：每通道量化到固定 bin（`QUANTIZE_STEP`，例如 16 → 每通道 256/16 = 16 bins → 16³ 個）。取累計最多的 bin；回傳該 bin 的代表色（bin 中心 = `bin_index * QUANTIZE_STEP + QUANTIZE_STEP/2`）。tie-break：bin index 最小者勝（deterministic）。
+  - **`QUANTIZE_STEP` 必須整除 256**（如 16 / 32 / 64），bin center / bin index 規則才乾淨；plan 階段選值時鎖死此約束。
+  - **alpha：** SP2 假設 screenshot-like 不透明輸入，回傳 alpha `255`。若未來 caller 傳非不透明影像（composited `ImageDocument` layer / imported image），alpha 處理需重新檢視（屆時可改 dominant quantized RGB + majority/median alpha）。先寫明此 assumption，避免變成永久隱性契約。
 
 - **`edge_density(gray: &GrayImage, rect: PixelRect) -> f32`**
-  對 rect 內每個有右/下鄰居的像素算 `|g(x+1,y) - g(x,y)| + |g(x,y+1) - g(x,y)|`，超過 `EDGE_THRESHOLD` 即記為 edge pixel。`edge_density = edge_count / counted_pixels`，落在 `[0,1]`。rect 的右/下邊界 1px 不計（無鄰居）；rect 寬或高 <2 時 `counted_pixels` 對應方向為 0 → 該情形回 `0.0`（不 panic、不除零）。不引 `imageproc` sobel，避免邊界與 dependency 行為變數。
+  對 rect 內每個**同時有右鄰居與下鄰居**的像素算 `|g(x+1,y) - g(x,y)| + |g(x,y+1) - g(x,y)|`，超過 `EDGE_THRESHOLD` 即記為 edge pixel。
+  - **分母明確**：counted set = rect 內 `x < x0+w-1` 且 `y < y0+h-1` 的像素，即 `(w-1)*(h-1)` 個；`edge_density = edge_count / counted`，落在 `[0,1]`。PR1 測試鎖住此定義。
+  - rect 寬 <2 或高 <2 → `counted == 0` → 回 `0.0`（不 panic、不除零）。
+  - 累加器用 `u64`（`edge_count` 與 `counted`），避免大圖 overflow；`GrayImage` 是 `u8`，無 non-finite 問題。
+  - 不引 `imageproc` sobel，避免邊界與 dependency 行為變數。
 
-兩個函式都吃 `PixelRect`（已 clip 進影像），純讀、無 alloc 影像、deterministic。
+兩個函式都吃已 clip 的 `PixelRect`，純讀、無 alloc 影像、deterministic。
 
-## 5. Error model（複用既有碼，不新增）
+## 5. Error model 與 limit 語意（複用既有碼，不新增）
 
-- `invalid_query`（`limit == 0`，與 `template_match` 一致）。
+**limit 語意（v0 結果長度恆為 0 或 1）：**
+
+- `limit == 0` → `invalid_query`（與 `template_match` 一致）。
+- `limit >= 1` → 回傳那唯一一個 prepared feature。
+- `limit > prepared.max_limit` → 仍回 `LimitExceeded`，但**僅作為 manifest / bridge 的一致性 guard**，**不代表會產生多個 feature**。
+
+> v0 **不**用 `limit` 控制 tiling 或 result count。`limit: 20` 不是「幫我切 20 塊」；它最多就是一個 feature。多 feature / 切割是永久 deferred（見 §1）。
+
+**錯誤碼（全部複用既有）：**
+
+- `invalid_query`（`limit == 0`）。
 - `non_finite_region` / `empty_region` / `region_too_large`（來自 `region_to_pixel_rect`）。
-- `vision_index_unavailable`（`Failed`，未 prepare 對應 region 時）。
-- `LimitExceeded`（`limit > prepared.max_limit`，與 `template_match` 一致；v0 結果恆 1，此檢查多為形式上一致）。
+- `vision_index_unavailable`（`Failed`，無對應 canonical key 時）。
+- `LimitExceeded`（如上，consistency guard）。
 
 新增常數 `MAX_REGION_FEATURES_AREA: u64`（直接沿用 `rect::MAX_SEARCH_AREA` 值即可）。**不新增** `VisionError` variant 或 `CapabilityError` 碼。
 
@@ -118,8 +155,8 @@ QuickJS callback 維持 SP1 invariant：**只 lookup + truncate，不在 callbac
 - **單元（合成圖，deterministic）**
   - `dominant_rgba`：純色 region → 該色；半紅半藍 region → 多數色；量化 tie-break 走最小 bin。
   - `edge_density`：純色 → `≈0`；高頻棋盤 → 高值；rect 寬/高 <2 → `0.0` 不 panic。
-  - region 解析：clip 出界 rect；`non_finite` / `empty` / `region_too_large` 皆 typed error。
-  - host：未 prepare → `vision_index_unavailable`；`limit == 0` → `invalid_query`；prepared 後查得且 `take(limit)` 正確。
+  - region 解析：clip 出界 rect 後 `bounds` 為 clipped measured rect；`non_finite` / `empty` / `region_too_large` 皆 typed error。
+  - host：未 prepare → `vision_index_unavailable`；`limit == 0` → `invalid_query`；prepared 後**用 canonical key 查得**（含「raw region 不等但 canonical 等價」如 `Full` vs 等價 full rect 仍命中）且 `take(limit)` 正確。
 - **整合（鏡像 SP1 PR6）**
   一支 role-free QuickJS fixture detector（單一來源 = `regionFeatures`，如 menu-bar 型：對固定頂端 strip 問 `edge_density`，低於門檻才輸出候選），經 `QuickJsExecutor` + 已 `prepare_region_features` 的 `RealAutomationHost`，在合成 scene 上產出預期候選。fixture JS 先過 `validate_source`（`filter` / `map` 在允許 subset 內）。
 - **指令**：`rtk cargo test -p rollshot-vision`、`rtk cargo fmt --check`、`rtk cargo clippy -p rollshot-vision --all-targets -- -D warnings`。非 stitching 路徑，不需 bench。
@@ -128,13 +165,15 @@ QuickJS callback 維持 SP1 invariant：**只 lookup + truncate，不在 callbac
 
 | PR | 內容 | 獨立 done-state |
 |---|---|---|
-| PR1 | `region_features.rs` 純函式 `dominant_rgba` / `edge_density` + named const + 合成圖單元測試 | 演算法在合成圖上 deterministic；無 host 接線；clippy/fmt 過 |
-| PR2 | `prepare_region_features` + `prepared_region_features` 快取；`region_features()` callback 改 cached lookup（取代 stub）；完整 error model + 單元測試 | prepared 後查得；未 prepare / `limit==0` / region 錯誤皆 typed；callback 不做影像運算 |
-| PR3 | role-free QuickJS regionFeatures fixture 整合測試（dev-dep rquickjs，鏡像 SP1 PR6） | demo detector 本機過、候選正確；handoff note: SP2 complete |
+| PR1 | `region_features.rs` 純函式 `dominant_rgba` / `edge_density` + named const（`QUANTIZE_STEP` 整除 256、`EDGE_THRESHOLD`）+ 合成圖單元測試 | 演算法在合成圖上 deterministic；`edge_density` 分母定義 `(w-1)*(h-1)` 被測試鎖住、u64 累加；無 host 接線；clippy/fmt 過 |
+| PR2 | `PixelRect` 補 `Hash`；`RegionFeaturesKey` + `prepare_region_features` + `prepared_region_features` 快取；`region_features()` callback 改 cached lookup（取代 stub）；完整 error / limit model + 單元測試 | prepared 後查得且 **lookup 用 canonical `PixelRect` key、非 raw `Region` 相等**；未 prepare / `limit==0` / region 錯誤皆 typed；callback 不做影像運算；`bounds` 回 clipped measured rect |
+| PR3 | role-free QuickJS regionFeatures fixture 整合測試（dev-dep rquickjs，鏡像 SP1 PR6） | demo detector 本機過、候選正確；**dynamic `imageWidth`-based fixture 在執行前明確 prepare 對應的 canonical rect**；handoff note: SP2 complete |
 
 每個 PR 收尾在 `docs/superpowers/handoffs/2026-06-22-rollshot-vision.md`（沿用同一檔）追加一則 handoff note。
 
 ## 9. Open questions（plan 階段決，不阻擋本 spec）
 
-1. `QUANTIZE_STEP` 與 `EDGE_THRESHOLD` 的確切數值（先給保守預設，整合測試上微調）。
-2. fixture detector 的 region 取得方式：固定像素 rect vs `input` 是否提供 `imageWidth`（依 SP1 input 形狀決定；不影響 spec 不變量）。
+1. `QUANTIZE_STEP`（整除 256）與 `EDGE_THRESHOLD` 的確切數值（先給保守預設，整合測試上微調）。
+2. fixture detector 的 region 取得方式：固定像素 rect vs `input.imageWidth`（依 SP1 input 形狀決定）。無論哪種，test harness 都必須在執行前 prepare 對應 canonical rect（§3.2 硬限制），不影響 spec 不變量。
+
+> alpha 處理已在 §4 定為「v0 假設 opaque、回 255、並寫明 assumption」，非 open question。
