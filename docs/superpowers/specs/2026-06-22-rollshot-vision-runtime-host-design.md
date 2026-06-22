@@ -69,7 +69,7 @@ rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }  # �
 
 **依賴方向:** rollshot-vision 只依賴 `AutomationHost` trait + capability 型別,**不**依賴 `rollshot-automation-rquickjs`(executor/bridge);host 由呼叫端注入 `&mut dyn AutomationHost`。PR6 以 dev-dependency 引 rquickjs 跑真 JS。無循環依賴(rquickjs 不依賴 vision)。
 
-**workspace 變更:** 新增 `imageproc = "0.26"` 到 `[workspace.dependencies]`;`rollshot-core` 順手改用 `{ workspace = true }`(小 cleanup,確保單一版本解析)。
+**workspace 變更:** 新增 `imageproc = { version = "0.26", default-features = false }` 到 `[workspace.dependencies]`(**明確帶 `default-features = false`** 對齊 `rollshot-core` 現況,否則 workspace 版本雖同、features 可能不一致);`rollshot-core` 與 `rollshot-vision` 都改用 `imageproc = { workspace = true }`,確保單一版本 + 一致 features。
 
 ### 3.2 Module layout (SP1)
 
@@ -85,6 +85,17 @@ crates/rollshot-vision/src/
 ```
 
 **不含** `ocr.rs` / `layout.rs` / `region_features.rs` / `confidence.rs`(SP2/SP4/SP5)。`image_source.rs`(ImageDocument adapter)延後到 SP6。
+
+## Implementation Guardrails
+
+開 PR1 前必須成立(逐項對應 §4–§5,2026-06-22 review 補):
+
+- `match_template_image` 回 `Result<Vec<TemplateMatch>, CapabilityError>`,不是裸 `Vec`。
+- `self_validate` 吃 `candidate_bounds: ImageRect`(內部自 `index.image()` 裁),不是只吃像素;回 `Result<_, VisionError>`。
+- `TemplateAsset` / `TemplateStore` **不得**有會寫出 bytes 的 generic serialize path;本機/匯出走各自 record 型別,匯出對 `Sensitive` strip。
+- `TemplateBytes` 是 raw RGBA,經 checked constructor(`w>0,h>0,len==w*h*4,w*h<=MAX_TEMPLATE_AREA`)。
+- `to_pixel_rect` 用 floor-min / ceil-max rounding,拒絕 non-finite(`non_finite_region`)與 empty(`empty_region`)、超限(`region_too_large`);回 `Result`。
+- NCC 分數必須有限;低資訊量 template 以 `template_low_information` 拒絕;非有限分數視為非命中。
 
 ## 4. Component Design
 
@@ -154,7 +165,7 @@ pub struct TemplateAsset {
     pub handle: TemplateHandle,
     pub sensitivity: TemplateSensitivity,
     pub source: TemplateSource,
-    pub created_at: Timestamp,                 // 由呼叫端傳入（無 ambient clock）
+    pub created_at_ms: u64,                    // 由呼叫端傳入（無 ambient clock）
     pub bounds_in_source_image: Option<ImageRect>,
     pub bytes: TemplateBytes,                  // RGBA 裁切（可供「檢視」）
 }
@@ -168,7 +179,26 @@ impl TemplateStore {
 }
 ```
 
-**D4 強制句(規格):** *Any code path that serializes presets outside local storage must inspect `TemplateSensitivity` before writing template bytes.* → SP1 的 `export()` 對 `Sensitive` 一律 **strip**(輸出不含其 bytes),deterministic、不需 UI;互動式「確認後包含」屬 SP6。`save_local()`(本機)不受限,寫全部。PR3 測試斷言匯出物不含任何 `Sensitive` bytes。
+**`TemplateBytes`(明確 invariant,避免 PR3 不確定該存 PNG / raw RGBA / RgbaImage):** raw RGBA,只能經 checked constructor 建立。
+
+```rust
+pub struct TemplateBytes { width: u32, height: u32, rgba: Vec<u8> } // invariant: rgba.len() == width*height*4
+impl TemplateBytes {
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, VisionError>; // 檢查 w>0,h>0,len==w*h*4,w*h<=MAX_TEMPLATE_AREA
+    pub fn to_rgba_image(&self) -> image::RgbaImage;                                 // invariant 保證有效，infallible
+}
+```
+
+**D4 強制句(規格):** *Any code path that serializes presets outside local storage must inspect `TemplateSensitivity` before writing template bytes.* → SP1 的 `export()` 對 `Sensitive` 一律 **strip**(輸出不含其 bytes),deterministic、不需 UI;互動式「確認後包含」屬 SP6。`save_local()`(本機)不受限,寫全部。
+
+**序列化隱私硬規則:** `TemplateAsset` / `TemplateStore` **不得** derive 一條會寫出 bytes 的 generic `Serialize`(否則 `serde_json::to_writer(f, &store)` 會繞過 `export()` 的 strip)。本機儲存與匯出走**各自明確的 record 型別**:
+
+```rust
+struct LocalTemplateAssetRecord  { handle, sensitivity, source, created_at_ms: u64, bounds_in_source_image: Option<ImageRect>, bytes: TemplateBytes }
+struct ExportTemplateAssetRecord { handle, sensitivity, source, created_at_ms: u64, bounds_in_source_image: Option<ImageRect>, bytes: Option<TemplateBytes> } // Sensitive → None
+```
+
+PR3 測試:不只測 `export()` strip,也測**沒有任何 generic serialize path 能意外寫出 `Sensitive` bytes**。
 
 SP1 store 用 in-memory + 本機序列化即可測;product 接線到 SP6。
 
@@ -181,24 +211,33 @@ impl VisualIndex {
 }
 
 // 第 4 節 factoring：capability 與 self-validation 共用的核心（吃 template 影像，不經 handle）
-fn match_template_image(index: &VisualIndex, tpl_gray: &image::GrayImage, region: Region, limit: u32)
-    -> Vec<TemplateMatch>;
+pub(crate) fn match_template_image(index: &VisualIndex, tpl_gray: &image::GrayImage, region: Region, limit: u32)
+    -> Result<Vec<TemplateMatch>, CapabilityError>;   // 回 Result（含 region/template 錯誤），不是裸 Vec
 ```
 
 演算法:
 
 1. `store.get(handle)` → 缺則 `Err(Failed{code:"template_not_found"})`。
-2. 搜尋區:`Full` = 整圖;`Rect` 經 `rect::to_pixel_rect` clamp 到影像邊界。搜尋面積超上限 → `Err(InvalidInput{code:"region_too_large"})`。
-3. template 轉灰階(一次);場景灰階取 `VisualIndex.gray()` 裁到搜尋區。
-4. NCC:`imageproc::template_matching`,`CrossCorrelationNormalized`。template 比搜尋區大 → `Err(InvalidInput{code:"template_larger_than_region"})`。
-5. 找峰 → **greedy NMS**(分數降序取,IoU > 0.4 後續抑制,用 `rect::iou`)→ 合併同實例群聚峰。
-6. 排序取前 `limit`。每個 → `TemplateMatch{ bounds=(absX,absY,tplW,tplH), score, anchor=bounds 中心 }`。
+2. **template 資訊量檢查**:variance/entropy 低於地板 → `Err(InvalidInput{code:"template_low_information"})`(防純色 template 在 NCC 下產生無意義高分/NaN)。
+3. 搜尋區:`Full` = 整圖;`Rect` 經 `rect::to_pixel_rect`(規則見下)轉像素。template 比搜尋區大 → `Err(InvalidInput{code:"template_larger_than_region"})`。
+4. template 轉灰階(一次);場景灰階取 `VisualIndex.gray()` 裁到搜尋區。
+5. NCC:`imageproc::template_matching`,`CrossCorrelationNormalized`。**非有限(NaN/Inf)分數一律視為非命中,永不排在有限分數之上。**
+6. 找峰 → **greedy NMS**(分數降序、stable;IoU > 0.4 後續抑制,用 `rect::iou`)→ 合併同實例群聚峰。
+7. 排序取前 `limit`。每個 → `TemplateMatch{ bounds=(absX,absY,tplW,tplH), score, anchor=bounds 中心 }`。
+
+`rect::to_pixel_rect(ImageRect, image_bounds) -> Result<PixelRect, CapabilityError>` 規則(寫死,避免 off-by-one / flaky 的 ±2px 測試):
+
+- `x0=floor(x)`, `y0=floor(y)`, `x1=ceil(x+w)`, `y1=ceil(y+h)`,再 clamp 到影像邊界。
+- non-finite → `InvalidInput{code:"non_finite_region"}`。
+- clamp 前後 `width<=0 || height<=0` → `InvalidInput{code:"empty_region"}`。
+- 面積溢位或超過 `MAX_SEARCH_AREA` → `InvalidInput{code:"region_too_large"}`。
 
 **決定:**
 
 - **host 不 threshold** —— capability 無 threshold 參數;回前 `limit` 名(分數降序、NMS 後),JS detector 自行 `.filter(m => m.score >= …)`。host 不設分數下限,保持可預測。
 - **anchor = bounds 中心**(對齊 idea-doc JSON 範例)。
 - NMS IoU 門檻、搜尋面積上限為帶預設值的常數(SP1 寫死,之後 config 化)。
+- **防守 NCC 病態:** 低資訊量 template → `template_low_information` 拒絕;非有限分數視為非命中、永不排在有限分數之上(防純色 template 與過乾淨合成圖被怪峰打穿)。
 - **決定論:** NCC + greedy NMS(stable sort,score → 位置 tie-break)可重現。
 
 ### 4.5 `TemplateSelfValidation`
@@ -225,9 +264,11 @@ pub struct TemplateSelfValidation {
     pub decision: TemplateDecision,
 }
 
-pub fn self_validate(index: &VisualIndex, candidate: &image::RgbaImage, cfg: &SelfValidationConfig)
-    -> TemplateSelfValidation;
+pub fn self_validate(index: &VisualIndex, candidate_bounds: ImageRect, cfg: &SelfValidationConfig)
+    -> Result<TemplateSelfValidation, VisionError>;
 ```
+
+> `self_validate` 內部自 `index.image()` 依 `candidate_bounds` 裁出 candidate,因此知道它在原圖的原始位置 —— self_score「最佳命中是否回到原 bounds 附近」、jitter 穩定性、`target_coverage` 都需要這個(只給像素無從比對位置)。bounds 出界 → `VisionError`;內部 `match_template_image` 回的 `CapabilityError` 在此映射為 Reject / `VisionError`。
 
 訊號:
 
@@ -248,7 +289,7 @@ decision(deterministic 門檻,非 ML):
 ## 5. Error Model
 
 - `VisionError`(建置/儲存期):空影像、IO/序列化失敗等。`build()` / `save_local()` / `export()` 回這個。(`export()` 對 `Sensitive` 是 strip 而非 error —— 見 §4.3。)
-- `CapabilityError`(來自 `rollshot-automation`,capability 呼叫期):`template_not_found` / `template_larger_than_region` / `region_too_large` / `capability_unavailable` / `vision_index_unavailable`。對齊 idea-doc Resource Control level 3 的拒絕碼。
+- `CapabilityError`(來自 `rollshot-automation`,capability 呼叫期):`template_not_found` / `template_larger_than_region` / `region_too_large` / `non_finite_region` / `empty_region` / `template_low_information` / `capability_unavailable` / `vision_index_unavailable`。對齊 idea-doc Resource Control level 3 的拒絕碼。
 - 兩者分開:build/store 在 host 建構前/外發生,不在 capability 呼叫鏈內。
 
 ## 6. Security & Privacy (carry from D4)
@@ -262,11 +303,12 @@ decision(deterministic 門檻,非 ML):
 
 ### 7.1 Unit tests (PR1–PR5,各自)
 
-- **rect.rs** — to_pixel_rect clamp/round、pad、iou、union 的 deterministic 單元測試。
+- **rect.rs** — `to_pixel_rect` 的 floor-min/ceil-max rounding、non-finite(`non_finite_region`)、empty(`empty_region`)、超限(`region_too_large`);pad、iou、union deterministic 測試。
 - **VisualIndex** — build 拒絕 0 面積;grayscale 正確性(合成圖)。
-- **TemplateStore** — by-handle get;missing → `None`(host 層轉 typed error);`save_local`/`export` round-trip;`export` strip `Sensitive`。
-- **templateMatch** — 合成 fixture 找到貼入 template;重疊去重(NMS);`limit` 生效;`template_larger_than_region` / `region_too_large` 錯誤。
-- **self_validate** — distinctive 裁切 Pass;純色塊 Reject(edge/entropy 地板);重複紋理 Reject(false positive 高);jitter 穩定性;area-bounds gate。
+- **TemplateBytes** — checked constructor 拒絕 `len != w*h*4`、0 維、超 `MAX_TEMPLATE_AREA`。
+- **TemplateStore** — by-handle get;missing → `None`(host 層轉 typed error);`save_local`/`export` round-trip;`export` strip `Sensitive`;**無任何 generic serialize path 能寫出 `Sensitive` bytes**。
+- **templateMatch** — 合成 fixture 找到貼入 template;重疊去重(NMS);`limit` 生效;`template_larger_than_region` / `region_too_large` 錯誤;**低資訊量 template → `template_low_information`**;**非有限 NCC 分數視為非命中**。
+- **self_validate** — distinctive 裁切 Pass;純色塊 Reject(edge/entropy 地板);重複紋理 Reject(false positive 高);jitter 穩定性;area-bounds gate;**`candidate_bounds` 出界 → `VisionError`**。
 
 ### 7.2 Integration tests (PR6 — role-free QuickJS fixtures)
 
