@@ -1,0 +1,22 @@
+[package]
+name = "rollshot-vision"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+image = { workspace = true }
+imageproc = { workspace = true }
+rollshot-automation = { path = "../rollshot-automation" }
+rollshot-image-document = { path = "../rollshot-image-document", features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
+static_assertions = "1.1"
