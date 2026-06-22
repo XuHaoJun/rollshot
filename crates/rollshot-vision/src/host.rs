@@ -89,7 +89,9 @@ impl AutomationHost for RealAutomationHost {
         query: TemplateMatchQuery,
     ) -> Result<Vec<TemplateMatch>, CapabilityError> {
         if query.limit == 0 {
-            return Err(CapabilityError::InvalidInput { code: "invalid_query" });
+            return Err(CapabilityError::InvalidInput {
+                code: "invalid_query",
+            });
         }
         let prepared = self
             .prepared_template_matches
@@ -97,7 +99,9 @@ impl AutomationHost for RealAutomationHost {
             .find(|prepared| {
                 prepared.template_handle == query.template_handle && prepared.region == query.region
             })
-            .ok_or(CapabilityError::Failed { code: "vision_index_unavailable" })?;
+            .ok_or(CapabilityError::Failed {
+                code: "vision_index_unavailable",
+            })?;
         if query.limit > prepared.max_limit {
             return Err(CapabilityError::LimitExceeded);
         }
@@ -129,7 +133,12 @@ mod tests {
                 limit: 1,
             })
             .unwrap_err();
-        assert_eq!(err, CapabilityError::Failed { code: "vision_index_unavailable" });
+        assert_eq!(
+            err,
+            CapabilityError::Failed {
+                code: "vision_index_unavailable"
+            }
+        );
     }
 
     #[test]
@@ -160,7 +169,8 @@ mod tests {
             limit: 4,
         };
         let mut host = RealAutomationHost::new();
-        host.prepare_template_match(&index, &store, &prepared_query).unwrap();
+        host.prepare_template_match(&index, &store, &prepared_query)
+            .unwrap();
 
         let results = host
             .template_match(TemplateMatchQuery {

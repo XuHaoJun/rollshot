@@ -75,11 +75,9 @@ pub fn self_validate(
     let cw = candidate_bounds.width.round().max(1.0) as u32;
     let ch = candidate_bounds.height.round().max(1.0) as u32;
     let candidate_area = u64::from(cw) * u64::from(ch);
-    let area_ok =
-        (MIN_SELF_VALIDATION_AREA..=MAX_TEMPLATE_AREA).contains(&candidate_area);
+    let area_ok = (MIN_SELF_VALIDATION_AREA..=MAX_TEMPLATE_AREA).contains(&candidate_area);
 
-    let candidate_rgba =
-        image::imageops::crop_imm(index.image(), cx, cy, cw, ch).to_image();
+    let candidate_rgba = image::imageops::crop_imm(index.image(), cx, cy, cw, ch).to_image();
     let candidate_gray = image::imageops::grayscale(&candidate_rgba);
 
     let edge_density = edge_density(&candidate_gray);
@@ -137,14 +135,22 @@ pub fn self_validate(
         .filter(|m| m.score >= FALSE_POSITIVE_SCORE)
         .count() as u32;
 
-    let stable_under_jitter =
-        jitter_stable(index, &candidate_rgba, candidate_bounds, self_score);
+    let stable_under_jitter = jitter_stable(index, &candidate_rgba, candidate_bounds, self_score);
 
     let count_ok = match cfg.expected_count {
         ExpectedCount::Unique => true,
-        ExpectedCount::Repeating => matches.iter().filter(|m| m.score >= FALSE_POSITIVE_SCORE).count() >= 2,
+        ExpectedCount::Repeating => {
+            matches
+                .iter()
+                .filter(|m| m.score >= FALSE_POSITIVE_SCORE)
+                .count()
+                >= 2
+        }
         ExpectedCount::AtLeast(n) => {
-            matches.iter().filter(|m| m.score >= FALSE_POSITIVE_SCORE).count()
+            matches
+                .iter()
+                .filter(|m| m.score >= FALSE_POSITIVE_SCORE)
+                .count()
                 >= n.max(1) as usize
         }
     };
@@ -285,8 +291,8 @@ fn jitter_stable(
     let w = candidate_bounds.width.round() as u32;
     let h = candidate_bounds.height.round() as u32;
     if w > 4 && h > 4 {
-        let inward = image::imageops::crop_imm(index.image(), x + 1, y + 1, w - 2, h - 2)
-            .to_image();
+        let inward =
+            image::imageops::crop_imm(index.image(), x + 1, y + 1, w - 2, h - 2).to_image();
         variants.push((
             image::imageops::grayscale(&inward),
             ImageRect {
@@ -316,9 +322,9 @@ fn jitter_stable(
             Ok(matches) => matches,
             Err(_) => return false,
         };
-        matches.iter().any(|m| {
-            iou(m.bounds, expected) >= 0.5 && base_score - m.score <= JITTER_SCORE_DROP
-        })
+        matches
+            .iter()
+            .any(|m| iou(m.bounds, expected) >= 0.5 && base_score - m.score <= JITTER_SCORE_DROP)
     })
 }
 
@@ -329,7 +335,10 @@ mod tests {
     use rollshot_image_document::ImageRect;
 
     fn cfg(expected: ExpectedCount) -> SelfValidationConfig {
-        SelfValidationConfig { expected_count: expected, target_bounds: None }
+        SelfValidationConfig {
+            expected_count: expected,
+            target_bounds: None,
+        }
     }
 
     // Scene with one distinctive non-periodic glyph at (10,12), size 8x8.
@@ -352,7 +361,12 @@ mod tests {
         let index = VisualIndex::build(distinctive_scene()).unwrap();
         let v = self_validate(
             &index,
-            ImageRect { x: 10.0, y: 12.0, width: 8.0, height: 8.0 },
+            ImageRect {
+                x: 10.0,
+                y: 12.0,
+                width: 8.0,
+                height: 8.0,
+            },
             &cfg(ExpectedCount::Unique),
         )
         .unwrap();
@@ -365,12 +379,19 @@ mod tests {
     fn flat_candidate_is_rejected() {
         // Crop a uniform patch -> low edge/entropy.
         let index = VisualIndex::build(image::RgbaImage::from_pixel(
-            40, 40, image::Rgba([180, 180, 180, 255]),
+            40,
+            40,
+            image::Rgba([180, 180, 180, 255]),
         ))
         .unwrap();
         let v = self_validate(
             &index,
-            ImageRect { x: 5.0, y: 5.0, width: 8.0, height: 8.0 },
+            ImageRect {
+                x: 5.0,
+                y: 5.0,
+                width: 8.0,
+                height: 8.0,
+            },
             &cfg(ExpectedCount::Unique),
         )
         .unwrap();
@@ -382,7 +403,12 @@ mod tests {
         let index = VisualIndex::build(distinctive_scene()).unwrap();
         let e = self_validate(
             &index,
-            ImageRect { x: 38.0, y: 38.0, width: 8.0, height: 8.0 },
+            ImageRect {
+                x: 38.0,
+                y: 38.0,
+                width: 8.0,
+                height: 8.0,
+            },
             &cfg(ExpectedCount::Unique),
         )
         .unwrap_err();
@@ -397,7 +423,12 @@ mod tests {
         let index = VisualIndex::build(scene).unwrap();
         let v = self_validate(
             &index,
-            ImageRect { x: 10.0, y: 12.0, width: 8.0, height: 8.0 },
+            ImageRect {
+                x: 10.0,
+                y: 12.0,
+                width: 8.0,
+                height: 8.0,
+            },
             &cfg(ExpectedCount::Unique),
         )
         .unwrap();
@@ -410,7 +441,12 @@ mod tests {
         let index = VisualIndex::build(distinctive_scene()).unwrap();
         let v = self_validate(
             &index,
-            ImageRect { x: 10.0, y: 12.0, width: 1.0, height: 1.0 },
+            ImageRect {
+                x: 10.0,
+                y: 12.0,
+                width: 1.0,
+                height: 1.0,
+            },
             &cfg(ExpectedCount::Unique),
         )
         .unwrap();
@@ -422,7 +458,12 @@ mod tests {
         let index = VisualIndex::build(distinctive_scene()).unwrap();
         let v = self_validate(
             &index,
-            ImageRect { x: 10.0, y: 12.0, width: 8.0, height: 8.0 },
+            ImageRect {
+                x: 10.0,
+                y: 12.0,
+                width: 8.0,
+                height: 8.0,
+            },
             &SelfValidationConfig {
                 expected_count: ExpectedCount::Unique,
                 target_bounds: Some(ImageRect {

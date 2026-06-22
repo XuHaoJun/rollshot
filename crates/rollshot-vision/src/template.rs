@@ -11,12 +11,12 @@ use std::path::Path;
 use image::Luma;
 use imageproc::template_matching::{match_template, MatchTemplateMethod};
 use rollshot_automation::{CapabilityError, Region, TemplateMatch, TemplateMatchQuery};
-use rollshot_image_document::{ImageRect, ImagePoint};
+use rollshot_image_document::{ImagePoint, ImageRect};
 use serde::{Deserialize, Serialize};
 
-use crate::VisionError;
 use crate::index::VisualIndex;
 use crate::rect::{iou, region_to_pixel_rect, MAX_SEARCH_AREA};
+use crate::VisionError;
 
 /// Cap on a single template's pixel area.
 pub const MAX_TEMPLATE_AREA: u64 = 1_048_576; // 1024x1024
@@ -325,11 +325,15 @@ pub(crate) fn prepare_template_match(
     q: &TemplateMatchQuery,
 ) -> Result<Vec<TemplateMatch>, CapabilityError> {
     if q.limit == 0 {
-        return Err(CapabilityError::InvalidInput { code: "invalid_query" });
+        return Err(CapabilityError::InvalidInput {
+            code: "invalid_query",
+        });
     }
     let asset = store
         .get(&q.template_handle)
-        .ok_or(CapabilityError::Failed { code: "template_not_found" })?;
+        .ok_or(CapabilityError::Failed {
+            code: "template_not_found",
+        })?;
     let tpl_gray = image::imageops::grayscale(&asset.bytes.to_rgba_image());
     match_template_image(index, &tpl_gray, &q.region, q.limit)
 }
@@ -343,35 +347,59 @@ pub(crate) fn match_template_image(
     limit: u32,
 ) -> Result<Vec<TemplateMatch>, CapabilityError> {
     if limit == 0 {
-        return Err(CapabilityError::InvalidInput { code: "invalid_query" });
+        return Err(CapabilityError::InvalidInput {
+            code: "invalid_query",
+        });
     }
     if gray_variance(tpl_gray) < MIN_TEMPLATE_VARIANCE {
-        return Err(CapabilityError::InvalidInput { code: "template_low_information" });
+        return Err(CapabilityError::InvalidInput {
+            code: "template_low_information",
+        });
     }
     let (tw, th) = tpl_gray.dimensions();
     if tw == 0 || th == 0 {
-        return Err(CapabilityError::InvalidInput { code: "template_low_information" });
+        return Err(CapabilityError::InvalidInput {
+            code: "template_low_information",
+        });
     }
 
     let search = region_to_pixel_rect(region, index.width(), index.height(), MAX_SEARCH_AREA)?;
     if tw > search.width || th > search.height {
-        return Err(CapabilityError::InvalidInput { code: "template_larger_than_region" });
+        return Err(CapabilityError::InvalidInput {
+            code: "template_larger_than_region",
+        });
     }
     let positions = u64::from(search.width - tw + 1)
         .checked_mul(u64::from(search.height - th + 1))
-        .ok_or(CapabilityError::InvalidInput { code: "region_too_large" })?;
-    let template_area = u64::from(tw)
-        .checked_mul(u64::from(th))
-        .ok_or(CapabilityError::InvalidInput { code: "region_too_large" })?;
-    let pixel_visits = positions
-        .checked_mul(template_area)
-        .ok_or(CapabilityError::InvalidInput { code: "region_too_large" })?;
+        .ok_or(CapabilityError::InvalidInput {
+            code: "region_too_large",
+        })?;
+    let template_area =
+        u64::from(tw)
+            .checked_mul(u64::from(th))
+            .ok_or(CapabilityError::InvalidInput {
+                code: "region_too_large",
+            })?;
+    let pixel_visits =
+        positions
+            .checked_mul(template_area)
+            .ok_or(CapabilityError::InvalidInput {
+                code: "region_too_large",
+            })?;
     if positions > MAX_SCORE_POSITIONS || pixel_visits > MAX_TEMPLATE_MATCH_PIXEL_VISITS {
-        return Err(CapabilityError::InvalidInput { code: "region_too_large" });
+        return Err(CapabilityError::InvalidInput {
+            code: "region_too_large",
+        });
     }
 
-    let scene = image::imageops::crop_imm(index.gray(), search.x, search.y, search.width, search.height)
-        .to_image();
+    let scene = image::imageops::crop_imm(
+        index.gray(),
+        search.x,
+        search.y,
+        search.width,
+        search.height,
+    )
+    .to_image();
 
     let raw_map: image::ImageBuffer<Luma<f32>, Vec<f32>> =
         if scene.width() == tw || scene.height() == th {
@@ -381,18 +409,19 @@ pub(crate) fn match_template_image(
         };
     let score_map = zero_mean_normalize(&scene, tpl_gray, raw_map);
 
-    let candidate_cap = limit
-        .saturating_mul(PEAK_OVERSAMPLE)
-        .clamp(64, 8_192) as usize;
-    let mut candidates = std::collections::BinaryHeap::<
-        std::cmp::Reverse<Peak>,
-    >::with_capacity(candidate_cap);
+    let candidate_cap = limit.saturating_mul(PEAK_OVERSAMPLE).clamp(64, 8_192) as usize;
+    let mut candidates =
+        std::collections::BinaryHeap::<std::cmp::Reverse<Peak>>::with_capacity(candidate_cap);
     for (mx, my, px) in score_map.enumerate_pixels() {
         let score = px.0[0];
         if !score.is_finite() {
             continue;
         }
-        let peak = Peak { score, x: search.x + mx, y: search.y + my };
+        let peak = Peak {
+            score,
+            x: search.x + mx,
+            y: search.y + my,
+        };
         if candidates.len() < candidate_cap {
             candidates.push(std::cmp::Reverse(peak));
         } else if candidates.peek().is_some_and(|worst| peak > worst.0) {
@@ -427,7 +456,10 @@ pub(crate) fn match_template_image(
         .map(|(score, bounds)| TemplateMatch {
             bounds,
             score,
-            anchor: ImagePoint::new(bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0),
+            anchor: ImagePoint::new(
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+            ),
         })
         .collect())
 }
@@ -502,11 +534,9 @@ fn zero_mean_normalize(
     let template_var = template_sq - template_sum * template_sum / n;
 
     image::ImageBuffer::from_fn(raw_map.width(), raw_map.height(), |x, y| {
-        let (scene_sum, scene_sq) =
-            moments.rect(x, y, template.width(), template.height());
+        let (scene_sum, scene_sq) = moments.rect(x, y, template.width(), template.height());
         let scene_var = scene_sq - scene_sum * scene_sum / n;
-        let numerator =
-            f64::from(raw_map.get_pixel(x, y).0[0]) - scene_sum * template_sum / n;
+        let numerator = f64::from(raw_map.get_pixel(x, y).0[0]) - scene_sum * template_sum / n;
         let score = if scene_var > 1.0 && template_var > 1.0 {
             (numerator / (scene_var * template_var).sqrt()) as f32
         } else {
@@ -540,7 +570,11 @@ impl IntegralMoments {
                 square_sum[index] = square_sum[y * width + x + 1] + row_square_sum;
             }
         }
-        Self { width, sum, square_sum }
+        Self {
+            width,
+            sum,
+            square_sum,
+        }
     }
 
     fn rect(&self, x: u32, y: u32, width: u32, height: u32) -> (f64, f64) {
@@ -561,8 +595,8 @@ impl IntegralMoments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::VisionError;
     use crate::index::VisualIndex;
+    use crate::VisionError;
     use rollshot_automation::{CapabilityError, Region, TemplateMatchQuery};
 
     fn bytes(w: u32, h: u32) -> TemplateBytes {
@@ -591,15 +625,16 @@ mod tests {
 
     fn store_with(handle: &str, bytes: TemplateBytes, s: TemplateSensitivity) -> TemplateStore {
         let mut store = TemplateStore::new();
-        store.insert(TemplateAsset {
-            handle: handle.into(),
-            sensitivity: s,
-            source: TemplateSource::UserRect,
-            created_at_ms: 0,
-            bounds_in_source_image: None,
-            bytes,
-        })
-        .unwrap();
+        store
+            .insert(TemplateAsset {
+                handle: handle.into(),
+                sensitivity: s,
+                source: TemplateSource::UserRect,
+                created_at_ms: 0,
+                bounds_in_source_image: None,
+                bytes,
+            })
+            .unwrap();
         store
     }
 
@@ -625,7 +660,10 @@ mod tests {
             .map(|m| (m.bounds.x as i32, m.bounds.y as i32))
             .collect();
         assert_eq!(positions, [(10, 12), (28, 6)].into_iter().collect());
-        assert_eq!((matches[0].bounds.width, matches[0].bounds.height), (8.0, 8.0));
+        assert_eq!(
+            (matches[0].bounds.width, matches[0].bounds.height),
+            (8.0, 8.0)
+        );
         let c = matches[0].bounds;
         assert!((matches[0].anchor.x - (c.x + c.width / 2.0)).abs() < 1e-3);
     }
@@ -663,7 +701,12 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(e, CapabilityError::Failed { code: "template_not_found" });
+        assert_eq!(
+            e,
+            CapabilityError::Failed {
+                code: "template_not_found"
+            }
+        );
     }
 
     #[test]
@@ -682,7 +725,12 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(e, CapabilityError::InvalidInput { code: "template_low_information" });
+        assert_eq!(
+            e,
+            CapabilityError::InvalidInput {
+                code: "template_low_information"
+            }
+        );
     }
 
     #[test]
@@ -706,7 +754,12 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(e, CapabilityError::InvalidInput { code: "template_larger_than_region" });
+        assert_eq!(
+            e,
+            CapabilityError::InvalidInput {
+                code: "template_larger_than_region"
+            }
+        );
     }
 
     #[test]
@@ -724,7 +777,12 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(e, CapabilityError::InvalidInput { code: "invalid_query" });
+        assert_eq!(
+            e,
+            CapabilityError::InvalidInput {
+                code: "invalid_query"
+            }
+        );
     }
 
     #[test]
@@ -767,7 +825,12 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(e, CapabilityError::InvalidInput { code: "region_too_large" });
+        assert_eq!(
+            e,
+            CapabilityError::InvalidInput {
+                code: "region_too_large"
+            }
+        );
     }
 
     fn asset(handle: &str, s: TemplateSensitivity) -> TemplateAsset {
