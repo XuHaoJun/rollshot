@@ -8,10 +8,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use rollshot_image_document::ImageRect;
+use image::Luma;
+use imageproc::template_matching::{match_template, MatchTemplateMethod};
+use rollshot_automation::{CapabilityError, Region, TemplateMatch, TemplateMatchQuery};
+use rollshot_image_document::{ImageRect, ImagePoint};
 use serde::{Deserialize, Serialize};
 
 use crate::VisionError;
+use crate::index::VisualIndex;
+use crate::rect::{iou, region_to_pixel_rect, MAX_SEARCH_AREA};
 
 /// Cap on a single template's pixel area.
 pub const MAX_TEMPLATE_AREA: u64 = 1_048_576; // 1024x1024
@@ -285,13 +290,484 @@ impl ExportTemplateAssetRecord {
     }
 }
 
+/// Variance floor below which a template carries too little information for NCC.
+const MIN_TEMPLATE_VARIANCE: f32 = 25.0;
+/// IoU above which two matches are treated as the same instance during NMS.
+const NMS_IOU_THRESHOLD: f32 = 0.4;
+/// Maximum score-map cells allocated by one prepared query. At this ceiling,
+/// the f32 score map is ~16 MiB; two f64 integral-moment planes are ~64 MiB
+/// for a similarly sized search image, before source/crop buffers.
+pub const MAX_SCORE_POSITIONS: u64 = 4_000_000;
+/// Maximum sliding-window pixel visits for one prepared query.
+pub const MAX_TEMPLATE_MATCH_PIXEL_VISITS: u64 = 250_000_000;
+/// Oversampling before NMS so one strong cluster does not hide later instances.
+const PEAK_OVERSAMPLE: u32 = 64;
+
+fn gray_variance(gray: &image::GrayImage) -> f32 {
+    let n = f64::from(gray.width()) * f64::from(gray.height());
+    if n == 0.0 {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    for p in gray.pixels() {
+        let v = f64::from(p.0[0]);
+        sum += v;
+        sum_sq += v * v;
+    }
+    let mean = sum / n;
+    ((sum_sq / n) - mean * mean) as f32
+}
+
+pub(crate) fn prepare_template_match(
+    index: &VisualIndex,
+    store: &TemplateStore,
+    q: &TemplateMatchQuery,
+) -> Result<Vec<TemplateMatch>, CapabilityError> {
+    if q.limit == 0 {
+        return Err(CapabilityError::InvalidInput { code: "invalid_query" });
+    }
+    let asset = store
+        .get(&q.template_handle)
+        .ok_or(CapabilityError::Failed { code: "template_not_found" })?;
+    let tpl_gray = image::imageops::grayscale(&asset.bytes.to_rgba_image());
+    match_template_image(index, &tpl_gray, &q.region, q.limit)
+}
+
+/// Core NCC + NMS matcher shared by the capability and self-validation. Takes a
+/// grayscale template directly (no store handle).
+pub(crate) fn match_template_image(
+    index: &VisualIndex,
+    tpl_gray: &image::GrayImage,
+    region: &Region,
+    limit: u32,
+) -> Result<Vec<TemplateMatch>, CapabilityError> {
+    if limit == 0 {
+        return Err(CapabilityError::InvalidInput { code: "invalid_query" });
+    }
+    if gray_variance(tpl_gray) < MIN_TEMPLATE_VARIANCE {
+        return Err(CapabilityError::InvalidInput { code: "template_low_information" });
+    }
+    let (tw, th) = tpl_gray.dimensions();
+    if tw == 0 || th == 0 {
+        return Err(CapabilityError::InvalidInput { code: "template_low_information" });
+    }
+
+    let search = region_to_pixel_rect(region, index.width(), index.height(), MAX_SEARCH_AREA)?;
+    if tw > search.width || th > search.height {
+        return Err(CapabilityError::InvalidInput { code: "template_larger_than_region" });
+    }
+    let positions = u64::from(search.width - tw + 1)
+        .checked_mul(u64::from(search.height - th + 1))
+        .ok_or(CapabilityError::InvalidInput { code: "region_too_large" })?;
+    let template_area = u64::from(tw)
+        .checked_mul(u64::from(th))
+        .ok_or(CapabilityError::InvalidInput { code: "region_too_large" })?;
+    let pixel_visits = positions
+        .checked_mul(template_area)
+        .ok_or(CapabilityError::InvalidInput { code: "region_too_large" })?;
+    if positions > MAX_SCORE_POSITIONS || pixel_visits > MAX_TEMPLATE_MATCH_PIXEL_VISITS {
+        return Err(CapabilityError::InvalidInput { code: "region_too_large" });
+    }
+
+    let scene = image::imageops::crop_imm(index.gray(), search.x, search.y, search.width, search.height)
+        .to_image();
+
+    let raw_map: image::ImageBuffer<Luma<f32>, Vec<f32>> =
+        if scene.width() == tw || scene.height() == th {
+            match_equal_dimension(&scene, tpl_gray)
+        } else {
+            match_template(&scene, tpl_gray, MatchTemplateMethod::CrossCorrelation)
+        };
+    let score_map = zero_mean_normalize(&scene, tpl_gray, raw_map);
+
+    let candidate_cap = limit
+        .saturating_mul(PEAK_OVERSAMPLE)
+        .clamp(64, 8_192) as usize;
+    let mut candidates = std::collections::BinaryHeap::<
+        std::cmp::Reverse<Peak>,
+    >::with_capacity(candidate_cap);
+    for (mx, my, px) in score_map.enumerate_pixels() {
+        let score = px.0[0];
+        if !score.is_finite() {
+            continue;
+        }
+        let peak = Peak { score, x: search.x + mx, y: search.y + my };
+        if candidates.len() < candidate_cap {
+            candidates.push(std::cmp::Reverse(peak));
+        } else if candidates.peek().is_some_and(|worst| peak > worst.0) {
+            candidates.pop();
+            candidates.push(std::cmp::Reverse(peak));
+        }
+    }
+
+    let mut candidates: Vec<_> = candidates.into_iter().map(|p| p.0).collect();
+    candidates.sort_by(|a, b| b.cmp(a));
+
+    let mut kept: Vec<(f32, ImageRect)> = Vec::new();
+    for peak in candidates {
+        let score = peak.score;
+        let rect = ImageRect {
+            x: peak.x as f32,
+            y: peak.y as f32,
+            width: tw as f32,
+            height: th as f32,
+        };
+        if kept.iter().any(|(_, k)| iou(*k, rect) > NMS_IOU_THRESHOLD) {
+            continue;
+        }
+        kept.push((score, rect));
+        if kept.len() as u32 >= limit {
+            break;
+        }
+    }
+
+    Ok(kept
+        .into_iter()
+        .map(|(score, bounds)| TemplateMatch {
+            bounds,
+            score,
+            anchor: ImagePoint::new(bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0),
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Peak {
+    score: f32,
+    x: u32,
+    y: u32,
+}
+
+impl Eq for Peak {}
+
+impl Ord for Peak {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.x.cmp(&self.x))
+            .then_with(|| other.y.cmp(&self.y))
+    }
+}
+
+impl PartialOrd for Peak {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn match_equal_dimension(
+    scene: &image::GrayImage,
+    template: &image::GrayImage,
+) -> image::ImageBuffer<Luma<f32>, Vec<f32>> {
+    let out_w = scene.width() - template.width() + 1;
+    let out_h = scene.height() - template.height() + 1;
+    image::ImageBuffer::from_fn(out_w, out_h, |x, y| {
+        Luma([dot_at(scene, template, x, y) as f32])
+    })
+}
+
+fn dot_at(
+    scene: &image::GrayImage,
+    template: &image::GrayImage,
+    offset_x: u32,
+    offset_y: u32,
+) -> f64 {
+    let mut dot = 0.0f64;
+    for y in 0..template.height() {
+        for x in 0..template.width() {
+            let s = f64::from(scene.get_pixel(offset_x + x, offset_y + y).0[0]);
+            let t = f64::from(template.get_pixel(x, y).0[0]);
+            dot += s * t;
+        }
+    }
+    dot
+}
+
+fn zero_mean_normalize(
+    scene: &image::GrayImage,
+    template: &image::GrayImage,
+    raw_map: image::ImageBuffer<Luma<f32>, Vec<f32>>,
+) -> image::ImageBuffer<Luma<f32>, Vec<f32>> {
+    let moments = IntegralMoments::build(scene);
+    let n = f64::from(template.width()) * f64::from(template.height());
+    let template_sum: f64 = template.pixels().map(|p| f64::from(p.0[0])).sum();
+    let template_sq: f64 = template
+        .pixels()
+        .map(|p| {
+            let v = f64::from(p.0[0]);
+            v * v
+        })
+        .sum();
+    let template_var = template_sq - template_sum * template_sum / n;
+
+    image::ImageBuffer::from_fn(raw_map.width(), raw_map.height(), |x, y| {
+        let (scene_sum, scene_sq) =
+            moments.rect(x, y, template.width(), template.height());
+        let scene_var = scene_sq - scene_sum * scene_sum / n;
+        let numerator =
+            f64::from(raw_map.get_pixel(x, y).0[0]) - scene_sum * template_sum / n;
+        let score = if scene_var > 1.0 && template_var > 1.0 {
+            (numerator / (scene_var * template_var).sqrt()) as f32
+        } else {
+            f32::NAN
+        };
+        Luma([score])
+    })
+}
+
+struct IntegralMoments {
+    width: usize,
+    sum: Vec<f64>,
+    square_sum: Vec<f64>,
+}
+
+impl IntegralMoments {
+    fn build(image: &image::GrayImage) -> Self {
+        let width = image.width() as usize + 1;
+        let height = image.height() as usize + 1;
+        let mut sum = vec![0.0; width * height];
+        let mut square_sum = vec![0.0; width * height];
+        for y in 0..image.height() as usize {
+            let mut row_sum = 0.0;
+            let mut row_square_sum = 0.0;
+            for x in 0..image.width() as usize {
+                let v = f64::from(image.get_pixel(x as u32, y as u32).0[0]);
+                row_sum += v;
+                row_square_sum += v * v;
+                let index = (y + 1) * width + x + 1;
+                sum[index] = sum[y * width + x + 1] + row_sum;
+                square_sum[index] = square_sum[y * width + x + 1] + row_square_sum;
+            }
+        }
+        Self { width, sum, square_sum }
+    }
+
+    fn rect(&self, x: u32, y: u32, width: u32, height: u32) -> (f64, f64) {
+        let x0 = x as usize;
+        let y0 = y as usize;
+        let x1 = x0 + width as usize;
+        let y1 = y0 + height as usize;
+        let read = |values: &[f64]| {
+            values[y1 * self.width + x1]
+                - values[y0 * self.width + x1]
+                - values[y1 * self.width + x0]
+                + values[y0 * self.width + x0]
+        };
+        (read(&self.sum), read(&self.square_sum))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::VisionError;
+    use crate::index::VisualIndex;
+    use rollshot_automation::{CapabilityError, Region, TemplateMatchQuery};
 
     fn bytes(w: u32, h: u32) -> TemplateBytes {
         TemplateBytes::new(w, h, vec![0u8; (w * h * 4) as usize]).unwrap()
+    }
+
+    /// 40x40 deterministic textured scene with a non-periodic 8x8 glyph pasted
+    /// at (10,12) and (28,6). Returns (scene, template_bytes).
+    fn scene_with_two_marks() -> (image::RgbaImage, TemplateBytes) {
+        let mut scene = image::RgbaImage::from_fn(40, 40, |x, y| {
+            let v = 120 + ((x * 3 + y * 5) % 23) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        for &(ox, oy) in &[(10u32, 12u32), (28, 6)] {
+            for dy in 0..8 {
+                for dx in 0..8 {
+                    let v = ((dx * 31 + dy * 17 + dx * dy * 7) % 220) as u8;
+                    scene.put_pixel(ox + dx, oy + dy, image::Rgba([v, v, v, 255]));
+                }
+            }
+        }
+        let tpl_img = image::imageops::crop_imm(&scene, 10, 12, 8, 8).to_image();
+        let bytes = TemplateBytes::new(8, 8, tpl_img.into_raw()).unwrap();
+        (scene, bytes)
+    }
+
+    fn store_with(handle: &str, bytes: TemplateBytes, s: TemplateSensitivity) -> TemplateStore {
+        let mut store = TemplateStore::new();
+        store.insert(TemplateAsset {
+            handle: handle.into(),
+            sensitivity: s,
+            source: TemplateSource::UserRect,
+            created_at_ms: 0,
+            bounds_in_source_image: None,
+            bytes,
+        })
+        .unwrap();
+        store
+    }
+
+    #[test]
+    fn finds_both_instances_with_nms() {
+        let (scene, tpl) = scene_with_two_marks();
+        let index = VisualIndex::build(scene).unwrap();
+        let store = store_with("mark", tpl, TemplateSensitivity::Chrome);
+        let matches = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "mark".into(),
+                region: Region::Full,
+                limit: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|m| m.score > 0.99));
+        let positions: std::collections::BTreeSet<_> = matches
+            .iter()
+            .map(|m| (m.bounds.x as i32, m.bounds.y as i32))
+            .collect();
+        assert_eq!(positions, [(10, 12), (28, 6)].into_iter().collect());
+        assert_eq!((matches[0].bounds.width, matches[0].bounds.height), (8.0, 8.0));
+        let c = matches[0].bounds;
+        assert!((matches[0].anchor.x - (c.x + c.width / 2.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn limit_is_respected() {
+        let (scene, tpl) = scene_with_two_marks();
+        let index = VisualIndex::build(scene).unwrap();
+        let store = store_with("mark", tpl, TemplateSensitivity::Chrome);
+        let matches = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "mark".into(),
+                region: Region::Full,
+                limit: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn missing_handle_is_typed_error() {
+        let (scene, _tpl) = scene_with_two_marks();
+        let index = VisualIndex::build(scene).unwrap();
+        let store = TemplateStore::new();
+        let e = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "nope".into(),
+                region: Region::Full,
+                limit: 10,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e, CapabilityError::Failed { code: "template_not_found" });
+    }
+
+    #[test]
+    fn low_information_template_is_rejected() {
+        let scene = image::RgbaImage::from_pixel(40, 40, image::Rgba([180, 180, 180, 255]));
+        let index = VisualIndex::build(scene).unwrap();
+        let flat = TemplateBytes::new(8, 8, vec![180u8; 8 * 8 * 4]).unwrap();
+        let store = store_with("flat", flat, TemplateSensitivity::Chrome);
+        let e = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "flat".into(),
+                region: Region::Full,
+                limit: 10,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e, CapabilityError::InvalidInput { code: "template_low_information" });
+    }
+
+    #[test]
+    fn template_larger_than_region_is_error() {
+        let scene = image::RgbaImage::from_pixel(6, 6, image::Rgba([180, 180, 180, 255]));
+        let index = VisualIndex::build(scene).unwrap();
+        let mut big_rgba = vec![0u8; 8 * 8 * 4];
+        for i in 0..(8 * 8) {
+            let v = ((i * 37) % 251) as u8;
+            big_rgba[i * 4..i * 4 + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+        let big = TemplateBytes::new(8, 8, big_rgba).unwrap();
+        let store = store_with("big", big, TemplateSensitivity::Chrome);
+        let e = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "big".into(),
+                region: Region::Full,
+                limit: 10,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e, CapabilityError::InvalidInput { code: "template_larger_than_region" });
+    }
+
+    #[test]
+    fn zero_limit_is_rejected_by_core_api() {
+        let (scene, tpl) = scene_with_two_marks();
+        let index = VisualIndex::build(scene).unwrap();
+        let store = store_with("mark", tpl, TemplateSensitivity::Chrome);
+        let e = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "mark".into(),
+                region: Region::Full,
+                limit: 0,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e, CapabilityError::InvalidInput { code: "invalid_query" });
+    }
+
+    #[test]
+    fn template_equal_to_region_scores_one_position_without_panicking() {
+        let (scene, tpl) = scene_with_two_marks();
+        let exact = image::imageops::crop_imm(&scene, 10, 12, 8, 8).to_image();
+        let index = VisualIndex::build(exact).unwrap();
+        let store = store_with("exact", tpl, TemplateSensitivity::Chrome);
+        let matches = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "exact".into(),
+                region: Region::Full,
+                limit: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].score > 0.99);
+    }
+
+    #[test]
+    fn excessive_match_work_is_rejected_before_matching() {
+        let scene = image::RgbaImage::from_pixel(1000, 1000, image::Rgba([80, 80, 80, 255]));
+        let index = VisualIndex::build(scene).unwrap();
+        let tpl_image = image::RgbaImage::from_fn(64, 64, |x, y| {
+            let v = ((x * 31 + y * 17 + x * y * 7) % 251) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        let tpl = TemplateBytes::new(64, 64, tpl_image.into_raw()).unwrap();
+        let store = store_with("mark", tpl, TemplateSensitivity::Chrome);
+        let e = prepare_template_match(
+            &index,
+            &store,
+            &TemplateMatchQuery {
+                template_handle: "mark".into(),
+                region: Region::Full,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e, CapabilityError::InvalidInput { code: "region_too_large" });
     }
 
     fn asset(handle: &str, s: TemplateSensitivity) -> TemplateAsset {

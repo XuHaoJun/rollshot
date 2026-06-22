@@ -15,7 +15,8 @@ pub use index::VisualIndex;
 pub use template::{
     ExportTemplateAssetRecord, LocalTemplateAssetRecord, TemplateAsset, TemplateBytes,
     TemplateBytesRecord, TemplateSensitivity, TemplateSource, TemplateStore, MAX_TEMPLATE_AREA,
-    MAX_TEMPLATE_COUNT, MAX_TEMPLATE_STORE_BYTES,
+    MAX_TEMPLATE_COUNT, MAX_TEMPLATE_STORE_BYTES, MAX_SCORE_POSITIONS,
+    MAX_TEMPLATE_MATCH_PIXEL_VISITS,
 };
 
 #[cfg(test)]
@@ -56,6 +57,8 @@ mod contract_tests {
             .unwrap_err(),
             expected
         );
+        // template_match returns vision_index_unavailable when no
+        // preparation has been done (the prepared callback contract).
         assert_eq!(
             host.template_match(TemplateMatchQuery {
                 template_handle: "x".into(),
@@ -63,7 +66,9 @@ mod contract_tests {
                 limit: 1,
             })
             .unwrap_err(),
-            expected
+            rollshot_automation::CapabilityError::Failed {
+                code: "vision_index_unavailable",
+            }
         );
     }
 }
