@@ -5,9 +5,12 @@
 
 mod error;
 mod host;
+mod index;
+pub mod rect;
 
 pub use error::VisionError;
 pub use host::RealAutomationHost;
+pub use index::VisualIndex;
 
 #[cfg(test)]
 mod contract_tests {
