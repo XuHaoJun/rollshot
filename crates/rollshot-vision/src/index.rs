@@ -5,7 +5,6 @@
 use crate::VisionError;
 
 #[derive(Debug)]
-#[allow(dead_code)] // gray field + accessor used by template matcher (PR3+)
 pub struct VisualIndex {
     image: image::RgbaImage,
     width: u32,
@@ -40,7 +39,6 @@ impl VisualIndex {
         &self.image
     }
 
-    #[allow(dead_code)] // used by template matcher (PR3+)
     pub(crate) fn gray(&self) -> &image::GrayImage {
         &self.gray
     }
