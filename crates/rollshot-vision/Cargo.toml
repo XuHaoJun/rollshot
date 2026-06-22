@@ -21,4 +21,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
+rollshot-edit-proposal = { path = "../rollshot-edit-proposal" }
 static_assertions = "1.1"

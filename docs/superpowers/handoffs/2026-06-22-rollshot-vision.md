@@ -7,3 +7,5 @@ PR3 done — checked raw-RGBA templates; bounded in-memory store; explicit local
 PR4 done — template work is prepared outside QuickJS; callbacks only perform cached lookup/truncation. Matching validates low-information templates, equal-dimension imageproc edge cases, score finiteness, score-position/pixel-visit budgets, bounded candidate extraction, deterministic ordering, and NMS. Next: PR5 self-validation.
 
 PR5 done — self-validation verifies source-location overlap, expected-count behavior, area/target-coverage gates, edge/entropy, false positives, and brightness plus ±1 px crop/padding stability. Next: PR6 integration matrix.
+
+PR6 done — SP1 complete. Hand-authored role-free detectors run through explicit vision preparation + `QuickJsExecutor` + cached `RealAutomationHost` and produce expected proposals on deterministic synthetic fixtures. Blank, translation, known-scale-miss, determinism, capability error, privacy, and resource-bound cases are covered. Deferred: query-plan extraction/product wiring (SP6), regionFeatures (SP2), author acquisition (SP3), inspectLayout (SP4), OCR (SP5).
