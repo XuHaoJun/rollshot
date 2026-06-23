@@ -1293,6 +1293,11 @@ path.
   retained session text have explicit byte ceilings.
 - JSON results over the limit are rejected whole; they are never truncated into
   invalid JSON.
+- Tool-argument byte ceilings are enforced after Rig's
+  `StreamedTurnAssembler` completes assembly and before tool execution;
+  mid-stream argument accumulation is bounded by the run deadline and
+  cancellation rather than a pre-assembly byte cap, as a consequence of reusing
+  Rig's assembler (D2).
 - Tool calls execute serially, bounding concurrent executor/host work to one.
 - Budget accounting uses checked arithmetic and commits charges only after the
   limit check succeeds.
