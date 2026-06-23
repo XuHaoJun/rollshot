@@ -130,7 +130,7 @@ pub enum ExecutionError {
     Cancelled,
 }
 
-pub trait AutomationExecutor {
+pub trait AutomationExecutor: Send + Sync {
     fn execute(
         &self,
         automation: &ValidatedAutomation,
