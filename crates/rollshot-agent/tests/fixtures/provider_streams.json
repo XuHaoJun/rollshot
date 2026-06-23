@@ -1,0 +1,145 @@
+{
+  "anthropic_text_only": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "substitutions": "Content scrubbed: IDs replaced with fake msg_/msg- IDs, model replaced with claude-sonnet-4-6, text replaced with test payload."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_001\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\", world!\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_tool_input_split": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "substitutions": "Content scrubbed: tool ID replaced, input JSON split across three delta events for fragmentation test."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_002\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":30,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_test_001\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"lo\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"cation\\\":\\\"P\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"aris\\\"}\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":12}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_text_and_tool": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "substitutions": "Content scrubbed: text and tool_use blocks present in same response. IDs and text replaced."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_003\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":40,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me check.\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_test_002\",\"name\":\"search\",\"input\":{}}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"test\\\"}\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":18}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_cumulative_usage": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "substitutions": "Content scrubbed: usage values are cumulative totals per Anthropic spec. input_tokens in message_start, output_tokens in message_delta."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_004\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":150,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Response.\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":25}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_unknown_event": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "unknown_future_event"],
+      "substitutions": "Content scrubbed. Includes a hypothetical future event type to test forward-compatibility."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_005\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: future_event\ndata: {\"type\":\"future_event\",\"data\":\"unknown\"}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_malformed_json": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_delta"],
+      "substitutions": "Content scrubbed. Contains a content_block_delta with malformed JSON in the data field."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_006\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_incomplete_stream": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["message_start", "content_block_start", "content_block_delta"],
+      "substitutions": "Content scrubbed. Stream ends prematurely after content_block_delta — no content_block_stop, message_delta, or message_stop."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_007\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial...\"}}\n\n"
+    ]
+  },
+  "anthropic_401": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/errors",
+      "retrieved": "2026-06-23",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Standard Anthropic error JSON for authentication failure."
+    },
+    "status": 401,
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid API key\"}}"
+  },
+  "anthropic_429": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/errors",
+      "retrieved": "2026-06-23",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Standard Anthropic error JSON for rate limit exceeded."
+    },
+    "status": 429,
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limit exceeded\"}}"
+  },
+  "anthropic_500": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/errors",
+      "retrieved": "2026-06-23",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Standard Anthropic error JSON for internal server error."
+    },
+    "status": 500,
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"}}"
+  }
+}
