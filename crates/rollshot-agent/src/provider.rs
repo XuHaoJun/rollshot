@@ -12,12 +12,32 @@ use crate::model::{
 };
 use crate::model::{ModelError, ModelMessage, ModelRequest, ModelStreamEvent};
 
+/// Snapshot of cancellation flag and deadline for bounding stream processing.
+#[derive(Debug, Clone)]
+pub struct StreamBounds {
+    pub cancellation: rollshot_automation::CancellationFlag,
+    pub deadline: tokio::time::Instant,
+}
+
+impl StreamBounds {
+    pub fn new(
+        cancellation: rollshot_automation::CancellationFlag,
+        deadline: tokio::time::Instant,
+    ) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+}
+
 type StreamResult = Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
 
 pub trait ProviderAdapter: Send + Sync {
     fn stream(
         &self,
         request: ModelRequest,
+        bounds: StreamBounds,
     ) -> impl std::future::Future<Output = Result<StreamResult, ModelError>> + Send;
 }
 
@@ -47,7 +67,11 @@ impl AnthropicAdapter {
 }
 
 impl ProviderAdapter for AnthropicAdapter {
-    async fn stream(&self, request: ModelRequest) -> Result<StreamResult, ModelError> {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        bounds: StreamBounds,
+    ) -> Result<StreamResult, ModelError> {
         let tool_names: BTreeSet<String> = request
             .tool_definitions
             .iter()
@@ -64,7 +88,7 @@ impl ProviderAdapter for AnthropicAdapter {
             .await
             .map_err(rig_to_model_error)?;
 
-        let output = stream_to_model_events(response, tool_names);
+        let output = stream_to_model_events(response, tool_names, bounds);
         Ok(Box::pin(output))
     }
 }
@@ -188,7 +212,11 @@ fn build_openai_completion_request(request: ModelRequest) -> Result<CompletionRe
 }
 
 impl ProviderAdapter for OpenAIAdapter {
-    async fn stream(&self, request: ModelRequest) -> Result<StreamResult, ModelError> {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        bounds: StreamBounds,
+    ) -> Result<StreamResult, ModelError> {
         let tool_names: BTreeSet<String> = request
             .tool_definitions
             .iter()
@@ -205,7 +233,7 @@ impl ProviderAdapter for OpenAIAdapter {
             .await
             .map_err(rig_to_model_error)?;
 
-        let output = stream_to_model_events(response, tool_names);
+        let output = stream_to_model_events(response, tool_names, bounds);
         Ok(Box::pin(output))
     }
 }
@@ -213,6 +241,7 @@ impl ProviderAdapter for OpenAIAdapter {
 fn stream_to_model_events<R>(
     mut stream: rig_core::streaming::StreamingCompletionResponse<R>,
     tool_names: BTreeSet<String>,
+    bounds: StreamBounds,
 ) -> impl Stream<Item = Result<ModelStreamEvent, ModelError>> + Send
 where
     R: Clone + Unpin + rig_core::completion::GetTokenUsage + Send + 'static,
@@ -222,48 +251,65 @@ where
     async_stream::stream! {
         let mut saw_completed = false;
         let mut saw_tool_call = false;
+        let cancellation = bounds.cancellation;
+        let deadline = bounds.deadline;
 
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(stream_item) => {
-                    let events = drive_streamed_turn(&mut asm, &stream_item);
-                    match events {
-                        Ok(bac_events) => {
-                            for event in &bac_events {
-                                let mut skip_yield = false;
-                                match event {
-                                    ModelStreamEvent::ToolCallStart { .. }
-                                    | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
-                                        saw_tool_call = true;
-                                    }
-                                    ModelStreamEvent::Completed(c) => {
-                                        saw_completed = true;
-                                        if saw_tool_call && c.stop_reason != StopReason::ToolUse {
-                                            yield Ok(ModelStreamEvent::Completed(
-                                                ModelCompletion {
-                                                    usage: c.usage.clone(),
-                                                    stop_reason: StopReason::ToolUse,
-                                                },
-                                            ));
-                                            skip_yield = true;
+        loop {
+            if cancellation.is_cancelled() {
+                yield Err(ModelError::StreamIncomplete("cancelled".into()));
+                return;
+            }
+
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    yield Err(ModelError::StreamIncomplete("deadline exceeded".into()));
+                    return;
+                }
+                item = stream.next() => {
+                    match item {
+                        Some(Ok(stream_item)) => {
+                            let events = drive_streamed_turn(&mut asm, &stream_item);
+                            match events {
+                                Ok(bac_events) => {
+                                    for event in &bac_events {
+                                        let mut skip_yield = false;
+                                        match event {
+                                            ModelStreamEvent::ToolCallStart { .. }
+                                            | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
+                                                saw_tool_call = true;
+                                            }
+                                            ModelStreamEvent::Completed(c) => {
+                                                saw_completed = true;
+                                                if saw_tool_call && c.stop_reason != StopReason::ToolUse {
+                                                    yield Ok(ModelStreamEvent::Completed(
+                                                        ModelCompletion {
+                                                            usage: c.usage.clone(),
+                                                            stop_reason: StopReason::ToolUse,
+                                                        },
+                                                    ));
+                                                    skip_yield = true;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        if !skip_yield {
+                                            yield Ok(event.clone());
                                         }
                                     }
-                                    _ => {}
                                 }
-                                if !skip_yield {
-                                    yield Ok(event.clone());
+                                Err(e) => {
+                                    yield Err(e);
+                                    return;
                                 }
                             }
                         }
-                        Err(e) => {
-                            yield Err(e);
+                        Some(Err(err)) => {
+                            yield Err(rig_to_model_error(err));
                             return;
                         }
+                        None => break,
                     }
-                }
-                Err(err) => {
-                    yield Err(rig_to_model_error(err));
-                    return;
                 }
             }
         }

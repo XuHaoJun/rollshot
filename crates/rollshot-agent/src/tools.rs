@@ -282,6 +282,7 @@ pub struct ToolContext {
     pub source: Mutex<String>,
     pub validation_limits: rollshot_automation::ValidationLimits,
     pub execution_policy: rollshot_automation::ExecutionPolicy,
+    pub automation_cancellation: rollshot_automation::CancellationFlag,
     pub session_id: SessionId,
     pub image_dims: (u32, u32),
 }
@@ -299,9 +300,14 @@ impl ToolContext {
             source: Mutex::new(initial_source),
             validation_limits,
             execution_policy,
+            automation_cancellation: rollshot_automation::CancellationFlag::new(),
             session_id,
             image_dims,
         }
+    }
+
+    pub fn set_cancellation(&mut self, flag: rollshot_automation::CancellationFlag) {
+        self.automation_cancellation = flag;
     }
 }
 
@@ -492,7 +498,7 @@ impl Tool for DryRunTool {
                 capability_handles: std::collections::BTreeMap::new(),
             };
 
-            let cancellation = rollshot_automation::CancellationFlag::new();
+            let cancellation = self.ctx.automation_cancellation.clone();
 
             let mut host_guard = self.host.lock().unwrap();
             let (proposal, _metrics) = rollshot_automation::execute_to_proposal(

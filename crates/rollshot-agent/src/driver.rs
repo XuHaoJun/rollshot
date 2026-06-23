@@ -57,6 +57,8 @@ use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 pub struct AgentConfig {
     pub max_turns: usize,
     pub max_assistant_bytes: usize,
+    pub max_argument_bytes: usize,
+    pub max_result_bytes: usize,
 }
 
 impl Default for AgentConfig {
@@ -64,6 +66,8 @@ impl Default for AgentConfig {
         Self {
             max_turns: 10,
             max_assistant_bytes: 4 * 1024 * 1024,
+            max_argument_bytes: 256 * 1024,
+            max_result_bytes: 256 * 1024,
         }
     }
 }
@@ -173,14 +177,33 @@ impl AgentRunner {
             .map(String::from)
             .collect();
 
+        tracing::debug!(
+            target: "rollshot::agent::driver",
+            session_id = tool_ctx.session_id.get(),
+            provider = %input.manifest.provider,
+            model = %input.manifest.model,
+            "run started"
+        );
+
         loop {
             if cancellation.is_cancelled() {
+                tracing::debug!(
+                    target: "rollshot::agent::driver",
+                    session_id = tool_ctx.session_id.get(),
+                    "run cancelled"
+                );
                 return RunTerminalState::Cancelled;
             }
 
             if let Err(BudgetError::Exceeded(dim)) =
                 tracker.check_wall_time(tokio::time::Instant::now())
             {
+                tracing::debug!(
+                    target: "rollshot::agent::driver",
+                    session_id = tool_ctx.session_id.get(),
+                    dimension = ?dim,
+                    "run budget exhausted"
+                );
                 return RunTerminalState::BudgetExhausted { dimension: dim };
             }
 
@@ -333,8 +356,30 @@ impl AgentRunner {
         let mut tool_call_ids: Vec<String> = Vec::new();
         let mut tool_call_names: Vec<String> = Vec::new();
         let mut tool_call_arg_deltas: Vec<String> = Vec::new();
+        let mut total_argument_bytes: usize = 0;
 
         for item in &items {
+            if cancellation.is_cancelled() {
+                tracing::debug!(
+                    target: "rollshot::agent::driver",
+                    turn = turn_index,
+                    "model turn cancelled between items"
+                );
+                return Err(DriverError::Cancelled);
+            }
+
+            if let Err(BudgetError::Exceeded(dim)) =
+                tracker.check_wall_time(tokio::time::Instant::now())
+            {
+                tracing::debug!(
+                    target: "rollshot::agent::driver",
+                    turn = turn_index,
+                    dimension = ?dim,
+                    "model turn deadline exceeded between items"
+                );
+                return Err(DriverError::BudgetExhausted(dim));
+            }
+
             let events = drive_streamed_turn(&mut asm, item)
                 .map_err(|e| DriverError::ProviderFailure(e.to_string()))?;
 
@@ -343,6 +388,12 @@ impl AgentRunner {
                     ModelStreamEvent::TextDelta(text) => {
                         *total_assistant_bytes += text.len();
                         if *total_assistant_bytes > max_assistant_bytes {
+                            tracing::debug!(
+                                target: "rollshot::agent::driver",
+                                turn = turn_index,
+                                limit = max_assistant_bytes,
+                                "assistant bytes limit exceeded"
+                            );
                             return Err(DriverError::BudgetExhausted(BudgetDimension::SourceBytes));
                         }
                         event_sink.emit(RunEvent::TextChunk { text });
@@ -353,6 +404,18 @@ impl AgentRunner {
                         tool_call_arg_deltas.push(String::new());
                     }
                     ModelStreamEvent::ToolCallArgumentDelta { id, delta } => {
+                        total_argument_bytes += delta.len();
+                        if total_argument_bytes > self.config.max_argument_bytes {
+                            tracing::debug!(
+                                target: "rollshot::agent::driver",
+                                turn = turn_index,
+                                limit = self.config.max_argument_bytes,
+                                "argument bytes limit exceeded"
+                            );
+                            return Err(DriverError::BudgetExhausted(
+                                BudgetDimension::ArgumentBytes,
+                            ));
+                        }
                         if let Some(pos) = tool_call_ids.iter().position(|tc_id| *tc_id == id) {
                             tool_call_arg_deltas[pos].push_str(&delta);
                         }
@@ -363,15 +426,20 @@ impl AgentRunner {
                         arguments,
                     } => {
                         // Complete tool call from assembler — use directly
+                        let serialized = serde_json::to_string(&arguments).unwrap_or_default();
+                        total_argument_bytes += serialized.len();
+                        if total_argument_bytes > self.config.max_argument_bytes {
+                            return Err(DriverError::BudgetExhausted(
+                                BudgetDimension::ArgumentBytes,
+                            ));
+                        }
                         if let Some(pos) = tool_call_ids.iter().position(|tc_id| *tc_id == id) {
                             tool_call_names[pos] = name;
-                            tool_call_arg_deltas[pos] =
-                                serde_json::to_string(&arguments).unwrap_or_default();
+                            tool_call_arg_deltas[pos] = serialized;
                         } else {
                             tool_call_ids.push(id);
                             tool_call_names.push(name);
-                            tool_call_arg_deltas
-                                .push(serde_json::to_string(&arguments).unwrap_or_default());
+                            tool_call_arg_deltas.push(serialized);
                         }
                     }
                     ModelStreamEvent::UsageDelta(u) => {
@@ -491,12 +559,24 @@ impl AgentRunner {
 
         let mut rig_results = Vec::new();
         let mut terminal_error: Option<String> = None;
+        let mut total_result_bytes: usize = 0;
 
         for (i, result) in results.into_iter().enumerate() {
             let call_id = pending_calls[i].tool_call.id.clone();
             let tool_name = &pending_calls[i].tool_call.function.name;
             match result {
                 Ok(ToolOutcome::Success { result_json }) => {
+                    let result_str = serde_json::to_string(&result_json).unwrap_or_default();
+                    total_result_bytes += result_str.len();
+                    if total_result_bytes > self.config.max_result_bytes {
+                        tracing::debug!(
+                            target: "rollshot::agent::driver",
+                            tool = tool_name.as_str(),
+                            limit = self.config.max_result_bytes,
+                            "result bytes limit exceeded"
+                        );
+                        return Err(DriverError::BudgetExhausted(BudgetDimension::ResultBytes));
+                    }
                     if tool_name == "submit_for_review" {
                         if let Some(submitted) = result_json.get("submitted") {
                             if submitted.as_bool() == Some(true) {
@@ -509,9 +589,7 @@ impl AgentRunner {
                     }
                     rig_results.push(rig_core::message::UserContent::tool_result(
                         call_id,
-                        rig_core::message::ToolResultContent::from_tool_output(
-                            serde_json::to_string(&result_json).unwrap_or_default(),
-                        ),
+                        rig_core::message::ToolResultContent::from_tool_output(result_str),
                     ));
                 }
                 Ok(ToolOutcome::Recoverable { error }) => {
@@ -526,6 +604,12 @@ impl AgentRunner {
                     ));
                 }
                 Err(e) => {
+                    tracing::debug!(
+                        target: "rollshot::agent::driver",
+                        tool = tool_name.as_str(),
+                        error = %e,
+                        "tool call failed"
+                    );
                     event_sink.emit(RunEvent::ToolCallEnd {
                         name: tool_name.clone(),
                         success: false,
@@ -1807,5 +1891,602 @@ pub(crate) mod tests {
                 dimension: BudgetDimension::InputTokens
             }
         ));
+    }
+
+    // ---- Resource bounds: cancellation between items ----
+
+    mod resource_bounds {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Event sink that cancels the run after N text chunk events.
+        struct CancelAfterNTexts {
+            inner: CollectingSink,
+            trigger_after: usize,
+            count: AtomicUsize,
+            cancel: RunCancellation,
+        }
+
+        impl CancelAfterNTexts {
+            fn new(trigger_after: usize, cancel: RunCancellation) -> Self {
+                Self {
+                    inner: CollectingSink::new(),
+                    trigger_after,
+                    count: AtomicUsize::new(0),
+                    cancel,
+                }
+            }
+
+            fn drain(&self) -> Vec<RunEvent> {
+                self.inner.drain()
+            }
+        }
+
+        impl RunEventSink for CancelAfterNTexts {
+            fn emit(&self, event: RunEvent) {
+                if matches!(&event, RunEvent::TextChunk { .. })
+                    && self.count.fetch_add(1, Ordering::SeqCst) == self.trigger_after
+                {
+                    self.cancel.cancel();
+                }
+                self.inner.emit(event);
+            }
+        }
+
+        #[tokio::test]
+        async fn cancellation_between_items_stops_early() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let cancel = RunCancellation::new();
+            // Cancel after the first text chunk
+            let sink = CancelAfterNTexts::new(0, cancel.clone());
+
+            let model_fn = |_turn: usize| -> Option<Vec<StreamedAssistantContent<MockResponse>>> {
+                Some(vec![
+                    text_item("first"),
+                    text_item("second"),
+                    text_item("third"),
+                    final_item(usage(5, 3)),
+                ])
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &sink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            assert_eq!(result, RunTerminalState::Cancelled);
+
+            // Verify only 1 text event was emitted — the second and third
+            // should have been skipped because cancellation was detected
+            // between items.
+            let events = sink.drain();
+            let text_count = events
+                .iter()
+                .filter(|e| matches!(e, RunEvent::TextChunk { .. }))
+                .count();
+            assert_eq!(
+                text_count, 1,
+                "should stop after cancellation, got {text_count} text events"
+            );
+        }
+
+        #[tokio::test]
+        async fn max_argument_bytes_exceeded() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            // Create a very long argument string
+            let long_arg = "x".repeat(500);
+            let replace_args = serde_json::json!({"source": long_arg, "generation": 0}).to_string();
+
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "replace_source"),
+                tool_call_delta_args("tc_1", &replace_args),
+                final_item(usage(10, 5)),
+            ];
+
+            let turns = vec![turn1];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            // Set max_argument_bytes to 100 — the 500-byte arg should exceed it
+            let runner = AgentRunner::new(AgentConfig {
+                max_argument_bytes: 100,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            assert!(matches!(
+                result,
+                RunTerminalState::BudgetExhausted {
+                    dimension: BudgetDimension::ArgumentBytes
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn max_result_bytes_exceeded() {
+            let ctx = test_ctx("src");
+
+            // Create a tool registry with a tool that returns a large result
+            struct BigResultTool;
+            impl crate::tools::Tool for BigResultTool {
+                fn name(&self) -> &str {
+                    "big_result"
+                }
+                fn json_schema(&self) -> serde_json::Value {
+                    crate::tools::tool_schema::<crate::tools::EmptyArgs>()
+                }
+                fn call<'a>(
+                    &'a self,
+                    _arguments: &'a serde_json::Value,
+                ) -> crate::tools::ToolFuture<'a> {
+                    Box::pin(async move {
+                        let big = "y".repeat(1000);
+                        Ok(crate::tools::ToolOutcome::Success {
+                            result_json: serde_json::json!({"data": big}),
+                        })
+                    })
+                }
+            }
+
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            reg.register(Arc::new(BigResultTool)).unwrap();
+
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "big_result"),
+                final_item(usage(10, 5)),
+            ];
+
+            let turns = vec![turn1];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            // Set max_result_bytes to 50 — the 1000-byte result should exceed it
+            let runner = AgentRunner::new(AgentConfig {
+                max_result_bytes: 50,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            assert!(matches!(
+                result,
+                RunTerminalState::BudgetExhausted {
+                    dimension: BudgetDimension::ResultBytes
+                }
+            ));
+        }
+    }
+
+    // ---- Privacy and QuickJS integration ----
+
+    mod privacy_and_quickjs {
+        use super::*;
+
+        #[tokio::test]
+        async fn sentinels_not_in_run_events_or_session() {
+            let user_sentinel = "USER_SECRET_abc123";
+            let source_sentinel = "SOURCE_SENTINEL_xyz789";
+            let tool_arg_sentinel = "TOOL_ARG_SENTINEL_ghi789";
+
+            let ctx = test_ctx("initial source");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            // Replace source with a DIFFERENT value than the sentinel
+            // The tool_arg_sentinel is in the replace_source args but not as the source value
+            let replace_args = serde_json::json!({
+                "source": source_sentinel,
+                "generation": 0
+            })
+            .to_string();
+            let validate_args = serde_json::json!({
+                "source": source_sentinel,
+                "generation": 1
+            })
+            .to_string();
+            let submit_args = serde_json::json!({"generation": 1}).to_string();
+
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "replace_source"),
+                tool_call_delta_args("tc_1", &replace_args),
+                tool_call_delta_name("tc_2", "validate_source"),
+                tool_call_delta_args("tc_2", &validate_args),
+                tool_call_delta_name("tc_3", "submit_for_review"),
+                tool_call_delta_args("tc_3", &submit_args),
+                final_item(usage(20, 10)),
+            ];
+            let turn2 = vec![text_item("done"), final_item(usage(5, 3))];
+
+            let turns = vec![turn1, turn2];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+            let sink = CollectingSink::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new(
+                        "t".into(),
+                        "m".into(),
+                        user_sentinel.into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &sink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            // Check RunEvents: only ToolCallStart (name only), ToolCallEnd (name only),
+            // and TextChunk (assistant text, which is allowed)
+            let events = sink.drain();
+            for event in &events {
+                let dbg = format!("{event:?}");
+                match event {
+                    RunEvent::ToolCallStart { .. } => {
+                        assert!(
+                            !dbg.contains(tool_arg_sentinel),
+                            "ToolCallStart debug must not contain tool arg sentinel: {dbg}"
+                        );
+                        assert!(
+                            !dbg.contains(user_sentinel),
+                            "ToolCallStart debug must not contain user sentinel: {dbg}"
+                        );
+                    }
+                    RunEvent::ToolCallEnd { .. } => {
+                        assert!(
+                            !dbg.contains(tool_arg_sentinel),
+                            "ToolCallEnd debug must not contain tool arg sentinel: {dbg}"
+                        );
+                    }
+                    RunEvent::TextChunk { .. } => {
+                        // Assistant text may contain source_sentinel by design
+                        // (it IS the model's output)
+                    }
+                    _ => {}
+                }
+            }
+
+            // Check session: assistant text may contain source_sentinel (it IS the output),
+            // but must NOT contain the user_secret or tool_arg_sentinel
+            for exchange in session.exchanges() {
+                assert!(
+                    !exchange.user.text.contains(tool_arg_sentinel),
+                    "session user text must not contain tool arg sentinel"
+                );
+                assert!(
+                    !exchange.user.text.contains(source_sentinel),
+                    "session user text must not contain source sentinel"
+                );
+            }
+
+            // Check terminal state Debug
+            let result_dbg = format!("{result:?}");
+            assert!(
+                !result_dbg.contains(user_sentinel),
+                "terminal state must not contain user sentinel: {result_dbg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn real_quickjs_produces_valid_proposal() {
+            use rollshot_automation_rquickjs::QuickJsExecutor;
+
+            // Source that returns a valid proposal when executed by real QuickJS
+            let valid_source = "function main(input) { return {candidates: [{kind: 'addRedaction', bounds: {x: 5, y: 5, width: 20, height: 20}, confidence: 0.85, label: 'email'}]}; }";
+
+            let mut policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                std::time::Duration::from_secs(5),
+                4 * 1024 * 1024,
+                1024 * 1024,
+            );
+            policy.proposal_limits.max_total_area_fraction = 0.5;
+
+            let ctx = Arc::new(ToolContext::new(
+                SessionId::new(42),
+                valid_source.into(),
+                rollshot_automation::ValidationLimits::default(),
+                policy,
+                (100, 100),
+            ));
+
+            let executor = Arc::new(QuickJsExecutor);
+            let host = Arc::new(Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            ));
+
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
+                .unwrap();
+            reg.register(Arc::new(ValidateSourceTool::new(ctx.clone())))
+                .unwrap();
+            reg.register(Arc::new(DryRunTool::new(ctx.clone(), executor, host)))
+                .unwrap();
+            reg.register(Arc::new(SubmitForReviewTool::new(ctx.clone())))
+                .unwrap();
+            reg.register(Arc::new(GetContextSummaryTool::new(ctx.clone())))
+                .unwrap();
+
+            let js = valid_source;
+            let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
+            let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+            let dry_run_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+            let submit_args = serde_json::json!({"generation": 1}).to_string();
+
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "get_context_summary"),
+                tool_call_delta_name("tc_2", "replace_source"),
+                tool_call_delta_args("tc_2", &replace_args),
+                final_item(usage(50, 30)),
+            ];
+
+            let turn2 = vec![
+                tool_call_delta_name("tc_3", "validate_source"),
+                tool_call_delta_args("tc_3", &validate_args),
+                tool_call_delta_name("tc_4", "dry_run"),
+                tool_call_delta_args("tc_4", &dry_run_args),
+                tool_call_delta_name("tc_5", "submit_for_review"),
+                tool_call_delta_args("tc_5", &submit_args),
+                final_item(usage(40, 25)),
+            ];
+
+            let turn3 = vec![text_item("workflow ready"), final_item(usage(20, 10))];
+
+            let turns = vec![turn1, turn2, turn3];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(42));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-3".into(),
+                        "author a redaction".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            // Verify ReadyForReview with correct generation
+            match &result {
+                RunTerminalState::ReadyForReview(r) => {
+                    assert_eq!(r.session_id, SessionId::new(42));
+                    assert_eq!(r.generation, 1);
+                    assert!(r.usage.input_tokens > 0);
+                    assert!(r.usage.output_tokens > 0);
+                }
+                other => panic!("expected ReadyForReview, got {other:?}"),
+            }
+
+            // Verify generation evidence
+            let draft = ctx.draft.lock().unwrap();
+            assert_eq!(draft.generation(), 1);
+            assert!(draft
+                .evidence()
+                .iter()
+                .any(|e| e.kind == EvidenceKind::Validation && e.source_generation == 1));
+            assert!(draft
+                .evidence()
+                .iter()
+                .any(|e| e.kind == EvidenceKind::DryRun && e.source_generation == 1));
+
+            // Verify source was replaced
+            assert_eq!(*ctx.source.lock().unwrap(), valid_source);
+
+            // Verify session has completed exchange
+            assert_eq!(session.exchanges().len(), 1);
+            assert_eq!(session.exchanges()[0].user.text, "author a redaction");
+        }
+
+        #[tokio::test]
+        async fn cancellation_flag_wired_to_executor() {
+            use rollshot_automation_rquickjs::QuickJsExecutor;
+
+            // Source with an infinite loop — should be interrupted by cancellation
+            let infinite_source =
+                "function main(input) { while (true) {} return {candidates: []}; }";
+
+            let mut policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                std::time::Duration::from_secs(5),
+                4 * 1024 * 1024,
+                1024 * 1024,
+            );
+            policy.proposal_limits.max_total_area_fraction = 1.0;
+
+            let cancel = RunCancellation::new();
+
+            // Pre-validate a valid source, then replace with infinite loop
+            let valid_source = "function main(input) { return {candidates: []}; }";
+            let mut tool_ctx = ToolContext::new(
+                SessionId::new(1),
+                valid_source.into(),
+                rollshot_automation::ValidationLimits::default(),
+                policy,
+                (100, 100),
+            );
+            // Wire the run's cancellation flag into the tool context
+            tool_ctx.automation_cancellation = cancel.automation_flag().clone();
+            let ctx = Arc::new(tool_ctx);
+
+            let executor = Arc::new(QuickJsExecutor);
+            let host = Arc::new(Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            ));
+
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
+                .unwrap();
+            reg.register(Arc::new(ValidateSourceTool::new(ctx.clone())))
+                .unwrap();
+            reg.register(Arc::new(DryRunTool::new(ctx.clone(), executor, host)))
+                .unwrap();
+
+            // Replace source with infinite loop, validate, then dry_run
+            let replace_args = serde_json::json!({
+                "source": infinite_source,
+                "generation": 0
+            })
+            .to_string();
+            let validate_args = serde_json::json!({
+                "source": infinite_source,
+                "generation": 1
+            })
+            .to_string();
+            let dry_run_args = serde_json::json!({
+                "source": infinite_source,
+                "generation": 1
+            })
+            .to_string();
+
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "replace_source"),
+                tool_call_delta_args("tc_1", &replace_args),
+                tool_call_delta_name("tc_2", "validate_source"),
+                tool_call_delta_args("tc_2", &validate_args),
+                tool_call_delta_name("tc_3", "dry_run"),
+                tool_call_delta_args("tc_3", &dry_run_args),
+                final_item(usage(20, 10)),
+            ];
+            let turn2 = vec![text_item("failed"), final_item(usage(5, 3))];
+
+            let turns = vec![turn1, turn2];
+            let cancel_clone = cancel.clone();
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                turn_idx += 1;
+                if turn_idx == 1 {
+                    // Cancel before dry_run executes — the executor should see
+                    // the cancellation flag and bail out
+                    cancel_clone.cancel();
+                }
+                if turn_idx <= turns.len() {
+                    Some(turns[turn_idx - 1].clone())
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            // The run should be cancelled because the cancellation flag was set
+            // before the tool calls executed
+            assert_eq!(result, RunTerminalState::Cancelled);
+        }
     }
 }

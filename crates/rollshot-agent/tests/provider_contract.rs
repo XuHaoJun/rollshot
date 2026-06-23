@@ -2,10 +2,17 @@ use futures_util::StreamExt;
 use rollshot_agent::model::{
     ModelError, ModelRequest, ModelStreamEvent, StopReason, ToolDefinition,
 };
-use rollshot_agent::provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter};
+use rollshot_agent::provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn test_bounds() -> StreamBounds {
+    StreamBounds::new(
+        rollshot_automation::CancellationFlag::new(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -120,7 +127,10 @@ async fn anthropic_text_only() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     // Synchronization barrier: first text event must arrive before completion
     let first = stream
@@ -161,7 +171,10 @@ async fn anthropic_tool_input_split_across_events() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![text_tool_def()]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -208,7 +221,10 @@ async fn anthropic_text_and_tool_call() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![search_tool_def()]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -260,7 +276,10 @@ async fn anthropic_cumulative_usage() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -291,7 +310,10 @@ async fn anthropic_unknown_event_type_ignored() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -319,7 +341,7 @@ async fn anthropic_malformed_json_emits_protocol_failure() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     // The error may come during stream creation or during consumption
     if let Ok(mut stream) = result {
@@ -341,7 +363,10 @@ async fn anthropic_incomplete_stream_emits_stream_incomplete() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     // Should get text delta
     let first = stream.next().await.expect("should have event").expect("ok");
@@ -380,7 +405,7 @@ async fn anthropic_provider_401() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     if let Ok(mut stream) = result {
         let (events, error) = collect_events(&mut stream).await;
@@ -403,7 +428,7 @@ async fn anthropic_provider_429() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     if let Ok(mut stream) = result {
         let (events, error) = collect_events(&mut stream).await;
@@ -426,7 +451,7 @@ async fn anthropic_provider_500() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     if let Ok(mut stream) = result {
         let (events, error) = collect_events(&mut stream).await;
@@ -477,7 +502,10 @@ async fn anthropic_stream_consumes_at_least_two_chunks() {
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     // First event must be text — observable before stream completes
     let first = stream.next().await.expect("should have event").expect("ok");
@@ -531,7 +559,10 @@ async fn openai_outbound_request_uses_chat_completions_strict_and_parallel_false
 
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
     let request = test_request(vec![text_tool_def()]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     // Consume the stream
     while let Some(result) = stream.next().await {
@@ -594,7 +625,10 @@ async fn anthropic_outbound_request_uses_messages_endpoint() {
 
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     // Consume the stream
     while let Some(result) = stream.next().await {
@@ -624,7 +658,10 @@ async fn openai_text_only() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let first = stream
         .next()
@@ -662,7 +699,10 @@ async fn openai_tool_input_split_across_events() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![text_tool_def()]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -706,7 +746,10 @@ async fn openai_multiple_tool_calls() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![text_tool_def(), search_tool_def()]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -744,7 +787,10 @@ async fn openai_usage_chunk() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -773,7 +819,10 @@ async fn openai_done_marker() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -799,7 +848,10 @@ async fn openai_malformed_json_skipped() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let mut events = Vec::new();
     while let Some(result) = stream.next().await {
@@ -826,7 +878,10 @@ async fn openai_incomplete_stream_emits_stream_incomplete() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let first = stream.next().await.expect("should have event").expect("ok");
     assert!(matches!(&first, ModelStreamEvent::TextDelta(t) if t == "Partial..."));
@@ -862,7 +917,7 @@ async fn openai_provider_401() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     if let Ok(mut stream) = result {
         let (events, error) = collect_events(&mut stream).await;
@@ -885,7 +940,7 @@ async fn openai_provider_429() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     if let Ok(mut stream) = result {
         let (events, error) = collect_events(&mut stream).await;
@@ -908,7 +963,7 @@ async fn openai_provider_500() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let result = adapter.stream(request).await;
+    let result = adapter.stream(request, test_bounds()).await;
 
     if let Ok(mut stream) = result {
         let (events, error) = collect_events(&mut stream).await;
@@ -947,7 +1002,10 @@ async fn openai_stream_consumes_at_least_two_chunks() {
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
-    let mut stream = adapter.stream(request).await.expect("stream should start");
+    let mut stream = adapter
+        .stream(request, test_bounds())
+        .await
+        .expect("stream should start");
 
     let first = stream.next().await.expect("should have event").expect("ok");
     assert!(
