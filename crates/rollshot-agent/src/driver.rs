@@ -254,6 +254,10 @@ impl AgentRunner {
                 rig_core::agent::run::AgentRunStep::Done(_) => {
                     tracker.apply_turn();
 
+                    if let Err(BudgetError::Exceeded(dim)) = tracker.check_accumulated() {
+                        return RunTerminalState::BudgetExhausted { dimension: dim };
+                    }
+
                     let assistant_text = tool_ctx.source.lock().unwrap().clone();
                     let _ = session.push_assistant(assistant_text.clone());
 
@@ -474,6 +478,11 @@ impl AgentRunner {
 
         let tool_usage = UsageSnapshot {
             tool_calls: tool_calls.len() as u32,
+            validation_attempts: tool_calls
+                .iter()
+                .filter(|tc| tc.name == "validate_source")
+                .count() as u32,
+            dry_run_attempts: tool_calls.iter().filter(|tc| tc.name == "dry_run").count() as u32,
             ..Default::default()
         };
         tracker.charge(tool_usage)?;
@@ -542,10 +551,11 @@ impl AgentRunner {
             rig_run
                 .tool_results(rig_results)
                 .map_err(|e| DriverError::AgentProtocolFailure(e.to_string()))?;
+            let assistant_text = tool_ctx.source.lock().unwrap().clone();
             return Ok(Some(RunTerminalState::NeedsUserInput(NeedsUserInput {
                 session_id: tool_ctx.session_id,
                 generation: tool_ctx.draft.lock().unwrap().generation(),
-                assistant_text: String::new(),
+                assistant_text,
             })));
         }
 
@@ -1467,5 +1477,335 @@ pub(crate) mod tests {
         // With validation_attempts=1, the validate_source call should succeed
         // and the run should complete with ReadyForReview
         assert!(matches!(result, RunTerminalState::ReadyForReview(_)));
+    }
+
+    // ---- Terminal: per-tool validation_attempts budget exceeded (I4) ----
+
+    #[tokio::test]
+    async fn terminal_validation_attempts_budget_exceeded() {
+        let ctx = test_ctx(valid_js());
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        let js = valid_js();
+        let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
+        let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "replace_source"),
+            tool_call_delta_args("tc_1", &replace_args),
+            tool_call_delta_name("tc_2", "validate_source"),
+            tool_call_delta_args("tc_2", &validate_args),
+            final_item(usage(10, 5)),
+        ];
+
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        // Budget allows 0 validation attempts — the validate_source call
+        // in the turn should cause BudgetExhausted.
+        let budget = RunBudget {
+            validation_attempts: 0,
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::ValidationAttempts
+            }
+        ));
+    }
+
+    // ---- Terminal: cancellation during stream (C2) ----
+
+    #[tokio::test]
+    async fn terminal_cancel_during_stream() {
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        let cancel = RunCancellation::new();
+        let cancel_clone = cancel.clone();
+
+        let mut call_count = 0;
+        let model_fn = move |_turn: usize| -> Option<Vec<StreamedAssistantContent<MockResponse>>> {
+            call_count += 1;
+            if call_count == 1 {
+                // First call: return items, cancel between first and second item
+                cancel_clone.cancel();
+                Some(vec![
+                    text_item("before cancel"),
+                    text_item("after cancel"),
+                    final_item(usage(5, 3)),
+                ])
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                RunBudget::unlimited(),
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert_eq!(result, RunTerminalState::Cancelled);
+    }
+
+    // ---- Terminal: provider failure via ModelStreamEvent::Error (I1) ----
+
+    #[tokio::test]
+    async fn terminal_provider_failure_stream_error() {
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        // Emit a tool call with an unknown name via streaming delta.
+        // The assembler detects the unknown tool during ingest() and emits
+        // StreamedTurnEvent::InvalidToolCall, which drive_streamed_turn maps
+        // to ModelStreamEvent::Error → DriverError::ProviderFailure.
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "nonexistent_tool"),
+            final_item(usage(5, 3)),
+        ];
+
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                RunBudget::unlimited(),
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(result, RunTerminalState::ProviderFailure { .. }));
+    }
+
+    // ---- Terminal: wall-time budget (I2) ----
+
+    #[tokio::test]
+    async fn terminal_wall_time_budget() {
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        let turn1 = vec![text_item("text"), final_item(usage(5, 3))];
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        let budget = RunBudget {
+            wall_time: std::time::Duration::from_micros(1),
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::WallTime
+            }
+        ));
+    }
+
+    // ---- Terminal: needs_user_input per-call ordering (I5) ----
+
+    #[tokio::test]
+    async fn terminal_needs_user_input_with_submit_in_same_batch() {
+        use crate::tools::RequestUserInputTool;
+
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+        reg.register(Arc::new(RequestUserInputTool::new(ctx.clone())))
+            .unwrap();
+
+        // Both request_user_input and submit_for_review in the same batch.
+        // request_user_input is processed first (lower tc id), so needs_user_input
+        // is set before submit_for_review sets has_submit_evidence.
+        // The Done handler checks needs_user_input first, so NeedsUserInput wins.
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "request_user_input"),
+            tool_call_delta_name("tc_2", "submit_for_review"),
+            tool_call_delta_args("tc_2", r#"{"generation":0}"#),
+            final_item(usage(10, 5)),
+        ];
+
+        // Turn 2: model gives up (no submission after NeedsUserInput early return
+        // wouldn't happen in practice, but this tests the ordering)
+        let turn2 = vec![text_item("done"), final_item(usage(5, 3))];
+
+        let turns = vec![turn1, turn2];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                RunBudget::unlimited(),
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        // NeedsUserInput should take precedence since it's checked before
+        // has_submit_evidence in the Done handler.
+        assert!(matches!(result, RunTerminalState::NeedsUserInput(_)));
+    }
+
+    // ---- C1: token budget bypassed on same-turn Done ----
+
+    #[tokio::test]
+    async fn terminal_budget_exhausted_on_same_turn_done() {
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        // Single turn with usage exceeding budget, followed by Done.
+        // Before the C1 fix, this would return ReadyForReview instead of
+        // BudgetExhausted because apply_turn() was called without a
+        // subsequent budget check.
+        let turn1 = vec![text_item("x"), final_item(usage(200, 5))];
+
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        let budget = RunBudget {
+            input_tokens: 100,
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::InputTokens
+            }
+        ));
     }
 }

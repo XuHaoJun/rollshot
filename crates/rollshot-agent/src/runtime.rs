@@ -391,6 +391,63 @@ impl BudgetTracker {
         self.used.affected_area = self.used.affected_area.saturating_add(t.affected_area);
     }
 
+    /// Check all accumulated usage against budget limits.
+    ///
+    /// Call this after `apply_turn()` to catch overages from the final turn
+    /// that `charge()` cannot see (because `charge()` only checks per-turn
+    /// deltas, not the cumulative total).
+    pub fn check_accumulated(&self) -> Result<(), BudgetError> {
+        let u = &self.used;
+        let b = &self.budget;
+
+        if u.model_calls > b.model_calls {
+            return Err(BudgetError::Exceeded(BudgetDimension::ModelCalls));
+        }
+        if u.input_tokens > b.input_tokens {
+            return Err(BudgetError::Exceeded(BudgetDimension::InputTokens));
+        }
+        if u.output_tokens > b.output_tokens {
+            return Err(BudgetError::Exceeded(BudgetDimension::OutputTokens));
+        }
+        if u.tool_calls > b.tool_calls {
+            return Err(BudgetError::Exceeded(BudgetDimension::ToolCalls));
+        }
+        if u.per_tool_calls > b.per_tool_calls {
+            return Err(BudgetError::Exceeded(BudgetDimension::PerToolCalls));
+        }
+        if u.argument_bytes > b.argument_bytes {
+            return Err(BudgetError::Exceeded(BudgetDimension::ArgumentBytes));
+        }
+        if u.result_bytes > b.result_bytes {
+            return Err(BudgetError::Exceeded(BudgetDimension::ResultBytes));
+        }
+        if u.source_bytes > b.source_bytes {
+            return Err(BudgetError::Exceeded(BudgetDimension::SourceBytes));
+        }
+        if u.attachments > b.attachments {
+            return Err(BudgetError::Exceeded(BudgetDimension::Attachments));
+        }
+        if u.validation_attempts > b.validation_attempts {
+            return Err(BudgetError::Exceeded(BudgetDimension::ValidationAttempts));
+        }
+        if u.dry_run_attempts > b.dry_run_attempts {
+            return Err(BudgetError::Exceeded(BudgetDimension::DryRunAttempts));
+        }
+        if u.capability_calls > b.capability_calls {
+            return Err(BudgetError::Exceeded(BudgetDimension::CapabilityCalls));
+        }
+        if u.candidate_count > b.candidate_count {
+            return Err(BudgetError::Exceeded(BudgetDimension::CandidateCount));
+        }
+        if u.affected_area > b.affected_area {
+            return Err(BudgetError::Exceeded(BudgetDimension::AffectedArea));
+        }
+        if u.cost > b.cost {
+            return Err(BudgetError::Exceeded(BudgetDimension::Cost));
+        }
+        Ok(())
+    }
+
     pub fn used(&self) -> &UsageSnapshot {
         &self.used
     }
