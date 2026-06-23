@@ -11,19 +11,17 @@ use crate::model::{
     drive_streamed_turn, emit_tool_call_completions, ModelCompletion, ModelUsage, StopReason,
 };
 use crate::model::{ModelError, ModelMessage, ModelRequest, ModelStreamEvent};
+use crate::runtime::RunCancellation;
 
 /// Snapshot of cancellation flag and deadline for bounding stream processing.
 #[derive(Debug, Clone)]
 pub struct StreamBounds {
-    pub cancellation: rollshot_automation::CancellationFlag,
-    pub deadline: tokio::time::Instant,
+    cancellation: RunCancellation,
+    deadline: tokio::time::Instant,
 }
 
 impl StreamBounds {
-    pub fn new(
-        cancellation: rollshot_automation::CancellationFlag,
-        deadline: tokio::time::Instant,
-    ) -> Self {
+    pub fn new(cancellation: RunCancellation, deadline: tokio::time::Instant) -> Self {
         Self {
             cancellation,
             deadline,
@@ -38,7 +36,7 @@ pub trait ProviderAdapter: Send + Sync {
         &self,
         request: ModelRequest,
         bounds: StreamBounds,
-    ) -> impl std::future::Future<Output = Result<StreamResult, ModelError>> + Send;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<StreamResult, ModelError>> + Send + '_>>;
 }
 
 pub struct AnthropicAdapter {
@@ -67,29 +65,32 @@ impl AnthropicAdapter {
 }
 
 impl ProviderAdapter for AnthropicAdapter {
-    async fn stream(
+    fn stream(
         &self,
         request: ModelRequest,
         bounds: StreamBounds,
-    ) -> Result<StreamResult, ModelError> {
-        let tool_names: BTreeSet<String> = request
-            .tool_definitions
-            .iter()
-            .map(|td| td.name.clone())
-            .collect();
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<StreamResult, ModelError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let tool_names: BTreeSet<String> = request
+                .tool_definitions
+                .iter()
+                .map(|td| td.name.clone())
+                .collect();
 
-        let model_id = request.model.clone();
-        let completion_request = build_completion_request(request)?;
+            let model_id = request.model.clone();
+            let completion_request = build_completion_request(request)?;
 
-        let model = self.client.completion_model(&model_id);
-        use rig_core::completion::CompletionModel;
-        let response = model
-            .stream(completion_request)
-            .await
-            .map_err(rig_to_model_error)?;
+            let model = self.client.completion_model(&model_id);
+            use rig_core::completion::CompletionModel;
+            let response = model
+                .stream(completion_request)
+                .await
+                .map_err(rig_to_model_error)?;
 
-        let output = stream_to_model_events(response, tool_names, bounds);
-        Ok(Box::pin(output))
+            let output = stream_to_model_events(response, tool_names, bounds);
+            Ok(Box::pin(output) as StreamResult)
+        })
     }
 }
 
@@ -212,29 +213,32 @@ fn build_openai_completion_request(request: ModelRequest) -> Result<CompletionRe
 }
 
 impl ProviderAdapter for OpenAIAdapter {
-    async fn stream(
+    fn stream(
         &self,
         request: ModelRequest,
         bounds: StreamBounds,
-    ) -> Result<StreamResult, ModelError> {
-        let tool_names: BTreeSet<String> = request
-            .tool_definitions
-            .iter()
-            .map(|td| td.name.clone())
-            .collect();
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<StreamResult, ModelError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let tool_names: BTreeSet<String> = request
+                .tool_definitions
+                .iter()
+                .map(|td| td.name.clone())
+                .collect();
 
-        let model_id = request.model.clone();
-        let completion_request = build_openai_completion_request(request)?;
+            let model_id = request.model.clone();
+            let completion_request = build_openai_completion_request(request)?;
 
-        let model = self.client.completion_model(&model_id);
-        use rig_core::completion::CompletionModel;
-        let response = model
-            .stream(completion_request)
-            .await
-            .map_err(rig_to_model_error)?;
+            let model = self.client.completion_model(&model_id);
+            use rig_core::completion::CompletionModel;
+            let response = model
+                .stream(completion_request)
+                .await
+                .map_err(rig_to_model_error)?;
 
-        let output = stream_to_model_events(response, tool_names, bounds);
-        Ok(Box::pin(output))
+            let output = stream_to_model_events(response, tool_names, bounds);
+            Ok(Box::pin(output) as StreamResult)
+        })
     }
 }
 
@@ -251,7 +255,9 @@ where
     async_stream::stream! {
         let mut saw_completed = false;
         let mut saw_tool_call = false;
-        let cancellation = bounds.cancellation;
+        let mut accumulated_input_tokens: u64 = 0;
+        let mut accumulated_output_tokens: u64 = 0;
+        let cancellation = bounds.cancellation.clone();
         let deadline = bounds.deadline;
 
         loop {
@@ -279,8 +285,14 @@ where
                                             | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
                                                 saw_tool_call = true;
                                             }
+                                            ModelStreamEvent::UsageDelta(u) => {
+                                                accumulated_input_tokens = u.input_tokens;
+                                                accumulated_output_tokens = u.output_tokens;
+                                            }
                                             ModelStreamEvent::Completed(c) => {
                                                 saw_completed = true;
+                                                accumulated_input_tokens = c.usage.input_tokens;
+                                                accumulated_output_tokens = c.usage.output_tokens;
                                                 if saw_tool_call && c.stop_reason != StopReason::ToolUse {
                                                     yield Ok(ModelStreamEvent::Completed(
                                                         ModelCompletion {
@@ -339,11 +351,15 @@ where
                 yield Ok(event);
             }
 
-            // Emit a synthetic Completed — usage was consumed by Rig's
-            // internal aggregation so we emit zero here.
+            // Emit a synthetic Completed with accumulated usage from
+            // UsageDelta events (missing provider usage is not zero).
             yield Ok(ModelStreamEvent::Completed(
                 ModelCompletion {
-                    usage: ModelUsage::default(),
+                    usage: ModelUsage {
+                        input_tokens: accumulated_input_tokens,
+                        output_tokens: accumulated_output_tokens,
+                        total_tokens: accumulated_input_tokens + accumulated_output_tokens,
+                    },
                     stop_reason,
                 },
             ));

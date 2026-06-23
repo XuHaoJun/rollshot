@@ -285,6 +285,10 @@ pub struct ToolContext {
     pub automation_cancellation: rollshot_automation::CancellationFlag,
     pub session_id: SessionId,
     pub image_dims: (u32, u32),
+    pub pending_ready_for_review: Mutex<Option<crate::driver::ReadyForReview>>,
+    pub last_validated: Mutex<Option<rollshot_automation::ValidatedAutomation>>,
+    pub last_dry_run_proposal: Mutex<Option<rollshot_edit_proposal::EditProposal>>,
+    pub last_dry_run_metrics: Mutex<Option<rollshot_automation::ExecutionMetrics>>,
 }
 
 impl ToolContext {
@@ -303,6 +307,10 @@ impl ToolContext {
             automation_cancellation: rollshot_automation::CancellationFlag::new(),
             session_id,
             image_dims,
+            pending_ready_for_review: Mutex::new(None),
+            last_validated: Mutex::new(None),
+            last_dry_run_proposal: Mutex::new(None),
+            last_dry_run_metrics: Mutex::new(None),
         }
     }
 
@@ -413,6 +421,9 @@ impl Tool for ValidateSourceTool {
                     tokio::time::Instant::now(),
                 )
                 .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+            drop(draft);
+
+            *self.ctx.last_validated.lock().unwrap() = Some(validated.clone());
 
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(ValidateSourceResult {
@@ -501,7 +512,7 @@ impl Tool for DryRunTool {
             let cancellation = self.ctx.automation_cancellation.clone();
 
             let mut host_guard = self.host.lock().unwrap();
-            let (proposal, _metrics) = rollshot_automation::execute_to_proposal(
+            let (proposal, metrics) = rollshot_automation::execute_to_proposal(
                 self.executor.as_ref(),
                 &validated,
                 &input,
@@ -539,6 +550,10 @@ impl Tool for DryRunTool {
                     tokio::time::Instant::now(),
                 )
                 .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+            drop(draft);
+
+            *self.ctx.last_dry_run_proposal.lock().unwrap() = Some(proposal.clone());
+            *self.ctx.last_dry_run_metrics.lock().unwrap() = Some(metrics);
 
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(DryRunResult {
@@ -585,14 +600,56 @@ impl Tool for SubmitForReviewTool {
             }
 
             // Require prior validation or dry_run evidence at this generation.
+            let current_gen = draft.generation();
             let has_evidence = draft.evidence().iter().any(|e| {
-                e.source_generation == args.generation
+                e.source_generation == current_gen
                     && matches!(e.kind, EvidenceKind::Validation | EvidenceKind::DryRun)
             });
             if !has_evidence {
                 return Err(ToolError::ArgumentDecode(
                     "no validation or dry_run evidence at this generation".into(),
                 ));
+            }
+            drop(draft);
+
+            // Construct the full ReadyForReview from stored intermediate results.
+            let source = self.ctx.source.lock().unwrap().clone();
+            let validated = self.ctx.last_validated.lock().unwrap().clone();
+            let proposal = self.ctx.last_dry_run_proposal.lock().unwrap().clone();
+
+            if let (Some(validated), Some(proposal)) = (validated, proposal) {
+                let dry_run_evidence = crate::driver::DryRunEvidence {
+                    candidate_count: proposal.candidates.len() as u32,
+                    affected_area: proposal
+                        .candidates
+                        .iter()
+                        .filter_map(|c| match &c.edit {
+                            rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds } => {
+                                Some(bounds.width.max(0.0) * bounds.height.max(0.0))
+                            }
+                            _ => None,
+                        })
+                        .sum(),
+                };
+
+                let draft_automation = crate::driver::DraftAutomation {
+                    source,
+                    validation_summary: validated.validation_summary.clone(),
+                    validated,
+                    dry_run: dry_run_evidence,
+                };
+
+                let ready = crate::driver::ReadyForReview {
+                    automation: draft_automation,
+                    proposal,
+                    budget_usage: crate::runtime::UsageSnapshot::default(),
+                    session_id: self.ctx.session_id,
+                    assistant_text: String::new(),
+                    generation: args.generation,
+                    usage: crate::runtime::UsageSnapshot::default(),
+                };
+
+                *self.ctx.pending_ready_for_review.lock().unwrap() = Some(ready);
             }
 
             Ok(ToolOutcome::Success {
@@ -650,7 +707,7 @@ impl GetContextSummaryTool {
 
 impl Tool for GetContextSummaryTool {
     fn name(&self) -> &str {
-        "get_context_summary"
+        "inspect_context_summary"
     }
 
     fn json_schema(&self) -> Value {
@@ -684,7 +741,7 @@ impl OcrTool {
 
 impl Tool for OcrTool {
     fn name(&self) -> &str {
-        "ocr"
+        "inspect_ocr"
     }
 
     fn json_schema(&self) -> Value {
@@ -715,7 +772,7 @@ impl LayoutTool {
 
 impl Tool for LayoutTool {
     fn name(&self) -> &str {
-        "layout"
+        "inspect_layout"
     }
 
     fn json_schema(&self) -> Value {
@@ -746,7 +803,7 @@ impl RegionFeaturesTool {
 
 impl Tool for RegionFeaturesTool {
     fn name(&self) -> &str {
-        "region_features"
+        "inspect_region_features"
     }
 
     fn json_schema(&self) -> Value {

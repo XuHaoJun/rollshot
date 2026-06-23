@@ -2,14 +2,14 @@ use futures_util::StreamExt;
 use rollshot_agent::model::{
     ModelError, ModelRequest, ModelStreamEvent, StopReason, ToolDefinition,
 };
-use rollshot_agent::provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};
+use rollshot_agent::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn test_bounds() -> StreamBounds {
     StreamBounds::new(
-        rollshot_automation::CancellationFlag::new(),
+        rollshot_agent::runtime::RunCancellation::new(),
         tokio::time::Instant::now() + std::time::Duration::from_secs(30),
     )
 }
