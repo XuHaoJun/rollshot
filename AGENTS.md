@@ -180,6 +180,19 @@ behavior against code before relying on them.
   bridges, manifest and resource enforcement, cancellation, and adversarial
   sandbox tests. This is an unsafe-isolation crate; do not expose rquickjs types
   through `rollshot-automation` or product-facing models.
+- `crates/rollshot-agent`: provider-neutral bounded agent control plane
+  (Bounded Agent Core). Owns in-memory agent sessions/runs, a Rollshot-owned
+  model facade with Anthropic and OpenAI streaming adapters (hand-rolled; Rig
+  `=0.39.0` is retained only as the turn state machine and tool-call/result
+  threading invariants), a typed availability-aware tool registry, run budgets
+  (16 dimensions) and cancellation, run-local automation draft orchestration
+  (validate → dry-run → submit-for-review), and terminal states
+  (`ReadyForReview` / `NeedsUserInput` / `Cancelled` / `BudgetExhausted` /
+  ...). No Rig types leak through the public API. Currently internal
+  infrastructure — not yet wired into the product UI and not behind a Cargo
+  feature. Changes to provider adapters, tool contracts, budget semantics, or
+  the driver state machine require the `provider_contract` suite and the
+  cancellation/privacy tests.
 - `crates/rollshot-iced-overlay`: iced overlay renderer. Both platform runners
   are active product paths: Linux uses the layer-shell runner
   (`linux_runner.rs`), macOS uses the capture-wired runner
