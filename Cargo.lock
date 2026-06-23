@@ -5937,6 +5937,7 @@ dependencies = [
 name = "rollshot-agent"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "futures-util",
  "rig-core",
  "rollshot-automation",

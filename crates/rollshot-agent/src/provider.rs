@@ -33,14 +33,16 @@ impl std::fmt::Debug for AnthropicAdapter {
     }
 }
 
+const DEFAULT_MAX_TOKENS: u64 = 4096;
+
 impl AnthropicAdapter {
-    pub fn new(api_key: &str, base_url: &str) -> Self {
+    pub fn new(api_key: &str, base_url: &str) -> Result<Self, ModelError> {
         let client = rig_core::providers::anthropic::Client::builder()
             .api_key(api_key)
             .base_url(base_url)
             .build()
-            .expect("Anthropic client build failed");
-        Self { client }
+            .map_err(|e| ModelError::ProviderFailure(format!("client build failed: {e}")))?;
+        Ok(Self { client })
     }
 }
 
@@ -52,9 +54,10 @@ impl ProviderAdapter for AnthropicAdapter {
             .map(|td| td.name.clone())
             .collect();
 
+        let model_id = request.model.clone();
         let completion_request = build_completion_request(request)?;
 
-        let model = self.client.completion_model("claude-sonnet-4-6");
+        let model = self.client.completion_model(&model_id);
         use rig_core::completion::CompletionModel;
         let response = model
             .stream(completion_request)
@@ -89,13 +92,13 @@ fn build_completion_request(request: ModelRequest) -> Result<CompletionRequest, 
         .collect();
 
     Ok(CompletionRequest {
-        model: Some("claude-sonnet-4-6".to_string()),
-        preamble: None,
+        model: Some(request.model),
+        preamble: request.system_prompt,
         chat_history,
         documents: vec![],
         tools,
         temperature: None,
-        max_tokens: Some(4096),
+        max_tokens: Some(request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
         tool_choice: None,
         additional_params: None,
         output_schema: None,

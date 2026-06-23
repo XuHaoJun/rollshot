@@ -40,10 +40,13 @@ fn get_fixture(name: &str) -> Fixture {
 
 fn test_request(tools: Vec<ToolDefinition>) -> ModelRequest {
     ModelRequest {
+        model: "test-model".into(),
         prompt: "test prompt".into(),
         history: vec![],
         turn: 1,
         tool_definitions: tools,
+        system_prompt: None,
+        max_tokens: None,
     }
 }
 
@@ -113,7 +116,7 @@ async fn collect_events(
 async fn anthropic_text_only() {
     let fixture = get_fixture("anthropic_text_only");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let mut stream = adapter.stream(request).await.expect("stream should start");
@@ -154,7 +157,7 @@ async fn anthropic_text_only() {
 async fn anthropic_tool_input_split_across_events() {
     let fixture = get_fixture("anthropic_tool_input_split");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![text_tool_def()]);
     let mut stream = adapter.stream(request).await.expect("stream should start");
@@ -201,7 +204,7 @@ async fn anthropic_tool_input_split_across_events() {
 async fn anthropic_text_and_tool_call() {
     let fixture = get_fixture("anthropic_text_and_tool");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![search_tool_def()]);
     let mut stream = adapter.stream(request).await.expect("stream should start");
@@ -246,7 +249,7 @@ async fn anthropic_text_and_tool_call() {
 async fn anthropic_cumulative_usage() {
     let fixture = get_fixture("anthropic_cumulative_usage");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let mut stream = adapter.stream(request).await.expect("stream should start");
@@ -277,7 +280,7 @@ async fn anthropic_cumulative_usage() {
 async fn anthropic_unknown_event_type_ignored() {
     let fixture = get_fixture("anthropic_unknown_event");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let mut stream = adapter.stream(request).await.expect("stream should start");
@@ -305,7 +308,7 @@ async fn anthropic_unknown_event_type_ignored() {
 async fn anthropic_malformed_json_emits_protocol_failure() {
     let fixture = get_fixture("anthropic_malformed_json");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let result = adapter.stream(request).await;
@@ -327,7 +330,7 @@ async fn anthropic_malformed_json_emits_protocol_failure() {
 async fn anthropic_incomplete_stream_emits_stream_incomplete() {
     let fixture = get_fixture("anthropic_incomplete_stream");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let mut stream = adapter.stream(request).await.expect("stream should start");
@@ -366,7 +369,7 @@ async fn anthropic_incomplete_stream_emits_stream_incomplete() {
 async fn anthropic_provider_401() {
     let fixture = get_fixture("anthropic_401");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let result = adapter.stream(request).await;
@@ -389,7 +392,7 @@ async fn anthropic_provider_401() {
 async fn anthropic_provider_429() {
     let fixture = get_fixture("anthropic_429");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let result = adapter.stream(request).await;
@@ -412,7 +415,7 @@ async fn anthropic_provider_429() {
 async fn anthropic_provider_500() {
     let fixture = get_fixture("anthropic_500");
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let result = adapter.stream(request).await;
@@ -433,11 +436,23 @@ async fn anthropic_provider_500() {
 
 #[tokio::test]
 async fn anthropic_api_key_not_in_debug() {
-    let adapter = AnthropicAdapter::new("super-secret-key-12345", "http://localhost:1");
+    let adapter =
+        AnthropicAdapter::new("super-secret-key-12345", "http://localhost:1").expect("new");
     let debug = format!("{:?}", adapter);
     assert!(
         !debug.contains("super-secret-key-12345"),
         "API key must not appear in Debug output: {}",
+        debug
+    );
+}
+
+#[tokio::test]
+async fn anthropic_base_url_not_in_debug() {
+    let adapter = AnthropicAdapter::new("key", "http://secret-internal-host:9999/v1").expect("new");
+    let debug = format!("{:?}", adapter);
+    assert!(
+        !debug.contains("secret-internal-host"),
+        "base URL must not appear in Debug output: {}",
         debug
     );
 }
@@ -451,7 +466,7 @@ async fn anthropic_stream_consumes_at_least_two_chunks() {
     );
 
     let server = setup_sse_mock(&fixture).await;
-    let adapter = AnthropicAdapter::new("test-key", &server.uri());
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
 
     let request = test_request(vec![]);
     let mut stream = adapter.stream(request).await.expect("stream should start");

@@ -4,10 +4,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequest {
+    pub model: String,
     pub prompt: String,
     pub history: Vec<ModelMessage>,
     pub turn: usize,
     pub tool_definitions: Vec<ToolDefinition>,
+    pub system_prompt: Option<String>,
+    pub max_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,10 +116,13 @@ fn rig_call_model_to_request(
         .collect();
 
     ModelRequest {
+        model: "test-model".into(),
         prompt: prompt_text,
         history: history_messages,
         turn,
         tool_definitions,
+        system_prompt: None,
+        max_tokens: None,
     }
 }
 
