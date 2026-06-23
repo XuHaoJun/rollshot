@@ -72,8 +72,10 @@ pub struct AuthorizedInputManifest {
 }
 
 impl AuthorizedInputManifest {
-    pub fn total_bytes(&self) -> u64 {
-        self.descriptors.iter().map(|d| d.byte_count).sum()
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.descriptors
+            .iter()
+            .try_fold(0u64, |acc, d| acc.checked_add(d.byte_count))
     }
 }
 
@@ -96,6 +98,7 @@ pub enum InputError {
 // ---------- Authorized model input ----------
 
 const ATTACHMENT_REDACTED: &str = "<redacted-attachment>";
+const USER_TEXT_REDACTED: &str = "<redacted-user-text>";
 
 pub struct AuthorizedModelInput {
     pub manifest: AuthorizedInputManifest,
@@ -133,7 +136,7 @@ impl AuthorizedModelInput {
             model,
             descriptors,
         };
-        let total = manifest.total_bytes();
+        let total = manifest.total_bytes().unwrap_or(u64::MAX);
         if total > MAX_TOTAL_BYTES {
             return Err(InputError::TotalByteOverflow {
                 bytes: total,
@@ -156,7 +159,7 @@ impl fmt::Debug for AuthorizedModelInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthorizedModelInput")
             .field("manifest", &self.manifest)
-            .field("user_message", &self.user_message)
+            .field("user_message", &USER_TEXT_REDACTED)
             .field("attachments", &ATTACHMENT_REDACTED)
             .finish()
     }
@@ -281,7 +284,7 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(manifest.total_bytes(), 3000);
+        assert_eq!(manifest.total_bytes(), Some(3000));
     }
 
     #[test]
@@ -469,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_output_contains_user_message() {
+    fn debug_output_redacts_user_message() {
         let input = AuthorizedModelInput::new(
             "openai".into(),
             "gpt-4o".into(),
@@ -479,7 +482,14 @@ mod tests {
         )
         .unwrap();
         let dbg = format!("{input:?}");
-        assert!(dbg.contains("hello world"));
+        assert!(
+            !dbg.contains("hello world"),
+            "Debug must not leak user text"
+        );
+        assert!(
+            dbg.contains("<redacted-user-text>"),
+            "Debug should contain user text redaction sentinel"
+        );
     }
 
     #[test]
