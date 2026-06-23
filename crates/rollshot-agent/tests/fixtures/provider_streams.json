@@ -141,5 +141,138 @@
     },
     "status": 500,
     "body": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"}}"
+  },
+  "openai_text_only": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed: IDs replaced with chatcmpl-test, model replaced with gpt-4, text replaced with test payload."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", world!\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_tool_input_split": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed: tool ID replaced, arguments JSON split across three delta events for fragmentation test."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-002\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_test_001\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-002\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"lo\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-002\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"cation\\\":\\\"P\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-002\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"aris\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-002\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_multiple_tool_calls": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed: tool IDs replaced. Two indexed tool calls in single response."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-003\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_test_003a\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-003\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\\\"Paris\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-003\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_test_003b\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-003\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"query\\\":\\\"test\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-003\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_usage_chunk": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed. Includes usage object in final chunk per stream_options.include_usage."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-004\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+      "data: {\"id\":\"chatcmpl-test-004\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Response.\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+      "data: {\"id\":\"chatcmpl-test-004\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+      "data: {\"id\":\"chatcmpl-test-004\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":150,\"completion_tokens\":25,\"total_tokens\":175}}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_done_marker": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed. Verifies [DONE] marker terminates stream."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-005\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-005\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-005\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_malformed_json": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed. Contains a chunk with malformed JSON in the data field."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-006\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{\"content\":\"Broken\n\n",
+      "data: {\"id\":\"chatcmpl-test-006\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-006\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_incomplete_stream": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": ["chat.completion.chunk"],
+      "substitutions": "Content scrubbed. Stream ends prematurely — no finish_reason, no [DONE] marker."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-007\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-007\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Partial...\"},\"finish_reason\":null}]}\n\n"
+    ]
+  },
+  "openai_401": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/errors",
+      "retrieved": "2026-06-23",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Standard OpenAI error JSON for authentication failure."
+    },
+    "status": 401,
+    "body": "{\"error\":{\"message\":\"Invalid API key\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}"
+  },
+  "openai_429": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/errors",
+      "retrieved": "2026-06-23",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Standard OpenAI error JSON for rate limit exceeded."
+    },
+    "status": 429,
+    "body": "{\"error\":{\"message\":\"Rate limit exceeded\",\"type\":\"requests\",\"code\":\"rate_limit_exceeded\"}}"
+  },
+  "openai_500": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/errors",
+      "retrieved": "2026-06-23",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Standard OpenAI error JSON for internal server error."
+    },
+    "status": 500,
+    "body": "{\"error\":{\"message\":\"Internal server error\",\"type\":\"server_error\",\"code\":\"internal_error\"}}"
   }
 }

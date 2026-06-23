@@ -157,6 +157,59 @@ fn sanitize_error(msg: &str) -> String {
     }
 }
 
+pub struct OpenAIAdapter {
+    client: rig_core::providers::openai::CompletionsClient,
+}
+
+impl std::fmt::Debug for OpenAIAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIAdapter")
+            .field("client", &"<redacted>")
+            .finish()
+    }
+}
+
+impl OpenAIAdapter {
+    pub fn new(api_key: &str, base_url: &str) -> Result<Self, ModelError> {
+        let client = rig_core::providers::openai::Client::builder()
+            .api_key(api_key)
+            .base_url(base_url)
+            .build()
+            .map_err(|e| ModelError::ProviderFailure(format!("client build failed: {e}")))?
+            .completions_api();
+        Ok(Self { client })
+    }
+}
+
+fn build_openai_completion_request(request: ModelRequest) -> Result<CompletionRequest, ModelError> {
+    let mut req = build_completion_request(request)?;
+    req.additional_params = Some(serde_json::json!({"parallel_tool_calls": false}));
+    Ok(req)
+}
+
+impl ProviderAdapter for OpenAIAdapter {
+    async fn stream(&self, request: ModelRequest) -> Result<StreamResult, ModelError> {
+        let tool_names: BTreeSet<String> = request
+            .tool_definitions
+            .iter()
+            .map(|td| td.name.clone())
+            .collect();
+
+        let model_id = request.model.clone();
+        let completion_request = build_openai_completion_request(request)?;
+
+        let model = self.client.completion_model(&model_id);
+        use rig_core::completion::CompletionModel;
+        let response = model
+            .stream(completion_request)
+            .await
+            .map_err(rig_to_model_error)?;
+
+        let output = stream_to_model_events(response, tool_names);
+        Ok(Box::pin(output))
+    }
+}
+
 fn stream_to_model_events<R>(
     mut stream: rig_core::streaming::StreamingCompletionResponse<R>,
     tool_names: BTreeSet<String>,
@@ -168,6 +221,7 @@ where
 
     async_stream::stream! {
         let mut saw_completed = false;
+        let mut saw_tool_call = false;
 
         while let Some(item) = stream.next().await {
             match item {
@@ -176,8 +230,24 @@ where
                     match events {
                         Ok(bac_events) => {
                             for event in &bac_events {
-                                if matches!(event, ModelStreamEvent::Completed(_)) {
-                                    saw_completed = true;
+                                match event {
+                                    ModelStreamEvent::ToolCallStart { .. }
+                                    | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
+                                        saw_tool_call = true;
+                                    }
+                                    ModelStreamEvent::Completed(c) => {
+                                        saw_completed = true;
+                                        if saw_tool_call && c.stop_reason != StopReason::ToolUse {
+                                            yield Ok(ModelStreamEvent::Completed(
+                                                ModelCompletion {
+                                                    usage: c.usage.clone(),
+                                                    stop_reason: StopReason::ToolUse,
+                                                },
+                                            ));
+                                            continue;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                                 yield Ok(event.clone());
                             }

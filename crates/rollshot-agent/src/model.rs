@@ -264,10 +264,6 @@ where
                     output_tokens: usage.output_tokens,
                     total_tokens: usage.total_tokens,
                 };
-                // Infer stop reason: emit_final is false when the turn
-                // produced tool calls without streaming text (the common
-                // tool-use path). When emit_final is true, text was streamed
-                // so the model ended its turn normally.
                 let stop_reason = if !emit_final && usage.total_tokens > 0 {
                     StopReason::ToolUse
                 } else {

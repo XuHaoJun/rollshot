@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use rollshot_agent::model::{
     ModelError, ModelRequest, ModelStreamEvent, StopReason, ToolDefinition,
 };
-use rollshot_agent::provider::{AnthropicAdapter, ProviderAdapter};
+use rollshot_agent::provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter};
 use serde::Deserialize;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -480,6 +480,360 @@ async fn anthropic_stream_consumes_at_least_two_chunks() {
     );
 
     // Stream should produce more events (more text + Completed)
+    let mut event_count = 1;
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(_) => event_count += 1,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        event_count >= 2,
+        "should observe at least 2 events from the stream"
+    );
+}
+
+// ========== OpenAI contract tests ==========
+
+#[tokio::test]
+async fn openai_text_only() {
+    let fixture = get_fixture("openai_text_only");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let first = stream
+        .next()
+        .await
+        .expect("should have first event")
+        .expect("ok");
+    assert!(
+        matches!(&first, ModelStreamEvent::TextDelta(t) if t == "Hello"),
+        "first event should be TextDelta, got: {:?}",
+        first
+    );
+
+    let (events, error) = collect_events(&mut stream).await;
+    assert!(error.is_none(), "unexpected error: {:?}", error);
+
+    let text_deltas: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ModelStreamEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text_deltas, vec![", world!"]);
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::Completed(c)
+        if c.stop_reason == StopReason::EndTurn)));
+}
+
+#[tokio::test]
+async fn openai_tool_input_split_across_events() {
+    let fixture = get_fixture("openai_tool_input_split");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![text_tool_def()]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let mut events = Vec::new();
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => events.push(event),
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ModelStreamEvent::ToolCallStart { id, name } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, vec![("call_test_001", "get_weather")]);
+
+    let arg_deltas: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ModelStreamEvent::ToolCallArgumentDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    let assembled: String = arg_deltas.join("");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&assembled).expect("reassembled tool arguments should be valid JSON");
+    assert_eq!(parsed["location"], "Paris");
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::Completed(c)
+        if c.stop_reason == StopReason::ToolUse)));
+}
+
+#[tokio::test]
+async fn openai_multiple_tool_calls() {
+    let fixture = get_fixture("openai_multiple_tool_calls");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![text_tool_def(), search_tool_def()]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let mut events = Vec::new();
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => events.push(event),
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ModelStreamEvent::ToolCallStart { id, name } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![
+            ("call_test_003a", "get_weather"),
+            ("call_test_003b", "search")
+        ]
+    );
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::Completed(c)
+        if c.stop_reason == StopReason::ToolUse)));
+}
+
+#[tokio::test]
+async fn openai_usage_chunk() {
+    let fixture = get_fixture("openai_usage_chunk");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let mut events = Vec::new();
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => events.push(event),
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ModelStreamEvent::Completed(_))),
+        "should have Completed event, got: {:?}",
+        events
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::TextDelta(t) if t == "Response.")));
+}
+
+#[tokio::test]
+async fn openai_done_marker() {
+    let fixture = get_fixture("openai_done_marker");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let mut events = Vec::new();
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => events.push(event),
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::Completed(c)
+        if c.stop_reason == StopReason::EndTurn)));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::TextDelta(t) if t == "Done.")));
+}
+
+#[tokio::test]
+async fn openai_malformed_json_skipped() {
+    let fixture = get_fixture("openai_malformed_json");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let mut events = Vec::new();
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => events.push(event),
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    // Rig's OpenAI parser skips malformed chunks; stream should complete
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::Completed(c)
+        if c.stop_reason == StopReason::EndTurn)));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ModelStreamEvent::TextDelta(t) if t == "OK")));
+}
+
+#[tokio::test]
+async fn openai_incomplete_stream_emits_stream_incomplete() {
+    let fixture = get_fixture("openai_incomplete_stream");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let first = stream.next().await.expect("should have event").expect("ok");
+    assert!(matches!(&first, ModelStreamEvent::TextDelta(t) if t == "Partial..."));
+
+    let mut got_terminal = false;
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(ModelStreamEvent::Completed(_)) => {
+                got_terminal = true;
+                break;
+            }
+            Ok(ModelStreamEvent::Error(_)) => {
+                got_terminal = true;
+                break;
+            }
+            Err(_) => {
+                got_terminal = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        got_terminal,
+        "incomplete stream should terminate with Completed or Error"
+    );
+}
+
+#[tokio::test]
+async fn openai_provider_401() {
+    let fixture = get_fixture("openai_401");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let result = adapter.stream(request).await;
+
+    if let Ok(mut stream) = result {
+        let (events, error) = collect_events(&mut stream).await;
+        assert!(
+            error.is_some()
+                || events
+                    .iter()
+                    .any(|e| matches!(e, ModelStreamEvent::Error(_))),
+            "401 should produce an error, got events: {:?}, error: {:?}",
+            events,
+            error
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_provider_429() {
+    let fixture = get_fixture("openai_429");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let result = adapter.stream(request).await;
+
+    if let Ok(mut stream) = result {
+        let (events, error) = collect_events(&mut stream).await;
+        assert!(
+            error.is_some()
+                || events
+                    .iter()
+                    .any(|e| matches!(e, ModelStreamEvent::Error(_))),
+            "429 should produce an error, got events: {:?}, error: {:?}",
+            events,
+            error
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_provider_500() {
+    let fixture = get_fixture("openai_500");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let result = adapter.stream(request).await;
+
+    if let Ok(mut stream) = result {
+        let (events, error) = collect_events(&mut stream).await;
+        assert!(
+            error.is_some()
+                || events
+                    .iter()
+                    .any(|e| matches!(e, ModelStreamEvent::Error(_))),
+            "500 should produce an error, got events: {:?}, error: {:?}",
+            events,
+            error
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_api_key_not_in_debug() {
+    let adapter = OpenAIAdapter::new("super-secret-key-12345", "http://localhost:1").expect("new");
+    let debug = format!("{:?}", adapter);
+    assert!(
+        !debug.contains("super-secret-key-12345"),
+        "API key must not appear in Debug output: {}",
+        debug
+    );
+}
+
+#[tokio::test]
+async fn openai_stream_consumes_at_least_two_chunks() {
+    let fixture = get_fixture("openai_text_only");
+    assert!(
+        fixture.chunks.len() >= 2,
+        "fixture must have at least 2 chunks for synchronization barrier test"
+    );
+
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    let first = stream.next().await.expect("should have event").expect("ok");
+    assert!(
+        matches!(&first, ModelStreamEvent::TextDelta(_)),
+        "first event should be TextDelta, got: {:?}",
+        first
+    );
+
     let mut event_count = 1;
     while let Some(result) = stream.next().await {
         match result {
