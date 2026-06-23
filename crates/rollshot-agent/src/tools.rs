@@ -136,7 +136,13 @@ impl ToolRegistry {
 
         self.counters.total.fetch_add(1, Ordering::SeqCst);
 
-        let outcome = tool.call(&call.arguments_json).await?;
+        let outcome = match tool.call(&call.arguments_json).await {
+            Ok(outcome) => outcome,
+            Err(ToolError::ArgumentDecode(msg)) => {
+                return Ok(ToolOutcome::Recoverable { error: msg });
+            }
+            Err(e) => return Err(e),
+        };
 
         let result_bytes = match &outcome {
             ToolOutcome::Success { result_json } => {
@@ -243,6 +249,10 @@ pub struct SubmitForReviewResult {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RequestUserInputArgs {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyArgs {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestUserInputResult {
@@ -638,7 +648,7 @@ impl Tool for GetContextSummaryTool {
     }
 
     fn json_schema(&self) -> Value {
-        tool_schema::<RequestUserInputArgs>()
+        tool_schema::<EmptyArgs>()
     }
 
     fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
@@ -672,7 +682,7 @@ impl Tool for OcrTool {
     }
 
     fn json_schema(&self) -> Value {
-        tool_schema::<RequestUserInputArgs>()
+        tool_schema::<EmptyArgs>()
     }
 
     fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
@@ -703,7 +713,7 @@ impl Tool for LayoutTool {
     }
 
     fn json_schema(&self) -> Value {
-        tool_schema::<RequestUserInputArgs>()
+        tool_schema::<EmptyArgs>()
     }
 
     fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
@@ -734,7 +744,7 @@ impl Tool for RegionFeaturesTool {
     }
 
     fn json_schema(&self) -> Value {
-        tool_schema::<RequestUserInputArgs>()
+        tool_schema::<EmptyArgs>()
     }
 
     fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
@@ -858,7 +868,7 @@ pub(crate) mod tests {
         }];
         let results = reg.execute_calls(&calls, &cancel).await;
         assert_eq!(results.len(), 1);
-        assert!(matches!(results[0], Err(ToolError::ArgumentDecode(_))));
+        assert!(matches!(&results[0], Ok(ToolOutcome::Recoverable { .. })));
     }
 
     #[tokio::test]
@@ -872,7 +882,7 @@ pub(crate) mod tests {
         }];
         let results = reg.execute_calls(&calls, &cancel).await;
         assert_eq!(results.len(), 1);
-        assert!(matches!(results[0], Err(ToolError::ArgumentDecode(_))));
+        assert!(matches!(&results[0], Ok(ToolOutcome::Recoverable { .. })));
     }
 
     #[tokio::test]
