@@ -1,0 +1,385 @@
+use std::collections::BTreeSet;
+use std::pin::Pin;
+
+use futures_util::{Stream, StreamExt};
+use rig_core::agent::run::StreamedTurnAssembler;
+use rig_core::client::CompletionClient;
+use rig_core::completion::CompletionRequest;
+use rig_core::message::{Message, UserContent};
+
+use crate::model::{
+    drive_streamed_turn, emit_tool_call_completions, ModelCompletion, ModelUsage, StopReason,
+};
+use crate::model::{ModelError, ModelMessage, ModelRequest, ModelStreamEvent};
+use crate::runtime::RunCancellation;
+
+/// Snapshot of cancellation flag and deadline for bounding stream processing.
+#[derive(Debug, Clone)]
+pub struct StreamBounds {
+    cancellation: RunCancellation,
+    deadline: tokio::time::Instant,
+}
+
+impl StreamBounds {
+    pub fn new(cancellation: RunCancellation, deadline: tokio::time::Instant) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+}
+
+type StreamResult = Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
+
+pub trait ProviderAdapter: Send + Sync {
+    fn stream(
+        &self,
+        request: ModelRequest,
+        bounds: StreamBounds,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<StreamResult, ModelError>> + Send + '_>>;
+}
+
+pub struct AnthropicAdapter {
+    client: rig_core::providers::anthropic::Client,
+}
+
+impl std::fmt::Debug for AnthropicAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicAdapter")
+            .field("client", &"<redacted>")
+            .finish()
+    }
+}
+
+const DEFAULT_MAX_TOKENS: u64 = 4096;
+
+impl AnthropicAdapter {
+    pub fn new(api_key: &str, base_url: &str) -> Result<Self, ModelError> {
+        let client = rig_core::providers::anthropic::Client::builder()
+            .api_key(api_key)
+            .base_url(base_url)
+            .build()
+            .map_err(|e| ModelError::ProviderFailure(format!("client build failed: {e}")))?;
+        Ok(Self { client })
+    }
+}
+
+impl ProviderAdapter for AnthropicAdapter {
+    fn stream(
+        &self,
+        request: ModelRequest,
+        bounds: StreamBounds,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<StreamResult, ModelError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let tool_names: BTreeSet<String> = request
+                .tool_definitions
+                .iter()
+                .map(|td| td.name.clone())
+                .collect();
+
+            let model_id = request.model.clone();
+            let completion_request = build_completion_request(request)?;
+
+            let model = self.client.completion_model(&model_id);
+            use rig_core::completion::CompletionModel;
+            let response = model
+                .stream(completion_request)
+                .await
+                .map_err(rig_to_model_error)?;
+
+            let output = stream_to_model_events(response, tool_names, bounds);
+            Ok(Box::pin(output) as StreamResult)
+        })
+    }
+}
+
+fn build_completion_request(request: ModelRequest) -> Result<CompletionRequest, ModelError> {
+    let mut chat_history: Vec<Message> = Vec::new();
+
+    for msg in &request.history {
+        chat_history.push(model_message_to_rig(msg));
+    }
+
+    // The prompt is empty when the full conversation (including the latest tool
+    // result) is carried in `history`; only append it when present.
+    if !request.prompt.is_empty() {
+        chat_history.push(Message::user(&request.prompt));
+    }
+
+    let chat_history = rig_core::OneOrMany::many(chat_history)
+        .map_err(|e| ModelError::ProtocolFailure(e.to_string()))?;
+
+    let tools: Vec<rig_core::completion::ToolDefinition> = request
+        .tool_definitions
+        .iter()
+        .map(|td| rig_core::completion::ToolDefinition {
+            name: td.name.clone(),
+            description: td.description.clone(),
+            parameters: td.parameters.clone(),
+        })
+        .collect();
+
+    Ok(CompletionRequest {
+        model: Some(request.model),
+        preamble: request.system_prompt,
+        chat_history,
+        documents: vec![],
+        tools,
+        temperature: None,
+        max_tokens: Some(request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+    })
+}
+
+fn model_message_to_rig(msg: &ModelMessage) -> Message {
+    match msg {
+        ModelMessage::User { content } => Message::user(content),
+        ModelMessage::Assistant { content } => Message::assistant(content),
+        ModelMessage::AssistantToolCall {
+            id,
+            name,
+            arguments,
+        } => Message::Assistant {
+            id: None,
+            content: rig_core::OneOrMany::one(rig_core::message::AssistantContent::ToolCall(
+                rig_core::message::ToolCall::new(
+                    id.clone(),
+                    rig_core::message::ToolFunction::new(name.clone(), arguments.clone()),
+                ),
+            )),
+        },
+        ModelMessage::ToolResult {
+            tool_call_id,
+            result,
+        } => {
+            let tr = rig_core::message::ToolResultContent::from_tool_output(result.clone());
+            Message::User {
+                content: rig_core::OneOrMany::one(UserContent::tool_result(
+                    tool_call_id.clone(),
+                    tr,
+                )),
+            }
+        }
+    }
+}
+
+fn rig_to_model_error(err: rig_core::completion::CompletionError) -> ModelError {
+    let msg = err.to_string();
+    match &err {
+        rig_core::completion::CompletionError::HttpError(_) => {
+            ModelError::ProviderFailure(sanitize_error(&msg))
+        }
+        rig_core::completion::CompletionError::ResponseError(inner) => {
+            if inner.contains("authentication") || inner.contains("Invalid API key") {
+                ModelError::ProviderFailure(sanitize_error(inner))
+            } else if inner.contains("rate_limit") || inner.contains("Rate limit") {
+                ModelError::StreamIncomplete(sanitize_error(inner))
+            } else {
+                ModelError::ProtocolFailure(sanitize_error(inner))
+            }
+        }
+        rig_core::completion::CompletionError::ProviderError(_) => {
+            ModelError::ProviderFailure(sanitize_error(&msg))
+        }
+        rig_core::completion::CompletionError::JsonError(_) => {
+            ModelError::ProtocolFailure(sanitize_error(&msg))
+        }
+        _ => ModelError::ProviderFailure(sanitize_error(&msg)),
+    }
+}
+
+fn sanitize_error(msg: &str) -> String {
+    if msg.len() > 500 {
+        format!("{}...", &msg[..500])
+    } else {
+        msg.to_string()
+    }
+}
+
+pub struct OpenAIAdapter {
+    client: rig_core::providers::openai::CompletionsClient,
+}
+
+impl std::fmt::Debug for OpenAIAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIAdapter")
+            .field("client", &"<redacted>")
+            .finish()
+    }
+}
+
+impl OpenAIAdapter {
+    pub fn new(api_key: &str, base_url: &str) -> Result<Self, ModelError> {
+        let client = rig_core::providers::openai::Client::builder()
+            .api_key(api_key)
+            .base_url(base_url)
+            .build()
+            .map_err(|e| ModelError::ProviderFailure(format!("client build failed: {e}")))?
+            .completions_api();
+        Ok(Self { client })
+    }
+}
+
+fn build_openai_completion_request(request: ModelRequest) -> Result<CompletionRequest, ModelError> {
+    let mut req = build_completion_request(request)?;
+    req.additional_params = Some(serde_json::json!({"parallel_tool_calls": false}));
+    Ok(req)
+}
+
+impl ProviderAdapter for OpenAIAdapter {
+    fn stream(
+        &self,
+        request: ModelRequest,
+        bounds: StreamBounds,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<StreamResult, ModelError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let tool_names: BTreeSet<String> = request
+                .tool_definitions
+                .iter()
+                .map(|td| td.name.clone())
+                .collect();
+
+            let model_id = request.model.clone();
+            let completion_request = build_openai_completion_request(request)?;
+
+            let model = self.client.completion_model(&model_id);
+            use rig_core::completion::CompletionModel;
+            let response = model
+                .stream(completion_request)
+                .await
+                .map_err(rig_to_model_error)?;
+
+            let output = stream_to_model_events(response, tool_names, bounds);
+            Ok(Box::pin(output) as StreamResult)
+        })
+    }
+}
+
+fn stream_to_model_events<R>(
+    mut stream: rig_core::streaming::StreamingCompletionResponse<R>,
+    tool_names: BTreeSet<String>,
+    bounds: StreamBounds,
+) -> impl Stream<Item = Result<ModelStreamEvent, ModelError>> + Send
+where
+    R: Clone + Unpin + rig_core::completion::GetTokenUsage + Send + 'static,
+{
+    let mut asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
+
+    async_stream::stream! {
+        let mut saw_completed = false;
+        let mut saw_tool_call = false;
+        let mut accumulated_input_tokens: u64 = 0;
+        let mut accumulated_output_tokens: u64 = 0;
+        let cancellation = bounds.cancellation.clone();
+        let deadline = bounds.deadline;
+
+        loop {
+            if cancellation.is_cancelled() {
+                yield Err(ModelError::StreamIncomplete("cancelled".into()));
+                return;
+            }
+
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    yield Err(ModelError::StreamIncomplete("deadline exceeded".into()));
+                    return;
+                }
+                item = stream.next() => {
+                    match item {
+                        Some(Ok(stream_item)) => {
+                            let events = drive_streamed_turn(&mut asm, &stream_item);
+                            match events {
+                                Ok(bac_events) => {
+                                    for event in &bac_events {
+                                        let mut skip_yield = false;
+                                        match event {
+                                            ModelStreamEvent::ToolCallStart { .. }
+                                            | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
+                                                saw_tool_call = true;
+                                            }
+                                            ModelStreamEvent::UsageDelta(u) => {
+                                                accumulated_input_tokens = u.input_tokens;
+                                                accumulated_output_tokens = u.output_tokens;
+                                            }
+                                            ModelStreamEvent::Completed(c) => {
+                                                saw_completed = true;
+                                                accumulated_input_tokens = c.usage.input_tokens;
+                                                accumulated_output_tokens = c.usage.output_tokens;
+                                                if saw_tool_call && c.stop_reason != StopReason::ToolUse {
+                                                    yield Ok(ModelStreamEvent::Completed(
+                                                        ModelCompletion {
+                                                            usage: c.usage.clone(),
+                                                            stop_reason: StopReason::ToolUse,
+                                                        },
+                                                    ));
+                                                    skip_yield = true;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        if !skip_yield {
+                                            yield Ok(event.clone());
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    yield Err(e);
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(err)) => {
+                            yield Err(rig_to_model_error(err));
+                            return;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // If the stream ended without a Final (common in Anthropic streaming
+        // because Rig's SSE loop breaks on message_delta with stop_reason),
+        // finish the assembler and emit tool-call completions + a synthetic
+        // Completed event so downstream consumers always see a terminal event.
+        if !saw_completed {
+            let final_choice = rig_core::OneOrMany::one(
+                rig_core::message::AssistantContent::text("")
+            );
+            let turn = asm.finish(None, &final_choice);
+
+            // Infer stop reason from assembled content
+            let has_tool_calls = turn.choice.iter().any(|c| {
+                matches!(c, rig_core::message::AssistantContent::ToolCall(_))
+            });
+            let stop_reason = if has_tool_calls {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            };
+
+            let completions = emit_tool_call_completions(&turn);
+            for event in completions {
+                yield Ok(event);
+            }
+
+            // Emit a synthetic Completed with accumulated usage from
+            // UsageDelta events (missing provider usage is not zero).
+            yield Ok(ModelStreamEvent::Completed(
+                ModelCompletion {
+                    usage: ModelUsage {
+                        input_tokens: accumulated_input_tokens,
+                        output_tokens: accumulated_output_tokens,
+                        total_tokens: accumulated_input_tokens + accumulated_output_tokens,
+                    },
+                    stop_reason,
+                },
+            ));
+        }
+    }
+}

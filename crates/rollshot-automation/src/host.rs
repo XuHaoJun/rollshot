@@ -13,7 +13,7 @@ pub enum CapabilityError {
     Failed { code: &'static str },
 }
 
-pub trait AutomationHost {
+pub trait AutomationHost: Send {
     fn ocr(&mut self, query: OcrQuery) -> Result<Vec<OcrMatch>, CapabilityError>;
     fn layout(&mut self, query: LayoutQuery) -> Result<Vec<LayoutRegion>, CapabilityError>;
     fn region_features(

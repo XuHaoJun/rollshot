@@ -47,6 +47,11 @@ and PipeWire support.
   capability contracts, and strict proposal decoding
 - `crates/rollshot-automation-rquickjs`: hardened QuickJS executor for validated
   automation; currently internal infrastructure and not yet wired into the product UI
+- `crates/rollshot-agent`: provider-neutral bounded agent control plane (Bounded
+  Agent Core) — in-memory agent sessions/runs, Anthropic/OpenAI streaming
+  adapters, typed tool registry, run budgets and cancellation, and run-local
+  automation draft orchestration. Currently internal infrastructure and not yet
+  wired into the product UI
 - `crates/rollshot-macos-oneshot`: isolated macOS ScreenCaptureKit one-shot capture (Objective-C FFI)
 - `crates/rollshot-action`, `crates/rollshot-linux-input`, `crates/rollshot-macos-input`:
   Action Guide recording and platform input observation (built behind the
