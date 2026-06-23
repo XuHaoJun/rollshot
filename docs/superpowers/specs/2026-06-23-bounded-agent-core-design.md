@@ -10,6 +10,36 @@
 > unrelated to vision roadmap SP4 (`inspectLayout`). Vision SP3 template
 > acquisition depends on BAC, but is not implemented by this subproject.
 
+## 0. Eng-Review Revisions (2026-06-23)
+
+This approved design was amended after an engineering plan review
+(`/plan-eng-review`, auto mode). The review cross-checked the design against the
+leaked Claude Code reference implementation and the current rollshot crate APIs.
+The following decisions are folded into the sections below:
+
+- **D1 — Rig's narrowed role (kept + de-risked).** BAC hand-rolls the provider
+  streaming adapters (§6.3), so Rig no longer supplies provider normalization.
+  Rig is retained only as the turn state machine (`next_step` /
+  `model_response` / `tool_results` / `Done`) and for its tool-call/tool-result
+  threading invariants and message DTOs (`ModelTurn`, `ToolCall`, `Usage`). The
+  spike validated the non-streaming `complete() -> ModelTurn` path; driving
+  `AgentRun` from a `ModelTurn` assembled incrementally from a live stream is
+  unvalidated and is de-risked by a Phase-4 fixture-backed check before adapter
+  work (§2.1, §14).
+- **D2 — One cancellation source bridges the async stream and the synchronous
+  dry-run (§10).**
+- **D3 — Known-tool schema-validation failures are recoverable, not terminal
+  (§6.2, §8.1, §11).**
+- **D4 — `UsageDelta` is a per-turn cumulative snapshot; charge the increase
+  once per turn, accumulate across turns (§6.2, §9).**
+- **D5 — `NeedsUserInput` references the current draft evidence (§8.5).**
+- **D6 — The OpenAI adapter targets the Chat Completions streaming API (§6.3).**
+- **D7 — Provider fixtures are recorded from real provider streams, then
+  content-scrubbed (§13.4).**
+- **D8 — The tool contract bounds per-tool output size, clamps caller-supplied
+  result limits, and the tool-argument assembly buffer is budgeted (§6.2, §8.1,
+  §9).**
+
 ## 1. Summary
 
 BAC provides the provider-neutral, bounded control plane that lets Rollshot
@@ -64,6 +94,17 @@ The retained Rig spike locks these choices:
 BAC closes the spike's remaining provider risk with recorded Anthropic and
 OpenAI wire fixtures covering tool schemas, streamed text, streamed tool-call
 arguments, normalized calls, usage, completion, and errors.
+
+Because BAC owns the provider streaming adapters (§6.3) rather than wrapping
+Rig's `CompletionModel`, Rig's role is narrowed: it is the turn state machine
+and the source of tool-call/tool-result threading invariants and message DTOs,
+not the provider-normalization layer. The spike validated Rig driven by a
+complete `ModelTurn` (`complete() -> ModelTurn`); driving `AgentRun` from a
+`ModelTurn` assembled incrementally from a live provider stream is not yet
+validated. Phase 4 must prove this with a fixture-backed integration check
+before the production adapters are built (§14). If that check shows Rig resists
+externally-streamed turns, the fallback is a Rollshot-owned turn state machine;
+the public BAC model does not change either way.
 
 ### 2.2 In scope
 
@@ -368,7 +409,7 @@ provider-specific parser
 ModelStreamEvent
     +-- TextDelta -----> RunEvent::TextDelta
     +-- ToolCallDelta -> private call assembler
-    +-- UsageDelta ---> budget charge + BudgetUpdated
+    +-- UsageDelta ---> cumulative-snapshot charge + BudgetUpdated (§9)
     +-- Completed ----> complete-message/tool validation
                               |
                               v
@@ -380,11 +421,21 @@ ModelStreamEvent
 
 BAC does not stream partial tool calls to the registry. Tool name, call ID, and
 arguments must be fully assembled. Arguments must decode as JSON and pass the
-registered tool schema before execution.
+registered tool schema before execution. The tool-argument assembly buffer is
+bounded (§9) so an unbounded or hostile stream cannot exhaust memory before any
+budget check fires.
 
-Malformed, duplicate, incomplete, or unsupported tool calls end in
-`AgentProtocolFailure`. A provider stream ending without its required completion
-signal is incomplete and fails rather than being treated as a valid turn.
+Two failure classes are distinguished:
+
+- *Stream/protocol failures* — undecodable JSON, duplicate or incomplete tool
+  calls, an unknown tool name, or a provider stream that ends without its
+  required completion signal — are terminal `AgentProtocolFailure`. The turn
+  itself is unusable.
+- *Schema-validation failures on a known tool* — well-formed JSON whose fields
+  do not satisfy that tool's registered schema — are returned to the model as a
+  typed tool error so it can repair within remaining budgets, consistent with
+  the repair philosophy for `validate_automation` / `dry_run_automation` (§11).
+  These are not terminal on their own.
 
 ### 6.3 Anthropic and OpenAI adapters
 
@@ -399,6 +450,13 @@ Both adapters are production code and must:
 - distinguish transport, rate-limit, authentication, provider rejection, and
   malformed-response failures; and
 - respond to cancellation without leaking partial payloads into durable state.
+
+The OpenAI adapter targets the Chat Completions streaming API (the reference
+implementation is Anthropic-wire-native only and offers no cover here). Its
+`ToolCallFragment` must model a provider-assigned call index, a call ID that
+appears only in the first fragment for a given index, the tool name, and an
+argument fragment; the assembler keys partial calls by that index (OpenAI) or
+content-block index (Anthropic).
 
 Recorded fixtures are the completion gate. Live API tests are optional because
 they require credentials and transmit data.
@@ -455,6 +513,9 @@ Every tool has:
 - an availability state;
 - a privacy classification;
 - a per-run call limit;
+- a maximum result size, with driver-side clamping of caller-supplied result
+  limits (e.g. an inspection tool's `limit`) to a configured ceiling so one
+  call cannot return an oversized payload that exhausts the token budget;
 - timeout and cancellation behavior; and
 - privacy-safe event summaries.
 
@@ -549,6 +610,13 @@ pub struct UserInputRequest {
 The driver bounds string lengths, choice count, and selection request type.
 Once valid, the tool immediately terminates the run as `NeedsUserInput`.
 
+Because BAC does not persist or resume runs, terminating here would otherwise
+discard all in-memory draft and evidence built so far. The `NeedsUserInput`
+terminal therefore references the current draft evidence (as `BudgetExhausted`
+does in §9) so Subproject 5 can reconstruct or resume the run once the user
+answers. Subproject 5 owns the resume mechanism; BAC only guarantees the draft
+reference is present in the terminal report.
+
 Assistant prose or a marker embedded in text cannot produce this state.
 
 ## 9. Budgets and Resource Control
@@ -562,6 +630,7 @@ BAC owns `RunBudget` and `RunBudgetUsage`. Limits include:
 - estimated provider cost;
 - per-tool and aggregate tool calls;
 - source bytes;
+- tool-argument assembly bytes;
 - validation attempts;
 - dry-run attempts;
 - automation capability calls;
@@ -571,10 +640,16 @@ BAC owns `RunBudget` and `RunBudgetUsage`. Limits include:
 Budget checks occur before and after provider/tool work where usage becomes
 known. Usage updates emit `BudgetUpdated`.
 
-If a provider reports cumulative usage, BAC computes and charges the positive
-delta exactly once. Missing provider usage is not treated as zero: the adapter
-must either provide a documented conservative estimate or terminate with a
-typed accounting failure according to configured policy.
+Provider usage within a single model turn is a cumulative snapshot, not a
+sequence of additive increments. `ModelStreamEvent::UsageDelta` therefore
+carries the latest cumulative figures for the current turn; BAC tracks the
+maximum seen and charges only the increase over what was already charged for
+that turn, then accumulates across turns. This mirrors the reference
+implementation's split between replacing within a turn and accumulating across
+turns, and prevents double-counting when the provider re-reports cumulative
+totals. Missing provider usage is not treated as zero: the adapter must either
+provide a documented conservative estimate or terminate with a typed accounting
+failure according to configured policy.
 
 Exhaustion produces `BudgetExhausted`. The report may reference the last valid
 draft evidence for diagnostics, but exhausted runs cannot become
@@ -587,6 +662,12 @@ One run cancellation signal covers:
 - an in-flight provider stream;
 - pending asynchronous tools; and
 - sandbox dry-run execution.
+
+The provider stream is async while the dry-run executor is synchronous and
+already takes `rollshot_automation::CancellationFlag` (an `Arc<AtomicBool>`).
+BAC owns one cancellation source (e.g. a `CancellationToken`) that drives the
+async paths and also sets / yields that existing `CancellationFlag` for the
+dry-run. BAC must not define a second, parallel cancellation primitive.
 
 Cancellation is cooperative. Before each state transition, model call, tool
 call, and terminal result, BAC checks cancellation.
@@ -688,6 +769,12 @@ repair after dry-run failure, and `request_user_input`.
 
 ### 13.4 Provider recorded-fixture tests
 
+Fixture stream framing must match real provider output: capture each provider's
+real stream once with synthetic prompts, scrub the content, and freeze the
+result. Hand-authored framing does not close the spike's open
+provider-tool-behavior risk. The one-time capture uses the optional live path in
+§13.7; the resulting tests must not require network access or API keys.
+
 Anthropic and OpenAI each require fixtures for:
 
 - request body and tool-definition schema;
@@ -747,7 +834,9 @@ The implementation plan should keep phases independently testable:
 1. Domain, events, draft generations, budgets, and terminal states.
 2. Typed tool registry and automation authoring tools.
 3. Manual scripted-model driver and complete author-loop acceptance.
-4. Streaming model facade and normalized stream assembly.
+4. Streaming model facade and normalized stream assembly, including a
+   fixture-backed check that an externally-streamed, externally-assembled
+   `ModelTurn` drives Rig's `AgentRun` correctly before adapter work (D1, §2.1).
 5. Anthropic adapter plus recorded fixtures.
 6. OpenAI adapter plus recorded fixtures.
 7. Cancellation, privacy, resource, and cross-crate integration hardening.
