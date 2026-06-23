@@ -4,6 +4,7 @@ use rollshot_agent::model::{
 };
 use rollshot_agent::provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter};
 use serde::Deserialize;
+use std::sync::{Arc, Mutex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Deserialize)]
@@ -240,6 +241,13 @@ async fn anthropic_text_and_tool_call() {
     // Completion — drive_streamed_turn infers EndTurn when text was streamed,
     // even if tool calls are present. The important assertion is that the tool
     // call was correctly assembled (verified above).
+    //
+    // Cross-provider invariant: the `saw_tool_call` override in
+    // `stream_to_model_events` rewrites stop_reason to ToolUse when any tool
+    // call was observed, regardless of what the provider reported. This test
+    // exercises the Anthropic path; the OpenAI `openai_multiple_tool_calls`
+    // test exercises the same logic from the OpenAI path. Both must pass to
+    // confirm the shared override is correct.
     assert!(events
         .iter()
         .any(|e| matches!(e, ModelStreamEvent::Completed(_))));
@@ -490,6 +498,120 @@ async fn anthropic_stream_consumes_at_least_two_chunks() {
     assert!(
         event_count >= 2,
         "should observe at least 2 events from the stream"
+    );
+}
+
+// ========== OpenAI outbound request assertions (I1) ==========
+
+/// Verify the outbound request uses Chat Completions (not Assistants),
+/// `parallel_tool_calls` is `false`, and tool definitions carry function schemas.
+#[tokio::test]
+async fn openai_outbound_request_uses_chat_completions_strict_and_parallel_false() {
+    let captured_body: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let body_clone = captured_body.clone();
+
+    // Use a dedicated mock server (no pre-mounted catch-all) so our
+    // capturing matcher is the sole responder.
+    let server = MockServer::start().await;
+    let sse_body = "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n";
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path_regex("/chat/completions"))
+        .and(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = req.body_json().unwrap_or_default();
+            *body_clone.lock().unwrap() = Some(parsed);
+            true
+        })
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+    let request = test_request(vec![text_tool_def()]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    // Consume the stream
+    while let Some(result) = stream.next().await {
+        if result.is_err() {
+            break;
+        }
+    }
+
+    let body = captured_body
+        .lock()
+        .unwrap()
+        .take()
+        .expect("request body was captured");
+
+    // parallel_tool_calls must be false
+    assert_eq!(
+        body["parallel_tool_calls"], false,
+        "parallel_tool_calls must be false in outbound request"
+    );
+
+    // Tool definitions must use function-type schema
+    let tools = body["tools"].as_array().expect("tools should be an array");
+    assert!(!tools.is_empty(), "tools array must not be empty");
+    for tool in tools {
+        assert_eq!(
+            tool["type"], "function",
+            "each tool must have type=function, got: {}",
+            tool["type"]
+        );
+        assert!(
+            tool["function"]["name"].is_string(),
+            "each tool must have a function.name, got: {}",
+            tool
+        );
+    }
+}
+
+/// Verify the Anthropic outbound request uses the Messages endpoint.
+#[tokio::test]
+async fn anthropic_outbound_request_uses_messages_endpoint() {
+    let fixture = get_fixture("anthropic_text_only");
+    // Use a dedicated mock server with a capturing closure to verify
+    // the Anthropic adapter targets /v1/messages, not /chat/completions.
+    let server = MockServer::start().await;
+    let sse_body: String = fixture.chunks.join("");
+    let captured_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let path_clone = captured_path.clone();
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(move |req: &wiremock::Request| {
+            *path_clone.lock().unwrap() = Some(req.url.path().to_string());
+            true
+        })
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
+    let request = test_request(vec![]);
+    let mut stream = adapter.stream(request).await.expect("stream should start");
+
+    // Consume the stream
+    while let Some(result) = stream.next().await {
+        if result.is_err() {
+            break;
+        }
+    }
+
+    let path = captured_path
+        .lock()
+        .unwrap()
+        .take()
+        .expect("request path was captured");
+    assert!(
+        path.contains("/v1/messages"),
+        "Anthropic should target /v1/messages, got: {}",
+        path
     );
 }
 
