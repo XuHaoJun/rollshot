@@ -155,6 +155,36 @@ enum ToolFailureKind {
     Runtime,
 }
 
+// ---------- Terminal construction ----------
+
+/// Build the `ReadyForReview` terminal from the handoff a successful
+/// `submit_for_review` left in the tool context. A missing handoff means the
+/// evidence was incomplete — never fabricate one (§4.5); fail as `RuntimeFailure`.
+fn finalize_ready_for_review(
+    tool_ctx: &ToolContext,
+    usage: &UsageSnapshot,
+    assistant_text: &str,
+) -> RunTerminalState {
+    match tool_ctx.pending_ready_for_review.lock().unwrap().take() {
+        Some(mut ready) => {
+            ready.usage = usage.clone();
+            ready.budget_usage = usage.clone();
+            ready.assistant_text = assistant_text.to_string();
+            ready.session_id = tool_ctx.session_id;
+            ready.generation = tool_ctx.draft.lock().unwrap().generation();
+            RunTerminalState::ReadyForReview(Box::new(ready))
+        }
+        None => {
+            tracing::debug!(
+                target: "rollshot::agent::driver",
+                session_id = tool_ctx.session_id.get(),
+                "submit reported success without a complete review handoff"
+            );
+            RunTerminalState::RuntimeFailure
+        }
+    }
+}
+
 // ---------- Runner ----------
 
 pub struct AgentRunner {
@@ -199,8 +229,7 @@ impl AgentRunner {
         let start = tokio::time::Instant::now();
         let mut tracker = BudgetTracker::new(budget, start);
         let mut total_assistant_bytes: usize = 0;
-        let mut has_submit_evidence = false;
-        let mut needs_user_input = false;
+        let mut last_assistant_text = String::new();
         let mut last_failure_kind: Option<ToolFailureKind> = None;
 
         let tool_names: BTreeSet<String> = tool_registry
@@ -259,6 +288,7 @@ impl AgentRunner {
                         &mut total_assistant_bytes,
                         self.config.max_assistant_bytes,
                         cancellation,
+                        &mut last_assistant_text,
                     ) {
                         Ok(()) => {}
                         Err(DriverError::BudgetExhausted(dim)) => {
@@ -283,14 +313,16 @@ impl AgentRunner {
                             &mut tracker,
                             cancellation,
                             tool_ctx,
-                            &mut has_submit_evidence,
-                            &mut needs_user_input,
+                            &last_assistant_text,
                             &mut last_failure_kind,
                         )
                         .await
                     {
                         Ok(terminal) => {
                             if let Some(state) = terminal {
+                                // The model turn completed before this terminal;
+                                // commit its prose as the session's assistant msg.
+                                let _ = session.push_assistant(last_assistant_text.clone());
                                 return state;
                             }
                         }
@@ -313,16 +345,7 @@ impl AgentRunner {
                         return RunTerminalState::BudgetExhausted { dimension: dim };
                     }
 
-                    let assistant_text = tool_ctx.source.lock().unwrap().clone();
-                    let _ = session.push_assistant(assistant_text.clone());
-
-                    if needs_user_input {
-                        return RunTerminalState::NeedsUserInput(NeedsUserInput {
-                            session_id: tool_ctx.session_id,
-                            generation: tool_ctx.draft.lock().unwrap().generation(),
-                            assistant_text,
-                        });
-                    }
+                    let _ = session.push_assistant(last_assistant_text.clone());
 
                     if let Some(failure) = last_failure_kind {
                         return match failure {
@@ -333,29 +356,9 @@ impl AgentRunner {
                         };
                     }
 
-                    if has_submit_evidence {
-                        // A successful submit must have produced a complete review
-                        // handoff (validated automation + dry-run proposal). If it
-                        // did not, the evidence was incomplete — never fabricate a
-                        // ReadyForReview (§4.5).
-                        let pending = tool_ctx.pending_ready_for_review.lock().unwrap().take();
-                        let Some(mut ready) = pending else {
-                            tracing::debug!(
-                                target: "rollshot::agent::driver",
-                                session_id = tool_ctx.session_id.get(),
-                                "submit reported success without a complete review handoff"
-                            );
-                            return RunTerminalState::RuntimeFailure;
-                        };
-                        // Fill in fields the tool cannot access (tracker, assistant text)
-                        ready.usage = tracker.used().clone();
-                        ready.budget_usage = tracker.used().clone();
-                        ready.assistant_text = assistant_text;
-                        ready.session_id = tool_ctx.session_id;
-                        ready.generation = tool_ctx.draft.lock().unwrap().generation();
-                        return RunTerminalState::ReadyForReview(Box::new(ready));
-                    }
-
+                    // A successful submit_for_review terminates the run in
+                    // run_tool_turn (§4.5), so reaching Done means the model never
+                    // submitted.
                     return RunTerminalState::AgentProtocolFailure {
                         message: "model completed without submission".into(),
                     };
@@ -389,8 +392,7 @@ impl AgentRunner {
         let start = tokio::time::Instant::now();
         let mut tracker = BudgetTracker::new(budget, start);
         let mut total_assistant_bytes: usize = 0;
-        let mut has_submit_evidence = false;
-        let mut needs_user_input = false;
+        let mut last_assistant_text = String::new();
         let mut last_failure_kind: Option<ToolFailureKind> = None;
 
         let tool_names: BTreeSet<String> = tool_registry
@@ -446,6 +448,7 @@ impl AgentRunner {
                             self.config.max_assistant_bytes,
                             cancellation,
                             &input,
+                            &mut last_assistant_text,
                         )
                         .await
                     {
@@ -472,14 +475,16 @@ impl AgentRunner {
                             &mut tracker,
                             cancellation,
                             tool_ctx,
-                            &mut has_submit_evidence,
-                            &mut needs_user_input,
+                            &last_assistant_text,
                             &mut last_failure_kind,
                         )
                         .await
                     {
                         Ok(terminal) => {
                             if let Some(state) = terminal {
+                                // The model turn completed before this terminal;
+                                // commit its prose as the session's assistant msg.
+                                let _ = session.push_assistant(last_assistant_text.clone());
                                 return state;
                             }
                         }
@@ -502,16 +507,7 @@ impl AgentRunner {
                         return RunTerminalState::BudgetExhausted { dimension: dim };
                     }
 
-                    let assistant_text = tool_ctx.source.lock().unwrap().clone();
-                    let _ = session.push_assistant(assistant_text.clone());
-
-                    if needs_user_input {
-                        return RunTerminalState::NeedsUserInput(NeedsUserInput {
-                            session_id: tool_ctx.session_id,
-                            generation: tool_ctx.draft.lock().unwrap().generation(),
-                            assistant_text,
-                        });
-                    }
+                    let _ = session.push_assistant(last_assistant_text.clone());
 
                     if let Some(failure) = last_failure_kind {
                         return match failure {
@@ -522,29 +518,9 @@ impl AgentRunner {
                         };
                     }
 
-                    if has_submit_evidence {
-                        // A successful submit must have produced a complete review
-                        // handoff (validated automation + dry-run proposal). If it
-                        // did not, the evidence was incomplete — never fabricate a
-                        // ReadyForReview (§4.5).
-                        let pending = tool_ctx.pending_ready_for_review.lock().unwrap().take();
-                        let Some(mut ready) = pending else {
-                            tracing::debug!(
-                                target: "rollshot::agent::driver",
-                                session_id = tool_ctx.session_id.get(),
-                                "submit reported success without a complete review handoff"
-                            );
-                            return RunTerminalState::RuntimeFailure;
-                        };
-                        // Fill in fields the tool cannot access (tracker, assistant text)
-                        ready.usage = tracker.used().clone();
-                        ready.budget_usage = tracker.used().clone();
-                        ready.assistant_text = assistant_text;
-                        ready.session_id = tool_ctx.session_id;
-                        ready.generation = tool_ctx.draft.lock().unwrap().generation();
-                        return RunTerminalState::ReadyForReview(Box::new(ready));
-                    }
-
+                    // A successful submit_for_review terminates the run in
+                    // run_tool_turn (§4.5), so reaching Done means the model never
+                    // submitted.
                     return RunTerminalState::AgentProtocolFailure {
                         message: "model completed without submission".into(),
                     };
@@ -567,6 +543,7 @@ impl AgentRunner {
         total_assistant_bytes: &mut usize,
         max_assistant_bytes: usize,
         cancellation: &RunCancellation,
+        last_assistant_text: &mut String,
     ) -> Result<(), DriverError> {
         if cancellation.is_cancelled() {
             return Err(DriverError::Cancelled);
@@ -587,6 +564,9 @@ impl AgentRunner {
         let mut asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
         let mut turn_input_tokens: u64 = 0;
         let mut turn_output_tokens: u64 = 0;
+        // The model's streamed prose for this turn (committed to the session and
+        // surfaced in terminal reports — distinct from the automation draft).
+        let mut turn_text = String::new();
 
         // Track tool calls: id → (name, accumulated_arg_deltas)
         let mut tool_call_ids: Vec<String> = Vec::new();
@@ -633,6 +613,7 @@ impl AgentRunner {
                             );
                             return Err(DriverError::BudgetExhausted(BudgetDimension::SourceBytes));
                         }
+                        turn_text.push_str(&text);
                         event_sink.emit(RunEvent::TextChunk { text });
                     }
                     ModelStreamEvent::ToolCallStart { id, name } => {
@@ -705,11 +686,24 @@ impl AgentRunner {
             }
         }
 
-        // Build final choice from tracked tool calls
+        // Commit this turn's prose as the run's latest assistant message.
+        *last_assistant_text = turn_text;
+
+        // Build final choice from tracked tool calls. Non-empty arguments that
+        // are not valid JSON are an unrecoverable protocol failure (§6.2); empty
+        // arguments are treated as an empty object (no-argument tools).
         let mut final_items: Vec<AssistantContent> = Vec::new();
         for i in 0..tool_call_ids.len() {
-            let args: serde_json::Value =
-                serde_json::from_str(&tool_call_arg_deltas[i]).unwrap_or(serde_json::json!({}));
+            let raw = &tool_call_arg_deltas[i];
+            let args: serde_json::Value = if raw.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(raw).map_err(|e| {
+                    DriverError::AgentProtocolFailure(format!(
+                        "tool call arguments are not valid JSON: {e}"
+                    ))
+                })?
+            };
             final_items.push(AssistantContent::ToolCall(RigToolCall::new(
                 tool_call_ids[i].clone(),
                 ToolFunction::new(tool_call_names[i].clone(), args),
@@ -774,6 +768,7 @@ impl AgentRunner {
         max_assistant_bytes: usize,
         cancellation: &RunCancellation,
         input: &AuthorizedModelInput,
+        last_assistant_text: &mut String,
     ) -> Result<(), DriverError> {
         if cancellation.is_cancelled() {
             return Err(DriverError::Cancelled);
@@ -820,6 +815,8 @@ impl AgentRunner {
         let asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
         let mut turn_input_tokens: u64 = 0;
         let mut turn_output_tokens: u64 = 0;
+        // The model's streamed prose for this turn.
+        let mut turn_text = String::new();
 
         let mut tool_call_ids: Vec<String> = Vec::new();
         let mut tool_call_names: Vec<String> = Vec::new();
@@ -847,6 +844,7 @@ impl AgentRunner {
                     if *total_assistant_bytes > max_assistant_bytes {
                         return Err(DriverError::BudgetExhausted(BudgetDimension::SourceBytes));
                     }
+                    turn_text.push_str(&text);
                     event_sink.emit(RunEvent::TextChunk { text });
                 }
                 ModelStreamEvent::ToolCallStart { id, name } => {
@@ -901,11 +899,24 @@ impl AgentRunner {
             }
         }
 
-        // Build final choice from tracked tool calls
+        // Commit this turn's prose as the run's latest assistant message.
+        *last_assistant_text = turn_text;
+
+        // Build final choice from tracked tool calls. Non-empty arguments that
+        // are not valid JSON are an unrecoverable protocol failure (§6.2); empty
+        // arguments are treated as an empty object (no-argument tools).
         let mut final_items: Vec<AssistantContent> = Vec::new();
         for i in 0..tool_call_ids.len() {
-            let args: serde_json::Value =
-                serde_json::from_str(&tool_call_arg_deltas[i]).unwrap_or(serde_json::json!({}));
+            let raw = &tool_call_arg_deltas[i];
+            let args: serde_json::Value = if raw.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(raw).map_err(|e| {
+                    DriverError::AgentProtocolFailure(format!(
+                        "tool call arguments are not valid JSON: {e}"
+                    ))
+                })?
+            };
             final_items.push(AssistantContent::ToolCall(RigToolCall::new(
                 tool_call_ids[i].clone(),
                 ToolFunction::new(tool_call_names[i].clone(), args),
@@ -961,8 +972,7 @@ impl AgentRunner {
         tracker: &mut BudgetTracker,
         cancellation: &RunCancellation,
         tool_ctx: &ToolContext,
-        has_submit_evidence: &mut bool,
-        needs_user_input: &mut bool,
+        assistant_text: &str,
         last_failure_kind: &mut Option<ToolFailureKind>,
     ) -> Result<Option<RunTerminalState>, DriverError> {
         if cancellation.is_cancelled() {
@@ -996,7 +1006,14 @@ impl AgentRunner {
         };
         tracker.charge(tool_usage)?;
 
-        let results = tool_registry.execute_calls(&tool_calls, cancellation).await;
+        // A successful terminal tool stops the rest of the batch (§8.3).
+        let terminal_tools: BTreeSet<String> = ["submit_for_review", "request_user_input"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let results = tool_registry
+            .execute_calls(&tool_calls, cancellation, &terminal_tools)
+            .await;
 
         let mut rig_results = Vec::new();
         let mut terminal_error: Option<String> = None;
@@ -1004,6 +1021,8 @@ impl AgentRunner {
         // Usage that only becomes known after a tool runs (dry-run candidate
         // count, affected area, and capability calls). Charged after the batch.
         let mut post_usage = UsageSnapshot::default();
+        let mut submit_succeeded = false;
+        let mut user_input_requested = false;
 
         for (i, result) in results.into_iter().enumerate() {
             let call_id = pending_calls[i].tool_call.id.clone();
@@ -1021,15 +1040,13 @@ impl AgentRunner {
                         );
                         return Err(DriverError::BudgetExhausted(BudgetDimension::ResultBytes));
                     }
-                    if tool_name == "submit_for_review" {
-                        if let Some(submitted) = result_json.get("submitted") {
-                            if submitted.as_bool() == Some(true) {
-                                *has_submit_evidence = true;
-                            }
-                        }
+                    if tool_name == "submit_for_review"
+                        && result_json.get("submitted").and_then(|v| v.as_bool()) == Some(true)
+                    {
+                        submit_succeeded = true;
                     }
                     if tool_name == "request_user_input" {
-                        *needs_user_input = true;
+                        user_input_requested = true;
                     }
                     if tool_name == "dry_run" {
                         if let Some(cc) =
@@ -1100,16 +1117,27 @@ impl AgentRunner {
         // candidate count, affected area, capability calls).
         tracker.charge(post_usage)?;
 
-        if *needs_user_input {
-            rig_run
-                .tool_results(rig_results)
-                .map_err(|e| DriverError::AgentProtocolFailure(e.to_string()))?;
-            let assistant_text = tool_ctx.source.lock().unwrap().clone();
+        // A successful terminal tool ends the run now; no further model work
+        // runs (§4.5). The first terminal tool in response order wins because
+        // execute_calls already stopped the batch after it.
+        if user_input_requested {
+            tracker.apply_turn();
             return Ok(Some(RunTerminalState::NeedsUserInput(NeedsUserInput {
                 session_id: tool_ctx.session_id,
                 generation: tool_ctx.draft.lock().unwrap().generation(),
-                assistant_text,
+                assistant_text: assistant_text.to_string(),
             })));
+        }
+        if submit_succeeded {
+            tracker.apply_turn();
+            if let Err(BudgetError::Exceeded(dim)) = tracker.check_accumulated() {
+                return Ok(Some(RunTerminalState::BudgetExhausted { dimension: dim }));
+            }
+            return Ok(Some(finalize_ready_for_review(
+                tool_ctx,
+                tracker.used(),
+                assistant_text,
+            )));
         }
 
         rig_run
@@ -1326,7 +1354,8 @@ pub(crate) mod tests {
             final_item(usage(50, 30)),
         ];
 
-        // Turn 2: validate + dry_run + submit
+        // Turn 2: validate + dry_run + submit. submit_for_review terminates the
+        // run here (§4.5) — there is no third model turn.
         let turn2 = vec![
             tool_call_delta_name("tc_3", "validate_source"),
             tool_call_delta_args("tc_3", &validate_args),
@@ -1337,13 +1366,7 @@ pub(crate) mod tests {
             final_item(usage(40, 25)),
         ];
 
-        // Turn 3: text
-        let turn3 = vec![
-            text_item("workflow ready for review"),
-            final_item(usage(20, 10)),
-        ];
-
-        let turns = vec![turn1, turn2, turn3];
+        let turns = vec![turn1, turn2];
         let mut turn_idx = 0;
         let model_fn = move |_turn: usize| {
             if turn_idx < turns.len() {
@@ -1385,8 +1408,9 @@ pub(crate) mod tests {
             RunTerminalState::ReadyForReview(r) => {
                 assert_eq!(r.session_id, SessionId::new(42));
                 assert_eq!(r.generation, 1);
-                assert_eq!(r.usage.input_tokens, 110);
-                assert_eq!(r.usage.output_tokens, 65);
+                // turns 1 + 2 only (submit terminates the run): 50+40 / 30+25.
+                assert_eq!(r.usage.input_tokens, 90);
+                assert_eq!(r.usage.output_tokens, 55);
             }
             other => panic!("expected ReadyForReview, got {other:?}"),
         }
@@ -1984,6 +2008,59 @@ pub(crate) mod tests {
                 dimension: BudgetDimension::CapabilityCalls
             }
         ));
+    }
+
+    // ---- Terminal: malformed tool-call arguments ----
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_are_protocol_failure() {
+        // Non-empty tool-call arguments that do not reassemble into valid JSON
+        // are an unrecoverable protocol failure (§6.2), not silently coerced to
+        // an empty object.
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "replace_source"),
+            // Truncated / invalid JSON.
+            tool_call_delta_args("tc_1", r#"{"source": "x", "generation":"#),
+            final_item(usage(5, 3)),
+        ];
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                RunBudget::unlimited(),
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(
+            matches!(result, RunTerminalState::AgentProtocolFailure { .. }),
+            "malformed tool args must be AgentProtocolFailure, got {result:?}"
+        );
     }
 
     // ---- Terminal: unknown tool ----
@@ -2702,6 +2779,273 @@ pub(crate) mod tests {
                 dimension: BudgetDimension::InputTokens
             }
         ));
+    }
+
+    // ---- Terminal-tool semantics (§8.3/§4.5) and assistant prose (§5) ----
+
+    mod terminal_semantics {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn complete_evidence_turn1() -> Vec<StreamedAssistantContent<MockResponse>> {
+            let js = valid_js();
+            vec![
+                tool_call_delta_name("tc_1", "replace_source"),
+                tool_call_delta_args(
+                    "tc_1",
+                    &serde_json::json!({"source": js, "generation": 0}).to_string(),
+                ),
+                tool_call_delta_name("tc_2", "validate_source"),
+                tool_call_delta_args(
+                    "tc_2",
+                    &serde_json::json!({"source": js, "generation": 1}).to_string(),
+                ),
+                tool_call_delta_name("tc_3", "dry_run"),
+                tool_call_delta_args(
+                    "tc_3",
+                    &serde_json::json!({"source": js, "generation": 1}).to_string(),
+                ),
+                final_item(usage(10, 5)),
+            ]
+        }
+
+        #[tokio::test]
+        async fn submit_terminates_run_without_further_model_turn() {
+            // After a successful submit, no further model work may run (§4.5).
+            let ctx = test_ctx(valid_js());
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let submit_args = serde_json::json!({"generation": 1}).to_string();
+            // A third turn that, if it ran, would replace the source and
+            // invalidate the submission.
+            let replace2 = serde_json::json!({"source": "different", "generation": 1}).to_string();
+
+            let turns = vec![
+                complete_evidence_turn1(),
+                vec![
+                    tool_call_delta_name("tc_4", "submit_for_review"),
+                    tool_call_delta_args("tc_4", &submit_args),
+                    final_item(usage(5, 3)),
+                ],
+                vec![
+                    tool_call_delta_name("tc_5", "replace_source"),
+                    tool_call_delta_args("tc_5", &replace2),
+                    final_item(usage(99, 99)),
+                ],
+            ];
+
+            let calls = Arc::new(AtomicUsize::new(0));
+            let calls_seen = calls.clone();
+            let mut turn_idx = 0;
+            let model_fn = move |_t: usize| {
+                calls_seen.fetch_add(1, Ordering::SeqCst);
+                if turn_idx < turns.len() {
+                    let it = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(it)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            assert!(
+                matches!(result, RunTerminalState::ReadyForReview(_)),
+                "expected ReadyForReview, got {result:?}"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "the model must not be invoked after a successful submit"
+            );
+        }
+
+        #[tokio::test]
+        async fn first_terminal_tool_in_response_order_wins() {
+            // submit_for_review before request_user_input in the same batch: the
+            // first terminal tool (submit) wins and the rest do not execute.
+            let ctx = test_ctx(valid_js());
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+            reg.register(Arc::new(crate::tools::RequestUserInputTool::new(
+                ctx.clone(),
+            )))
+            .unwrap();
+
+            let submit_args = serde_json::json!({"generation": 1}).to_string();
+            let turns = vec![
+                complete_evidence_turn1(),
+                vec![
+                    tool_call_delta_name("tc_a", "submit_for_review"),
+                    tool_call_delta_args("tc_a", &submit_args),
+                    tool_call_delta_name("tc_b", "request_user_input"),
+                    final_item(usage(5, 3)),
+                ],
+            ];
+            let mut turn_idx = 0;
+            let model_fn = move |_t: usize| {
+                if turn_idx < turns.len() {
+                    let it = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(it)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            assert!(
+                matches!(result, RunTerminalState::ReadyForReview(_)),
+                "submit came first, so ReadyForReview must win, got {result:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn ready_for_review_assistant_text_is_model_prose() {
+            // assistant_text must be the model's prose, not the automation source.
+            let ctx = test_ctx(valid_js());
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let submit_args = serde_json::json!({"generation": 1}).to_string();
+            let turns = vec![
+                complete_evidence_turn1(),
+                vec![
+                    text_item("submitting the redaction now"),
+                    tool_call_delta_name("tc_4", "submit_for_review"),
+                    tool_call_delta_args("tc_4", &submit_args),
+                    final_item(usage(5, 3)),
+                ],
+            ];
+            let mut turn_idx = 0;
+            let model_fn = move |_t: usize| {
+                if turn_idx < turns.len() {
+                    let it = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(it)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            match result {
+                RunTerminalState::ReadyForReview(r) => {
+                    assert_eq!(r.assistant_text, "submitting the redaction now");
+                    // the draft source must NOT be used as the assistant message
+                    assert_ne!(r.assistant_text, valid_js());
+                }
+                other => panic!("expected ReadyForReview, got {other:?}"),
+            }
+            assert_eq!(
+                session.exchanges()[0].assistant.text,
+                "submitting the redaction now"
+            );
+        }
+
+        #[tokio::test]
+        async fn needs_user_input_assistant_text_is_model_prose() {
+            let ctx = test_ctx("automation source here");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            reg.register(Arc::new(crate::tools::RequestUserInputTool::new(
+                ctx.clone(),
+            )))
+            .unwrap();
+
+            let turns = vec![vec![
+                text_item("which region should I redact?"),
+                tool_call_delta_name("tc_1", "request_user_input"),
+                final_item(usage(5, 3)),
+            ]];
+            let mut turn_idx = 0;
+            let model_fn = move |_t: usize| {
+                if turn_idx < turns.len() {
+                    let it = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(it)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            match result {
+                RunTerminalState::NeedsUserInput(n) => {
+                    assert_eq!(n.assistant_text, "which region should I redact?");
+                    assert_ne!(n.assistant_text, "automation source here");
+                }
+                other => panic!("expected NeedsUserInput, got {other:?}"),
+            }
+        }
     }
 
     // ---- Real-provider path: history + tool schema threading ----

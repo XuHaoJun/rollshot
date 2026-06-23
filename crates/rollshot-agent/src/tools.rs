@@ -173,10 +173,15 @@ impl ToolRegistry {
         Ok(outcome)
     }
 
+    /// Execute the batch serially in response order. Stops after a hard error
+    /// or after the first successful call whose name is in `stop_after_success`
+    /// — used to halt remaining calls once a terminal tool succeeds (§8.3), so
+    /// later calls in the same batch never run.
     pub async fn execute_calls(
         &self,
         calls: &[ToolCall],
         cancellation: &RunCancellation,
+        stop_after_success: &std::collections::BTreeSet<String>,
     ) -> Vec<Result<ToolOutcome, ToolError>> {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
@@ -189,10 +194,14 @@ impl ToolRegistry {
             };
 
             let result = self.execute_single(index, call, cancellation).await;
-            let is_terminal = result.is_err();
+            let stop = match &result {
+                Err(_) => true,
+                Ok(ToolOutcome::Success { .. }) => stop_after_success.contains(&call.name),
+                Ok(ToolOutcome::Recoverable { .. }) => false,
+            };
             results.push(result);
 
-            if is_terminal {
+            if stop {
                 break;
             }
         }
@@ -943,7 +952,9 @@ pub(crate) mod tests {
             name: "nonexistent".into(),
             arguments_json: serde_json::json!({}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0],
@@ -960,7 +971,9 @@ pub(crate) mod tests {
             name: "echo".into(),
             arguments_json: serde_json::json!({"wrong_field": 42}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert!(matches!(&results[0], Ok(ToolOutcome::Recoverable { .. })));
     }
@@ -974,7 +987,9 @@ pub(crate) mod tests {
             name: "echo".into(),
             arguments_json: serde_json::json!({"text": "hello", "extra": true}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert!(matches!(&results[0], Ok(ToolOutcome::Recoverable { .. })));
     }
@@ -994,7 +1009,9 @@ pub(crate) mod tests {
             name: "echo".into(),
             arguments_json: serde_json::json!({"text": long_text}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert!(matches!(
             results[0],
@@ -1037,7 +1054,9 @@ pub(crate) mod tests {
             name: "big_result".into(),
             arguments_json: serde_json::json!({"text": "ok"}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert!(matches!(
             results[0],
@@ -1060,14 +1079,18 @@ pub(crate) mod tests {
             name: "echo".into(),
             arguments_json: serde_json::json!({"text": "first"}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert!(results[0].is_ok());
 
         let calls = vec![ToolCall {
             name: "echo".into(),
             arguments_json: serde_json::json!({"text": "second"}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert!(matches!(
             results[0],
             Err(ToolError::PerToolCallLimitExceeded { .. })
@@ -1104,7 +1127,9 @@ pub(crate) mod tests {
                 arguments_json: serde_json::json!({"text": "3"}),
             },
         ];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 3);
 
         fn seq(outcome: &ToolOutcome) -> u64 {
@@ -1136,7 +1161,9 @@ pub(crate) mod tests {
                 arguments_json: serde_json::json!({"text": "y"}),
             },
         ];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
     }
@@ -1152,7 +1179,9 @@ pub(crate) mod tests {
             name: "echo".into(),
             arguments_json: serde_json::json!({"text": "hello"}),
         }];
-        let results = reg.execute_calls(&calls, &cancel).await;
+        let results = reg
+            .execute_calls(&calls, &cancel, &std::collections::BTreeSet::new())
+            .await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], Err(ToolError::Cancelled));
     }
