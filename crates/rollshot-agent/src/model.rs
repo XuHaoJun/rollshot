@@ -252,25 +252,56 @@ where
                     format!("unknown tool: {}", invalid.tool_call.function.name),
                 )));
             }
-            StreamedTurnEvent::Completed {
-                usage,
-                emit_final: _,
-            } => {
+            StreamedTurnEvent::Completed { usage, emit_final } => {
                 let model_usage = ModelUsage {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
                     total_tokens: usage.total_tokens,
                 };
+                // Infer stop reason: emit_final is false when the turn
+                // produced tool calls without streaming text (the common
+                // tool-use path). When emit_final is true, text was streamed
+                // so the model ended its turn normally.
+                let stop_reason = if !emit_final && usage.total_tokens > 0 {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::EndTurn
+                };
                 bac_events.push(ModelStreamEvent::UsageDelta(model_usage.clone()));
                 bac_events.push(ModelStreamEvent::Completed(ModelCompletion {
                     usage: model_usage,
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason,
                 }));
             }
         }
     }
 
     Ok(bac_events)
+}
+
+/// Emit a [`ModelStreamEvent::ToolCallComplete`] for each tool call in the
+/// assembled [`StreamedTurn`]. Call this after
+/// [`StreamedTurnAssembler::finish`] to produce the completion events that
+/// `drive_streamed_turn` cannot emit (the assembler buffers complete tool
+/// calls internally and only exposes them via the finished `StreamedTurn`).
+#[allow(dead_code)]
+pub(crate) fn emit_tool_call_completions(
+    turn: &rig_core::agent::run::StreamedTurn,
+) -> Vec<ModelStreamEvent> {
+    turn.choice
+        .iter()
+        .filter_map(|item| {
+            if let rig_core::message::AssistantContent::ToolCall(tc) = item {
+                Some(ModelStreamEvent::ToolCallComplete {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    arguments: tc.function.arguments.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 // ---------- Tests ----------
@@ -397,7 +428,10 @@ pub(crate) mod tests {
             drive_streamed_turn(&mut asm, &final_item(usage)).expect("ingest should succeed");
         assert_eq!(events.len(), 2); // UsageDelta + Completed
         assert!(matches!(&events[0], ModelStreamEvent::UsageDelta(u) if u.input_tokens == 10));
-        assert!(matches!(&events[1], ModelStreamEvent::Completed(c) if c.usage.total_tokens == 25));
+        assert!(
+            matches!(&events[1], ModelStreamEvent::Completed(c) if c.usage.total_tokens == 25 && c.stop_reason == StopReason::ToolUse),
+            "tool-call turn should have StopReason::ToolUse"
+        );
 
         // Record usage and feed assembled turn to Rig
         run.record_streamed_completion_call(usage)
@@ -461,6 +495,10 @@ pub(crate) mod tests {
         let events = drive_streamed_turn(&mut asm2, &final_item(Usage::new()))
             .expect("ingest should succeed");
         assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[1], ModelStreamEvent::Completed(c) if c.stop_reason == StopReason::EndTurn),
+            "text-only turn should have StopReason::EndTurn"
+        );
 
         let final_choice = OneOrMany::one(AssistantContent::text("the answer is 2"));
         run.streamed_turn(asm2.finish(None, &final_choice))
@@ -715,19 +753,49 @@ pub(crate) mod tests {
             .any(|d| d.name == "subtract"));
     }
 
-    // ---- Test 8: Upgrade guard — Rig 0.39 streamed API compiles ----
+    // ---- Test 8: Upgrade guard — Rig 0.39 streamed API compiles and round-trips ----
 
     #[test]
     fn rig_039_streamed_turn_api_compiles() {
-        // This test names the pinned Rig version expectation. If Rig's
-        // StreamedTurnAssembler, StreamedTurnEvent, or AgentRun::streamed_turn
-        // API changes, this test will fail to compile.
+        // Verify key types are accessible
         let _assembler = StreamedTurnAssembler::new(BTreeSet::new(), BTreeSet::new());
         let mut run = AgentRun::new("test");
         let _step = run.next_step();
 
-        // Verify key types are accessible
         let _: StreamedAssistantContent<MockResponse> = StreamedAssistantContent::text("x");
         let _tool_names: BTreeSet<String> = BTreeSet::new();
+
+        // Exercise ingest + finish to catch signature-level breaking changes
+        let mut asm = StreamedTurnAssembler::new(tool_names(&["add"]), tool_names(&["add"]));
+        let events =
+            drive_streamed_turn(&mut asm, &text_item("hello")).expect("ingest should succeed");
+        assert_eq!(events.len(), 1);
+        let events = drive_streamed_turn(&mut asm, &final_item(Usage::new()))
+            .expect("ingest should succeed");
+        assert_eq!(events.len(), 2);
+
+        let final_choice = OneOrMany::one(AssistantContent::text("hello"));
+        let turn = asm.finish(None, &final_choice);
+        assert!(
+            turn.choice
+                .iter()
+                .any(|c| matches!(c, AssistantContent::Text(t) if t.text == "hello")),
+            "finished turn should contain the text"
+        );
+
+        // Verify emit_tool_call_completions works on a tool-call turn
+        let mut asm_tc = StreamedTurnAssembler::new(tool_names(&["add"]), tool_names(&["add"]));
+        drive_streamed_turn(&mut asm_tc, &tool_call_item("tc_1", "add")).expect("ingest");
+        drive_streamed_turn(&mut asm_tc, &final_item(Usage::new())).expect("ingest");
+        let final_choice_tc = OneOrMany::one(AssistantContent::ToolCall(ToolCall::new(
+            "tc_1".to_string(),
+            ToolFunction::new("add".to_string(), serde_json::json!({"x": 1})),
+        )));
+        let turn_tc = asm_tc.finish(None, &final_choice_tc);
+        let completions = emit_tool_call_completions(&turn_tc);
+        assert_eq!(completions.len(), 1);
+        assert!(
+            matches!(&completions[0], ModelStreamEvent::ToolCallComplete { id, name, .. } if id == "tc_1" && name == "add")
+        );
     }
 }
