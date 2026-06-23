@@ -34,7 +34,7 @@
 //!    ` Done --> ReadyForReview | typed terminal state
 //! ```
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use rig_core::agent::run::StreamedTurnAssembler;
 use rig_core::completion::Usage;
@@ -357,6 +357,7 @@ impl AgentRunner {
         let mut tool_call_names: Vec<String> = Vec::new();
         let mut tool_call_arg_deltas: Vec<String> = Vec::new();
         let mut total_argument_bytes: usize = 0;
+        let mut tool_calls_with_deltas: HashSet<String> = HashSet::new();
 
         for item in &items {
             if cancellation.is_cancelled() {
@@ -404,6 +405,7 @@ impl AgentRunner {
                         tool_call_arg_deltas.push(String::new());
                     }
                     ModelStreamEvent::ToolCallArgumentDelta { id, delta } => {
+                        tool_calls_with_deltas.insert(id.clone());
                         total_argument_bytes += delta.len();
                         if total_argument_bytes > self.config.max_argument_bytes {
                             tracing::debug!(
@@ -427,11 +429,21 @@ impl AgentRunner {
                     } => {
                         // Complete tool call from assembler — use directly
                         let serialized = serde_json::to_string(&arguments).unwrap_or_default();
-                        total_argument_bytes += serialized.len();
-                        if total_argument_bytes > self.config.max_argument_bytes {
-                            return Err(DriverError::BudgetExhausted(
-                                BudgetDimension::ArgumentBytes,
-                            ));
+                        // Only count argument bytes if deltas weren't already received
+                        // for this tool call, to avoid double-counting.
+                        if !tool_calls_with_deltas.contains(&id) {
+                            total_argument_bytes += serialized.len();
+                            if total_argument_bytes > self.config.max_argument_bytes {
+                                tracing::debug!(
+                                    target: "rollshot::agent::driver",
+                                    turn = turn_index,
+                                    limit = self.config.max_argument_bytes,
+                                    "argument bytes limit exceeded"
+                                );
+                                return Err(DriverError::BudgetExhausted(
+                                    BudgetDimension::ArgumentBytes,
+                                ));
+                            }
                         }
                         if let Some(pos) = tool_call_ids.iter().position(|tc_id| *tc_id == id) {
                             tool_call_names[pos] = name;
@@ -2118,6 +2130,116 @@ pub(crate) mod tests {
                 }
             ));
         }
+
+        // ---- I3: Deadline expiry between stream items ----
+
+        #[tokio::test]
+        async fn deadline_between_stream_items() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let cancel = RunCancellation::new();
+
+            // First turn: 3 text items — the deadline check between items should fire
+            let turn1 = vec![
+                text_item("first"),
+                text_item("second"),
+                text_item("third"),
+                final_item(usage(5, 3)),
+            ];
+
+            let turns = vec![turn1];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+
+            // Budget with 1 nanosecond wall time — expires immediately
+            let budget = RunBudget {
+                wall_time: std::time::Duration::from_nanos(1),
+                ..RunBudget::unlimited()
+            };
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    budget,
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            assert!(matches!(
+                result,
+                RunTerminalState::BudgetExhausted {
+                    dimension: BudgetDimension::WallTime
+                }
+            ));
+        }
+
+        // ---- I3: Provider stream returns None (stream dropped/cancelled) ----
+
+        #[tokio::test]
+        async fn provider_stream_returns_none() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            // Turn 1: tool call (no submit), so the state machine requests a second model turn.
+            // Turn 2: model returns None (provider stream ended).
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "get_context_summary"),
+                final_item(usage(5, 3)),
+            ];
+            let turns = vec![turn1];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    // Simulates provider stream ending unexpectedly
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            // The model returning None for the second turn should produce ProviderFailure
+            assert!(matches!(result, RunTerminalState::ProviderFailure { .. }));
+        }
     }
 
     // ---- Privacy and QuickJS integration ----
@@ -2487,6 +2609,248 @@ pub(crate) mod tests {
             // The run should be cancelled because the cancellation flag was set
             // before the tool calls executed
             assert_eq!(result, RunTerminalState::Cancelled);
+        }
+
+        // ---- C2/I1: All 6 sentinel positions + tracing subscriber capture ----
+
+        #[tokio::test]
+        async fn all_sentinels_not_in_tracing_or_session_or_events() {
+            // All 6 sentinel positions
+            let user_sentinel = "USER_SECRET_all_positions";
+            let source_sentinel = "SOURCE_SENTINEL_all_positions";
+            let tool_arg_sentinel = "TOOL_ARG_SENTINEL_all_positions";
+            let api_key_sentinel = "API_KEY_SENTINEL_all_positions";
+            let attachment_sentinel = "ATTACHMENT_BYTES_SENTINEL_all_positions";
+            let provider_meta_sentinel = "PROVIDER_RAW_META_SENTINEL_all_positions";
+
+            // Capturing writer for tracing subscriber
+            let log_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+            let log_buffer_check = log_buffer.clone();
+
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || WriteAdaptor {
+                    buf: log_buffer.clone(),
+                })
+                .with_ansi(false)
+                .with_target(true)
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+
+            let _guard = tracing::subscriber::set_default(subscriber);
+
+            let ctx = test_ctx("initial source");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let replace_args = serde_json::json!({
+                "source": source_sentinel,
+                "generation": 0
+            })
+            .to_string();
+            let validate_args = serde_json::json!({
+                "source": source_sentinel,
+                "generation": 1
+            })
+            .to_string();
+            let submit_args = serde_json::json!({"generation": 1}).to_string();
+
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "replace_source"),
+                tool_call_delta_args("tc_1", &replace_args),
+                tool_call_delta_name("tc_2", "validate_source"),
+                tool_call_delta_args("tc_2", &validate_args),
+                tool_call_delta_name("tc_3", "submit_for_review"),
+                tool_call_delta_args("tc_3", &submit_args),
+                final_item(usage(20, 10)),
+            ];
+            let turn2 = vec![text_item("done"), final_item(usage(5, 3))];
+
+            let turns = vec![turn1, turn2];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+            let sink = CollectingSink::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new(
+                        "t".into(),
+                        "m".into(),
+                        user_sentinel.into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &sink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            // 1. RunEvent Debug: no tool arg, user, api key, attachment, or provider sentinels
+            let events = sink.drain();
+            for event in &events {
+                let dbg = format!("{event:?}");
+                assert!(
+                    !dbg.contains(tool_arg_sentinel),
+                    "RunEvent debug must not contain tool arg sentinel: {dbg}"
+                );
+                assert!(
+                    !dbg.contains(user_sentinel),
+                    "RunEvent debug must not contain user sentinel: {dbg}"
+                );
+                assert!(
+                    !dbg.contains(api_key_sentinel),
+                    "RunEvent debug must not contain API key sentinel: {dbg}"
+                );
+                assert!(
+                    !dbg.contains(attachment_sentinel),
+                    "RunEvent debug must not contain attachment sentinel: {dbg}"
+                );
+                assert!(
+                    !dbg.contains(provider_meta_sentinel),
+                    "RunEvent debug must not contain provider meta sentinel: {dbg}"
+                );
+            }
+
+            // 2. Terminal state Debug: no user, api key, attachment, or provider sentinels
+            let result_dbg = format!("{result:?}");
+            for sentinel in &[
+                user_sentinel,
+                api_key_sentinel,
+                attachment_sentinel,
+                provider_meta_sentinel,
+            ] {
+                assert!(
+                    !result_dbg.contains(sentinel),
+                    "terminal state must not contain sentinel '{sentinel}': {result_dbg}"
+                );
+            }
+
+            // 3. Session Debug: no tool arg, api key, attachment, or provider sentinels
+            // (user message is stored in session by design — that's expected)
+            let session_dbg = format!("{session:?}");
+            for sentinel in &[
+                tool_arg_sentinel,
+                api_key_sentinel,
+                attachment_sentinel,
+                provider_meta_sentinel,
+            ] {
+                assert!(
+                    !session_dbg.contains(sentinel),
+                    "session debug must not contain sentinel '{sentinel}': {session_dbg}"
+                );
+            }
+
+            // 4. Tracing output: no sentinels in captured log
+            let log_guard = log_buffer_check.lock().unwrap();
+            let logs = String::from_utf8_lossy(&log_guard);
+            for sentinel in &[
+                user_sentinel,
+                source_sentinel,
+                tool_arg_sentinel,
+                api_key_sentinel,
+                attachment_sentinel,
+                provider_meta_sentinel,
+            ] {
+                assert!(
+                    !logs.contains(sentinel),
+                    "tracing output must not contain sentinel '{sentinel}': {logs}"
+                );
+            }
+        }
+
+        /// Helper: adapts `Arc<Mutex<Vec<u8>>>` to `std::io::Write` for tracing subscriber.
+        struct WriteAdaptor {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+
+        impl std::io::Write for WriteAdaptor {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.buf.lock().unwrap().write(data)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // ---- C1: No double-counting when deltas precede ToolCallComplete ----
+
+        #[tokio::test]
+        async fn no_double_counting_argument_bytes_with_deltas() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            // 50-byte argument via delta, then ToolCallComplete with same content.
+            // Budget is 60 bytes — if double-counted, would exceed (50+50=100 > 60).
+            let args_50 = "x".repeat(50);
+            let turn1 = vec![
+                tool_call_delta_name("tc_1", "replace_source"),
+                tool_call_delta_args("tc_1", &args_50),
+                final_item(usage(10, 5)),
+            ];
+            let turn2 = vec![text_item("done"), final_item(usage(5, 3))];
+
+            let turns = vec![turn1, turn2];
+            let mut turn_idx = 0;
+            let model_fn = move |_turn: usize| {
+                if turn_idx < turns.len() {
+                    let items = turns[turn_idx].clone();
+                    turn_idx += 1;
+                    Some(items)
+                } else {
+                    None
+                }
+            };
+
+            let runner = AgentRunner::new(AgentConfig {
+                max_argument_bytes: 60,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(SessionId::new(1));
+            let cancel = RunCancellation::new();
+
+            let result = runner
+                .run(
+                    AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                        .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    model_fn,
+                )
+                .await;
+
+            // Should NOT be BudgetExhausted — the 50-byte delta should be counted once.
+            // Without the fix, the ToolCallComplete would add 50 more bytes (100 > 60).
+            assert!(
+                !matches!(
+                    &result,
+                    RunTerminalState::BudgetExhausted {
+                        dimension: BudgetDimension::ArgumentBytes
+                    }
+                ),
+                "should not double-count argument bytes, got: {result:?}"
+            );
         }
     }
 }

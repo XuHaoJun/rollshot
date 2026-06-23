@@ -5941,6 +5941,7 @@ dependencies = [
  "futures-util",
  "rig-core",
  "rollshot-automation",
+ "rollshot-automation-rquickjs",
  "rollshot-edit-proposal",
  "rollshot-image-document",
  "schemars",
@@ -5950,6 +5951,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]
