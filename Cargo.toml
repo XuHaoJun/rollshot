@@ -64,3 +64,11 @@ wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Shrink target/ debug artifacts: keep line numbers for our backtraces,
+# drop full debug info from third-party deps (the bulk of the size).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
