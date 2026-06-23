@@ -101,7 +101,11 @@ fn build_completion_request(request: ModelRequest) -> Result<CompletionRequest, 
         chat_history.push(model_message_to_rig(msg));
     }
 
-    chat_history.push(Message::user(&request.prompt));
+    // The prompt is empty when the full conversation (including the latest tool
+    // result) is carried in `history`; only append it when present.
+    if !request.prompt.is_empty() {
+        chat_history.push(Message::user(&request.prompt));
+    }
 
     let chat_history = rig_core::OneOrMany::many(chat_history)
         .map_err(|e| ModelError::ProtocolFailure(e.to_string()))?;
@@ -134,6 +138,19 @@ fn model_message_to_rig(msg: &ModelMessage) -> Message {
     match msg {
         ModelMessage::User { content } => Message::user(content),
         ModelMessage::Assistant { content } => Message::assistant(content),
+        ModelMessage::AssistantToolCall {
+            id,
+            name,
+            arguments,
+        } => Message::Assistant {
+            id: None,
+            content: rig_core::OneOrMany::one(rig_core::message::AssistantContent::ToolCall(
+                rig_core::message::ToolCall::new(
+                    id.clone(),
+                    rig_core::message::ToolFunction::new(name.clone(), arguments.clone()),
+                ),
+            )),
+        },
         ModelMessage::ToolResult {
             tool_call_id,
             result,

@@ -28,6 +28,13 @@ pub enum ModelMessage {
     Assistant {
         content: String,
     },
+    /// An assistant turn that issued a tool call. Required in multi-turn history
+    /// so the provider can match a later tool result to its originating call.
+    AssistantToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
     ToolResult {
         tool_call_id: String,
         result: String,
@@ -193,6 +200,61 @@ fn rig_message_to_model_message(msg: &rig_core::completion::Message) -> ModelMes
                 .collect::<Vec<_>>()
                 .join("");
             ModelMessage::Assistant { content: text }
+        }
+    }
+}
+
+/// Convert a Rig completion message into BAC [`ModelMessage`]s, preserving
+/// assistant tool calls and tool results so multi-turn provider history stays
+/// faithful. One Rig message may yield several BAC messages (e.g. assistant
+/// text plus one or more tool calls). This is the only translation point from
+/// Rig message types into BAC's provider-neutral history.
+pub(crate) fn push_model_messages(
+    msg: &rig_core::completion::Message,
+    out: &mut Vec<ModelMessage>,
+) {
+    use rig_core::completion::Message;
+    use rig_core::message::{AssistantContent, ToolResultContent, UserContent};
+    match msg {
+        Message::System { content } => out.push(ModelMessage::User {
+            content: format!("[system] {content}"),
+        }),
+        Message::User { content } => {
+            for c in content.iter() {
+                match c {
+                    UserContent::Text(t) => out.push(ModelMessage::User {
+                        content: t.text.clone(),
+                    }),
+                    UserContent::ToolResult(tr) => {
+                        let mut result = String::new();
+                        for rc in tr.content.iter() {
+                            if let ToolResultContent::Text(t) = rc {
+                                result.push_str(&t.text);
+                            }
+                        }
+                        out.push(ModelMessage::ToolResult {
+                            tool_call_id: tr.id.clone(),
+                            result,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Message::Assistant { content, .. } => {
+            for c in content.iter() {
+                match c {
+                    AssistantContent::Text(t) => out.push(ModelMessage::Assistant {
+                        content: t.text.clone(),
+                    }),
+                    AssistantContent::ToolCall(tc) => out.push(ModelMessage::AssistantToolCall {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                    }),
+                    _ => {}
+                }
+            }
         }
     }
 }

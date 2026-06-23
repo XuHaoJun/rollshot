@@ -100,6 +100,19 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name()).collect()
     }
 
+    /// Provider-neutral tool definitions (name + JSON input schema) for the
+    /// model request. Descriptions are left to the caller/product layer.
+    pub fn tool_definitions(&self) -> Vec<crate::model::ToolDefinition> {
+        self.tools
+            .iter()
+            .map(|t| crate::model::ToolDefinition {
+                name: t.name().to_string(),
+                description: String::new(),
+                parameters: t.json_schema(),
+            })
+            .collect()
+    }
+
     async fn execute_single(
         &self,
         index: usize,
@@ -233,6 +246,7 @@ pub struct DryRunArgs {
 pub struct DryRunResult {
     pub candidate_count: u32,
     pub affected_area: f32,
+    pub capability_calls: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -292,19 +306,26 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
+    /// Construct a tool context bound to the run's single cancellation source.
+    ///
+    /// The dry-run executor observes `cancellation`'s automation flag, so the
+    /// same `RunCancellation` passed to [`AgentRunner::run`](crate::driver::AgentRunner)
+    /// must be passed here. There is no second, independent cancellation
+    /// primitive (§10 / D2).
     pub fn new(
         session_id: SessionId,
         initial_source: String,
         validation_limits: rollshot_automation::ValidationLimits,
         execution_policy: rollshot_automation::ExecutionPolicy,
         image_dims: (u32, u32),
+        cancellation: &RunCancellation,
     ) -> Self {
         Self {
             draft: Mutex::new(DraftState::new(session_id)),
             source: Mutex::new(initial_source),
             validation_limits,
             execution_policy,
-            automation_cancellation: rollshot_automation::CancellationFlag::new(),
+            automation_cancellation: cancellation.automation_flag().clone(),
             session_id,
             image_dims,
             pending_ready_for_review: Mutex::new(None),
@@ -312,10 +333,6 @@ impl ToolContext {
             last_dry_run_proposal: Mutex::new(None),
             last_dry_run_metrics: Mutex::new(None),
         }
-    }
-
-    pub fn set_cancellation(&mut self, flag: rollshot_automation::CancellationFlag) {
-        self.automation_cancellation = flag;
     }
 }
 
@@ -361,6 +378,13 @@ impl Tool for ReplaceSourceTool {
             drop(draft);
 
             *self.ctx.source.lock().unwrap() = args.source;
+
+            // §4.3: replacement invalidates every validation, dry-run, proposal,
+            // and submission result from older generations.
+            *self.ctx.last_validated.lock().unwrap() = None;
+            *self.ctx.last_dry_run_proposal.lock().unwrap() = None;
+            *self.ctx.last_dry_run_metrics.lock().unwrap() = None;
+            *self.ctx.pending_ready_for_review.lock().unwrap() = None;
 
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(ReplaceSourceResult {
@@ -552,6 +576,7 @@ impl Tool for DryRunTool {
                 .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
             drop(draft);
 
+            let capability_calls = metrics.capability_calls;
             *self.ctx.last_dry_run_proposal.lock().unwrap() = Some(proposal.clone());
             *self.ctx.last_dry_run_metrics.lock().unwrap() = Some(metrics);
 
@@ -559,6 +584,7 @@ impl Tool for DryRunTool {
                 result_json: serde_json::to_value(DryRunResult {
                     candidate_count: proposal.candidates.len() as u32,
                     affected_area,
+                    capability_calls,
                 })
                 .unwrap_or_default(),
             })
@@ -599,16 +625,21 @@ impl Tool for SubmitForReviewTool {
                 )));
             }
 
-            // Require prior validation or dry_run evidence at this generation.
+            // Require BOTH successful validation AND dry-run evidence at this
+            // generation (§4.5/§8.4 — submit requires complete current-generation
+            // evidence). Either alone is a recoverable error so the model can run
+            // the missing step and resubmit.
             let current_gen = draft.generation();
-            let has_evidence = draft.evidence().iter().any(|e| {
-                e.source_generation == current_gen
-                    && matches!(e.kind, EvidenceKind::Validation | EvidenceKind::DryRun)
+            let has_validation = draft.evidence().iter().any(|e| {
+                e.source_generation == current_gen && matches!(e.kind, EvidenceKind::Validation)
             });
-            if !has_evidence {
-                return Err(ToolError::ArgumentDecode(
-                    "no validation or dry_run evidence at this generation".into(),
-                ));
+            let has_dry_run = draft.evidence().iter().any(|e| {
+                e.source_generation == current_gen && matches!(e.kind, EvidenceKind::DryRun)
+            });
+            if !has_validation || !has_dry_run {
+                return Err(ToolError::ArgumentDecode(format!(
+                    "incomplete evidence at generation {current_gen}: validation={has_validation}, dry_run={has_dry_run}"
+                )));
             }
             drop(draft);
 
@@ -1141,6 +1172,7 @@ pub(crate) mod tests {
             rollshot_automation::ValidationLimits::default(),
             policy,
             (100, 100),
+            &RunCancellation::new(),
         ))
     }
 
@@ -1206,6 +1238,34 @@ pub(crate) mod tests {
         }
     }
 
+    // ---- Cancellation wiring (D2/§10) ----
+
+    #[test]
+    fn tool_context_shares_run_cancellation_flag() {
+        // The dry-run executor must observe the SAME flag that the run's
+        // RunCancellation::cancel() sets — not a second, independent primitive.
+        let cancel = RunCancellation::new();
+        let policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(5),
+            4 * 1024 * 1024,
+            1024 * 1024,
+        );
+        let ctx = ToolContext::new(
+            SessionId::new(1),
+            "src".into(),
+            rollshot_automation::ValidationLimits::default(),
+            policy,
+            (100, 100),
+            &cancel,
+        );
+        assert!(!ctx.automation_cancellation.is_cancelled());
+        cancel.cancel();
+        assert!(
+            ctx.automation_cancellation.is_cancelled(),
+            "dry-run must observe the run's cancellation flag (single source, D2/§10)"
+        );
+    }
+
     // ---- Authoring: replace_source ----
 
     #[tokio::test]
@@ -1225,6 +1285,49 @@ pub(crate) mod tests {
 
         assert_eq!(*ctx.source.lock().unwrap(), "new source");
         assert_eq!(ctx.draft.lock().unwrap().generation(), 1);
+    }
+
+    #[tokio::test]
+    async fn replace_source_invalidates_prior_validation_and_dry_run_caches() {
+        // §4.3: replacing the source invalidates every prior validation, dry-run,
+        // and proposal result — including the cached payloads the submit handoff
+        // reads — not just the evidence records.
+        let ctx = test_context(valid_js_source());
+        let executor = Arc::new(FakeExecutor::with_valid_proposal());
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+
+        // Validate + dry-run at generation 0 to populate the caches.
+        ValidateSourceTool::new(ctx.clone())
+            .call(&serde_json::json!({"source": valid_js_source(), "generation": 0}))
+            .await
+            .unwrap();
+        DryRunTool::new(ctx.clone(), executor, host)
+            .call(&serde_json::json!({"source": valid_js_source(), "generation": 0}))
+            .await
+            .unwrap();
+        assert!(ctx.last_validated.lock().unwrap().is_some());
+        assert!(ctx.last_dry_run_proposal.lock().unwrap().is_some());
+
+        // Replace the source — caches from the old generation must be cleared.
+        ReplaceSourceTool::new(ctx.clone())
+            .call(&serde_json::json!({"source": "new source", "generation": 0}))
+            .await
+            .unwrap();
+
+        assert!(
+            ctx.last_validated.lock().unwrap().is_none(),
+            "replace must clear cached validation"
+        );
+        assert!(
+            ctx.last_dry_run_proposal.lock().unwrap().is_none(),
+            "replace must clear cached dry-run proposal"
+        );
+        assert!(
+            ctx.last_dry_run_metrics.lock().unwrap().is_none(),
+            "replace must clear cached dry-run metrics"
+        );
     }
 
     #[tokio::test]
@@ -1330,14 +1433,19 @@ pub(crate) mod tests {
     // ---- Authoring: submit_for_review ----
 
     #[tokio::test]
-    async fn submit_for_review_succeeds_with_prior_evidence() {
+    async fn submit_for_review_succeeds_with_validation_and_dry_run_evidence() {
         let ctx = test_context(valid_js_source());
-        // Record validation evidence at generation 0.
-        ctx.draft
-            .lock()
-            .unwrap()
-            .record_evidence(EvidenceKind::Validation, 0, tokio::time::Instant::now())
-            .unwrap();
+        // Record BOTH validation and dry-run evidence at generation 0, per spec
+        // §8.4 (submit requires complete current-generation evidence).
+        {
+            let mut draft = ctx.draft.lock().unwrap();
+            draft
+                .record_evidence(EvidenceKind::Validation, 0, tokio::time::Instant::now())
+                .unwrap();
+            draft
+                .record_evidence(EvidenceKind::DryRun, 0, tokio::time::Instant::now())
+                .unwrap();
+        }
 
         let tool = SubmitForReviewTool::new(ctx);
         let args = serde_json::json!({"generation": 0});
@@ -1349,6 +1457,40 @@ pub(crate) mod tests {
             }
             other => panic!("expected success, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_fails_with_only_validation_evidence() {
+        // Validation alone is not enough — a successful dry-run is also required
+        // (§4.5/§8.4). Without it, submit must return a recoverable error so the
+        // model can run dry_run and resubmit, rather than producing a bogus
+        // ReadyForReview.
+        let ctx = test_context(valid_js_source());
+        ctx.draft
+            .lock()
+            .unwrap()
+            .record_evidence(EvidenceKind::Validation, 0, tokio::time::Instant::now())
+            .unwrap();
+
+        let tool = SubmitForReviewTool::new(ctx);
+        let args = serde_json::json!({"generation": 0});
+        let err = tool.call(&args).await.unwrap_err();
+        assert!(matches!(err, ToolError::ArgumentDecode(_)));
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_fails_with_only_dry_run_evidence() {
+        let ctx = test_context(valid_js_source());
+        ctx.draft
+            .lock()
+            .unwrap()
+            .record_evidence(EvidenceKind::DryRun, 0, tokio::time::Instant::now())
+            .unwrap();
+
+        let tool = SubmitForReviewTool::new(ctx);
+        let args = serde_json::json!({"generation": 0});
+        let err = tool.call(&args).await.unwrap_err();
+        assert!(matches!(err, ToolError::ArgumentDecode(_)));
     }
 
     #[tokio::test]

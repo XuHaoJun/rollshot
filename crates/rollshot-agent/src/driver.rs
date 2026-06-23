@@ -39,12 +39,17 @@ use std::collections::{BTreeSet, HashSet};
 use rig_core::agent::run::StreamedTurnAssembler;
 use rig_core::completion::Usage;
 use rig_core::message::{AssistantContent, ToolCall as RigToolCall, ToolFunction};
-use rig_core::streaming::StreamedAssistantContent;
-use rig_core::test_utils::MockResponse;
 use rig_core::OneOrMany;
+// Rig stream types are used only by the crate-internal scripted `run` harness.
+#[cfg(test)]
+use rig_core::streaming::StreamedAssistantContent;
+#[cfg(test)]
+use rig_core::test_utils::MockResponse;
 
 use crate::domain::{AgentSession, AuthorizedModelInput, SessionId};
-use crate::model::{drive_streamed_turn, emit_tool_call_completions, ModelStreamEvent};
+#[cfg(test)]
+use crate::model::drive_streamed_turn;
+use crate::model::{emit_tool_call_completions, ModelStreamEvent};
 use crate::provider::{ProviderAdapter, StreamBounds};
 use crate::runtime::{
     BudgetDimension, BudgetError, BudgetTracker, RunBudget, RunCancellation, RunEvent,
@@ -165,8 +170,15 @@ impl AgentRunner {
     ///
     /// `model_turn_fn` is called with the turn index (1-based) and must return
     /// `Some(items)` for that turn, or `None` to end the model's contribution.
+    ///
+    /// This scripted entry point is crate-internal: its `model_turn_fn` uses Rig
+    /// stream types (`StreamedAssistantContent`/`MockResponse`), which must not
+    /// appear in the public API (§2.1, success criterion #10). Production callers
+    /// use [`AgentRunner::run_with_provider`]. It drives the acceptance/unit
+    /// tests for the bounded author loop.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn run(
+    pub(crate) async fn run(
         &self,
         input: AuthorizedModelInput,
         session: &mut AgentSession,
@@ -322,67 +334,19 @@ impl AgentRunner {
                     }
 
                     if has_submit_evidence {
-                        let mut ready = tool_ctx
-                            .pending_ready_for_review
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .unwrap_or_else(|| ReadyForReview {
-                                automation: DraftAutomation {
-                                    source: assistant_text.clone(),
-                                    validated: rollshot_automation::ValidatedAutomation {
-                                        source: assistant_text.clone(),
-                                        validation_limits: tool_ctx.validation_limits.clone(),
-                                        language_schema_version:
-                                            rollshot_automation::LANGUAGE_SCHEMA_V1,
-                                        ir_schema_version: rollshot_automation::IR_SCHEMA_V1,
-                                        capability_api_version:
-                                            rollshot_automation::CAPABILITY_API_V1,
-                                        output_schema_version:
-                                            rollshot_automation::OUTPUT_SCHEMA_V1,
-                                        workflow_ir: rollshot_automation::WorkflowIr::empty(),
-                                        validation_summary:
-                                            rollshot_automation::ValidationSummary {
-                                                source_bytes: 0,
-                                                ast_nodes: 0,
-                                                helper_count: 0,
-                                                capability_calls: 0,
-                                                max_output_candidates: 0,
-                                            },
-                                    },
-                                    validation_summary: rollshot_automation::ValidationSummary {
-                                        source_bytes: assistant_text.len(),
-                                        ast_nodes: 0,
-                                        helper_count: 0,
-                                        capability_calls: 0,
-                                        max_output_candidates: 0,
-                                    },
-                                    dry_run: DryRunEvidence {
-                                        candidate_count: 0,
-                                        affected_area: 0.0,
-                                    },
-                                },
-                                proposal: rollshot_edit_proposal::EditProposal {
-                                    id: rollshot_edit_proposal::ProposalId(0),
-                                    base_document_state_id: 0,
-                                    candidates: Vec::new(),
-                                    confidence_summary:
-                                        rollshot_edit_proposal::ConfidenceSummary::from_confidences(
-                                            &[],
-                                        ),
-                                    rationale_summary: None,
-                                    provenance: rollshot_edit_proposal::Provenance {
-                                        source: rollshot_edit_proposal::ProvenanceSource::Agent {
-                                            run_id: tool_ctx.session_id.get(),
-                                        },
-                                    },
-                                },
-                                budget_usage: tracker.used().clone(),
-                                session_id: tool_ctx.session_id,
-                                assistant_text: assistant_text.clone(),
-                                generation: tool_ctx.draft.lock().unwrap().generation(),
-                                usage: tracker.used().clone(),
-                            });
+                        // A successful submit must have produced a complete review
+                        // handoff (validated automation + dry-run proposal). If it
+                        // did not, the evidence was incomplete — never fabricate a
+                        // ReadyForReview (§4.5).
+                        let pending = tool_ctx.pending_ready_for_review.lock().unwrap().take();
+                        let Some(mut ready) = pending else {
+                            tracing::debug!(
+                                target: "rollshot::agent::driver",
+                                session_id = tool_ctx.session_id.get(),
+                                "submit reported success without a complete review handoff"
+                            );
+                            return RunTerminalState::RuntimeFailure;
+                        };
                         // Fill in fields the tool cannot access (tracker, assistant text)
                         ready.usage = tracker.used().clone();
                         ready.budget_usage = tracker.used().clone();
@@ -434,6 +398,7 @@ impl AgentRunner {
             .into_iter()
             .map(String::from)
             .collect();
+        let tool_definitions = tool_registry.tool_definitions();
 
         tracing::debug!(
             target: "rollshot::agent::driver",
@@ -464,11 +429,16 @@ impl AgentRunner {
             };
 
             match step {
-                rig_core::agent::run::AgentRunStep::CallModel { .. } => {
+                rig_core::agent::run::AgentRunStep::CallModel {
+                    prompt, history, ..
+                } => {
                     match self
                         .run_model_turn_with_provider(
                             &mut rig_run,
                             &tool_names,
+                            &tool_definitions,
+                            prompt,
+                            history,
                             provider,
                             event_sink,
                             &mut tracker,
@@ -476,7 +446,6 @@ impl AgentRunner {
                             self.config.max_assistant_bytes,
                             cancellation,
                             &input,
-                            tool_ctx,
                         )
                         .await
                     {
@@ -554,67 +523,19 @@ impl AgentRunner {
                     }
 
                     if has_submit_evidence {
-                        let mut ready = tool_ctx
-                            .pending_ready_for_review
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .unwrap_or_else(|| ReadyForReview {
-                                automation: DraftAutomation {
-                                    source: assistant_text.clone(),
-                                    validated: rollshot_automation::ValidatedAutomation {
-                                        source: assistant_text.clone(),
-                                        validation_limits: tool_ctx.validation_limits.clone(),
-                                        language_schema_version:
-                                            rollshot_automation::LANGUAGE_SCHEMA_V1,
-                                        ir_schema_version: rollshot_automation::IR_SCHEMA_V1,
-                                        capability_api_version:
-                                            rollshot_automation::CAPABILITY_API_V1,
-                                        output_schema_version:
-                                            rollshot_automation::OUTPUT_SCHEMA_V1,
-                                        workflow_ir: rollshot_automation::WorkflowIr::empty(),
-                                        validation_summary:
-                                            rollshot_automation::ValidationSummary {
-                                                source_bytes: 0,
-                                                ast_nodes: 0,
-                                                helper_count: 0,
-                                                capability_calls: 0,
-                                                max_output_candidates: 0,
-                                            },
-                                    },
-                                    validation_summary: rollshot_automation::ValidationSummary {
-                                        source_bytes: assistant_text.len(),
-                                        ast_nodes: 0,
-                                        helper_count: 0,
-                                        capability_calls: 0,
-                                        max_output_candidates: 0,
-                                    },
-                                    dry_run: DryRunEvidence {
-                                        candidate_count: 0,
-                                        affected_area: 0.0,
-                                    },
-                                },
-                                proposal: rollshot_edit_proposal::EditProposal {
-                                    id: rollshot_edit_proposal::ProposalId(0),
-                                    base_document_state_id: 0,
-                                    candidates: Vec::new(),
-                                    confidence_summary:
-                                        rollshot_edit_proposal::ConfidenceSummary::from_confidences(
-                                            &[],
-                                        ),
-                                    rationale_summary: None,
-                                    provenance: rollshot_edit_proposal::Provenance {
-                                        source: rollshot_edit_proposal::ProvenanceSource::Agent {
-                                            run_id: tool_ctx.session_id.get(),
-                                        },
-                                    },
-                                },
-                                budget_usage: tracker.used().clone(),
-                                session_id: tool_ctx.session_id,
-                                assistant_text: assistant_text.clone(),
-                                generation: tool_ctx.draft.lock().unwrap().generation(),
-                                usage: tracker.used().clone(),
-                            });
+                        // A successful submit must have produced a complete review
+                        // handoff (validated automation + dry-run proposal). If it
+                        // did not, the evidence was incomplete — never fabricate a
+                        // ReadyForReview (§4.5).
+                        let pending = tool_ctx.pending_ready_for_review.lock().unwrap().take();
+                        let Some(mut ready) = pending else {
+                            tracing::debug!(
+                                target: "rollshot::agent::driver",
+                                session_id = tool_ctx.session_id.get(),
+                                "submit reported success without a complete review handoff"
+                            );
+                            return RunTerminalState::RuntimeFailure;
+                        };
                         // Fill in fields the tool cannot access (tracker, assistant text)
                         ready.usage = tracker.used().clone();
                         ready.budget_usage = tracker.used().clone();
@@ -634,6 +555,7 @@ impl AgentRunner {
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn run_model_turn(
         &self,
@@ -812,6 +734,7 @@ impl AgentRunner {
 
         // Charge usage
         let turn_usage = UsageSnapshot {
+            model_calls: 1,
             input_tokens: turn_input_tokens,
             output_tokens: turn_output_tokens,
             ..Default::default()
@@ -841,6 +764,9 @@ impl AgentRunner {
         &self,
         rig_run: &mut rig_core::agent::run::AgentRun,
         tool_names: &BTreeSet<String>,
+        tool_definitions: &[crate::model::ToolDefinition],
+        prompt: rig_core::completion::Message,
+        history: Vec<rig_core::completion::Message>,
         provider: &dyn ProviderAdapter,
         event_sink: &dyn RunEventSink,
         tracker: &mut BudgetTracker,
@@ -848,7 +774,6 @@ impl AgentRunner {
         max_assistant_bytes: usize,
         cancellation: &RunCancellation,
         input: &AuthorizedModelInput,
-        _tool_ctx: &ToolContext,
     ) -> Result<(), DriverError> {
         if cancellation.is_cancelled() {
             return Err(DriverError::Cancelled);
@@ -857,25 +782,32 @@ impl AgentRunner {
         tracker.check_wall_time(tokio::time::Instant::now())?;
 
         let turn_index = rig_run.turn();
-        let deadline =
-            tokio::time::Instant::now() + tracker.remaining_wall_time(tokio::time::Instant::now());
+        // Cap the per-stream deadline so an unbounded wall-time budget
+        // (Duration::MAX) cannot overflow the instant arithmetic. The tracker
+        // still enforces the real wall-time budget between stream items.
+        let now = tokio::time::Instant::now();
+        let remaining = tracker
+            .remaining_wall_time(now)
+            .min(std::time::Duration::from_secs(3600));
+        let deadline = now + remaining;
         let bounds = StreamBounds::new(cancellation.clone(), deadline);
 
-        let tool_defs: Vec<crate::model::ToolDefinition> = tool_names
-            .iter()
-            .map(|name| crate::model::ToolDefinition {
-                name: name.clone(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            })
-            .collect();
+        // Faithfully reconstruct the conversation Rig has accumulated (prior
+        // user/assistant turns, the assistant's tool calls, and the latest tool
+        // result) so the model sees its own tool results across turns. The whole
+        // conversation is carried in `history`; `prompt` is left empty.
+        let mut history_msgs: Vec<crate::model::ModelMessage> = Vec::new();
+        for m in &history {
+            crate::model::push_model_messages(m, &mut history_msgs);
+        }
+        crate::model::push_model_messages(&prompt, &mut history_msgs);
 
         let request = crate::model::ModelRequest {
             model: input.manifest.model.clone(),
-            prompt: input.user_message.clone(),
-            history: Vec::new(),
+            prompt: String::new(),
+            history: history_msgs,
             turn: turn_index,
-            tool_definitions: tool_defs,
+            tool_definitions: tool_definitions.to_vec(),
             system_prompt: None,
             max_tokens: None,
         };
@@ -995,6 +927,7 @@ impl AgentRunner {
         }
 
         let turn_usage = UsageSnapshot {
+            model_calls: 1,
             input_tokens: turn_input_tokens,
             output_tokens: turn_output_tokens,
             ..Default::default()
@@ -1068,6 +1001,9 @@ impl AgentRunner {
         let mut rig_results = Vec::new();
         let mut terminal_error: Option<String> = None;
         let mut total_result_bytes: usize = 0;
+        // Usage that only becomes known after a tool runs (dry-run candidate
+        // count, affected area, and capability calls). Charged after the batch.
+        let mut post_usage = UsageSnapshot::default();
 
         for (i, result) in results.into_iter().enumerate() {
             let call_id = pending_calls[i].tool_call.id.clone();
@@ -1094,6 +1030,27 @@ impl AgentRunner {
                     }
                     if tool_name == "request_user_input" {
                         *needs_user_input = true;
+                    }
+                    if tool_name == "dry_run" {
+                        if let Some(cc) =
+                            result_json.get("candidate_count").and_then(|v| v.as_u64())
+                        {
+                            post_usage.candidate_count =
+                                post_usage.candidate_count.saturating_add(cc as u32);
+                        }
+                        if let Some(area) =
+                            result_json.get("affected_area").and_then(|v| v.as_f64())
+                        {
+                            post_usage.affected_area = post_usage
+                                .affected_area
+                                .saturating_add(area.max(0.0).ceil() as u64);
+                        }
+                        if let Some(caps) =
+                            result_json.get("capability_calls").and_then(|v| v.as_u64())
+                        {
+                            post_usage.capability_calls =
+                                post_usage.capability_calls.saturating_add(caps as u32);
+                        }
                     }
                     rig_results.push(rig_core::message::UserContent::tool_result(
                         call_id,
@@ -1138,6 +1095,10 @@ impl AgentRunner {
         if let Some(msg) = terminal_error {
             return Err(DriverError::AgentProtocolFailure(msg));
         }
+
+        // Charge usage that only became known once the tools ran (dry-run
+        // candidate count, affected area, capability calls).
+        tracker.charge(post_usage)?;
 
         if *needs_user_input {
             rig_run
@@ -1228,6 +1189,7 @@ pub(crate) mod tests {
             rollshot_automation::ValidationLimits::default(),
             policy,
             (100, 100),
+            &RunCancellation::new(),
         ))
     }
 
@@ -1254,6 +1216,7 @@ pub(crate) mod tests {
 
     struct FakeExecutor {
         output_json: String,
+        capability_calls: u32,
     }
 
     impl FakeExecutor {
@@ -1268,6 +1231,7 @@ pub(crate) mod tests {
             });
             Self {
                 output_json: serde_json::to_string(&output).unwrap(),
+                capability_calls: 0,
             }
         }
 
@@ -1282,7 +1246,14 @@ pub(crate) mod tests {
             });
             Self {
                 output_json: serde_json::to_string(&output).unwrap(),
+                capability_calls: 0,
             }
+        }
+
+        fn with_capability_calls(capability_calls: u32) -> Self {
+            let mut e = Self::with_valid_proposal();
+            e.capability_calls = capability_calls;
+            e
         }
     }
 
@@ -1301,7 +1272,7 @@ pub(crate) mod tests {
                 output_json: self.output_json.clone(),
                 metrics: rollshot_automation::ExecutionMetrics {
                     duration: std::time::Duration::from_millis(10),
-                    capability_calls: 0,
+                    capability_calls: self.capability_calls,
                     output_bytes: self.output_json.len(),
                     interrupted: false,
                 },
@@ -1756,6 +1727,265 @@ pub(crate) mod tests {
         ));
     }
 
+    // ---- Terminal: model-call budget ----
+
+    #[tokio::test]
+    async fn terminal_model_calls_budget() {
+        let ctx = test_ctx("src");
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        // Turn 1 makes a tool call (forcing a second model turn); the second
+        // model turn must exceed a model_calls budget of 1.
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "inspect_context_summary"),
+            final_item(usage(5, 3)),
+        ];
+        let turn2 = vec![text_item("more"), final_item(usage(5, 3))];
+        let turns = vec![turn1, turn2];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        let budget = RunBudget {
+            model_calls: 1,
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::ModelCalls
+            }
+        ));
+    }
+
+    // ---- Terminal: candidate-count budget ----
+
+    #[tokio::test]
+    async fn terminal_candidate_count_budget() {
+        let ctx = test_ctx(valid_js());
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx); // dry-run yields 1 candidate
+
+        let js = valid_js();
+        let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
+        let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+        let dry_run_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "replace_source"),
+            tool_call_delta_args("tc_1", &replace_args),
+            tool_call_delta_name("tc_2", "validate_source"),
+            tool_call_delta_args("tc_2", &validate_args),
+            tool_call_delta_name("tc_3", "dry_run"),
+            tool_call_delta_args("tc_3", &dry_run_args),
+            final_item(usage(10, 5)),
+        ];
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        let budget = RunBudget {
+            candidate_count: 0,
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::CandidateCount
+            }
+        ));
+    }
+
+    // ---- Terminal: affected-area budget ----
+
+    #[tokio::test]
+    async fn terminal_affected_area_budget() {
+        let ctx = test_ctx(valid_js());
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx); // dry-run yields a 20x20 = 400 area redaction
+
+        let js = valid_js();
+        let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
+        let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+        let dry_run_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "replace_source"),
+            tool_call_delta_args("tc_1", &replace_args),
+            tool_call_delta_name("tc_2", "validate_source"),
+            tool_call_delta_args("tc_2", &validate_args),
+            tool_call_delta_name("tc_3", "dry_run"),
+            tool_call_delta_args("tc_3", &dry_run_args),
+            final_item(usage(10, 5)),
+        ];
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        let budget = RunBudget {
+            affected_area: 100, // 400 > 100
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::AffectedArea
+            }
+        ));
+    }
+
+    // ---- Terminal: capability-calls budget ----
+
+    #[tokio::test]
+    async fn terminal_capability_calls_budget() {
+        let ctx = test_ctx(valid_js());
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        // dry-run executor reports 5 capability calls.
+        let executor = Arc::new(FakeExecutor::with_capability_calls(5));
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
+            .unwrap();
+        reg.register(Arc::new(ValidateSourceTool::new(ctx.clone())))
+            .unwrap();
+        reg.register(Arc::new(DryRunTool::new(ctx.clone(), executor, host)))
+            .unwrap();
+
+        let js = valid_js();
+        let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
+        let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+        let dry_run_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "replace_source"),
+            tool_call_delta_args("tc_1", &replace_args),
+            tool_call_delta_name("tc_2", "validate_source"),
+            tool_call_delta_args("tc_2", &validate_args),
+            tool_call_delta_name("tc_3", "dry_run"),
+            tool_call_delta_args("tc_3", &dry_run_args),
+            final_item(usage(10, 5)),
+        ];
+        let turns = vec![turn1];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+        let budget = RunBudget {
+            capability_calls: 2, // 5 > 2
+            ..RunBudget::unlimited()
+        };
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                budget,
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            RunTerminalState::BudgetExhausted {
+                dimension: BudgetDimension::CapabilityCalls
+            }
+        ));
+    }
+
     // ---- Terminal: unknown tool ----
 
     #[tokio::test]
@@ -1920,6 +2150,76 @@ pub(crate) mod tests {
         assert_eq!(result, RunTerminalState::RuntimeFailure);
     }
 
+    // ---- Terminal: submit without dry-run must not fabricate ReadyForReview ----
+
+    #[tokio::test]
+    async fn submit_without_dry_run_does_not_become_ready_for_review() {
+        // The model validates then submits, skipping dry_run. Per §4.5/§8.4 the
+        // submission has incomplete evidence, so the run must NOT terminate as
+        // ReadyForReview (the driver previously fabricated an empty automation
+        // and proposal here).
+        let ctx = test_ctx(valid_js());
+        let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+        register_all_tools(&mut reg, &ctx);
+
+        let js = valid_js();
+        let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
+        let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+        let submit_args = serde_json::json!({"generation": 1}).to_string();
+
+        // Turn 1: replace + validate + submit (no dry_run).
+        let turn1 = vec![
+            tool_call_delta_name("tc_1", "replace_source"),
+            tool_call_delta_args("tc_1", &replace_args),
+            tool_call_delta_name("tc_2", "validate_source"),
+            tool_call_delta_args("tc_2", &validate_args),
+            tool_call_delta_name("tc_3", "submit_for_review"),
+            tool_call_delta_args("tc_3", &submit_args),
+            final_item(usage(20, 10)),
+        ];
+        // Turn 2: model gives up.
+        let turn2 = vec![text_item("giving up"), final_item(usage(5, 3))];
+
+        let turns = vec![turn1, turn2];
+        let mut turn_idx = 0;
+        let model_fn = move |_turn: usize| {
+            if turn_idx < turns.len() {
+                let items = turns[turn_idx].clone();
+                turn_idx += 1;
+                Some(items)
+            } else {
+                None
+            }
+        };
+
+        let runner = AgentRunner::new(AgentConfig::default());
+        let mut session = AgentSession::new(SessionId::new(1));
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run(
+                AuthorizedModelInput::new("t".into(), "m".into(), "q".into(), vec![], vec![])
+                    .unwrap(),
+                &mut session,
+                &reg,
+                RunBudget::unlimited(),
+                &cancel,
+                &NullEventSink,
+                &ctx,
+                model_fn,
+            )
+            .await;
+
+        assert!(
+            !matches!(result, RunTerminalState::ReadyForReview(_)),
+            "submit without dry-run must not become ReadyForReview, got {result:?}"
+        );
+        assert!(
+            matches!(result, RunTerminalState::AgentProtocolFailure { .. }),
+            "expected AgentProtocolFailure, got {result:?}"
+        );
+    }
+
     // ---- Terminal: model completion without submission ----
 
     #[tokio::test]
@@ -2012,6 +2312,7 @@ pub(crate) mod tests {
         let js = valid_js();
         let replace_args = serde_json::json!({"source": js, "generation": 0}).to_string();
         let validate_args = serde_json::json!({"source": js, "generation": 1}).to_string();
+        let dry_run_args = serde_json::json!({"source": js, "generation": 1}).to_string();
         let submit_args = serde_json::json!({"generation": 1}).to_string();
 
         let turn1 = vec![
@@ -2019,6 +2320,8 @@ pub(crate) mod tests {
             tool_call_delta_args("tc_1", &replace_args),
             tool_call_delta_name("tc_2", "validate_source"),
             tool_call_delta_args("tc_2", &validate_args),
+            tool_call_delta_name("tc_2b", "dry_run"),
+            tool_call_delta_args("tc_2b", &dry_run_args),
             final_item(usage(10, 5)),
         ];
 
@@ -2399,6 +2702,173 @@ pub(crate) mod tests {
                 dimension: BudgetDimension::InputTokens
             }
         ));
+    }
+
+    // ---- Real-provider path: history + tool schema threading ----
+
+    mod provider_path {
+        use super::*;
+        use crate::model::{
+            ModelCompletion, ModelMessage, ModelRequest, ModelStreamEvent, StopReason,
+        };
+        use crate::provider::{ProviderAdapter, StreamBounds};
+        use std::collections::VecDeque;
+        use std::pin::Pin;
+
+        /// Records every `ModelRequest` it receives and replays a scripted set of
+        /// stream events per call.
+        struct RecordingProvider {
+            requests: Mutex<Vec<ModelRequest>>,
+            scripts: Mutex<VecDeque<Vec<ModelStreamEvent>>>,
+        }
+
+        impl ProviderAdapter for RecordingProvider {
+            fn stream(
+                &self,
+                request: ModelRequest,
+                _bounds: StreamBounds,
+            ) -> Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                Pin<
+                                    Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    ModelStreamEvent,
+                                                    crate::model::ModelError,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >,
+                                crate::model::ModelError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                self.requests.lock().unwrap().push(request);
+                let events = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+                Box::pin(async move {
+                    let s = futures_util::stream::iter(events.into_iter().map(Ok));
+                    Ok(Box::pin(s)
+                        as Pin<
+                            Box<
+                                dyn futures_util::Stream<
+                                        Item = Result<ModelStreamEvent, crate::model::ModelError>,
+                                    > + Send,
+                            >,
+                        >)
+                })
+            }
+        }
+
+        fn completion(stop: StopReason) -> ModelStreamEvent {
+            ModelStreamEvent::Completed(ModelCompletion {
+                usage: crate::model::ModelUsage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 8,
+                },
+                stop_reason: stop,
+            })
+        }
+
+        #[tokio::test]
+        async fn second_turn_request_carries_history_and_tool_schemas() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            reg.register(Arc::new(GetContextSummaryTool::new(ctx.clone())))
+                .unwrap();
+            reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
+                .unwrap();
+
+            // Turn 1: a tool call. Turn 2: plain text.
+            let provider = RecordingProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(vec![
+                    vec![
+                        ModelStreamEvent::ToolCallStart {
+                            id: "tc_1".into(),
+                            name: "inspect_context_summary".into(),
+                        },
+                        completion(StopReason::ToolUse),
+                    ],
+                    vec![
+                        ModelStreamEvent::TextDelta("done".into()),
+                        completion(StopReason::EndTurn),
+                    ],
+                ])),
+            };
+
+            let runner = AgentRunner::new(AgentConfig::default());
+            let mut session = AgentSession::new(SessionId::new(7));
+            let cancel = RunCancellation::new();
+
+            let _result = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "please inspect".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                )
+                .await;
+
+            let requests = provider.requests.lock().unwrap();
+            assert!(
+                requests.len() >= 2,
+                "expected at least 2 model requests, got {}",
+                requests.len()
+            );
+
+            // The second request must carry the prior assistant tool call and the
+            // tool result so the model can continue the loop.
+            let second = &requests[1];
+            assert!(
+                second.history.iter().any(|m| matches!(
+                    m,
+                    ModelMessage::AssistantToolCall { name, .. } if name == "inspect_context_summary"
+                )),
+                "second request history must include the assistant tool call, got: {:?}",
+                second.history
+            );
+            assert!(
+                second
+                    .history
+                    .iter()
+                    .any(|m| matches!(m, ModelMessage::ToolResult { .. })),
+                "second request history must include the tool result, got: {:?}",
+                second.history
+            );
+
+            // Tool definitions must carry real JSON schemas, not empty objects.
+            let summary_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_context_summary")
+                .expect("inspect_context_summary tool definition present");
+            assert!(
+                summary_def.parameters.get("type").is_some()
+                    || summary_def
+                        .parameters
+                        .as_object()
+                        .map(|o| !o.is_empty())
+                        .unwrap_or(false),
+                "tool definition must carry a real schema, got: {}",
+                summary_def.parameters
+            );
+        }
     }
 
     // ---- Resource bounds: cancellation between items ----
@@ -2880,12 +3350,14 @@ pub(crate) mod tests {
             );
             policy.proposal_limits.max_total_area_fraction = 0.5;
 
+            let cancel = RunCancellation::new();
             let ctx = Arc::new(ToolContext::new(
                 SessionId::new(42),
                 valid_source.into(),
                 rollshot_automation::ValidationLimits::default(),
                 policy,
                 (100, 100),
+                &cancel,
             ));
 
             let executor = Arc::new(QuickJsExecutor);
@@ -2944,7 +3416,6 @@ pub(crate) mod tests {
 
             let runner = AgentRunner::new(AgentConfig::default());
             let mut session = AgentSession::new(SessionId::new(42));
-            let cancel = RunCancellation::new();
 
             let result = runner
                 .run(
@@ -3014,18 +3485,17 @@ pub(crate) mod tests {
 
             let cancel = RunCancellation::new();
 
-            // Pre-validate a valid source, then replace with infinite loop
+            // Pre-validate a valid source, then replace with infinite loop.
+            // The tool context binds to the run's single cancellation source.
             let valid_source = "function main(input) { return {candidates: []}; }";
-            let mut tool_ctx = ToolContext::new(
+            let ctx = Arc::new(ToolContext::new(
                 SessionId::new(1),
                 valid_source.into(),
                 rollshot_automation::ValidationLimits::default(),
                 policy,
                 (100, 100),
-            );
-            // Wire the run's cancellation flag into the tool context
-            tool_ctx.automation_cancellation = cancel.automation_flag().clone();
-            let ctx = Arc::new(tool_ctx);
+                &cancel,
+            ));
 
             let executor = Arc::new(QuickJsExecutor);
             let host = Arc::new(Mutex::new(

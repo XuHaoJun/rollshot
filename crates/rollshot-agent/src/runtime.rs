@@ -32,6 +32,10 @@ pub struct RunBudget {
     pub model_calls: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Estimated provider cost ceiling. NOT enforced by the driver yet: there is
+    /// no per-provider/model pricing model, so cost is never charged (it stays
+    /// 0). Bound spend via `input_tokens`/`output_tokens`/`model_calls` instead.
+    /// Enforcing this requires wiring a pricing function (see §9).
     pub cost: f64,
     pub tool_calls: u32,
     pub per_tool_calls: u32,
