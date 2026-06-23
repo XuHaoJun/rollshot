@@ -230,6 +230,7 @@ where
                     match events {
                         Ok(bac_events) => {
                             for event in &bac_events {
+                                let mut skip_yield = false;
                                 match event {
                                     ModelStreamEvent::ToolCallStart { .. }
                                     | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
@@ -244,12 +245,14 @@ where
                                                     stop_reason: StopReason::ToolUse,
                                                 },
                                             ));
-                                            continue;
+                                            skip_yield = true;
                                         }
                                     }
                                     _ => {}
                                 }
-                                yield Ok(event.clone());
+                                if !skip_yield {
+                                    yield Ok(event.clone());
+                                }
                             }
                         }
                         Err(e) => {
