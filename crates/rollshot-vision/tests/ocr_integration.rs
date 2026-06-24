@@ -246,9 +246,19 @@ fn no_ocr_text_or_pixels_in_tracing() {
     }
 
     let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+    // Capture only rollshot's own tracing. Every rollshot event uses an explicit
+    // `rollshot::*` target (AGENTS.md §7), and rollshot's diagnostics are the only
+    // privacy surface this test owns. ONNX Runtime (`ort`) emits verbose INFO logs
+    // whose graph-node names contain `@` (e.g. `Reshape@8`, `Constant@92`), which
+    // would false-trip the `@` assertion below; that third-party output is filtered
+    // out so the test asserts on rollshot's logging, not ort's.
     let subscriber = tracing_subscriber::fmt()
         .with_writer(buf.clone())
-        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::OFF.into())
+                .parse_lossy("rollshot=trace"),
+        )
         .finish();
 
     let secret = "topsecret@example.com";
