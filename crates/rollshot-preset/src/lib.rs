@@ -5,12 +5,14 @@
 mod domain;
 mod error;
 mod io;
+mod store;
 
 pub use domain::{
     AutomationRevision, Preset, PresetId, PresetSummary, RevisionId, RevisionOrigin,
     RevisionProvenance, RevisionSummary, STORE_SCHEMA_VERSION,
 };
 pub use error::{EntityKind, Result, StoreError};
+pub use store::PresetStore;
 
 #[cfg(test)]
 mod tests {
