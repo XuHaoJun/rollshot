@@ -28,3 +28,4 @@ ab_glyph = "0.2"
 rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
 rollshot-edit-proposal = { path = "../rollshot-edit-proposal" }
 static_assertions = "1.1"
+tracing-subscriber = { workspace = true }
