@@ -164,18 +164,24 @@ RevisionProvenance
   revisions/<rev-id>.json     # one immutable AutomationRevision per file
 ```
 
-`<root>` is injected. The product edge resolves it with the **etcetera** XDG
-base strategy, matching the reference `opencode` layout:
+`<root>` is injected. The product edge resolves it through the **single shared
+resolver** `rollshot_app::daemon::config::rollshot_config_dir()`, so presets
+nest under the *same* root as the daemon's `config.toml` and `daemon.lock` —
+one rollshot config root per machine. That resolver is upgraded from
+`dirs::config_dir()` to the **etcetera** XDG base strategy (rollshot is not yet
+publicly released, so no path migration is needed), matching the reference
+`opencode` layout:
 
-- Linux / macOS: `~/.config/rollshot` (honors `$XDG_CONFIG_HOME`).
-- Windows: native `%APPDATA%\rollshot` (etcetera's `choose_base_strategy`
-  uses the Windows strategy there; rollshot does not target Windows today, so
-  this divergence is acceptable).
+- Linux / macOS: `~/.config/rollshot` (honors `$XDG_CONFIG_HOME`); presets at
+  `~/.config/rollshot/presets/`.
+- Windows: native `%APPDATA%\rollshot` (etcetera's `choose_base_strategy` uses
+  the Windows strategy there; rollshot does not target Windows today, so this
+  divergence is acceptable).
 
-The reserved future session location is `state_dir()/rollshot/sessions/`
-(Linux/macOS `~/.local/state/rollshot/sessions`), kept separate from the
-config tree so transient state never mixes with durable config. SP5 does not
-create or use it.
+The preset root is `rollshot_config_dir()?.join("presets")`. The reserved
+future session location is `state_dir()/rollshot/sessions/` (Linux/macOS
+`~/.local/state/rollshot/sessions`), kept separate from the config tree so
+transient state never mixes with durable config. SP5 does not create or use it.
 
 Presets are stored as **config** rather than **data** because a preset is a
 JavaScript automation the user authors and reuses — configuration, not
@@ -243,8 +249,9 @@ it does not migrate artifacts.
 - **Concurrency:** immutable revision files have unique ids and are therefore
   conflict-free across writers. Only `preset.json` mutations (`active`,
   `name`) need serialization; they take a per-preset-directory **advisory file
-  lock** (the same approach as `opencode`'s `Flock`). This adds one small
-  cross-platform lock crate (`fs2` or `fd-lock`).
+  lock** (the same approach as `opencode`'s `Flock`, and the existing daemon
+  `InstanceGuard`). This uses `fs4`, already a workspace dependency — no new
+  crate.
 
 ## 10. Error model
 
