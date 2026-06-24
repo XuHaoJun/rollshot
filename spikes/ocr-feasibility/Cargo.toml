@@ -1,0 +1,27 @@
+[package]
+name = "spike-ocr-feasibility"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[workspace]
+
+# Mirrors learn-projects/snow-shot's proven screenshot-OCR stack:
+#   paddle-ocr-rs (RapidOCR det/cls/rec ONNX pipeline) + ort (ONNX Runtime).
+# `ort` uses unsafe FFI to ONNX Runtime, so this spike crate allows unsafe --
+# the production plan is an isolation crate (allow) depended on by a
+# `forbid(unsafe_code)` vision crate, exactly like rollshot-macos-oneshot.
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]
+# Pinned exactly to learn-projects/snow-shot's lockfile set (paddle-ocr-rs 0.6.1
+# + ort 2.0.0-rc.10 + ndarray 0.16.1). Letting `ort` float to rc.12 pulls a
+# newer ndarray and produces two ndarray versions in the graph, breaking
+# `Tensor::from_array` trait bounds.
+paddle-ocr-rs = "=0.6.1"
+ort = { version = "=2.0.0-rc.10", default-features = false }
+ndarray = "=0.16.1"
+num_cpus = "1.17.0"
+image = "0.25"
