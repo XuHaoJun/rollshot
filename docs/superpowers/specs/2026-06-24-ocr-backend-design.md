@@ -125,7 +125,8 @@ rollshot-vision  (forbid(unsafe_code), stance unchanged)
 `[build-dependencies]` for `build.rs` (model provisioning, §5): `etcetera`
 (workspace — default cache-dir resolution, same crate `rollshot-app` already
 uses), `sha2` (build-time hash verification), and a lightweight HTTP client
-(`ureq`) for the download fallback. These are build-only and do not enter the
+(`ureq`) for the model download (ModelScope primary, optional Release mirror).
+These are build-only and do not enter the
 crate's runtime graph. (If the maintainer later chooses local-dir-only with no
 fallback, the HTTP client drops out.)
 
@@ -349,13 +350,20 @@ and `lib.rs` does `include_bytes!(concat!(env!("OUT_DIR"), "/…onnx"))`. This
 keeps ~15.5 MB of binary blobs out of the repo history while preserving the
 embedded-at-runtime guarantee.
 
-| File | Size | SHA256 (verified against RapidOCR `default_models.yaml` @ v3.1.0) |
+| Embedded name (`include_bytes!`) | Size | SHA256 |
 |---|---|---|
 | `ch_PP-OCRv4_det_infer.onnx` | 4.5 MB | `d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9` |
 | `ch_ppocr_mobile_v2.0_cls_infer.onnx` | 571.8 KB | `e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c` |
 | `ch_PP-OCRv4_rec_infer.onnx` | 10.4 MB | `48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b` |
 
-Source: `https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.1.0/onnx/PP-OCRv4/{det,cls,rec}/...`
+Source: RapidOCR's official ModelScope distribution at tag **v3.9.0**, which
+publishes these PP-OCRv4 `ch` models under a `_mobile.onnx` suffix:
+`https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.0/onnx/PP-OCRv4/{det,rec}/ch_PP-OCRv4_{det,rec}_mobile.onnx`
+(cls: `.../cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx`). The v3.9.0 `_mobile.onnx`
+files are **byte-identical** to the SHA256s above; `build.rs` downloads under the
+official `_mobile.onnx` name (its `cache_name`) and writes `OUT_DIR` under the
+stable `_infer.onnx` name (`out_name`) that `lib.rs` `include_bytes!`s, so the
+upstream rename never reaches the embed paths.
 License: RapidOCR models are Apache-2.0; `paddle-ocr-rs` is MIT; `ort` is
 MIT/Apache-2.0.
 
@@ -391,17 +399,26 @@ against the table above (fail the build on mismatch)**, and copies them into
    `cache_dir()` (the models are regenerable downloads, not user config):
    `choose_base_strategy().cache_dir().join("rollshot/ocr-models")`
    → `~/.cache/rollshot/ocr-models/` (Linux), `~/Library/Caches/rollshot/ocr-models/`
-   (macOS). This dir is shared across worktrees/branches, so a model is fetched
-   at most once per machine. The maintainer keeps a personal backup of the three
-   files (drop them here or point `$ROLLSHOT_OCR_MODELS_DIR` at the backup).
-2. **Checksummed download fallback** — if a model is absent locally, fetch it
-   from a **GitHub Release asset** on the rollshot repo (the maintainer uploads
-   the backup once to e.g. a `models-v3.1.0` release) and verify its SHA256
-   before use, so fresh checkouts and CI build without manual setup. The
-   ModelScope URL in the table above is kept only as provenance/origin — CI does
-   **not** fetch from it directly (CN host, unreliable from GitHub-hosted
-   runners). A release asset is not part of the git tree, so this still honors
-   "models not in git".
+   (macOS). The cache is keyed by the official `_mobile.onnx` filename
+   (`cache_name`); this dir is shared across worktrees/branches, so a model is
+   fetched at most once per machine. Drop a personal backup here or point
+   `$ROLLSHOT_OCR_MODELS_DIR` at it for a fully offline build.
+2. **Checksummed download** — if a model is absent locally, fetch it and verify
+   its SHA256 before use, so fresh checkouts and CI build without manual setup:
+   - **RapidOCR ModelScope official URL (primary).** The hardcoded v3.9.0
+     ModelScope URLs in the table above are the primary source — currently live
+     and requiring no maintainer action. This closes the original provisioning
+     hole: the earlier design assumed a pre-existing `xuhaojun/rollshot` GitHub
+     Release (`ocr-models-v3.1.0`) as the download source, but that release does
+     not exist, so a cold build would hard-fail.
+   - **GitHub Release mirror (optional fallback).** If the ModelScope fetch
+     fails (CN host can be unreliable from GitHub-hosted runners), `build.rs`
+     falls back to a GitHub Release asset (`ocr-models-v3.1.0` tag, `_mobile.onnx`
+     names). This is an **optional mirror, not a prerequisite** — the maintainer
+     may upload the backup there later, but a missing release no longer blocks
+     the build. A release asset is not in the git tree, so it still honors
+     "models not in git".
+   Both sources are SHA256-verified against the table; a mismatch fails the build.
 
 Build-time provisioning is independent of the **runtime** offline guarantee
 (the shipped binary embeds the verified bytes and never phones home). The
@@ -421,10 +438,11 @@ hit):
 
 - **warm cache** → models restored, build is fully offline (no network);
 - **cold cache** (new key/branch, fork PR, eviction, outage) → the step 2
-  download fallback fetches once, SHA256-verifies, and re-populates the cache.
+  download (ModelScope primary, optional Release mirror) fetches once,
+  SHA256-verifies, and re-populates the cache.
 
-A cache alone cannot guarantee presence (it is best-effort), so the download
-fallback is what makes a cold cache recoverable; the two are complementary, not
+A cache alone cannot guarantee presence (it is best-effort), so the step 2
+download is what makes a cold cache recoverable; the two are complementary, not
 alternatives. (Pure local-dir-only with *no* fallback would hard-fail CI on any
 cold miss and is only robust on a self-hosted runner / pre-baked image, which
 this project does not use.)
@@ -747,16 +765,21 @@ isolation, backend choice, bundling, prepare/cached-callback wiring are
 | # | Decision | Where applied |
 |---|---|---|
 | D15 | **Move the small-text upscale + its coordinate inversion into `rollshot-ocr::detect`** (returns input-native coords). `rollshot-vision` only adds the crop offset. Cleaner boundary: the isolation crate owns the scale trick, vision owns region placement. | §3, §4.2, §4.3, §4.4, §8.1, §8.2, §12.11 |
-| D16 | **Models are NOT committed to git.** `crates/rollshot-ocr/models/` is git-ignored; `build.rs` provisions the three `.onnx` into `OUT_DIR` (local `$ROLLSHOT_OCR_MODELS_DIR` first, **GitHub Release-asset** download fallback) with build-time SHA256 verification; `lib.rs` `include_bytes!` from `OUT_DIR`. Runtime stays offline. CI (GitHub-hosted `ubuntu-24.04` + `macos-14`) layers `actions/cache` keyed on the model SHA256s; cold cache recovers via the fallback. | §2.2, §3, §5, §12.13 |
+| D16 | **Models are NOT committed to git.** `crates/rollshot-ocr/models/` is git-ignored; `build.rs` provisions the three `.onnx` into `OUT_DIR` (local `$ROLLSHOT_OCR_MODELS_DIR`/cache first, **RapidOCR ModelScope official URL** primary download, optional GitHub Release mirror fallback) with build-time SHA256 verification; `lib.rs` `include_bytes!` from `OUT_DIR`. Runtime stays offline. CI (GitHub-hosted `ubuntu-24.04` + `macos-14`) layers `actions/cache` keyed on the model SHA256s; cold cache recovers via the download. | §2.2, §3, §5, §12.13 |
 | D17 | **Feature-gate OCR (Level 2).** `rollshot-vision` gets an off-by-default `ocr = ["dep:rollshot-ocr"]` feature; `rollshot-ocr` is excluded from workspace `default-members`. Real `prepare_ocr`/`ocr` are `#[cfg(feature="ocr")]` (stub when off); trait stays unconditional. CI splits into a default lane (`--workspace --exclude rollshot-ocr`, no ort/models, every PR) and a **path-filtered, auto** OCR lane (`ci-ocr.yml`: `--features ocr`, ubuntu+macos, hosts the §8.5 gate) that fires on OCR-relevant PR paths + always on `main` push — not manual. Mirrors `action-guide`, plus default-members exclusion + path filter because OCR is far heavier. | §2.1, §3, §4.2, §8.2, §8.3, §8.4, §8.5, §9, §12.14 |
 
 Notes: **macOS risk downgraded** — maintainer confirms snow-shot ships OCR on
 macOS, so the §8.5 hard-gate-at-completion stance stands (no earlier spike
 needed). **D3 cache model** kept exact-key for now (maintainer chose option A),
-flagged to revisit with SP6. **D16 source resolved** — GitHub Release-asset
-download fallback + `actions/cache` keyed on the model SHA256s (warm = offline,
-cold = one fallback fetch); pure local-dir-only rejected as not robust on stock
-GitHub-hosted runners.
+flagged to revisit with SP6. **D16 source resolved (revised 2026-06-25)** —
+primary download is RapidOCR's official ModelScope URL (v3.9.0, `_mobile.onnx`
+names, byte-identical to the table's SHA256s), with an optional GitHub Release
+mirror fallback, layered under `actions/cache` keyed on the model SHA256s
+(warm = offline, cold = one fetch). This **replaces** the earlier "GitHub
+Release asset is the download fallback" resolution, which assumed a pre-existing
+`xuhaojun/rollshot` `ocr-models-v3.1.0` release that does not exist — a hardcoded
+always-live primary was needed so cold builds don't hard-fail. Pure
+local-dir-only remains rejected as not robust on stock GitHub-hosted runners.
 
 **snow-shot cross-check (2026-06-24).** Reviewed how `snow-shot` handles OCR in
 CI. Findings: (a) snow-shot does **not** bundle models — it downloads a

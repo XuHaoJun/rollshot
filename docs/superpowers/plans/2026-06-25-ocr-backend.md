@@ -4,7 +4,7 @@
 
 **Goal:** Replace the `ocr` `capability_unavailable` stub in `rollshot-vision::RealAutomationHost` with a real RapidOCR/ONNX backend, isolated in a new `rollshot-ocr` crate, behind an off-by-default `ocr` feature, verified by real-OCR Smart-Redaction integration tests.
 
-**Architecture:** A new `unsafe_code = "allow"` isolation crate `rollshot-ocr` wraps `paddle-ocr-rs` + `ort` (ONNX Runtime FFI) behind a safe API (`OcrEngine::new` / `OcrEngine::detect`) returning primitives (`OcrDetection`). It owns the small-text upscale **and its coordinate inversion** internally. `rollshot-vision` depends on it **optionally** (`ocr` feature), wires a lazy `prepare_ocr` + cached `ocr` callback pair mirroring the existing `region_features` precedent, and adds only the crop offset to produce full-image-native `OcrMatch.bounds`. The three PP-OCRv4 ONNX models are **not committed to git**: a `build.rs` provisions them into `OUT_DIR` (local cache dir first, GitHub Release-asset download fallback, SHA256-verified) and `lib.rs` `include_bytes!`s them, so the runtime stays offline.
+**Architecture:** A new `unsafe_code = "allow"` isolation crate `rollshot-ocr` wraps `paddle-ocr-rs` + `ort` (ONNX Runtime FFI) behind a safe API (`OcrEngine::new` / `OcrEngine::detect`) returning primitives (`OcrDetection`). It owns the small-text upscale **and its coordinate inversion** internally. `rollshot-vision` depends on it **optionally** (`ocr` feature), wires a lazy `prepare_ocr` + cached `ocr` callback pair mirroring the existing `region_features` precedent, and adds only the crop offset to produce full-image-native `OcrMatch.bounds`. The three PP-OCRv4 ONNX models are **not committed to git**: a `build.rs` provisions them into `OUT_DIR` (ModelScope official URLs primary, local cache dir, optional GitHub Release mirror fallback, SHA256-verified) and `lib.rs` `include_bytes!`s them, so the runtime stays offline.
 
 **Tech Stack:** Rust 2021, MSRV 1.94; `paddle-ocr-rs =0.6.1`, `ort =2.0.0-rc.10` (default-features off — lib provided), `ndarray =0.16.1`, `num_cpus`, `image 0.25`, `sha2`, `thiserror`, `tracing`; build-deps `etcetera`, `sha2`, `ureq`; dev-deps `ab_glyph` (test text rendering); CI helper shell script for static ONNX Runtime provisioning. Source spec: `docs/superpowers/specs/2026-06-24-ocr-backend-design.md` (eng-review decisions D1–D17).
 
@@ -23,7 +23,7 @@
 ## File Structure
 
 - Create: `crates/rollshot-ocr/Cargo.toml` — isolation crate manifest (pins, build-deps, `unsafe_code = "allow"`).
-- Create: `crates/rollshot-ocr/build.rs` — model provisioning (local dir → Release download → SHA256 verify → `OUT_DIR`).
+- Create: `crates/rollshot-ocr/build.rs` — model provisioning (ModelScope primary → local cache → optional Release mirror → SHA256 verify → `OUT_DIR`).
 - Create: `crates/rollshot-ocr/src/lib.rs` — `OcrEngine`, `OcrDetection`, `OcrRegionQuery`, `OcrError`, model hashes, unit tests.
 - Create: `crates/rollshot-ocr/.gitignore` — ignore `models/`.
 - Modify: `Cargo.toml` (workspace root) — add `rollshot-ocr` to `members`; add `default-members` excluding it.
@@ -155,18 +155,11 @@ sha2 = "0.10"
 ureq = "2"
 ```
 
-- [ ] **Step 3: Provision the ONNX Runtime lib and the models locally, then verify the crate links**
+- [ ] **Step 3: Provision the ONNX Runtime lib locally, then verify the crate links**
 
 This is the environment-setup step (spec §3.3/D4 — the known-uncertain part). Do it once locally.
 
-1. **Models** — place the three `.onnx` files (the maintainer's backup) in the cache dir build.rs reads, or point an env var at them:
-
-```bash
-rtk mkdir -p ~/.cache/rollshot/ocr-models
-# copy ch_PP-OCRv4_det_infer.onnx, ch_ppocr_mobile_v2.0_cls_infer.onnx,
-# ch_PP-OCRv4_rec_infer.onnx into ~/.cache/rollshot/ocr-models/
-# (or: export ROLLSHOT_OCR_MODELS_DIR=/path/to/backup)
-```
+1. **Models** — no manual search required. `build.rs` downloads the three PP-OCRv4 ONNX models from RapidOCR's official ModelScope URLs first, verifies SHA256, stores them in the local cache, then writes the bytes into `OUT_DIR` under the stable filenames used by `lib.rs`. `$ROLLSHOT_OCR_MODELS_DIR` remains an offline override. The rollshot GitHub Release asset is an optional mirror fallback only (not a prerequisite — the release may not exist yet).
 
 2. **ONNX Runtime static lib** — download the version-matched static build from `supertone-inc/onnxruntime-build` and point `ort` at it:
 
@@ -182,29 +175,52 @@ Expected: `rtk cargo build -p rollshot-ocr` reaches the `include_bytes!` stage (
 
 ```rust
 //! Provisions the three PP-OCRv4 ONNX models into OUT_DIR (eng-review D16).
-//! Resolution: $ROLLSHOT_OCR_MODELS_DIR, else the etcetera cache dir; missing
-//! files are downloaded from the rollshot GitHub Release asset. Every model's
-//! SHA256 is verified against the recorded hash (build fails on mismatch).
-use std::{env, fs, path::PathBuf};
+//! Resolution order:
+//!   1. $ROLLSHOT_OCR_MODELS_DIR override (offline / CI-warm path)
+//!   2. etcetera cache dir (warm from a previous build)
+//!   3. RapidOCR official ModelScope URL (primary, always available)
+//!   4. rollshot GitHub Release mirror (optional fallback, may not exist yet)
+//! Every model's SHA256 is verified against the recorded hash (build fails on
+//! mismatch). The upstream RapidOCR filenames use the `_mobile.onnx` suffix
+//! (v3.9.0 tag); lib.rs expects the legacy `_infer.onnx` names, so build.rs
+//! downloads under the official name but writes to OUT_DIR under the stable
+//! name used by include_bytes!.
+use std::{env, fs, io::Read, path::PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const MODELS: [(&str, &str); 3] = [
-    (
-        "ch_PP-OCRv4_det_infer.onnx",
-        "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
-    ),
-    (
-        "ch_ppocr_mobile_v2.0_cls_infer.onnx",
-        "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
-    ),
-    (
-        "ch_PP-OCRv4_rec_infer.onnx",
-        "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
-    ),
+struct Model {
+    /// Filename written to OUT_DIR and used by lib.rs include_bytes!.
+    out_name: &'static str,
+    /// Filename used by RapidOCR's official ModelScope distribution.
+    cache_name: &'static str,
+    sha256: &'static str,
+    primary_url: &'static str,
+}
+
+const MODELS: &[Model] = &[
+    Model {
+        out_name: "ch_PP-OCRv4_det_infer.onnx",
+        cache_name: "ch_PP-OCRv4_det_mobile.onnx",
+        sha256: "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+        primary_url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.0/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.onnx",
+    },
+    Model {
+        out_name: "ch_ppocr_mobile_v2.0_cls_infer.onnx",
+        cache_name: "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        sha256: "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+        primary_url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.0/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+    },
+    Model {
+        out_name: "ch_PP-OCRv4_rec_infer.onnx",
+        cache_name: "ch_PP-OCRv4_rec_mobile.onnx",
+        sha256: "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+        primary_url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.0/onnx/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile.onnx",
+    },
 ];
 
-// Maintainer uploads the three files to this release tag once (eng-review D16).
+// Optional mirror fallback — maintainer may upload the three files here later.
+// Not a prerequisite; the primary ModelScope URLs are always tried first.
 const RELEASE_BASE: &str =
     "https://github.com/xuhaojun/rollshot/releases/download/ocr-models-v3.1.0";
 
@@ -225,6 +241,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn download(url: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    ureq::get(url)
+        .call()
+        .unwrap_or_else(|e| panic!("download {url}: {e}"))
+        .into_reader()
+        .read_to_end(&mut buf)
+        .unwrap_or_else(|e| panic!("read body {url}: {e}"));
+    buf
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=ROLLSHOT_OCR_MODELS_DIR");
     println!("cargo:rerun-if-changed=build.rs");
@@ -232,33 +259,41 @@ fn main() {
     let src = cache_dir();
     fs::create_dir_all(&src).ok();
 
-    for (name, want) in MODELS {
-        let local = src.join(name);
+    for model in MODELS {
+        // 1. Try the local cache (keyed by the official RapidOCR filename).
+        let local = src.join(model.cache_name);
         let bytes = if local.is_file() {
             fs::read(&local).unwrap_or_else(|e| panic!("read {}: {e}", local.display()))
         } else {
-            let url = format!("{RELEASE_BASE}/{name}");
-            let mut buf = Vec::new();
-            ureq::get(&url)
-                .call()
-                .unwrap_or_else(|e| panic!("download {url}: {e}"))
-                .into_reader()
-                .read_to_end(&mut buf)
-                .unwrap_or_else(|e| panic!("read body {url}: {e}"));
-            fs::write(&local, &buf).ok(); // populate the cache for next time
-            buf
+            // 2. Try the official ModelScope URL (primary, always available).
+            // 3. Fall back to the optional GitHub Release mirror.
+            let bytes = match ureq::get(model.primary_url).call() {
+                Ok(resp) => {
+                    let mut buf = Vec::new();
+                    resp.into_reader()
+                        .read_to_end(&mut buf)
+                        .unwrap_or_else(|e| panic!("read body {}: {e}", model.primary_url));
+                    buf
+                }
+                Err(_) => {
+                    let mirror = format!("{RELEASE_BASE}/{}", model.cache_name);
+                    download(&mirror)
+                }
+            };
+            fs::write(&local, &bytes).ok(); // populate the cache for next time
+            bytes
         };
         let got = sha256_hex(&bytes);
         assert_eq!(
-            got, want,
-            "SHA256 mismatch for {name}: expected {want}, got {got}"
+            got, model.sha256,
+            "SHA256 mismatch for {}: expected {}, got {got}",
+            model.cache_name, model.sha256
         );
-        fs::write(out.join(name), &bytes).expect("write model to OUT_DIR");
+        // Write to OUT_DIR under the stable name used by lib.rs include_bytes!.
+        fs::write(out.join(model.out_name), &bytes).expect("write model to OUT_DIR");
     }
 }
 ```
-
-(`use std::io::Read;` is required for `read_to_end`; add it to the `use` block.)
 
 - [ ] **Step 5: Write `src/lib.rs` — types, model hashes, `OcrEngine::new`, `detect`**
 
@@ -1220,7 +1255,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-dev libdbus-1-dev libxkbcommon-dev
 
-      # Models: warm cache → offline; cold cache → build.rs Release download.
+      # Models: warm cache → offline; cold cache → build.rs ModelScope primary download.
       - name: Cache OCR models
         uses: actions/cache@v4
         with:
@@ -1319,7 +1354,7 @@ Add `rollshot-ocr` and `rollshot-vision` entries (the latter is currently absent
 
 - [ ] **Step 3: Write the completion handoff**
 
-Create `docs/superpowers/handoffs/2026-06-25-ocr-backend.md` recording (spec §10): delivered crate + exact pins; public API + usage example; bundled model hashes + Release source; `prepare_ocr`/`ocr` wiring; integration-test evidence (Linux + macOS); measured OCR-lane wall-clock (D14); known limitations (angle handling, `layout` stubbed, `ch`-set only, ORT-lib provisioning recipe); how SP6 consumes `ocr`; migration notes for `ort`/`paddle-ocr-rs`/`ndarray` upgrades and the SP6 switch to a self-contained static-ORT product build.
+Create `docs/superpowers/handoffs/2026-06-25-ocr-backend.md` recording (spec §10): delivered crate + exact pins; public API + usage example; bundled model hashes + ModelScope primary source + optional Release mirror; `prepare_ocr`/`ocr` wiring; integration-test evidence (Linux + macOS); measured OCR-lane wall-clock (D14); known limitations (angle handling, `layout` stubbed, `ch`-set only, ORT-lib provisioning recipe); how SP6 consumes `ocr`; migration notes for `ort`/`paddle-ocr-rs`/`ndarray` upgrades and the SP6 switch to a self-contained static-ORT product build.
 
 - [ ] **Step 4: Update parent spec §12 delivery status**
 
@@ -1492,7 +1527,7 @@ Net: The bounded version is still simple and much safer in the hot path.
 | Task / behavior | Unit | Integ | E2E / smoke | Manual only |
 |---|---:|---:|---:|---:|
 | Task 1 / workspace membership and default-members exclusion | - | - | smoke via default CI | no |
-| Task 1 / model provisioning, SHA256 verification, Release fallback | yes | - | OCR CI build | no |
+| Task 1 / model provisioning, SHA256 verification, ModelScope primary + Release mirror fallback | yes | - | OCR CI build | no |
 | Task 1 / `OcrEngine::new` session init with static ORT | yes | - | OCR CI linux+macOS | no |
 | Task 1 / `OcrEngine::detect` text, blank image, zero-dim error | yes | - | - | no |
 | Task 1 / defaults, `Send`, upscale coordinate inversion, scale cap | yes | - | - | no |
@@ -1510,7 +1545,7 @@ Net: The bounded version is still simple and much safer in the hot path.
 
 | New codepath | Production failure | Test covers it | Error handling in plan | User-visible result |
 |---|---|---|---|---|
-| `build.rs` model provisioning | Release download missing or hash mismatch | Task 1 Step 7 / OCR CI build | build panic with model name/hash | build failure, not silent |
+| `build.rs` model provisioning | ModelScope primary or Release mirror download missing, or hash mismatch | Task 1 Step 7 / OCR CI build | build panic with model name/hash | build failure, not silent |
 | Static ONNX Runtime provisioning | wrong static lib version or missing archive | Task 1 Step 3; Task 4 OCR CI Linux/macOS | CI/link failure; handoff records version | build failure, not silent |
 | `OcrEngine::new` | ORT session init fails | Task 1 `new_succeeds`; Task 2 maps init error | `OcrError::SessionInit` → `Failed { code: "ocr_session_init" }` | clear capability failure code |
 | `OcrEngine::detect` | empty/invalid image | Task 1 `detect_rejects_zero_dim` | `OcrError::InvalidImage` | clear capability failure code when surfaced |
@@ -1573,6 +1608,7 @@ Plan is locked in — run `superpowers:executing-plans` for a single sequential 
 
 ### Plan Edits From Review
 
+- Fixed model provisioning hole: replaced the non-existent `xuhaojun/rollshot` GitHub Release `ocr-models-v3.1.0` prerequisite with hardcoded RapidOCR official ModelScope URLs as the primary download source. The GitHub Release is now an optional mirror fallback only. Updated `build.rs` `Model` struct to carry separate `out_name` (stable `_infer.onnx` used by `lib.rs`) and `cache_name` (official `_mobile.onnx` from RapidOCR v3.9.0), so the upstream filename change does not propagate into `include_bytes!` paths.
 - Added Snow Shot-style ORT session builder (`init_models_from_memory_custom`, physical-thread settings, Level3 optimization).
 - Added OCR upscale memory cap and tests for scaling, `Send`, and default query values.
 - Changed host OCR crop conversion to avoid an intermediate full RGBA crop allocation.
@@ -1589,7 +1625,7 @@ Plan is locked in — run `superpowers:executing-plans` for a single sequential 
 - `prepare_ocr` + cached `ocr` callback replacing the stub; `OcrDetection`→`OcrMatch` + quad→AABB → Task 2. ✓
 - Lazy `Option<OcrEngine>` (D2); area cap (D13); coordinate inversion split (D6/D15) → Task 1 (`detect` inversion) + Task 2 (crop offset, cap). ✓
 - Feature gate + default-members (D17) → Task 1 (root Cargo) + Task 2 (vision Cargo + cfg) + Task 4 (CI). ✓
-- Models out of git + build.rs + cache + Release fallback (D16); etcetera cache dir → Task 1. ✓
+- Models out of git + build.rs + cache + ModelScope primary + Release mirror fallback (D16); etcetera cache dir → Task 1. ✓
 - Real-OCR JS e2e (5 scenarios) + vendored font (D8) + flakiness handling (D10) + privacy test (D9) → Task 3. ✓
 - macOS hard gate → Task 4 (`macos-14` OCR lane). ✓
 - ORT static-vendor recipe (D4) → Task 4 Step 2–3. ✓
@@ -1597,6 +1633,6 @@ Plan is locked in — run `superpowers:executing-plans` for a single sequential 
 - Negative tests: zero-limit, unprepared, limit-exceeded, non-finite region (D11), zero-dim image → Tasks 1–2. ✓
 - D14 timing → recorded in handoff (Task 5 Step 3). ✓
 
-**Placeholder scan:** No `TODO`/"add error handling"/"similar to". The one externally-sensitive value is the static ONNX Runtime asset version (`1.22.1` in `provision-onnxruntime.sh`) and the Release tag URL. Both are concrete defaults, Snow Shot-informed, and hard-gated by Task 1 Step 3 plus the Linux/macOS OCR CI lane; they are not silent placeholders.
+**Placeholder scan:** No `TODO`/"add error handling"/"similar to". The externally-sensitive values are the static ONNX Runtime asset version (`1.22.1` in `provision-onnxruntime.sh`), the ModelScope primary URLs (hardcoded, verified against RapidOCR's `default_models.yaml` v3.9.0), and the optional GitHub Release mirror tag URL. The ModelScope URLs are concrete and currently live; the static ORT version is a Snow Shot-informed default hard-gated by Task 1 Step 3 plus the Linux/macOS OCR CI lane; the Release mirror is a fallback only, not a prerequisite.
 
 **Type consistency:** `OcrDetection { x,y,w,h,text,confidence }`, `OcrRegionQuery::default()`, `OcrEngine::{new,detect}`, `OcrError`, `MAX_OCR_AREA`, `OcrKey`/`PreparedOcr`, error codes (`ocr_session_init`, `ocr_detect`, `vision_index_unavailable`, `invalid_query`, `capability_unavailable`) are used identically across Tasks 1–3. `detect` returns input-native coords (Task 1), vision adds crop offset only (Task 2) — the split matches §4.3. ✓
