@@ -201,12 +201,18 @@ matrix:
 Static linking means **no `.so`/`.dylib` to ship at runtime** — the engine is in
 the binary, matching the bundled-models offline stance.
 
-**Version-match caveat.** snow-shot ships ORT 1.22.2; the implementation must
-confirm the ONNX Runtime version `ort 2.0.0-rc.10` expects and pick the matching
-`supertone-inc/onnxruntime-build` tag. If no compatible static build exists,
-fall back to ort `download-binaries`, or `load-dynamic` as the last resort
-(spike fallback trigger). The macOS hard gate (§8.5) validates the chosen
-strategy links on macOS; the completion handoff records it for SP6 packaging.
+**Version pin.** Pin supertone **`1.22.2`** — the version snow-shot ships with the
+same `ort = 2.0.0-rc.10`, and supertone publishes `1.22.2` static libs for
+linux-x64, osx-universal2, and win-x64 (all confirmed to exist). Point `ort` at it
+via `ORT_LIB_LOCATION` (the env var `ort-sys` rc.10 reads; rc.12 renamed it to
+`ORT_LIB_PATH` and changed feature behavior — do **not** adopt rc.12's env var or
+features while pinned to rc.10). `ort-sys` rc.10 *declares* ONNX Runtime `1.22.0`;
+the only residual unknown is that patch-level match, which the Linux+macOS OCR CI
+lane gates (snow-shot runs this exact combination in production). If a future ort
+bump breaks the static build, fall back to ort `download-binaries`, or
+`load-dynamic` as the last resort (spike fallback trigger). The macOS hard gate
+(§8.5) validates the strategy links on macOS; the completion handoff records it
+for SP6 packaging.
 
 ## 4. Query and Result Mapping
 
@@ -363,8 +369,10 @@ publishes these PP-OCRv4 `ch` models under a `_mobile.onnx` suffix:
 files are **byte-identical** to the SHA256s above; `build.rs` downloads under the
 official `_mobile.onnx` name (its `cache_name`) and writes `OUT_DIR` under the
 stable `_infer.onnx` name (`out_name`) that `lib.rs` `include_bytes!`s, so the
-upstream rename never reaches the embed paths.
-License: RapidOCR models are Apache-2.0; `paddle-ocr-rs` is MIT; `ort` is
+upstream rename never reaches the embed paths. We pin these exact PP-OCRv4 `ch`
+hashes deliberately — `build.rs` must **not** auto-track RapidOCR's evolving
+default model set (now extended to PP-OCRv5/v6); the SHA256s define the models.
+License: RapidOCR models are Apache-2.0; `paddle-ocr-rs` is Apache-2.0; `ort` is
 MIT/Apache-2.0.
 
 `OcrEngine::new()` verifies each bundled model's SHA256 and returns

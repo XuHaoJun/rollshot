@@ -17,8 +17,8 @@
 - **No OCR text, query contents, or image pixels in `tracing`** (spec §6/D9). Events on target `rollshot::vision::ocr` carry only `duration_ms`, `result_count`, and (on error) a static `code`.
 - **`ocr` feature is OFF by default**; `rollshot-ocr` is excluded from workspace `default-members` (spec §13/D17). With the feature off, `RealAutomationHost::ocr` returns `Failed { code: "capability_unavailable" }`.
 - **Detection defaults** (spec §4.4), encoded in `OcrRegionQuery::default()`: `padding=50`, `max_side_len=0` (0 ⇒ paddle uses the image's own longest side — no downscale, the D1 fix), `box_score_thresh=0.5`, `box_thresh=0.3`, `unclip_ratio=1.6`, `do_angle=false`, `min_scale=1.5`.
-- **ONNX Runtime lib provisioning is the known-uncertain part (spec §3.3/D4).** `ort` is pinned `default-features = false`, so the native lib must be provided (`ORT_LIB_LOCATION` to a vendored static build from `supertone-inc/onnxruntime-build`). Local `ort-sys 2.0.0-rc.10` declares ONNX Runtime `1.22.0`; Snow Shot validates the same `ort = 2.0.0-rc.10` family with supertone `1.22.1`, and supertone publishes `v1.22.1`/`v1.22.2` static releases. Use `1.22.1` as the provisional CI script default, verify it in Task 1 Step 3, and do **not** silently advance to `1.22.2` unless both Linux and macOS OCR CI pass.
-- **OCR memory ceiling:** internal scaling must never turn an OCR region into an unbounded working image. `OcrEngine` clamps effective scale so `scaled_width * scaled_height <= MAX_UPSCALED_PIXELS` (private constant, default `16_000_000`) and unit-tests the clamp; host-side `MAX_OCR_AREA` still rejects oversized prepared regions before OCR.
+- **ONNX Runtime lib provisioning (spec §3.3/D4).** `ort` is pinned `default-features = false`, so the native lib must be provided via `ORT_LIB_LOCATION` (the env var `ort-sys 2.0.0-rc.10` reads — do **not** adopt `ort` rc.12's `ORT_LIB_PATH` rename or its feature changes while pinned to rc.10) pointing at a vendored static build from `supertone-inc/onnxruntime-build`. Local `ort-sys 2.0.0-rc.10` declares ONNX Runtime `1.22.0`; Snow Shot ships the same `ort = 2.0.0-rc.10` with supertone **`1.22.2`** (its release CI downloads `onnxruntime-{linux-x64,osx-universal2}-static_lib-1.22.2.tgz`). Pin **`1.22.2`** — both the Linux x64 and macOS universal2 static assets are confirmed to exist at that tag. The only residual unknown is the `ort-sys`-declared `1.22.0` ↔ `1.22.2`-lib patch-level match; the Linux+macOS OCR CI lane is the gate (snow-shot already runs this combination in production).
+- **OCR memory ceiling:** internal scaling must never turn an OCR region into an unbounded working image. `OcrEngine` clamps the effective **upscale** factor (never below `1.0`, so inputs are never silently downscaled) so `scaled_width * scaled_height <= MAX_UPSCALED_PIXELS` (private constant, default `16_000_000`) and unit-tests the clamp; host-side `MAX_OCR_AREA` still rejects oversized prepared regions before OCR, so an accepted region's working image stays under the ceiling.
 
 ## File Structure
 
@@ -157,16 +157,17 @@ ureq = "2"
 
 - [ ] **Step 3: Provision the ONNX Runtime lib locally, then verify the crate links**
 
-This is the environment-setup step (spec §3.3/D4 — the known-uncertain part). Do it once locally.
+This is the environment-setup step (spec §3.3/D4). The model and ORT-lib versions/URLs are pinned (below + Step 3 script); the only thing this step proves locally is that the pinned ORT static lib links against `ort 2.0.0-rc.10` on your machine. Do it once locally.
 
 1. **Models** — no manual search required. `build.rs` downloads the three PP-OCRv4 ONNX models from RapidOCR's official ModelScope URLs first, verifies SHA256, stores them in the local cache, then writes the bytes into `OUT_DIR` under the stable filenames used by `lib.rs`. `$ROLLSHOT_OCR_MODELS_DIR` remains an offline override. The rollshot GitHub Release asset is an optional mirror fallback only (not a prerequisite — the release may not exist yet).
 
-2. **ONNX Runtime static lib** — download the version-matched static build from `supertone-inc/onnxruntime-build` and point `ort` at it:
+2. **ONNX Runtime static lib** — download the pinned supertone `v1.22.2` static build (the version snow-shot ships with `ort 2.0.0-rc.10`) and point `ort` at it:
 
 ```bash
-# Verify which ONNX Runtime version ort 2.0.0-rc.10 expects, pick the matching
-# supertone tag, then:
+# supertone v1.22.2: onnxruntime-{linux-x64,osx-universal2}-static_lib-1.22.2.tgz,
+# extract its lib/ dir, then:
 export ORT_LIB_LOCATION=/path/to/onnxruntime/lib   # contains libonnxruntime*.a
+# rc.10 reads ORT_LIB_LOCATION; do NOT use rc.12's ORT_LIB_PATH while pinned to rc.10.
 ```
 
 Expected: `rtk cargo build -p rollshot-ocr` reaches the `include_bytes!` stage (it will fail later only on the not-yet-written `lib.rs`, which is fine — this step proves models provision and `ort` links).
@@ -412,11 +413,16 @@ fn build_session(builder: SessionBuilder) -> Result<SessionBuilder, ort::Error> 
         .with_optimization_level(GraphOptimizationLevel::Level3)
 }
 
+/// Upscale factor for the small-text trick. Only ever **upscales** (never below
+/// `1.0`): a requested `min_scale` is capped so the working image stays within
+/// `MAX_UPSCALED_PIXELS`, and an input already at/over that budget is used at
+/// native size — never downscaled. The host `MAX_OCR_AREA` bounds the input, so
+/// an accepted region's working image stays under the budget.
 fn effective_scale(width: u32, height: u32, min_scale: f32) -> f32 {
     let requested = min_scale.max(1.0);
     let pixels = (width as u64).saturating_mul(height as u64).max(1);
     let cap_scale = ((MAX_UPSCALED_PIXELS as f64) / (pixels as f64)).sqrt() as f32;
-    requested.min(cap_scale).max(0.01)
+    requested.min(cap_scale).max(1.0)
 }
 
 impl OcrEngine {
@@ -604,12 +610,17 @@ mod tests {
     }
 
     #[test]
-    fn effective_scale_caps_large_images() {
+    fn effective_scale_upscales_small_never_downscales_large() {
+        // Small input: full requested upscale.
         assert_eq!(effective_scale(300, 90, 1.5), 1.5);
-        let scale = effective_scale(8000, 4000, 1.5);
-        assert!(scale > 0.0 && scale < 1.0);
-        let pixels = (8000.0 * scale) * (4000.0 * scale);
-        assert!(pixels <= MAX_UPSCALED_PIXELS as f32 + 1024.0);
+        // Input where 1.5× would exceed the working-image budget: the upscale is
+        // capped between 1.0 and 1.5 so the working image stays within budget.
+        let capped = effective_scale(3600, 3000, 1.5);
+        assert!((1.0..1.5).contains(&capped));
+        let working = (3600.0 * capped) * (3000.0 * capped);
+        assert!(working <= MAX_UPSCALED_PIXELS as f32 + 1024.0);
+        // Input already over the budget is used at native size — never downscaled.
+        assert_eq!(effective_scale(8000, 4000, 1.5), 1.0);
     }
 
     #[test]
@@ -790,11 +801,25 @@ struct OcrKey {
 }
 
 #[cfg(feature = "ocr")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PreparedOcr {
     key: OcrKey,
     max_limit: u32,
     results: Vec<OcrMatch>,
+}
+
+// `OcrMatch` carries recognized text (potential PII). Never emit it via `{:?}`,
+// or it leaks through `RealAutomationHost: Debug` (debug logs, error reports,
+// test-failure dumps). Custom Debug prints only the count.
+#[cfg(feature = "ocr")]
+impl std::fmt::Debug for PreparedOcr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedOcr")
+            .field("key", &self.key)
+            .field("max_limit", &self.max_limit)
+            .field("result_count", &self.results.len())
+            .finish()
+    }
 }
 ```
 
@@ -837,14 +862,16 @@ pub fn prepare_ocr(
     }
 
     if self.ocr_engine.is_none() {
-        self.ocr_engine = Some(
-            OcrEngine::new().map_err(|_| CapabilityError::Failed { code: "ocr_session_init" })?,
-        );
+        self.ocr_engine = Some(OcrEngine::new().map_err(|_| {
+            tracing::debug!(target: "rollshot::vision::ocr", code = "ocr_session_init", "ocr prepare failed");
+            CapabilityError::Failed { code: "ocr_session_init" }
+        })?);
     }
     let engine = self.ocr_engine.as_mut().expect("engine just set");
-    let detections = engine
-        .detect(&rgb, &OcrRegionQuery::default())
-        .map_err(|_| CapabilityError::Failed { code: "ocr_detect" })?;
+    let detections = engine.detect(&rgb, &OcrRegionQuery::default()).map_err(|_| {
+        tracing::debug!(target: "rollshot::vision::ocr", code = "ocr_detect", "ocr prepare failed");
+        CapabilityError::Failed { code: "ocr_detect" }
+    })?;
 
     let (ox, oy) = (rect.x as f32, rect.y as f32);
     let results: Vec<OcrMatch> = detections
@@ -1292,13 +1319,13 @@ jobs:
 
 - [ ] **Step 3: Add `scripts/ci/provision-onnxruntime.sh`**
 
-A small script that downloads the matching `supertone-inc/onnxruntime-build` static asset per OS into the target dir's `lib/`. Verify the exact version/URL against `ort 2.0.0-rc.10` during Task 1 Step 3, then encode it here:
+A small script that downloads the pinned `supertone-inc/onnxruntime-build` static asset per OS into the target dir's `lib/`. The version (`v1.22.2`) and per-OS asset names are pinned below — both confirmed to exist at that tag and matching snow-shot's `ort 2.0.0-rc.10` config. Task 1 Step 3 / the OCR CI lane only confirms the link succeeds; the worker does not re-pick the version:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 os="$1"; dest="$2"
-ver="1.22.1"   # Snow Shot-validated supertone static lib for ort 2.0.0-rc.10; verify in Task 1.
+ver="1.22.2"   # Pinned: supertone static lib snow-shot ships with ort 2.0.0-rc.10 (linux-x64 + osx-universal2 assets confirmed). CI lane gates the link; do not bump without it.
 base="https://github.com/supertone-inc/onnxruntime-build/releases/download/v${ver}"
 case "$os" in
   Linux)  asset="onnxruntime-linux-x64-static_lib-${ver}.tgz" ;;
@@ -1393,7 +1420,7 @@ git commit -m "docs(ocr): project map, README, completion handoff, parent-spec s
 - **Existing code reused:** `rollshot-vision::RealAutomationHost` already has the prepare-then-cached-callback pattern in `prepare_region_features` / `region_features`; this plan reuses that shape. `crates/rollshot-vision/src/rect.rs` already owns finite/empty/oversized region validation; OCR adds only `MAX_OCR_AREA`. `rollshot-automation` already defines `OcrQuery`, `OcrMatch`, `AutomationHost::ocr`, and `CapabilityError`; the plan does not rebuild those contracts. Snow Shot (`learn-projects/snow-shot`) already validates the RapidOCR + `paddle-ocr-rs` + `ort` approach, cached `OcrLite`, memory-loaded models, explicit ORT session tuning, and supertone static ONNX Runtime provisioning.
 - **Minimum viable plan:** Tasks 1-4 are required to achieve the goal. Task 5 is not runtime-critical, but it is required for handoff and future maintainability because this introduces an unsafe-isolation crate plus native model/lib provisioning.
 - **Complexity check:** 5 tasks, 17 declared file entries after review, 1 new crate, 1 new CI script. Net-new files are 8, below the >12 smell threshold. Scope accepted as-is.
-- **Search/reference check:** `paddle-ocr-rs` is explicitly RapidOCR/ONNX Runtime based; `ort 2.0.0-rc.12` has newer multiversion guidance, but this plan pins `rc.10` for local dependency compatibility; supertone publishes static ONNX Runtime releases including `v1.22.1`/`v1.22.2`; Snow Shot uses `ort = 2.0.0-rc.10` with supertone `1.22.1`. No built-in Rust OCR facility replaces this.
+- **Search/reference check:** `paddle-ocr-rs` is explicitly RapidOCR/ONNX Runtime based; `ort 2.0.0-rc.12` has newer multiversion guidance, but this plan pins `rc.10` for local dependency compatibility; supertone publishes static ONNX Runtime releases including `v1.22.1`/`v1.22.2`; Snow Shot uses `ort = 2.0.0-rc.10` with supertone `1.22.2`. No built-in Rust OCR facility replaces this.
 - **Completeness check:** AI-assisted execution makes complete negative tests and CI gating cheap; the plan now includes the missing `Send`/defaults/upscale tests, default/action-guide CI exclusions, and script syntax verification.
 - **Distribution check:** The plan introduces a library crate and native build artifacts, not a user-installed binary. CI provisioning and docs/handoff are in scope; product packaging of a self-contained ORT build is explicitly deferred below.
 
@@ -1429,23 +1456,23 @@ B) Keep default `init_models_from_memory` — effort human: 0 / AI: 0; risk medi
   ❌ Leaves performance/configuration implicit.
 Net: This spends a few lines to make the native runtime behavior explicit.
 
-**Auto decision D3 — Pin provisional static ORT to supertone `1.22.1`, not `1.22.2`**
-Context: Local `ort-sys 2.0.0-rc.10` declares ONNX Runtime `1.22.0`, while Snow Shot documents supertone `1.22.1` for the same ORT line.
-ELI10: A patch-level native library mismatch can be fine, but it should be deliberate. Snow Shot is the closest real reference we have. The plan should start from its known-good `1.22.1`, then let the OCR CI prove Linux and macOS.
+**Auto decision D3 — Pin static ORT to supertone `1.22.2` (the version Snow Shot ships)**
+Context: Local `ort-sys 2.0.0-rc.10` declares ONNX Runtime `1.22.0`. Snow Shot's release CI downloads supertone **`1.22.2`** static libs with the same `ort = 2.0.0-rc.10` (verified in `learn-projects/snow-shot/.github/workflows/release.yml`). A prior review round wrongly flipped this pin to `1.22.1` citing Snow Shot — that premise was false; this restores `1.22.2`.
+ELI10: A patch-level native-lib mismatch can be fine, but it should match a known-good reference. Snow Shot proves `1.22.2` + `rc.10` in production, and supertone publishes `1.22.2` static libs for linux-x64, osx-universal2, and win-x64 (all confirmed). Pin `1.22.2`; the OCR CI lane proves Linux and macOS link.
 Stakes if we pick wrong: CI or product builds may fail at link time or load a subtly incompatible runtime.
-Recommendation: 3A because it is the most evidence-backed static-lib default.
+Recommendation: 3A because it matches the snow-shot-proven combination and all required assets exist.
 Completeness: A=9/10, B=6/10, C=5/10
 Pros / cons:
-A) Default to `1.22.1` and hard-gate in CI (recommended) — effort human: ~30 min / AI: ~5 min; risk low-medium; maintenance burden low.
-  ✅ Matches the Snow Shot reference and available supertone release.
+A) Pin `1.22.2` and hard-gate in CI (recommended) — effort human: ~30 min / AI: ~5 min; risk low; maintenance burden low.
+  ✅ Exactly the version + ort-crate pairing snow-shot ships; linux/macOS static assets confirmed.
   ❌ Still requires the Task 1 smoke check to confirm Rollshot's exact build.
-B) Use `1.22.2` — effort human: ~30 min / AI: ~5 min; risk medium; maintenance burden medium.
-  ✅ Newer patch release.
-  ❌ Not the version validated by the reference project.
+B) Use `1.22.1` — effort human: ~30 min / AI: ~5 min; risk medium; maintenance burden medium.
+  ✅ Also exists as a supertone static release.
+  ❌ Not the version the reference project actually validates (snow-shot ships `1.22.2`).
 C) Leave the script placeholder — effort human: 0 / AI: 0; risk high; maintenance burden high.
   ✅ Avoids deciding now.
   ❌ CI cannot be trusted until someone fills it in later.
-Net: Start from the closest validated version, then let the dedicated OCR lane prove it.
+Net: Match snow-shot's proven `1.22.2`, then let the dedicated OCR lane prove it.
 
 **Auto decision D4 — Exclude `rollshot-ocr` from action-guide workspace CI too**
 Context: The original CI edit excluded OCR from the normal clippy/test steps but left action-guide `--workspace` steps unchanged.
@@ -1516,7 +1543,7 @@ Completeness: A=10/10, B=6/10
 Pros / cons:
 A) Add private `MAX_UPSCALED_PIXELS` and direct RGBA→RGB crop conversion (recommended) — effort human: ~1-2 hours / AI: ~15 min; risk low; maintenance burden low.
   ✅ Prevents unbounded upscale memory and removes one full-image allocation.
-  ❌ Very large direct engine inputs may get less upscale, or a downscale if they bypass the host area cap.
+  ❌ Very large direct engine inputs may get less upscale (capped to ×1.0 once already over the budget); never downscaled.
 B) Keep unconditional upscale and double allocation — effort human: 0 / AI: 0; risk high; maintenance burden medium.
   ✅ Simplest code.
   ❌ Memory use scales badly with capture size.
@@ -1549,7 +1576,7 @@ Net: The bounded version is still simple and much safer in the hot path.
 | Static ONNX Runtime provisioning | wrong static lib version or missing archive | Task 1 Step 3; Task 4 OCR CI Linux/macOS | CI/link failure; handoff records version | build failure, not silent |
 | `OcrEngine::new` | ORT session init fails | Task 1 `new_succeeds`; Task 2 maps init error | `OcrError::SessionInit` → `Failed { code: "ocr_session_init" }` | clear capability failure code |
 | `OcrEngine::detect` | empty/invalid image | Task 1 `detect_rejects_zero_dim` | `OcrError::InvalidImage` | clear capability failure code when surfaced |
-| Scale path | huge image would allocate too much | Task 1 `effective_scale_caps_large_images` | private scale clamp | degraded upscale/downscale, not crash |
+| Scale path | huge image would allocate too much | Task 1 `effective_scale_upscales_small_never_downscales_large` | private upscale clamp (≥1.0) | capped upscale; oversized inputs used at native size; never downscaled, never crash |
 | Host OCR prepare | non-finite or too-large region | Task 2 `prepare_ocr_rejects_non_finite_region`; existing rect tests cover oversize | `CapabilityError::InvalidInput` | clear invalid input code |
 | Host OCR callback | called before prepare or with higher limit | Task 2 unprepared / limit tests | `vision_index_unavailable` / `LimitExceeded` | clear capability failure |
 | Smart-Redaction e2e | OCR returns no text on sensitive fixture | Task 3 email/SSN/key tests fail | assertion failure in OCR CI | CI failure, not silent |
@@ -1613,10 +1640,15 @@ Plan is locked in — run `superpowers:executing-plans` for a single sequential 
 - Added OCR upscale memory cap and tests for scaling, `Send`, and default query values.
 - Changed host OCR crop conversion to avoid an intermediate full RGBA crop allocation.
 - Added `scripts/ci/provision-onnxruntime.sh` to all file declarations and verification.
-- Changed provisional static ORT script version from `1.22.2` to Snow Shot-validated `1.22.1`, with explicit hard-gate verification.
+- Pinned static ORT script version to supertone `1.22.2` — the version Snow Shot actually ships with `ort 2.0.0-rc.10` (a prior round had wrongly flipped this to `1.22.1`); linux-x64 + osx-universal2 static assets confirmed, with explicit hard-gate verification.
 - Added `--exclude rollshot-ocr` to action-guide CI clippy/test commands.
 - Added `bash -n` verification for the provision script and expanded final verification.
 - Added required NOT-in-scope, existing-code, failure-mode, coverage, and parallelization sections.
+- (2026-06-25 external-review round) Restored the static ORT pin to `1.22.2` (snow-shot's shipped version; see D3) and pinned `ORT_LIB_LOCATION` for `ort` rc.10 (not rc.12's `ORT_LIB_PATH`); confirmed both required supertone static assets exist.
+- (2026-06-25) `effective_scale` now floors at `1.0` (only upscales; oversized inputs use native size, never silently downscaled) — matches the spec's "upscale" framing and D1. Kept host `MAX_OCR_AREA` at 16M as the input bound (reducing it to ~7.1M would reject 4K full-screen OCR, the core Smart-Redaction case; the cap already keeps the working image ≤16M).
+- (2026-06-25) `PreparedOcr` gets a custom `Debug` that omits recognized text, closing a PII leak through `RealAutomationHost: Debug` (the tracing-privacy test only covered tracing output, not `{:?}`).
+- (2026-06-25) `prepare_ocr` emits privacy-safe error tracing events (code only) on session-init/detect failure, matching the spec's "error code" tracing field.
+- (2026-06-25) Corrected the `paddle-ocr-rs` license in the spec: Apache-2.0, not MIT (confirmed via crates.io).
 
 ## Self-Review
 
@@ -1633,6 +1665,6 @@ Plan is locked in — run `superpowers:executing-plans` for a single sequential 
 - Negative tests: zero-limit, unprepared, limit-exceeded, non-finite region (D11), zero-dim image → Tasks 1–2. ✓
 - D14 timing → recorded in handoff (Task 5 Step 3). ✓
 
-**Placeholder scan:** No `TODO`/"add error handling"/"similar to". The externally-sensitive values are the static ONNX Runtime asset version (`1.22.1` in `provision-onnxruntime.sh`), the ModelScope primary URLs (hardcoded, verified against RapidOCR's `default_models.yaml` v3.9.0), and the optional GitHub Release mirror tag URL. The ModelScope URLs are concrete and currently live; the static ORT version is a Snow Shot-informed default hard-gated by Task 1 Step 3 plus the Linux/macOS OCR CI lane; the Release mirror is a fallback only, not a prerequisite.
+**Placeholder scan:** No `TODO`/"add error handling"/"similar to". The externally-sensitive values are the static ONNX Runtime asset version (`1.22.2` in `provision-onnxruntime.sh`), the ModelScope primary URLs (hardcoded, verified against RapidOCR's `default_models.yaml` v3.9.0), and the optional GitHub Release mirror tag URL. The ModelScope URLs are concrete and currently live; the static ORT version is the snow-shot-shipped pin (`1.22.2`, both required static assets confirmed to exist) hard-gated by Task 1 Step 3 plus the Linux/macOS OCR CI lane; the Release mirror is a fallback only, not a prerequisite.
 
 **Type consistency:** `OcrDetection { x,y,w,h,text,confidence }`, `OcrRegionQuery::default()`, `OcrEngine::{new,detect}`, `OcrError`, `MAX_OCR_AREA`, `OcrKey`/`PreparedOcr`, error codes (`ocr_session_init`, `ocr_detect`, `vision_index_unavailable`, `invalid_query`, `capability_unavailable`) are used identically across Tasks 1–3. `detect` returns input-native coords (Task 1), vision adds crop offset only (Task 2) — the split matches §4.3. ✓
