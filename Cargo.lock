@@ -6169,6 +6169,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rollshot-preset"
+version = "0.1.0"
+dependencies = [
+ "fs4",
+ "rollshot-automation",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "rollshot-vision"
 version = "0.1.0"
 dependencies = [

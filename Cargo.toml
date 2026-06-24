@@ -17,6 +17,7 @@ members = [
     "crates/rollshot-automation-rquickjs",
     "crates/rollshot-vision",
     "crates/rollshot-agent",
+    "crates/rollshot-preset",
 ]
 resolver = "2"
 
