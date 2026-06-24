@@ -4,7 +4,7 @@
 
 **Goal:** Build the `rollshot-preset` crate — durable, file-based JSON persistence for Smart Redaction presets and their immutable automation revisions, with safe active-revision selection and revalidate-on-load — and unify the app's config-root resolver on the XDG (etcetera) strategy.
 
-**Architecture:** A framework-neutral library crate stores each preset as a directory under an injected root: `preset.json` plus write-once `revisions/<id>.json` files, each wrapping a `rollshot_automation::ValidatedAutomation`. Writes are atomic (`tmp → fsync → rename`); `preset.json` mutations take an `fs4` advisory lock. Loading a revision calls `rollshot_automation::ensure_compatible` to revalidate it. The product edge resolves the root via the shared `rollshot_config_dir()`, upgraded from `dirs` to `etcetera`.
+**Architecture:** A framework-neutral library crate stores each preset as a directory under an injected root: `preset.json` plus write-once `revisions/<id>.json` files, each wrapping a `rollshot_automation::ValidatedAutomation`. Writes are atomic (`tmp → fsync → rename`); every mutation under one preset directory takes an `fs4` advisory lock before checking existence and writing, so write-once revision semantics survive concurrent callers. Loading a revision calls `rollshot_automation::ensure_compatible` to revalidate it. The product edge resolves the root via the shared `rollshot_config_dir()`, upgraded from `dirs` to `etcetera`.
 
 **Tech Stack:** Rust (edition 2021, MSRV 1.94), `serde`/`serde_json`, `thiserror`, `fs4` (file locks), `etcetera` (XDG dirs, product edge only), `rollshot-automation`. Tests use `tempfile`.
 
@@ -18,11 +18,11 @@ Every task's requirements implicitly include these (verbatim from the spec):
 - Dependency direction: `rollshot-preset → rollshot-automation` **only**. No dependency on `rollshot-agent`, no UI/windowing/capture/provider code.
 - The store accepts an **injected `root: PathBuf`**; the crate never resolves a home/config path and never reads environment variables. All crate tests run against a temp dir.
 - IDs and timestamps are **caller-supplied** opaque values (`PresetId(String)`, `RevisionId(String)`, RFC 3339 `created_at`/`now: String`). The crate treats them as opaque.
-- `AutomationRevision` is **immutable / write-once**; there is no overwrite or mutate API. Only `preset.json` fields (`active_revision_id`, `name`, `updated_at`) change.
+- `AutomationRevision` is **immutable / write-once**; there is no overwrite or mutate API. Only `preset.json` fields (`active_revision_id`, `name`, `updated_at`) change. Revision writes must hold the preset directory lock while checking for an existing file and writing the new file.
 - `add_revision` does **not** auto-activate; activation is a separate `set_active_revision` call.
 - Every file write is atomic: serialize to `<file>.tmp`, `fsync`, `rename` over the destination. Readers/listers ignore `.tmp`.
 - `load_revision` / `load_active_revision` must call `rollshot_automation::ensure_compatible(&artifact)` before returning.
-- `store_schema_version` (`const STORE_SCHEMA_VERSION: u16 = 1`) is embedded in every file, independent of the automation schema versions.
+- `store_schema_version` (`const STORE_SCHEMA_VERSION: u16 = 1`) is embedded in every file, independent of the automation schema versions. `load_preset` and `load_revision` must reject unsupported store schema versions instead of silently accepting future records.
 - Tracing (if any) uses stable `rollshot::*` targets with privacy-safe fields only; no `println!`/`eprintln!`/`dbg!`. (This plan adds no tracing.)
 - Verify each task with `rtk cargo test -p rollshot-preset`, `rtk cargo fmt --check`, `rtk cargo clippy -p rollshot-preset --all-targets -- -D warnings`.
 
@@ -91,7 +91,7 @@ pub enum EntityKind {
 /// Errors returned by the preset store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path:?}: {source}")]
     Io {
         path: PathBuf,
         #[source]
@@ -107,7 +107,13 @@ pub enum StoreError {
     Integrity(String),
     #[error("revision already exists: {0}")]
     RevisionExists(String),
-    #[error("corrupt store entry at {path}: {detail}")]
+    #[error("unsupported store schema version at {path:?}: expected {expected}, found {found}")]
+    UnsupportedStoreSchema {
+        path: PathBuf,
+        expected: u16,
+        found: u16,
+    },
+    #[error("corrupt store entry at {path:?}: {detail}")]
     Corrupt { path: PathBuf, detail: String },
 }
 
@@ -538,7 +544,7 @@ git commit -m "feat(preset): advisory directory lock via fs4"
 - Modify: `crates/rollshot-preset/src/lib.rs` (add `mod store;` and `pub use store::PresetStore;`)
 
 **Interfaces:**
-- Consumes: `io::{write_atomic, read_optional_bytes}`; domain types; `StoreError`.
+- Consumes: `io::{write_atomic, read_optional_bytes, lock_dir}`; domain types; `StoreError`.
 - Produces:
   - `pub struct PresetStore`
   - `PresetStore::open(root: PathBuf) -> Self`
@@ -668,6 +674,29 @@ mod tests {
         mk().unwrap();
         assert!(matches!(mk().unwrap_err(), StoreError::Integrity(_)));
     }
+
+    #[test]
+    fn unsupported_preset_store_schema_is_rejected() {
+        let (dir, store) = store();
+        store
+            .create_preset(
+                PresetId("p1".into()),
+                "x".into(),
+                String::new(),
+                "2026-06-24T00:00:00Z".into(),
+            )
+            .unwrap();
+        let path = dir.path().join("presets").join("p1").join("preset.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["store_schema_version"] = serde_json::json!(999);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.load_preset(&PresetId("p1".into())).unwrap_err(),
+            StoreError::UnsupportedStoreSchema { .. }
+        ));
+    }
 }
 ```
 
@@ -694,6 +723,18 @@ fn validate_id(id: &str) -> Result<()> {
         Ok(())
     } else {
         Err(StoreError::Integrity(format!("invalid id: {id:?}")))
+    }
+}
+
+fn ensure_store_schema(path: PathBuf, found: u16) -> Result<()> {
+    if found == STORE_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(StoreError::UnsupportedStoreSchema {
+            path,
+            expected: STORE_SCHEMA_VERSION,
+            found,
+        })
     }
 }
 
@@ -725,6 +766,7 @@ impl PresetStore {
         now: String,
     ) -> Result<Preset> {
         validate_id(&id.0)?;
+        let _lock = io::lock_dir(&self.preset_dir(&id))?;
         if self.preset_json(&id).exists() {
             return Err(StoreError::Integrity(format!(
                 "preset already exists: {}",
@@ -753,10 +795,15 @@ impl PresetStore {
                 kind: EntityKind::Preset,
                 id: id.0.clone(),
             }),
-            Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt {
-                path,
-                detail: e.to_string(),
-            }),
+            Some(bytes) => {
+                let preset: Preset =
+                    serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt {
+                        path: path.clone(),
+                        detail: e.to_string(),
+                    })?;
+                ensure_store_schema(path, preset.store_schema_version)?;
+                Ok(preset)
+            }
         }
     }
 
@@ -809,7 +856,7 @@ Note: `AutomationRevision`, `RevisionId`, `RevisionSummary`, and `io::{read_opti
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `rtk cargo test -p rollshot-preset store::`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 6: Format, lint, commit**
 
@@ -885,6 +932,14 @@ function main(input) {
             )
             .unwrap();
         (dir, store)
+    }
+
+    /// Path to the revision file (mirrors the store's internal layout).
+    fn revision_path(dir: &std::path::Path, preset: &str, rev: &str) -> PathBuf {
+        dir.join("presets")
+            .join(preset)
+            .join("revisions")
+            .join(format!("{rev}.json"))
     }
 
     #[test]
@@ -988,6 +1043,25 @@ function main(input) {
             .collect();
         assert_eq!(ids, vec!["r1".to_string(), "r2".to_string()]);
     }
+
+    #[test]
+    fn add_revision_rejects_incompatible_artifact() {
+        let (_dir, store) = seeded();
+        let mut artifact = sample_artifact();
+        artifact.source = "@@@ not javascript @@@".into();
+
+        let err = store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                artifact,
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Incompatible(_)));
+    }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1028,6 +1102,8 @@ Add the path helpers and methods inside `impl PresetStore`:
         now: String,
     ) -> Result<AutomationRevision> {
         validate_id(&id.0)?;
+        ensure_compatible(&artifact)?;
+        let _lock = io::lock_dir(&self.preset_dir(preset_id))?;
         // Preset must exist.
         let _ = self.load_preset(preset_id)?;
         let path = self.revision_json(preset_id, &id);
@@ -1065,6 +1141,7 @@ Add the path helpers and methods inside `impl PresetStore`:
                 path: path.clone(),
                 detail: e.to_string(),
             })?;
+        ensure_store_schema(path, revision.store_schema_version)?;
         ensure_compatible(&revision.artifact)?;
         Ok(revision)
     }
@@ -1099,6 +1176,7 @@ Add the path helpers and methods inside `impl PresetStore`:
                     path: path.clone(),
                     detail: e.to_string(),
                 })?;
+            ensure_store_schema(path, revision.store_schema_version)?;
             out.push(RevisionSummary {
                 id: revision.id,
                 parent_id: revision.parent_id,
@@ -1113,7 +1191,7 @@ Add the path helpers and methods inside `impl PresetStore`:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `rtk cargo test -p rollshot-preset store::`
-Expected: PASS (5 prior + 5 new = 10 store tests).
+Expected: PASS (6 prior + 6 new = 12 store tests).
 
 - [ ] **Step 5: Format, lint, commit**
 
@@ -1189,6 +1267,39 @@ git commit -m "feat(preset): immutable revisions with revalidate-on-load"
     }
 
     #[test]
+    fn activate_incompatible_revision_is_rejected() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["artifact"]["source"] = serde_json::Value::String("@@@ not javascript @@@".into());
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let err = store
+            .set_active_revision(
+                &PresetId("p1".into()),
+                &RevisionId("r1".into()),
+                "2026-06-24T00:02:00Z".into(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Incompatible(_)));
+
+        let preset = store.load_preset(&PresetId("p1".into())).unwrap();
+        assert_eq!(preset.active_revision_id, None);
+    }
+
+    #[test]
     fn load_active_without_selection_is_integrity_error() {
         let (_dir, store) = seeded();
         let err = store
@@ -1257,6 +1368,9 @@ Expected: FAIL — `set_active_revision` / `load_active_revision` / `rename_pres
                 rev_id.0, preset_id.0
             )));
         }
+        // Validate before publishing the pointer; otherwise a corrupted or
+        // stale revision can become active and fail only later.
+        let _ = self.load_revision(preset_id, rev_id)?;
         preset.active_revision_id = Some(rev_id.clone());
         preset.updated_at = now;
         let bytes = serde_json::to_vec_pretty(&preset)?;
@@ -1312,7 +1426,7 @@ Expected: FAIL — `set_active_revision` / `load_active_revision` / `rename_pres
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `rtk cargo test -p rollshot-preset store::`
-Expected: PASS (10 prior + 5 new = 15 store tests).
+Expected: PASS (12 prior + 6 new = 18 store tests).
 
 - [ ] **Step 5: Format, lint, commit**
 
@@ -1332,19 +1446,11 @@ git commit -m "feat(preset): active-revision selection and preset lifecycle"
 
 **Interfaces:**
 - Consumes: existing `add_revision` / `load_revision`; `serde_json::Value` for on-disk mutation.
-- Produces: no new public API; verifies `StoreError::Incompatible` and `StoreError::Corrupt` paths.
+- Produces: no new public API; verifies `StoreError::Incompatible`, `StoreError::UnsupportedStoreSchema`, and `StoreError::Corrupt` paths.
 
 - [ ] **Step 1: Write the failing tests (add to the `tests` module in `store.rs`)**
 
 ```rust
-    /// Path to the revision file (mirrors the store's internal layout).
-    fn revision_path(dir: &std::path::Path, preset: &str, rev: &str) -> PathBuf {
-        dir.join("presets")
-            .join(preset)
-            .join("revisions")
-            .join(format!("{rev}.json"))
-    }
-
     #[test]
     fn tampered_source_is_incompatible() {
         let (dir, store) = seeded();
@@ -1401,6 +1507,32 @@ git commit -m "feat(preset): active-revision selection and preset lifecycle"
     }
 
     #[test]
+    fn unsupported_revision_store_schema_is_rejected() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["store_schema_version"] = serde_json::json!(999);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let err = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedStoreSchema { .. }));
+    }
+
+    #[test]
     fn corrupt_revision_json_is_corrupt_error() {
         let (dir, store) = seeded();
         store
@@ -1427,7 +1559,7 @@ git commit -m "feat(preset): active-revision selection and preset lifecycle"
 - [ ] **Step 2: Run the tests**
 
 Run: `rtk cargo test -p rollshot-preset store::`
-Expected: PASS. These exercise existing code (no implementation change). If `tampered_source_is_incompatible` or `stale_schema_version_is_incompatible` fail, the bug is in how `load_revision` propagates `ensure_compatible`'s error — confirm `ensure_compatible(&revision.artifact)?` is present and `StoreError::Incompatible(#[from] CompatibilityError)` is wired.
+Expected: PASS. These exercise existing code (no implementation change). If `tampered_source_is_incompatible` or `stale_schema_version_is_incompatible` fail, the bug is in how `load_revision` propagates `ensure_compatible`'s error — confirm `ensure_compatible(&revision.artifact)?` is present and `StoreError::Incompatible(#[from] CompatibilityError)` is wired. If `unsupported_revision_store_schema_is_rejected` fails, confirm `ensure_store_schema(path, revision.store_schema_version)?` runs before returning a decoded revision.
 
 - [ ] **Step 3: Format, lint, commit**
 
@@ -1449,7 +1581,7 @@ git commit -m "test(preset): revalidate-on-load tamper, schema, and corruption c
 
 **Interfaces:**
 - Consumes: `etcetera::base_strategy::{choose_base_strategy, BaseStrategy}`.
-- Produces: unchanged signature `rollshot_config_dir() -> Result<PathBuf, String>`, now resolving via the XDG strategy. SP6 will build the preset root as `rollshot_config_dir()?.join("presets")`.
+- Produces: unchanged signature `rollshot_config_dir() -> Result<PathBuf, String>`, now resolving via the XDG strategy, plus private helper `fn rollshot_config_dir_from_base(base: PathBuf) -> PathBuf` for deterministic testing. SP6 will build the preset root as `rollshot_config_dir()?.join("presets")`.
 
 - [ ] **Step 1: Add `etcetera` to the workspace dependencies**
 
@@ -1473,26 +1605,30 @@ Add to the existing `#[cfg(test)] mod tests` block in that file:
 
 ```rust
     #[test]
-    fn rollshot_config_dir_resolves_under_rollshot() {
-        let dir = super::rollshot_config_dir().expect("config dir resolves");
-        assert!(dir.ends_with("rollshot"), "got {dir:?}");
+    fn rollshot_config_dir_from_base_appends_rollshot() {
+        let dir = rollshot_config_dir_from_base(PathBuf::from("/tmp/xdg-config"));
+        assert_eq!(dir, PathBuf::from("/tmp/xdg-config").join("rollshot"));
     }
 ```
 
-(If the test module imports `use super::*;`, call `rollshot_config_dir()` directly instead of `super::rollshot_config_dir()`.)
+The test module already imports `use super::*;`, so `PathBuf` is in scope through the module's private imports. This avoids depending on the real user's home/config environment in a unit test.
 
 - [ ] **Step 4: Run the test to verify current behavior, then change the implementation**
 
-Run: `rtk cargo test -p rollshot-app config::tests::rollshot_config_dir_resolves_under_rollshot`
-Expected: PASS already (the `dirs` implementation also ends with `rollshot`). This test is a guard that survives the swap.
+Run: `rtk cargo test -p rollshot-app config::tests::rollshot_config_dir_from_base_appends_rollshot`
+Expected: FAIL — `rollshot_config_dir_from_base` does not exist yet.
 
 Replace `rollshot_config_dir` (currently `crates/rollshot-app/src/daemon/config.rs:166-170`):
 
 ```rust
+fn rollshot_config_dir_from_base(base: PathBuf) -> PathBuf {
+    base.join("rollshot")
+}
+
 pub fn rollshot_config_dir() -> Result<PathBuf, String> {
     use etcetera::base_strategy::{choose_base_strategy, BaseStrategy};
     choose_base_strategy()
-        .map(|strategy| strategy.config_dir().join("rollshot"))
+        .map(|strategy| rollshot_config_dir_from_base(strategy.config_dir()))
         .map_err(|error| format!("platform configuration directory is unavailable: {error}"))
 }
 ```
@@ -1500,7 +1636,7 @@ pub fn rollshot_config_dir() -> Result<PathBuf, String> {
 - [ ] **Step 5: Run the test and the daemon-config suite to verify they pass**
 
 Run: `rtk cargo test -p rollshot-app config::`
-Expected: PASS — the guard test passes and existing `load_from`-based config tests are unaffected (they pass explicit paths).
+Expected: PASS — the pure resolver-helper guard passes and existing `load_from`-based config tests are unaffected (they pass explicit paths).
 
 - [ ] **Step 6: Format, lint, commit**
 
@@ -1525,7 +1661,7 @@ rtk cargo test -p rollshot-preset
 rtk cargo fmt --check
 rtk cargo clippy -p rollshot-preset --all-targets -- -D warnings
 ```
-Expected: all PASS; `rollshot-preset` has ~19 tests (1 lib + 4 io + 15 store... adjust count to actual).
+Expected: all PASS; `rollshot-preset` has ~27 tests (1 lib + 4 io + 22 store... adjust count only if implementation adds/removes tests).
 
 - [ ] **Step 2: Workspace-wide gate (catches the resolver change's blast radius)**
 
@@ -1575,3 +1711,202 @@ No spec requirement is left without a task.
 **2. Placeholder scan:** No "TBD"/"add error handling"/"similar to Task N"/"write tests for the above" — every code and test step contains complete code. Path-traversal, immutability, integrity, and revalidation each have concrete test bodies.
 
 **3. Type consistency:** `PresetId`/`RevisionId` are `(pub String)` newtypes used consistently; `set_active_revision`/`rename_preset`/`create_preset`/`add_revision` all take `now: String`; `load_revision`/`load_active_revision` both call `ensure_compatible`; `StoreError` variants referenced in tests (`NotFound{kind,..}`, `Integrity`, `RevisionExists`, `Incompatible`, `Corrupt`) all match `error.rs`. `RevisionProvenance`/`RevisionOrigin` field and variant names match between `domain.rs` and the test helpers. `write_atomic`'s `<file>.tmp` naming matches the `.json`-only extension filter in `list_revisions`.
+
+---
+
+## Engineering Review Lock-In (auto mode)
+
+### Step 0: Scope Challenge
+
+- **Goal alignment:** All nine tasks directly support durable preset persistence or the config-root resolver needed to locate the future preset root.
+- **Minimum viable plan:** Keep Tasks 1-9. Deferring Task 8 would leave SP6 without the shared config-root resolver named in the Goal; deferring Task 7 would leave revalidate-on-load failure behavior unproven.
+- **Complexity check:** 5 create / 5 modify, 9 tasks, 1 new crate. The threshold is not triggered.
+- **Search check:** `etcetera` 0.11 documents `choose_base_strategy` / `BaseStrategy::config_dir`, with default BaseStrategy using Windows on Windows and XDG elsewhere; that matches the requested XDG strategy. `fs4` 1.1 provides `FileExt` locking and `TryLockError`. Rust `rename` replaces the target and does not work across mount points; this plan writes the temp file as a sibling, keeping source and destination on the same filesystem.
+
+### Auto decisions applied
+
+**Auto decision D1 — Lock write-once mutations**
+
+Context: The original plan locked `preset.json` mutations but allowed concurrent `create_preset` / `add_revision` callers to pass the existence check and overwrite via rename.
+ELI10: A "write-once" file is only write-once if two writers cannot both decide it is missing at the same time. The file lock makes the check and write act like one turn.
+Stakes if we pick wrong: Concurrent agent/app runs can silently replace a supposedly immutable revision.
+Recommendation: **1A** because correctness depends on this lock.
+Completeness: A=10/10, B=5/10
+Pros / cons:
+A) Lock all preset-directory mutations (recommended) - effort human: ~1 hour / AI: ~10 min; risk low; maintenance low.
+  - Pro: Preserves immutable revision semantics under concurrent callers.
+  - Con: Slightly serializes writes under one preset.
+B) Keep only `preset.json` locks - effort none; risk medium; maintenance low.
+  - Pro: Smaller diff.
+  - Con: Write-once is not actually guaranteed.
+Net: Trade a tiny amount of write parallelism for the core persistence invariant.
+
+**Auto decision D2 — Enforce store schema versions**
+
+Context: The plan wrote `store_schema_version` but did not reject unsupported versions on load.
+ELI10: Writing a version number is only useful if readers check it. Otherwise a future file format can be read as if it were today's format.
+Stakes if we pick wrong: Future migrations can produce silent data corruption or misleading UI state.
+Recommendation: **2A** because explicit failure is safer than pretending unknown data is compatible.
+Completeness: A=10/10, B=4/10
+Pros / cons:
+A) Add `UnsupportedStoreSchema` and tests (recommended) - effort human: ~1 hour / AI: ~10 min; risk low; maintenance low.
+  - Pro: Unknown future store files fail clearly.
+  - Con: Adds one error variant and helper.
+B) Keep version as documentation only - effort none; risk medium; maintenance low.
+  - Pro: Smaller code.
+  - Con: The version field has no protective value.
+Net: Explicit over clever; the stored schema version becomes an enforceable contract.
+
+**Auto decision D3 — Validate revisions before write and activation**
+
+Context: `load_revision` revalidated artifacts, but `add_revision` and `set_active_revision` could accept an already incompatible in-memory or tampered revision.
+ELI10: The store should not save or publish something it already knows cannot be used. Loading later is a second safety check, not the first one.
+Stakes if we pick wrong: A preset can become active and then immediately fail when the user applies it.
+Recommendation: **3A** because safe active selection is part of the Goal.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Validate on add, activate, and load (recommended) - effort human: ~1 hour / AI: ~15 min; risk low; maintenance low.
+  - Pro: Bad revisions fail before they become durable or active.
+  - Con: Revalidation cost is paid on write/activation too.
+B) Validate only on load - effort none; risk medium; maintenance low.
+  - Pro: Slightly less work per write.
+  - Con: Invalid active pointers remain possible.
+Net: Spend cheap validation work to keep persisted and active state trustworthy.
+
+**Auto decision D4 — Make config-dir tests deterministic**
+
+Context: The original Task 8 test called `rollshot_config_dir()` directly, depending on the real user home/config environment.
+ELI10: Unit tests should not depend on whether a machine has a normal home directory. Testing the pure path join gives the stable behavior we care about.
+Stakes if we pick wrong: CI or sandboxed runs can fail for environment reasons unrelated to the code.
+Recommendation: **4A** because deterministic tests are easier to trust.
+Completeness: A=9/10, B=6/10
+Pros / cons:
+A) Add pure helper and test it (recommended) - effort human: ~30 min / AI: ~5 min; risk low; maintenance low.
+  - Pro: Stable on CI and developer machines.
+  - Con: Does not exercise `choose_base_strategy` at runtime.
+B) Test `rollshot_config_dir()` directly - effort none; risk medium; maintenance low.
+  - Pro: Exercises the full resolver.
+  - Con: Environment-dependent failure mode.
+Net: Keep runtime resolver simple and test the deterministic part locally.
+
+**Auto decision D5 — Share the revision-path test helper**
+
+Context: Task 6 and Task 7 both need to mutate stored revision files in tests.
+ELI10: Duplicating the same helper invites drift. Put it once where later tests can use it.
+Stakes if we pick wrong: Subagents can add duplicate helpers that conflict or get updated inconsistently.
+Recommendation: **5A** because DRY matters in test infrastructure too.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Define `revision_path` once in Task 5 tests (recommended) - effort human: ~10 min / AI: ~2 min; risk low; maintenance low.
+  - Pro: One helper supports all later tamper tests.
+  - Con: Task 5 introduces a helper not used until later tests.
+B) Duplicate helper in each task - effort none; risk low; maintenance medium.
+  - Pro: Each task is locally self-contained.
+  - Con: Repetition creates avoidable churn.
+Net: A small shared helper is simpler than repeated path construction.
+
+**Auto decision D6 — Use debug formatting for persisted paths in errors**
+
+Context: The original `thiserror` messages used `{path}` for `PathBuf`, which does not implement `Display`.
+ELI10: Error messages are code too. If the formatter asks a path to print in a way it does not support, the crate does not compile.
+Stakes if we pick wrong: Task 1 fails at compile time before any store behavior can be tested.
+Recommendation: **6A** because compile-correct snippets are a baseline requirement for an executable plan.
+Completeness: A=10/10, B=0/10
+Pros / cons:
+A) Change path formatters to `{path:?}` (recommended) - effort human: ~5 min / AI: ~1 min; risk low; maintenance low.
+  - Pro: The error enum compiles and still shows useful path information.
+  - Con: Debug path formatting is slightly noisier than display formatting.
+B) Keep `{path}` - effort none; risk high; maintenance none.
+  - Pro: Looks cleaner in prose.
+  - Con: The crate will not compile.
+Net: A tiny formatting change prevents an immediate compile failure.
+
+### Review Section Results
+
+- Architecture Review: 3 issues, all resolved by D1-D3.
+- Plan Structure + Code Quality: 2 issues, resolved by D5-D6.
+- Test Review: 2 gaps, resolved by D2 and D4.
+- Performance & Resource Review: No remaining issues. The plan uses sibling temp files for same-filesystem rename and bounds the persistence path to small JSON metadata/artifact files, not frame buffers.
+
+### Test Coverage Table
+
+| Task / behavior | Unit | Integ | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / domain serde round trip | yes | no | no | no |
+| Task 2 / atomic write/read/missing/tmp cleanup | yes | no | no | no |
+| Task 3 / advisory lock contention | yes | no | no | no |
+| Task 4 / preset create/load/list/id validation/schema rejection | yes | no | no | no |
+| Task 5 / revision add/load/list/duplicate/missing/incompatible-on-add | yes | no | no | no |
+| Task 6 / activate/load active/rename/delete/incompatible activation | yes | no | no | no |
+| Task 7 / tamper, automation schema bump, store schema bump, corrupt JSON | yes | no | no | no |
+| Task 8 / config-root appends `rollshot` under selected base | yes | no | no | no |
+| Task 9 / crate and workspace verification | no | yes | no | no |
+
+### Failure Modes
+
+| Codepath | Realistic failure | Covered by | Handling/user visibility |
+|---|---|---|---|
+| Atomic file write | parent cannot be created or file cannot be synced | Task 2 happy path; Task 9 clippy/test gate | `StoreError::Io` with path; caller can show a clear persistence error |
+| Directory lock | another process holds the lock or lock file cannot open | Task 3 contention test | blocking lock or `StoreError::Io`; no silent failure |
+| Preset load | missing/corrupt/future schema file | Task 4 missing + unsupported schema; Task 7 corrupt revision equivalent | `NotFound`, `Corrupt`, or `UnsupportedStoreSchema`; no silent failure |
+| Revision add | duplicate ID or incompatible artifact | Task 5 duplicate + incompatible-on-add | `RevisionExists` or `Incompatible`; no overwrite |
+| Revision load | tampered source, automation schema bump, corrupt JSON, future store schema | Task 7 | `Incompatible`, `Corrupt`, or `UnsupportedStoreSchema`; no silent failure |
+| Active selection | target missing or incompatible | Task 6 missing + incompatible activation | `Integrity` or `Incompatible`; active pointer remains unchanged |
+| Config resolver | platform config dir unavailable | Task 8 compiles path; runtime branch not unit-faked | `Err(String)` from `rollshot_config_dir`; caller can show setup/config error |
+
+Critical gaps flagged: 0 after the auto edits.
+
+### What already exists
+
+- `rollshot_automation::ValidatedAutomation`, `validate_source`, `ValidationLimits`, `ensure_compatible`, and `CompatibilityError` already exist and are reused rather than rebuilt.
+- `rollshot-app/src/daemon/config.rs::rollshot_config_dir` already exists and is modified in place rather than adding a second resolver.
+- `fs4` already exists in workspace dependencies and `rollshot-app`; the new crate reuses the same locking crate.
+- `dirs` remains used elsewhere in `rollshot-app` (`storage.rs`, timeline workspace), so Task 8 intentionally does not remove the crate dependency.
+
+### NOT in scope
+
+- UI for creating, editing, selecting, or applying presets: SP5 provides the persistence layer only.
+- Agent session linkage beyond opaque `source_run_ref`: SP6 can attach real session identity later.
+- Migration framework for future `store_schema_version` values: unknown versions are rejected clearly for now.
+- Encryption or OS keychain integration: no sensitive provider secrets are stored in this crate.
+- Network, provider, capture, or windowing integration: forbidden by the crate boundary.
+- Build/publish pipeline changes: this is a workspace library crate and app dependency refactor, not a new distributable artifact.
+
+### Worktree / Subagent Parallelization Strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| Task 1 | workspace root, `crates/rollshot-preset/` | none |
+| Task 2 | `crates/rollshot-preset/` | Task 1 |
+| Task 3 | `crates/rollshot-preset/` | Task 2 |
+| Task 4 | `crates/rollshot-preset/` | Task 3 |
+| Task 5 | `crates/rollshot-preset/` | Task 4 |
+| Task 6 | `crates/rollshot-preset/` | Task 5 |
+| Task 7 | `crates/rollshot-preset/` | Task 6 |
+| Task 8 | workspace root, `crates/rollshot-app/` | Task 1 |
+| Task 9 | whole workspace | Tasks 2-8 merged |
+
+- Lane A: Task 1 (serial workspace scaffold).
+- Lane B: Task 2 -> Task 3 -> Task 4 -> Task 5 -> Task 6 -> Task 7 (sequential, all touch `crates/rollshot-preset/`).
+- Lane C: Task 8 (can run after Task 1, independent of Lane B except for possible root `Cargo.toml` merge coordination).
+- Execution order: run Task 1 first; then Lane B and Lane C may run in parallel; merge both; run Task 9.
+- Conflict flags: Task 1 and Task 8 both modify root `Cargo.toml`, so Task 8 should start only after Task 1 lands or be merged carefully.
+
+### Completion Summary
+
+Plan reviewed:           `docs/superpowers/plans/2026-06-24-preset-persistence.md`
+Tasks in plan:           9
+Files Create/Modify:     5 create / 5 modify
+
+- Step 0: Scope Challenge   — accepted as-is
+- Architecture Review:        3 issues
+- Plan Structure + Code Q:    2 issues
+- Test Review:                table produced, 2 gaps
+- Performance Review:         0 issues
+- NOT in scope:               written
+- What already exists:        written
+- Failure modes:              0 critical gaps flagged
+- Parallelization:            3 lanes, 2 parallel after Task 1 / 2 sequential gates
+- Unresolved decisions:       0
+
+Plan is locked in — run `superpowers:subagent-driven-development` if you want Lane B and Lane C parallelized after Task 1, or `superpowers:executing-plans` for a simpler sequential execution.
