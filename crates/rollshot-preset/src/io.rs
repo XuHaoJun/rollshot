@@ -9,7 +9,6 @@ use crate::error::{Result, StoreError};
 /// Write `bytes` to `path` atomically: serialize to a sibling `.tmp`, fsync,
 /// then rename over the destination. A reader sees the old file or the new
 /// one, never a partial write.
-#[allow(dead_code)]
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| StoreError::Io {
         path: path.to_path_buf(),
@@ -49,7 +48,6 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Read all bytes at `path`, returning `None` if the file does not exist.
-#[allow(dead_code)]
 pub(crate) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -63,14 +61,12 @@ pub(crate) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
 
 /// RAII advisory lock over a preset directory. The OS releases the flock when
 /// the held file is dropped/closed.
-#[allow(dead_code)]
 pub(crate) struct DirLock {
     _file: File,
 }
 
 /// Acquire a blocking exclusive advisory lock on `<dir>/.lock`, creating `dir`
 /// if needed. Serializes concurrent `preset.json` mutations across processes.
-#[allow(dead_code)]
 pub(crate) fn lock_dir(dir: &Path) -> Result<DirLock> {
     std::fs::create_dir_all(dir).map_err(|source| StoreError::Io {
         path: dir.to_path_buf(),

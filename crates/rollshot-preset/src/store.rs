@@ -93,6 +93,7 @@ impl PresetStore {
     }
 
     pub fn load_preset(&self, id: &PresetId) -> Result<Preset> {
+        validate_id(&id.0)?;
         let path = self.preset_json(id);
         match io::read_optional_bytes(&path)? {
             None => Err(StoreError::NotFound {
@@ -143,7 +144,7 @@ impl PresetStore {
                     active_revision_id: p.active_revision_id,
                     updated_at: p.updated_at,
                 }),
-                Err(StoreError::NotFound { .. }) => continue,
+                Err(StoreError::NotFound { .. } | StoreError::Integrity(_)) => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -161,6 +162,7 @@ impl PresetStore {
         now: String,
     ) -> Result<AutomationRevision> {
         validate_id(&id.0)?;
+        validate_id(&preset_id.0)?;
         ensure_compatible(&artifact)?;
         let _lock = io::lock_dir(&self.preset_dir(preset_id))?;
         let _ = self.load_preset(preset_id)?;
@@ -187,6 +189,8 @@ impl PresetStore {
         preset_id: &PresetId,
         rev_id: &RevisionId,
     ) -> Result<AutomationRevision> {
+        validate_id(&preset_id.0)?;
+        validate_id(&rev_id.0)?;
         let path = self.revision_json(preset_id, rev_id);
         let bytes = io::read_optional_bytes(&path)?.ok_or_else(|| StoreError::NotFound {
             kind: EntityKind::Revision,
@@ -208,6 +212,8 @@ impl PresetStore {
         rev_id: &RevisionId,
         now: String,
     ) -> Result<()> {
+        validate_id(&preset_id.0)?;
+        validate_id(&rev_id.0)?;
         if !self.preset_json(preset_id).exists() {
             return Err(StoreError::NotFound {
                 kind: EntityKind::Preset,
@@ -239,6 +245,7 @@ impl PresetStore {
     }
 
     pub fn rename_preset(&self, preset_id: &PresetId, new_name: String, now: String) -> Result<()> {
+        validate_id(&preset_id.0)?;
         if !self.preset_json(preset_id).exists() {
             return Err(StoreError::NotFound {
                 kind: EntityKind::Preset,
@@ -255,6 +262,7 @@ impl PresetStore {
     }
 
     pub fn delete_preset(&self, id: &PresetId) -> Result<()> {
+        validate_id(&id.0)?;
         if !self.preset_json(id).exists() {
             return Err(StoreError::NotFound {
                 kind: EntityKind::Preset,
@@ -346,6 +354,13 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn load_rejects_unsafe_id() {
+        let (_dir, store) = store();
+        let err = store.load_preset(&PresetId("../evil".into())).unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
     }
 
     #[test]
@@ -711,6 +726,15 @@ function main(input) {
             store.delete_preset(&PresetId("p1".into())).unwrap_err(),
             StoreError::NotFound { .. }
         ));
+    }
+
+    #[test]
+    fn delete_rejects_unsafe_id() {
+        let (_dir, store) = store();
+        let err = store
+            .delete_preset(&PresetId("../evil".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
     }
 
     #[test]
