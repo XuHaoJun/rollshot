@@ -163,10 +163,15 @@ pub fn config_path() -> Result<PathBuf, String> {
     rollshot_config_dir().map(|dir| dir.join("config.toml"))
 }
 
+fn rollshot_config_dir_from_base(base: PathBuf) -> PathBuf {
+    base.join("rollshot")
+}
+
 pub fn rollshot_config_dir() -> Result<PathBuf, String> {
-    dirs::config_dir()
-        .map(|dir| dir.join("rollshot"))
-        .ok_or_else(|| "platform configuration directory is unavailable".to_string())
+    use etcetera::base_strategy::{choose_base_strategy, BaseStrategy};
+    choose_base_strategy()
+        .map(|strategy| rollshot_config_dir_from_base(strategy.config_dir()))
+        .map_err(|error| format!("platform configuration directory is unavailable: {error}"))
 }
 
 pub fn load_from(path: &Path, platform: Platform) -> LoadedConfig {
@@ -333,5 +338,11 @@ mod tests {
                 .to_string(),
             "Command+Shift+6"
         );
+    }
+
+    #[test]
+    fn rollshot_config_dir_from_base_appends_rollshot() {
+        let dir = rollshot_config_dir_from_base(PathBuf::from("/tmp/xdg-config"));
+        assert_eq!(dir, PathBuf::from("/tmp/xdg-config").join("rollshot"));
     }
 }
