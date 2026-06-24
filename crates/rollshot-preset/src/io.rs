@@ -1,6 +1,8 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+
+use fs4::FileExt;
 
 use crate::error::{Result, StoreError};
 
@@ -59,6 +61,36 @@ pub(crate) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// RAII advisory lock over a preset directory. The OS releases the flock when
+/// the held file is dropped/closed.
+#[allow(dead_code)]
+pub(crate) struct DirLock {
+    _file: File,
+}
+
+/// Acquire a blocking exclusive advisory lock on `<dir>/.lock`, creating `dir`
+/// if needed. Serializes concurrent `preset.json` mutations across processes.
+#[allow(dead_code)]
+pub(crate) fn lock_dir(dir: &Path) -> Result<DirLock> {
+    std::fs::create_dir_all(dir).map_err(|source| StoreError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let path = dir.join(".lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    FileExt::lock(&file).map_err(|source| StoreError::Io { path, source })?;
+    Ok(DirLock { _file: file })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +117,28 @@ mod tests {
         write_atomic(&path, b"data").unwrap();
         assert!(!dir.path().join("file.tmp").exists());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn lock_dir_serializes_two_handles() {
+        use fs4::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = lock_dir(dir.path()).unwrap();
+
+        // A second exclusive try-lock on the same lock file must report contention
+        // while the first guard is alive (mirrors daemon InstanceGuard semantics).
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join(".lock"))
+            .unwrap();
+        assert!(matches!(
+            FileExt::try_lock(&second),
+            Err(fs4::TryLockError::WouldBlock)
+        ));
+
+        drop(guard);
     }
 }
