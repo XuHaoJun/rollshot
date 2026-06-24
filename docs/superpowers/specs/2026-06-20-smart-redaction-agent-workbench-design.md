@@ -957,6 +957,11 @@ Recommended sequence:
    - Secure copy/save.
    - Linux and macOS runtime verification.
 
+**OCR backend subproject (delivered 2026-06-25).** `rollshot-ocr` isolation
+crate + host wiring in `rollshot-vision` + real-OCR integration tests + CI
+lanes. Replaces the `capability_unavailable` stub for `ocr`. Details:
+`docs/superpowers/handoffs/2026-06-25-ocr-backend.md`.
+
 Each item after the spikes receives its own implementation spec or plan. The
 first implementation plan created from this document should cover the
 technical spikes, not the complete product.

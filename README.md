@@ -53,6 +53,8 @@ and PipeWire support.
   automation draft orchestration. Currently internal infrastructure and not yet
   wired into the product UI
 - `crates/rollshot-macos-oneshot`: isolated macOS ScreenCaptureKit one-shot capture (Objective-C FFI)
+- `crates/rollshot-ocr`: unsafe-isolation crate for RapidOCR/ONNX Runtime OCR (bundled PP-OCRv4 models, safe API, excluded from default workspace builds)
+- `crates/rollshot-vision`: visual inspection host (template matching, region features, OCR behind the off-by-default `ocr` feature)
 - `crates/rollshot-action`, `crates/rollshot-linux-input`, `crates/rollshot-macos-input`:
   Action Guide recording and platform input observation (built behind the
   `action-guide` feature)

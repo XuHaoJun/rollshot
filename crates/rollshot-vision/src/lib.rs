@@ -52,7 +52,9 @@ mod contract_tests {
                 limit: 1
             })
             .unwrap_err(),
-            rollshot_automation::CapabilityError::Failed { code: "vision_index_unavailable" }
+            rollshot_automation::CapabilityError::Failed {
+                code: "vision_index_unavailable"
+            }
         );
         assert_eq!(
             host.layout(LayoutQuery {

@@ -12,13 +12,13 @@ use rollshot_automation::{
 use rollshot_image_document::ImageRect;
 
 use crate::index::VisualIndex;
-use crate::rect::{region_to_pixel_rect, PixelRect};
 #[cfg(feature = "ocr")]
 use crate::rect::MAX_OCR_AREA;
-#[cfg(feature = "ocr")]
-use rollshot_ocr::{OcrEngine, OcrRegionQuery};
+use crate::rect::{region_to_pixel_rect, PixelRect};
 use crate::region_features::{dominant_rgba, edge_density, MAX_REGION_FEATURES_AREA};
 use crate::template::{prepare_template_match as prepare_template_results, TemplateStore};
+#[cfg(feature = "ocr")]
+use rollshot_ocr::{OcrEngine, OcrRegionQuery};
 
 #[derive(Debug, Clone)]
 struct PreparedTemplateMatch {
@@ -165,7 +165,8 @@ impl RealAutomationHost {
         query: &OcrQuery,
     ) -> Result<(), CapabilityError> {
         let started = Instant::now();
-        let rect = region_to_pixel_rect(&query.region, index.width(), index.height(), MAX_OCR_AREA)?;
+        let rect =
+            region_to_pixel_rect(&query.region, index.width(), index.height(), MAX_OCR_AREA)?;
 
         // Crop RGBA → RGB for paddle without materializing an intermediate RGBA
         // crop. A full-screen OCR region is already large; do one RGB allocation.
@@ -191,11 +192,20 @@ impl RealAutomationHost {
         let results: Vec<OcrMatch> = detections
             .into_iter()
             .filter_map(|d| {
-                let bounds = ImageRect { x: d.x + ox, y: d.y + oy, width: d.w, height: d.h };
+                let bounds = ImageRect {
+                    x: d.x + ox,
+                    y: d.y + oy,
+                    width: d.w,
+                    height: d.h,
+                };
                 if !bounds.is_finite() || d.w <= 0.0 || d.h <= 0.0 {
                     return None;
                 }
-                Some(OcrMatch { bounds, text: d.text, confidence: d.confidence })
+                Some(OcrMatch {
+                    bounds,
+                    text: d.text,
+                    confidence: d.confidence,
+                })
             })
             .collect();
 
@@ -203,7 +213,11 @@ impl RealAutomationHost {
         self.image_dimensions = Some((index.width(), index.height()));
         self.prepared_ocr.retain(|p| p.key != key);
         let result_count = results.len() as u64;
-        self.prepared_ocr.push(PreparedOcr { key, max_limit: query.limit, results });
+        self.prepared_ocr.push(PreparedOcr {
+            key,
+            max_limit: query.limit,
+            results,
+        });
         tracing::debug!(
             target: "rollshot::vision::ocr",
             duration_ms = started.elapsed().as_millis() as u64,
@@ -219,27 +233,38 @@ impl AutomationHost for RealAutomationHost {
         #[cfg(not(feature = "ocr"))]
         {
             let _ = query;
-            Err(CapabilityError::Failed { code: "capability_unavailable" })
+            Err(CapabilityError::Failed {
+                code: "capability_unavailable",
+            })
         }
         #[cfg(feature = "ocr")]
         {
             if query.limit == 0 {
-                return Err(CapabilityError::InvalidInput { code: "invalid_query" });
+                return Err(CapabilityError::InvalidInput {
+                    code: "invalid_query",
+                });
             }
-            let (w, h) = self
-                .image_dimensions
-                .ok_or(CapabilityError::Failed { code: "vision_index_unavailable" })?;
+            let (w, h) = self.image_dimensions.ok_or(CapabilityError::Failed {
+                code: "vision_index_unavailable",
+            })?;
             let rect = region_to_pixel_rect(&query.region, w, h, MAX_OCR_AREA)?;
             let key = OcrKey { rect };
-            let prepared = self
-                .prepared_ocr
-                .iter()
-                .find(|p| p.key == key)
-                .ok_or(CapabilityError::Failed { code: "vision_index_unavailable" })?;
+            let prepared =
+                self.prepared_ocr
+                    .iter()
+                    .find(|p| p.key == key)
+                    .ok_or(CapabilityError::Failed {
+                        code: "vision_index_unavailable",
+                    })?;
             if query.limit > prepared.max_limit {
                 return Err(CapabilityError::LimitExceeded);
             }
-            Ok(prepared.results.iter().take(query.limit as usize).cloned().collect())
+            Ok(prepared
+                .results
+                .iter()
+                .take(query.limit as usize)
+                .cloned()
+                .collect())
         }
     }
 
@@ -601,8 +626,7 @@ mod ocr_tests {
     use image::Rgba;
     use rollshot_automation::OcrQuery;
 
-    const FONT: &[u8] =
-        include_bytes!("../../rollshot-image-document/assets/fonts/DejaVuSans.ttf");
+    const FONT: &[u8] = include_bytes!("../../rollshot-image-document/assets/fonts/DejaVuSans.ttf");
 
     fn text_scene(w: u32, h: u32, x: i32, y: i32, px: f32, text: &str) -> image::RgbaImage {
         use imageproc::drawing::draw_text_mut;
@@ -616,18 +640,34 @@ mod ocr_tests {
     fn unprepared_ocr_query_fails_explicitly() {
         let mut host = RealAutomationHost::new();
         let err = host
-            .ocr(OcrQuery { region: rollshot_automation::Region::Full, limit: 1 })
+            .ocr(OcrQuery {
+                region: rollshot_automation::Region::Full,
+                limit: 1,
+            })
             .unwrap_err();
-        assert_eq!(err, CapabilityError::Failed { code: "vision_index_unavailable" });
+        assert_eq!(
+            err,
+            CapabilityError::Failed {
+                code: "vision_index_unavailable"
+            }
+        );
     }
 
     #[test]
     fn ocr_rejects_zero_limit() {
         let mut host = RealAutomationHost::new();
         let err = host
-            .ocr(OcrQuery { region: rollshot_automation::Region::Full, limit: 0 })
+            .ocr(OcrQuery {
+                region: rollshot_automation::Region::Full,
+                limit: 0,
+            })
             .unwrap_err();
-        assert_eq!(err, CapabilityError::InvalidInput { code: "invalid_query" });
+        assert_eq!(
+            err,
+            CapabilityError::InvalidInput {
+                code: "invalid_query"
+            }
+        );
     }
 
     #[test]
@@ -635,7 +675,10 @@ mod ocr_tests {
         let scene = text_scene(640, 160, 30, 60, 48.0, "Hello");
         let index = VisualIndex::build(scene).unwrap();
         let mut host = RealAutomationHost::new();
-        let q = OcrQuery { region: rollshot_automation::Region::Full, limit: 10 };
+        let q = OcrQuery {
+            region: rollshot_automation::Region::Full,
+            limit: 10,
+        };
         host.prepare_ocr(&index, &q).unwrap();
         let out = host.ocr(q).unwrap();
         assert!(!out.is_empty());
@@ -650,10 +693,19 @@ mod ocr_tests {
         let scene = text_scene(640, 160, 30, 60, 48.0, "Hello");
         let index = VisualIndex::build(scene).unwrap();
         let mut host = RealAutomationHost::new();
-        host.prepare_ocr(&index, &OcrQuery { region: rollshot_automation::Region::Full, limit: 1 })
-            .unwrap();
+        host.prepare_ocr(
+            &index,
+            &OcrQuery {
+                region: rollshot_automation::Region::Full,
+                limit: 1,
+            },
+        )
+        .unwrap();
         let err = host
-            .ocr(OcrQuery { region: rollshot_automation::Region::Full, limit: 2 })
+            .ocr(OcrQuery {
+                region: rollshot_automation::Region::Full,
+                limit: 2,
+            })
             .unwrap_err();
         assert_eq!(err, CapabilityError::LimitExceeded);
     }
@@ -664,9 +716,27 @@ mod ocr_tests {
         let index = VisualIndex::build(scene).unwrap();
         let mut host = RealAutomationHost::new();
         let bad = rollshot_automation::Region::Rect {
-            bounds: ImageRect { x: f32::NAN, y: 0.0, width: 8.0, height: 8.0 },
+            bounds: ImageRect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
         };
-        let err = host.prepare_ocr(&index, &OcrQuery { region: bad, limit: 1 }).unwrap_err();
-        assert_eq!(err, CapabilityError::InvalidInput { code: "non_finite_region" });
+        let err = host
+            .prepare_ocr(
+                &index,
+                &OcrQuery {
+                    region: bad,
+                    limit: 1,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CapabilityError::InvalidInput {
+                code: "non_finite_region"
+            }
+        );
     }
 }

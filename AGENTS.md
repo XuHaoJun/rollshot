@@ -168,6 +168,19 @@ behavior against code before relying on them.
   policy-validation, review-decision, and `ImageDocument` operation-lowering
   contracts. Automation and later agent/UI work produce proposals; this crate
   does not execute automation or mutate documents directly.
+- `crates/rollshot-ocr`: unsafe-isolation crate for RapidOCR/ONNX Runtime OCR
+  (`paddle-ocr-rs` + `ort`). Public API is safe and returns primitives only (no
+  rollshot deps), so the rest of the workspace keeps `unsafe_code = "forbid"`.
+  Bundled PP-OCRv4 Chinese models (det/cls/rec) are provisioned by `build.rs`
+  from ModelScope with SHA256 verification. Exact-pinned deps (`paddle-ocr-rs
+  =0.6.1`, `ort =2.0.0-rc.10`, `ndarray =0.16.1`) are load-bearing. Excluded
+  from `default-members`; built only via `-p rollshot-ocr` or the dedicated OCR
+  CI lane. Used by `rollshot-vision` behind the off-by-default `ocr` feature.
+- `crates/rollshot-vision`: visual inspection host. Implements `AutomationHost`
+  with prepared template matching, region features, and OCR. `ocr` is real
+  behind the off-by-default `ocr` feature (via `rollshot-ocr`); `layout` remains
+  stubbed (`capability_unavailable`). `RealAutomationHost` owns the
+  prepare-then-cached-callback pattern for all vision capabilities.
 - `crates/rollshot-automation`: restricted-JavaScript frontend and runtime-
   independent automation contracts — oxc parsing, Language Schema validation,
   Workflow IR/static cost, capability APIs, strict output decoding, and
@@ -241,7 +254,7 @@ learn-projects results when needed.
 | `obs-studio` | obsproject/obs-studio | Reference for streaming and capture layer (OBS capture architecture, PipeWire, ScreenCaptureKit patterns). Directly relevant to `rollshot-capture`. |
 | `rust-cv` | rust-cv/cv | Computer Vision library in Rust. Reference for image stitching, feature detection, and geometric transforms used in `rollshot-core`. |
 | `scap` | zed-industries/scap | Screen capture library by Zed Industries. `rollshot-capture` is built as a scap-compatible crate; the macOS backend uses scap. Directly relevant to `rollshot-capture`. |
-| `snow-shot` | mg-chao/snow-shot | Same category: screenshot/long-screenshot software. Reference for screenshot workflows, UI patterns. |
+| `snow-shot` | mg-chao/snow-shot | Same category: screenshot/long-screenshot software. Validated OCR-stack reference (paddle-ocr-rs + ort + RapidOCR; runtime plugin-download model strategy, supertone static ORT lib in CI). Reference for screenshot workflows, UI patterns, and the OCR backend (`rollshot-ocr`). |
 | `spectacle` | KDE/spectacle | KDE screenshot utility. Reference for capture workflows and Linux/Wayland portal integration. |
 | `wayscrollshot` | jswysnemc/wayscrollshot | Same category: Wayland scrolling screenshot tool. Reference for screenshot/capture workflows, especially Linux/Wayland portal integration. |
 
