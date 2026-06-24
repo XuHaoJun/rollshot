@@ -711,4 +711,105 @@ function main(input) {
             StoreError::NotFound { .. }
         ));
     }
+
+    #[test]
+    fn tampered_source_is_incompatible() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["artifact"]["source"] = serde_json::Value::String("@@@ not javascript @@@".into());
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let err = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Incompatible(_)));
+    }
+
+    #[test]
+    fn stale_schema_version_is_incompatible() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["artifact"]["language_schema_version"] = serde_json::json!(999);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let err = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Incompatible(_)));
+    }
+
+    #[test]
+    fn unsupported_revision_store_schema_is_rejected() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["store_schema_version"] = serde_json::json!(999);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let err = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedStoreSchema { .. }));
+    }
+
+    #[test]
+    fn corrupt_revision_json_is_corrupt_error() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        std::fs::write(&path, b"{ not valid json").unwrap();
+
+        let err = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Corrupt { .. }));
+    }
 }
