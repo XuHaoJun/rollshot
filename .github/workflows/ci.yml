@@ -37,16 +37,16 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude rollshot-ocr --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude rollshot-ocr
 
       - name: Clippy (action-guide feature)
-        run: cargo clippy --workspace --all-targets --features rollshot-app/action-guide -- -D warnings
+        run: cargo clippy --workspace --exclude rollshot-ocr --all-targets --features rollshot-app/action-guide -- -D warnings
 
       - name: Test (action-guide feature)
-        run: cargo test --workspace --features rollshot-app/action-guide
+        run: cargo test --workspace --exclude rollshot-ocr --features rollshot-app/action-guide
 
       - name: Check macOS targets
         if: runner.os == 'macOS'

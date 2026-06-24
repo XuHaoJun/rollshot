@@ -36,6 +36,7 @@ mod contract_tests {
         let expected = rollshot_automation::CapabilityError::Failed {
             code: "capability_unavailable",
         };
+        #[cfg(not(feature = "ocr"))]
         assert_eq!(
             host.ocr(OcrQuery {
                 region: Region::Full,
@@ -43,6 +44,17 @@ mod contract_tests {
             })
             .unwrap_err(),
             expected
+        );
+        #[cfg(feature = "ocr")]
+        assert_eq!(
+            host.ocr(OcrQuery {
+                region: Region::Full,
+                limit: 1
+            })
+            .unwrap_err(),
+            rollshot_automation::CapabilityError::Failed {
+                code: "vision_index_unavailable"
+            }
         );
         assert_eq!(
             host.layout(LayoutQuery {

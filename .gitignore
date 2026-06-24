@@ -19,3 +19,6 @@ crates/**/bench-results/
 # Spike build artifacts (isolated crates under spikes/). Cargo.lock is kept as
 # frozen decision-time evidence; only target/ is ignored.
 spikes/*/target/
+
+# ONNX Runtime static lib (provisioned by CI or manual download, ~90MB).
+.ort/

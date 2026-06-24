@@ -1,0 +1,34 @@
+[package]
+name = "rollshot-ocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints.rust]
+# Isolation crate for ort (ONNX Runtime FFI) + paddle-ocr-rs unsafe.
+# The rest of the workspace stays unsafe_code = "forbid".
+unsafe_code = "allow"
+
+[dependencies]
+# EXACT pins are load-bearing (spec §3.2): floating `ort` pulls a second
+# `ndarray` and breaks `Tensor::from_array` in paddle-ocr-rs.
+paddle-ocr-rs = "=0.6.1"
+ort = { version = "=2.0.0-rc.10", default-features = false }
+ndarray = "=0.16.1"
+num_cpus = "1.17.0"
+image = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sha2 = "0.10"
+
+[build-dependencies]
+etcetera = { workspace = true }
+sha2 = "0.10"
+ureq = "2"
+
+[dev-dependencies]
+ab_glyph = "0.2"
+imageproc = { workspace = true, features = ["text"] }

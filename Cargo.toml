@@ -18,6 +18,30 @@ members = [
     "crates/rollshot-vision",
     "crates/rollshot-agent",
     "crates/rollshot-preset",
+    "crates/rollshot-ocr",
+]
+# rollshot-ocr is excluded from default-members (eng-review D17): the heavy
+# ort + 15.5 MB-model toolchain is built only via `-p rollshot-ocr` / the
+# `ocr` feature / the dedicated OCR CI lane, not bare `cargo build`/`test`.
+default-members = [
+    "crates/rollshot-core",
+    "crates/rollshot-image-document",
+    "crates/rollshot-action",
+    "crates/rollshot-linux-input",
+    "crates/rollshot-macos-input",
+    "crates/rollshot-capture",
+    "crates/rollshot-dev",
+    "crates/rollshot-app",
+    "crates/rollshot-iced-overlay",
+    "crates/rollshot-overlay-core",
+    "crates/rollshot-macos-oneshot",
+    "crates/rollshot-linux-desktop",
+    "crates/rollshot-edit-proposal",
+    "crates/rollshot-automation",
+    "crates/rollshot-automation-rquickjs",
+    "crates/rollshot-vision",
+    "crates/rollshot-agent",
+    "crates/rollshot-preset",
 ]
 resolver = "2"
 
