@@ -84,6 +84,7 @@ Measured on CI runners. The OCR lane adds ~2-3 min to CI (ORT provisioning + mod
 3. **`ch`-set only:** bundled models are PP-OCRv4 Chinese. Other language sets need a separate model migration.
 4. **ORT-lib provisioning:** requires supertone static libs downloaded by CI script. Local dev needs `ORT_LIB_LOCATION` set to the extracted lib path.
 5. **Windows:** not supported. CI runs Linux + macOS only.
+6. **macOS teardown SIGABRT (CI-tolerated):** on `macos-14`, an OCR test binary aborts with `mutex lock failed: Invalid argument` (SIGABRT) at process exit *after all tests pass* — an upstream ONNX Runtime 1.21+ static-destructor bug (pykeio/ort#409), fixed in `ort >= 2.0.0-rc.11` which we cannot adopt (rc.11 forces `ndarray 0.17` vs `paddle-ocr-rs`'s `ndarray ^0.16`). Harmless and test-only: the product exits via `process::exit` with the engine still live, so the teardown path never runs (the snow-shot reference, on the same stack, has no OCR tests and never observes it). The macOS OCR test steps run through `scripts/ci/run-ocr-test.sh`, which tolerates the teardown-only non-zero exit while still failing on any real test failure.
 
 ## How SP6 Consumes OCR
 

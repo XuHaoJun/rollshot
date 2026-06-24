@@ -210,6 +210,28 @@ cargo test --workspace --features rollshot-app/action-guide
 large-frame matcher smoke on `ubuntu-24.04`. It complements the deterministic
 structural budget test in the normal suite.
 
+`.github/workflows/ci-ocr.yml` is a separate path-filtered lane for the OCR
+backend (`rollshot-ocr` / `rollshot-vision --features ocr`). It is excluded from
+default CI because it provisions a static ONNX Runtime library and downloads
+RapidOCR models. It runs on `ubuntu-24.04` and `macos-14`.
+
+### Known issue: macOS ONNX Runtime teardown abort
+
+On `macos-14`, an OCR test binary aborts with `libc++abi: ... mutex lock failed:
+Invalid argument` (SIGABRT) **after all tests pass**, when it returns from `main`
+and runs ONNX Runtime's C++ static destructors at process exit. This is an
+upstream ONNX Runtime 1.21+ bug ([pykeio/ort#409](https://github.com/pykeio/ort/issues/409),
+[microsoft/onnxruntime#24579](https://github.com/microsoft/onnxruntime/issues/24579)),
+fixed in `ort >= 2.0.0-rc.11` — which we cannot adopt because rc.11 requires
+`ndarray 0.17` while `paddle-ocr-rs` pins `ndarray ^0.16`.
+
+The crash is harmless and test-only: the tests themselves pass, and the product
+(`rollshot-app`) never hits it because it exits via `process::exit` while the OCR
+engine is still live, so the teardown path never runs. Accordingly the macOS OCR
+test steps run through `scripts/ci/run-ocr-test.sh`, which tolerates a non-zero
+exit **only** when the test summary shows tests ran and passed; any real test
+failure still fails the job.
+
 Hosted PR CI does not run real desktop capture. KDE Wayland capture needs a real
 interactive desktop session, xdg-desktop-portal-kde, PipeWire, and user
 selection. macOS ScreenCaptureKit needs Screen Recording permission. Those

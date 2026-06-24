@@ -57,11 +57,16 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      - name: Check ONNX Runtime provision script
-        run: bash -n scripts/ci/provision-onnxruntime.sh
+      - name: Check CI shell scripts
+        run: bash -n scripts/ci/provision-onnxruntime.sh scripts/ci/run-ocr-test.sh
       - name: Clippy (ocr)
         run: cargo clippy -p rollshot-ocr -p rollshot-vision --features rollshot-vision/ocr --all-targets -- -D warnings
+      # The test steps run through run-ocr-test.sh, which tolerates ONLY the
+      # macOS-specific ONNX Runtime teardown SIGABRT that fires after all tests
+      # pass (pykeio/ort#409; unfixable without bumping ort past the ndarray 0.16
+      # / paddle-ocr-rs pin). Real test failures still fail the job. See the
+      # script header for the full rationale.
       - name: Test rollshot-ocr
-        run: cargo test -p rollshot-ocr
+        run: bash scripts/ci/run-ocr-test.sh cargo test -p rollshot-ocr
       - name: Test rollshot-vision (ocr)
-        run: cargo test -p rollshot-vision --features ocr
+        run: bash scripts/ci/run-ocr-test.sh cargo test -p rollshot-vision --features ocr
