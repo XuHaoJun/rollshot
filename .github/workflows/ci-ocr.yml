@@ -1,0 +1,67 @@
+name: CI (OCR)
+
+on:
+  pull_request:
+    paths:
+      - "crates/rollshot-ocr/**"
+      - "crates/rollshot-vision/**"
+      - "crates/rollshot-automation/**"
+      - "crates/rollshot-image-document/**"
+      - "Cargo.toml"
+      - ".github/workflows/ci-ocr.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ocr:
+    name: OCR (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    env:
+      ROLLSHOT_OCR_MODELS_DIR: ${{ github.workspace }}/.ocr-models
+      ORT_LIB_LOCATION: ${{ github.workspace }}/.ort/lib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Linux capture deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libpipewire-0.3-dev libclang-dev libdbus-1-dev libxkbcommon-dev
+
+      # Models: warm cache → offline; cold cache → build.rs ModelScope primary download.
+      - name: Cache OCR models
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ocr-models
+          key: ocr-models-ppocrv4-${{ hashFiles('crates/rollshot-ocr/build.rs') }}
+
+      # ONNX Runtime static lib: vendor + ORT_LIB_LOCATION.
+      - name: Cache ONNX Runtime lib
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ort
+          key: ort-static-${{ matrix.os }}-2.0.0-rc.10
+      - name: Provision ONNX Runtime static lib
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${{ github.workspace }}/.ort"
+          ./scripts/ci/provision-onnxruntime.sh "${{ runner.os }}" "${{ github.workspace }}/.ort"
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Check ONNX Runtime provision script
+        run: bash -n scripts/ci/provision-onnxruntime.sh
+      - name: Clippy (ocr)
+        run: cargo clippy -p rollshot-ocr -p rollshot-vision --features rollshot-vision/ocr --all-targets -- -D warnings
+      - name: Test rollshot-ocr
+        run: cargo test -p rollshot-ocr
+      - name: Test rollshot-vision (ocr)
+        run: cargo test -p rollshot-vision --features ocr
