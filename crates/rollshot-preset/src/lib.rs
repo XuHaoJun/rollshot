@@ -4,6 +4,7 @@
 
 mod domain;
 mod error;
+mod io;
 
 pub use domain::{
     AutomationRevision, Preset, PresetId, PresetSummary, RevisionId, RevisionOrigin,
