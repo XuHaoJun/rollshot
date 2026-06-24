@@ -1,6 +1,11 @@
 use std::path::PathBuf;
 
-use crate::domain::{Preset, PresetId, PresetSummary, STORE_SCHEMA_VERSION};
+use rollshot_automation::{ensure_compatible, ValidatedAutomation};
+
+use crate::domain::{
+    AutomationRevision, Preset, PresetId, PresetSummary, RevisionId, RevisionSummary,
+    STORE_SCHEMA_VERSION,
+};
 use crate::error::{EntityKind, Result, StoreError};
 use crate::io;
 
@@ -47,6 +52,15 @@ impl PresetStore {
 
     fn preset_json(&self, id: &PresetId) -> PathBuf {
         self.preset_dir(id).join("preset.json")
+    }
+
+    fn revisions_dir(&self, id: &PresetId) -> PathBuf {
+        self.preset_dir(id).join("revisions")
+    }
+
+    fn revision_json(&self, preset_id: &PresetId, rev_id: &RevisionId) -> PathBuf {
+        self.revisions_dir(preset_id)
+            .join(format!("{}.json", rev_id.0))
     }
 
     pub fn create_preset(
@@ -132,6 +146,96 @@ impl PresetStore {
                 Err(StoreError::NotFound { .. }) => continue,
                 Err(e) => return Err(e),
             }
+        }
+        out.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(out)
+    }
+
+    pub fn add_revision(
+        &self,
+        preset_id: &PresetId,
+        id: RevisionId,
+        parent_id: Option<RevisionId>,
+        artifact: ValidatedAutomation,
+        provenance: crate::domain::RevisionProvenance,
+        now: String,
+    ) -> Result<AutomationRevision> {
+        validate_id(&id.0)?;
+        ensure_compatible(&artifact)?;
+        let _lock = io::lock_dir(&self.preset_dir(preset_id))?;
+        let _ = self.load_preset(preset_id)?;
+        let path = self.revision_json(preset_id, &id);
+        if path.exists() {
+            return Err(StoreError::RevisionExists(id.0.clone()));
+        }
+        let revision = AutomationRevision {
+            store_schema_version: STORE_SCHEMA_VERSION,
+            id: id.clone(),
+            preset_id: preset_id.clone(),
+            parent_id,
+            created_at: now,
+            provenance,
+            artifact,
+        };
+        let bytes = serde_json::to_vec_pretty(&revision)?;
+        io::write_atomic(&path, &bytes)?;
+        Ok(revision)
+    }
+
+    pub fn load_revision(
+        &self,
+        preset_id: &PresetId,
+        rev_id: &RevisionId,
+    ) -> Result<AutomationRevision> {
+        let path = self.revision_json(preset_id, rev_id);
+        let bytes = io::read_optional_bytes(&path)?.ok_or_else(|| StoreError::NotFound {
+            kind: EntityKind::Revision,
+            id: rev_id.0.clone(),
+        })?;
+        let revision: AutomationRevision =
+            serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt {
+                path: path.clone(),
+                detail: e.to_string(),
+            })?;
+        ensure_store_schema(path, revision.store_schema_version)?;
+        ensure_compatible(&revision.artifact)?;
+        Ok(revision)
+    }
+
+    pub fn list_revisions(&self, preset_id: &PresetId) -> Result<Vec<RevisionSummary>> {
+        let _ = self.load_preset(preset_id)?;
+        let dir = self.revisions_dir(preset_id);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(StoreError::Io { path: dir, source }),
+        };
+
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = match io::read_optional_bytes(&path)? {
+                Some(b) => b,
+                None => continue,
+            };
+            let revision: AutomationRevision =
+                serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt {
+                    path: path.clone(),
+                    detail: e.to_string(),
+                })?;
+            ensure_store_schema(path, revision.store_schema_version)?;
+            out.push(RevisionSummary {
+                id: revision.id,
+                parent_id: revision.parent_id,
+                created_at: revision.created_at,
+            });
         }
         out.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         Ok(out)
@@ -253,5 +357,182 @@ mod tests {
             store.load_preset(&PresetId("p1".into())).unwrap_err(),
             StoreError::UnsupportedStoreSchema { .. }
         ));
+    }
+
+    use rollshot_automation::{validate_source, ValidatedAutomation, ValidationLimits};
+
+    const SAMPLE_SOURCE: &str = r#"function expandBounds(rect, padding) {
+  return {
+    x: rect.x - padding,
+    y: rect.y - padding,
+    width: rect.width + padding * 2,
+    height: rect.height + padding * 2,
+  };
+}
+
+function main(input) {
+  const matches = rollshot.ocr({ region: input.region, limit: 10 });
+  return {
+    candidates: matches.map((match) => ({
+      kind: "addRedaction",
+      bounds: expandBounds(match.bounds, 8),
+      confidence: match.confidence,
+      label: "ocr-match",
+    })),
+  };
+}
+"#;
+
+    fn sample_artifact() -> ValidatedAutomation {
+        validate_source(SAMPLE_SOURCE, &ValidationLimits::default()).unwrap()
+    }
+
+    fn provenance() -> crate::domain::RevisionProvenance {
+        crate::domain::RevisionProvenance {
+            origin: crate::domain::RevisionOrigin::AgentRun,
+            note: None,
+            source_run_ref: None,
+        }
+    }
+
+    fn seeded() -> (tempfile::TempDir, PresetStore) {
+        let (dir, store) = store();
+        store
+            .create_preset(
+                PresetId("p1".into()),
+                "p".into(),
+                String::new(),
+                "2026-06-24T00:00:00Z".into(),
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    #[allow(dead_code)]
+    fn revision_path(dir: &std::path::Path, preset: &str, rev: &str) -> PathBuf {
+        dir.join("presets")
+            .join(preset)
+            .join("revisions")
+            .join(format!("{rev}.json"))
+    }
+
+    #[test]
+    fn add_then_load_revision_does_not_activate() {
+        let (_dir, store) = seeded();
+        let rev = store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let loaded = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
+            .unwrap();
+        assert_eq!(loaded, rev);
+
+        let preset = store.load_preset(&PresetId("p1".into())).unwrap();
+        assert_eq!(preset.active_revision_id, None);
+    }
+
+    #[test]
+    fn add_revision_to_missing_preset_is_not_found() {
+        let (_dir, store) = store();
+        let err = store
+            .add_revision(
+                &PresetId("ghost".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::NotFound {
+                kind: EntityKind::Preset,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn duplicate_revision_id_is_rejected() {
+        let (_dir, store) = seeded();
+        let add = || {
+            store.add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+        };
+        add().unwrap();
+        assert!(matches!(add().unwrap_err(), StoreError::RevisionExists(_)));
+    }
+
+    #[test]
+    fn load_missing_revision_is_not_found() {
+        let (_dir, store) = seeded();
+        let err = store
+            .load_revision(&PresetId("p1".into()), &RevisionId("absent".into()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::NotFound {
+                kind: EntityKind::Revision,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn list_revisions_returns_summaries() {
+        let (_dir, store) = seeded();
+        for id in ["r2", "r1"] {
+            store
+                .add_revision(
+                    &PresetId("p1".into()),
+                    RevisionId(id.into()),
+                    None,
+                    sample_artifact(),
+                    provenance(),
+                    "2026-06-24T00:01:00Z".into(),
+                )
+                .unwrap();
+        }
+        let ids: Vec<String> = store
+            .list_revisions(&PresetId("p1".into()))
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id.0)
+            .collect();
+        assert_eq!(ids, vec!["r1".to_string(), "r2".to_string()]);
+    }
+
+    #[test]
+    fn add_revision_rejects_incompatible_artifact() {
+        let (_dir, store) = seeded();
+        let mut artifact = sample_artifact();
+        artifact.source = "@@@ not javascript @@@".into();
+
+        let err = store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                artifact,
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Incompatible(_)));
     }
 }
