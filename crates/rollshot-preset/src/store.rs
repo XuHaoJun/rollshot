@@ -202,6 +202,70 @@ impl PresetStore {
         Ok(revision)
     }
 
+    pub fn set_active_revision(
+        &self,
+        preset_id: &PresetId,
+        rev_id: &RevisionId,
+        now: String,
+    ) -> Result<()> {
+        if !self.preset_json(preset_id).exists() {
+            return Err(StoreError::NotFound {
+                kind: EntityKind::Preset,
+                id: preset_id.0.clone(),
+            });
+        }
+        let _lock = io::lock_dir(&self.preset_dir(preset_id))?;
+        let mut preset = self.load_preset(preset_id)?;
+        if !self.revision_json(preset_id, rev_id).exists() {
+            return Err(StoreError::Integrity(format!(
+                "revision {} not found for preset {}",
+                rev_id.0, preset_id.0
+            )));
+        }
+        let _ = self.load_revision(preset_id, rev_id)?;
+        preset.active_revision_id = Some(rev_id.clone());
+        preset.updated_at = now;
+        let bytes = serde_json::to_vec_pretty(&preset)?;
+        io::write_atomic(&self.preset_json(preset_id), &bytes)?;
+        Ok(())
+    }
+
+    pub fn load_active_revision(&self, preset_id: &PresetId) -> Result<AutomationRevision> {
+        let preset = self.load_preset(preset_id)?;
+        let rev_id = preset.active_revision_id.ok_or_else(|| {
+            StoreError::Integrity(format!("preset {} has no active revision", preset_id.0))
+        })?;
+        self.load_revision(preset_id, &rev_id)
+    }
+
+    pub fn rename_preset(&self, preset_id: &PresetId, new_name: String, now: String) -> Result<()> {
+        if !self.preset_json(preset_id).exists() {
+            return Err(StoreError::NotFound {
+                kind: EntityKind::Preset,
+                id: preset_id.0.clone(),
+            });
+        }
+        let _lock = io::lock_dir(&self.preset_dir(preset_id))?;
+        let mut preset = self.load_preset(preset_id)?;
+        preset.name = new_name;
+        preset.updated_at = now;
+        let bytes = serde_json::to_vec_pretty(&preset)?;
+        io::write_atomic(&self.preset_json(preset_id), &bytes)?;
+        Ok(())
+    }
+
+    pub fn delete_preset(&self, id: &PresetId) -> Result<()> {
+        if !self.preset_json(id).exists() {
+            return Err(StoreError::NotFound {
+                kind: EntityKind::Preset,
+                id: id.0.clone(),
+            });
+        }
+        let dir = self.preset_dir(id);
+        std::fs::remove_dir_all(&dir).map_err(|source| StoreError::Io { path: dir, source })?;
+        Ok(())
+    }
+
     pub fn list_revisions(&self, preset_id: &PresetId) -> Result<Vec<RevisionSummary>> {
         let _ = self.load_preset(preset_id)?;
         let dir = self.revisions_dir(preset_id);
@@ -408,7 +472,6 @@ function main(input) {
         (dir, store)
     }
 
-    #[allow(dead_code)]
     fn revision_path(dir: &std::path::Path, preset: &str, rev: &str) -> PathBuf {
         dir.join("presets")
             .join(preset)
@@ -534,5 +597,118 @@ function main(input) {
             )
             .unwrap_err();
         assert!(matches!(err, StoreError::Incompatible(_)));
+    }
+
+    #[test]
+    fn activate_then_load_active() {
+        let (_dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+        store
+            .set_active_revision(
+                &PresetId("p1".into()),
+                &RevisionId("r1".into()),
+                "2026-06-24T00:02:00Z".into(),
+            )
+            .unwrap();
+
+        let preset = store.load_preset(&PresetId("p1".into())).unwrap();
+        assert_eq!(preset.active_revision_id, Some(RevisionId("r1".into())));
+        assert_eq!(preset.updated_at, "2026-06-24T00:02:00Z");
+
+        let active = store.load_active_revision(&PresetId("p1".into())).unwrap();
+        assert_eq!(active.id, RevisionId("r1".into()));
+    }
+
+    #[test]
+    fn activate_missing_revision_is_integrity_error() {
+        let (_dir, store) = seeded();
+        let err = store
+            .set_active_revision(
+                &PresetId("p1".into()),
+                &RevisionId("ghost".into()),
+                "2026-06-24T00:02:00Z".into(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
+    }
+
+    #[test]
+    fn activate_incompatible_revision_is_rejected() {
+        let (dir, store) = seeded();
+        store
+            .add_revision(
+                &PresetId("p1".into()),
+                RevisionId("r1".into()),
+                None,
+                sample_artifact(),
+                provenance(),
+                "2026-06-24T00:01:00Z".into(),
+            )
+            .unwrap();
+
+        let path = revision_path(dir.path(), "p1", "r1");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["artifact"]["source"] = serde_json::Value::String("@@@ not javascript @@@".into());
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let err = store
+            .set_active_revision(
+                &PresetId("p1".into()),
+                &RevisionId("r1".into()),
+                "2026-06-24T00:02:00Z".into(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Incompatible(_)));
+
+        let preset = store.load_preset(&PresetId("p1".into())).unwrap();
+        assert_eq!(preset.active_revision_id, None);
+    }
+
+    #[test]
+    fn load_active_without_selection_is_integrity_error() {
+        let (_dir, store) = seeded();
+        let err = store
+            .load_active_revision(&PresetId("p1".into()))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
+    }
+
+    #[test]
+    fn rename_updates_name_and_timestamp() {
+        let (_dir, store) = seeded();
+        store
+            .rename_preset(
+                &PresetId("p1".into()),
+                "Renamed".into(),
+                "2026-06-24T00:03:00Z".into(),
+            )
+            .unwrap();
+        let preset = store.load_preset(&PresetId("p1".into())).unwrap();
+        assert_eq!(preset.name, "Renamed");
+        assert_eq!(preset.updated_at, "2026-06-24T00:03:00Z");
+    }
+
+    #[test]
+    fn delete_removes_preset() {
+        let (_dir, store) = seeded();
+        store.delete_preset(&PresetId("p1".into())).unwrap();
+        assert!(matches!(
+            store.load_preset(&PresetId("p1".into())).unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+        assert!(matches!(
+            store.delete_preset(&PresetId("p1".into())).unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
     }
 }
