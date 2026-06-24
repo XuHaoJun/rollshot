@@ -8,6 +8,11 @@ use rollshot_image_document::ImageRect;
 /// Default cap on template search area (pixels). Bounds naive-NCC cost.
 pub const MAX_SEARCH_AREA: u64 = 8_000_000; // ~ 4000x2000
 
+/// Cap on prepared-OCR region area (pixels). Larger than MAX_SEARCH_AREA because
+/// OCR legitimately covers full screenshots; tall captures beyond this must use
+/// a bounded `Rect` query (eng-review D13). ~ up to a 4K full screen.
+pub const MAX_OCR_AREA: u64 = 16_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PixelRect {
     pub x: u32,

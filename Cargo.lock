@@ -6464,12 +6464,14 @@ dependencies = [
 name = "rollshot-vision"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "image",
  "imageproc 0.26.2",
  "rollshot-automation",
  "rollshot-automation-rquickjs",
  "rollshot-edit-proposal",
  "rollshot-image-document",
+ "rollshot-ocr",
  "serde",
  "serde_json",
  "static_assertions",
