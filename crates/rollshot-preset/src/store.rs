@@ -261,6 +261,7 @@ impl PresetStore {
                 id: id.0.clone(),
             });
         }
+        let _lock = io::lock_dir(&self.preset_dir(id))?;
         let dir = self.preset_dir(id);
         std::fs::remove_dir_all(&dir).map_err(|source| StoreError::Io { path: dir, source })?;
         Ok(())
