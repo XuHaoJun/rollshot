@@ -1,0 +1,2 @@
+# Models are provisioned by build.rs (eng-review D16); never commit them.
+models/
