@@ -957,9 +957,17 @@ Recommended sequence:
    - Secure copy/save.
    - Linux and macOS runtime verification.
 
+**rollshot-vision runtime host (delivered 2026-06-22).** `rollshot-vision`
+crate with `RealAutomationHost` (template-first NCC + NMS detection,
+`TemplateSelfValidation`, `TemplateStore`) and `region_features` capability.
+Replaces `FakeAutomationHost` for template/region detection. Design:
+`docs/superpowers/specs/2026-06-22-rollshot-vision-runtime-host-design.md`.
+Details: `docs/superpowers/handoffs/2026-06-22-rollshot-vision.md`.
+
 **OCR backend subproject (delivered 2026-06-25).** `rollshot-ocr` isolation
 crate + host wiring in `rollshot-vision` + real-OCR integration tests + CI
-lanes. Replaces the `capability_unavailable` stub for `ocr`. Details:
+lanes. Replaces the `capability_unavailable` stub for `ocr`. Design:
+`docs/superpowers/specs/2026-06-24-ocr-backend-design.md`. Details:
 `docs/superpowers/handoffs/2026-06-25-ocr-backend.md`.
 
 Each item after the spikes receives its own implementation spec or plan. The
