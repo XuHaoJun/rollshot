@@ -20,7 +20,21 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
         .width(Length::Fixed(280.0))
         .height(Length::Fill);
 
-    let main = row![canvas_area, right_pane]
+    // Activity drawer: a left pane of streamed ActivityEntry's (spec §6.1).
+    // The pane slot is always child 0 of the row so the canvas stays at a
+    // stable tree index (iced tracks widgets by position; reordering would
+    // reset the canvas scrollable's viewport). When there is nothing to show
+    // it collapses to a zero-width space, keeping run-existing full-canvas.
+    let show_activity = wb.run_state.is_running() || !wb.live_activity.is_empty();
+    let activity: Element<'a, Message> = if show_activity {
+        scrollable(activity_column(wb))
+            .width(Length::Fixed(260.0))
+            .height(Length::Fill)
+            .into()
+    } else {
+        Space::new().width(Length::Fixed(0.0)).into()
+    };
+    let main = row![activity, canvas_area, right_pane]
         .spacing(4)
         .height(Length::Fill);
 
@@ -49,6 +63,60 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
         iced::widget::stack![content, modal].into()
     } else {
         content.into()
+    }
+}
+
+fn activity_column<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
+    let mut col = column![].spacing(6).padding(8);
+    if wb.live_activity.is_empty() {
+        col = col.push(text("(waiting for activity…)").size(11));
+    } else {
+        for entry in &wb.live_activity {
+            col = col.push(activity_entry_view(entry));
+        }
+    }
+    col.into()
+}
+
+fn activity_entry_view<'a>(entry: &'a super::state::ActivityEntry) -> Element<'a, Message> {
+    use super::state::ToolCardStatus;
+    match entry {
+        super::state::ActivityEntry::UserMessage(msg) => {
+            container(text(format!("You: {msg}")).size(12))
+                .style(|_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.2, 0.4, 0.8, 0.15,
+                    ))),
+                    ..Default::default()
+                })
+                .padding(6)
+                .into()
+        }
+        super::state::ActivityEntry::AssistantText(t) => text(t).size(12).into(),
+        super::state::ActivityEntry::ToolCard {
+            name,
+            status,
+            summary,
+        } => {
+            let mark = match status {
+                ToolCardStatus::Running => "…",
+                ToolCardStatus::Success => "✓",
+                ToolCardStatus::Failed => "✗",
+            };
+            let mut line = format!("{mark} {name}");
+            if !summary.is_empty() {
+                line.push_str(&format!(" — {summary}"));
+            }
+            text(line).size(11).into()
+        }
+        super::state::ActivityEntry::RunStatus {
+            turn,
+            budget_summary,
+            elapsed,
+        } => text(format!("Turn {turn} · {budget_summary} · {elapsed:?}"))
+            .size(10)
+            .into(),
+        super::state::ActivityEntry::TerminalLabel(label) => text(label).size(12).into(),
     }
 }
 
