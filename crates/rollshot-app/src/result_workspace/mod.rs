@@ -6,6 +6,7 @@ mod secure_sharing;
 mod update;
 mod view;
 pub mod viewport;
+pub mod workbench;
 
 #[allow(unused_imports)]
 pub use document::{close_decision, CloseDecision, DiscardPrompt, ResultDocument};
@@ -87,6 +88,8 @@ pub struct ResultWorkspace {
     pub scrollable_id: iced::widget::Id,
     /// UI/session editor state (active tool, selection, drafts, Navigator).
     pub editor: canvas::EditorState,
+    /// Workspace mode: Normal or Workbench (Smart Redaction).
+    pub mode: workbench::WorkspaceMode,
     /// Identity of the inline text editor widget, for focus operations.
     #[allow(dead_code)]
     pub text_editor_id: iced::widget::Id,
@@ -129,6 +132,7 @@ impl ResultWorkspace {
                 document.image.state_id(),
                 viewport::is_tall_image(source_size),
             ),
+            mode: workbench::WorkspaceMode::Normal,
             text_editor_id: iced::widget::Id::unique(),
             document,
             message,
