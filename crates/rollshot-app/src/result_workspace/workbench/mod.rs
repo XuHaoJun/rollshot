@@ -7,6 +7,11 @@ pub mod state;
 pub mod view;
 
 #[allow(unused_imports)]
+pub use provider_config::{
+    build_adapter, has_key, load_provider_config, provider_model_label, resolve_key,
+    save_provider_config, KeySource, ProviderConfig, ProviderKind,
+};
+#[allow(unused_imports)]
 pub use state::{
     proposed_edit_bounds, ActivityEntry, CandidateReview, CandidateReviewState, RunState,
     ToolCardStatus, WorkbenchError,
