@@ -143,37 +143,41 @@ fn composer<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
 fn disclosure_modal<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     use super::PayloadMode;
     let label = super::provider_config::provider_model_label(&wb.provider_config);
+    let mut col = column![
+        text(format!("Send to {label}")).size(16),
+        text("This run will send:").size(13),
+    ];
+    if matches!(wb.payload_mode, PayloadMode::FullScreenshot) {
+        col = col.push(text("  Screenshot image (full-screenshot mode)"));
+    }
     let dialog = container(
-        column![
-            text(format!("Send to {label}")).size(16),
-            text("This run will send:").size(13),
-            text("  Screenshot image (full-screenshot mode)"),
-            text("  Local OCR/layout summary"),
-            text("Privacy mode:").size(13),
-            iced::widget::radio(
+        col.push(text("  Local OCR/layout summary"))
+            .push(text("Privacy mode:").size(13))
+            .push(iced::widget::radio(
                 "Full screenshot — best accuracy",
                 PayloadMode::FullScreenshot,
                 Some(wb.payload_mode),
                 |m| Message::Workbench(WorkbenchMessage::PayloadModeSelected(m)),
-            ),
-            iced::widget::radio(
+            ))
+            .push(iced::widget::radio(
                 "OCR/layout only — no image upload",
                 PayloadMode::OcrLayoutOnly,
                 Some(wb.payload_mode),
                 |m| Message::Workbench(WorkbenchMessage::PayloadModeSelected(m)),
-            ),
-            Space::new().height(Length::Fixed(12.0)),
-            row![
-                button(text(format!("Send to {}", wb.provider_config.provider)))
-                    .on_press(Message::Workbench(WorkbenchMessage::DisclosureConfirmed)),
-                button(text("Cancel"))
-                    .on_press(Message::Workbench(WorkbenchMessage::DisclosureCancelled)),
-            ]
-            .spacing(12),
-        ]
-        .spacing(8)
-        .padding(24)
-        .max_width(450),
+            ))
+            .push(Space::new().height(Length::Fixed(12.0)))
+            .push(
+                row![
+                    button(text(format!("Send to {}", wb.provider_config.provider)))
+                        .on_press(Message::Workbench(WorkbenchMessage::DisclosureConfirmed)),
+                    button(text("Cancel"))
+                        .on_press(Message::Workbench(WorkbenchMessage::DisclosureCancelled)),
+                ]
+                .spacing(12),
+            )
+            .spacing(8)
+            .padding(24)
+            .max_width(450),
     )
     .style(|_t| iced::widget::container::Style {
         background: Some(iced::Background::Color(iced::Color::from_rgba(

@@ -199,12 +199,6 @@ pub fn start_agent_run(
         let (descriptors, attachment_bytes) = match payload_mode {
             PayloadMode::OcrLayoutOnly => (vec![], vec![]),
             PayloadMode::FullScreenshot => {
-                let descriptor = AttachmentDescriptor {
-                    media_type: MediaType::Png,
-                    width: image_dims.0,
-                    height: image_dims.1,
-                    byte_count: (image_dims.0 as u64) * (image_dims.1 as u64) * 4,
-                };
                 let mut buf = Vec::new();
                 if image::DynamicImage::ImageRgba8(image.clone())
                     .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
@@ -217,6 +211,12 @@ pub fn start_agent_run(
                     );
                     return;
                 }
+                let descriptor = AttachmentDescriptor {
+                    media_type: MediaType::Png,
+                    width: image_dims.0,
+                    height: image_dims.1,
+                    byte_count: buf.len() as u64,
+                };
                 (vec![descriptor], vec![buf])
             }
         };
