@@ -682,9 +682,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::CanvasMoved(point) => handle_canvas_moved(state, point),
         Message::CanvasReleased(point) => handle_canvas_released(state, point),
         Message::SmartRedaction => {
-            state.mode = super::workbench::WorkspaceMode::Workbench(
-                super::workbench::WorkbenchState::default(),
-            );
+            let mut wb = super::workbench::WorkbenchState::default();
+            if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
+                if let Ok(cfg) = super::workbench::load_provider_config(&config_dir) {
+                    wb.provider_config = cfg;
+                }
+            }
+            state.mode = super::workbench::WorkspaceMode::Workbench(wb);
             Task::none()
         }
         Message::Workbench(msg) => {
