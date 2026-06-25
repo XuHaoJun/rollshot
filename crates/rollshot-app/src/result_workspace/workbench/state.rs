@@ -224,6 +224,26 @@ impl RunState {
     }
 }
 
+/// Whether pending (unapplied) candidates exist. Copy/Save must warn or block.
+pub fn has_pending_candidates(wb: &super::WorkbenchState) -> bool {
+    wb.pending_proposal.is_some() && !wb.review.is_empty()
+}
+
+/// Apply/skip summary for the review bar and the Copy/Save warning.
+pub fn apply_skip_summary(wb: &super::WorkbenchState) -> String {
+    let total = wb
+        .pending_proposal
+        .as_ref()
+        .map_or(0, |p| p.candidates.len());
+    let rejected = wb.review.rejected_count();
+    let apply = total - rejected;
+    let warnings = wb
+        .pending_proposal
+        .as_ref()
+        .map_or(0, |p| CandidateReview::warning_count(p, 0.75));
+    format!("Apply {apply} redactions, skip {rejected} rejected\n{warnings} warnings included")
+}
+
 /// Map a RunEvent to an ActivityEntry for the live drawer. `TurnComplete` is
 /// never emitted by the driver (§10.8) so it maps to `None`.
 pub fn event_to_activity_entry(event: &RunEvent) -> Option<ActivityEntry> {
@@ -416,5 +436,75 @@ mod tests {
             }),
             "Budget exhausted: WallTime"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod gating_tests {
+    use super::*;
+    use crate::result_workspace::workbench::WorkbenchState;
+    use rollshot_edit_proposal::{
+        CandidateId, ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate, ProposedEdit,
+        Provenance, ProvenanceSource,
+    };
+    use rollshot_image_document::ImageRect;
+
+    fn proposal(n: usize) -> EditProposal {
+        let cands = (0..n)
+            .map(|i| ProposedCandidate {
+                id: CandidateId(i as u64),
+                edit: ProposedEdit::AddRedaction {
+                    bounds: ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                },
+                confidence: 0.9,
+                label: "t".into(),
+                rationale: None,
+                provenance: Provenance {
+                    source: ProvenanceSource::Manual,
+                },
+            })
+            .collect();
+        EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: cands,
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        }
+    }
+
+    #[test]
+    fn has_pending_candidates_false_when_no_proposal() {
+        let wb = WorkbenchState::default();
+        assert!(!has_pending_candidates(&wb));
+    }
+
+    #[test]
+    fn has_pending_candidates_true_with_proposal_and_review() {
+        let mut wb = WorkbenchState::default();
+        wb.pending_proposal = Some(proposal(2));
+        wb.review = CandidateReview::from_candidates(&[CandidateId(0), CandidateId(1)]);
+        assert!(has_pending_candidates(&wb));
+    }
+
+    #[test]
+    fn apply_skip_summary_format() {
+        let mut wb = WorkbenchState::default();
+        wb.pending_proposal = Some(proposal(3));
+        wb.review =
+            CandidateReview::from_candidates(&[CandidateId(0), CandidateId(1), CandidateId(2)]);
+        wb.review.mark_rejected(CandidateId(1));
+        let s = apply_skip_summary(&wb);
+        assert!(s.contains("Apply 2 redactions"));
+        assert!(s.contains("skip 1 rejected"));
     }
 }

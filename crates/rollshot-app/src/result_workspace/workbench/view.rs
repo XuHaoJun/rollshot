@@ -23,7 +23,16 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
     let main = row![canvas_area, right_pane]
         .spacing(4)
         .height(Length::Fill);
-    let content = column![bar, main].spacing(8).padding(8);
+
+    let mut content = column![bar].spacing(8).padding(8);
+
+    if let Some(banner) = error_message_banner(wb, &state.message) {
+        content = content.push(banner);
+    }
+    if let Some(banner) = result_state_banner(wb) {
+        content = content.push(banner);
+    }
+    content = content.push(main);
 
     if wb.disclosure_pending {
         iced::widget::stack![content, disclosure_modal(wb)].into()
@@ -164,4 +173,93 @@ fn disclosure_modal<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     .center_x(Length::Fill)
     .center_y(Length::Fill);
     iced::widget::opaque(dialog)
+}
+
+fn error_message_banner<'a>(
+    wb: &'a WorkbenchState,
+    inline_message: &'a Option<super::super::InlineMessage>,
+) -> Option<Element<'a, Message>> {
+    let mut parts: Vec<Element<'a, Message>> = Vec::new();
+
+    if let Some(err) = &wb.error {
+        parts.push(text(format!("{err}")).into());
+    }
+
+    if let Some(msg) = inline_message {
+        parts.push(
+            row![
+                text(msg.text()),
+                Space::new().width(Length::Fill),
+                button(text("Dismiss")).on_press(Message::DismissMessage),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(8)
+            .into(),
+        );
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut col = column![].spacing(4).padding(8);
+    for p in parts {
+        col = col.push(p);
+    }
+    Some(container(col).width(Length::Fill).into())
+}
+
+fn result_state_banner<'a>(wb: &'a WorkbenchState) -> Option<Element<'a, Message>> {
+    let proposal = wb.pending_proposal.as_ref()?;
+    let total = proposal.candidates.len();
+    if total == 0 {
+        return Some(
+            container(
+                column![
+                    text("This preset did not find anything on this screenshot."),
+                    row![
+                        button(text("Improve preset"))
+                            .on_press(Message::Workbench(WorkbenchMessage::ImStart)),
+                        button(text("Manual redact"))
+                            .on_press(Message::SelectTool(super::super::canvas::Tool::Redact)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(8)
+                .padding(12),
+            )
+            .into(),
+        );
+    }
+    let warnings = super::state::CandidateReview::warning_count(proposal, 0.75);
+    if warnings == total {
+        return Some(
+            container(
+                column![
+                    text("Only low-confidence matches were found."),
+                    row![
+                        button(text("Review warnings"))
+                            .on_press(Message::Workbench(WorkbenchMessage::NextWarning)),
+                        button(text("Improve preset"))
+                            .on_press(Message::Workbench(WorkbenchMessage::ImStart)),
+                        button(text("Discard"))
+                            .on_press(Message::Workbench(WorkbenchMessage::DiscardCandidates)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(8)
+                .padding(12),
+            )
+            .into(),
+        );
+    }
+    Some(
+        container(
+            text(format!(
+                "{total} candidates found. Review before applying."
+            )),
+        )
+        .padding(12)
+        .into(),
+    )
 }

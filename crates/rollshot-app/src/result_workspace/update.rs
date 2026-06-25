@@ -419,6 +419,15 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Copy => {
+            if let super::workbench::WorkspaceMode::Workbench(ref wb) = state.mode {
+                if super::workbench::state::has_pending_candidates(wb) {
+                    state.message = Some(InlineMessage::Error(format!(
+                        "{}\nApply them before safe copy/save.",
+                        super::workbench::state::apply_skip_summary(wb)
+                    )));
+                    return Task::none();
+                }
+            }
             commit_text_draft(state);
             let safe_output = state.has_secure_redactions();
             let result = super::actions::copy_image(&copy_payload(state));
@@ -459,6 +468,15 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::SaveAs => {
+            if let super::workbench::WorkspaceMode::Workbench(ref wb) = state.mode {
+                if super::workbench::state::has_pending_candidates(wb) {
+                    state.message = Some(InlineMessage::Error(format!(
+                        "{}\nApply them before safe copy/save.",
+                        super::workbench::state::apply_skip_summary(wb)
+                    )));
+                    return Task::none();
+                }
+            }
             commit_text_draft(state);
             let default_dir = crate::storage::Platform::current()
                 .and_then(crate::storage::default_output_dir)
