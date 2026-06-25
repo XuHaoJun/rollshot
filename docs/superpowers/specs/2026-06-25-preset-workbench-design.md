@@ -18,14 +18,17 @@ persistence and resume are deferred (§2.2).
 ## 1. Summary
 
 The Workbench is a **mode of the existing Result Workspace**, not a separate
-application. A toolbar entry opens a preset picker; "Run existing" is a
-lightweight candidate-review mode (no agent, no upload), while "Create" /
-"Improve Preset" swap the workspace body to a three-pane workbench (agent
-session + canvas-with-candidates + automation review) operating on the same
-`ImageDocument` instance. Accepted candidates become `OpaqueRedaction`
-annotations via the existing `lower()` → `ImageDocument::apply_batch` path;
-safe copy/save activates automatically. Accepted automation revisions persist
-via `PresetStore` (SP5).
+application. A toolbar entry opens Smart Redaction with "Run preset", "Create
+new preset", and "Manage presets / Settings"; **Improve Preset** is entered
+from a review/correction context after the user has seen and corrected a
+result. The first-release UX is canvas-first: proposed candidates sit directly
+on the screenshot, with a context review bar and optional drawers/tabs for
+candidate review, agent activity, and advanced details. Accepted candidates
+become `OpaqueRedaction` annotations via the existing `lower()` →
+`ImageDocument::apply_batch` path; safe copy/save activates automatically only
+after proposals are applied. Saved automation revisions persist via
+`PresetStore` (SP5) and are visually/textually separate from applying
+redactions to the current screenshot.
 
 The bounded agent runs as an `iced::Task` that spawns `run_with_provider` on
 the Tokio runtime and streams `RunEvent`s back through a channel exposed as an
@@ -40,10 +43,10 @@ implied, never silently re-used.
 |---|---|
 | D1 | **Scope:** full first-release workbench (create + run + review/apply + Improve Preset + disclosure). Matches parent §3.1/§14 as one deliverable; the implementation plan may decompose internally. |
 | D2 | **Surface model:** Workbench is a mode of the Result Workspace (same canvas, same `ImageDocument`, same safe-export). One canvas, one document, one safe-export path. |
-| D3 | **Three-pane layout:** classic three-column (agent session · canvas · automation review), always visible in Workbench mode. |
-| D4 | **Candidate lifecycle:** unified proposal model — run-existing and author/improve both produce `EditProposal` candidates on the same canvas; candidates are never committed to `ImageDocument` until Apply. Accept-revision and apply-candidates are distinct actions (parent §8.3). |
+| D3 | **Canvas-primary layout:** Workbench has three logical regions (visual review, agent activity, automation review), but the first-release layout prioritizes the canvas. Agent activity and automation review are collapsible/resizable drawers or tabs; source/IR/cost/logs live under Advanced details by default. |
+| D4 | **Candidate lifecycle:** unified proposal model — run-existing and author/improve both produce `EditProposal` candidates on the same canvas; candidates are never committed to `ImageDocument` until Apply. Saving a preset/revision and applying candidates are distinct actions (parent §8.3). |
 | D5 | **Provider config + disclosure:** app-level config (provider/model/keychain); per-run disclosure modal before every upload (author/improve). Run-existing bypasses disclosure (no upload). |
-| D6 | **Live progress:** streaming conversation + collapsible tool cards in the agent session pane, reconstructed from the `RunEvent` stream. |
+| D6 | **Live progress:** streaming conversation + collapsible tool cards in the activity drawer, reconstructed from the `RunEvent` stream. |
 | D7 | **Session persistence:** in-memory only in SP6; session/run persistence + resume is a deferred subproject. |
 | D8 | **Run architecture:** `Task::stream` + channel events through a `Subscription` (Option 1). Cooperative cancellation via `RunCancellation`. |
 | D9 | **Freeze rule:** in-progress candidate editing frozen during a run (pan/zoom live); fully editable after terminal. |
@@ -52,14 +55,16 @@ implied, never silently re-used.
 
 ### 2.1 In scope
 
-- Workbench mode of Result Workspace (three-pane, Option A).
-- Entry: Smart Redaction toolbar button → preset picker → Run-existing / Create / Improve.
+- Workbench mode of Result Workspace (canvas-primary review surface with collapsible/tabbed side regions).
+- Entry: Smart Redaction toolbar button → Run preset / Create new preset / Manage presets or Settings. Improve Preset appears only from candidate review/correction states.
 - Run-existing: headless automation → candidates → review/apply (no agent, no upload).
-- Author/improve: bounded agent run with streaming session pane + automation review.
+- Author/improve: bounded agent run with streaming activity drawer + automation review drawer.
 - Canvas candidate overlay (dashed proposals, confidence badges, select/move/resize/delete/reject, before/after).
+- Candidate list/drawer with jump-to-candidate, next-warning navigation, and long-screenshot review progress.
 - Per-run upload disclosure modal; app-level provider config (provider/model/keychain).
-- Accept revision (→ `PresetStore`) and Apply candidates (→ `apply_batch`) as distinct actions.
-- Improve Preset correction-evidence flow.
+- Save preset / Save new revision (→ `PresetStore`) and Apply candidates (→ `apply_batch`) as distinct actions.
+- Improve Preset correction-evidence flow, including explicitly added missing candidates.
+- Pending candidate Copy/Save gating: preview proposals never count as safe redactions.
 - In-memory sessions (no persistence/resume).
 - Error model with correct retry per terminal state.
 - Privacy-safe tracing + activity entries.
@@ -86,12 +91,12 @@ implied, never silently re-used.
 ```rust
 pub enum WorkspaceMode {
     Normal,                       // single canvas + Navigator (today's layout)
-    Workbench(WorkbenchState),   // three-pane (D3)
+    Workbench(WorkbenchState),   // canvas-primary review mode (D3)
 }
 ```
 
-The existing single-canvas + Navigator layout is `Normal`; the three-pane
-layout is `Workbench`. Switching mode rebuilds `workspace_row`
+The existing single-canvas + Navigator layout is `Normal`; the canvas-primary
+review layout is `Workbench`. Switching mode rebuilds `workspace_row`
 (`view.rs:117`, the existing toggle-and-row-rebuild mechanic behind
 `Message::ToggleNavigator`), and may resize the window on macOS
 (`window::Id` in `macos_product.rs`). The `ResultDocument`, `ImageDocument`,
@@ -99,9 +104,18 @@ viewport, and safe-export plumbing are shared across both modes — the
 Workbench does not duplicate canvas or save logic.
 
 **Entry point:** a "Smart Redaction" button in the toolbar (`view.rs:58`,
-beside the existing `Tool::Redact` at `view.rs:72`) opens a preset picker.
-- **Run existing** → lightweight mode (canvas + candidates + review bar, no agent pane).
-- **Create** / **Improve Preset** → full three-pane `Workbench` mode.
+beside the existing `Tool::Redact` at `view.rs:72`) opens:
+- **Run preset** → recent/all preset list with a local-only/no-upload label,
+  then lightweight mode (canvas + candidates + review bar, no agent pane).
+- **Create new preset** → prompt + optional example marks + disclosure, then
+  canvas candidates plus review/activity drawers.
+- **Manage presets / Settings** → minimal key-presence/provider surface and
+  preset management entry.
+
+**Improve Preset** is not a top-level picker action. It appears after a
+run-existing result or draft review when the user has correction evidence:
+rejected candidates, resized candidates, added missing candidates, and/or
+explanatory text.
 
 Both paths produce `EditProposal` candidates; the canvas adds a candidate
 overlay via the existing `iced::widget::stack![img, overlay]` pattern
@@ -114,7 +128,7 @@ The bounded agent runs as an `iced::Task` that spawns
 (`TextChunk` / `ToolCallStart` / `ToolCallEnd`) flows through an mpsc channel
 exposed via `Subscription::run_with_id`. Each event arrives as a
 `Message::Workbench(WorkbenchMessage::RunEvent(...))` and is appended to the
-agent session pane. The final `RunTerminalState` arrives as a terminal
+activity drawer. The final `RunTerminalState` arrives as a terminal
 message and switches the workbench sub-state.
 
 Cancellation: the Cancel button calls `RunCancellation::cancel()` on the
@@ -189,7 +203,7 @@ pub enum RunState {
 ```
 
 - **`Idle`** — prompt composer active; Send starts a run (after disclosure for author/improve).
-- **`Running`** — session pane streams `ActivityEntry`s; canvas frozen for candidate editing (pan/zoom live); Cancel visible. The subscription keyed on `stream_id` drains the channel.
+- **`Running`** — activity drawer streams `ActivityEntry`s; canvas frozen for candidate editing (pan/zoom live); Cancel visible. The subscription keyed on `stream_id` drains the channel.
 - **`Terminal(RunTerminalState)`**:
   - `ReadyForReview` → fills automation-review pane (source diff vs active revision + IR summary) AND canvas candidates (the dry-run `EditProposal`). Canvas becomes fully editable.
   - `NeedsUserInput` → prompt composer refocuses with the agent's clarifying question; no candidates.
@@ -199,9 +213,9 @@ pub enum RunState {
 
 ### 4.3 Three flows through the same state machine
 
-- **Run-existing** (lightweight, no agent pane): skip `AgentSession`/provider entirely. Build `VisualIndex` + host, run the active revision's `ValidatedAutomation` through `execute_to_proposal` directly, produce `pending_proposal` → terminal-equivalent without `pending_draft`. No disclosure (no upload).
-- **Author** (full three-pane): disclosure → `AgentRunner::run_with_provider` → terminal state fills both panes.
-- **Improve Preset** (full three-pane, from a prior review): assemble correction evidence (parent §6.4) into a new `AuthorizedModelInput`, then same as Author. The parent revision is the baseline for the automation diff.
+- **Run preset** (lightweight, no agent pane): skip `AgentSession`/provider entirely. Build `VisualIndex` + host, run the active revision's `ValidatedAutomation` through `execute_to_proposal` directly, produce `pending_proposal` → terminal-equivalent without `pending_draft`. No disclosure (no upload).
+- **Author**: disclosure → `AgentRunner::run_with_provider` → terminal state fills the canvas, review drawer, and optional activity drawer.
+- **Improve Preset** (from a prior review/correction context): assemble correction evidence (parent §6.4) into a new `AuthorizedModelInput`, then same as Author. The parent revision is the baseline for the automation diff.
 
 ### 4.4 Candidate review model
 
@@ -218,11 +232,20 @@ pub struct CandidateReview {
 }
 ```
 
+First-release semantics:
+
+- `Pending` = will apply by default.
+- `Modified` = will apply with the modified bounds.
+- `Rejected` = will not apply.
+- `Accepted` = optional explicit-confirmed state; not required for normal flow.
+
 Canvas gestures mutate this in place: deleting = `Rejected`, dragging =
-`Modified(new bounds)`. On **Apply candidates**, `ReviewDecision` is built
-from this state, `lower(proposal, decision) → Vec<EditOp>`,
-`ImageDocument::apply_batch` commits them as one undo entry. On **Accept
-revision** (distinct per §8.3), `pending_draft.validated` →
+`Modified(new bounds)`, and **Add missing candidate** creates an explicit
+proposal/evidence item rather than an immediate committed annotation. On
+**Apply candidates**, `ReviewDecision` is built from this state,
+`lower(proposal, decision) → Vec<EditOp>`, and
+`ImageDocument::apply_batch` commits them as one undo entry. On **Save preset**
+or **Save new revision** (distinct per §8.3), `pending_draft.validated` →
 `PresetStore::add_revision` then `set_active_revision`.
 
 ### 4.5 Freeze rule (D9)
@@ -242,9 +265,10 @@ committed annotations + the in-progress drag draft. SP6 adds a third draw
 pass: **proposed candidates**, with the distinct visual language:
 
 - **Dashed border** for proposals, **solid** for accepted (committed) annotations — never conflated.
-- **Confidence color:** red dashed (`#ff5050`) for ≥0.85, amber dashed (`#ff8c1a`) for low-confidence/applicability-warning. Warnings are never silently omitted (parent §8.2).
-- **Confidence badge** floats above each candidate: `● score · label` (or `⚠` for warnings). Drawn via the existing canvas text path (the vendored DejaVu font `rollshot_image_document::style::FONT_REGULAR_BYTES` already used for annotation text).
+- **State color:** proposed candidates use a neutral/accent dashed outline. Warning or low-confidence candidates use the same dashed outline plus a warning badge; red is reserved for committed redaction fill, not confidence.
+- **Zoom-aware badges:** at small zoom show clusters/counts and warning badges only; at medium zoom show the label; on hover/selection show confidence and rationale in the popover. The candidate list carries full details.
 - **Selected state:** solid blue border + 4 resize handles, reusing the existing `redaction_handles` / `resized_rect` / `direct_manipulation_hit` machinery (`canvas.rs:348`, `update.rs:136`). Same gestures as manual redactions: drag body = move, drag handle = resize, Del = reject, right-click/long-press = rationale popover.
+- **Rejected state:** rejected candidates are muted/hidden with an undo affordance in the candidate list, not silently erased from review history.
 
 The overlay program owns proposal rendering (it has the `ProposedCandidate`s),
 keeping `RenderShape` for committed annotations unchanged — surgical, no
@@ -253,17 +277,33 @@ token-set churn. `ProposedCandidate` carries `confidence` / `label` /
 
 ### 5.2 Review bar
 
-Canvas bottom bar: `Original` / `Before-After` / `Candidates` toggle +
-candidate count + zoom. "Before/After" swaps the render between original
-pixels and redacted render to judge coverage (toggles whether committed
-annotations are drawn; candidates always drawn in Candidates mode). Reuses
-existing `ViewportState` zoom/scroll.
+Canvas bottom/context review bar: `Original` / `Before-After` / `Candidates`
+toggle + candidate counts + warning counts + zoom + primary review actions:
+`Apply N redactions`, `Next warning`, `Improve preset`, and `Details`.
+"Before/After" swaps the render between original pixels and redacted render to
+judge coverage (toggles whether committed annotations are drawn; candidates
+always drawn in Candidates mode). Reuses existing `ViewportState` zoom/scroll.
+
+The summary always states what will apply, for example:
+
+```text
+Apply 101 redactions, skip 7 rejected
+2 warnings included
+```
+
+When pending candidates exist, the bar also states:
+
+```text
+8 proposed redactions are preview-only. Apply before safe copy/save.
+```
 
 ### 5.3 Gestures → `CandidateReview`
 
 - Click empty candidate → select (single; clear prior selection).
 - Drag body/handle → `CandidateReview::Modified(bounds)`, live-updated during drag, committed on release.
 - Del / Backspace → `Rejected`.
+- Add missing candidate → creates `CandidateReviewState::Modified` for a new
+  proposed candidate/evidence item; it does not commit a redaction.
 - Click empty canvas → deselect.
 - Multi-select: shift-click (modifier tracking already in `ResultWorkspace.modifiers`).
 
@@ -286,6 +326,32 @@ Workbench must re-stamp against the live document before lowering (§10.5).
 Candidate draw culls to the visible rect like committed annotations
 (`canvas.rs:404`'s `intersects` check), so a 1080×20000 capture with hundreds
 of candidates stays responsive. Pan/zoom unchanged.
+
+Performance culling is not enough for review workflow, so SP6 also includes a
+candidate list/drawer:
+
+- grouped by warnings, rejected, modified, manually added, and viewport order
+- each row supports jump-to-candidate, reject/undo reject, and rationale
+- `Next warning` jumps to the next warning candidate
+- review progress shows `Reviewed X / Y` and the apply/skip summary
+
+### 5.6 Copy/Save gating with pending candidates
+
+Pending candidates are preview-only. They are not redactions and do not make
+the screenshot safe.
+
+If `pending_proposal` exists, current toolbar Copy/Save cannot silently export
+an image that only shows dashed preview candidates. The UI either disables the
+safe export action or shows a blocking confirmation:
+
+```text
+8 proposed redactions are preview only. Apply them before safe copy/save.
+[Apply 8 redactions] [Copy/save without proposed redactions]
+```
+
+After Apply, candidates become committed annotations, dashed overlays
+disappear, and safe copy/save activates through the existing secure-sharing
+path.
 
 ## 6. Agent Session Pane and Streaming
 
@@ -363,22 +429,41 @@ provider-management UX is out of scope (§2.2).
 Opens on Send for author/improve, before any upload (parent §9.1). Uses the
 existing `iced::widget::stack` scrim+modal pattern (`view.rs:342` / `389`).
 
-| Field | Example |
-|---|---|
-| Provider | Anthropic |
-| Model | claude-sonnet-4-6 |
-| Payload mode | Full screenshot **or** OCR/layout-only |
-| Complete screenshot | ✓ attached (3.2 MB) |
-| OCR/layout | ✓ included |
-| Selected region | none |
-| Selected annotations | none |
-| Correction evidence (improve) | 2 rejected, 1 modified, 1 added |
-| Estimated budget | 10 turns, 30s wall, 20k tokens |
+The modal is written as user-facing privacy copy first, with technical manifest
+details available under Details:
+
+```text
+Send to Anthropic / claude-sonnet-4-6
+
+This run will send:
+✓ Screenshot image, 3.2 MB
+✓ Local OCR/layout summary
+— Selected region: none
+— Selected annotations: none
+✓ Correction examples: 2 rejected, 1 resized
+
+Privacy mode:
+(•) Full screenshot — best accuracy
+( ) OCR/layout only — no image upload
+
+[Send to Anthropic] [Cancel]
+```
+
+If no provider key is resolvable, the modal shows:
+
+```text
+Provider not configured
+Add an API key to create or improve presets.
+Run existing presets still works locally.
+
+[Open Settings] [Cancel]
+```
 
 Two explicit, distinct consent lines per parent §9.1: one for **complete
 screenshot inclusion**, one for **OCR/layout-only** — never implied by a
 single toggle. The primary button reads `Send to {provider}` (not a generic
-"OK"); back/cancel returns to the composer without uploading.
+"OK"); back/cancel returns to the composer without uploading. Budget/cost
+details stay under Details unless a hard warning must block the run.
 
 ### 7.3 Payload mode
 
@@ -411,41 +496,85 @@ The disclosure modal is the single chokepoint where the user sees exactly what
 leaves the machine. No run starts without passing through it (author/improve).
 Run-existing bypasses it (no upload).
 
-## 8. Automation Review Pane and Improve Preset
+## 8. Automation Review Drawer and Improve Preset
 
-### 8.1 Pane contents (parent §8.3)
+### 8.1 Review drawer contents (parent §8.3)
 
 Shown only in `Terminal(ReadyForReview)` for author/improve:
+
+Default tab:
+
+1. **Preset draft / revision summary** — human-readable behavior first. For create, includes an editable preset name and generated description before save:
+
+   ```text
+   Preset draft
+   Name: [Browser Bookmarks]
+   Description: Hides bookmark labels/icons in browser screenshots
+   ```
+
+   For improve, labels the parent:
+
+   ```text
+   Updating preset: Work Desktop Share
+   New revision summary
+   ```
+
+2. **Behavior summary** — what the preset will look for, redact, and skip:
+
+   ```text
+   This preset will:
+   - Look for a browser bookmark bar near the top of screenshots
+   - Redact bookmark labels and icons
+   - Skip screenshots that do not look like browsers
+   ```
+
+3. **Current screenshot summary** — candidate count, warnings, total proposed area, rejected/modified/manual-added counts, and reviewed progress.
+
+4. **Two visually separate cards**:
+   - **This screenshot** — `N proposed redactions, W warnings`, with `Apply N redactions` and `Discard candidates`.
+   - **Reusable preset** — `New detector draft is ready`, with `Save preset` or `Save new revision`, `Ask agent to revise`, and `Discard draft`. Button copy must avoid ambiguous revision-acceptance wording; saving a preset states that it does not edit this screenshot.
+
+Advanced details tab/drawer:
 
 1. **Source diff** — agent-authored JS vs the active revision's source (or empty template for a new preset). Monospace line diff over `pending_draft.source` vs `active_revision.artifact.source`.
 2. **Workflow IR semantic summary** — from `rollshot-automation::diff::semantic_summary`: capability additions/removals, threshold/padding/region/limit changes, candidate-count change, static-cost change. Compact bullet list (no graph — parent §5.3 defers visual workflow diagrams).
 3. **Static cost + budget** — `ValidationSummary` (source bytes, AST nodes, helper count, capability calls, max output candidates) + the run's `UsageSnapshot` (turns, tokens, wall-time, cost). Shows whether the revision is within `smart_redaction_default` policy limits.
-4. **Actions** — three distinct buttons (parent §8.3: "accepting revision and applying candidates are related but distinct"):
-   - **Accept revision** — `pending_draft.validated` → `PresetStore::add_revision(preset_id, new_rev_id, parent_id = active_revision_id, artifact, provenance = AgentRun { source_run_ref: Some(session_id) })`, then `set_active_revision`. Does *not* touch the current image's annotations. Offers "apply candidates now?".
-   - **Ask agent to revise** — returns to the composer with the session intact; the revision request starts a new bounded run whose parent is the just-rejected draft. (Distinct from Improve Preset — mid-authoring refinement, not correction evidence.)
-   - **Discard** — drops `pending_draft` + `pending_proposal`, returns to `Idle`, session history kept.
+4. **Validation diagnostics and agent trace** — bounded, privacy-safe summaries; full raw OCR/tool/provider bodies are never shown.
 
 **Apply candidates** lives on the *canvas review bar* (§5.2), not here — to
-reinforce that applying to the current image is separate from accepting the
-reusable automation.
+reinforce that applying to the current image is separate from saving reusable
+automation.
 
 ### 8.2 Improve Preset flow (parent §6.4, §8.5)
 
 Entry from a prior review: the user reviews a run-existing result on the
-canvas, edits candidates (reject/modify/add), then chooses **Improve Preset**.
+canvas, edits candidates (reject/modify/add missing), then chooses **Improve
+Preset**. Improve is unavailable when there is no review/correction context.
 This assembles correction evidence:
 
 - parent automation revision (the active one)
 - original proposal candidates
 - user-rejected candidate ids
 - user-modified candidates (with new bounds)
-- user-added redactions (if explicitly included)
+- user-added missing candidates (if explicitly included)
 - optional explanatory text (from a small composer)
+
+Manual correction never silently trains or mutates a preset. The Improve modal
+summarizes evidence before disclosure:
+
+```text
+Correction evidence to send:
+- 2 rejected candidates
+- 1 resized candidate
+- 1 manually added missing candidate
+
+[Include manually added candidates as examples] ✓
+```
 
 The disclosure modal reflects "correction evidence included" (§7.2 field).
 The run's parent is the active revision; the resulting draft's automation
 diff is against that parent. Reviewed exactly like initial authoring. Does
-not mutate the preset directly — only a new accepted revision does (parent
+not mutate the preset directly — only **Save new revision** does (parent
 §2.5).
 
 ### 8.3 Fixture regression (carry-forward)
@@ -473,7 +602,7 @@ retry):
 | `AgentProtocolFailure` | `RunTerminalState::AgentProtocolFailure` | Retry run / report |
 | `BudgetExhausted` | `RunTerminalState::BudgetExhausted` | Show which dimension; allow review if a valid draft was retained |
 | `VisionPrepare` | `VisualIndex::build` / `prepare_*` failure | Block run; show capability error (`template_not_found`, `region_too_large`, etc.) |
-| `Store` | `PresetStore` IO/compatibility | Block accept; show `StoreError` variant |
+| `Store` | `PresetStore` IO/compatibility | Block save; show `StoreError` variant |
 | `Config` | Unresolvable provider key | Block run; point to Settings |
 | `Cancelled` | `RunTerminalState::Cancelled` | Not an error — return to `Idle`, session kept |
 
@@ -484,21 +613,36 @@ internally to JSON; the Workbench surfaces the structured form for the user
 by re-deriving from `pending_draft.validation_summary` + any diagnostics
 captured during the agent repair loop.
 
-### 9.2 Privacy (parent §9.5, §9.6, §9.2)
+### 9.2 Product result states
+
+No-match and low-confidence outcomes are product states, not generic errors.
+The UI surfaces them with clear next actions:
+
+| State | User message | Primary actions |
+|---|---|---|
+| Candidates found | `8 candidates found. Review before applying.` | Apply / Next warning / Improve |
+| No candidates found | `This preset did not find anything on this screenshot.` | Mark missing area / Improve preset / Try another preset / Manual redact |
+| Low-confidence only | `Only low-confidence matches were found.` | Review warnings / Improve preset / Discard |
+| Preset not applicable | `This preset may not apply to this screenshot.` | Explain why / Try another preset / Improve |
+| Provider missing | `Add an API key to create or improve presets.` | Open Settings / Run existing local presets |
+| Budget exhausted | `The agent stopped before finishing.` | Review last valid draft if any / Retry with same context / Discard |
+| Generated preset invalid | `The draft failed validation.` | Ask agent to repair / Show diagnostics / Discard |
+
+### 9.3 Privacy (parent §9.5, §9.6, §9.2)
 
 - `ActivityEntry` construction uses bounded summaries only (counts, durations, labels) — never raw OCR text, tool arguments, provider response bodies, or image pixels.
 - `tracing` events use stable `rollshot::workbench::*` targets with structured fields (duration, result count, error code, terminal state, provider name, model name, budget dimension) — never OCR text, query contents, or pixels. Mirrors the OCR privacy rule validated by the §8.2 D9 privacy test.
 - `Provenance`/`rationale` on candidates carries agent-supplied text; shown in the right-click popover, never in tracing.
 - Persisted (SP5, already done): preset/revision metadata + accepted automation source/IR. **Not** persisted in SP6: sessions, run events, raw OCR, tool results, provider bodies, visual attachments (in-memory).
 
-### 9.3 Verification (preview-to-accept path)
+### 9.4 Verification (preview-to-save path)
 
 - Budget enforced by `BudgetTracker` (agent crate) during the run; the Workbench builds a finite `RunBudget` literal (no ergonomic constructor exists — §10.4; the Workbench owns a small constructor with documented defaults).
 - Policy: `ExecutionPolicy::smart_redaction_default(...)` is the only constructor; the Workbench uses it. `decode_proposal` runs `validate_policy` internally (twice); no third recheck before `lower`.
 - `PresetStore::add_revision` runs `ensure_compatible` (re-validate + re-parse JS) — so a corrupt/incompatible revision is rejected at store time, not just load time.
 - Candidate output validation (parent §9.4): `validate_policy` rejects malformed candidates, non-finite coordinates, zero-area, excessive counts/area. Final gate before `lower`.
 
-### 9.4 Platform verification (parent §11.7)
+### 9.5 Platform verification (parent §11.7)
 
 Two active paths — Linux `iced::application` workspace + macOS `iced::daemon`
 `Phase::Workspace`. Every `WorkbenchMessage` flows through
@@ -516,7 +660,7 @@ From the crate-API map, made explicit for the implementation plan:
 
 1. **Host preparation before run.** Build `VisualIndex` + prepare the host, then wrap in `Arc<Mutex>` once before the run starts. Re-preparing mid-run would re-lock the mutex `DryRunTool` holds during execution.
 2. **Executor dependency.** `QuickJsExecutor` is pulled in from `rollshot-automation-rquickjs`; no concrete executor exists in the five core crates.
-3. **Conversation reconstruction.** The session pane is reconstructed from the `RunEvent` stream, not `AgentSession` alone (which carries only finished user/assistant prose, not tool calls).
+3. **Conversation reconstruction.** The activity drawer is reconstructed from the `RunEvent` stream, not `AgentSession` alone (which carries only finished user/assistant prose, not tool calls).
 4. **`RunBudget` literal.** No ergonomic constructor exists (only `unlimited()`); the Workbench owns a small documented constructor for finite budgets.
 5. **Proposal re-stamping.** `base_document_state_id` is re-stamped from `ImageDocument::state_id()` before `lower` (the dry-run proposal carries a hardcoded `0`).
 6. **`validate_source` diagnostics.** Returns `Vec<SourceDiagnostic>`, not a typed enum; shown as structured spans, not a flattened string.
@@ -528,25 +672,28 @@ From the crate-API map, made explicit for the implementation plan:
 
 This subproject is complete when:
 
-1. A user starts a Smart Redaction session from the Result Workspace toolbar; sees exactly what will be sent to which provider before any upload.
-2. A bounded agent inspects (OCR/region/template), authors, validates, and dry-runs an automation; the session pane streams text + tool cards live; cancel works.
-3. A `ReadyForReview` run fills the automation review pane (source diff + IR summary) and the canvas with editable candidates.
-4. The user reviews/edits candidates on the canvas (select/move/resize/delete/reject, before/after) and applies them as one undoable `ImageDocument` transaction; safe-copy/save activates.
-5. The user accepts an immutable automation revision (distinct from applying candidates); it persists via `PresetStore` and becomes the active revision.
-6. The user runs an existing preset (no LLM call) and reviews/applies its candidates.
-7. The user explicitly Improves Preset with correction evidence; the new revision is reviewed like initial authoring.
-8. Each terminal state surfaces the correct retry action; errors never become generic ignored text.
-9. No OCR text, tool args, provider responses, or image pixels appear in `tracing` events or activity entries.
-10. Linux iced Result Workspace + macOS iced Result Workspace both verified (disclosure, session, diffs, candidate editing, improve, cancel, safe save, tall-stitch perf).
-11. `cargo test` / `fmt` / `clippy -- -D warnings` pass on the default lane (no `ort`/models — the Workbench introduces no new `unsafe`).
+1. A user starts Smart Redaction from the Result Workspace toolbar; run-existing presets are clearly local-only, and create/improve shows exactly what will be sent to which provider before any upload.
+2. A bounded agent inspects (OCR/region/template), authors, validates, and dry-runs an automation; the activity drawer streams text + tool cards live; cancel works.
+3. A `ReadyForReview` run fills the canvas with editable candidates and opens a review drawer whose default surface is human-readable without reading source code.
+4. Source diff, Workflow IR, budget, validation diagnostics, and trace details are inspectable under Advanced details but are not required for normal use.
+5. The user reviews/edits candidates on the canvas and candidate list (select/move/resize/delete/reject/add missing, next warning, jump-to-candidate, before/after) and applies them as one undoable `ImageDocument` transaction; safe-copy/save activates only after Apply.
+6. Pending candidates are never exported as if they were applied redactions; Copy/Save warns or blocks while unapplied candidates exist.
+7. The user saves a preset or new immutable revision (distinct from applying candidates); it persists via `PresetStore` and becomes the active revision.
+8. The user runs an existing preset (no LLM call, no agent pane) and reviews/applies its candidates.
+9. The user explicitly Improves Preset only from a review/correction context; correction evidence is summarized before disclosure, and the new revision is reviewed like initial authoring.
+10. No-match, low-confidence, not-applicable, provider-missing, budget-exhausted, and invalid-draft states provide clear next actions.
+11. Each terminal state surfaces the correct retry action; errors never become generic ignored text.
+12. No OCR text, tool args, provider responses, or image pixels appear in `tracing` events or activity entries.
+13. Linux iced Result Workspace + macOS iced Result Workspace both verified (disclosure, activity, advanced details, candidate editing/navigation, improve, cancel, safe save, tall-stitch perf).
+14. `cargo test` / `fmt` / `clippy -- -D warnings` pass on the default lane (no `ort`/models — the Workbench introduces no new `unsafe`).
 
 ## 12. Delivery Decomposition Note
 
 This spec covers the full first-release workbench (D1). The implementation
 plan (next step via `superpowers:writing-plans`) is expected to decompose
 internally — e.g. Workbench mode scaffolding + state model → canvas candidate
-overlay → run architecture + streaming session → disclosure + provider config
-→ automation review + accept/apply → Improve Preset → platform verification —
+overlay → run architecture + streaming activity → disclosure + provider config
+→ review drawer + save/apply → Improve Preset → platform verification —
 with stable interfaces between phases. Each phase gets its own commit-worthy,
 independently testable slice, mirroring the SP1–SP5 PR-phase precedent.
 
