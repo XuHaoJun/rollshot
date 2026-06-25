@@ -4,7 +4,9 @@
 
 **Goal:** Build the first-release Smart Redaction Preset Workbench — a mode of the Result Workspace where users author, run, review, and save reusable redaction presets via a bounded visual agent, with candidates rendered as an overlay on the existing annotation canvas.
 
-**Architecture:** The Workbench extends `ResultWorkspace` with a `WorkspaceMode` enum (Normal vs Workbench). Domain logic (candidate review, state machine, provider config, review→apply, `WorkbenchError`) lives in a new `workbench/` module under `result_workspace/`, fully TDD-tested. The agent run is bridged from async `run_with_provider` to iced's `Task::run(stream, f)` via a `tokio::sync::mpsc` channel; the `AgentSession` is guarded by a `tokio::sync::Mutex` so the spawned future stays `Send`. Candidate rendering is an overlay pass added to the existing view-built `AnnotationCanvas` program (extra fields on the struct, not a canvas-internal state). The review drawer is a collapsible right panel with a default human-readable tab and an advanced technical tab.
+**Architecture:** The Workbench extends `ResultWorkspace` with a `WorkspaceMode` enum (Normal vs Workbench). Domain logic (candidate review, state machine, provider config, review→apply, `WorkbenchError`) lives in a new `workbench/` module under `result_workspace/`, fully TDD-tested. The agent run is bridged from async `run_with_provider` to iced's `Task::run(stream, f)` via a `tokio::sync::mpsc` channel; the `AgentSession` is **moved by value into the spawned run task** (not held in any `Mutex`) so the spawned future stays `Send` (see Task 7 design note). Candidate rendering is an overlay pass added to the existing view-built `AnnotationCanvas` program (extra fields on the struct, not a canvas-internal state). The review drawer is a collapsible right panel with a default human-readable tab and an advanced technical tab.
+
+> **⚠ Eng-review addendum (2026-06-25): read [Review Addendum](#review-addendum-2026-06-25-eng-review) below before executing any task.** It carries normative bug-fixes (compile-blocking and one privacy-critical), the explicit scope reconciliation (what SP6 actually ships vs defers), and the required added tests. Where a task's inline code conflicts with the addendum, **the addendum wins**.
 
 **Tech Stack:** iced 0.14 (`canvas`, `image`, `tokio`, `async_stream`), rollshot-agent (driver, runtime, tools, domain, provider), rollshot-preset (store, domain), rollshot-vision (`RealAutomationHost`, `VisualIndex`), rollshot-edit-proposal (`EditProposal`, `lower`, `ReviewDecision`), rollshot-automation (`validate_source`, `execute_to_proposal`, `ExecutionPolicy`, `AutomationHost`), rollshot-automation-rquickjs (`QuickJsExecutor`). `tokio` features: `rt`, `sync`, `time` (via iced's "tokio" feature + workspace dep).
 
@@ -27,13 +29,105 @@
   - `RunBudget { affected_area: u64, ... }` — integer, not float (`runtime.rs:50`).
   `RunBudget::unlimited()` is the only constructor (`runtime.rs:54`); the workbench owns a finite-literal constructor.
   - `ProposedEdit` is defined in `rollshot-edit-proposal` (`proposal.rs:64`); **cannot `impl ProposedEdit` in rollshot-app** (orphan rule). Use a free function `proposed_edit_bounds(&ProposedEdit) -> Option<ImageRect>` in `workbench/`.
-  - `AgentSession` is `!Clone`, held by value; `run_with_provider(&mut self, ..., session: &mut AgentSession, ...).await` (`driver.rs:374`). A `std::sync::Mutex` guard is `!Send` and cannot cross `.await` inside `tokio::spawn` → **must use `tokio::sync::Mutex`** for the session, or move the session into the spawned task and stream the terminal out.
+  - `AgentRunner::run_with_provider(&self, input, session: &mut AgentSession, registry, budget, &RunCancellation, &dyn RunEventSink, &ToolContext, &dyn ProviderAdapter) -> RunTerminalState` — **async, takes `&self` (NOT `&mut self`), returns `RunTerminalState` directly (not `Result`)** (verified `driver.rs:374`). `AgentSession` actually derives `Clone` (re-verified), but SP6 **moves it by value** into the spawned task (no `Mutex`) so the future is `Send` — see the Task 7 design note. (The earlier "`tokio::sync::Mutex` required" framing is superseded: move-by-value is the chosen design.)
   - `QuickJsExecutor` is a unit struct (`automation-rquickjs/src/lib.rs:10`); `AutomationExecutor::execute` is **sync** (`executor.rs:133`). `DryRunTool::new(ctx, executor: Arc<dyn AutomationExecutor>, host: Arc<Mutex<dyn AutomationHost>>)` (`tools.rs:482`).
   - `AuthorizedModelInput::new(provider, model, user_message, descriptors, attachment_bytes) -> Result<Self, InputError>` (`domain.rs:110`).
   - `PresetStore::open(root: PathBuf) -> Self` (`store.rs:41`); `create_preset(id, name, original_intent, now) -> Result<Preset>` (`store.rs:66`); `add_revision(preset_id, id, parent_id, artifact: ValidatedAutomation, provenance, now) -> Result<AutomationRevision>` (`store.rs:155`); `set_active_revision(preset_id, rev_id, now) -> Result<()>` (`store.rs:209`); `load_active_revision(preset_id) -> Result<AutomationRevision>` (`store.rs:239`).
   - `AnnotationCanvas<'a>` is a view-built `canvas::Program` (`canvas.rs:196`) with fields `document`, `editor`, `scale`, `visible`; `draw(_state: &(), ...)` (`canvas.rs:388`). Candidate overlay = add `pending_proposal: Option<&'a EditProposal>` + `review: Option<&'a CandidateReview>` + `selected_candidate: Option<CandidateId>` fields; no canvas-internal state.
   - Existing modal pattern: `discard_modal`/`unredacted_action_modal` in `view.rs:342/389` use `stack![base, opaque(scrim)]`. Reuse it.
   - `result_workspace::Message` enum lives in `update.rs:26`; `subscription()` at `update.rs:799` returns `Subscription<Message>`. The streaming activity drawer is delivered via `Task::run(stream, f)` returned from the `DisclosureConfirmed` handler (not via `subscription`), so it is bound to the run lifecycle, not the view cycle.
+
+---
+
+## Review Addendum (2026-06-25 eng review)
+
+This addendum is **normative** and overrides any conflicting inline task code. It is the output of an engineering plan review. The plan's *API grounding was independently re-verified against code and is accurate*; the items below are logic / architecture / scope / privacy fixes the inline tasks miss. Apply each in the task noted.
+
+### A. Compile-blocking fixes (do these or the enforced `clippy -- -D warnings` / `cargo check` gates fail)
+
+1. **`wb` is undefined in `start_agent_run` (Task 7 Step 3).** The fn signature has no `wb` param. In the `AuthorizedModelInput::new(...)` call, replace `wb.provider_config.provider` / `wb.provider_config.model` with the `provider_config` **parameter** (`provider_config.provider` / `provider_config.model`).
+2. **Unused `map_err` bindings → `unused_variables` warnings (fail `-D warnings`).** Everywhere the plan writes `.map_err(|e| WorkbenchError::Variant)` (or `|diags| ...`) **without using the bound name**, change to `.map_err(|_| ...)`. Sites: Task 4 `apply_candidates`; Task 5 `run_existing_preset`; Task 7 `reg` closure, `registry.register`, `build_adapter(...)`; Task 9 `save_revision` (`validate_source` err).
+3. **Dead `stream_id` field (fails `-D warnings` via `dead_code`).** SP6 uses `Task::run`, not a `Subscription`, so `stream_id` is never read. **Remove `stream_id` from `RunState::Running`** (Task 1 Step 2) and from its construction in `DisclosureConfirmed` (Task 7 Step 5): `RunState::Running { cancellation }`.
+
+### B. Runtime-correctness fixes
+
+4. **`tokio::spawn` from the synchronous `update` handler panics ("no reactor running").** In `start_agent_run` (Task 7 Step 3) the `tokio::spawn(...)` runs in iced's synchronous `update`, which is not guaranteed to be inside a Tokio runtime. **Move the `tokio::spawn` *inside* the `async_stream::stream!` block** (that block is polled by iced's async executor, which IS in runtime context). Sketch:
+   ```rust
+   let runner = AgentRunner::new(AgentConfig::default());
+   let budget = budget.clone();
+   let (tx, mut rx) = tokio::sync::mpsc::channel::<RunEvent>(64);
+   let cancellation_for_task = cancellation.clone();
+   let stream = async_stream::stream! {
+       let run_task = tokio::spawn(async move {       // now in executor (tokio) context
+           let sink = ChannelEventSink { tx };
+           let mut session = session;
+           let provider = adapter.as_ref();
+           runner.run_with_provider(
+               model_input, &mut session, &registry, budget,
+               &cancellation_for_task, &sink, &tool_ctx, provider,   // &Arc<_> derefs to &T
+           ).await
+       });
+       while let Some(event) = rx.recv().await {
+           yield Message::Workbench(super::WorkbenchMessage::RunEvent(event));
+       }
+       if let Ok(terminal) = run_task.await {
+           yield Message::Workbench(super::WorkbenchMessage::RunTerminal(terminal));
+       }
+   };
+   Ok((iced::Task::run(stream, std::convert::identity), cancellation))
+   ```
+5. **Heavy work on the UI thread (tall-stitch frame stall).** `prepare_vision_context` (full-image `clone` + `VisualIndex::build`) and the PNG encode currently run synchronously inside `update` before the Task is returned. For a 1080×20000 capture this freezes the UI for seconds. **Move vision-prep + PNG-encode into the spawned task** (inside the stream block, B4), so `start_agent_run` returns to the UI thread immediately. Encode borrowing the buffer you already hold to avoid a second full clone.
+
+### C. Privacy-critical fix (do NOT ship the stub)
+
+6. **`PayloadMode::OcrLayoutOnly` is a false promise.** The disclosure modal offers "OCR/layout only — no image upload", but Task 7 Step 3 always PNG-encodes and uploads the image for both `Author` and `Improve`. A privacy control that says "no image upload" while uploading the image is worse than no control (spec §7.3, §7.6 — disclosure is "the single chokepoint where the user sees exactly what leaves the machine"). **The selected `payload_mode` MUST gate the bytes.** Thread `payload_mode: PayloadMode` into `start_agent_run` (read `workbench.payload_mode` at `DisclosureConfirmed`) and build the attachment accordingly:
+   ```rust
+   let (descriptors, attachment_bytes): (Vec<AttachmentDescriptor>, Vec<Vec<u8>>) = match payload_mode {
+       PayloadMode::OcrLayoutOnly => (vec![], vec![]),     // image stays local; agent still has OCR via tools
+       PayloadMode::FullScreenshot => {
+           let mut buf = Vec::new();
+           image::DynamicImage::ImageRgba8(image.clone())
+               .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+               .map_err(|e| WorkbenchError::VisionPrepare { message: format!("png encode: {e}") })?;
+           let d = AttachmentDescriptor { media_type: MediaType::Png, width: params.image_dims.0,
+               height: params.image_dims.1, byte_count: buf.len() as u64 };
+           (vec![d], vec![buf])
+       }
+   };
+   ```
+   **Verify during execution:** confirm `AuthorizedModelInput::new` accepts **zero** descriptors/attachments (OcrLayoutOnly). If `InputError` rejects an empty attachment set, either relax that constraint or, for first release, **disable/remove the OcrLayoutOnly radio** rather than ship a non-functional privacy toggle — never leave it selectable-but-ignored. Also make the modal's "This run will send:" copy reflect the selected mode (omit the "Screenshot image" line under OcrLayoutOnly).
+
+### D. Functional fix
+
+7. **Un-reject is impossible (Task 6 `candidate_list`).** The "Undo" button emits `CandidateDeselected` (clears selection, not rejection); there is no message that re-marks a candidate `Pending`. Add `WorkbenchMessage::CandidateUnrejected(CandidateId)` (Task 1 `WorkbenchMessage` enum), handle it in Task 7 with `workbench.review.mark_pending(id)`, and point the list's "Undo" button at it. Rename the list's `Jump` button to `Select` until viewport-scroll lands (it only selects today).
+
+### E. Required added tests (project rule: "rather too many tests than too few")
+
+8. **Reducer tests for the `Message::Workbench` handler (Task 7).** The ~15-arm reducer is the most complex, least-tested code and contains fix A1. Add unit tests (construct a `WorkbenchState`, feed messages, assert state) for at least: `RunTerminal(ReadyForReview)` populates `pending_proposal` + `review` + `pending_draft`; `ApplyCandidates` commits + clears `pending_proposal`; `CandidateDeleted`/`CandidateUnrejected` flip review state; `SendRequested` captures `pending_run` + sets `disclosure_pending`; `DisclosureCancelled` clears both. Extract reducer arms into small pure `fn`s where needed to make them testable without an iced runtime.
+9. **Geometry test for `point_on_rect_perimeter` (Task 6).** Pure fn with wraparound/segment-boundary risk; assert the four corners and one midpoint per edge.
+
+### F. Scope reconciliation — what SP6 actually ships (overrides §11 success criteria)
+
+The inline tasks ship working **domain + canvas candidate review + run-existing engine + per-run disclosure + apply + Copy/Save gating**, plus the two small UI surfaces required for safe operation (below). The following spec/§11 items are **explicitly DEFERRED** to a follow-up (SP6.1) — they are *not* silently dropped, but the inline tasks only stub them and must say so:
+
+- **Improve Preset wiring (criterion #9, spec §8.2).** `ImStart` + `SendRequested(RunKind::Improve)` + assembling correction evidence into `AuthorizedModelInput` is **not** wired; `SendRequested` hardcodes `RunKind::Author`. Deferred. **Also fix `assemble_correction_evidence`:** either implement real `added_count` or remove the `assert_eq!(e.added_count, 0)` expectation and mark the fn `// SP6.1` — do not ship a test that enshrines dropped evidence.
+- **Run-existing UI entry (criterion #8).** `run_existing_preset` (Task 5) is built + tested but **no UI calls it**. Either add a minimal preset-pick + "Run" button in Task 6, or explicitly defer the entry and note that run-existing is reachable only programmatically in SP6.
+- **Automation review drawer (criteria #3, #4, spec §8.1).** Human-readable default tab + advanced source/IR/cost tab (`diff::semantic_summary` exists, verified) is **not** built. Deferred.
+- **Before/after toggle, `Next warning` / `Jump to candidate` viewport scroll, tool-card summaries.** No-ops. Deferred.
+
+**Build now (small, safety-required, not deferrable):**
+
+- **Cancel button + run-status line.** Criterion #2/#11 require cancel to work and there is otherwise no way to stop a runaway run. Add to `workbench_view` (Task 6/7) a one-line run-status row that, while `run_state.is_running()`, shows the provider/model label + a `Cancel` button emitting `WorkbenchMessage::CancelRun` (handler already exists). On terminal, show `terminal_state_label(...)`.
+- **Activity drawer rendering.** `live_activity: Vec<ActivityEntry>` is collected but never rendered. Add a scrollable column in `workbench_view` that renders each entry (UserMessage/AssistantText/ToolCard/TerminalLabel) as text/cards. Without it, criterion #2 ("activity drawer streams text + tool cards live") is unmet.
+- **Error / message surface (criteria #6, #11 — silent-failure fix).** `workbench_view` currently renders **neither** `workbench.error` (set by the RunTerminal/Apply/Config/Store paths) **nor** `state.message` (the `InlineMessage::Error` set by the Copy/Save gate in Task 8). As written, every failure path and the Copy/Save block reason are **invisible** in Workbench mode — the user sees nothing. Add an error/message banner to `workbench_view` that renders `wb.error` (via `WorkbenchError::Display` + the §9.1 retry hint) and `state.message`. Without it, "errors never become generic ignored text" becomes "errors become *no* text", and the no-provider-key path (`WorkbenchError::Config`, spec §7.2 "Provider not configured" modal) has no surface at all.
+
+Update §11 and Task 10's handoff to list the deferred items above under "Known limitations / deferred" (the handoff already lists several — extend it with Improve-wiring, run-existing-entry, and review-drawer).
+
+### G. Determinism / minor
+
+- `save_revision` (Task 9) builds the revision id from `chrono::Utc::now()` — keep the unit test asserting only on `source` (it does); do not add assertions on the generated id.
+- `serde_json` is **not** currently a `rollshot-app` dep; Task 1's "if not already" note is correct to add it — but if nothing in `workbench/` actually uses it, drop it to avoid an unused dep.
+- Event-drop reconciliation (perf): the bounded `try_send` channel can drop `TextChunk` deltas under UI lag. On `RunTerminal(ReadyForReview)`, reconcile the accumulated `AssistantText` against the authoritative `ready.assistant_text` (spec §6.2) so dropped chunks don't leave gaps.
 
 ---
 
