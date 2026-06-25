@@ -198,6 +198,10 @@ pub struct AnnotationCanvas<'a> {
     pub editor: &'a EditorState,
     pub scale: f32,
     pub visible: ImageRect,
+    // SP6 workbench candidate overlay. `None` in Normal mode.
+    pub pending_proposal: Option<&'a rollshot_edit_proposal::EditProposal>,
+    pub review: Option<&'a super::workbench::CandidateReview>,
+    pub selected_candidate: Option<rollshot_edit_proposal::CandidateId>,
 }
 
 fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> Option<ImagePoint> {
@@ -410,6 +414,71 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             self.draw_annotation(&mut frame, &draft);
         }
 
+        // SP6: proposed-candidate overlay. Dashed border (white, 40% alpha)
+        // or solid blue when selected. Rejected candidates are skipped.
+        // Zoom-aware: confidence badge only at scale > 0.3. Cull to visible.
+        if let Some(proposal) = self.pending_proposal {
+            let review = self.review;
+            let s = self.scale;
+            for cand in &proposal.candidates {
+                let Some(bounds) = super::workbench::proposed_edit_bounds(&cand.edit) else {
+                    continue;
+                };
+                if !bounds.intersects(&self.visible) {
+                    continue;
+                }
+                let is_rejected = matches!(
+                    review.and_then(|r| r.per_candidate.get(&cand.id)),
+                    Some(super::workbench::CandidateReviewState::Rejected)
+                );
+                if is_rejected {
+                    continue;
+                }
+                let is_selected = self.selected_candidate == Some(cand.id);
+
+                let rect = iced::Rectangle {
+                    x: bounds.x * s,
+                    y: bounds.y * s,
+                    width: bounds.width * s,
+                    height: bounds.height * s,
+                };
+                let border_color = if is_selected {
+                    iced::Color::from_rgb(0.13, 0.40, 1.0)
+                } else {
+                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.4)
+                };
+                let stroke = canvas::Stroke::default()
+                    .with_color(border_color)
+                    .with_width(if is_selected { 2.0 } else { 1.5 });
+                draw_dashed_rect(&mut frame, rect, 6.0, 4.0, stroke);
+
+                if s > 0.3 {
+                    let label = format!("{} {:.0}%", cand.label, cand.confidence * 100.0);
+                    frame.fill_text(canvas::Text {
+                        content: label,
+                        position: iced::Point::new(rect.x, rect.y - 14.0),
+                        color: iced::Color::WHITE,
+                        size: iced::Pixels(10.0),
+                        ..canvas::Text::default()
+                    });
+                }
+                if is_selected {
+                    for handle in [
+                        iced::Point::new(rect.x, rect.y),
+                        iced::Point::new(rect.x + rect.width, rect.y),
+                        iced::Point::new(rect.x, rect.y + rect.height),
+                        iced::Point::new(rect.x + rect.width, rect.y + rect.height),
+                    ] {
+                        let hr = canvas::Path::rectangle(
+                            handle - iced::Vector::new(3.5, 3.5),
+                            iced::Size::new(7.0, 7.0),
+                        );
+                        frame.fill(&hr, iced::Color::from_rgb(0.13, 0.40, 1.0));
+                    }
+                }
+            }
+        }
+
         if let Some(id) = self.editor.selection {
             if Some(id) != dragged && Some(id) != editing_text {
                 if let Some(annotation) = self.document.annotation(id) {
@@ -452,6 +521,73 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             None => mouse::Interaction::Crosshair,
         }
     }
+}
+
+fn draw_dashed_rect(
+    frame: &mut canvas::Frame,
+    rect: iced::Rectangle,
+    dash: f32,
+    gap: f32,
+    stroke: canvas::Stroke,
+) {
+    let perimeter = 2.0 * (rect.width + rect.height);
+    let segments: Vec<(iced::Point, iced::Point)> = {
+        let mut segs = Vec::new();
+        let mut dist = 0.0f32;
+        while dist < perimeter {
+            let on_end = (dist + dash).min(perimeter);
+            let a = point_on_rect_perimeter(rect, dist);
+            let b = point_on_rect_perimeter(rect, on_end);
+            segs.push((a, b));
+            dist += dash + gap;
+        }
+        segs
+    };
+    let path = canvas::Path::new(|builder| {
+        for (a, b) in segments {
+            builder.move_to(a);
+            builder.line_to(b);
+        }
+    });
+    frame.stroke(&path, stroke);
+}
+
+fn point_on_rect_perimeter(rect: iced::Rectangle, dist: f32) -> iced::Point {
+    let w = rect.width;
+    let h = rect.height;
+    let peri = 2.0 * (w + h);
+    let d = dist.rem_euclid(peri);
+    if d < w {
+        iced::Point::new(rect.x + d, rect.y)
+    } else if d < w + h {
+        iced::Point::new(rect.x + w, rect.y + (d - w))
+    } else if d < 2.0 * w + h {
+        iced::Point::new(rect.x + w - (d - w - h), rect.y + h)
+    } else {
+        iced::Point::new(rect.x, rect.y + h - (d - 2.0 * w - h))
+    }
+}
+
+/// Hit-test proposed candidates in image space. Skips rejected candidates.
+pub fn hit_test_proposal_candidate(
+    proposal: &rollshot_edit_proposal::EditProposal,
+    point: rollshot_image_document::ImagePoint,
+    review: &super::workbench::CandidateReview,
+) -> Option<rollshot_edit_proposal::CandidateId> {
+    use super::workbench::{proposed_edit_bounds, CandidateReviewState};
+    proposal
+        .candidates
+        .iter()
+        .find(|c| {
+            if matches!(
+                review.per_candidate.get(&c.id),
+                Some(CandidateReviewState::Rejected)
+            ) {
+                return false;
+            }
+            proposed_edit_bounds(&c.edit).is_some_and(|b| b.contains(point))
+        })
+        .map(|c| c.id)
 }
 
 #[cfg(test)]
@@ -565,5 +701,95 @@ mod tests {
         )
         .expect("active drag release should survive leaving the canvas");
         assert_eq!(point, ImagePoint::new(60.0, 115.0));
+    }
+
+    #[test]
+    fn point_on_rect_perimeter_corners_and_edge_midpoints() {
+        let rect = iced::Rectangle {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let peri = 2.0 * (rect.width + rect.height); // 300
+
+        // Top-left corner (start of top edge)
+        let p = point_on_rect_perimeter(rect, 0.0);
+        assert!((p.x - 10.0).abs() < 1e-5 && (p.y - 20.0).abs() < 1e-5);
+
+        // Top-right corner (end of top edge)
+        let p = point_on_rect_perimeter(rect, 100.0);
+        assert!((p.x - 110.0).abs() < 1e-5 && (p.y - 20.0).abs() < 1e-5);
+
+        // Bottom-right corner (end of right edge)
+        let p = point_on_rect_perimeter(rect, 150.0);
+        assert!((p.x - 110.0).abs() < 1e-5 && (p.y - 70.0).abs() < 1e-5);
+
+        // Bottom-left corner (end of bottom edge)
+        let p = point_on_rect_perimeter(rect, 250.0);
+        assert!((p.x - 10.0).abs() < 1e-5 && (p.y - 70.0).abs() < 1e-5);
+
+        // Top edge midpoint
+        let p = point_on_rect_perimeter(rect, 50.0);
+        assert!((p.x - 60.0).abs() < 1e-5 && (p.y - 20.0).abs() < 1e-5);
+
+        // Right edge midpoint
+        let p = point_on_rect_perimeter(rect, 125.0);
+        assert!((p.x - 110.0).abs() < 1e-5 && (p.y - 45.0).abs() < 1e-5);
+
+        // Bottom edge midpoint
+        let p = point_on_rect_perimeter(rect, 200.0);
+        assert!((p.x - 60.0).abs() < 1e-5 && (p.y - 70.0).abs() < 1e-5);
+
+        // Left edge midpoint
+        let p = point_on_rect_perimeter(rect, 275.0);
+        assert!((p.x - 10.0).abs() < 1e-5 && (p.y - 45.0).abs() < 1e-5);
+
+        // Wraparound: dist == perimeter should equal dist == 0
+        let p_wrap = point_on_rect_perimeter(rect, peri);
+        let p_zero = point_on_rect_perimeter(rect, 0.0);
+        assert!((p_wrap.x - p_zero.x).abs() < 1e-5);
+        assert!((p_wrap.y - p_zero.y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn hit_test_proposal_candidate_finds_contained() {
+        use super::super::workbench::CandidateReview;
+        use rollshot_edit_proposal::{
+            CandidateId, ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate,
+            ProposedEdit, Provenance, ProvenanceSource,
+        };
+
+        let proposal = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![ProposedCandidate {
+                id: CandidateId(1),
+                edit: ProposedEdit::AddRedaction {
+                    bounds: ImageRect {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 50.0,
+                        height: 50.0,
+                    },
+                },
+                confidence: 0.9,
+                label: "t".into(),
+                rationale: None,
+                provenance: Provenance {
+                    source: ProvenanceSource::Manual,
+                },
+            }],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        };
+        let review = CandidateReview::from_candidates(&[CandidateId(1)]);
+        let hit = hit_test_proposal_candidate(&proposal, ImagePoint::new(20.0, 20.0), &review);
+        assert_eq!(hit, Some(CandidateId(1)));
+        let miss = hit_test_proposal_candidate(&proposal, ImagePoint::new(0.0, 0.0), &review);
+        assert_eq!(miss, None);
     }
 }

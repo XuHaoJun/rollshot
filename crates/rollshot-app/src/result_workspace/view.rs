@@ -200,13 +200,24 @@ fn message_row(state: &ResultWorkspace) -> Element<'_, Message> {
     }
 }
 
-fn canvas_view<'a>(state: &'a ResultWorkspace, image_size: Size) -> Element<'a, Message> {
+pub(crate) fn canvas_view<'a>(
+    state: &'a ResultWorkspace,
+    image_size: Size,
+) -> Element<'a, Message> {
     let geometry = geometry_for(state.viewport.zoom, image_size, state.viewport_bounds);
 
     let img = image_widget(state.image_handle.clone())
         .width(Length::Fixed(geometry.rendered_size.width))
         .height(Length::Fixed(geometry.rendered_size.height));
 
+    let (pending_proposal, review, selected_candidate) = match &state.mode {
+        super::workbench::WorkspaceMode::Workbench(wb) => (
+            wb.pending_proposal.as_ref(),
+            Some(&wb.review),
+            wb.selected_candidate,
+        ),
+        _ => (None, None, None),
+    };
     let overlay = iced::widget::canvas(super::canvas::AnnotationCanvas {
         document: &state.document.image,
         editor: &state.editor,
@@ -217,6 +228,9 @@ fn canvas_view<'a>(state: &'a ResultWorkspace, image_size: Size) -> Element<'a, 
             geometry.scale,
             geometry.image_origin,
         ),
+        pending_proposal,
+        review,
+        selected_candidate,
     })
     .width(Length::Fixed(geometry.rendered_size.width))
     .height(Length::Fixed(geometry.rendered_size.height));
