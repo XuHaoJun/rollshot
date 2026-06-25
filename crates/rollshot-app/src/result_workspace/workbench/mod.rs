@@ -146,6 +146,7 @@ pub enum WorkbenchMessage {
     CandidateSelected(CandidateId),
     CandidateDeselected,
     CandidateDeleted(CandidateId),
+    CandidateUnrejected(CandidateId),
     CandidateMoved {
         id: CandidateId,
         new_bounds: ImageRect,
