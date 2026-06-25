@@ -619,6 +619,110 @@ mod reducer_tests {
     }
 
     #[test]
+    fn text_chunks_accumulate_into_one_entry() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
+                text: "hello ".into(),
+            })),
+        );
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
+                text: "world".into(),
+            })),
+        );
+        let state = wb(&ws);
+        assert_eq!(state.live_activity.len(), 1, "two chunks → one entry");
+        match &state.live_activity[0] {
+            super::super::state::ActivityEntry::AssistantText(t) => {
+                assert_eq!(t, "hello world");
+            }
+            other => panic!("expected AssistantText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_reconciles_assistant_text() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+        // Streamed chunks (may have gaps from dropped try_send).
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
+                text: "hel".into(),
+            })),
+        );
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
+                text: "lo".into(),
+            })),
+        );
+        // Terminal with authoritative full text.
+        let ready = ready_for_review_with_text("hello world");
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunTerminal(
+                RunTerminalState::ReadyForReview(Box::new(ready)),
+            )),
+        );
+        let state = wb(&ws);
+        // Find the AssistantText entry (before the TerminalLabel).
+        let assistant_text = state.live_activity.iter().find_map(|e| match e {
+            super::super::state::ActivityEntry::AssistantText(t) => Some(t.as_str()),
+            _ => None,
+        });
+        assert_eq!(assistant_text, Some("hello world"), "reconciled to authoritative text");
+    }
+
+    fn ready_for_review_with_text(text: &str) -> rollshot_agent::driver::ReadyForReview {
+        use rollshot_agent::domain::SessionId;
+        use rollshot_agent::driver::{DraftAutomation, DryRunEvidence, ReadyForReview};
+        use rollshot_agent::runtime::UsageSnapshot;
+        ReadyForReview {
+            automation: DraftAutomation {
+                source: "function main(input) { return { candidates: [] }; }".into(),
+                validated: rollshot_automation::validate_source(
+                    "function main(input) { return { candidates: [] }; }",
+                    &rollshot_automation::ValidationLimits::default(),
+                )
+                .unwrap(),
+                validation_summary: rollshot_automation::ValidationSummary {
+                    source_bytes: 0,
+                    ast_nodes: 0,
+                    helper_count: 0,
+                    capability_calls: 0,
+                    max_output_candidates: 0,
+                },
+                dry_run: DryRunEvidence {
+                    candidate_count: 0,
+                    affected_area: 0.0,
+                },
+            },
+            proposal: rollshot_edit_proposal::EditProposal {
+                id: rollshot_edit_proposal::ProposalId(1),
+                base_document_state_id: 0,
+                candidates: vec![],
+                confidence_summary: rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[]),
+                rationale_summary: None,
+                provenance: rollshot_edit_proposal::Provenance {
+                    source: rollshot_edit_proposal::ProvenanceSource::Manual,
+                },
+            },
+            budget_usage: UsageSnapshot::default(),
+            session_id: SessionId::new(0),
+            assistant_text: text.into(),
+            generation: 1,
+            usage: UsageSnapshot::default(),
+        }
+    }
+
+    #[test]
     fn cancel_run_calls_cancellation() {
         use rollshot_agent::runtime::RunCancellation;
 

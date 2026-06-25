@@ -694,12 +694,70 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             };
             match msg {
                 super::workbench::WorkbenchMessage::RunEvent(event) => {
-                    if let Some(entry) = super::workbench::state::event_to_activity_entry(&event) {
-                        workbench.live_activity.push(entry);
+                    use rollshot_agent::runtime::RunEvent;
+                    match &event {
+                        RunEvent::TextChunk { text } => {
+                            // Accumulate into the last AssistantText entry
+                            // (spec §6.2 typewriter) instead of pushing one
+                            // entry per chunk.
+                            if let Some(
+                                super::workbench::state::ActivityEntry::AssistantText(prev),
+                            ) = workbench.live_activity.last_mut()
+                            {
+                                prev.push_str(text);
+                            } else {
+                                workbench.live_activity.push(
+                                    super::workbench::state::ActivityEntry::AssistantText(
+                                        text.clone(),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            if let Some(entry) =
+                                super::workbench::state::event_to_activity_entry(&event)
+                            {
+                                workbench.live_activity.push(entry);
+                            }
+                        }
                     }
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::RunTerminal(terminal) => {
+                    // Reconcile accumulated AssistantText against the
+                    // authoritative final text before pushing the terminal
+                    // label (spec §6.2 / addendum G — dropped try_send chunks
+                    // can leave gaps in the streamed text).
+                    let authoritative_text: Option<&str> = match &terminal {
+                        rollshot_agent::driver::RunTerminalState::ReadyForReview(ready) => {
+                            Some(&ready.assistant_text)
+                        }
+                        rollshot_agent::driver::RunTerminalState::NeedsUserInput(n) => {
+                            Some(&n.assistant_text)
+                        }
+                        _ => None,
+                    };
+                    if let Some(final_text) = authoritative_text {
+                        if !final_text.is_empty() {
+                            let mut replaced = false;
+                            for entry in workbench.live_activity.iter_mut().rev() {
+                                if let super::workbench::state::ActivityEntry::AssistantText(prev) =
+                                    entry
+                                {
+                                    *prev = final_text.to_string();
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                            if !replaced {
+                                workbench.live_activity.push(
+                                    super::workbench::state::ActivityEntry::AssistantText(
+                                        final_text.to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     workbench.live_activity.push(
                         super::workbench::state::ActivityEntry::TerminalLabel(
                             super::workbench::state::terminal_state_label(&terminal),
