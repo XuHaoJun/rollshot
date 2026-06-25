@@ -236,7 +236,7 @@ pub fn apply_skip_summary(wb: &super::WorkbenchState) -> String {
         .as_ref()
         .map_or(0, |p| p.candidates.len());
     let rejected = wb.review.rejected_count();
-    let apply = total - rejected;
+    let apply = total.saturating_sub(rejected);
     let warnings = wb
         .pending_proposal
         .as_ref()

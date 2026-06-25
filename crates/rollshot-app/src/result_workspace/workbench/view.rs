@@ -154,7 +154,7 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     let proposal = wb.pending_proposal.as_ref();
     let total = proposal.map_or(0, |p| p.candidates.len());
     let rejected = wb.review.rejected_count();
-    let apply = total - rejected;
+    let apply = total.saturating_sub(rejected);
     let warnings = proposal.map_or(0, |p| super::state::CandidateReview::warning_count(p, 0.75));
 
     let summary = if total > 0 {
