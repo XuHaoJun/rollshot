@@ -297,11 +297,9 @@ fn result_state_banner<'a>(wb: &'a WorkbenchState) -> Option<Element<'a, Message
         );
     }
     Some(
-        container(
-            text(format!(
-                "{total} candidates found. Review before applying."
-            )),
-        )
+        container(text(format!(
+            "{total} candidates found. Review before applying."
+        )))
         .padding(12)
         .into(),
     )

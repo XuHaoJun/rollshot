@@ -81,10 +81,9 @@ pub fn run_existing_preset(
 pub fn prepare_vision_context(
     image: &image::RgbaImage,
 ) -> Result<super::VisionContext, WorkbenchError> {
-    let index = VisualIndex::build(image.clone())
-        .map_err(|e| WorkbenchError::VisionPrepare {
-            message: format!("VisualIndex: {e}"),
-        })?;
+    let index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
+        message: format!("VisualIndex: {e}"),
+    })?;
     let host = rollshot_vision::RealAutomationHost::new();
     Ok(super::VisionContext {
         index,
@@ -118,11 +117,16 @@ pub fn start_agent_run(
     budget: &RunBudget,
     session: rollshot_agent::domain::AgentSession,
     payload_mode: PayloadMode,
-) -> Result<(iced::Task<crate::result_workspace::Message>, rollshot_agent::runtime::RunCancellation), WorkbenchError>
-{
+) -> Result<
+    (
+        iced::Task<crate::result_workspace::Message>,
+        rollshot_agent::runtime::RunCancellation,
+    ),
+    WorkbenchError,
+> {
     use rollshot_agent::{
-        driver::{AgentConfig, AgentRunner},
         domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType},
+        driver::{AgentConfig, AgentRunner},
         runtime::{RunCancellation, RunEvent},
         tools::{
             DryRunTool, GetContextSummaryTool, ReplaceSourceTool, RequestUserInputTool,
@@ -142,10 +146,7 @@ pub fn start_agent_run(
     let session_id = session.session_id;
     let user_message = params.user_message.clone();
     let image_dims = params.image_dims;
-    let active_source = params
-        .active_revision_source
-        .clone()
-        .unwrap_or_default();
+    let active_source = params.active_revision_source.clone().unwrap_or_default();
     let image = image.clone();
     let budget = budget.clone();
 
@@ -377,19 +378,24 @@ mod prepare_tests {
 
 #[cfg(test)]
 mod reducer_tests {
+    use crate::result_workspace::document::ResultDocument;
     use crate::result_workspace::update::{update, Message};
     use crate::result_workspace::workbench::{WorkbenchMessage, WorkbenchState, WorkspaceMode};
-    use crate::result_workspace::document::ResultDocument;
     use crate::result_workspace::ResultWorkspace;
+    use rollshot_agent::driver::RunTerminalState;
     use rollshot_edit_proposal::{
         CandidateId, ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate, ProposedEdit,
         Provenance, ProvenanceSource,
     };
-    use rollshot_image_document::{ImageRect};
-    use rollshot_agent::driver::RunTerminalState;
+    use rollshot_image_document::ImageRect;
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> ImageRect {
-        ImageRect { x, y, width: w, height: h }
+        ImageRect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     fn candidate(id: u64, b: ImageRect) -> ProposedCandidate {
@@ -399,7 +405,9 @@ mod reducer_tests {
             confidence: 0.9,
             label: "t".into(),
             rationale: None,
-            provenance: Provenance { source: ProvenanceSource::Manual },
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
         }
     }
 
@@ -410,16 +418,15 @@ mod reducer_tests {
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Manual },
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
         }
     }
 
     fn ws_with_workbench() -> ResultWorkspace {
         let img = image::RgbaImage::new(200, 200);
-        let mut ws = ResultWorkspace::new(
-            ResultDocument::unsaved(img),
-            None,
-        );
+        let mut ws = ResultWorkspace::new(ResultDocument::unsaved(img), None);
         ws.mode = WorkspaceMode::Workbench(WorkbenchState::default());
         ws
     }
@@ -440,8 +447,8 @@ mod reducer_tests {
 
     #[test]
     fn run_terminal_ready_for_review_populates_proposal_review_draft() {
-        use rollshot_agent::driver::{DraftAutomation, DryRunEvidence, ReadyForReview};
         use rollshot_agent::domain::SessionId;
+        use rollshot_agent::driver::{DraftAutomation, DryRunEvidence, ReadyForReview};
         use rollshot_agent::runtime::UsageSnapshot;
 
         let mut ws = ws_with_workbench();
@@ -455,7 +462,8 @@ mod reducer_tests {
                 validated: rollshot_automation::validate_source(
                     "function main(input) { return { candidates: [] }; }",
                     &rollshot_automation::ValidationLimits::default(),
-                ).unwrap(),
+                )
+                .unwrap(),
                 validation_summary: rollshot_automation::ValidationSummary {
                     source_bytes: 0,
                     ast_nodes: 0,
@@ -463,7 +471,10 @@ mod reducer_tests {
                     capability_calls: 0,
                     max_output_candidates: 0,
                 },
-                dry_run: DryRunEvidence { candidate_count: 2, affected_area: 100.0 },
+                dry_run: DryRunEvidence {
+                    candidate_count: 2,
+                    affected_area: 100.0,
+                },
             },
             proposal: p.clone(),
             budget_usage: UsageSnapshot::default(),
@@ -472,16 +483,22 @@ mod reducer_tests {
             generation: 1,
             usage: UsageSnapshot::default(),
         };
-        let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::RunTerminal(
-            RunTerminalState::ReadyForReview(Box::new(ready)),
-        )));
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunTerminal(
+                RunTerminalState::ReadyForReview(Box::new(ready)),
+            )),
+        );
         let state = wb(&ws);
         assert!(state.pending_proposal.is_some(), "proposal populated");
         assert_eq!(state.pending_proposal.as_ref().unwrap().candidates.len(), 2);
         assert_eq!(state.review.per_candidate.len(), 2);
         assert!(state.pending_draft.is_some(), "draft populated");
         assert_eq!(state.pending_draft.as_ref().unwrap().assistant_text, "done");
-        assert!(matches!(state.run_state, super::super::RunState::Terminal(_)));
+        assert!(matches!(
+            state.run_state,
+            super::super::RunState::Terminal(_)
+        ));
     }
 
     #[test]
@@ -492,27 +509,41 @@ mod reducer_tests {
         wb_mut(&mut ws).pending_proposal = Some(p);
         wb_mut(&mut ws).review = review;
 
-        let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::ApplyCandidates));
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::ApplyCandidates),
+        );
         let state = wb(&ws);
         assert!(state.pending_proposal.is_none(), "proposal cleared");
         assert!(state.review.is_empty(), "review cleared");
-        assert_eq!(ws.document.image.annotations().len(), 1, "annotation committed");
+        assert_eq!(
+            ws.document.image.annotations().len(),
+            1,
+            "annotation committed"
+        );
     }
 
     #[test]
     fn candidate_deleted_marks_rejected() {
         let mut ws = ws_with_workbench();
-        let review = super::super::CandidateReview::from_candidates(&[CandidateId(1), CandidateId(2)]);
+        let review =
+            super::super::CandidateReview::from_candidates(&[CandidateId(1), CandidateId(2)]);
         wb_mut(&mut ws).review = review;
         wb_mut(&mut ws).selected_candidate = Some(CandidateId(1));
 
-        let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::CandidateDeleted(CandidateId(1))));
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::CandidateDeleted(CandidateId(1))),
+        );
         let state = wb(&ws);
         assert_eq!(
             state.review.per_candidate[&CandidateId(1)],
             super::super::CandidateReviewState::Rejected,
         );
-        assert!(state.selected_candidate.is_none(), "selection cleared when deleted");
+        assert!(
+            state.selected_candidate.is_none(),
+            "selection cleared when deleted"
+        );
     }
 
     #[test]
@@ -522,7 +553,10 @@ mod reducer_tests {
         review.mark_rejected(CandidateId(1));
         wb_mut(&mut ws).review = review;
 
-        let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::CandidateUnrejected(CandidateId(1))));
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::CandidateUnrejected(CandidateId(1))),
+        );
         let state = wb(&ws);
         assert_eq!(
             state.review.per_candidate[&CandidateId(1)],
@@ -565,7 +599,10 @@ mod reducer_tests {
             mode: super::super::RunKind::Author,
         });
 
-        let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::DisclosureCancelled));
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::DisclosureCancelled),
+        );
         let state = wb(&ws);
         assert!(!state.disclosure_pending);
         assert!(state.pending_run.is_none());
@@ -576,9 +613,12 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
-        let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::RunEvent(
-            RunEvent::TextChunk { text: "hello".into() },
-        )));
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
+                text: "hello".into(),
+            })),
+        );
         let state = wb(&ws);
         assert_eq!(state.live_activity.len(), 1);
     }

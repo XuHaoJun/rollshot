@@ -264,8 +264,15 @@ mod save_tests {
             )
             .unwrap();
         let source = r#"function main(input) { return { candidates: [] }; }"#;
-        save_revision(&store, &preset_id, source, None, 42, "2026-01-01T00:00:00Z".into())
-            .unwrap();
+        save_revision(
+            &store,
+            &preset_id,
+            source,
+            None,
+            42,
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .unwrap();
         let active = store.load_active_revision(&preset_id).unwrap();
         assert!(active.artifact.source.contains("function main"));
     }
@@ -285,10 +292,15 @@ mod save_tests {
             .unwrap();
         // No `main` function → validation fails.
         let bad = r#"function not_main() { return { candidates: [] }; }"#;
-        assert!(
-            save_revision(&store, &preset_id, bad, None, 1, "2026-01-01T00:00:00Z".into())
-                .is_err()
-        );
+        assert!(save_revision(
+            &store,
+            &preset_id,
+            bad,
+            None,
+            1,
+            "2026-01-01T00:00:00Z".into()
+        )
+        .is_err());
     }
 }
 
@@ -352,8 +364,10 @@ mod evidence_tests {
     #[test]
     fn correction_evidence_counts_reject_and_modify() {
         let p = proposal();
-        let mut review =
-            super::super::state::CandidateReview::from_candidates(&[CandidateId(1), CandidateId(2)]);
+        let mut review = super::super::state::CandidateReview::from_candidates(&[
+            CandidateId(1),
+            CandidateId(2),
+        ]);
         review.mark_rejected(CandidateId(1));
         review.mark_modified(
             CandidateId(2),
@@ -377,8 +391,10 @@ mod evidence_tests {
     #[test]
     fn correction_evidence_all_pending_is_zero() {
         let p = proposal();
-        let review =
-            super::super::state::CandidateReview::from_candidates(&[CandidateId(1), CandidateId(2)]);
+        let review = super::super::state::CandidateReview::from_candidates(&[
+            CandidateId(1),
+            CandidateId(2),
+        ]);
         let e = assemble_correction_evidence(&p, &review);
         assert_eq!(e.rejected_count, 0);
         assert_eq!(e.modified_count, 0);

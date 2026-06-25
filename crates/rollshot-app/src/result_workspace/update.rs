@@ -700,16 +700,21 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::RunTerminal(terminal) => {
-                    workbench.live_activity.push(super::workbench::state::ActivityEntry::TerminalLabel(
-                        super::workbench::state::terminal_state_label(&terminal),
-                    ));
-                    if let Some(err) = super::workbench::state::WorkbenchError::from_terminal(&terminal) {
+                    workbench.live_activity.push(
+                        super::workbench::state::ActivityEntry::TerminalLabel(
+                            super::workbench::state::terminal_state_label(&terminal),
+                        ),
+                    );
+                    if let Some(err) =
+                        super::workbench::state::WorkbenchError::from_terminal(&terminal)
+                    {
                         workbench.error = Some(err);
                     }
                     workbench.run_state = super::workbench::RunState::Terminal(terminal);
                     if let super::workbench::RunState::Terminal(
                         rollshot_agent::driver::RunTerminalState::ReadyForReview(ref ready),
-                    ) = &workbench.run_state {
+                    ) = &workbench.run_state
+                    {
                         workbench.pending_proposal = Some(ready.proposal.clone());
                         let ids: Vec<_> = ready.proposal.candidates.iter().map(|c| c.id).collect();
                         workbench.review = super::workbench::CandidateReview::from_candidates(&ids);
@@ -722,14 +727,21 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CancelRun => {
-                    if let super::workbench::RunState::Running { ref cancellation, .. } = workbench.run_state {
+                    if let super::workbench::RunState::Running {
+                        ref cancellation, ..
+                    } = workbench.run_state
+                    {
                         cancellation.cancel();
                     }
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::ApplyCandidates => {
                     if let Some(proposal) = workbench.pending_proposal.clone() {
-                        match super::workbench::review::apply_candidates(&proposal, &workbench.review, &mut state.document.image) {
+                        match super::workbench::review::apply_candidates(
+                            &proposal,
+                            &workbench.review,
+                            &mut state.document.image,
+                        ) {
                             Ok(()) => {
                                 workbench.pending_proposal = None;
                                 workbench.review = super::workbench::CandidateReview::default();
@@ -760,24 +772,35 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateMoved { id, new_bounds } => {
-                    workbench.review.mark_modified(id, rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds: new_bounds });
+                    workbench.review.mark_modified(
+                        id,
+                        rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds: new_bounds },
+                    );
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::AddManualCandidate { bounds } => {
-                    let id = rollshot_edit_proposal::CandidateId(workbench.next_manual_candidate_id);
+                    let id =
+                        rollshot_edit_proposal::CandidateId(workbench.next_manual_candidate_id);
                     workbench.next_manual_candidate_id += 1;
                     if let Some(proposal) = &mut workbench.pending_proposal {
-                        use rollshot_edit_proposal::{ProposedCandidate, ProposedEdit, Provenance, ProvenanceSource};
+                        use rollshot_edit_proposal::{
+                            ProposedCandidate, ProposedEdit, Provenance, ProvenanceSource,
+                        };
                         proposal.candidates.push(ProposedCandidate {
                             id,
                             edit: ProposedEdit::AddRedaction { bounds },
                             confidence: 1.0,
                             label: "manual".into(),
                             rationale: Some("Manually added missing candidate".into()),
-                            provenance: Provenance { source: ProvenanceSource::Manual },
+                            provenance: Provenance {
+                                source: ProvenanceSource::Manual,
+                            },
                         });
                     }
-                    workbench.review.mark_modified(id, rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds });
+                    workbench.review.mark_modified(
+                        id,
+                        rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds },
+                    );
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::NextWarning => Task::none(),
@@ -788,12 +811,17 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 super::workbench::WorkbenchMessage::SendRequested => {
                     let user_message = std::mem::take(&mut workbench.composer);
-                    if user_message.is_empty() { return Task::none(); }
+                    if user_message.is_empty() {
+                        return Task::none();
+                    }
                     let (w, h) = state.document.image.source().dimensions();
                     let params = super::workbench::PendingRunParams {
                         user_message,
                         image_dims: (w, h),
-                        active_revision_source: workbench.active_revision.as_ref().map(|r| r.artifact.source.clone()),
+                        active_revision_source: workbench
+                            .active_revision
+                            .as_ref()
+                            .map(|r| r.artifact.source.clone()),
                         mode: super::workbench::RunKind::Author,
                     };
                     workbench.disclosure_pending = true;
@@ -806,7 +834,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 super::workbench::WorkbenchMessage::DisclosureConfirmed => {
                     workbench.disclosure_pending = false;
-                    let Some(params) = workbench.pending_run.take() else { return Task::none(); };
+                    let Some(params) = workbench.pending_run.take() else {
+                        return Task::none();
+                    };
                     let image = state.document.image.source().clone();
                     let session_id = workbench.session.session_id;
                     let session = std::mem::replace(
@@ -814,11 +844,16 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         rollshot_agent::domain::AgentSession::new(session_id),
                     );
                     match super::workbench::run::start_agent_run(
-                        &params, &image, &workbench.provider_config, &workbench.budget, session,
+                        &params,
+                        &image,
+                        &workbench.provider_config,
+                        &workbench.budget,
+                        session,
                         workbench.payload_mode,
                     ) {
                         Ok((task, cancellation)) => {
-                            workbench.run_state = super::workbench::RunState::Running { cancellation };
+                            workbench.run_state =
+                                super::workbench::RunState::Running { cancellation };
                             task
                         }
                         Err(e) => {

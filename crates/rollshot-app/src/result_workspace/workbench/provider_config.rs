@@ -91,8 +91,7 @@ pub fn provider_model_label(cfg: &ProviderConfig) -> String {
 pub fn build_adapter(
     cfg: &ProviderConfig,
 ) -> Result<Box<dyn rollshot_agent::ProviderAdapter>, String> {
-    let key = resolve_key(&cfg.key_source)
-        .ok_or_else(|| "no provider key resolved".to_string())?;
+    let key = resolve_key(&cfg.key_source).ok_or_else(|| "no provider key resolved".to_string())?;
     let base_url = cfg.base_url.as_deref().unwrap_or(match cfg.provider {
         ProviderKind::Anthropic => "https://api.anthropic.com",
         ProviderKind::OpenAI => "https://api.openai.com/v1",
@@ -143,7 +142,10 @@ mod tests {
         let loaded = load_provider_config(tmp.path()).unwrap();
         assert_eq!(loaded.provider, ProviderKind::OpenAI);
         assert_eq!(loaded.model, "gpt-4o");
-        assert_eq!(loaded.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(
+            loaded.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
     }
 
     #[test]
