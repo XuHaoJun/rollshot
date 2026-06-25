@@ -677,7 +677,11 @@ mod reducer_tests {
             super::super::state::ActivityEntry::AssistantText(t) => Some(t.as_str()),
             _ => None,
         });
-        assert_eq!(assistant_text, Some("hello world"), "reconciled to authoritative text");
+        assert_eq!(
+            assistant_text,
+            Some("hello world"),
+            "reconciled to authoritative text"
+        );
     }
 
     fn ready_for_review_with_text(text: &str) -> rollshot_agent::driver::ReadyForReview {
@@ -739,10 +743,9 @@ mod reducer_tests {
     #[test]
     fn run_failed_sets_error_and_terminal() {
         let mut ws = ws_with_workbench();
-        wb_mut(&mut ws).run_state =
-            super::super::RunState::Running {
-                cancellation: rollshot_agent::runtime::RunCancellation::new(),
-            };
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        };
 
         let _ = update(
             &mut ws,
@@ -769,10 +772,9 @@ mod reducer_tests {
     #[test]
     fn disclosure_confirmed_blocked_while_running() {
         let mut ws = ws_with_workbench();
-        wb_mut(&mut ws).run_state =
-            super::super::RunState::Running {
-                cancellation: rollshot_agent::runtime::RunCancellation::new(),
-            };
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        };
         wb_mut(&mut ws).disclosure_pending = true;
         wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
             user_message: "test".into(),

@@ -242,9 +242,7 @@ fn composer<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     } else {
         button(text("Send")).on_press(Message::Workbench(WorkbenchMessage::SendRequested))
     };
-    row![input.width(Length::Fill), send]
-        .spacing(8)
-        .into()
+    row![input.width(Length::Fill), send].spacing(8).into()
 }
 
 fn disclosure_modal<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
@@ -302,13 +300,11 @@ fn improve_modal<'a>(evidence: &super::review::CorrectionEvidence) -> Element<'a
         column![
             text("Correction evidence to send:").size(14),
             text(format!("- {evidence}")),
-            iced::widget::checkbox(true)
-                .label("Include manually added candidates as examples")
-                .on_toggle(|_| Message::Workbench(WorkbenchMessage::ImStart)),
+            iced::widget::checkbox(true).label("Include manually added candidates as examples"),
+            text("Not available in this release (SP6.1)").size(11),
             Space::new().height(Length::Fixed(12.0)),
             row![
-                button(text("Send improvement"))
-                    .on_press(Message::Workbench(WorkbenchMessage::DisclosureConfirmed)),
+                button(text("Send improvement")),
                 button(text("Cancel"))
                     .on_press(Message::Workbench(WorkbenchMessage::DisclosureCancelled)),
             ]

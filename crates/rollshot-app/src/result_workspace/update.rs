@@ -700,9 +700,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             // Accumulate into the last AssistantText entry
                             // (spec §6.2 typewriter) instead of pushing one
                             // entry per chunk.
-                            if let Some(
-                                super::workbench::state::ActivityEntry::AssistantText(prev),
-                            ) = workbench.live_activity.last_mut()
+                            if let Some(super::workbench::state::ActivityEntry::AssistantText(
+                                prev,
+                            )) = workbench.live_activity.last_mut()
                             {
                                 prev.push_str(text);
                             } else {
@@ -786,10 +786,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 super::workbench::WorkbenchMessage::RunFailed(e) => {
                     workbench.error = Some(e);
-                    workbench.run_state =
-                        super::workbench::RunState::Terminal(
-                            rollshot_agent::driver::RunTerminalState::RuntimeFailure,
-                        );
+                    workbench.run_state = super::workbench::RunState::Terminal(
+                        rollshot_agent::driver::RunTerminalState::RuntimeFailure,
+                    );
                     workbench.live_activity.push(
                         super::workbench::state::ActivityEntry::TerminalLabel(
                             super::workbench::state::terminal_state_label(
