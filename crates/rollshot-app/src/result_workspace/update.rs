@@ -726,6 +726,21 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     Task::none()
                 }
+                super::workbench::WorkbenchMessage::RunFailed(e) => {
+                    workbench.error = Some(e);
+                    workbench.run_state =
+                        super::workbench::RunState::Terminal(
+                            rollshot_agent::driver::RunTerminalState::RuntimeFailure,
+                        );
+                    workbench.live_activity.push(
+                        super::workbench::state::ActivityEntry::TerminalLabel(
+                            super::workbench::state::terminal_state_label(
+                                &rollshot_agent::driver::RunTerminalState::RuntimeFailure,
+                            ),
+                        ),
+                    );
+                    Task::none()
+                }
                 super::workbench::WorkbenchMessage::CancelRun => {
                     if let super::workbench::RunState::Running {
                         ref cancellation, ..

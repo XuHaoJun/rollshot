@@ -157,11 +157,9 @@ pub fn start_agent_run(
         // Heavy work runs inside the spawned task (B5).
         let vision = match prepare_vision_context(&image) {
             Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunTerminal(
-                        rollshot_agent::driver::RunTerminalState::RuntimeFailure,
-                    ),
+                    super::WorkbenchMessage::RunFailed(e),
                 );
                 return;
             }
@@ -200,14 +198,13 @@ pub fn start_agent_run(
             PayloadMode::OcrLayoutOnly => (vec![], vec![]),
             PayloadMode::FullScreenshot => {
                 let mut buf = Vec::new();
-                if image::DynamicImage::ImageRgba8(image.clone())
+                if let Err(e) = image::DynamicImage::ImageRgba8(image.clone())
                     .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-                    .is_err()
                 {
                     yield crate::result_workspace::Message::Workbench(
-                        super::WorkbenchMessage::RunTerminal(
-                            rollshot_agent::driver::RunTerminalState::RuntimeFailure,
-                        ),
+                        super::WorkbenchMessage::RunFailed(WorkbenchError::VisionPrepare {
+                            message: format!("png encode: {e}"),
+                        }),
                     );
                     return;
                 }
@@ -231,9 +228,7 @@ pub fn start_agent_run(
             Ok(input) => input,
             Err(_) => {
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunTerminal(
-                        rollshot_agent::driver::RunTerminalState::RuntimeFailure,
-                    ),
+                    super::WorkbenchMessage::RunFailed(WorkbenchError::RuntimeFailure),
                 );
                 return;
             }
@@ -635,5 +630,35 @@ mod reducer_tests {
 
         let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::CancelRun));
         assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn run_failed_sets_error_and_terminal() {
+        let mut ws = ws_with_workbench();
+        wb_mut(&mut ws).run_state =
+            super::super::RunState::Running {
+                cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            };
+
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunFailed(
+                super::WorkbenchError::VisionPrepare {
+                    message: "region_too_large".into(),
+                },
+            )),
+        );
+        let state = wb(&ws);
+        assert!(
+            matches!(
+                &state.error,
+                Some(super::WorkbenchError::VisionPrepare { message }) if message == "region_too_large"
+            ),
+            "typed error preserved"
+        );
+        assert!(
+            matches!(state.run_state, super::super::RunState::Terminal(_)),
+            "run transitioned to terminal"
+        );
     }
 }

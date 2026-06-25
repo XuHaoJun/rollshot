@@ -139,6 +139,10 @@ pub enum WorkbenchMessage {
     // Run events from the agent (streamed via Task::run channel bridge)
     RunEvent(RunEvent),
     RunTerminal(RunTerminalState),
+    /// Run could not start or failed before the agent produced a terminal
+    /// state (e.g. vision-prepare failure). Carries the typed error so the
+    /// UI can show the real message (spec §9.1 VisionPrepare row).
+    RunFailed(state::WorkbenchError),
     // Disclosure
     DisclosureRequested(PendingRunParams),
     PayloadModeSelected(PayloadMode),
