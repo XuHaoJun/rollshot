@@ -227,15 +227,24 @@ fn candidate_list<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
 }
 
 fn composer<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
-    let input = text_input("Ask the agent…", &wb.composer)
-        .on_input(|s| Message::Workbench(WorkbenchMessage::ComposerChanged(s)))
-        .on_submit(Message::Workbench(WorkbenchMessage::SendRequested));
-    row![
-        input.width(Length::Fill),
+    // Disabled while Running (spec §6.4). Without on_input/on_submit the
+    // text_input is effectively read-only; the Send button renders without
+    // on_press so it's non-interactive.
+    let running = wb.run_state.is_running();
+    let mut input = text_input("Ask the agent…", &wb.composer);
+    if !running {
+        input = input
+            .on_input(|s| Message::Workbench(WorkbenchMessage::ComposerChanged(s)))
+            .on_submit(Message::Workbench(WorkbenchMessage::SendRequested));
+    }
+    let send = if running {
+        button(text("Send"))
+    } else {
         button(text("Send")).on_press(Message::Workbench(WorkbenchMessage::SendRequested))
-    ]
-    .spacing(8)
-    .into()
+    };
+    row![input.width(Length::Fill), send]
+        .spacing(8)
+        .into()
 }
 
 fn disclosure_modal<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {

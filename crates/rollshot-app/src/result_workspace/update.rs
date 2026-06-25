@@ -907,6 +907,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 super::workbench::WorkbenchMessage::DisclosureConfirmed => {
                     workbench.disclosure_pending = false;
+                    // Guard against concurrent runs (spec §4.5 freeze rule).
+                    // The composer is disabled while Running, but this is a
+                    // defense-in-depth check.
+                    if workbench.run_state.is_running() {
+                        return Task::none();
+                    }
                     let Some(params) = workbench.pending_run.take() else {
                         return Task::none();
                     };

@@ -765,4 +765,35 @@ mod reducer_tests {
             "run transitioned to terminal"
         );
     }
+
+    #[test]
+    fn disclosure_confirmed_blocked_while_running() {
+        let mut ws = ws_with_workbench();
+        wb_mut(&mut ws).run_state =
+            super::super::RunState::Running {
+                cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            };
+        wb_mut(&mut ws).disclosure_pending = true;
+        wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
+            user_message: "test".into(),
+            image_dims: (100, 100),
+            active_revision_source: None,
+            mode: super::super::RunKind::Author,
+        });
+
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::DisclosureConfirmed),
+        );
+        let state = wb(&ws);
+        // The guard bails before consuming pending_run.
+        assert!(
+            state.pending_run.is_some(),
+            "pending_run not consumed when running"
+        );
+        assert!(
+            state.run_state.is_running(),
+            "run_state unchanged (no second run started)"
+        );
+    }
 }
