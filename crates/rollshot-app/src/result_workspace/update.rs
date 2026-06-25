@@ -832,11 +832,46 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     workbench.pending_run = None;
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::SavePresetOrRevision => Task::none(),
+                super::workbench::WorkbenchMessage::SavePresetOrRevision => {
+                    if let Some(draft) = workbench.pending_draft.clone() {
+                        if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
+                            let store =
+                                rollshot_preset::PresetStore::open(config_dir.join("presets"));
+                            let preset_id = rollshot_preset::PresetId("workbench-draft".into());
+                            if store.load_preset(&preset_id).is_err() {
+                                let _ = store.create_preset(
+                                    preset_id.clone(),
+                                    "Workbench Draft".into(),
+                                    "Authored via Smart Redaction".into(),
+                                    chrono::Utc::now().to_rfc3339(),
+                                );
+                            }
+                            match super::workbench::review::save_revision(
+                                &store,
+                                &preset_id,
+                                &draft.source,
+                                None,
+                                workbench.session.session_id.get(),
+                                chrono::Utc::now().to_rfc3339(),
+                            ) {
+                                Ok(()) => workbench.pending_draft = None,
+                                Err(e) => workbench.error = Some(e),
+                            }
+                        } else {
+                            workbench.error = Some(super::workbench::state::WorkbenchError::Config);
+                        }
+                    }
+                    Task::none()
+                }
+                super::workbench::WorkbenchMessage::ImStart => {
+                    if workbench.pending_proposal.is_some() && !workbench.review.is_empty() {
+                        workbench.disclosure_pending = true;
+                    }
+                    Task::none()
+                }
                 super::workbench::WorkbenchMessage::AskAgentToRevise
                 | super::workbench::WorkbenchMessage::DiscardDraft
                 | super::workbench::WorkbenchMessage::DiscardCandidates
-                | super::workbench::WorkbenchMessage::ImStart
                 | super::workbench::WorkbenchMessage::ToggleAdvancedDetails
                 | super::workbench::WorkbenchMessage::OpenProviderSettings
                 | super::workbench::WorkbenchMessage::DisclosureRequested(_) => Task::none(),

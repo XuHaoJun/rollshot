@@ -35,7 +35,18 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
     content = content.push(main);
 
     if wb.disclosure_pending {
-        iced::widget::stack![content, disclosure_modal(wb)].into()
+        let modal = if wb.pending_run.is_some() {
+            disclosure_modal(wb)
+        } else {
+            // ImStart sets disclosure_pending without pending_run (SP6 stub).
+            let evidence = super::review::CorrectionEvidence {
+                rejected_count: wb.review.rejected_count(),
+                modified_count: wb.review.modified_count(),
+                added_count: 0,
+            };
+            improve_modal(&evidence)
+        };
+        iced::widget::stack![content, modal].into()
     } else {
         content.into()
     }
@@ -154,6 +165,38 @@ fn disclosure_modal<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
             Space::new().height(Length::Fixed(12.0)),
             row![
                 button(text(format!("Send to {}", wb.provider_config.provider)))
+                    .on_press(Message::Workbench(WorkbenchMessage::DisclosureConfirmed)),
+                button(text("Cancel"))
+                    .on_press(Message::Workbench(WorkbenchMessage::DisclosureCancelled)),
+            ]
+            .spacing(12),
+        ]
+        .spacing(8)
+        .padding(24)
+        .max_width(450),
+    )
+    .style(|_t| iced::widget::container::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgba(
+            0.0, 0.0, 0.0, 0.7,
+        ))),
+        ..Default::default()
+    })
+    .center_x(Length::Fill)
+    .center_y(Length::Fill);
+    iced::widget::opaque(dialog)
+}
+
+fn improve_modal<'a>(evidence: &super::review::CorrectionEvidence) -> Element<'a, Message> {
+    let dialog = container(
+        column![
+            text("Correction evidence to send:").size(14),
+            text(format!("- {evidence}")),
+            iced::widget::checkbox(true)
+                .label("Include manually added candidates as examples")
+                .on_toggle(|_| Message::Workbench(WorkbenchMessage::ImStart)),
+            Space::new().height(Length::Fixed(12.0)),
+            row![
+                button(text("Send improvement"))
                     .on_press(Message::Workbench(WorkbenchMessage::DisclosureConfirmed)),
                 button(text("Cancel"))
                     .on_press(Message::Workbench(WorkbenchMessage::DisclosureCancelled)),
