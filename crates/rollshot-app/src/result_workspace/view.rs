@@ -73,6 +73,7 @@ fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
         tool_button(ICON_NUMBER, "Number", "N", Tool::Number, state),
         tool_button(ICON_TEXT, "Text", "T", Tool::Text, state),
         tool_button(ICON_REDACT, "Redact", "R", Tool::Redact, state),
+        button(text("Smart Redaction")).on_press(Message::SmartRedaction),
         tooltip(
             undo_btn,
             text(shortcut_label("Undo", "Ctrl+Z")),
@@ -114,24 +115,31 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
 
     let status = status_bar(state, original);
 
-    let workspace_row: Element<'_, Message> = if state.editor.navigator_open {
-        row![canvas_area, super::navigator::navigator_panel(state)]
-            .spacing(4)
-            .into()
-    } else {
-        canvas_area
+    let body: Element<'_, Message> = match &state.mode {
+        super::workbench::WorkspaceMode::Normal => {
+            let workspace_row: Element<'_, Message> = if state.editor.navigator_open {
+                row![canvas_area, super::navigator::navigator_panel(state)]
+                    .spacing(4)
+                    .into()
+            } else {
+                canvas_area
+            };
+            column![toolbar, disclosure, message_area, workspace_row, status]
+                .spacing(8)
+                .padding(8)
+                .into()
+        }
+        super::workbench::WorkspaceMode::Workbench(_) => {
+            super::workbench::view::workbench_view(state)
+        }
     };
 
-    let layout = column![toolbar, disclosure, message_area, workspace_row, status]
-        .spacing(8)
-        .padding(8);
-
     let layout: Element<'_, Message> = if let Some(prompt) = &state.pending_discard {
-        discard_modal(layout.into(), prompt.text())
+        discard_modal(body, prompt.text())
     } else if let Some(action) = state.pending_unredacted_action {
-        unredacted_action_modal(layout.into(), action)
+        unredacted_action_modal(body, action)
     } else {
-        layout.into()
+        body
     };
     if state.editor.copy_menu_open
         && state.pending_discard.is_none()
@@ -192,13 +200,24 @@ fn message_row(state: &ResultWorkspace) -> Element<'_, Message> {
     }
 }
 
-fn canvas_view<'a>(state: &'a ResultWorkspace, image_size: Size) -> Element<'a, Message> {
+pub(crate) fn canvas_view<'a>(
+    state: &'a ResultWorkspace,
+    image_size: Size,
+) -> Element<'a, Message> {
     let geometry = geometry_for(state.viewport.zoom, image_size, state.viewport_bounds);
 
     let img = image_widget(state.image_handle.clone())
         .width(Length::Fixed(geometry.rendered_size.width))
         .height(Length::Fixed(geometry.rendered_size.height));
 
+    let (pending_proposal, review, selected_candidate) = match &state.mode {
+        super::workbench::WorkspaceMode::Workbench(wb) => (
+            wb.pending_proposal.as_ref(),
+            Some(&wb.review),
+            wb.selected_candidate,
+        ),
+        _ => (None, None, None),
+    };
     let overlay = iced::widget::canvas(super::canvas::AnnotationCanvas {
         document: &state.document.image,
         editor: &state.editor,
@@ -209,6 +228,9 @@ fn canvas_view<'a>(state: &'a ResultWorkspace, image_size: Size) -> Element<'a, 
             geometry.scale,
             geometry.image_origin,
         ),
+        pending_proposal,
+        review,
+        selected_candidate,
     })
     .width(Length::Fixed(geometry.rendered_size.width))
     .height(Length::Fixed(geometry.rendered_size.height));

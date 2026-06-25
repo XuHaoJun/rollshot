@@ -15,6 +15,7 @@ action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot
 
 [dependencies]
 arboard = "3.4"
+async-stream = "0.3"
 chrono = "0.4"
 dirs = "6"
 etcetera = { workspace = true }
@@ -23,10 +24,17 @@ iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
 rollshot-action = { path = "../rollshot-action", optional = true }
+rollshot-agent = { path = "../rollshot-agent" }
+rollshot-automation = { path = "../rollshot-automation" }
+rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
 rollshot-capture = { path = "../rollshot-capture" }
+rollshot-edit-proposal = { path = "../rollshot-edit-proposal" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 rollshot-image-document = { path = "../rollshot-image-document" }
+rollshot-preset = { path = "../rollshot-preset" }
+rollshot-vision = { path = "../rollshot-vision" }
 serde = { workspace = true }
+tokio = { workspace = true }
 toml = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -51,7 +59,6 @@ ksni = { version = "0.3", features = ["blocking"] }
 nix = { workspace = true }
 rollshot-linux-desktop = { path = "../rollshot-linux-desktop" }
 rollshot-linux-input = { path = "../rollshot-linux-input", optional = true }
-tokio = { workspace = true }
 url = { workspace = true }
 zbus = { workspace = true }
 
