@@ -38,7 +38,7 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
         .spacing(4)
         .height(Length::Fill);
 
-    let mut content = column![bar].spacing(8).padding(8);
+    let mut content = column![run_status_row(wb), bar].spacing(8).padding(8);
 
     if let Some(banner) = error_message_banner(wb, &state.message) {
         content = content.push(banner);
@@ -64,6 +64,36 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
     } else {
         content.into()
     }
+}
+
+fn run_status_row<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
+    use super::RunState;
+    // While Running: provider/model label + Cancel (spec §6.3, plan addendum F
+    // — non-deferrable; without this a hung run is unstoppable until the 30s
+    // wall-time budget elapses). On Terminal: the terminal-state label. The
+    // CancelRun handler already existed; only the UI affordance was missing.
+    let (status, cancel) = match &wb.run_state {
+        RunState::Running { .. } => (
+            text(format!(
+                "Running: {}",
+                super::provider_config::provider_model_label(&wb.provider_config)
+            ))
+            .size(12),
+            Some(button(text("Cancel")).on_press(Message::Workbench(WorkbenchMessage::CancelRun))),
+        ),
+        RunState::Terminal(terminal) => (
+            text(super::state::terminal_state_label(terminal)).size(12),
+            None,
+        ),
+        RunState::Idle => (text("Ready").size(12), None),
+    };
+    let mut r = row![status, Space::new().width(Length::Fill)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if let Some(btn) = cancel {
+        r = r.push(btn);
+    }
+    container(r).padding(4).width(Length::Fill).into()
 }
 
 fn activity_column<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
