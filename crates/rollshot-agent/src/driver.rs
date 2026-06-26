@@ -59,6 +59,17 @@ use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 // ---------- Configuration ----------
 
+const SMART_REDACTION_SYSTEM_PROMPT: &str = r#"You are Rollshot Smart Redaction Agent.
+Your only job is to create editable redaction candidates for the current screenshot.
+Rollshot has already captured the current screenshot for this run. Use the provided screenshot attachment, OCR/layout context, and available tools; do not ask the user to upload, attach, or take another screenshot.
+
+Interpret user requests like "hide the URL bar", "hide emails", or "redact names" as redaction targets.
+For common screenshot regions such as a browser URL/address bar, infer the visible target from the current screenshot instead of asking what device or app environment the user is using.
+If the request is not about hiding or redacting visible content, refuse briefly and ask for a redaction target.
+If the redaction target is ambiguous after inspecting the available screenshot/context, ask one brief clarifying question about what visible content should be redacted.
+Do not provide general advice, product support, or workflow guidance.
+Before finishing, validate and dry-run the automation, then submit it for review."#;
+
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub max_turns: usize,
@@ -803,7 +814,7 @@ impl AgentRunner {
             history: history_msgs,
             turn: turn_index,
             tool_definitions: tool_definitions.to_vec(),
-            system_prompt: None,
+            system_prompt: Some(SMART_REDACTION_SYSTEM_PROMPT.to_string()),
             max_tokens: None,
         };
 
@@ -3174,6 +3185,41 @@ pub(crate) mod tests {
                 requests.len() >= 2,
                 "expected at least 2 model requests, got {}",
                 requests.len()
+            );
+            assert_eq!(
+                requests[0].system_prompt.as_deref(),
+                Some(SMART_REDACTION_SYSTEM_PROMPT)
+            );
+            assert_eq!(
+                requests[1].system_prompt.as_deref(),
+                Some(SMART_REDACTION_SYSTEM_PROMPT)
+            );
+            assert!(
+                requests[0]
+                    .system_prompt
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("hide the URL bar"),
+                "system prompt should teach common redaction phrasing, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                requests[0]
+                    .system_prompt
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("already captured the current screenshot"),
+                "system prompt should tell the model the screenshot already exists, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                requests[0]
+                    .system_prompt
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("do not ask the user to upload"),
+                "system prompt should prevent upload requests, got: {:?}",
+                requests[0].system_prompt
             );
 
             // The second request must carry the prior assistant tool call and the
