@@ -77,6 +77,7 @@ Rollshot JavaScript authoring guide:
 - bounds is { x, y, width, height } in image pixels. width and height must be positive.
 - confidence must be between 0 and 1. label must be short and non-empty.
 - Supported capability calls are rollshot.ocr(query), rollshot.layout(query) when available, rollshot.regionFeatures(query), and rollshot.templateMatch(query) only when a matching input.capabilityHandles entry exists.
+- Use only template handles listed by inspect_image_context capability_handles before calling rollshot.templateMatch. Do not invent template handles when that list is empty.
 - In OCR-enabled runs, call inspect_ocr for text-driven redaction requests before writing source. inspect_ocr returns full recognized text, bounds, and confidence for canonical regions. Use OCR bounds as evidence for candidate rectangles.
 - If OCR is unavailable, treat that as a harness limitation and do not invent text evidence.
 - Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
@@ -101,10 +102,11 @@ Rollshot JavaScript authoring guide:
 
 Inspection loop:
 1. Call inspect_image_context before writing or replacing source.
-2. Call inspect_ocr for text-driven redaction requests such as visible words, names, emails, ids, labels, form fields, or account-like strings.
-3. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
-4. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
-5. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
+2. Check capability_handles before writing source that calls rollshot.templateMatch.
+3. Call inspect_ocr for text-driven redaction requests such as visible words, names, emails, ids, labels, form fields, or account-like strings.
+4. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
+5. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
+6. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
 
 Authoring loop:
 1. Use replace_source for a new source generation.
@@ -3390,6 +3392,16 @@ pub(crate) mod tests {
             assert!(
                 system_prompt.contains("inspect_ocr returns full recognized text"),
                 "system prompt should disclose full OCR text in tool results, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Use only template handles listed by inspect_image_context"),
+                "system prompt should require inspected template handles before templateMatch, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Do not invent template handles"),
+                "system prompt should forbid invented template handles, got: {:?}",
                 system_prompt
             );
 
