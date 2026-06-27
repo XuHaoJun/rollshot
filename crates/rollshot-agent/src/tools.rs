@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -389,11 +389,19 @@ pub struct ImageContextCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct CapabilityHandleSummary {
+    pub name: String,
+    pub handle: String,
+    pub capability: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageContextResult {
     pub image: ImageContextImage,
     pub source: ImageContextSource,
     pub regions: Vec<CanonicalRegionInspection>,
     pub ocr_regions: Vec<CanonicalOcrInspection>,
+    pub capability_handles: Vec<CapabilityHandleSummary>,
     pub capabilities: ImageContextCapabilities,
 }
 
@@ -407,6 +415,7 @@ pub struct ToolContext {
     pub automation_cancellation: rollshot_automation::CancellationFlag,
     pub session_id: SessionId,
     pub image_dims: (u32, u32),
+    pub capability_handles: BTreeMap<String, String>,
     pub pending_ready_for_review: Mutex<Option<crate::driver::ReadyForReview>>,
     pub last_validated: Mutex<Option<rollshot_automation::ValidatedAutomation>>,
     pub last_dry_run_proposal: Mutex<Option<rollshot_edit_proposal::EditProposal>>,
@@ -428,6 +437,26 @@ impl ToolContext {
         image_dims: (u32, u32),
         cancellation: &RunCancellation,
     ) -> Self {
+        Self::new_with_capability_handles(
+            session_id,
+            initial_source,
+            validation_limits,
+            execution_policy,
+            image_dims,
+            BTreeMap::new(),
+            cancellation,
+        )
+    }
+
+    pub fn new_with_capability_handles(
+        session_id: SessionId,
+        initial_source: String,
+        validation_limits: rollshot_automation::ValidationLimits,
+        execution_policy: rollshot_automation::ExecutionPolicy,
+        image_dims: (u32, u32),
+        capability_handles: BTreeMap<String, String>,
+        cancellation: &RunCancellation,
+    ) -> Self {
         Self {
             draft: Mutex::new(DraftState::new(session_id)),
             source: Mutex::new(initial_source),
@@ -436,6 +465,7 @@ impl ToolContext {
             automation_cancellation: cancellation.automation_flag().clone(),
             session_id,
             image_dims,
+            capability_handles,
             pending_ready_for_review: Mutex::new(None),
             last_validated: Mutex::new(None),
             last_dry_run_proposal: Mutex::new(None),
@@ -916,6 +946,23 @@ impl Tool for InspectImageContextTool {
                 CapabilityStatus::available()
             };
 
+            let capability_handles: Vec<CapabilityHandleSummary> = self
+                .ctx
+                .capability_handles
+                .iter()
+                .take(16)
+                .map(|(name, handle)| CapabilityHandleSummary {
+                    name: name.clone(),
+                    handle: handle.clone(),
+                    capability: "template_match".into(),
+                })
+                .collect();
+            let template_match = if self.ctx.capability_handles.is_empty() {
+                CapabilityStatus::unavailable("no_capability_handles")
+            } else {
+                CapabilityStatus::available()
+            };
+
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(ImageContextResult {
                     image: ImageContextImage {
@@ -930,11 +977,12 @@ impl Tool for InspectImageContextTool {
                     },
                     regions: self.inspection.regions.clone(),
                     ocr_regions: self.inspection.ocr_regions.clone(),
+                    capability_handles,
                     capabilities: ImageContextCapabilities {
                         region_features,
                         ocr,
                         layout: self.inspection.layout_status.clone(),
-                        template_match: self.inspection.template_match_status.clone(),
+                        template_match,
                     },
                 })
                 .unwrap_or_default(),
@@ -2438,7 +2486,10 @@ pub(crate) mod tests {
                     result_json["capabilities"]["ocr"]["status"].as_str(),
                     Some("available")
                 );
-                assert!(result_json["capability_handles"].as_array().unwrap().is_empty());
+                assert!(result_json["capability_handles"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty());
                 assert_eq!(
                     result_json["capabilities"]["template_match"]["reason"].as_str(),
                     Some("no_capability_handles")
