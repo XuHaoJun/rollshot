@@ -109,12 +109,13 @@ Inspection loop:
 6. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
 
 Authoring loop:
-1. Use replace_source for a new source generation.
-2. Use validate_source on the current generation.
-3. Use dry_run on the current generation.
-4. If validation or dry_run fails, edit the source and retry from replace_source.
-5. Use submit_for_review only after the current generation has successful validate_source and dry_run evidence.
-6. A successful dry_run means "ready for user review", not "safe to export"."#;
+1. Use read_current_source to inspect the current source, generation, validation summary, and recent evidence before editing.
+2. Prefer edit_source with unique exact old/new text for small changes; use replace_source only when a full rewrite is clearer.
+3. Use validate_source on the current generation.
+4. Use dry_run on the current generation.
+5. If validation or dry_run fails, read_current_source, edit_source, and retry validation/dry-run on the new generation.
+6. Use submit_for_review only after the current generation has successful validate_source and dry_run evidence.
+7. A successful dry_run means "ready for user review", not "safe to export"."#;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -1105,6 +1106,18 @@ impl AgentRunner {
                     if tool_name == "request_user_input" {
                         user_input_requested = true;
                     }
+                    if matches!(tool_name.as_str(), "replace_source" | "edit_source") {
+                        if let Some(diff) = result_json
+                            .get("diff")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                        {
+                            event_sink.emit(RunEvent::SourceChanged {
+                                tool: tool_name.clone(),
+                                diff,
+                            });
+                        }
+                    }
                     if tool_name == "dry_run" {
                         if let Some(cc) =
                             result_json.get("candidate_count").and_then(|v| v.as_u64())
@@ -1214,8 +1227,9 @@ pub(crate) mod tests {
     use crate::domain::SessionId;
     use crate::runtime::{EvidenceKind, NullEventSink, RunBudget};
     use crate::tools::{
-        DryRunTool, GetContextSummaryTool, InspectImageContextTool, OcrTool, RegionFeaturesTool,
-        ReplaceSourceTool, SubmitForReviewTool, ToolRegistryLimits, ValidateSourceTool,
+        DryRunTool, EditSourceTool, GetContextSummaryTool, InspectImageContextTool, OcrTool,
+        ReadCurrentSourceTool, RegionFeaturesTool, ReplaceSourceTool, SubmitForReviewTool,
+        ToolRegistryLimits, ValidateSourceTool,
     };
     use rig_core::completion::Usage;
     use rig_core::streaming::StreamedAssistantContent;
@@ -1289,7 +1303,11 @@ pub(crate) mod tests {
         ));
         reg.register(Arc::new(GetContextSummaryTool::new(ctx.clone())))
             .unwrap();
+        reg.register(Arc::new(ReadCurrentSourceTool::new(ctx.clone())))
+            .unwrap();
         reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
+            .unwrap();
+        reg.register(Arc::new(EditSourceTool::new(ctx.clone())))
             .unwrap();
         reg.register(Arc::new(ValidateSourceTool::new(ctx.clone())))
             .unwrap();
@@ -1393,7 +1411,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn full_author_loop() {
-        let ctx = test_ctx(valid_js());
+        let ctx = test_ctx("function main(input) { return { candidates: [] }; }");
         let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
         register_all_tools(&mut reg, &ctx);
 
@@ -1491,6 +1509,23 @@ pub(crate) mod tests {
                 "submit_for_review"
             ]
         );
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::SourceChanged {
+                    tool,
+                    diff
+                } if tool == "replace_source"
+                    && diff.old_generation == 0
+                    && diff.new_generation == 1
+                    && diff.lines.iter().any(|line| {
+                        line.kind == crate::runtime::SourceDiffLineKind::Removed
+                    })
+                    && diff.lines.iter().any(|line| {
+                        line.kind == crate::runtime::SourceDiffLineKind::Added
+                    })
+            )
+        }));
 
         // Assert generation evidence
         let draft = ctx.draft.lock().unwrap();

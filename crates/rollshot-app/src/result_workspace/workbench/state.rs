@@ -45,6 +45,10 @@ pub enum ActivityEntry {
         status: ToolCardStatus,
         summary: String,
     },
+    SourceDiff {
+        tool: String,
+        lines: Vec<String>,
+    },
     RunStatus {
         turn: u32,
         budget_summary: String,
@@ -263,6 +267,26 @@ pub fn event_to_activity_entry(event: &RunEvent) -> Option<ActivityEntry> {
             },
             summary: String::new(),
         }),
+        RunEvent::SourceChanged { tool, diff } => {
+            let mut lines = Vec::with_capacity(diff.lines.len().saturating_add(1));
+            lines.push(format!(
+                "generation {} -> {}",
+                diff.old_generation, diff.new_generation
+            ));
+            for line in &diff.lines {
+                let marker = match line.kind {
+                    rollshot_agent::runtime::SourceDiffLineKind::Context => " ",
+                    rollshot_agent::runtime::SourceDiffLineKind::Removed => "-",
+                    rollshot_agent::runtime::SourceDiffLineKind::Added => "+",
+                    rollshot_agent::runtime::SourceDiffLineKind::Omitted => ".",
+                };
+                lines.push(format!("{marker} {}", line.text));
+            }
+            Some(ActivityEntry::SourceDiff {
+                tool: tool.clone(),
+                lines,
+            })
+        }
         RunEvent::TurnComplete => None,
     }
 }
@@ -398,7 +422,9 @@ mod tests {
 
     #[test]
     fn event_to_activity_entry_maps_each_variant() {
-        use rollshot_agent::runtime::RunEvent;
+        use rollshot_agent::runtime::{
+            RunEvent, SourceDiffLine, SourceDiffLineKind, SourceDiffSummary,
+        };
         let e = event_to_activity_entry(&RunEvent::TextChunk { text: "hi".into() });
         assert!(matches!(e, Some(ActivityEntry::AssistantText(t)) if t == "hi"));
         let e = event_to_activity_entry(&RunEvent::ToolCallStart {
@@ -421,6 +447,25 @@ mod tests {
                 status: ToolCardStatus::Failed,
                 ..
             })
+        ));
+        let e = event_to_activity_entry(&RunEvent::SourceChanged {
+            tool: "edit_source".into(),
+            diff: SourceDiffSummary {
+                old_generation: 0,
+                new_generation: 1,
+                old_source_bytes: 3,
+                new_source_bytes: 3,
+                omitted_lines: 0,
+                lines: vec![SourceDiffLine {
+                    kind: SourceDiffLineKind::Added,
+                    text: "new".into(),
+                }],
+            },
+        });
+        assert!(matches!(
+            e,
+            Some(ActivityEntry::SourceDiff { tool, lines })
+                if tool == "edit_source" && lines.iter().any(|line| line == "+ new")
         ));
         assert!(event_to_activity_entry(&RunEvent::TurnComplete).is_none());
     }

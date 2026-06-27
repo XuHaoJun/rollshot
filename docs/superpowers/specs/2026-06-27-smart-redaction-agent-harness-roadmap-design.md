@@ -1,7 +1,7 @@
 # Smart Redaction Agent Harness Roadmap
 
 **Date:** 2026-06-27
-**Status:** Active roadmap; Phase B2 complete
+**Status:** Active roadmap; Phase C complete
 
 ## Context
 
@@ -60,21 +60,38 @@ screenshot attachment alone.
   - Default builds keep OCR unavailable and do not register a fake OCR tool.
   - The authoring prompt now directs text-driven requests through OCR
     inspection before source changes.
+- Phase B3: Capability Handle Visibility was implemented on
+  `feat/smart-redaction-agent-harness-roadmap`.
+  - Authoring inspection exposes bounded capability-handle summaries and
+    template-match availability metadata.
+  - Product Smart Redaction currently reports template matching unavailable
+    because the product handle map is empty.
+- Phase B4: Layout and Template Inspection Follow-Up was completed as a
+  truthful registry check on `feat/smart-redaction-agent-harness-roadmap`.
+  - Product Smart Redaction keeps layout/template inspection tools out of the
+    registry until their underlying lifecycle returns real, testable data.
+  - Template-handle creation and persistence remain Phase F work.
+- Phase C: Source Editing Ergonomics was implemented on
+  `feat/smart-redaction-agent-harness-roadmap`.
+  - The agent can read current source, generation, validation summary, and
+    recent evidence before editing.
+  - The agent can perform exact-replace source edits with stale-generation
+    checks and recoverable mismatch feedback.
+  - Source mutations emit bounded diff summaries for the run stream and
+    workbench activity drawer.
 
 ### Remaining Gaps
 
 - The agent has source replacement and validation tools, but still lacks a rich
   equivalent of "read the file and environment before editing."
-- Layout and template inspection still remain unavailable in product authoring
-  runs until they return truthful data.
+- Layout and template inspection remain unavailable in product authoring runs
+  until they return truthful data.
 - `RealAutomationHost` now prepares canonical region-feature results and,
   behind OCR-enabled builds, canonical OCR results for dry-run and product
   authoring inspection. Template matching and arbitrary region inspection remain
   unavailable in product authoring runs.
 - `AutomationInput.capability_handles` is empty in the product workbench path,
   so fixture-style template presets cannot work there yet.
-- Dry-run returns bounded candidate previews, but the model still needs
-  pre-authoring visual observations to choose better source before dry-run.
 
 ## Roadmap
 
@@ -120,21 +137,21 @@ editing ergonomics into one change.
 - Make OCR-disabled builds report structured unavailable responses without
   exposing a fake working tool.
 
-#### Phase B3: Capability Handle Visibility — Drafted
+#### Phase B3: Capability Handle Visibility — Complete
 
 - Expose available `AutomationInput.capability_handles` and capability
   availability metadata to the model.
 - Do not invent template-handle persistence here; only surface handles that
   already exist.
 
-#### Phase B4: Layout and Template Inspection Follow-Up
+#### Phase B4: Layout and Template Inspection Follow-Up — Complete
 
 - Add real layout or template inspection only after the underlying capability
   lifecycle is designed and testable.
 - Keep layout/template stubs out of the product registry until they return
   truthful data.
 
-### Phase C: Source Editing Ergonomics
+### Phase C: Source Editing Ergonomics — Complete
 
 Move from whole-source replacement toward code-agent-style editing.
 
@@ -213,5 +230,8 @@ Make reusable visual detectors work beyond the first screenshot.
 
 ## Open Decisions
 
-- Whether source editing should use exact-replace, unified diff, or AST-aware
-  operations in Phase C.
+- Resolved (Phase C): source editing uses exact-replace with a required unique
+  `old` match; `replace_source` remains the full-rewrite escape hatch. Unified
+  diff and AST-aware operations were rejected as ill-suited to short detector
+  scripts. See
+  `2026-06-27-smart-redaction-agent-phase-c-source-editing-ergonomics-design.md`.

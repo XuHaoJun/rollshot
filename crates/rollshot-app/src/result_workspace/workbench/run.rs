@@ -429,9 +429,9 @@ fn build_authoring_tool_registry(
     #[cfg(feature = "ocr")]
     use rollshot_agent::tools::OcrTool;
     use rollshot_agent::tools::{
-        DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
-        ReplaceSourceTool, RequestUserInputTool, SubmitForReviewTool, ToolRegistry,
-        ToolRegistryLimits, ValidateSourceTool,
+        DryRunTool, EditSourceTool, GetContextSummaryTool, InspectImageContextTool,
+        ReadCurrentSourceTool, RegionFeaturesTool, ReplaceSourceTool, RequestUserInputTool,
+        SubmitForReviewTool, ToolRegistry, ToolRegistryLimits, ValidateSourceTool,
     };
 
     let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
@@ -465,10 +465,18 @@ fn build_authoring_tool_registry(
     )?;
     reg(
         &mut registry,
+        Arc::new(ReadCurrentSourceTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
         Arc::new(InspectImageContextTool::new(
             tool_ctx.clone(),
             inspection.clone(),
         )),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(EditSourceTool::new(tool_ctx.clone())),
     )?;
     reg(
         &mut registry,
@@ -982,7 +990,9 @@ mod prepare_tests {
                 "submit_for_review",
                 "request_user_input",
                 "inspect_context_summary",
+                "read_current_source",
                 "inspect_image_context",
+                "edit_source",
                 "inspect_region_features",
                 "dry_run",
             ]

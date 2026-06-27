@@ -139,6 +139,13 @@ fn activity_entry_view<'a>(entry: &'a super::state::ActivityEntry) -> Element<'a
             }
             text(line).size(11).into()
         }
+        super::state::ActivityEntry::SourceDiff { tool, lines } => {
+            let mut diff = column![text(format!("Source change: {tool}")).size(11)].spacing(2);
+            for line in lines {
+                diff = diff.push(text(line).size(10).font(iced::Font::MONOSPACE));
+            }
+            diff.into()
+        }
         super::state::ActivityEntry::RunStatus {
             turn,
             budget_summary,

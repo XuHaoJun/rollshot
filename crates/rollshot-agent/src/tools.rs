@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::SessionId;
-use crate::runtime::{DraftState, EvidenceKind, RunCancellation};
+use crate::runtime::{
+    DraftState, EvidenceKind, RunCancellation, SourceDiffLine, SourceDiffLineKind,
+    SourceDiffSummary,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolError {
@@ -226,6 +229,36 @@ pub struct ReplaceSourceArgs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplaceSourceResult {
     pub new_generation: u64,
+    pub diff: SourceDiffSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceEvidenceSummary {
+    pub kind: String,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadCurrentSourceResult {
+    pub generation: u64,
+    pub source: String,
+    pub source_bytes: usize,
+    pub evidence: Vec<SourceEvidenceSummary>,
+    pub validation_summary: Option<rollshot_automation::ValidationSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditSourceArgs {
+    pub generation: u64,
+    pub old: String,
+    pub new: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditSourceResult {
+    pub new_generation: u64,
+    pub diff: SourceDiffSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -292,6 +325,123 @@ pub struct EmptyArgs {}
 pub struct RequestUserInputResult {
     pub needs_input: bool,
     pub current_generation: u64,
+}
+
+const SOURCE_DIFF_CONTEXT_LINES: usize = 2;
+const SOURCE_DIFF_MAX_CHANGE_LINES: usize = 40;
+const SOURCE_DIFF_MAX_LINE_CHARS: usize = 160;
+
+fn evidence_kind_label(kind: &EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::Validation => "validation",
+        EvidenceKind::Policy => "policy",
+        EvidenceKind::DryRun => "dry_run",
+    }
+}
+
+fn truncate_diff_line(line: &str) -> String {
+    let mut out = String::new();
+    for (idx, ch) in line.chars().enumerate() {
+        if idx >= SOURCE_DIFF_MAX_LINE_CHARS {
+            out.push_str(" [truncated]");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn push_diff_line(lines: &mut Vec<SourceDiffLine>, kind: SourceDiffLineKind, text: &str) {
+    lines.push(SourceDiffLine {
+        kind,
+        text: truncate_diff_line(text),
+    });
+}
+
+fn build_source_diff(
+    old_source: &str,
+    new_source: &str,
+    old_generation: u64,
+    new_generation: u64,
+) -> SourceDiffSummary {
+    let old_lines: Vec<&str> = old_source.lines().collect();
+    let new_lines: Vec<&str> = new_source.lines().collect();
+
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix < old_lines.len().saturating_sub(prefix)
+        && suffix < new_lines.len().saturating_sub(prefix)
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let old_change_end = old_lines.len().saturating_sub(suffix);
+    let new_change_end = new_lines.len().saturating_sub(suffix);
+    let context_start = prefix.saturating_sub(SOURCE_DIFF_CONTEXT_LINES);
+    let context_end = old_change_end
+        .saturating_add(SOURCE_DIFF_CONTEXT_LINES)
+        .min(old_lines.len());
+
+    let mut lines = Vec::new();
+    for line in &old_lines[context_start..prefix] {
+        push_diff_line(&mut lines, SourceDiffLineKind::Context, line);
+    }
+
+    let removed = &old_lines[prefix..old_change_end];
+    let added = &new_lines[prefix..new_change_end];
+    let changed_total = removed.len().saturating_add(added.len());
+    let mut emitted_changes = 0;
+    for line in removed {
+        if emitted_changes >= SOURCE_DIFF_MAX_CHANGE_LINES {
+            break;
+        }
+        push_diff_line(&mut lines, SourceDiffLineKind::Removed, line);
+        emitted_changes += 1;
+    }
+    for line in added {
+        if emitted_changes >= SOURCE_DIFF_MAX_CHANGE_LINES {
+            break;
+        }
+        push_diff_line(&mut lines, SourceDiffLineKind::Added, line);
+        emitted_changes += 1;
+    }
+
+    let omitted_lines = changed_total.saturating_sub(emitted_changes);
+    if omitted_lines > 0 {
+        push_diff_line(
+            &mut lines,
+            SourceDiffLineKind::Omitted,
+            &format!("{omitted_lines} changed line(s) omitted"),
+        );
+    }
+
+    for line in &old_lines[old_change_end..context_end] {
+        push_diff_line(&mut lines, SourceDiffLineKind::Context, line);
+    }
+
+    SourceDiffSummary {
+        old_generation,
+        new_generation,
+        old_source_bytes: old_source.len(),
+        new_source_bytes: new_source.len(),
+        omitted_lines,
+        lines,
+    }
+}
+
+fn clear_generation_caches(ctx: &ToolContext) {
+    *ctx.last_validated.lock().unwrap() = None;
+    *ctx.last_dry_run_proposal.lock().unwrap() = None;
+    *ctx.last_dry_run_metrics.lock().unwrap() = None;
+    *ctx.pending_ready_for_review.lock().unwrap() = None;
 }
 
 // ---------- Inspection types ----------
@@ -515,18 +665,153 @@ impl Tool for ReplaceSourceTool {
                 .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
             drop(draft);
 
+            let old_source = self.ctx.source.lock().unwrap().clone();
+            let diff = build_source_diff(&old_source, &args.source, args.generation, new_gen);
             *self.ctx.source.lock().unwrap() = args.source;
 
             // §4.3: replacement invalidates every validation, dry-run, proposal,
             // and submission result from older generations.
-            *self.ctx.last_validated.lock().unwrap() = None;
-            *self.ctx.last_dry_run_proposal.lock().unwrap() = None;
-            *self.ctx.last_dry_run_metrics.lock().unwrap() = None;
-            *self.ctx.pending_ready_for_review.lock().unwrap() = None;
+            clear_generation_caches(&self.ctx);
 
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(ReplaceSourceResult {
                     new_generation: new_gen,
+                    diff,
+                })
+                .unwrap_or_default(),
+            })
+        })
+    }
+}
+
+pub struct ReadCurrentSourceTool {
+    ctx: Arc<ToolContext>,
+}
+
+impl ReadCurrentSourceTool {
+    pub fn new(ctx: Arc<ToolContext>) -> Self {
+        Self { ctx }
+    }
+}
+
+impl Tool for ReadCurrentSourceTool {
+    fn name(&self) -> &str {
+        "read_current_source"
+    }
+
+    fn json_schema(&self) -> Value {
+        tool_schema::<EmptyArgs>()
+    }
+
+    fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let draft = self.ctx.draft.lock().unwrap();
+            let generation = draft.generation();
+            let evidence = draft
+                .evidence()
+                .iter()
+                .rev()
+                .take(8)
+                .rev()
+                .map(|record| SourceEvidenceSummary {
+                    kind: evidence_kind_label(&record.kind).into(),
+                    generation: record.source_generation,
+                })
+                .collect();
+            drop(draft);
+
+            let source = self.ctx.source.lock().unwrap().clone();
+            let validation_summary = self
+                .ctx
+                .last_validated
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|validated| validated.source == source)
+                .map(|validated| validated.validation_summary.clone());
+
+            Ok(ToolOutcome::Success {
+                result_json: serde_json::to_value(ReadCurrentSourceResult {
+                    generation,
+                    source_bytes: source.len(),
+                    source,
+                    evidence,
+                    validation_summary,
+                })
+                .unwrap_or_default(),
+            })
+        })
+    }
+}
+
+pub struct EditSourceTool {
+    ctx: Arc<ToolContext>,
+}
+
+impl EditSourceTool {
+    pub fn new(ctx: Arc<ToolContext>) -> Self {
+        Self { ctx }
+    }
+}
+
+impl Tool for EditSourceTool {
+    fn name(&self) -> &str {
+        "edit_source"
+    }
+
+    fn json_schema(&self) -> Value {
+        tool_schema::<EditSourceArgs>()
+    }
+
+    fn call<'a>(&'a self, arguments: &'a Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let args: EditSourceArgs = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+
+            let mut draft = self.ctx.draft.lock().unwrap();
+            if draft.generation() != args.generation {
+                return Err(ToolError::ArgumentDecode(format!(
+                    "stale generation: expected {}, got {}",
+                    draft.generation(),
+                    args.generation
+                )));
+            }
+            if args.old.is_empty() {
+                return Ok(ToolOutcome::Recoverable {
+                    error: "old text must be non-empty".into(),
+                });
+            }
+
+            let old_source = self.ctx.source.lock().unwrap().clone();
+            let matches = old_source.matches(&args.old).count();
+            if matches == 0 {
+                return Ok(ToolOutcome::Recoverable {
+                    error: "old text not found in current source".into(),
+                });
+            }
+            if matches > 1 {
+                return Ok(ToolOutcome::Recoverable {
+                    error: format!(
+                        "old text matched {matches} ranges; provide a unique exact text"
+                    ),
+                });
+            }
+
+            let new_source = old_source.replacen(&args.old, &args.new, 1);
+            draft.invalidate_evidence_after(args.generation);
+            let new_gen = draft
+                .next_generation()
+                .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+            drop(draft);
+
+            let diff = build_source_diff(&old_source, &new_source, args.generation, new_gen);
+            *self.ctx.source.lock().unwrap() = new_source;
+            clear_generation_caches(&self.ctx);
+
+            Ok(ToolOutcome::Success {
+                result_json: serde_json::to_value(EditSourceResult {
+                    new_generation: new_gen,
+                    diff,
                 })
                 .unwrap_or_default(),
             })
@@ -1783,6 +2068,8 @@ pub(crate) mod tests {
         match result {
             ToolOutcome::Success { result_json } => {
                 assert_eq!(result_json["new_generation"].as_u64(), Some(1));
+                assert_eq!(result_json["diff"]["old_generation"].as_u64(), Some(0));
+                assert_eq!(result_json["diff"]["new_generation"].as_u64(), Some(1));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -1844,6 +2131,111 @@ pub(crate) mod tests {
         let args = serde_json::json!({"source": "new", "generation": 0});
         let err = tool.call(&args).await.unwrap_err();
         assert!(matches!(err, ToolError::ArgumentDecode(_)));
+    }
+
+    // ---- Authoring: read_current_source / edit_source ----
+
+    #[tokio::test]
+    async fn read_current_source_returns_source_generation_and_evidence() {
+        let ctx = test_context(valid_js_source());
+        ValidateSourceTool::new(ctx.clone())
+            .call(&serde_json::json!({"source": valid_js_source(), "generation": 0}))
+            .await
+            .unwrap();
+        let tool = ReadCurrentSourceTool::new(ctx);
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["generation"].as_u64(), Some(0));
+                assert_eq!(result_json["source"].as_str(), Some(valid_js_source()));
+                assert_eq!(
+                    result_json["validation_summary"]["source_bytes"].as_u64(),
+                    Some(valid_js_source().len() as u64)
+                );
+                assert_eq!(
+                    result_json["evidence"][0]["kind"].as_str(),
+                    Some("validation")
+                );
+                assert_eq!(result_json["evidence"][0]["generation"].as_u64(), Some(0));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_source_exact_replace_advances_generation_and_returns_diff() {
+        let ctx = test_context("function main(input) {\n  return { candidates: [] };\n}");
+        let tool = EditSourceTool::new(ctx.clone());
+
+        let result = tool
+            .call(&serde_json::json!({
+                "generation": 0,
+                "old": "candidates: []",
+                "new": "candidates: [{ kind: 'addRedaction', bounds: { x: 0, y: 0, width: 10, height: 10 }, confidence: 0.8, label: 'top' }]"
+            }))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["new_generation"].as_u64(), Some(1));
+                assert_eq!(result_json["diff"]["old_generation"].as_u64(), Some(0));
+                assert_eq!(result_json["diff"]["new_generation"].as_u64(), Some(1));
+                let lines = result_json["diff"]["lines"].as_array().unwrap();
+                assert!(lines.iter().any(|line| line["kind"] == "removed"));
+                assert!(lines.iter().any(|line| line["kind"] == "added"));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+
+        assert_eq!(ctx.draft.lock().unwrap().generation(), 1);
+        assert!(ctx.source.lock().unwrap().contains("kind: 'addRedaction'"));
+    }
+
+    #[tokio::test]
+    async fn edit_source_rejects_stale_generation_without_mutating_source() {
+        let ctx = test_context("source text");
+        ctx.draft.lock().unwrap().next_generation().unwrap();
+        let tool = EditSourceTool::new(ctx.clone());
+
+        let err = tool
+            .call(&serde_json::json!({
+                "generation": 0,
+                "old": "source",
+                "new": "changed"
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::ArgumentDecode(_)));
+        assert_eq!(*ctx.source.lock().unwrap(), "source text");
+        assert_eq!(ctx.draft.lock().unwrap().generation(), 1);
+    }
+
+    #[tokio::test]
+    async fn edit_source_recovers_when_exact_text_is_missing() {
+        let ctx = test_context("source text");
+        let tool = EditSourceTool::new(ctx.clone());
+
+        let result = tool
+            .call(&serde_json::json!({
+                "generation": 0,
+                "old": "not present",
+                "new": "changed"
+            }))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Recoverable { error } => {
+                assert!(error.contains("not found"));
+            }
+            other => panic!("expected recoverable mismatch, got {other:?}"),
+        }
+        assert_eq!(*ctx.source.lock().unwrap(), "source text");
+        assert_eq!(ctx.draft.lock().unwrap().generation(), 0);
     }
 
     // ---- Authoring: validate_source ----
