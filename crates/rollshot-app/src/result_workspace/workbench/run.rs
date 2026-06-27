@@ -16,6 +16,18 @@ const PHASE_A_REGION_FEATURE_STRIP_PX: u32 = 96;
 const PHASE_A_REGION_FEATURE_LIMIT: u32 = 1;
 const PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT: u64 = 8_000_000;
 
+const PHASE_B2_OCR_STRIP_PX: u32 = 96;
+const PHASE_B2_OCR_LIMIT: u32 = 50;
+const PHASE_B2_OCR_AREA_LIMIT: u64 = 16_000_000;
+
+#[derive(Debug, Clone, PartialEq)]
+struct CanonicalOcrEntry {
+    name: &'static str,
+    bounds: rollshot_image_document::ImageRect,
+    query: Option<rollshot_automation::OcrQuery>,
+    unavailable_reason: Option<&'static str>,
+}
+
 /// Finite budget for Smart Redaction runs. `RunBudget::unlimited()` is the
 /// only constructor in rollshot-agent (§10.4); the workbench owns this one.
 pub fn smart_redaction_budget() -> RunBudget {
@@ -146,13 +158,121 @@ fn canonical_region_feature_catalog(width: u32, height: u32) -> Vec<CanonicalReg
     ]
 }
 
+fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcrEntry> {
+    use rollshot_automation::{OcrQuery, Region};
+    use rollshot_image_document::ImageRect;
+
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let width_f = width as f32;
+    let height_f = height as f32;
+    let strip_h = height.min(PHASE_B2_OCR_STRIP_PX) as f32;
+    let strip_w = width.min(PHASE_B2_OCR_STRIP_PX) as f32;
+
+    let make_entry = |name: &'static str, bounds: ImageRect| {
+        let area = (bounds.width.ceil() as u64).saturating_mul(bounds.height.ceil() as u64);
+        if area > PHASE_B2_OCR_AREA_LIMIT {
+            CanonicalOcrEntry {
+                name,
+                bounds,
+                query: None,
+                unavailable_reason: Some("area_limit_exceeded"),
+            }
+        } else {
+            CanonicalOcrEntry {
+                name,
+                bounds,
+                query: Some(OcrQuery {
+                    region: Region::Rect { bounds },
+                    limit: PHASE_B2_OCR_LIMIT,
+                }),
+                unavailable_reason: None,
+            }
+        }
+    };
+
+    vec![
+        CanonicalOcrEntry {
+            name: "full",
+            bounds: ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: width_f,
+                height: height_f,
+            },
+            query: if (width as u64 * height as u64) <= PHASE_B2_OCR_AREA_LIMIT {
+                Some(OcrQuery {
+                    region: Region::Full,
+                    limit: PHASE_B2_OCR_LIMIT,
+                })
+            } else {
+                None
+            },
+            unavailable_reason: if (width as u64 * height as u64) <= PHASE_B2_OCR_AREA_LIMIT {
+                None
+            } else {
+                Some("area_limit_exceeded")
+            },
+        },
+        make_entry(
+            "top_strip",
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: width_f,
+                height: strip_h,
+            },
+        ),
+        make_entry(
+            "left_strip",
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: strip_w,
+                height: height_f,
+            },
+        ),
+        make_entry(
+            "right_strip",
+            ImageRect {
+                x: (width_f - strip_w).max(0.0),
+                y: 0.0,
+                width: strip_w,
+                height: height_f,
+            },
+        ),
+        make_entry(
+            "bottom_strip",
+            ImageRect {
+                x: 0.0,
+                y: (height_f - strip_h).max(0.0),
+                width: width_f,
+                height: strip_h,
+            },
+        ),
+    ]
+}
+
 fn authoring_inspection_context(
     payload_mode: PayloadMode,
     catalog: &[CanonicalRegionFeatureEntry],
+    ocr_catalog: &[CanonicalOcrEntry],
 ) -> rollshot_agent::tools::AuthoringInspectionContext {
     let regions = catalog
         .iter()
         .map(|entry| rollshot_agent::tools::CanonicalRegionInspection {
+            name: entry.name.into(),
+            bounds: Some(entry.bounds),
+            query: entry.query.clone(),
+            unavailable_reason: entry.unavailable_reason.map(str::to_string),
+        })
+        .collect();
+
+    let ocr_regions = ocr_catalog
+        .iter()
+        .map(|entry| rollshot_agent::tools::CanonicalOcrInspection {
             name: entry.name.into(),
             bounds: Some(entry.bounds),
             query: entry.query.clone(),
@@ -168,8 +288,12 @@ fn authoring_inspection_context(
     rollshot_agent::tools::AuthoringInspectionContext {
         payload_mode: payload_mode.into(),
         regions,
-        ocr_regions: vec![],
-        ocr_status: rollshot_agent::tools::CapabilityStatus::unavailable("ocr_disabled"),
+        ocr_regions,
+        ocr_status: if cfg!(feature = "ocr") {
+            rollshot_agent::tools::CapabilityStatus::unavailable("no_prepared_ocr_regions")
+        } else {
+            rollshot_agent::tools::CapabilityStatus::unavailable("ocr_disabled")
+        },
         layout_status: rollshot_agent::tools::CapabilityStatus::unavailable(
             "capability_unavailable",
         ),
@@ -400,9 +524,12 @@ pub fn start_agent_run(
             &cancellation_for_task,
         ));
 
+        let region_catalog = canonical_region_feature_catalog(image_dims.0, image_dims.1);
+        let ocr_catalog = canonical_ocr_catalog(image_dims.0, image_dims.1);
         let inspection = authoring_inspection_context(
             payload_mode,
-            &canonical_region_feature_catalog(image_dims.0, image_dims.1),
+            &region_catalog,
+            &ocr_catalog,
         );
         let registry = match build_authoring_tool_registry(
             tool_ctx.clone(),
@@ -695,6 +822,55 @@ mod prepare_tests {
     }
 
     #[test]
+    fn canonical_ocr_catalog_has_named_entries_for_every_region() {
+        let names: Vec<&str> = canonical_ocr_catalog(160, 120)
+            .iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "full",
+                "top_strip",
+                "left_strip",
+                "right_strip",
+                "bottom_strip"
+            ]
+        );
+    }
+
+    #[test]
+    fn canonical_ocr_catalog_prefers_full_region_when_under_cap() {
+        let catalog = canonical_ocr_catalog(160, 120);
+        let full = catalog
+            .iter()
+            .find(|entry| entry.name == "full")
+            .expect("full OCR entry");
+        assert_eq!(
+            full.bounds,
+            rollshot_image_document::ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
+                height: 120.0,
+            }
+        );
+        assert!(full.query.is_some());
+        assert_eq!(full.unavailable_reason, None);
+    }
+
+    #[test]
+    fn canonical_ocr_catalog_keeps_oversized_regions_with_reason() {
+        let catalog = canonical_ocr_catalog(100_000, 100_000);
+        let full = catalog
+            .iter()
+            .find(|entry| entry.name == "full")
+            .expect("full OCR entry");
+        assert_eq!(full.query, None);
+        assert_eq!(full.unavailable_reason, Some("area_limit_exceeded"));
+    }
+
+    #[test]
     fn canonical_region_catalog_never_prepares_region_over_area_cap() {
         for entry in canonical_region_feature_catalog(100_000, 100_000) {
             if let Some(query) = &entry.query {
@@ -745,6 +921,7 @@ mod prepare_tests {
         let inspection = authoring_inspection_context(
             PayloadMode::FullScreenshot,
             &canonical_region_feature_catalog(64, 64),
+            &canonical_ocr_catalog(64, 64),
         );
 
         let registry = build_authoring_tool_registry(ctx, executor, host, inspection).unwrap();
@@ -774,7 +951,11 @@ mod prepare_tests {
         let image = image::RgbaImage::from_fn(64, 64, |_, _| image::Rgba([160, 170, 180, 255]));
         let vision = prepare_vision_context(&image).unwrap();
         let catalog = canonical_region_feature_catalog(64, 64);
-        let inspection = authoring_inspection_context(PayloadMode::FullScreenshot, &catalog);
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &catalog,
+            &canonical_ocr_catalog(64, 64),
+        );
         let ctx = tool_context_for_tests();
         let host = vision.host.clone()
             as std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>>;

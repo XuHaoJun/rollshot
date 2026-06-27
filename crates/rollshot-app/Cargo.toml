@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [features]
 action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot-macos-input", "rollshot-iced-overlay/action-guide"]
+ocr = ["rollshot-vision/ocr"]
 
 [dependencies]
 arboard = "3.4"
@@ -63,6 +64,8 @@ url = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+ab_glyph = "0.2"
+imageproc = { workspace = true, features = ["text"] }
 serde_json = { workspace = true }
 tempfile = "3"
 
