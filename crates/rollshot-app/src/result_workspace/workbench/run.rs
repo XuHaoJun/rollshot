@@ -416,13 +416,13 @@ fn build_authoring_tool_registry(
     host: Arc<StdMutex<dyn rollshot_automation::AutomationHost>>,
     inspection: rollshot_agent::tools::AuthoringInspectionContext,
 ) -> Result<rollshot_agent::tools::ToolRegistry, WorkbenchError> {
+    #[cfg(feature = "ocr")]
+    use rollshot_agent::tools::OcrTool;
     use rollshot_agent::tools::{
         DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
         ReplaceSourceTool, RequestUserInputTool, SubmitForReviewTool, ToolRegistry,
         ToolRegistryLimits, ValidateSourceTool,
     };
-    #[cfg(feature = "ocr")]
-    use rollshot_agent::tools::OcrTool;
 
     let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
     let reg = |registry: &mut ToolRegistry,
