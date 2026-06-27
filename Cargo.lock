@@ -6220,6 +6220,7 @@ dependencies = [
 name = "rollshot-app"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "arboard",
  "ashpd 0.9.3",
  "async-stream",
@@ -6232,6 +6233,7 @@ dependencies = [
  "global-hotkey",
  "iced",
  "image",
+ "imageproc 0.26.2",
  "ksni",
  "nix 0.29.0",
  "objc2 0.6.4",
