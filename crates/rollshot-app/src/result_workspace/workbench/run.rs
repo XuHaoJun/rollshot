@@ -417,10 +417,12 @@ fn build_authoring_tool_registry(
     inspection: rollshot_agent::tools::AuthoringInspectionContext,
 ) -> Result<rollshot_agent::tools::ToolRegistry, WorkbenchError> {
     use rollshot_agent::tools::{
-        DryRunTool, GetContextSummaryTool, InspectImageContextTool, OcrTool, RegionFeaturesTool,
+        DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
         ReplaceSourceTool, RequestUserInputTool, SubmitForReviewTool, ToolRegistry,
         ToolRegistryLimits, ValidateSourceTool,
     };
+    #[cfg(feature = "ocr")]
+    use rollshot_agent::tools::OcrTool;
 
     let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
     let reg = |registry: &mut ToolRegistry,
