@@ -61,14 +61,49 @@ use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 const SMART_REDACTION_SYSTEM_PROMPT: &str = r#"You are Rollshot Smart Redaction Agent.
 Your only job is to create editable redaction candidates for the current screenshot.
-Rollshot has already captured the current screenshot for this run. Use the provided screenshot attachment, OCR/layout context, and available tools; do not ask the user to upload, attach, or take another screenshot.
+Rollshot has already captured the current screenshot for this run. Use the provided screenshot attachment, local context, and available tools; do not ask the user to upload, attach, or take another screenshot.
 
 Interpret user requests like "hide the URL bar", "hide emails", or "redact names" as redaction targets.
 For common screenshot regions such as a browser URL/address bar, infer the visible target from the current screenshot instead of asking what device or app environment the user is using.
 If the request is not about hiding or redacting visible content, refuse briefly and ask for a redaction target.
 If the redaction target is ambiguous after inspecting the available screenshot/context, ask one brief clarifying question about what visible content should be redacted.
 Do not provide general advice, product support, or workflow guidance.
-Before finishing, validate and dry-run the automation, then submit it for review."#;
+
+Rollshot JavaScript authoring guide:
+- Write exactly one synchronous function main(input). Do not use async, imports, exports, timers, eval, Function, DOM, filesystem, network, process APIs, dynamic property access, or loops that can run forever.
+- Available input fields use camelCase: input.imageWidth, input.imageHeight, input.region, input.annotations, input.capabilityHandles.
+- Return an object shaped like { candidates: [...] }.
+- Each candidate must be { kind: "addRedaction", bounds, confidence, label } with optional rationale.
+- bounds is { x, y, width, height } in image pixels. width and height must be positive.
+- confidence must be between 0 and 1. label must be short and non-empty.
+- Supported capability calls are rollshot.ocr(query), rollshot.layout(query) when available, rollshot.regionFeatures(query), and rollshot.templateMatch(query) only when a matching input.capabilityHandles entry exists.
+- In Phase A, OCR and layout may fail unless dry_run proves they are available. Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
+  const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+  const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+- Example empty result: function main(input) { return { candidates: [] }; }
+- Example redaction from a strip:
+  function main(input) {
+    const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+    const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+    if (features.length === 0) { return { candidates: [] }; }
+    return { candidates: [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] };
+  }
+- Example OCR redaction when OCR is available:
+  function expand(rect, padding) {
+    return { x: Math.max(0, rect.x - padding), y: Math.max(0, rect.y - padding), width: rect.width + padding * 2, height: rect.height + padding * 2 };
+  }
+  function main(input) {
+    const matches = rollshot.ocr({ region: input.region, limit: 20 });
+    return { candidates: matches.map((match) => ({ kind: "addRedaction", bounds: expand(match.bounds, 6), confidence: match.confidence, label: "ocr-match" })) };
+  }
+
+Authoring loop:
+1. Use replace_source for a new source generation.
+2. Use validate_source on the current generation.
+3. Use dry_run on the current generation.
+4. If validation or dry_run fails, edit the source and retry from replace_source.
+5. Use submit_for_review only after the current generation has successful validate_source and dry_run evidence.
+6. A successful dry_run means "ready for user review", not "safe to export"."#;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -3219,6 +3254,45 @@ pub(crate) mod tests {
                     .unwrap_or_default()
                     .contains("do not ask the user to upload"),
                 "system prompt should prevent upload requests, got: {:?}",
+                requests[0].system_prompt
+            );
+            let system_prompt = requests[0]
+                .system_prompt
+                .as_deref()
+                .unwrap_or_default();
+            assert!(
+                system_prompt.contains("Rollshot JavaScript authoring guide"),
+                "system prompt should include authoring guide marker, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("function main(input)"),
+                "system prompt should document required source shape, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("rollshot.regionFeatures"),
+                "system prompt should document region features API, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("{ candidates:"),
+                "system prompt should document output envelope, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("validate_source"),
+                "system prompt should require validation before submit, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("dry_run"),
+                "system prompt should require dry run before submit, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("submit_for_review"),
+                "system prompt should require review submit, got: {:?}",
                 requests[0].system_prompt
             );
 
