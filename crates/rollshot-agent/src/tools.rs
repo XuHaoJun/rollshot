@@ -1017,7 +1017,9 @@ impl Tool for OcrTool {
                 .iter()
                 .find(|region| region.name == region_name)
                 .ok_or_else(|| {
-                    ToolError::ArgumentDecode(format!("unknown canonical OCR region: {region_name}"))
+                    ToolError::ArgumentDecode(format!(
+                        "unknown canonical OCR region: {region_name}"
+                    ))
                 })?;
 
             let Some(query) = region.query.clone() else {
@@ -2418,10 +2420,7 @@ pub(crate) mod tests {
                     result_json["capabilities"]["template_match"]["status"].as_str(),
                     Some("unavailable")
                 );
-                assert_eq!(
-                    result_json["ocr_regions"][0]["name"].as_str(),
-                    Some("full")
-                );
+                assert_eq!(result_json["ocr_regions"][0]["name"].as_str(), Some("full"));
                 assert!(result_json["ocr_regions"][0].get("query").is_none());
                 assert_eq!(
                     result_json["capabilities"]["ocr"]["status"].as_str(),

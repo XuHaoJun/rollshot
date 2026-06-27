@@ -1212,9 +1212,8 @@ pub(crate) mod tests {
     use crate::domain::SessionId;
     use crate::runtime::{EvidenceKind, NullEventSink, RunBudget};
     use crate::tools::{
-        DryRunTool, GetContextSummaryTool, InspectImageContextTool, OcrTool,
-        RegionFeaturesTool, ReplaceSourceTool, SubmitForReviewTool, ToolRegistryLimits,
-        ValidateSourceTool,
+        DryRunTool, GetContextSummaryTool, InspectImageContextTool, OcrTool, RegionFeaturesTool,
+        ReplaceSourceTool, SubmitForReviewTool, ToolRegistryLimits, ValidateSourceTool,
     };
     use rig_core::completion::Usage;
     use rig_core::streaming::StreamedAssistantContent;

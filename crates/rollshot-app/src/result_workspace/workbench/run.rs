@@ -1068,8 +1068,7 @@ function main(input) {
             return;
         }
         let font = font.unwrap();
-        let mut image =
-            image::RgbaImage::from_pixel(480, 160, image::Rgba([255, 255, 255, 255]));
+        let mut image = image::RgbaImage::from_pixel(480, 160, image::Rgba([255, 255, 255, 255]));
         draw_text_mut(
             &mut image,
             image::Rgba([0, 0, 0, 255]),
@@ -1083,8 +1082,11 @@ function main(input) {
         let vision = prepare_vision_context(&image).unwrap();
         let region_catalog = canonical_region_feature_catalog(480, 160);
         let ocr_catalog = canonical_ocr_catalog(480, 160);
-        let inspection =
-            authoring_inspection_context(PayloadMode::FullScreenshot, &region_catalog, &ocr_catalog);
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &region_catalog,
+            &ocr_catalog,
+        );
         let cancel = rollshot_agent::runtime::RunCancellation::new();
         let ctx = std::sync::Arc::new(rollshot_agent::tools::ToolContext::new(
             rollshot_agent::domain::SessionId::new(1),
