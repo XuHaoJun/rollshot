@@ -1876,21 +1876,164 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Inspection: unavailable ----
+    // ---- Inspection: OCR ----
+
+    #[test]
+    fn inspect_ocr_schema_is_object() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = OcrTool::new(ctx, host, inspection_context_for_tests().ocr_regions);
+        let schema = tool.json_schema();
+        assert_eq!(schema["type"].as_str(), Some("object"));
+    }
+
+    #[test]
+    fn inspect_ocr_schema_advertises_canonical_regions() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = OcrTool::new(ctx, host, inspection_context_for_tests().ocr_regions);
+        let schema = tool.json_schema().to_string();
+        for name in [
+            "full",
+            "top_strip",
+            "left_strip",
+            "right_strip",
+            "bottom_strip",
+        ] {
+            assert!(
+                schema.contains(name),
+                "schema should advertise canonical OCR region {name}, got: {schema}"
+            );
+        }
+    }
 
     #[tokio::test]
-    async fn ocr_returns_unavailable() {
-        let tool = OcrTool::new();
-        let args = serde_json::json!({});
-        let result = tool.call(&args).await.unwrap();
+    async fn inspect_ocr_rejects_unknown_region() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = OcrTool::new(ctx, host, inspection_context_for_tests().ocr_regions);
+
+        let err = tool
+            .call(&serde_json::json!({"region": "custom_rect"}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::ArgumentDecode(_)));
+    }
+
+    #[tokio::test]
+    async fn inspect_ocr_returns_full_text_bounds_and_confidence() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(rollshot_automation::FakeAutomationHost {
+            ocr_results: vec![rollshot_automation::OcrMatch {
+                bounds: rollshot_image_document::ImageRect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 120.0,
+                    height: 24.0,
+                },
+                text: "alice@example.com".into(),
+                confidence: 0.92,
+            }],
+            ..Default::default()
+        }));
+        let tool = OcrTool::new(ctx, host, inspection_context_for_tests().ocr_regions);
+
+        let result = tool
+            .call(&serde_json::json!({"region": "full"}))
+            .await
+            .unwrap();
 
         match result {
             ToolOutcome::Success { result_json } => {
-                assert_eq!(result_json["capability"].as_str(), Some("ocr"));
-                assert!(result_json["reason"]
-                    .as_str()
-                    .unwrap()
-                    .contains("not available"));
+                assert_eq!(result_json["region"].as_str(), Some("full"));
+                assert_eq!(result_json["status"].as_str(), Some("available"));
+                assert_eq!(result_json["matches"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    result_json["matches"][0]["text"].as_str(),
+                    Some("alice@example.com")
+                );
+                assert_eq!(
+                    result_json["matches"][0]["bounds"]["x"].as_f64(),
+                    Some(10.0)
+                );
+                assert_eq!(
+                    result_json["matches"][0]["confidence"].as_f64(),
+                    Some(0.9200000166893005)
+                );
+                assert!(result_json["unavailable_reason"].is_null());
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_ocr_returns_unavailable_for_skipped_region() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let regions = vec![CanonicalOcrInspection {
+            name: "full".into(),
+            bounds: Some(rollshot_image_document::ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100_000.0,
+                height: 100_000.0,
+            }),
+            query: None,
+            unavailable_reason: Some("area_limit_exceeded".into()),
+        }];
+        let tool = OcrTool::new(ctx, host, regions);
+
+        let result = tool
+            .call(&serde_json::json!({"region": "full"}))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["status"].as_str(), Some("unavailable"));
+                assert_eq!(
+                    result_json["unavailable_reason"].as_str(),
+                    Some("area_limit_exceeded")
+                );
+                assert!(result_json["matches"].as_array().unwrap().is_empty());
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_ocr_converts_host_error_to_unavailable() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(rollshot_automation::FakeAutomationHost {
+            failure: Some(rollshot_automation::CapabilityError::Failed {
+                code: "vision_index_unavailable",
+            }),
+            ..Default::default()
+        }));
+        let tool = OcrTool::new(ctx, host, inspection_context_for_tests().ocr_regions);
+
+        let result = tool
+            .call(&serde_json::json!({"region": "full"}))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["status"].as_str(), Some("unavailable"));
+                assert_eq!(
+                    result_json["unavailable_reason"].as_str(),
+                    Some("vision_index_unavailable")
+                );
+                assert!(result_json["matches"].as_array().unwrap().is_empty());
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -2092,7 +2235,21 @@ pub(crate) mod tests {
                 }),
                 unavailable_reason: None,
             }],
-            ocr_status: CapabilityStatus::unavailable("ocr_disabled"),
+            ocr_regions: vec![CanonicalOcrInspection {
+                name: "full".into(),
+                bounds: Some(rollshot_image_document::ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                }),
+                query: Some(rollshot_automation::OcrQuery {
+                    region: rollshot_automation::Region::Full,
+                    limit: 50,
+                }),
+                unavailable_reason: None,
+            }],
+            ocr_status: CapabilityStatus::available(),
             layout_status: CapabilityStatus::unavailable("capability_unavailable"),
             template_match_status: CapabilityStatus::unavailable("no_capability_handles"),
         }
@@ -2143,6 +2300,15 @@ pub(crate) mod tests {
                 assert_eq!(
                     result_json["capabilities"]["template_match"]["status"].as_str(),
                     Some("unavailable")
+                );
+                assert_eq!(
+                    result_json["ocr_regions"][0]["name"].as_str(),
+                    Some("full")
+                );
+                assert!(result_json["ocr_regions"][0].get("query").is_none());
+                assert_eq!(
+                    result_json["capabilities"]["ocr"]["status"].as_str(),
+                    Some("available")
                 );
             }
             other => panic!("expected success, got {other:?}"),
