@@ -668,7 +668,7 @@ impl Tool for DryRunTool {
                 image_height: self.ctx.image_dims.1,
                 region: None,
                 annotations: Vec::new(),
-                capability_handles: std::collections::BTreeMap::new(),
+                capability_handles: self.ctx.capability_handles.clone(),
             };
 
             let cancellation = self.ctx.automation_cancellation.clone();
@@ -2576,6 +2576,41 @@ pub(crate) mod tests {
                 assert!(area > 0.0, "affected area should be positive");
             }
             other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_exposes_capability_handles_to_javascript_input() {
+        let ctx = test_context_with_handles("source", template_handle_map());
+        let tool = DryRunTool::new(
+            ctx,
+            Arc::new(rollshot_automation_rquickjs::QuickJsExecutor),
+            Arc::new(Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            )),
+        );
+
+        let source = r#"
+function main(input) {
+  return input.capabilityHandles.logo === "tpl-logo-v1"
+    ? { candidates: [{ kind: "addRedaction", bounds: { x: 0, y: 0, width: 10, height: 10 }, confidence: 0.9, label: "handle-visible" }] }
+    : { candidates: [] };
+}
+"#;
+        let result = tool
+            .call(&serde_json::json!({"source": source, "generation": 0}))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(
+                    result_json["candidate_count"].as_u64(),
+                    Some(1),
+                    "expected JavaScript to see input.capabilityHandles.logo"
+                );
+            }
+            other => panic!("expected dry-run success, got {other:?}"),
         }
     }
 
