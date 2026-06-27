@@ -313,6 +313,7 @@ pub struct CapabilityUnavailable {
 pub struct AuthoringInspectionContext {
     pub payload_mode: String,
     pub regions: Vec<CanonicalRegionInspection>,
+    pub ocr_regions: Vec<CanonicalOcrInspection>,
     pub ocr_status: CapabilityStatus,
     pub layout_status: CapabilityStatus,
     pub template_match_status: CapabilityStatus,
@@ -324,6 +325,15 @@ pub struct CanonicalRegionInspection {
     pub bounds: Option<rollshot_image_document::ImageRect>,
     #[serde(skip_serializing)]
     pub query: Option<rollshot_automation::RegionFeaturesQuery>,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CanonicalOcrInspection {
+    pub name: String,
+    pub bounds: Option<rollshot_image_document::ImageRect>,
+    #[serde(skip_serializing)]
+    pub query: Option<rollshot_automation::OcrQuery>,
     pub unavailable_reason: Option<String>,
 }
 
@@ -383,6 +393,7 @@ pub struct ImageContextResult {
     pub image: ImageContextImage,
     pub source: ImageContextSource,
     pub regions: Vec<CanonicalRegionInspection>,
+    pub ocr_regions: Vec<CanonicalOcrInspection>,
     pub capabilities: ImageContextCapabilities,
 }
 
@@ -884,6 +895,27 @@ impl Tool for InspectImageContextTool {
                 CapabilityStatus::available()
             };
 
+            let ocr_prepared = self
+                .inspection
+                .ocr_regions
+                .iter()
+                .filter(|region| region.query.is_some())
+                .count();
+            let ocr_skipped = self
+                .inspection
+                .ocr_regions
+                .len()
+                .saturating_sub(ocr_prepared);
+            let ocr = if self.inspection.ocr_regions.is_empty() {
+                self.inspection.ocr_status.clone()
+            } else if ocr_prepared == 0 {
+                CapabilityStatus::unavailable("no_prepared_ocr_regions")
+            } else if ocr_skipped > 0 {
+                CapabilityStatus::partial("some_ocr_regions_unavailable")
+            } else {
+                CapabilityStatus::available()
+            };
+
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(ImageContextResult {
                     image: ImageContextImage {
@@ -897,9 +929,10 @@ impl Tool for InspectImageContextTool {
                         evidence_count,
                     },
                     regions: self.inspection.regions.clone(),
+                    ocr_regions: self.inspection.ocr_regions.clone(),
                     capabilities: ImageContextCapabilities {
                         region_features,
-                        ocr: self.inspection.ocr_status.clone(),
+                        ocr,
                         layout: self.inspection.layout_status.clone(),
                         template_match: self.inspection.template_match_status.clone(),
                     },
@@ -945,12 +978,23 @@ impl Tool for GetContextSummaryTool {
     }
 }
 
-#[derive(Default)]
-pub struct OcrTool;
+pub struct OcrTool {
+    _ctx: Arc<ToolContext>,
+    host: Arc<Mutex<dyn rollshot_automation::AutomationHost>>,
+    regions: Vec<CanonicalOcrInspection>,
+}
 
 impl OcrTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(
+        ctx: Arc<ToolContext>,
+        host: Arc<Mutex<dyn rollshot_automation::AutomationHost>>,
+        regions: Vec<CanonicalOcrInspection>,
+    ) -> Self {
+        Self {
+            _ctx: ctx,
+            host,
+            regions,
+        }
     }
 }
 
@@ -960,18 +1004,75 @@ impl Tool for OcrTool {
     }
 
     fn json_schema(&self) -> Value {
-        tool_schema::<EmptyArgs>()
+        tool_schema::<InspectRegionFeaturesArgs>()
     }
 
-    fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
+    fn call<'a>(&'a self, arguments: &'a Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            Ok(ToolOutcome::Success {
-                result_json: serde_json::to_value(CapabilityUnavailable {
-                    capability: "ocr".into(),
-                    reason: "OCR not available in this context".into(),
-                })
-                .unwrap_or_default(),
-            })
+            let args: InspectRegionFeaturesArgs = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+            let region_name = args.region.as_str();
+            let region = self
+                .regions
+                .iter()
+                .find(|region| region.name == region_name)
+                .ok_or_else(|| {
+                    ToolError::ArgumentDecode(format!("unknown canonical OCR region: {region_name}"))
+                })?;
+
+            let Some(query) = region.query.clone() else {
+                return Ok(ToolOutcome::Success {
+                    result_json: serde_json::to_value(InspectOcrResult {
+                        region: region.name.clone(),
+                        status: "unavailable".into(),
+                        bounds: region.bounds,
+                        matches: Vec::new(),
+                        unavailable_reason: region
+                            .unavailable_reason
+                            .clone()
+                            .or_else(|| Some("ocr_region_unavailable".into())),
+                    })
+                    .unwrap_or_default(),
+                });
+            };
+
+            let matches = {
+                let mut host = self.host.lock().unwrap();
+                host.ocr(query)
+            };
+
+            match matches {
+                Ok(matches) => {
+                    let summaries = matches
+                        .into_iter()
+                        .map(|m| OcrMatchSummary {
+                            bounds: m.bounds,
+                            text: m.text,
+                            confidence: m.confidence,
+                        })
+                        .collect();
+                    Ok(ToolOutcome::Success {
+                        result_json: serde_json::to_value(InspectOcrResult {
+                            region: region.name.clone(),
+                            status: "available".into(),
+                            bounds: region.bounds,
+                            matches: summaries,
+                            unavailable_reason: None,
+                        })
+                        .unwrap_or_default(),
+                    })
+                }
+                Err(error) => Ok(ToolOutcome::Success {
+                    result_json: serde_json::to_value(InspectOcrResult {
+                        region: region.name.clone(),
+                        status: "unavailable".into(),
+                        bounds: region.bounds,
+                        matches: Vec::new(),
+                        unavailable_reason: Some(capability_error_code(error)),
+                    })
+                    .unwrap_or_default(),
+                }),
+            }
         })
     }
 }
@@ -1048,6 +1149,22 @@ pub struct InspectRegionFeaturesResult {
     pub status: String,
     pub bounds: Option<rollshot_image_document::ImageRect>,
     pub features: Vec<RegionFeatureSummary>,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OcrMatchSummary {
+    pub bounds: rollshot_image_document::ImageRect,
+    pub text: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectOcrResult {
+    pub region: String,
+    pub status: String,
+    pub bounds: Option<rollshot_image_document::ImageRect>,
+    pub matches: Vec<OcrMatchSummary>,
     pub unavailable_reason: Option<String>,
 }
 
@@ -2291,7 +2408,7 @@ pub(crate) mod tests {
                 );
                 assert_eq!(
                     result_json["capabilities"]["ocr"]["status"].as_str(),
-                    Some("unavailable")
+                    Some("available")
                 );
                 assert_eq!(
                     result_json["capabilities"]["layout"]["status"].as_str(),

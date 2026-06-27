@@ -168,6 +168,7 @@ fn authoring_inspection_context(
     rollshot_agent::tools::AuthoringInspectionContext {
         payload_mode: payload_mode.into(),
         regions,
+        ocr_regions: vec![],
         ocr_status: rollshot_agent::tools::CapabilityStatus::unavailable("ocr_disabled"),
         layout_status: rollshot_agent::tools::CapabilityStatus::unavailable(
             "capability_unavailable",

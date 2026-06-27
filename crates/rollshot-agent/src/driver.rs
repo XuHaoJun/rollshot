@@ -3196,6 +3196,7 @@ pub(crate) mod tests {
                     }),
                     unavailable_reason: None,
                 }],
+                ocr_regions: vec![],
                 ocr_status: crate::tools::CapabilityStatus::unavailable("ocr_disabled"),
                 layout_status: crate::tools::CapabilityStatus::unavailable(
                     "capability_unavailable",
