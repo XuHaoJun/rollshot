@@ -1,6 +1,8 @@
 # Smart Redaction Agent Phase B2 OCR Inspection Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Status:** Complete
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add truthful OCR inspection to Smart Redaction authoring runs, with full OCR text exposed through `inspect_ocr` only when OCR is compiled and prepared.
 
@@ -40,7 +42,7 @@ No other files are required for this phase.
 - Modify: `crates/rollshot-agent/src/tools.rs`
 - Test: `crates/rollshot-agent/src/tools.rs`
 
-- [ ] **Step 1: Add failing tests for OCR inspection context and tool behavior**
+- [x] **Step 1: Add failing tests for OCR inspection context and tool behavior**
 
 In `crates/rollshot-agent/src/tools.rs`, inside `#[cfg(test)] pub(crate) mod tests`, replace the existing `ocr_returns_unavailable` test with the following tests and update `inspection_context_for_tests()` as shown.
 
@@ -240,7 +242,7 @@ Also extend `inspect_image_context_returns_authoring_and_region_context()` with 
                 );
 ```
 
-- [ ] **Step 2: Run tests to verify they fail before implementation**
+- [x] **Step 2: Run tests to verify they fail before implementation**
 
 Run:
 
@@ -251,7 +253,7 @@ rtk cargo test -p rollshot-agent inspect_image_context_returns_authoring_and_reg
 
 Expected: FAIL to compile with missing `CanonicalOcrInspection`, missing `ocr_regions`, and `OcrTool::new` signature mismatch.
 
-- [ ] **Step 3: Commit the failing contract tests**
+- [x] **Step 3: Commit the failing contract tests**
 
 ```bash
 rtk git add crates/rollshot-agent/src/tools.rs
@@ -266,7 +268,7 @@ rtk git commit -m "test(agent): define smart redaction OCR inspection contract"
 - Modify: `crates/rollshot-agent/src/tools.rs`
 - Test: `crates/rollshot-agent/src/tools.rs`
 
-- [ ] **Step 1: Add OCR inspection context/result types**
+- [x] **Step 1: Add OCR inspection context/result types**
 
 In `crates/rollshot-agent/src/tools.rs`, update the inspection types near `AuthoringInspectionContext`:
 
@@ -311,7 +313,7 @@ pub struct InspectOcrResult {
 }
 ```
 
-- [ ] **Step 2: Extend image context result with OCR regions**
+- [x] **Step 2: Extend image context result with OCR regions**
 
 Add `ocr_regions` to `ImageContextResult`:
 
@@ -363,7 +365,7 @@ Use that `ocr` value in the serialized result:
                     },
 ```
 
-- [ ] **Step 3: Replace the OCR unavailable stub with a prepared-host tool**
+- [x] **Step 3: Replace the OCR unavailable stub with a prepared-host tool**
 
 Replace the existing `OcrTool` implementation with this structure:
 
@@ -470,7 +472,7 @@ impl Tool for OcrTool {
 
 Keep `LayoutTool` unchanged.
 
-- [ ] **Step 4: Run agent tool tests**
+- [x] **Step 4: Run agent tool tests**
 
 Run:
 
@@ -481,7 +483,7 @@ rtk cargo test -p rollshot-agent inspect_image_context
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit agent OCR tool implementation**
+- [x] **Step 5: Commit agent OCR tool implementation**
 
 ```bash
 rtk git add crates/rollshot-agent/src/tools.rs
@@ -497,7 +499,7 @@ rtk git commit -m "feat(agent): inspect prepared OCR regions"
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
 - Test: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
 
-- [ ] **Step 1: Add failing catalog tests**
+- [x] **Step 1: Add failing catalog tests**
 
 In `crates/rollshot-app/src/result_workspace/workbench/run.rs`, inside `mod prepare_tests`, add:
 
@@ -552,7 +554,7 @@ In `crates/rollshot-app/src/result_workspace/workbench/run.rs`, inside `mod prep
     }
 ```
 
-- [ ] **Step 2: Run tests to verify missing catalog failure**
+- [x] **Step 2: Run tests to verify missing catalog failure**
 
 Run:
 
@@ -562,7 +564,7 @@ rtk cargo test -p rollshot-app canonical_ocr_catalog
 
 Expected: FAIL to compile because `canonical_ocr_catalog` does not exist.
 
-- [ ] **Step 3: Add the Cargo feature**
+- [x] **Step 3: Add the Cargo feature**
 
 In `crates/rollshot-app/Cargo.toml`, update `[features]`:
 
@@ -582,7 +584,7 @@ serde_json = { workspace = true }
 tempfile = "3"
 ```
 
-- [ ] **Step 4: Add OCR catalog types and constants**
+- [x] **Step 4: Add OCR catalog types and constants**
 
 In `crates/rollshot-app/src/result_workspace/workbench/run.rs`, near the B1 catalog constants and type, add:
 
@@ -701,7 +703,7 @@ fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcrEntry> {
 }
 ```
 
-- [ ] **Step 5: Extend authoring inspection context conversion**
+- [x] **Step 5: Extend authoring inspection context conversion**
 
 Change `authoring_inspection_context` signature:
 
@@ -760,7 +762,7 @@ In `start_agent_run`, construct both catalogs:
         );
 ```
 
-- [ ] **Step 6: Run workbench catalog tests**
+- [x] **Step 6: Run workbench catalog tests**
 
 Run:
 
@@ -771,7 +773,7 @@ rtk cargo test -p rollshot-app result_workspace::workbench::run::prepare_tests::
 
 Expected: PASS. The registry test still excludes `inspect_ocr` in the default build.
 
-- [ ] **Step 7: Commit feature flag and OCR catalog**
+- [x] **Step 7: Commit feature flag and OCR catalog**
 
 ```bash
 rtk git add crates/rollshot-app/Cargo.toml crates/rollshot-app/src/result_workspace/workbench/run.rs
@@ -786,7 +788,7 @@ rtk git commit -m "feat(app): add smart redaction OCR inspection catalog"
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
 - Test: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
 
-- [ ] **Step 1: Add failing registry and dry-run tests**
+- [x] **Step 1: Add failing registry and dry-run tests**
 
 Inside `mod prepare_tests`, add an OCR-enabled registry test:
 
@@ -898,7 +900,7 @@ function main(input) {
     }
 ```
 
-- [ ] **Step 2: Run tests to verify registry test fails before registration**
+- [x] **Step 2: Run tests to verify registry test fails before registration**
 
 Run:
 
@@ -908,7 +910,7 @@ rtk cargo test -p rollshot-app --features ocr authoring_registry_exposes_ocr_too
 
 Expected: FAIL because `inspect_ocr` is not registered yet.
 
-- [ ] **Step 3: Add OCR preparation helper**
+- [x] **Step 3: Add OCR preparation helper**
 
 In `crates/rollshot-app/src/result_workspace/workbench/run.rs`, add:
 
@@ -947,7 +949,7 @@ Call it in `run_existing_preset` after region-feature preparation:
     prepare_phase_b2_ocr(&mut host, &index)?;
 ```
 
-- [ ] **Step 4: Register `inspect_ocr` only in OCR-enabled app builds**
+- [x] **Step 4: Register `inspect_ocr` only in OCR-enabled app builds**
 
 In `build_authoring_tool_registry`, add `OcrTool` to the import list:
 
@@ -969,7 +971,7 @@ After `RegionFeaturesTool` registration and before `DryRunTool`, add:
     )?;
 ```
 
-- [ ] **Step 5: Run default and OCR-enabled workbench tests**
+- [x] **Step 5: Run default and OCR-enabled workbench tests**
 
 Run:
 
@@ -981,7 +983,7 @@ rtk cargo test -p rollshot-app --features ocr prepared_vision_context_dry_runs_f
 
 Expected: PASS. If the OCR dry-run test fails because local OCR runtime dependencies are unavailable, capture the exact error and keep the registry/catalog tests passing; do not replace the test with a fake-host assertion unless the error is an environment setup failure outside the crate.
 
-- [ ] **Step 6: Commit OCR product wiring**
+- [x] **Step 6: Commit OCR product wiring**
 
 ```bash
 rtk git add crates/rollshot-app/src/result_workspace/workbench/run.rs
@@ -996,7 +998,7 @@ rtk git commit -m "feat(app): wire OCR inspection into smart redaction runs"
 - Modify: `crates/rollshot-agent/src/driver.rs`
 - Test: `crates/rollshot-agent/src/driver.rs`
 
-- [ ] **Step 1: Add failing prompt/schema assertions**
+- [x] **Step 1: Add failing prompt/schema assertions**
 
 In `second_turn_request_carries_history_and_tool_schemas`, update the test inspection context to include `ocr_regions`:
 
@@ -1065,7 +1067,7 @@ Add OCR schema assertion after `region_features_def`:
             );
 ```
 
-- [ ] **Step 2: Run driver prompt test to verify failure**
+- [x] **Step 2: Run driver prompt test to verify failure**
 
 Run:
 
@@ -1075,7 +1077,7 @@ rtk cargo test -p rollshot-agent second_turn_request_carries_history_and_tool_sc
 
 Expected: FAIL because the prompt does not yet contain the new OCR guidance.
 
-- [ ] **Step 3: Update the Smart Redaction system prompt**
+- [x] **Step 3: Update the Smart Redaction system prompt**
 
 In `SMART_REDACTION_SYSTEM_PROMPT`, replace the current OCR/layout guidance:
 
@@ -1102,7 +1104,7 @@ Inspection loop:
 5. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
 ```
 
-- [ ] **Step 4: Keep prompt examples valid**
+- [x] **Step 4: Keep prompt examples valid**
 
 Run:
 
@@ -1112,7 +1114,7 @@ rtk cargo test -p rollshot-agent smart_redaction_prompt_examples_validate
 
 Expected: PASS. If the OCR example extraction now includes the `Inspection loop:` marker incorrectly, adjust the test marker from `"Authoring loop:"` to `"Inspection loop:"` so only the JavaScript example is validated.
 
-- [ ] **Step 5: Run driver tests**
+- [x] **Step 5: Run driver tests**
 
 Run:
 
@@ -1123,7 +1125,7 @@ rtk cargo test -p rollshot-agent smart_redaction_prompt_examples_validate
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit prompt contract changes**
+- [x] **Step 6: Commit prompt contract changes**
 
 ```bash
 rtk git add crates/rollshot-agent/src/driver.rs
@@ -1137,7 +1139,7 @@ rtk git commit -m "feat(agent): guide OCR inspection in smart redaction prompt"
 **Files:**
 - No source edits unless verification exposes a defect in this phase's changes.
 
-- [ ] **Step 1: Run narrow default-build checks**
+- [x] **Step 1: Run narrow default-build checks**
 
 Run:
 
@@ -1150,7 +1152,7 @@ rtk cargo test -p rollshot-app result_workspace::workbench
 
 Expected: PASS.
 
-- [ ] **Step 2: Run OCR-enabled checks**
+- [x] **Step 2: Run OCR-enabled checks**
 
 Run:
 
@@ -1162,7 +1164,7 @@ rtk cargo test -p rollshot-vision --features ocr ocr
 
 Expected: PASS. If `rollshot-ocr` model provisioning or ONNX Runtime setup fails, record the exact failing command and stderr in the final response; do not claim OCR runtime verification passed.
 
-- [ ] **Step 3: Run formatting**
+- [x] **Step 3: Run formatting**
 
 Run:
 
@@ -1172,7 +1174,7 @@ rtk cargo fmt --check
 
 Expected: PASS.
 
-- [ ] **Step 4: Run broader package tests**
+- [x] **Step 4: Run broader package tests**
 
 Run:
 
@@ -1183,7 +1185,7 @@ rtk cargo test -p rollshot-app
 
 Expected: PASS.
 
-- [ ] **Step 5: Inspect final git status**
+- [x] **Step 5: Inspect final git status**
 
 Run:
 
@@ -1193,7 +1195,7 @@ rtk git status --short
 
 Expected: only intentional tracked changes from this phase are present. Ignore unrelated untracked `learn-projects/claude-code-source-code/` if it is still present.
 
-- [ ] **Step 6: Commit verification fixes if needed**
+- [x] **Step 6: Commit verification fixes if needed**
 
 If any verification step required a source fix, commit only the expected B2 files touched by that fix:
 

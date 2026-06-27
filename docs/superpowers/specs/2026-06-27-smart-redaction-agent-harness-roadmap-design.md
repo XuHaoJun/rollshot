@@ -1,7 +1,7 @@
 # Smart Redaction Agent Harness Roadmap
 
 **Date:** 2026-06-27
-**Status:** Active roadmap; Phase A complete
+**Status:** Active roadmap; Phase B2 complete
 
 ## Context
 
@@ -47,18 +47,30 @@ screenshot attachment alone.
   - Workbench dry-run and existing-preset execution prepare canonical
     region-feature queries before QuickJS.
   - Dry-run results include bounded candidate previews.
+- Phase B1: RegionFeatures-First Inspection Surface was implemented on
+  `feat/smart-redaction-agent-harness-roadmap`.
+  - Product Smart Redaction runs expose truthful image context,
+    region-feature inspection, capability availability, and authoring state.
+  - Region-feature observations are bounded, named, and backed by prepared
+    `RealAutomationHost` context.
+- Phase B2: OCR-Enabled Inspection Surface was implemented on
+  `feat/smart-redaction-agent-harness-roadmap`.
+  - OCR-enabled builds expose `inspect_ocr` backed by prepared canonical OCR
+    regions.
+  - Default builds keep OCR unavailable and do not register a fake OCR tool.
+  - The authoring prompt now directs text-driven requests through OCR
+    inspection before source changes.
 
 ### Remaining Gaps
 
 - The agent has source replacement and validation tools, but still lacks a rich
   equivalent of "read the file and environment before editing."
-- The workbench registers authoring tools and a context summary, but still does
-  not expose useful screenshot inspection observations to the model.
-- Inspection tools for OCR, layout, and region features still exist as stubs in
-  `rollshot-agent`; product runs avoid them until they return truthful data.
-- `RealAutomationHost` now prepares canonical region-feature results for dry-run
-  and existing-preset execution, but OCR, layout, template matching, and
-  arbitrary region inspection remain unavailable in product authoring runs.
+- Layout and template inspection still remain unavailable in product authoring
+  runs until they return truthful data.
+- `RealAutomationHost` now prepares canonical region-feature results and,
+  behind OCR-enabled builds, canonical OCR results for dry-run and product
+  authoring inspection. Template matching and arbitrary region inspection remain
+  unavailable in product authoring runs.
 - `AutomationInput.capability_handles` is empty in the product workbench path,
   so fixture-style template presets cannot work there yet.
 - Dry-run returns bounded candidate previews, but the model still needs
@@ -88,9 +100,7 @@ Phase B is split into multiple implementation specs so inspection can improve
 without mixing OCR model/toolchain risk, template lifecycle design, and source
 editing ergonomics into one change.
 
-#### Phase B1: RegionFeatures-First Inspection Surface
-
-Immediate next target.
+#### Phase B1: RegionFeatures-First Inspection Surface — Complete
 
 - Add real inspection tools for image dimensions, canonical prepared
   region-feature observations, capability availability, and current authoring
@@ -101,7 +111,7 @@ Immediate next target.
 - Keep raw pixels and OCR text out of tool results.
 - Keep OCR/layout/template-match inspection unavailable but structured.
 
-#### Phase B2: OCR-Enabled Inspection Surface
+#### Phase B2: OCR-Enabled Inspection Surface — Complete
 
 - Add `inspect_ocr` only when the `rollshot-vision/ocr` feature is compiled and
   the OCR engine can prepare bounded regions.
@@ -110,7 +120,7 @@ Immediate next target.
 - Make OCR-disabled builds report structured unavailable responses without
   exposing a fake working tool.
 
-#### Phase B3: Capability Handle Visibility
+#### Phase B3: Capability Handle Visibility — Drafted
 
 - Expose available `AutomationInput.capability_handles` and capability
   availability metadata to the model.
@@ -203,9 +213,5 @@ Make reusable visual detectors work beyond the first screenshot.
 
 ## Open Decisions
 
-- Whether Phase B2 should expose OCR text directly, truncated text, hashed text,
-  or geometry-only matches in OCR/layout-only mode.
-- Whether template handles become visible in B3 before Phase F persistence, or
-  stay entirely deferred until the capability lifecycle exists.
 - Whether source editing should use exact-replace, unified diff, or AST-aware
   operations in Phase C.
