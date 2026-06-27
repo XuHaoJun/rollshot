@@ -589,7 +589,6 @@ impl Tool for DryRunTool {
             let candidate_preview: Vec<DryRunCandidatePreview> = proposal
                 .candidates
                 .iter()
-                .take(DRY_RUN_CANDIDATE_PREVIEW_LIMIT)
                 .filter_map(|candidate| match &candidate.edit {
                     rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds } => {
                         Some(DryRunCandidatePreview {
@@ -601,6 +600,7 @@ impl Tool for DryRunTool {
                     }
                     _ => None,
                 })
+                .take(DRY_RUN_CANDIDATE_PREVIEW_LIMIT)
                 .collect();
 
             let mut draft = self.ctx.draft.lock().unwrap();
