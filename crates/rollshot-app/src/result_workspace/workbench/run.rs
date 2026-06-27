@@ -938,19 +938,21 @@ mod prepare_tests {
 
     fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
         let cancel = rollshot_agent::runtime::RunCancellation::new();
-        std::sync::Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
-            rollshot_agent::domain::SessionId::new(1),
-            String::new(),
-            rollshot_automation::ValidationLimits::default(),
-            rollshot_automation::ExecutionPolicy::smart_redaction_default(
-                std::time::Duration::from_secs(5),
-                4 * 1024 * 1024,
-                1024 * 1024,
+        std::sync::Arc::new(
+            rollshot_agent::tools::ToolContext::new_with_capability_handles(
+                rollshot_agent::domain::SessionId::new(1),
+                String::new(),
+                rollshot_automation::ValidationLimits::default(),
+                rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                    std::time::Duration::from_secs(5),
+                    4 * 1024 * 1024,
+                    1024 * 1024,
+                ),
+                (64, 64),
+                product_capability_handles(),
+                &cancel,
             ),
-            (64, 64),
-            product_capability_handles(),
-            &cancel,
-        ))
+        )
     }
 
     #[test]
@@ -1018,7 +1020,10 @@ mod prepare_tests {
                     result_json["ocr_regions"].as_array().unwrap().is_empty(),
                     "default builds must not advertise prepared OCR regions"
                 );
-                assert!(result_json["capability_handles"].as_array().unwrap().is_empty());
+                assert!(result_json["capability_handles"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty());
                 assert_eq!(
                     result_json["capabilities"]["template_match"]["reason"].as_str(),
                     Some("no_capability_handles")
@@ -1044,7 +1049,10 @@ mod prepare_tests {
 
         match result {
             rollshot_agent::tools::ToolOutcome::Success { result_json } => {
-                assert!(result_json["capability_handles"].as_array().unwrap().is_empty());
+                assert!(result_json["capability_handles"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty());
                 assert_eq!(
                     result_json["capabilities"]["template_match"]["status"].as_str(),
                     Some("unavailable")
@@ -1172,19 +1180,21 @@ function main(input) {
             &ocr_catalog,
         );
         let cancel = rollshot_agent::runtime::RunCancellation::new();
-        let ctx = std::sync::Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
-            rollshot_agent::domain::SessionId::new(1),
-            String::new(),
-            rollshot_automation::ValidationLimits::default(),
-            rollshot_automation::ExecutionPolicy::smart_redaction_default(
-                std::time::Duration::from_secs(5),
-                4 * 1024 * 1024,
-                1024 * 1024,
+        let ctx = std::sync::Arc::new(
+            rollshot_agent::tools::ToolContext::new_with_capability_handles(
+                rollshot_agent::domain::SessionId::new(1),
+                String::new(),
+                rollshot_automation::ValidationLimits::default(),
+                rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                    std::time::Duration::from_secs(5),
+                    4 * 1024 * 1024,
+                    1024 * 1024,
+                ),
+                (480, 160),
+                product_capability_handles(),
+                &cancel,
             ),
-            (480, 160),
-            product_capability_handles(),
-            &cancel,
-        ));
+        );
         let host = vision.host.clone()
             as std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>>;
 
