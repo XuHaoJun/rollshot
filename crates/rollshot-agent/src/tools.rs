@@ -1711,7 +1711,10 @@ pub(crate) mod tests {
         match result {
             ToolOutcome::Success { result_json } => {
                 assert_eq!(result_json["candidate_count"].as_u64(), Some(8));
-                assert_eq!(result_json["candidate_preview"].as_array().unwrap().len(), 5);
+                assert_eq!(
+                    result_json["candidate_preview"].as_array().unwrap().len(),
+                    5
+                );
             }
             other => panic!("expected success, got {other:?}"),
         }

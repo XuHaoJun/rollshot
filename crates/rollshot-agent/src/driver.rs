@@ -3256,10 +3256,7 @@ pub(crate) mod tests {
                 "system prompt should prevent upload requests, got: {:?}",
                 requests[0].system_prompt
             );
-            let system_prompt = requests[0]
-                .system_prompt
-                .as_deref()
-                .unwrap_or_default();
+            let system_prompt = requests[0].system_prompt.as_deref().unwrap_or_default();
             assert!(
                 system_prompt.contains("Rollshot JavaScript authoring guide"),
                 "system prompt should include authoring guide marker, got: {:?}",
