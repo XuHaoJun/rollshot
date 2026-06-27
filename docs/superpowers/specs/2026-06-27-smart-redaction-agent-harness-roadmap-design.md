@@ -1,7 +1,7 @@
 # Smart Redaction Agent Harness Roadmap
 
 **Date:** 2026-06-27
-**Status:** Draft for user review
+**Status:** Active roadmap; Phase A complete
 
 ## Context
 
@@ -35,29 +35,38 @@ behave like it is editing code:
 The model should not be expected to infer hidden Rollshot contracts from a
 screenshot attachment alone.
 
-## Current Gaps
+## Progress
 
-- The system prompt is too small for source authoring. It does not include the
-  JavaScript subset, output shape, capability API, examples, or common recovery
-  loop.
-- The agent has source replacement and validation tools, but no good equivalent
-  of "read the file and environment before editing."
-- The workbench registers the authoring tools and a context summary, but no
-  useful screenshot inspection tools.
-- Inspection tools for OCR, layout, and region features exist as stubs that
-  report unavailable, which can mislead the model if exposed.
-- `RealAutomationHost` requires capability preparation before QuickJS execution,
-  but the workbench path currently constructs a fresh host without preparing
-  OCR, template, or region-feature results.
+### Completed
+
+- Phase A: Authoring Stabilization was implemented on
+  `feat/smart-redaction-agent-harness-roadmap`.
+  - The provider request now carries a Rollshot JavaScript authoring guide with
+    prompt-example validation.
+  - The product workbench registry exposes only truthful Phase A authoring tools.
+  - Workbench dry-run and existing-preset execution prepare canonical
+    region-feature queries before QuickJS.
+  - Dry-run results include bounded candidate previews.
+
+### Remaining Gaps
+
+- The agent has source replacement and validation tools, but still lacks a rich
+  equivalent of "read the file and environment before editing."
+- The workbench registers authoring tools and a context summary, but still does
+  not expose useful screenshot inspection observations to the model.
+- Inspection tools for OCR, layout, and region features still exist as stubs in
+  `rollshot-agent`; product runs avoid them until they return truthful data.
+- `RealAutomationHost` now prepares canonical region-feature results for dry-run
+  and existing-preset execution, but OCR, layout, template matching, and
+  arbitrary region inspection remain unavailable in product authoring runs.
 - `AutomationInput.capability_handles` is empty in the product workbench path,
   so fixture-style template presets cannot work there yet.
-- Dry-run returns only candidate count, affected area, and capability-call
-  count. It does not return enough bounded candidate evidence for the model to
-  understand whether it found the requested target.
+- Dry-run returns bounded candidate previews, but the model still needs
+  pre-authoring visual observations to choose better source before dry-run.
 
 ## Roadmap
 
-### Phase A: Authoring Stabilization
+### Phase A: Authoring Stabilization — Complete
 
 Make the existing harness usable without changing its architecture.
 
@@ -68,22 +77,52 @@ Make the existing harness usable without changing its architecture.
   context or remove them from the product registry until they are real.
 - Improve validation and dry-run tool descriptions/results enough for the model
   to iterate.
-- Add focused tests for request prompt content, tool contracts, host preparation,
-  and a region-feature-based preset.
-
-This phase is the immediate implementation target.
+- Add focused tests for request prompt content, prompt examples, tool contracts,
+  host preparation, and a region-feature-based preset.
 
 ### Phase B: Visual Inspection Surface
 
 Give the model compact, safe, structured observations about the current image.
 
-- Add real inspection tools for image dimensions, region features, OCR when
-  compiled/enabled, and available capability handles.
-- Return bounded observations with coordinates, confidence, and error codes.
-- Keep raw pixels out of tool results unless the user explicitly chose full
-  screenshot upload.
-- Make "OCR/layout-only mode" actually provide local context when full upload is
-  disabled.
+Phase B is split into multiple implementation specs so inspection can improve
+without mixing OCR model/toolchain risk, template lifecycle design, and source
+editing ergonomics into one change.
+
+#### Phase B1: RegionFeatures-First Inspection Surface
+
+Immediate next target.
+
+- Add real inspection tools for image dimensions, canonical prepared
+  region-feature observations, capability availability, and current authoring
+  state.
+- Return bounded observations with coordinates, feature summaries, and explicit
+  error/availability codes.
+- Register these truthful tools in product Smart Redaction runs.
+- Keep raw pixels and OCR text out of tool results.
+- Keep OCR/layout/template-match inspection unavailable but structured.
+
+#### Phase B2: OCR-Enabled Inspection Surface
+
+- Add `inspect_ocr` only when the `rollshot-vision/ocr` feature is compiled and
+  the OCR engine can prepare bounded regions.
+- Return bounded OCR matches with coordinates, confidence, and redacted/truncated
+  text policy decided in the B2 spec.
+- Make OCR-disabled builds report structured unavailable responses without
+  exposing a fake working tool.
+
+#### Phase B3: Capability Handle Visibility
+
+- Expose available `AutomationInput.capability_handles` and capability
+  availability metadata to the model.
+- Do not invent template-handle persistence here; only surface handles that
+  already exist.
+
+#### Phase B4: Layout and Template Inspection Follow-Up
+
+- Add real layout or template inspection only after the underlying capability
+  lifecycle is designed and testable.
+- Keep layout/template stubs out of the product registry until they return
+  truthful data.
 
 ### Phase C: Source Editing Ergonomics
 
@@ -164,9 +203,9 @@ Make reusable visual detectors work beyond the first screenshot.
 
 ## Open Decisions
 
-- Whether Phase B should expose OCR results in OCR/layout-only mode when the OCR
-  Cargo feature is disabled by default.
-- Whether template handles belong in Phase A or should wait for Phase F. Phase A
-  should not invent a persistence format for templates.
+- Whether Phase B2 should expose OCR text directly, truncated text, hashed text,
+  or geometry-only matches in OCR/layout-only mode.
+- Whether template handles become visible in B3 before Phase F persistence, or
+  stay entirely deferred until the capability lifecycle exists.
 - Whether source editing should use exact-replace, unified diff, or AST-aware
   operations in Phase C.
