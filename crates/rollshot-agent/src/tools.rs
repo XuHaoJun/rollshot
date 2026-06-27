@@ -251,11 +251,22 @@ pub struct DryRunArgs {
     pub generation: u64,
 }
 
+const DRY_RUN_CANDIDATE_PREVIEW_LIMIT: usize = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DryRunCandidatePreview {
+    pub kind: String,
+    pub bounds: rollshot_image_document::ImageRect,
+    pub confidence: f32,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DryRunResult {
     pub candidate_count: u32,
     pub affected_area: f32,
     pub capability_calls: u32,
+    pub candidate_preview: Vec<DryRunCandidatePreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -575,6 +586,23 @@ impl Tool for DryRunTool {
                 })
                 .sum();
 
+            let candidate_preview: Vec<DryRunCandidatePreview> = proposal
+                .candidates
+                .iter()
+                .take(DRY_RUN_CANDIDATE_PREVIEW_LIMIT)
+                .filter_map(|candidate| match &candidate.edit {
+                    rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds } => {
+                        Some(DryRunCandidatePreview {
+                            kind: "addRedaction".into(),
+                            bounds: *bounds,
+                            confidence: candidate.confidence,
+                            label: candidate.label.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+
             let mut draft = self.ctx.draft.lock().unwrap();
             draft
                 .record_evidence(
@@ -594,6 +622,7 @@ impl Tool for DryRunTool {
                     candidate_count: proposal.candidates.len() as u32,
                     affected_area,
                     capability_calls,
+                    candidate_preview,
                 })
                 .unwrap_or_default(),
             })
@@ -1421,6 +1450,15 @@ pub(crate) mod tests {
             ToolOutcome::Success { result_json } => {
                 assert_eq!(result_json["candidate_count"].as_u64(), Some(1));
                 assert!(result_json["affected_area"].as_f64().unwrap() > 0.0);
+                let preview = result_json["candidate_preview"].as_array().unwrap();
+                assert_eq!(preview.len(), 1);
+                assert_eq!(preview[0]["kind"].as_str(), Some("addRedaction"));
+                assert_eq!(preview[0]["label"].as_str(), Some("email"));
+                assert!((preview[0]["confidence"].as_f64().unwrap() - 0.85).abs() < 1e-6);
+                assert_eq!(preview[0]["bounds"]["x"].as_f64(), Some(5.0));
+                assert_eq!(preview[0]["bounds"]["y"].as_f64(), Some(5.0));
+                assert_eq!(preview[0]["bounds"]["width"].as_f64(), Some(20.0));
+                assert_eq!(preview[0]["bounds"]["height"].as_f64(), Some(20.0));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -1638,6 +1676,42 @@ pub(crate) mod tests {
             ToolOutcome::Success { result_json } => {
                 let area = result_json["affected_area"].as_f64().unwrap() as f32;
                 assert!(area > 0.0, "affected area should be positive");
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_candidate_preview_is_capped() {
+        let ctx = test_context(valid_js_source());
+        let candidates: Vec<_> = (0..8)
+            .map(|i| {
+                serde_json::json!({
+                    "kind": "addRedaction",
+                    "bounds": {"x": i * 2, "y": 0, "width": 1, "height": 1},
+                    "confidence": 0.8,
+                    "label": format!("candidate-{i}")
+                })
+            })
+            .collect();
+        let output = serde_json::json!({ "candidates": candidates });
+        let executor = Arc::new(FakeExecutor {
+            output_json: serde_json::to_string(&output).unwrap(),
+        });
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = DryRunTool::new(ctx, executor, host);
+
+        let result = tool
+            .call(&serde_json::json!({"source": valid_js_source(), "generation": 0}))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["candidate_count"].as_u64(), Some(8));
+                assert_eq!(result_json["candidate_preview"].as_array().unwrap().len(), 5);
             }
             other => panic!("expected success, got {other:?}"),
         }
