@@ -1007,10 +1007,32 @@ impl Tool for LayoutTool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalRegion {
+    Full,
+    TopStrip,
+    LeftStrip,
+    RightStrip,
+    BottomStrip,
+}
+
+impl CanonicalRegion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CanonicalRegion::Full => "full",
+            CanonicalRegion::TopStrip => "top_strip",
+            CanonicalRegion::LeftStrip => "left_strip",
+            CanonicalRegion::RightStrip => "right_strip",
+            CanonicalRegion::BottomStrip => "bottom_strip",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectRegionFeaturesArgs {
-    pub region: String,
+    pub region: CanonicalRegion,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1070,12 +1092,13 @@ impl Tool for RegionFeaturesTool {
         Box::pin(async move {
             let args: InspectRegionFeaturesArgs = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+            let region_name = args.region.as_str();
             let region = self
                 .regions
                 .iter()
-                .find(|region| region.name == args.region)
+                .find(|region| region.name == region_name)
                 .ok_or_else(|| {
-                    ToolError::ArgumentDecode(format!("unknown canonical region: {}", args.region))
+                    ToolError::ArgumentDecode(format!("unknown canonical region: {region_name}"))
                 })?;
 
             let Some(query) = region.query.clone() else {
@@ -1896,6 +1919,28 @@ pub(crate) mod tests {
         let tool = RegionFeaturesTool::new(ctx, host, inspection_context_for_tests().regions);
         let schema = tool.json_schema();
         assert_eq!(schema["type"].as_str(), Some("object"));
+    }
+
+    #[test]
+    fn inspect_region_features_schema_advertises_canonical_regions() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = RegionFeaturesTool::new(ctx, host, inspection_context_for_tests().regions);
+        let schema = tool.json_schema().to_string();
+        for name in [
+            "full",
+            "top_strip",
+            "left_strip",
+            "right_strip",
+            "bottom_strip",
+        ] {
+            assert!(
+                schema.contains(name),
+                "schema should advertise canonical region {name}, got: {schema}"
+            );
+        }
     }
 
     #[tokio::test]
