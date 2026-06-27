@@ -97,6 +97,12 @@ Rollshot JavaScript authoring guide:
     return { candidates: matches.map((match) => ({ kind: "addRedaction", bounds: expand(match.bounds, 6), confidence: match.confidence, label: "ocr-match" })) };
   }
 
+Inspection loop:
+1. Call inspect_image_context before writing or replacing source.
+2. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
+3. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
+4. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
+
 Authoring loop:
 1. Use replace_source for a new source generation.
 2. Use validate_source on the current generation.
@@ -1203,8 +1209,8 @@ pub(crate) mod tests {
     use crate::domain::SessionId;
     use crate::runtime::{EvidenceKind, NullEventSink, RunBudget};
     use crate::tools::{
-        DryRunTool, GetContextSummaryTool, ReplaceSourceTool, SubmitForReviewTool,
-        ToolRegistryLimits, ValidateSourceTool,
+        DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
+        ReplaceSourceTool, SubmitForReviewTool, ToolRegistryLimits, ValidateSourceTool,
     };
     use rig_core::completion::Usage;
     use rig_core::streaming::StreamedAssistantContent;
@@ -3167,9 +3173,54 @@ pub(crate) mod tests {
         #[tokio::test]
         async fn second_turn_request_carries_history_and_tool_schemas() {
             let ctx = test_ctx("src");
+            let inspection = crate::tools::AuthoringInspectionContext {
+                payload_mode: "full_screenshot".into(),
+                regions: vec![crate::tools::CanonicalRegionInspection {
+                    name: "top_strip".into(),
+                    bounds: Some(rollshot_image_document::ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 96.0,
+                    }),
+                    query: Some(rollshot_automation::RegionFeaturesQuery {
+                        region: rollshot_automation::Region::Rect {
+                            bounds: rollshot_image_document::ImageRect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 100.0,
+                                height: 96.0,
+                            },
+                        },
+                        limit: 1,
+                    }),
+                    unavailable_reason: None,
+                }],
+                ocr_status: crate::tools::CapabilityStatus::unavailable("ocr_disabled"),
+                layout_status: crate::tools::CapabilityStatus::unavailable(
+                    "capability_unavailable",
+                ),
+                template_match_status: crate::tools::CapabilityStatus::unavailable(
+                    "no_capability_handles",
+                ),
+            };
+            let host = Arc::new(Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            ));
             let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
             reg.register(Arc::new(GetContextSummaryTool::new(ctx.clone())))
                 .unwrap();
+            reg.register(Arc::new(InspectImageContextTool::new(
+                ctx.clone(),
+                inspection.clone(),
+            )))
+            .unwrap();
+            reg.register(Arc::new(RegionFeaturesTool::new(
+                ctx.clone(),
+                host.clone(),
+                inspection.regions.clone(),
+            )))
+            .unwrap();
             reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
                 .unwrap();
 
@@ -3292,6 +3343,22 @@ pub(crate) mod tests {
                 "system prompt should require review submit, got: {:?}",
                 requests[0].system_prompt
             );
+            assert!(
+                system_prompt
+                    .contains("Call inspect_image_context before writing or replacing source"),
+                "system prompt should guide inspection before source writing, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Use inspect_region_features with canonical regions"),
+                "system prompt should guide region feature inspection, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("full, top_strip, left_strip, right_strip, bottom_strip"),
+                "system prompt should list canonical region names, got: {:?}",
+                system_prompt
+            );
 
             // The second request must carry the prior assistant tool call and the
             // tool result so the model can continue the loop.
@@ -3328,6 +3395,34 @@ pub(crate) mod tests {
                         .unwrap_or(false),
                 "tool definition must carry a real schema, got: {}",
                 summary_def.parameters
+            );
+
+            let image_context_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_image_context")
+                .expect("inspect_image_context tool definition present");
+            assert_eq!(
+                image_context_def.parameters["type"].as_str(),
+                Some("object")
+            );
+
+            let region_features_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_region_features")
+                .expect("inspect_region_features tool definition present");
+            assert_eq!(
+                region_features_def.parameters["type"].as_str(),
+                Some("object")
+            );
+            assert!(
+                region_features_def
+                    .parameters
+                    .to_string()
+                    .contains("region"),
+                "inspect_region_features schema must require a canonical region argument, got: {}",
+                region_features_def.parameters
             );
         }
     }
