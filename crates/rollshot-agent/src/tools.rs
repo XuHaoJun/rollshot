@@ -1604,20 +1604,32 @@ pub(crate) mod tests {
     // ---- Authoring test helpers ----
 
     fn test_context(source: &str) -> Arc<ToolContext> {
+        test_context_with_handles(source, std::collections::BTreeMap::new())
+    }
+
+    fn test_context_with_handles(
+        source: &str,
+        capability_handles: std::collections::BTreeMap<String, String>,
+    ) -> Arc<ToolContext> {
         let mut policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(5),
             4 * 1024 * 1024,
             1024 * 1024,
         );
         policy.proposal_limits.max_total_area_fraction = 0.5;
-        Arc::new(ToolContext::new(
+        Arc::new(ToolContext::new_with_capability_handles(
             SessionId::new(1),
             source.into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
             (100, 100),
+            capability_handles,
             &RunCancellation::new(),
         ))
+    }
+
+    fn template_handle_map() -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([("logo".into(), "tpl-logo-v1".into())])
     }
 
     fn valid_js_source() -> &'static str {
@@ -2424,6 +2436,67 @@ pub(crate) mod tests {
                 assert!(result_json["ocr_regions"][0].get("query").is_none());
                 assert_eq!(
                     result_json["capabilities"]["ocr"]["status"].as_str(),
+                    Some("available")
+                );
+                assert!(result_json["capability_handles"].as_array().unwrap().is_empty());
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["reason"].as_str(),
+                    Some("no_capability_handles")
+                );
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_image_context_exposes_existing_capability_handles() {
+        let ctx = test_context_with_handles("source", template_handle_map());
+        let tool = InspectImageContextTool::new(ctx, inspection_context_for_tests());
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(
+                    result_json["capability_handles"][0]["name"].as_str(),
+                    Some("logo")
+                );
+                assert_eq!(
+                    result_json["capability_handles"][0]["handle"].as_str(),
+                    Some("tpl-logo-v1")
+                );
+                assert_eq!(
+                    result_json["capability_handles"][0]["capability"].as_str(),
+                    Some("template_match")
+                );
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["status"].as_str(),
+                    Some("available")
+                );
+                assert!(result_json["capabilities"]["template_match"]["reason"].is_null());
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_image_context_bounds_capability_handle_summaries() {
+        let handles = (0..20)
+            .map(|i| (format!("handle-{i:02}"), format!("tpl-{i:02}")))
+            .collect();
+        let ctx = test_context_with_handles("source", handles);
+        let tool = InspectImageContextTool::new(ctx, inspection_context_for_tests());
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                let handles = result_json["capability_handles"].as_array().unwrap();
+                assert_eq!(handles.len(), 16);
+                assert_eq!(handles[0]["name"].as_str(), Some("handle-00"));
+                assert_eq!(handles[15]["name"].as_str(), Some("handle-15"));
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["status"].as_str(),
                     Some("available")
                 );
             }
