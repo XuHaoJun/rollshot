@@ -120,7 +120,7 @@ Expected: compile failure mentioning missing `InspectImageContextTool`, `Authori
 In `crates/rollshot-agent/src/tools.rs`, under `// ---------- Inspection types ----------`, add:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AuthoringInspectionContext {
     pub payload_mode: String,
     pub regions: Vec<CanonicalRegionInspection>,
@@ -129,16 +129,16 @@ pub struct AuthoringInspectionContext {
     pub template_match_status: CapabilityStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CanonicalRegionInspection {
     pub name: String,
     pub bounds: Option<rollshot_image_document::ImageRect>,
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     pub query: Option<rollshot_automation::RegionFeaturesQuery>,
     pub unavailable_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CapabilityStatus {
     pub status: String,
     pub reason: Option<String>,
@@ -167,21 +167,21 @@ impl CapabilityStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageContextImage {
     pub width: u32,
     pub height: u32,
     pub payload_mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageContextSource {
     pub generation: u64,
     pub source_bytes: usize,
     pub evidence_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageContextCapabilities {
     pub region_features: CapabilityStatus,
     pub ocr: CapabilityStatus,
@@ -189,7 +189,7 @@ pub struct ImageContextCapabilities {
     pub template_match: CapabilityStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageContextResult {
     pub image: ImageContextImage,
     pub source: ImageContextSource,
@@ -446,14 +446,14 @@ pub struct InspectRegionFeaturesArgs {
     pub region: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RegionFeatureSummary {
     pub bounds: rollshot_image_document::ImageRect,
     pub dominant_rgba: [u8; 4],
     pub edge_density: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InspectRegionFeaturesResult {
     pub region: String,
     pub status: String,
@@ -646,6 +646,29 @@ fn canonical_region_catalog_has_named_entries_for_every_region() {
 }
 
 #[test]
+fn canonical_region_catalog_never_prepares_region_over_area_cap() {
+    for entry in canonical_region_feature_catalog(100_000, 100_000) {
+        if let Some(query) = &entry.query {
+            let area = match query.region {
+                rollshot_automation::Region::Full => 100_000_u64 * 100_000_u64,
+                rollshot_automation::Region::Rect { bounds } => {
+                    (bounds.width.ceil() as u64).saturating_mul(bounds.height.ceil() as u64)
+                }
+            };
+            assert!(
+                area <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT,
+                "{} prepared area {} exceeds cap {}",
+                entry.name,
+                area,
+                PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT
+            );
+        } else {
+            assert_eq!(entry.unavailable_reason, Some("area_limit_exceeded"));
+        }
+    }
+}
+
+#[test]
 fn authoring_registry_exposes_truthful_phase_b1_tools() {
     let ctx = tool_context_for_tests();
     let executor: std::sync::Arc<dyn rollshot_automation::AutomationExecutor> =
@@ -677,6 +700,56 @@ fn authoring_registry_exposes_truthful_phase_b1_tools() {
     );
     assert!(!names.contains(&"inspect_ocr"));
     assert!(!names.contains(&"inspect_layout"));
+}
+
+#[tokio::test]
+async fn prepared_vision_context_inspects_and_dry_runs_top_strip() {
+    use rollshot_agent::tools::{DryRunTool, RegionFeaturesTool, Tool};
+
+    let image = image::RgbaImage::from_fn(64, 64, |_, _| image::Rgba([160, 170, 180, 255]));
+    let vision = prepare_vision_context(&image).unwrap();
+    let catalog = canonical_region_feature_catalog(64, 64);
+    let inspection = authoring_inspection_context(PayloadMode::FullScreenshot, &catalog);
+    let ctx = tool_context_for_tests();
+    let host =
+        vision.host.clone() as std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>>;
+
+    let inspect = RegionFeaturesTool::new(ctx.clone(), host.clone(), inspection.regions.clone());
+    let inspected = inspect
+        .call(&serde_json::json!({"region": "top_strip"}))
+        .await
+        .unwrap();
+    match inspected {
+        rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+            assert_eq!(result_json["status"].as_str(), Some("available"));
+            assert_eq!(result_json["features"].as_array().unwrap().len(), 1);
+        }
+        other => panic!("expected inspection success, got {other:?}"),
+    }
+
+    let source = r#"
+function main(input) {
+  const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+  const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+  return { candidates: features.length > 0 ? [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] : [] };
+}
+"#;
+    let dry_run = DryRunTool::new(
+        ctx,
+        std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor),
+        host,
+    );
+    let dry_run_result = dry_run
+        .call(&serde_json::json!({"source": source, "generation": 0}))
+        .await
+        .unwrap();
+    match dry_run_result {
+        rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+            assert_eq!(result_json["candidate_count"].as_u64(), Some(1));
+            assert_eq!(result_json["candidate_preview"][0]["label"].as_str(), Some("top-strip"));
+        }
+        other => panic!("expected dry-run success, got {other:?}"),
+    }
 }
 ```
 
@@ -949,9 +1022,10 @@ assert!(prompt.contains("Use inspect_region_features with canonical regions"));
 assert!(prompt.contains("full, top_strip, left_strip, right_strip, bottom_strip"));
 ```
 
-- [ ] **Step 2: Update test helper registration in driver tests**
+- [ ] **Step 2: Update provider-contract registry setup in driver tests**
 
-In `register_all_tools`, import and register the new tools so provider-contract tests can include the B1 schemas:
+In `crates/rollshot-agent/src/driver.rs`, update the test imports at the top of
+`pub(crate) mod tests` so provider-contract tests can register the B1 schemas:
 
 ```rust
 use crate::tools::{
@@ -960,7 +1034,8 @@ use crate::tools::{
 };
 ```
 
-Inside `register_all_tools`, create one inspection context and pass cloned regions to the region tool:
+Inside `second_turn_request_carries_history_and_tool_schemas`, create one
+inspection context before the registry setup:
 
 ```rust
 let inspection = crate::tools::AuthoringInspectionContext {
@@ -990,6 +1065,15 @@ let inspection = crate::tools::AuthoringInspectionContext {
     layout_status: crate::tools::CapabilityStatus::unavailable("capability_unavailable"),
     template_match_status: crate::tools::CapabilityStatus::unavailable("no_capability_handles"),
 };
+let host = Arc::new(Mutex::new(
+    rollshot_automation::FakeAutomationHost::default(),
+));
+```
+
+Register the new tools in that same test after `inspect_context_summary` and
+before `replace_source`:
+
+```rust
 reg.register(Arc::new(InspectImageContextTool::new(
     ctx.clone(),
     inspection.clone(),
@@ -998,12 +1082,38 @@ reg.register(Arc::new(InspectImageContextTool::new(
 reg.register(Arc::new(RegionFeaturesTool::new(
     ctx.clone(),
     host.clone(),
-    inspection.regions,
+    inspection.regions.clone(),
 )))
 .unwrap();
 ```
 
-If another driver test manually constructs a `RegionFeaturesTool::new()` stub, update it to use the same concrete context/host/regions pattern. Do not reintroduce product-visible OCR/layout stubs.
+Then add explicit schema assertions next to the existing
+`inspect_context_summary` assertion:
+
+```rust
+let image_context_def = second
+    .tool_definitions
+    .iter()
+    .find(|d| d.name == "inspect_image_context")
+    .expect("inspect_image_context tool definition present");
+assert_eq!(image_context_def.parameters["type"].as_str(), Some("object"));
+
+let region_features_def = second
+    .tool_definitions
+    .iter()
+    .find(|d| d.name == "inspect_region_features")
+    .expect("inspect_region_features tool definition present");
+assert_eq!(region_features_def.parameters["type"].as_str(), Some("object"));
+assert!(
+    region_features_def.parameters.to_string().contains("region"),
+    "inspect_region_features schema must require a canonical region argument, got: {}",
+    region_features_def.parameters
+);
+```
+
+If another driver test manually constructs a `RegionFeaturesTool::new()` stub,
+update it to use the same concrete context/host/regions pattern. Do not
+reintroduce product-visible OCR/layout stubs.
 
 - [ ] **Step 3: Run prompt and driver schema tests and verify they fail**
 
@@ -1014,7 +1124,7 @@ rtk cargo test -p rollshot-agent smart_redaction_system_prompt_contains_authorin
 rtk cargo test -p rollshot-agent second_turn_request_carries_history_and_tool_schemas -- --nocapture
 ```
 
-Expected before implementation: prompt assertion failure for the first command, and compile or schema expectation failure for the second if helper registration still needs updates.
+Expected before implementation: the prompt command fails on the new inspection-loop assertions. The schema command should compile and pass after Step 2; if it fails, fix the registry setup before changing the prompt.
 
 - [ ] **Step 4: Update the authoring guide**
 
@@ -1110,6 +1220,69 @@ rtk git commit -m "fix(agent): stabilize smart redaction region inspection"
 ```
 
 If Step 1 and Step 2 pass without additional tracked changes, skip this commit.
+
+---
+
+## Engineering Review Notes
+
+### Test Coverage Table
+
+| Task / behavior | Unit | Integ | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / `inspect_image_context` object schema | yes | no | no | no |
+| Task 1 / image dimensions, payload mode, source generation, capability statuses | yes | no | no | no |
+| Task 1 / internal region query is not serialized to tool result | yes | no | no | no |
+| Task 2 / `inspect_region_features` object schema and required region arg | yes | no | no | no |
+| Task 2 / unknown canonical region returns recoverable argument error | yes | no | no | no |
+| Task 2 / prepared feature summary is bounded to one result | yes | no | no | no |
+| Task 2 / skipped canonical region returns structured unavailable result | yes | no | no | no |
+| Task 2 / host capability error becomes structured unavailable result | yes | no | no | no |
+| Task 3 / catalog names and prompt-compatible top-strip geometry | yes | no | no | no |
+| Task 3 / area cap prevents oversized prepared regions | yes | no | no | no |
+| Task 3 / product registry includes B1 tools and excludes OCR/layout stubs | yes | no | no | no |
+| Task 3 / same prepared host supports inspection and dry-run top strip | yes | yes | no | no |
+| Task 4 / prompt instructs inspection before source writing | yes | no | no | no |
+| Task 4 / provider request carries B1 tool schemas | yes | no | no | no |
+| Task 5 / package-level regression pass | no | yes | no | no |
+
+### NOT in Scope
+
+- OCR-backed `inspect_ocr`: deferred to Phase B2 because text privacy and OCR model availability need a separate policy.
+- Layout inspection: deferred because `RealAutomationHost::layout` is still a truthful unavailable stub.
+- Template-handle persistence or template-match inspection: deferred because product workbench inputs still pass empty `capability_handles`.
+- Arbitrary rectangle/crop inspection: deferred to avoid expensive, privacy-sensitive, unbounded image probing.
+- Source patch/edit tools: deferred to Phase C so B1 can stay focused on read-only inspection.
+- UI redesign: deferred because B1 changes the agent harness/tool surface, not the workbench layout.
+
+### What Already Exists
+
+- `ToolRegistry`, `Tool`, and `ToolContext` in `crates/rollshot-agent/src/tools.rs`: reused for both new tools instead of adding another tool-dispatch layer.
+- `GetContextSummaryTool`: kept as the narrow Phase A summary; B1 adds richer image context instead of overloading it.
+- `RealAutomationHost::prepare_region_features` and `AutomationHost::region_features`: reused for truthful prepared-region reads.
+- `prepare_vision_context` and `prepare_phase_a_region_features`: refactored around a named catalog rather than duplicated.
+- `DryRunTool`: reused for the final integration proof that inspected canonical regions match QuickJS dry-run behavior.
+- `PayloadMode`: reused as the source for the serialized payload-mode string in `inspect_image_context`.
+
+### Failure Modes
+
+| Codepath | Production failure | Test coverage | Error handling in plan | User-visible result |
+|---|---|---|---|---|
+| `inspect_image_context` with no prepared regions | Catalog has no usable entries for an invalid or zero-sized image | `prepare_vision_context_rejects_empty_image`; image-context unit test covers normal status | Tool reports `region_features.status = "unavailable"` when prepared count is zero | Model sees unavailable status; run startup still fails clearly for invalid image |
+| `inspect_region_features` unknown name | Model asks for `custom_rect` or typo | Task 2 unknown-region test | Returns `ToolError::ArgumentDecode`, which registry converts to recoverable tool error | Model gets a recoverable error and can retry canonical names |
+| `inspect_region_features` skipped region | Full or strip region exceeds area cap | Task 2 skipped-region test; Task 3 area-cap catalog test | Returns `status = "unavailable"` and `unavailable_reason = "area_limit_exceeded"` | Model sees the region cannot be inspected and can choose another canonical region |
+| `inspect_region_features` stale/unprepared host cache | Catalog and host preparation drift | Task 2 host-error test; Task 3 prepared-host inspect+dry-run test | Converts `CapabilityError` to structured unavailable result | Model sees `vision_index_unavailable` instead of fake data |
+| Workbench registry wiring | Product run forgets to register B1 tools or accidentally registers stubs | Task 3 registry test; Task 5 registry grep | Registry assertions check includes/excludes | Model receives truthful B1 tools only |
+| Prompt/tool contract drift | Prompt stops telling model to inspect first | Task 4 prompt assertions | Provider-contract tests pin prompt sections and schemas | Model guidance regresses only if tests fail |
+
+No critical failure mode remains both untested and silent in this plan.
+
+### Worktree / Subagent Parallelization Strategy
+
+Sequential execution, no parallelization opportunity.
+
+Tasks 1, 2, and 4 all touch `crates/rollshot-agent/src/`; Task 3 depends on
+the agent types from Tasks 1 and 2 before it can wire the workbench registry.
+Run tasks in order in a single branch/worktree.
 
 ---
 
