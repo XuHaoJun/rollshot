@@ -255,6 +255,10 @@ fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcrEntry> {
     ]
 }
 
+fn product_capability_handles() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
+}
+
 fn authoring_inspection_context(
     payload_mode: PayloadMode,
     catalog: &[CanonicalRegionFeatureEntry],
@@ -553,12 +557,13 @@ pub fn start_agent_run(
         let policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(25), 80_000_000, 8_000_000,
         );
-        let tool_ctx = Arc::new(rollshot_agent::tools::ToolContext::new(
+        let tool_ctx = Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
             session_id,
             active_source,
             validation_limits,
             policy,
             image_dims,
+            product_capability_handles(),
             &cancellation_for_task,
         ));
 
@@ -933,7 +938,7 @@ mod prepare_tests {
 
     fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
         let cancel = rollshot_agent::runtime::RunCancellation::new();
-        std::sync::Arc::new(rollshot_agent::tools::ToolContext::new(
+        std::sync::Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
             rollshot_agent::domain::SessionId::new(1),
             String::new(),
             rollshot_automation::ValidationLimits::default(),
@@ -943,12 +948,14 @@ mod prepare_tests {
                 1024 * 1024,
             ),
             (64, 64),
+            product_capability_handles(),
             &cancel,
         ))
     }
 
     #[test]
     fn authoring_registry_exposes_truthful_phase_b1_tools() {
+        assert!(product_capability_handles().is_empty());
         let ctx = tool_context_for_tests();
         let executor: std::sync::Arc<dyn rollshot_automation::AutomationExecutor> =
             std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor);
@@ -1010,6 +1017,41 @@ mod prepare_tests {
                 assert!(
                     result_json["ocr_regions"].as_array().unwrap().is_empty(),
                     "default builds must not advertise prepared OCR regions"
+                );
+                assert!(result_json["capability_handles"].as_array().unwrap().is_empty());
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["reason"].as_str(),
+                    Some("no_capability_handles")
+                );
+            }
+            other => panic!("expected inspection success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn product_inspection_reports_template_match_unavailable_without_handles() {
+        use rollshot_agent::tools::{InspectImageContextTool, Tool};
+
+        let ctx = tool_context_for_tests();
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &canonical_region_feature_catalog(64, 64),
+            &canonical_ocr_catalog(64, 64),
+        );
+        let tool = InspectImageContextTool::new(ctx, inspection);
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert!(result_json["capability_handles"].as_array().unwrap().is_empty());
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["status"].as_str(),
+                    Some("unavailable")
+                );
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["reason"].as_str(),
+                    Some("no_capability_handles")
                 );
             }
             other => panic!("expected inspection success, got {other:?}"),
@@ -1130,7 +1172,7 @@ function main(input) {
             &ocr_catalog,
         );
         let cancel = rollshot_agent::runtime::RunCancellation::new();
-        let ctx = std::sync::Arc::new(rollshot_agent::tools::ToolContext::new(
+        let ctx = std::sync::Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
             rollshot_agent::domain::SessionId::new(1),
             String::new(),
             rollshot_automation::ValidationLimits::default(),
@@ -1140,6 +1182,7 @@ function main(input) {
                 1024 * 1024,
             ),
             (480, 160),
+            product_capability_handles(),
             &cancel,
         ));
         let host = vision.host.clone()
