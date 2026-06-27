@@ -319,6 +319,23 @@ fn prepare_phase_a_region_features(
     Ok(())
 }
 
+#[cfg(feature = "ocr")]
+fn prepare_phase_b2_ocr(
+    host: &mut rollshot_vision::RealAutomationHost,
+    index: &VisualIndex,
+) -> Result<(), WorkbenchError> {
+    for entry in canonical_ocr_catalog(index.width(), index.height()) {
+        let Some(query) = entry.query else {
+            continue;
+        };
+        host.prepare_ocr(index, &query)
+            .map_err(|e| WorkbenchError::VisionPrepare {
+                message: format!("ocr {}: {e}", entry.name),
+            })?;
+    }
+    Ok(())
+}
+
 /// Run a preset's active `ValidatedAutomation` against the given image
 /// (no LLM, no upload). Builds `VisualIndex`, prepares a fresh
 /// `RealAutomationHost`, and runs the automation via `execute_to_proposal`.
@@ -334,6 +351,8 @@ pub fn run_existing_preset(
     })?;
     let mut host = rollshot_vision::RealAutomationHost::new();
     prepare_phase_a_region_features(&mut host, &index)?;
+    #[cfg(feature = "ocr")]
+    prepare_phase_b2_ocr(&mut host, &index)?;
     let executor = QuickJsExecutor;
     let cancellation = CancellationFlag::default();
     let input = AutomationInput {
@@ -371,6 +390,8 @@ pub fn prepare_vision_context(
     })?;
     let mut host = rollshot_vision::RealAutomationHost::new();
     prepare_phase_a_region_features(&mut host, &index)?;
+    #[cfg(feature = "ocr")]
+    prepare_phase_b2_ocr(&mut host, &index)?;
     Ok(super::VisionContext {
         index,
         host: Arc::new(StdMutex::new(host)),
@@ -396,7 +417,7 @@ fn build_authoring_tool_registry(
     inspection: rollshot_agent::tools::AuthoringInspectionContext,
 ) -> Result<rollshot_agent::tools::ToolRegistry, WorkbenchError> {
     use rollshot_agent::tools::{
-        DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
+        DryRunTool, GetContextSummaryTool, InspectImageContextTool, OcrTool, RegionFeaturesTool,
         ReplaceSourceTool, RequestUserInputTool, SubmitForReviewTool, ToolRegistry,
         ToolRegistryLimits, ValidateSourceTool,
     };
@@ -443,6 +464,15 @@ fn build_authoring_tool_registry(
             tool_ctx.clone(),
             host.clone(),
             inspection.regions.clone(),
+        )),
+    )?;
+    #[cfg(feature = "ocr")]
+    reg(
+        &mut registry,
+        Arc::new(OcrTool::new(
+            tool_ctx.clone(),
+            host.clone(),
+            inspection.ocr_regions.clone(),
         )),
     )?;
     reg(
@@ -996,6 +1026,120 @@ function main(input) {
                 assert_eq!(
                     result_json["candidate_preview"][0]["label"].as_str(),
                     Some("top-strip")
+                );
+            }
+            other => panic!("expected dry-run success, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn authoring_registry_exposes_ocr_tool_when_feature_enabled() {
+        let ctx = tool_context_for_tests();
+        let executor: std::sync::Arc<dyn rollshot_automation::AutomationExecutor> =
+            std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor);
+        let host: std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>> =
+            std::sync::Arc::new(std::sync::Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            ));
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &canonical_region_feature_catalog(64, 64),
+            &canonical_ocr_catalog(64, 64),
+        );
+
+        let registry = build_authoring_tool_registry(ctx, executor, host, inspection).unwrap();
+        let names = registry.tool_names();
+
+        assert!(names.contains(&"inspect_ocr"));
+        assert!(!names.contains(&"inspect_layout"));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[tokio::test]
+    async fn prepared_vision_context_dry_runs_full_ocr_query() {
+        use imageproc::drawing::draw_text_mut;
+        use rollshot_agent::tools::{DryRunTool, OcrTool, Tool};
+
+        let font = ab_glyph::FontRef::try_from_slice(include_bytes!(
+            "../../../../rollshot-image-document/assets/fonts/DejaVuSans.ttf"
+        ));
+        if font.is_err() {
+            return;
+        }
+        let font = font.unwrap();
+        let mut image =
+            image::RgbaImage::from_pixel(480, 160, image::Rgba([255, 255, 255, 255]));
+        draw_text_mut(
+            &mut image,
+            image::Rgba([0, 0, 0, 255]),
+            20,
+            40,
+            ab_glyph::PxScale::from(32.0),
+            &font,
+            "alice@example.com",
+        );
+
+        let vision = prepare_vision_context(&image).unwrap();
+        let region_catalog = canonical_region_feature_catalog(480, 160);
+        let ocr_catalog = canonical_ocr_catalog(480, 160);
+        let inspection =
+            authoring_inspection_context(PayloadMode::FullScreenshot, &region_catalog, &ocr_catalog);
+        let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let ctx = std::sync::Arc::new(rollshot_agent::tools::ToolContext::new(
+            rollshot_agent::domain::SessionId::new(1),
+            String::new(),
+            rollshot_automation::ValidationLimits::default(),
+            rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                std::time::Duration::from_secs(5),
+                4 * 1024 * 1024,
+                1024 * 1024,
+            ),
+            (480, 160),
+            &cancel,
+        ));
+        let host = vision.host.clone()
+            as std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>>;
+
+        let inspect = OcrTool::new(ctx.clone(), host.clone(), inspection.ocr_regions.clone());
+        let inspected = inspect
+            .call(&serde_json::json!({"region": "full"}))
+            .await
+            .unwrap();
+        match inspected {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["status"].as_str(), Some("available"));
+            }
+            other => panic!("expected OCR inspection success, got {other:?}"),
+        }
+
+        let source = r#"
+function main(input) {
+  const matches = rollshot.ocr({ region: { kind: "full" }, limit: 50 });
+  return {
+    candidates: matches.map((match) => ({
+      kind: "addRedaction",
+      bounds: match.bounds,
+      confidence: match.confidence,
+      label: "ocr-match"
+    }))
+  };
+}
+"#;
+        let dry_run = DryRunTool::new(
+            ctx,
+            std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor),
+            host,
+        );
+        let dry_run_result = dry_run
+            .call(&serde_json::json!({"source": source, "generation": 0}))
+            .await
+            .unwrap();
+        match dry_run_result {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert!(
+                    result_json["candidate_count"].as_u64().unwrap_or(0) > 0,
+                    "expected OCR dry-run candidates, got {result_json}"
                 );
             }
             other => panic!("expected dry-run success, got {other:?}"),
