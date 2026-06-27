@@ -12,6 +12,10 @@ use rollshot_vision::VisualIndex;
 use super::state::WorkbenchError;
 use super::PayloadMode;
 
+const PHASE_A_REGION_FEATURE_STRIP_PX: u32 = 96;
+const PHASE_A_REGION_FEATURE_LIMIT: u32 = 1;
+const PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT: u64 = 8_000_000;
+
 /// Finite budget for Smart Redaction runs. `RunBudget::unlimited()` is the
 /// only constructor in rollshot-agent (§10.4); the workbench owns this one.
 pub fn smart_redaction_budget() -> RunBudget {
@@ -35,6 +39,86 @@ pub fn smart_redaction_budget() -> RunBudget {
     }
 }
 
+fn phase_a_region_feature_queries(
+    width: u32,
+    height: u32,
+) -> Vec<rollshot_automation::RegionFeaturesQuery> {
+    use rollshot_automation::{Region, RegionFeaturesQuery};
+    use rollshot_image_document::ImageRect;
+
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut queries = Vec::new();
+    let full_area = width as u64 * height as u64;
+    if full_area <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT {
+        queries.push(RegionFeaturesQuery {
+            region: Region::Full,
+            limit: PHASE_A_REGION_FEATURE_LIMIT,
+        });
+    }
+
+    let strip_h = height.min(PHASE_A_REGION_FEATURE_STRIP_PX) as f32;
+    let strip_w = width.min(PHASE_A_REGION_FEATURE_STRIP_PX) as f32;
+    let width_f = width as f32;
+    let height_f = height as f32;
+
+    let push_rect =
+        |queries: &mut Vec<RegionFeaturesQuery>, x: f32, y: f32, width: f32, height: f32| {
+            if width <= 0.0 || height <= 0.0 {
+                return;
+            }
+            let area = (width.ceil() as u64).saturating_mul(height.ceil() as u64);
+            if area > PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT {
+                return;
+            }
+            queries.push(RegionFeaturesQuery {
+                region: Region::Rect {
+                    bounds: ImageRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                },
+                limit: PHASE_A_REGION_FEATURE_LIMIT,
+            });
+        };
+
+    push_rect(&mut queries, 0.0, 0.0, width_f, strip_h);
+    push_rect(&mut queries, 0.0, 0.0, strip_w, height_f);
+    push_rect(
+        &mut queries,
+        (width_f - strip_w).max(0.0),
+        0.0,
+        strip_w,
+        height_f,
+    );
+    push_rect(
+        &mut queries,
+        0.0,
+        (height_f - strip_h).max(0.0),
+        width_f,
+        strip_h,
+    );
+
+    queries
+}
+
+fn prepare_phase_a_region_features(
+    host: &mut rollshot_vision::RealAutomationHost,
+    index: &VisualIndex,
+) -> Result<(), WorkbenchError> {
+    for query in phase_a_region_feature_queries(index.width(), index.height()) {
+        host.prepare_region_features(index, &query)
+            .map_err(|e| WorkbenchError::VisionPrepare {
+                message: format!("regionFeatures: {e}"),
+            })?;
+    }
+    Ok(())
+}
+
 /// Run a preset's active `ValidatedAutomation` against the given image
 /// (no LLM, no upload). Builds `VisualIndex`, prepares a fresh
 /// `RealAutomationHost`, and runs the automation via `execute_to_proposal`.
@@ -45,10 +129,11 @@ pub fn run_existing_preset(
     policy: &ExecutionPolicy,
 ) -> Result<EditProposal, WorkbenchError> {
     let (w, h) = image.dimensions();
-    let _index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
+    let index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
         message: format!("VisualIndex: {e}"),
     })?;
     let mut host = rollshot_vision::RealAutomationHost::new();
+    prepare_phase_a_region_features(&mut host, &index)?;
     let executor = QuickJsExecutor;
     let cancellation = CancellationFlag::default();
     let input = AutomationInput {
@@ -84,7 +169,8 @@ pub fn prepare_vision_context(
     let index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
         message: format!("VisualIndex: {e}"),
     })?;
-    let host = rollshot_vision::RealAutomationHost::new();
+    let mut host = rollshot_vision::RealAutomationHost::new();
+    prepare_phase_a_region_features(&mut host, &index)?;
     Ok(super::VisionContext {
         index,
         host: Arc::new(StdMutex::new(host)),
@@ -372,6 +458,55 @@ mod tests {
         assert!(matches!(result, Err(WorkbenchError::VisionPrepare { .. })));
     }
 
+    fn make_revision_from_source(source: &str) -> AutomationRevision {
+        use rollshot_preset::*;
+        let limits = rollshot_automation::ValidationLimits::default();
+        let validated = rollshot_automation::validate_source(source, &limits).unwrap();
+        AutomationRevision {
+            store_schema_version: STORE_SCHEMA_VERSION,
+            id: RevisionId("rev-1".into()),
+            preset_id: PresetId("test".into()),
+            parent_id: None,
+            created_at: "2026-06-27T00:00:00Z".into(),
+            provenance: RevisionProvenance {
+                origin: RevisionOrigin::Manual,
+                note: None,
+                source_run_ref: None,
+            },
+            artifact: validated,
+        }
+    }
+
+    #[test]
+    fn run_existing_preset_prepares_top_strip_region_features() {
+        let source = r#"
+function main(input) {
+  const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+  const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+  const hasFeatures = features.length > 0;
+  return {
+    candidates: hasFeatures ? [{
+      kind: "addRedaction",
+      bounds: bounds,
+      confidence: 0.6,
+      label: "top-strip"
+    }] : []
+  };
+}
+"#;
+        let image = image::RgbaImage::from_pixel(160, 120, image::Rgba([30, 30, 30, 255]));
+        let revision = make_revision_from_source(source);
+        let policy = ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(10),
+            100_000_000,
+            8_000_000,
+        );
+
+        let proposal = run_existing_preset(&image, &revision, &policy).unwrap();
+
+        assert_eq!(proposal.candidates.len(), 1);
+    }
+
     fn make_empty_revision() -> AutomationRevision {
         use rollshot_preset::*;
         let source = r#"function main(input) { return { candidates: [] }; }"#;
@@ -412,6 +547,50 @@ mod prepare_tests {
         assert_eq!(ctx.index.height(), 8);
     }
 
+    #[test]
+    fn phase_a_region_feature_queries_match_prompt_top_strip() {
+        let queries = phase_a_region_feature_queries(160, 120);
+        assert!(queries.iter().any(|query| {
+            matches!(
+                query.region,
+                rollshot_automation::Region::Rect { bounds }
+                    if bounds.x == 0.0
+                        && bounds.y == 0.0
+                        && bounds.width == 160.0
+                        && bounds.height == 96.0
+            )
+        }));
+    }
+
+    #[test]
+    fn phase_a_region_feature_queries_skip_oversized_full_image() {
+        let queries = phase_a_region_feature_queries(10_000, 10_000);
+        assert!(!queries
+            .iter()
+            .any(|query| matches!(query.region, rollshot_automation::Region::Full)));
+    }
+
+    #[test]
+    fn phase_a_region_feature_queries_keep_every_region_under_area_cap() {
+        fn query_area(
+            query: &rollshot_automation::RegionFeaturesQuery,
+            image_width: u32,
+            image_height: u32,
+        ) -> u64 {
+            match query.region {
+                rollshot_automation::Region::Full => image_width as u64 * image_height as u64,
+                rollshot_automation::Region::Rect { bounds } => {
+                    (bounds.width.ceil() as u64).saturating_mul(bounds.height.ceil() as u64)
+                }
+            }
+        }
+
+        let queries = phase_a_region_feature_queries(100_000, 100_000);
+        assert!(queries.iter().all(|query| {
+            query_area(query, 100_000, 100_000) <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT
+        }));
+    }
+
     fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
         let cancel = rollshot_agent::runtime::RunCancellation::new();
         std::sync::Arc::new(rollshot_agent::tools::ToolContext::new(
@@ -433,11 +612,10 @@ mod prepare_tests {
         let ctx = tool_context_for_tests();
         let executor: std::sync::Arc<dyn rollshot_automation::AutomationExecutor> =
             std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor);
-        let host: std::sync::Arc<
-            std::sync::Mutex<dyn rollshot_automation::AutomationHost>,
-        > = std::sync::Arc::new(std::sync::Mutex::new(
-            rollshot_automation::FakeAutomationHost::default(),
-        ));
+        let host: std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>> =
+            std::sync::Arc::new(std::sync::Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            ));
 
         let registry = build_authoring_tool_registry(ctx, executor, host).unwrap();
         let names = registry.tool_names();
