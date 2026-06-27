@@ -63,6 +63,7 @@ url = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = "3"
 
 # Narrowed from the workspace `forbid(unsafe_code)`: the AppKit native-drag

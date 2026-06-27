@@ -39,10 +39,15 @@ pub fn smart_redaction_budget() -> RunBudget {
     }
 }
 
-fn phase_a_region_feature_queries(
-    width: u32,
-    height: u32,
-) -> Vec<rollshot_automation::RegionFeaturesQuery> {
+#[derive(Debug, Clone, PartialEq)]
+struct CanonicalRegionFeatureEntry {
+    name: &'static str,
+    bounds: rollshot_image_document::ImageRect,
+    query: Option<rollshot_automation::RegionFeaturesQuery>,
+    unavailable_reason: Option<&'static str>,
+}
+
+fn canonical_region_feature_catalog(width: u32, height: u32) -> Vec<CanonicalRegionFeatureEntry> {
     use rollshot_automation::{Region, RegionFeaturesQuery};
     use rollshot_image_document::ImageRect;
 
@@ -50,70 +55,140 @@ fn phase_a_region_feature_queries(
         return Vec::new();
     }
 
-    let mut queries = Vec::new();
-    let full_area = width as u64 * height as u64;
-    if full_area <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT {
-        queries.push(RegionFeaturesQuery {
-            region: Region::Full,
-            limit: PHASE_A_REGION_FEATURE_LIMIT,
-        });
-    }
-
-    let strip_h = height.min(PHASE_A_REGION_FEATURE_STRIP_PX) as f32;
-    let strip_w = width.min(PHASE_A_REGION_FEATURE_STRIP_PX) as f32;
     let width_f = width as f32;
     let height_f = height as f32;
+    let strip_h = height.min(PHASE_A_REGION_FEATURE_STRIP_PX) as f32;
+    let strip_w = width.min(PHASE_A_REGION_FEATURE_STRIP_PX) as f32;
 
-    let push_rect =
-        |queries: &mut Vec<RegionFeaturesQuery>, x: f32, y: f32, width: f32, height: f32| {
-            if width <= 0.0 || height <= 0.0 {
-                return;
+    let make_entry = |name: &'static str, bounds: ImageRect| {
+        let area = (bounds.width.ceil() as u64).saturating_mul(bounds.height.ceil() as u64);
+        if area > PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT {
+            CanonicalRegionFeatureEntry {
+                name,
+                bounds,
+                query: None,
+                unavailable_reason: Some("area_limit_exceeded"),
             }
-            let area = (width.ceil() as u64).saturating_mul(height.ceil() as u64);
-            if area > PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT {
-                return;
+        } else {
+            CanonicalRegionFeatureEntry {
+                name,
+                bounds,
+                query: Some(RegionFeaturesQuery {
+                    region: Region::Rect { bounds },
+                    limit: PHASE_A_REGION_FEATURE_LIMIT,
+                }),
+                unavailable_reason: None,
             }
-            queries.push(RegionFeaturesQuery {
-                region: Region::Rect {
-                    bounds: ImageRect {
-                        x,
-                        y,
-                        width,
-                        height,
-                    },
-                },
-                limit: PHASE_A_REGION_FEATURE_LIMIT,
-            });
-        };
+        }
+    };
 
-    push_rect(&mut queries, 0.0, 0.0, width_f, strip_h);
-    push_rect(&mut queries, 0.0, 0.0, strip_w, height_f);
-    push_rect(
-        &mut queries,
-        (width_f - strip_w).max(0.0),
-        0.0,
-        strip_w,
-        height_f,
-    );
-    push_rect(
-        &mut queries,
-        0.0,
-        (height_f - strip_h).max(0.0),
-        width_f,
-        strip_h,
-    );
+    vec![
+        CanonicalRegionFeatureEntry {
+            name: "full",
+            bounds: ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: width_f,
+                height: height_f,
+            },
+            query: if (width as u64 * height as u64) <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT {
+                Some(RegionFeaturesQuery {
+                    region: Region::Full,
+                    limit: PHASE_A_REGION_FEATURE_LIMIT,
+                })
+            } else {
+                None
+            },
+            unavailable_reason: if (width as u64 * height as u64)
+                <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT
+            {
+                None
+            } else {
+                Some("area_limit_exceeded")
+            },
+        },
+        make_entry(
+            "top_strip",
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: width_f,
+                height: strip_h,
+            },
+        ),
+        make_entry(
+            "left_strip",
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: strip_w,
+                height: height_f,
+            },
+        ),
+        make_entry(
+            "right_strip",
+            ImageRect {
+                x: (width_f - strip_w).max(0.0),
+                y: 0.0,
+                width: strip_w,
+                height: height_f,
+            },
+        ),
+        make_entry(
+            "bottom_strip",
+            ImageRect {
+                x: 0.0,
+                y: (height_f - strip_h).max(0.0),
+                width: width_f,
+                height: strip_h,
+            },
+        ),
+    ]
+}
 
-    queries
+fn authoring_inspection_context(
+    payload_mode: PayloadMode,
+    catalog: &[CanonicalRegionFeatureEntry],
+) -> rollshot_agent::tools::AuthoringInspectionContext {
+    let regions = catalog
+        .iter()
+        .map(|entry| rollshot_agent::tools::CanonicalRegionInspection {
+            name: entry.name.into(),
+            bounds: Some(entry.bounds),
+            query: entry.query.clone(),
+            unavailable_reason: entry.unavailable_reason.map(str::to_string),
+        })
+        .collect();
+
+    let payload_mode = match payload_mode {
+        PayloadMode::FullScreenshot => "full_screenshot",
+        PayloadMode::OcrLayoutOnly => "ocr_layout_only",
+    };
+
+    rollshot_agent::tools::AuthoringInspectionContext {
+        payload_mode: payload_mode.into(),
+        regions,
+        ocr_status: rollshot_agent::tools::CapabilityStatus::unavailable("ocr_disabled"),
+        layout_status: rollshot_agent::tools::CapabilityStatus::unavailable(
+            "capability_unavailable",
+        ),
+        template_match_status: rollshot_agent::tools::CapabilityStatus::unavailable(
+            "no_capability_handles",
+        ),
+    }
 }
 
 fn prepare_phase_a_region_features(
     host: &mut rollshot_vision::RealAutomationHost,
     index: &VisualIndex,
 ) -> Result<(), WorkbenchError> {
-    for query in phase_a_region_feature_queries(index.width(), index.height()) {
+    for entry in canonical_region_feature_catalog(index.width(), index.height()) {
+        let Some(query) = entry.query else {
+            continue;
+        };
         host.prepare_region_features(index, &query)
             .map_err(|e| WorkbenchError::VisionPrepare {
-                message: format!("regionFeatures: {e}"),
+                message: format!("regionFeatures {}: {e}", entry.name),
             })?;
     }
     Ok(())
@@ -193,10 +268,12 @@ fn build_authoring_tool_registry(
     tool_ctx: Arc<rollshot_agent::tools::ToolContext>,
     executor: Arc<dyn rollshot_automation::AutomationExecutor>,
     host: Arc<StdMutex<dyn rollshot_automation::AutomationHost>>,
+    inspection: rollshot_agent::tools::AuthoringInspectionContext,
 ) -> Result<rollshot_agent::tools::ToolRegistry, WorkbenchError> {
     use rollshot_agent::tools::{
-        DryRunTool, GetContextSummaryTool, ReplaceSourceTool, RequestUserInputTool,
-        SubmitForReviewTool, ToolRegistry, ToolRegistryLimits, ValidateSourceTool,
+        DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
+        ReplaceSourceTool, RequestUserInputTool, SubmitForReviewTool, ToolRegistry,
+        ToolRegistryLimits, ValidateSourceTool,
     };
 
     let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
@@ -227,6 +304,21 @@ fn build_authoring_tool_registry(
     reg(
         &mut registry,
         Arc::new(GetContextSummaryTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(InspectImageContextTool::new(
+            tool_ctx.clone(),
+            inspection.clone(),
+        )),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(RegionFeaturesTool::new(
+            tool_ctx.clone(),
+            host.clone(),
+            inspection.regions.clone(),
+        )),
     )?;
     reg(
         &mut registry,
@@ -307,10 +399,15 @@ pub fn start_agent_run(
             &cancellation_for_task,
         ));
 
+        let inspection = authoring_inspection_context(
+            payload_mode,
+            &canonical_region_feature_catalog(image_dims.0, image_dims.1),
+        );
         let registry = match build_authoring_tool_registry(
             tool_ctx.clone(),
             Arc::new(vision.executor),
             vision.host.clone() as Arc<StdMutex<dyn rollshot_automation::AutomationHost>>,
+            inspection,
         ) {
             Ok(registry) => registry,
             Err(e) => {
@@ -548,47 +645,75 @@ mod prepare_tests {
     }
 
     #[test]
-    fn phase_a_region_feature_queries_match_prompt_top_strip() {
-        let queries = phase_a_region_feature_queries(160, 120);
-        assert!(queries.iter().any(|query| {
-            matches!(
-                query.region,
-                rollshot_automation::Region::Rect { bounds }
-                    if bounds.x == 0.0
-                        && bounds.y == 0.0
-                        && bounds.width == 160.0
-                        && bounds.height == 96.0
-            )
-        }));
-    }
-
-    #[test]
-    fn phase_a_region_feature_queries_skip_oversized_full_image() {
-        let queries = phase_a_region_feature_queries(10_000, 10_000);
-        assert!(!queries
+    fn canonical_region_catalog_matches_prompt_top_strip() {
+        let catalog = canonical_region_feature_catalog(160, 120);
+        let top = catalog
             .iter()
-            .any(|query| matches!(query.region, rollshot_automation::Region::Full)));
+            .find(|entry| entry.name == "top_strip")
+            .expect("top strip entry");
+        assert_eq!(
+            top.bounds,
+            rollshot_image_document::ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
+                height: 96.0,
+            }
+        );
+        assert!(top.query.is_some());
+        assert_eq!(top.unavailable_reason, None);
     }
 
     #[test]
-    fn phase_a_region_feature_queries_keep_every_region_under_area_cap() {
-        fn query_area(
-            query: &rollshot_automation::RegionFeaturesQuery,
-            image_width: u32,
-            image_height: u32,
-        ) -> u64 {
-            match query.region {
-                rollshot_automation::Region::Full => image_width as u64 * image_height as u64,
-                rollshot_automation::Region::Rect { bounds } => {
-                    (bounds.width.ceil() as u64).saturating_mul(bounds.height.ceil() as u64)
-                }
+    fn canonical_region_catalog_keeps_skipped_full_region_with_reason() {
+        let catalog = canonical_region_feature_catalog(10_000, 10_000);
+        let full = catalog
+            .iter()
+            .find(|entry| entry.name == "full")
+            .expect("full entry");
+        assert_eq!(full.query, None);
+        assert_eq!(full.unavailable_reason, Some("area_limit_exceeded"));
+    }
+
+    #[test]
+    fn canonical_region_catalog_has_named_entries_for_every_region() {
+        let names: Vec<&str> = canonical_region_feature_catalog(160, 120)
+            .iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "full",
+                "top_strip",
+                "left_strip",
+                "right_strip",
+                "bottom_strip"
+            ]
+        );
+    }
+
+    #[test]
+    fn canonical_region_catalog_never_prepares_region_over_area_cap() {
+        for entry in canonical_region_feature_catalog(100_000, 100_000) {
+            if let Some(query) = &entry.query {
+                let area = match query.region {
+                    rollshot_automation::Region::Full => 100_000_u64 * 100_000_u64,
+                    rollshot_automation::Region::Rect { bounds } => {
+                        (bounds.width.ceil() as u64).saturating_mul(bounds.height.ceil() as u64)
+                    }
+                };
+                assert!(
+                    area <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT,
+                    "{} prepared area {} exceeds cap {}",
+                    entry.name,
+                    area,
+                    PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT
+                );
+            } else {
+                assert_eq!(entry.unavailable_reason, Some("area_limit_exceeded"));
             }
         }
-
-        let queries = phase_a_region_feature_queries(100_000, 100_000);
-        assert!(queries.iter().all(|query| {
-            query_area(query, 100_000, 100_000) <= PHASE_A_REGION_FEATURE_FULL_AREA_LIMIT
-        }));
     }
 
     fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
@@ -608,7 +733,7 @@ mod prepare_tests {
     }
 
     #[test]
-    fn authoring_registry_exposes_only_truthful_phase_a_tools() {
+    fn authoring_registry_exposes_truthful_phase_b1_tools() {
         let ctx = tool_context_for_tests();
         let executor: std::sync::Arc<dyn rollshot_automation::AutomationExecutor> =
             std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor);
@@ -616,8 +741,12 @@ mod prepare_tests {
             std::sync::Arc::new(std::sync::Mutex::new(
                 rollshot_automation::FakeAutomationHost::default(),
             ));
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &canonical_region_feature_catalog(64, 64),
+        );
 
-        let registry = build_authoring_tool_registry(ctx, executor, host).unwrap();
+        let registry = build_authoring_tool_registry(ctx, executor, host, inspection).unwrap();
         let names = registry.tool_names();
 
         assert_eq!(
@@ -628,12 +757,67 @@ mod prepare_tests {
                 "submit_for_review",
                 "request_user_input",
                 "inspect_context_summary",
+                "inspect_image_context",
+                "inspect_region_features",
                 "dry_run",
             ]
         );
         assert!(!names.contains(&"inspect_ocr"));
         assert!(!names.contains(&"inspect_layout"));
-        assert!(!names.contains(&"inspect_region_features"));
+    }
+
+    #[tokio::test]
+    async fn prepared_vision_context_inspects_and_dry_runs_top_strip() {
+        use rollshot_agent::tools::{DryRunTool, RegionFeaturesTool, Tool};
+
+        let image = image::RgbaImage::from_fn(64, 64, |_, _| image::Rgba([160, 170, 180, 255]));
+        let vision = prepare_vision_context(&image).unwrap();
+        let catalog = canonical_region_feature_catalog(64, 64);
+        let inspection = authoring_inspection_context(PayloadMode::FullScreenshot, &catalog);
+        let ctx = tool_context_for_tests();
+        let host = vision.host.clone()
+            as std::sync::Arc<std::sync::Mutex<dyn rollshot_automation::AutomationHost>>;
+
+        let inspect =
+            RegionFeaturesTool::new(ctx.clone(), host.clone(), inspection.regions.clone());
+        let inspected = inspect
+            .call(&serde_json::json!({"region": "top_strip"}))
+            .await
+            .unwrap();
+        match inspected {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["status"].as_str(), Some("available"));
+                assert_eq!(result_json["features"].as_array().unwrap().len(), 1);
+            }
+            other => panic!("expected inspection success, got {other:?}"),
+        }
+
+        let source = r#"
+function main(input) {
+  const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+  const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+  return { candidates: features.length > 0 ? [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] : [] };
+}
+"#;
+        let dry_run = DryRunTool::new(
+            ctx,
+            std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor),
+            host,
+        );
+        let dry_run_result = dry_run
+            .call(&serde_json::json!({"source": source, "generation": 0}))
+            .await
+            .unwrap();
+        match dry_run_result {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["candidate_count"].as_u64(), Some(1));
+                assert_eq!(
+                    result_json["candidate_preview"][0]["label"].as_str(),
+                    Some("top-strip")
+                );
+            }
+            other => panic!("expected dry-run success, got {other:?}"),
+        }
     }
 }
 
