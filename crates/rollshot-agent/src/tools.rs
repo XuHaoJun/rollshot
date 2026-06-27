@@ -1007,12 +1007,53 @@ impl Tool for LayoutTool {
     }
 }
 
-#[derive(Default)]
-pub struct RegionFeaturesTool;
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InspectRegionFeaturesArgs {
+    pub region: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegionFeatureSummary {
+    pub bounds: rollshot_image_document::ImageRect,
+    pub dominant_rgba: [u8; 4],
+    pub edge_density: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectRegionFeaturesResult {
+    pub region: String,
+    pub status: String,
+    pub bounds: Option<rollshot_image_document::ImageRect>,
+    pub features: Vec<RegionFeatureSummary>,
+    pub unavailable_reason: Option<String>,
+}
+
+fn capability_error_code(error: rollshot_automation::CapabilityError) -> String {
+    match error {
+        rollshot_automation::CapabilityError::InvalidInput { code } => code.into(),
+        rollshot_automation::CapabilityError::LimitExceeded => "limit_exceeded".into(),
+        rollshot_automation::CapabilityError::Failed { code } => code.into(),
+    }
+}
+
+pub struct RegionFeaturesTool {
+    _ctx: Arc<ToolContext>,
+    host: Arc<Mutex<dyn rollshot_automation::AutomationHost>>,
+    regions: Vec<CanonicalRegionInspection>,
+}
 
 impl RegionFeaturesTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(
+        ctx: Arc<ToolContext>,
+        host: Arc<Mutex<dyn rollshot_automation::AutomationHost>>,
+        regions: Vec<CanonicalRegionInspection>,
+    ) -> Self {
+        Self {
+            _ctx: ctx,
+            host,
+            regions,
+        }
     }
 }
 
@@ -1022,18 +1063,75 @@ impl Tool for RegionFeaturesTool {
     }
 
     fn json_schema(&self) -> Value {
-        tool_schema::<EmptyArgs>()
+        tool_schema::<InspectRegionFeaturesArgs>()
     }
 
-    fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
+    fn call<'a>(&'a self, arguments: &'a Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            Ok(ToolOutcome::Success {
-                result_json: serde_json::to_value(CapabilityUnavailable {
-                    capability: "region_features".into(),
-                    reason: "Region features not available in this context".into(),
-                })
-                .unwrap_or_default(),
-            })
+            let args: InspectRegionFeaturesArgs = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolError::ArgumentDecode(e.to_string()))?;
+            let region = self
+                .regions
+                .iter()
+                .find(|region| region.name == args.region)
+                .ok_or_else(|| {
+                    ToolError::ArgumentDecode(format!("unknown canonical region: {}", args.region))
+                })?;
+
+            let Some(query) = region.query.clone() else {
+                return Ok(ToolOutcome::Success {
+                    result_json: serde_json::to_value(InspectRegionFeaturesResult {
+                        region: region.name.clone(),
+                        status: "unavailable".into(),
+                        bounds: region.bounds,
+                        features: Vec::new(),
+                        unavailable_reason: region
+                            .unavailable_reason
+                            .clone()
+                            .or_else(|| Some("region_unavailable".into())),
+                    })
+                    .unwrap_or_default(),
+                });
+            };
+
+            let features = {
+                let mut host = self.host.lock().unwrap();
+                host.region_features(query)
+            };
+
+            match features {
+                Ok(features) => {
+                    let summaries = features
+                        .into_iter()
+                        .take(1)
+                        .map(|feature| RegionFeatureSummary {
+                            bounds: feature.bounds,
+                            dominant_rgba: feature.dominant_rgba,
+                            edge_density: feature.edge_density,
+                        })
+                        .collect();
+                    Ok(ToolOutcome::Success {
+                        result_json: serde_json::to_value(InspectRegionFeaturesResult {
+                            region: region.name.clone(),
+                            status: "available".into(),
+                            bounds: region.bounds,
+                            features: summaries,
+                            unavailable_reason: None,
+                        })
+                        .unwrap_or_default(),
+                    })
+                }
+                Err(error) => Ok(ToolOutcome::Success {
+                    result_json: serde_json::to_value(InspectRegionFeaturesResult {
+                        region: region.name.clone(),
+                        status: "unavailable".into(),
+                        bounds: region.bounds,
+                        features: Vec::new(),
+                        unavailable_reason: Some(capability_error_code(error)),
+                    })
+                    .unwrap_or_default(),
+                }),
+            }
         })
     }
 }
@@ -1789,15 +1887,135 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn inspect_region_features_schema_is_object() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = RegionFeaturesTool::new(ctx, host, inspection_context_for_tests().regions);
+        let schema = tool.json_schema();
+        assert_eq!(schema["type"].as_str(), Some("object"));
+    }
+
     #[tokio::test]
-    async fn region_features_returns_unavailable() {
-        let tool = RegionFeaturesTool::new();
-        let args = serde_json::json!({});
-        let result = tool.call(&args).await.unwrap();
+    async fn inspect_region_features_rejects_unknown_region() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = RegionFeaturesTool::new(ctx, host, inspection_context_for_tests().regions);
+
+        let err = tool
+            .call(&serde_json::json!({"region": "custom_rect"}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::ArgumentDecode(_)));
+    }
+
+    #[tokio::test]
+    async fn inspect_region_features_returns_prepared_feature_summary() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(rollshot_automation::FakeAutomationHost {
+            region_feature_results: vec![rollshot_automation::RegionFeatures {
+                bounds: rollshot_image_document::ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 96.0,
+                },
+                dominant_rgba: [10, 20, 30, 255],
+                edge_density: 0.25,
+            }],
+            ..Default::default()
+        }));
+        let tool = RegionFeaturesTool::new(ctx, host, inspection_context_for_tests().regions);
+
+        let result = tool
+            .call(&serde_json::json!({"region": "top_strip"}))
+            .await
+            .unwrap();
 
         match result {
             ToolOutcome::Success { result_json } => {
-                assert_eq!(result_json["capability"].as_str(), Some("region_features"));
+                assert_eq!(result_json["region"].as_str(), Some("top_strip"));
+                assert_eq!(result_json["status"].as_str(), Some("available"));
+                assert_eq!(result_json["features"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    result_json["features"][0]["dominant_rgba"][0].as_u64(),
+                    Some(10)
+                );
+                assert_eq!(
+                    result_json["features"][0]["edge_density"].as_f64(),
+                    Some(0.25)
+                );
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_region_features_returns_unavailable_for_skipped_region() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let regions = vec![CanonicalRegionInspection {
+            name: "full".into(),
+            bounds: Some(rollshot_image_document::ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100_000.0,
+                height: 100_000.0,
+            }),
+            query: None,
+            unavailable_reason: Some("area_limit_exceeded".into()),
+        }];
+        let tool = RegionFeaturesTool::new(ctx, host, regions);
+
+        let result = tool
+            .call(&serde_json::json!({"region": "full"}))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["status"].as_str(), Some("unavailable"));
+                assert_eq!(
+                    result_json["unavailable_reason"].as_str(),
+                    Some("area_limit_exceeded")
+                );
+                assert!(result_json["features"].as_array().unwrap().is_empty());
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_region_features_converts_host_error_to_unavailable() {
+        let ctx = test_context("source");
+        let host = Arc::new(Mutex::new(rollshot_automation::FakeAutomationHost {
+            failure: Some(rollshot_automation::CapabilityError::Failed {
+                code: "vision_index_unavailable",
+            }),
+            ..Default::default()
+        }));
+        let tool = RegionFeaturesTool::new(ctx, host, inspection_context_for_tests().regions);
+
+        let result = tool
+            .call(&serde_json::json!({"region": "top_strip"}))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["status"].as_str(), Some("unavailable"));
+                assert_eq!(
+                    result_json["unavailable_reason"].as_str(),
+                    Some("vision_index_unavailable")
+                );
+                assert!(result_json["features"].as_array().unwrap().is_empty());
             }
             other => panic!("expected success, got {other:?}"),
         }
