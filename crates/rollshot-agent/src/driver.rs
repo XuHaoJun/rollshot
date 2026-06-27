@@ -77,7 +77,9 @@ Rollshot JavaScript authoring guide:
 - bounds is { x, y, width, height } in image pixels. width and height must be positive.
 - confidence must be between 0 and 1. label must be short and non-empty.
 - Supported capability calls are rollshot.ocr(query), rollshot.layout(query) when available, rollshot.regionFeatures(query), and rollshot.templateMatch(query) only when a matching input.capabilityHandles entry exists.
-- In Phase A, OCR and layout may fail unless dry_run proves they are available. Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
+- In OCR-enabled runs, call inspect_ocr for text-driven redaction requests before writing source. inspect_ocr returns full recognized text, bounds, and confidence for canonical regions. Use OCR bounds as evidence for candidate rectangles.
+- If OCR is unavailable, treat that as a harness limitation and do not invent text evidence.
+- Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
   const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
   const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
 - Example empty result: function main(input) { return { candidates: [] }; }
@@ -99,9 +101,10 @@ Rollshot JavaScript authoring guide:
 
 Inspection loop:
 1. Call inspect_image_context before writing or replacing source.
-2. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
-3. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
-4. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
+2. Call inspect_ocr for text-driven redaction requests such as visible words, names, emails, ids, labels, form fields, or account-like strings.
+3. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
+4. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
+5. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
 
 Authoring loop:
 1. Use replace_source for a new source generation.
@@ -1209,8 +1212,9 @@ pub(crate) mod tests {
     use crate::domain::SessionId;
     use crate::runtime::{EvidenceKind, NullEventSink, RunBudget};
     use crate::tools::{
-        DryRunTool, GetContextSummaryTool, InspectImageContextTool, RegionFeaturesTool,
-        ReplaceSourceTool, SubmitForReviewTool, ToolRegistryLimits, ValidateSourceTool,
+        DryRunTool, GetContextSummaryTool, InspectImageContextTool, OcrTool,
+        RegionFeaturesTool, ReplaceSourceTool, SubmitForReviewTool, ToolRegistryLimits,
+        ValidateSourceTool,
     };
     use rig_core::completion::Usage;
     use rig_core::streaming::StreamedAssistantContent;
@@ -3196,8 +3200,21 @@ pub(crate) mod tests {
                     }),
                     unavailable_reason: None,
                 }],
-                ocr_regions: vec![],
-                ocr_status: crate::tools::CapabilityStatus::unavailable("ocr_disabled"),
+                ocr_regions: vec![crate::tools::CanonicalOcrInspection {
+                    name: "full".into(),
+                    bounds: Some(rollshot_image_document::ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 100.0,
+                    }),
+                    query: Some(rollshot_automation::OcrQuery {
+                        region: rollshot_automation::Region::Full,
+                        limit: 50,
+                    }),
+                    unavailable_reason: None,
+                }],
+                ocr_status: crate::tools::CapabilityStatus::available(),
                 layout_status: crate::tools::CapabilityStatus::unavailable(
                     "capability_unavailable",
                 ),
@@ -3220,6 +3237,12 @@ pub(crate) mod tests {
                 ctx.clone(),
                 host.clone(),
                 inspection.regions.clone(),
+            )))
+            .unwrap();
+            reg.register(Arc::new(OcrTool::new(
+                ctx.clone(),
+                host.clone(),
+                inspection.ocr_regions.clone(),
             )))
             .unwrap();
             reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
@@ -3360,6 +3383,16 @@ pub(crate) mod tests {
                 "system prompt should list canonical region names, got: {:?}",
                 system_prompt
             );
+            assert!(
+                system_prompt.contains("Call inspect_ocr for text-driven redaction requests"),
+                "system prompt should guide OCR inspection for text-driven intents, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("inspect_ocr returns full recognized text"),
+                "system prompt should disclose full OCR text in tool results, got: {:?}",
+                system_prompt
+            );
 
             // The second request must carry the prior assistant tool call and the
             // tool result so the model can continue the loop.
@@ -3424,6 +3457,18 @@ pub(crate) mod tests {
                     .contains("region"),
                 "inspect_region_features schema must require a canonical region argument, got: {}",
                 region_features_def.parameters
+            );
+
+            let ocr_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_ocr")
+                .expect("inspect_ocr tool definition present");
+            assert_eq!(ocr_def.parameters["type"].as_str(), Some("object"));
+            assert!(
+                ocr_def.parameters.to_string().contains("region"),
+                "inspect_ocr schema must require a canonical region argument, got: {}",
+                ocr_def.parameters
             );
         }
     }
