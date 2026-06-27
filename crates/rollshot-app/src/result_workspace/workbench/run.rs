@@ -103,6 +103,53 @@ impl rollshot_agent::runtime::RunEventSink for ChannelEventSink {
     }
 }
 
+fn build_authoring_tool_registry(
+    tool_ctx: Arc<rollshot_agent::tools::ToolContext>,
+    executor: Arc<dyn rollshot_automation::AutomationExecutor>,
+    host: Arc<StdMutex<dyn rollshot_automation::AutomationHost>>,
+) -> Result<rollshot_agent::tools::ToolRegistry, WorkbenchError> {
+    use rollshot_agent::tools::{
+        DryRunTool, GetContextSummaryTool, ReplaceSourceTool, RequestUserInputTool,
+        SubmitForReviewTool, ToolRegistry, ToolRegistryLimits, ValidateSourceTool,
+    };
+
+    let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+    let reg = |registry: &mut ToolRegistry,
+               tool: Arc<dyn rollshot_agent::tools::Tool>|
+     -> Result<(), WorkbenchError> {
+        registry
+            .register(tool)
+            .map_err(|_| WorkbenchError::RuntimeFailure)
+    };
+
+    reg(
+        &mut registry,
+        Arc::new(ReplaceSourceTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(ValidateSourceTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(SubmitForReviewTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(RequestUserInputTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(GetContextSummaryTool::new(tool_ctx.clone())),
+    )?;
+    reg(
+        &mut registry,
+        Arc::new(DryRunTool::new(tool_ctx, executor, host)),
+    )?;
+
+    Ok(registry)
+}
+
 /// Start a bounded agent run as an iced `Task` that streams `RunEvent`s and
 /// emits a final `RunTerminal`. The `AgentSession` is moved into the spawned
 /// task by value (not held in any Mutex) so the spawned future stays `Send`
@@ -128,10 +175,6 @@ pub fn start_agent_run(
         domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType},
         driver::{AgentConfig, AgentRunner},
         runtime::{RunCancellation, RunEvent},
-        tools::{
-            DryRunTool, GetContextSummaryTool, ReplaceSourceTool, RequestUserInputTool,
-            SubmitForReviewTool, ToolContext, ToolRegistry, ToolRegistryLimits, ValidateSourceTool,
-        },
     };
 
     if !super::provider_config::has_key(provider_config) {
@@ -169,7 +212,7 @@ pub fn start_agent_run(
         let policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(25), 80_000_000, 8_000_000,
         );
-        let tool_ctx = Arc::new(ToolContext::new(
+        let tool_ctx = Arc::new(rollshot_agent::tools::ToolContext::new(
             session_id,
             active_source,
             validation_limits,
@@ -178,20 +221,19 @@ pub fn start_agent_run(
             &cancellation_for_task,
         ));
 
-        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
-        let reg = |r: &mut ToolRegistry, t: Arc<dyn rollshot_agent::tools::Tool>| -> Result<(), WorkbenchError> {
-            r.register(t).map_err(|_| WorkbenchError::RuntimeFailure)
-        };
-        reg(&mut registry, Arc::new(ReplaceSourceTool::new(tool_ctx.clone()))).unwrap();
-        reg(&mut registry, Arc::new(ValidateSourceTool::new(tool_ctx.clone()))).unwrap();
-        reg(&mut registry, Arc::new(SubmitForReviewTool::new(tool_ctx.clone()))).unwrap();
-        reg(&mut registry, Arc::new(RequestUserInputTool::new(tool_ctx.clone()))).unwrap();
-        reg(&mut registry, Arc::new(GetContextSummaryTool::new(tool_ctx.clone()))).unwrap();
-        reg(&mut registry, Arc::new(DryRunTool::new(
+        let registry = match build_authoring_tool_registry(
             tool_ctx.clone(),
             Arc::new(vision.executor),
             vision.host.clone() as Arc<StdMutex<dyn rollshot_automation::AutomationHost>>,
-        ))).unwrap();
+        ) {
+            Ok(registry) => registry,
+            Err(e) => {
+                yield crate::result_workspace::Message::Workbench(
+                    super::WorkbenchMessage::RunFailed(e),
+                );
+                return;
+            }
+        };
 
         // C6: payload_mode gates the bytes.
         let (descriptors, attachment_bytes) = match payload_mode {
@@ -368,6 +410,52 @@ mod prepare_tests {
         let ctx = prepare_vision_context(&img).unwrap();
         assert_eq!(ctx.index.width(), 8);
         assert_eq!(ctx.index.height(), 8);
+    }
+
+    fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
+        let cancel = rollshot_agent::runtime::RunCancellation::new();
+        std::sync::Arc::new(rollshot_agent::tools::ToolContext::new(
+            rollshot_agent::domain::SessionId::new(1),
+            String::new(),
+            rollshot_automation::ValidationLimits::default(),
+            rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                std::time::Duration::from_secs(5),
+                4 * 1024 * 1024,
+                1024 * 1024,
+            ),
+            (64, 64),
+            &cancel,
+        ))
+    }
+
+    #[test]
+    fn authoring_registry_exposes_only_truthful_phase_a_tools() {
+        let ctx = tool_context_for_tests();
+        let executor: std::sync::Arc<dyn rollshot_automation::AutomationExecutor> =
+            std::sync::Arc::new(rollshot_automation_rquickjs::QuickJsExecutor);
+        let host: std::sync::Arc<
+            std::sync::Mutex<dyn rollshot_automation::AutomationHost>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+
+        let registry = build_authoring_tool_registry(ctx, executor, host).unwrap();
+        let names = registry.tool_names();
+
+        assert_eq!(
+            names,
+            vec![
+                "replace_source",
+                "validate_source",
+                "submit_for_review",
+                "request_user_input",
+                "inspect_context_summary",
+                "dry_run",
+            ]
+        );
+        assert!(!names.contains(&"inspect_ocr"));
+        assert!(!names.contains(&"inspect_layout"));
+        assert!(!names.contains(&"inspect_region_features"));
     }
 }
 
