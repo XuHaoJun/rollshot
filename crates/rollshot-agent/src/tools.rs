@@ -309,6 +309,83 @@ pub struct CapabilityUnavailable {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AuthoringInspectionContext {
+    pub payload_mode: String,
+    pub regions: Vec<CanonicalRegionInspection>,
+    pub ocr_status: CapabilityStatus,
+    pub layout_status: CapabilityStatus,
+    pub template_match_status: CapabilityStatus,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CanonicalRegionInspection {
+    pub name: String,
+    pub bounds: Option<rollshot_image_document::ImageRect>,
+    #[serde(skip_serializing)]
+    pub query: Option<rollshot_automation::RegionFeaturesQuery>,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CapabilityStatus {
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+impl CapabilityStatus {
+    pub fn available() -> Self {
+        Self {
+            status: "available".into(),
+            reason: None,
+        }
+    }
+
+    pub fn partial(reason: impl Into<String>) -> Self {
+        Self {
+            status: "partial".into(),
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            status: "unavailable".into(),
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageContextImage {
+    pub width: u32,
+    pub height: u32,
+    pub payload_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageContextSource {
+    pub generation: u64,
+    pub source_bytes: usize,
+    pub evidence_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageContextCapabilities {
+    pub region_features: CapabilityStatus,
+    pub ocr: CapabilityStatus,
+    pub layout: CapabilityStatus,
+    pub template_match: CapabilityStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageContextResult {
+    pub image: ImageContextImage,
+    pub source: ImageContextSource,
+    pub regions: Vec<CanonicalRegionInspection>,
+    pub capabilities: ImageContextCapabilities,
+}
+
 // ---------- Tool context ----------
 
 pub struct ToolContext {
@@ -763,6 +840,75 @@ impl Tool for RequestUserInputTool {
 }
 
 // ---------- Inspection tools ----------
+
+pub struct InspectImageContextTool {
+    ctx: Arc<ToolContext>,
+    inspection: AuthoringInspectionContext,
+}
+
+impl InspectImageContextTool {
+    pub fn new(ctx: Arc<ToolContext>, inspection: AuthoringInspectionContext) -> Self {
+        Self { ctx, inspection }
+    }
+}
+
+impl Tool for InspectImageContextTool {
+    fn name(&self) -> &str {
+        "inspect_image_context"
+    }
+
+    fn json_schema(&self) -> Value {
+        tool_schema::<EmptyArgs>()
+    }
+
+    fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let draft = self.ctx.draft.lock().unwrap();
+            let generation = draft.generation();
+            let evidence_count = draft.evidence().len();
+            drop(draft);
+
+            let source_bytes = self.ctx.source.lock().unwrap().len();
+            let prepared = self
+                .inspection
+                .regions
+                .iter()
+                .filter(|region| region.query.is_some())
+                .count();
+            let skipped = self.inspection.regions.len().saturating_sub(prepared);
+            let region_features = if prepared == 0 {
+                CapabilityStatus::unavailable("no_prepared_regions")
+            } else if skipped > 0 {
+                CapabilityStatus::partial("some_regions_unavailable")
+            } else {
+                CapabilityStatus::available()
+            };
+
+            Ok(ToolOutcome::Success {
+                result_json: serde_json::to_value(ImageContextResult {
+                    image: ImageContextImage {
+                        width: self.ctx.image_dims.0,
+                        height: self.ctx.image_dims.1,
+                        payload_mode: self.inspection.payload_mode.clone(),
+                    },
+                    source: ImageContextSource {
+                        generation,
+                        source_bytes,
+                        evidence_count,
+                    },
+                    regions: self.inspection.regions.clone(),
+                    capabilities: ImageContextCapabilities {
+                        region_features,
+                        ocr: self.inspection.ocr_status.clone(),
+                        layout: self.inspection.layout_status.clone(),
+                        template_match: self.inspection.template_match_status.clone(),
+                    },
+                })
+                .unwrap_or_default(),
+            })
+        })
+    }
+}
 
 pub struct GetContextSummaryTool {
     ctx: Arc<ToolContext>,
@@ -1652,6 +1798,89 @@ pub(crate) mod tests {
         match result {
             ToolOutcome::Success { result_json } => {
                 assert_eq!(result_json["capability"].as_str(), Some("region_features"));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    // ---- Inspection: image context ----
+
+    fn inspection_context_for_tests() -> AuthoringInspectionContext {
+        AuthoringInspectionContext {
+            payload_mode: "full_screenshot".into(),
+            regions: vec![CanonicalRegionInspection {
+                name: "top_strip".into(),
+                bounds: Some(rollshot_image_document::ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 96.0,
+                }),
+                query: Some(rollshot_automation::RegionFeaturesQuery {
+                    region: rollshot_automation::Region::Rect {
+                        bounds: rollshot_image_document::ImageRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 100.0,
+                            height: 96.0,
+                        },
+                    },
+                    limit: 1,
+                }),
+                unavailable_reason: None,
+            }],
+            ocr_status: CapabilityStatus::unavailable("ocr_disabled"),
+            layout_status: CapabilityStatus::unavailable("capability_unavailable"),
+            template_match_status: CapabilityStatus::unavailable("no_capability_handles"),
+        }
+    }
+
+    #[test]
+    fn inspect_image_context_schema_is_object() {
+        let tool =
+            InspectImageContextTool::new(test_context("source"), inspection_context_for_tests());
+        let schema = tool.json_schema();
+        assert_eq!(schema["type"].as_str(), Some("object"));
+    }
+
+    #[tokio::test]
+    async fn inspect_image_context_returns_authoring_and_region_context() {
+        let ctx = test_context("hello world");
+        let tool = InspectImageContextTool::new(ctx, inspection_context_for_tests());
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            ToolOutcome::Success { result_json } => {
+                assert_eq!(result_json["image"]["width"].as_u64(), Some(100));
+                assert_eq!(result_json["image"]["height"].as_u64(), Some(100));
+                assert_eq!(
+                    result_json["image"]["payload_mode"].as_str(),
+                    Some("full_screenshot")
+                );
+                assert_eq!(result_json["source"]["generation"].as_u64(), Some(0));
+                assert_eq!(result_json["source"]["source_bytes"].as_u64(), Some(11));
+                assert_eq!(
+                    result_json["regions"][0]["name"].as_str(),
+                    Some("top_strip")
+                );
+                assert!(result_json["regions"][0].get("query").is_none());
+                assert_eq!(
+                    result_json["capabilities"]["region_features"]["status"].as_str(),
+                    Some("available")
+                );
+                assert_eq!(
+                    result_json["capabilities"]["ocr"]["status"].as_str(),
+                    Some("unavailable")
+                );
+                assert_eq!(
+                    result_json["capabilities"]["layout"]["status"].as_str(),
+                    Some("unavailable")
+                );
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["status"].as_str(),
+                    Some("unavailable")
+                );
             }
             other => panic!("expected success, got {other:?}"),
         }
