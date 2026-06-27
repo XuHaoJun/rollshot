@@ -85,8 +85,8 @@ Rollshot JavaScript authoring guide:
   function main(input) {
     const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
     const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
-    if (features.length === 0) { return { candidates: [] }; }
-    return { candidates: [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] };
+    const hasFeatures = features.length > 0;
+    return { candidates: hasFeatures ? [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] : [] };
   }
 - Example OCR redaction when OCR is available:
   function expand(rect, padding) {
@@ -3329,6 +3329,41 @@ pub(crate) mod tests {
                 "tool definition must carry a real schema, got: {}",
                 summary_def.parameters
             );
+        }
+    }
+
+    #[test]
+    fn smart_redaction_prompt_examples_validate() {
+        fn example_source(start_marker: &str, end_marker: &str) -> String {
+            let after_start = SMART_REDACTION_SYSTEM_PROMPT
+                .split_once(start_marker)
+                .unwrap_or_else(|| panic!("missing prompt marker: {start_marker}"))
+                .1;
+            let example = after_start
+                .split_once(end_marker)
+                .unwrap_or_else(|| panic!("missing prompt marker: {end_marker}"))
+                .0;
+            example
+                .lines()
+                .filter_map(|line| line.strip_prefix("  "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let limits = rollshot_automation::ValidationLimits::default();
+        for source in [
+            example_source(
+                "- Example redaction from a strip:",
+                "- Example OCR redaction when OCR is available:",
+            ),
+            example_source(
+                "- Example OCR redaction when OCR is available:",
+                "Authoring loop:",
+            ),
+        ] {
+            rollshot_automation::validate_source(&source, &limits).unwrap_or_else(|diags| {
+                panic!("prompt example should validate:\n{source}\n{diags:#?}")
+            });
         }
     }
 
