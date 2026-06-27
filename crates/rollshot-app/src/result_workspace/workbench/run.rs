@@ -270,6 +270,7 @@ fn authoring_inspection_context(
         })
         .collect();
 
+    #[cfg(feature = "ocr")]
     let ocr_regions = ocr_catalog
         .iter()
         .map(|entry| rollshot_agent::tools::CanonicalOcrInspection {
@@ -279,6 +280,11 @@ fn authoring_inspection_context(
             unavailable_reason: entry.unavailable_reason.map(str::to_string),
         })
         .collect();
+    #[cfg(not(feature = "ocr"))]
+    let ocr_regions = {
+        let _ = ocr_catalog;
+        Vec::new()
+    };
 
     let payload_mode = match payload_mode {
         PayloadMode::FullScreenshot => "full_screenshot",
@@ -974,6 +980,40 @@ mod prepare_tests {
         );
         assert!(!names.contains(&"inspect_ocr"));
         assert!(!names.contains(&"inspect_layout"));
+    }
+
+    #[cfg(not(feature = "ocr"))]
+    #[tokio::test]
+    async fn default_build_inspection_reports_ocr_disabled() {
+        use rollshot_agent::tools::{InspectImageContextTool, Tool};
+
+        let ctx = tool_context_for_tests();
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &canonical_region_feature_catalog(64, 64),
+            &canonical_ocr_catalog(64, 64),
+        );
+        let tool = InspectImageContextTool::new(ctx, inspection);
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert_eq!(
+                    result_json["capabilities"]["ocr"]["status"].as_str(),
+                    Some("unavailable")
+                );
+                assert_eq!(
+                    result_json["capabilities"]["ocr"]["reason"].as_str(),
+                    Some("ocr_disabled")
+                );
+                assert!(
+                    result_json["ocr_regions"].as_array().unwrap().is_empty(),
+                    "default builds must not advertise prepared OCR regions"
+                );
+            }
+            other => panic!("expected inspection success, got {other:?}"),
+        }
     }
 
     #[tokio::test]
