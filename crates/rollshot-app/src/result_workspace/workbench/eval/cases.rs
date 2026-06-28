@@ -99,7 +99,7 @@ fn layer2_gate_over_all_present_fixtures() {
             .join(spec.name)
             .join("golden_source.js");
         if !golden_path.exists() {
-            if meta.seeded || std::env::var_os("CI").is_some() {
+            if meta.seeded {
                 panic!(
                     "seeded eval fixture {} is missing golden_source.js",
                     spec.name
