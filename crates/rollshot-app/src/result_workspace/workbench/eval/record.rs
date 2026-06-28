@@ -263,6 +263,7 @@ pub(crate) async fn record_cassette(
     intent: &str,
     real_base_url: &str,
     api_key: &str,
+    model_override: Option<&str>,
 ) -> Result<(), String> {
     let image = super::fixture::load_image(intent);
     let meta = super::fixture::load_meta(intent);
@@ -312,9 +313,10 @@ pub(crate) async fn record_cassette(
         height: h,
         byte_count: png.len() as u64,
     };
+    let model = model_override.unwrap_or(&meta.model);
     let input = AuthorizedModelInput::new(
         meta.provider.clone(),
-        meta.model.clone(),
+        model.to_string(),
         format!("Redact the {} in this screenshot.", meta.intent),
         vec![descriptor],
         vec![png.clone()],
@@ -363,7 +365,7 @@ pub(crate) async fn record_cassette(
         metadata: CassetteMeta {
             recorded_at: now,
             provider: meta.provider.clone(),
-            model: meta.model.clone(),
+            model: model.to_string(),
             substitutions: "none".into(),
         },
         attachment: Some(image_meta),
@@ -391,13 +393,21 @@ mod tests {
             .try_init();
 
         let intent = std::env::var("EVAL_INTENT").expect("EVAL_INTENT not set");
-        let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
         if std::env::var("ROLLSHOT_RECORD_EVAL").is_err() {
             eprintln!("SKIP: ROLLSHOT_RECORD_EVAL not set");
             return;
         }
 
-        record_cassette(&intent, "https://api.anthropic.com", &api_key)
+        let config_dir = dirs::config_dir()
+            .expect("no config dir")
+            .join("rollshot");
+        let cfg = crate::result_workspace::workbench::provider_config::load_provider_config(&config_dir)
+            .expect("load provider.toml");
+        let api_key = crate::result_workspace::workbench::provider_config::resolve_key(&cfg.key_source)
+            .expect("no API key resolved from provider.toml");
+        let base_url = cfg.base_url.as_deref().unwrap_or("https://api.anthropic.com");
+
+        record_cassette(&intent, base_url, &api_key, Some(&cfg.model))
             .await
             .expect("record_cassette succeeded");
     }
