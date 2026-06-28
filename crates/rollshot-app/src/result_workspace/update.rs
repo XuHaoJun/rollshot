@@ -871,9 +871,25 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::AddManualCandidate { bounds } => {
-                    let id =
-                        rollshot_edit_proposal::CandidateId(workbench.next_manual_candidate_id);
-                    workbench.next_manual_candidate_id += 1;
+                    let max_proposal_id = workbench
+                        .pending_proposal
+                        .as_ref()
+                        .and_then(|proposal| proposal.candidates.iter().map(|c| c.id.0).max())
+                        .unwrap_or(0);
+                    let max_review_id = workbench
+                        .review
+                        .per_candidate
+                        .keys()
+                        .map(|id| id.0)
+                        .max()
+                        .unwrap_or(0);
+                    let id = rollshot_edit_proposal::CandidateId(
+                        max_proposal_id
+                            .max(max_review_id)
+                            .max(workbench.next_manual_candidate_id.saturating_sub(1))
+                            + 1,
+                    );
+                    workbench.next_manual_candidate_id = id.0 + 1;
                     if let Some(proposal) = &mut workbench.pending_proposal {
                         use rollshot_edit_proposal::{
                             ProposedCandidate, ProposedEdit, Provenance, ProvenanceSource,
@@ -996,7 +1012,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 workbench.session.session_id.get(),
                                 chrono::Utc::now().to_rfc3339(),
                             ) {
-                                Ok(()) => workbench.pending_draft = None,
+                                Ok(revision) => {
+                                    workbench.active_revision = Some(revision);
+                                    workbench.pending_draft = None;
+                                }
                                 Err(e) => workbench.error = Some(e),
                             }
                         } else {

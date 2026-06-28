@@ -1,7 +1,9 @@
 use rollshot_edit_proposal::{lower, CandidateId, EditProposal, ProvenanceSource, ReviewDecision};
 use rollshot_image_document::ImageDocument;
 use rollshot_image_document::ImageRect;
-use rollshot_preset::{PresetId, PresetStore, RevisionId, RevisionOrigin, RevisionProvenance};
+use rollshot_preset::{
+    AutomationRevision, PresetId, PresetStore, RevisionId, RevisionOrigin, RevisionProvenance,
+};
 
 use super::state::{CandidateReview, WorkbenchError};
 
@@ -58,7 +60,7 @@ pub fn save_revision(
     provenance_note: Option<&str>,
     session_id: u64,
     now: String,
-) -> Result<(), WorkbenchError> {
+) -> Result<AutomationRevision, WorkbenchError> {
     let limits = rollshot_automation::ValidationLimits::default();
     let validated = rollshot_automation::validate_source(source, &limits)
         .map_err(|_| WorkbenchError::SourceValidationFailure)?;
@@ -85,7 +87,11 @@ pub fn save_revision(
         .map_err(|e| WorkbenchError::Store {
             message: e.to_string(),
         })?;
-    Ok(())
+    store
+        .load_active_revision(preset_id)
+        .map_err(|e| WorkbenchError::Store {
+            message: e.to_string(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -426,6 +432,36 @@ mod save_tests {
             active.provenance.note.as_deref(),
             Some("improved from rev-parent; 1 rejected, 0 resized, 0 manually added")
         );
+    }
+
+    #[test]
+    fn save_revision_returns_saved_active_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = PresetStore::open(tmp.path().to_path_buf());
+        let preset_id = PresetId("test-preset".into());
+        store
+            .create_preset(
+                preset_id.clone(),
+                "Test".into(),
+                "intent".into(),
+                "2026-01-01T00:00:00Z".into(),
+            )
+            .unwrap();
+        let source = r#"function main(input) { return { candidates: [] }; }"#;
+        let saved = save_revision(
+            &store,
+            &preset_id,
+            source,
+            None,
+            Some("initial author run"),
+            42,
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .unwrap();
+
+        assert_eq!(saved.preset_id, preset_id);
+        assert_eq!(saved.provenance.note.as_deref(), Some("initial author run"));
+        assert_eq!(store.load_active_revision(&preset_id).unwrap().id, saved.id);
     }
 
     #[test]

@@ -1795,6 +1795,38 @@ mod reducer_tests {
     }
 
     #[test]
+    fn manual_candidate_uses_non_colliding_id_for_missed_target_evidence() {
+        let mut ws = ws_with_workbench();
+        {
+            let wb = wb_mut(&mut ws);
+            wb.pending_proposal = Some(proposal(vec![agent_candidate(
+                1,
+                rect(10.0, 10.0, 50.0, 50.0),
+            )]));
+            wb.review = super::super::CandidateReview::from_candidates(&[CandidateId(1)]);
+        }
+
+        let manual_bounds = rect(80.0, 20.0, 12.0, 8.0);
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::AddManualCandidate {
+                bounds: manual_bounds,
+            }),
+        );
+
+        let state = wb(&ws);
+        let proposal = state.pending_proposal.as_ref().unwrap();
+        assert_eq!(proposal.candidates[0].id, CandidateId(1));
+        assert_eq!(proposal.candidates[1].id, CandidateId(2));
+
+        let evidence = super::super::review::assemble_correction_evidence(proposal, &state.review);
+        assert!(evidence.resized.is_empty());
+        assert_eq!(evidence.manual_added.len(), 1);
+        assert_eq!(evidence.manual_added[0].id, CandidateId(2));
+        assert_eq!(evidence.manual_added[0].bounds, manual_bounds);
+    }
+
+    #[test]
     fn ask_agent_to_revise_is_noop_without_corrections() {
         let mut ws = ws_with_workbench();
         // Active revision + proposal present, but the review has no rejections,
