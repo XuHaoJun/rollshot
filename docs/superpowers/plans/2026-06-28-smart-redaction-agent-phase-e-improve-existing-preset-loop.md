@@ -6,6 +6,8 @@
 
 **Architecture:** Keep the bounded agent runtime unchanged. The workbench converts review state into privacy-safe correction evidence, starts a normal agent run with `RunKind::Improve`, and carries revision lineage metadata in workbench state until the user saves the improved draft.
 
+> **Note — `RunKind::Improve` is run metadata, not a runtime branch.** `start_agent_run` does not read `params.mode`. Improve behavior is carried by three things only: (1) the correction-evidence user message, (2) the active-revision source seeded as the run's starting source (`active_revision_source`), and (3) the Task 5 system-prompt section. Do not look for `mode`-based branching in the runner — there is none.
+
 **Tech Stack:** Rust, iced task/update state, `rollshot-agent` bounded run loop, `rollshot-preset` immutable revision store, existing Phase D eval harness.
 
 ---
@@ -15,14 +17,28 @@
 - Modify `crates/rollshot-app/src/result_workspace/workbench/review.rs`
   - Owns correction evidence extraction and human-readable improve summaries.
   - Already owns review lowering and revision saving.
+  - Task 1 replaces the count-only `CorrectionEvidence` struct, its `Display`
+    impl, and `assemble_correction_evidence`, and deletes the two obsolete
+    count-based tests.
+- Modify `crates/rollshot-app/src/result_workspace/workbench/state.rs`
+  - Adds run-lineage fields to `RunState::Running` (the enum is defined here,
+    re-exported via `mod.rs`).
 - Modify `crates/rollshot-app/src/result_workspace/workbench/mod.rs`
-  - Adds run-lineage fields to `RunState`, `PendingRunParams`, and `PendingDraft`.
+  - Adds run-lineage fields to `PendingRunParams` and `PendingDraft`.
+- Modify `crates/rollshot-app/src/result_workspace/workbench/view.rs`
+  - Rebuilds the improve-modal `CorrectionEvidence` via
+    `assemble_correction_evidence` (the manual count-field construction no
+    longer compiles after Task 1), and adds the review-bar
+    "Ask agent to revise" entry point wired to `AskAgentToRevise`.
 - Modify `crates/rollshot-app/src/result_workspace/update.rs`
-  - Wires `AskAgentToRevise`, carries lineage metadata through `DisclosureConfirmed`, and saves child revisions.
+  - Wires `AskAgentToRevise`, carries lineage metadata through
+    `DisclosureConfirmed`/`RunTerminal`, and saves child revisions.
 - Modify `crates/rollshot-app/src/result_workspace/workbench/run.rs`
-  - Adds deterministic tests around improve parameter assembly and terminal draft metadata.
+  - Adds deterministic tests around improve parameter assembly, lineage
+    threading, and terminal draft metadata.
 - Modify `crates/rollshot-agent/src/driver.rs`
-  - Updates the system prompt and prompt contract tests for improve semantics.
+  - Updates the system prompt and adds a prompt contract test for improve
+    semantics.
 - Modify `docs/smart-redaction-eval.md`
   - Notes that live improve cassettes are deferred until Phase E prompt stabilizes.
 
@@ -30,6 +46,7 @@
 
 **Files:**
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/review.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/workbench/view.rs`
 
 - [ ] **Step 1: Add failing tests for rejected, resized, and manual-added evidence**
 
@@ -285,36 +302,65 @@ pub fn assemble_correction_evidence(
 }
 ```
 
-If `review.rs` already imports any of these names, merge imports instead of duplicating them.
+Import scope: `review.rs` already does `use rollshot_edit_proposal::{lower, EditProposal, ReviewDecision};` — **merge** `CandidateId` and `ProvenanceSource` into that line; add `use rollshot_image_document::ImageRect;`. Do **not** import `ProposedEdit` at module scope — it is not named in the new code and would warn under `-D warnings`. The new struct drops the speculative `accepted_count` field (nothing reads it); if you keep it, justify the reader.
 
-- [ ] **Step 4: Run the focused tests and verify they pass**
+This step **replaces three things** in `review.rs`: the `CorrectionEvidence` struct, its existing `Display` impl (the old one references the removed count fields and would either conflict or fail to compile), and `assemble_correction_evidence`.
+
+- [ ] **Step 3b: Delete the obsolete count-based tests**
+
+In `review.rs` `evidence_tests`, delete `correction_evidence_counts_reject_and_modify` and `correction_evidence_all_pending_is_zero`. They reference the removed `rejected_count`/`modified_count`/`added_count` fields, and their semantics are now wrong (a `Manual`-provenance candidate marked modified is classified as `manual_added`, not `resized`). The new Step 1 tests supersede them.
+
+- [ ] **Step 3c: Fix the `view.rs` evidence construction (D1 — crate won't build otherwise)**
+
+In `view.rs` (~line 56), the improve-modal branch builds `CorrectionEvidence { rejected_count, modified_count, added_count }` from `wb.review`. Those fields no longer exist. Replace the manual construction with the shared extractor:
+
+```rust
+let evidence = match wb.pending_proposal.as_ref() {
+    Some(proposal) => super::review::assemble_correction_evidence(proposal, &wb.review),
+    None => super::review::CorrectionEvidence::default(),
+};
+improve_modal(&evidence)
+```
+
+`improve_modal`'s `text(format!("- {evidence}"))` keeps working via the new `Display`/`summary_line`. No other `view.rs` change is needed in Task 1 (the entry-point button is Task 3).
+
+- [ ] **Step 4: Build the crate and run the focused tests, verify they pass**
 
 Run:
 
 ```bash
+rtk cargo check -p rollshot-app
 rtk cargo test -p rollshot-app workbench::review::evidence_tests -- --nocapture
 ```
 
-Expected: all evidence tests pass.
+Expected: the whole crate compiles (proves `view.rs` was updated) and all evidence tests pass.
 
 - [ ] **Step 5: Commit Task 1**
 
 Run:
 
 ```bash
-rtk git add crates/rollshot-app/src/result_workspace/workbench/review.rs
+rtk git add crates/rollshot-app/src/result_workspace/workbench/review.rs crates/rollshot-app/src/result_workspace/workbench/view.rs
 rtk git commit -m "feat(app): model smart redaction correction evidence"
 ```
 
 ## Task 2: Run Lineage State
 
 **Files:**
+- Modify: `crates/rollshot-app/src/result_workspace/workbench/state.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/mod.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/update.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
 
 - [ ] **Step 1: Add failing compile-time usage for lineage fields**
 
-In `mod.rs`, update the type definitions first. This intentionally causes compile errors until `update.rs` is wired:
+`RunState` is defined in `state.rs` (and re-exported from `mod.rs`);
+`PendingDraft`/`PendingRunParams` are defined in `mod.rs`. Edit each in its
+real home. This intentionally causes compile errors until `update.rs` is wired.
+
+In `state.rs`, update `RunState` (note `Option<rollshot_preset::RevisionId>`
+requires `rollshot_preset` to be a dependency of `rollshot-app` — it already is;
+reference it by full path here):
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -328,7 +374,11 @@ pub enum RunState {
     },
     Terminal(RunTerminalState),
 }
+```
 
+In `mod.rs`, update the two struct definitions:
+
+```rust
 #[derive(Debug, Clone)]
 pub struct PendingDraft {
     pub source: String,
@@ -427,7 +477,52 @@ Search for `PendingRunParams {` and `RunState::Running {`:
 rtk rg -n "PendingRunParams \\{|RunState::Running \\{" crates/rollshot-app/src/result_workspace
 ```
 
-Add `parent_revision_id: None` and `revision_note: None` to each test/helper initializer that starts an author run.
+Add `parent_revision_id: None` and `revision_note: None` to **every**
+`RunState::Running { … }` and `PendingRunParams { … }` *construction* site (not
+the `RunState::Running { .. }` pattern matches, which already use `..`). This
+includes the three test constructions in `run.rs` (`cancel_run_calls_cancellation`,
+`run_failed_sets_error_and_terminal`, `disclosure_confirmed_blocked_while_running`)
+and the `disclosure_cancelled_clears_pending_run_and_flag` test — none of which
+"start an author run" but all of which construct the affected types.
+
+- [ ] **Step 4b: Add a failing test for lineage threading Running → Terminal → PendingDraft**
+
+This is the hop Task 2 actually adds (Step 3's `RunTerminal` capture) and is
+otherwise untested. In `run.rs` `reducer_tests`, add a test that seeds a
+`Running` state carrying lineage, fires `RunTerminal(ReadyForReview(..))`, and
+asserts the lineage lands on `PendingDraft`. Reuse the existing
+`ready_for_review_with_text` helper:
+
+```rust
+#[test]
+fn run_terminal_carries_lineage_into_pending_draft() {
+    let mut ws = ws_with_workbench();
+    wb_mut(&mut ws).run_state = super::super::RunState::Running {
+        cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        parent_revision_id: Some(rollshot_preset::RevisionId("rev-parent".into())),
+        revision_note: Some("improved from rev-parent; 1 rejected, 0 resized, 0 manually added".into()),
+    };
+    let ready = ready_for_review_with_text("done");
+    let _ = update(
+        &mut ws,
+        Message::Workbench(WorkbenchMessage::RunTerminal(
+            RunTerminalState::ReadyForReview(Box::new(ready)),
+        )),
+    );
+    let draft = wb(&ws).pending_draft.as_ref().expect("draft populated");
+    assert_eq!(draft.parent_revision_id.as_ref().unwrap().0, "rev-parent");
+    assert!(draft.revision_note.as_ref().unwrap().contains("1 rejected"));
+}
+```
+
+Because Task 2 bundles the `RunTerminal` lineage capture into Step 3, this test
+passes once Step 3 is in place. To confirm it is a real guard (not a tautology),
+temporarily comment out the `parent_revision_id`/`revision_note` assignment in
+the Step 3 `PendingDraft` construction and watch it go RED, then restore:
+
+```bash
+rtk cargo test -p rollshot-app run_terminal_carries_lineage_into_pending_draft -- --nocapture
+```
 
 - [ ] **Step 5: Run check and focused tests**
 
@@ -445,7 +540,7 @@ Expected: check passes and existing workbench run tests pass.
 Run:
 
 ```bash
-rtk git add crates/rollshot-app/src/result_workspace/workbench/mod.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/workbench/run.rs
+rtk git add crates/rollshot-app/src/result_workspace/workbench/state.rs crates/rollshot-app/src/result_workspace/workbench/mod.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/workbench/run.rs
 rtk git commit -m "feat(app): carry smart redaction run lineage"
 ```
 
@@ -454,6 +549,7 @@ rtk git commit -m "feat(app): carry smart redaction run lineage"
 **Files:**
 - Modify: `crates/rollshot-app/src/result_workspace/update.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/workbench/view.rs`
 
 - [ ] **Step 1: Add failing update tests for improve param assembly**
 
@@ -541,6 +637,29 @@ fn ask_agent_to_revise_queues_improve_run_with_correction_evidence() {
     assert!(params.revision_note.as_ref().unwrap().contains("1 rejected"));
     assert!(state.disclosure_pending);
 }
+
+#[test]
+fn ask_agent_to_revise_is_noop_without_corrections() {
+    let mut ws = ws_with_workbench();
+    // Active revision + proposal present, but the review has no rejections,
+    // resizes, or manual additions → empty evidence → silent no-op.
+    // Scope the mutable borrow in a block so the local does not shadow the
+    // `wb(&ws)` accessor used below.
+    {
+        let wb = wb_mut(&mut ws);
+        wb.active_revision = Some(active_revision_for_reducer_test());
+        wb.pending_proposal = Some(proposal(vec![agent_candidate(1, rect(10.0, 10.0, 50.0, 50.0))]));
+        wb.review = super::super::CandidateReview::from_candidates(&[CandidateId(1)]);
+    }
+
+    let _ = update(
+        &mut ws,
+        Message::Workbench(WorkbenchMessage::AskAgentToRevise),
+    );
+    let state = wb(&ws);
+    assert!(state.pending_run.is_none(), "no run queued without corrections");
+    assert!(!state.disclosure_pending, "disclosure not opened");
+}
 ```
 
 - [ ] **Step 2: Run the failing test**
@@ -591,23 +710,55 @@ super::workbench::WorkbenchMessage::AskAgentToRevise => {
 
 Keep `DiscardDraft`, `DiscardCandidates`, `ToggleAdvancedDetails`, `OpenProviderSettings`, and `DisclosureRequested(_)` in a separate no-op arm.
 
+- [ ] **Step 3b: Add the UI entry point (without it the improve loop is unreachable)**
+
+The reducer logic above is dead until a control emits `AskAgentToRevise`. Today
+the only improve affordances (`view.rs` "Improve preset" buttons) emit `ImStart`,
+which opens the inert `improve_modal` (its "Send improvement" button has no
+`on_press`). Add a button in the **candidate review bar** (near the existing
+"Apply" control, `view.rs` ~lines 180-250), enabled only when there is something
+to send:
+
+```rust
+// Mirror the reducer guard: needs an active revision to revise *from*, a
+// proposal, and at least one correction. Otherwise the click is a no-op.
+let revise_enabled = wb.active_revision.is_some()
+    && wb
+        .pending_proposal
+        .as_ref()
+        .map(|p| !super::review::assemble_correction_evidence(p, &wb.review).is_empty())
+        .unwrap_or(false);
+// …in the review bar row…
+button(text("Ask agent to revise")).on_press_maybe(
+    revise_enabled.then_some(Message::Workbench(WorkbenchMessage::AskAgentToRevise)),
+)
+```
+
+When fired, `AskAgentToRevise` sets `pending_run`, so the view shows the working
+`disclosure_modal` (confirm → `DisclosureConfirmed` → real Improve run), not the
+inert `improve_modal`. The legacy `ImStart`/`improve_modal` stub is now
+superseded; removing it is left as a follow-up (out of scope here) to keep this
+task's diff focused.
+
 - [ ] **Step 4: Run the focused improve tests**
 
 Run:
 
 ```bash
+rtk cargo check -p rollshot-app
 rtk cargo test -p rollshot-app ask_agent_to_revise_queues_improve_run_with_correction_evidence -- --nocapture
+rtk cargo test -p rollshot-app ask_agent_to_revise_is_noop_without_corrections -- --nocapture
 rtk cargo test -p rollshot-app workbench::review::evidence_tests -- --nocapture
 ```
 
-Expected: both pass.
+Expected: crate compiles (view button wired) and all three test invocations pass.
 
 - [ ] **Step 5: Commit Task 3**
 
 Run:
 
 ```bash
-rtk git add crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/workbench/run.rs
+rtk git add crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/workbench/run.rs crates/rollshot-app/src/result_workspace/workbench/view.rs
 rtk git commit -m "feat(app): start smart redaction improve runs"
 ```
 
@@ -734,34 +885,44 @@ rtk git commit -m "feat(app): save improved presets as child revisions"
 **Files:**
 - Modify: `crates/rollshot-agent/src/driver.rs`
 
-- [ ] **Step 1: Add failing prompt contract assertions**
+- [ ] **Step 1: Add a failing prompt contract test**
 
-In the existing system prompt test around `SMART_REDACTION_SYSTEM_PROMPT`, add:
+There is **no** existing test whose name contains `system_prompt`, and no test
+currently binds a `system_prompt` local to assert `.contains(...)` (the closest,
+`smart_redaction_prompt_examples_validate`, only validates the embedded JS
+examples). So **add a new test** — its name must contain `system_prompt` so the
+`-p rollshot-agent system_prompt` filter selects it (otherwise Step 2 runs zero
+tests and passes vacuously). Place it in the same `#[cfg(test)]` module as
+`smart_redaction_prompt_examples_validate`:
 
 ```rust
-assert!(
-    system_prompt.contains("Improve runs"),
-    "system prompt should document improve runs, got: {:?}",
-    system_prompt
-);
-assert!(
-    system_prompt.contains("Treat rejected candidates as false positives"),
-    "system prompt should explain rejected correction semantics, got: {:?}",
-    system_prompt
-);
-assert!(
-    system_prompt.contains("Treat manually added candidates as missed targets"),
-    "system prompt should explain manual correction semantics, got: {:?}",
-    system_prompt
-);
-assert!(
-    system_prompt.contains("Explain what changed in the detector before submit_for_review"),
-    "system prompt should require detector-change explanation, got: {:?}",
-    system_prompt
-);
+#[test]
+fn smart_redaction_system_prompt_documents_improve_runs() {
+    let system_prompt = SMART_REDACTION_SYSTEM_PROMPT;
+    assert!(
+        system_prompt.contains("Improve runs"),
+        "system prompt should document improve runs, got: {:?}",
+        system_prompt
+    );
+    assert!(
+        system_prompt.contains("Treat rejected candidates as false positives"),
+        "system prompt should explain rejected correction semantics, got: {:?}",
+        system_prompt
+    );
+    assert!(
+        system_prompt.contains("Treat manually added candidates as missed targets"),
+        "system prompt should explain manual correction semantics, got: {:?}",
+        system_prompt
+    );
+    assert!(
+        system_prompt.contains("Explain what changed in the detector before submit_for_review"),
+        "system prompt should require detector-change explanation, got: {:?}",
+        system_prompt
+    );
+}
 ```
 
-- [ ] **Step 2: Run the failing prompt test**
+- [ ] **Step 2: Run the failing prompt test and confirm it actually runs**
 
 Run:
 
@@ -769,7 +930,11 @@ Run:
 rtk cargo test -p rollshot-agent system_prompt -- --nocapture
 ```
 
-Expected: fail on the new assertions.
+Expected: **1 test runs and fails** on the new assertions. If the output says
+`0 tests`, the test name is wrong — fix it before proceeding (a passing-on-zero
+run is a false green). The appended prompt section comes after `Authoring loop:`,
+so it does not disturb `smart_redaction_prompt_examples_validate`, whose example
+extraction ends at the `Authoring loop:` marker.
 
 - [ ] **Step 3: Update the system prompt**
 
@@ -809,8 +974,13 @@ rtk git commit -m "feat(agent): teach smart redaction improve runs"
 
 **Files:**
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/review.rs`
-- Modify: `crates/rollshot-app/src/result_workspace/workbench/run.rs`
 - Modify: `docs/smart-redaction-eval.md`
+
+> These two tests partially overlap the Task 1 evidence tests (rejected →
+> "Rejected false positives"; manual → "Manually added missed targets"). They
+> are kept intentionally as named overfire/miss documentation of the two
+> correction modes (per the project's "rather too many tests than too few"
+> preference). No `run.rs` change happens in this task.
 
 - [ ] **Step 1: Add overfire and miss evidence tests**
 
@@ -888,7 +1058,7 @@ Expected: all pass. `eval` should continue to run the existing selftest gate.
 Run:
 
 ```bash
-rtk git add crates/rollshot-app/src/result_workspace/workbench/review.rs crates/rollshot-app/src/result_workspace/workbench/run.rs docs/smart-redaction-eval.md
+rtk git add crates/rollshot-app/src/result_workspace/workbench/review.rs docs/smart-redaction-eval.md
 rtk git commit -m "test(app): cover smart redaction improve corrections"
 ```
 
@@ -945,6 +1115,6 @@ Expected: pass. If this is too slow for the environment, record the reason and t
 Run only if verification caused additional edits:
 
 ```bash
-rtk git add crates/rollshot-app/src/result_workspace/workbench/review.rs crates/rollshot-app/src/result_workspace/workbench/mod.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/workbench/run.rs crates/rollshot-agent/src/driver.rs docs/smart-redaction-eval.md
+rtk git add crates/rollshot-app/src/result_workspace/workbench/review.rs crates/rollshot-app/src/result_workspace/workbench/state.rs crates/rollshot-app/src/result_workspace/workbench/mod.rs crates/rollshot-app/src/result_workspace/workbench/view.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/workbench/run.rs crates/rollshot-agent/src/driver.rs docs/smart-redaction-eval.md
 rtk git commit -m "fix(app): stabilize smart redaction improve loop"
 ```
