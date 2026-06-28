@@ -18,6 +18,223 @@
 - Tools/diagnostics rules from AGENTS.md apply: use `tracing` with `rollshot::*` targets for any retained runtime diagnostics; no `println!`/`dbg!`. Prefix shell commands with `rtk`.
 - The harness must exercise the genuine product authoring path; reconstructing the catalogs/registry instead of reusing the workbench helpers is disallowed (drift).
 
+## Engineering Review Lock-In
+
+This section is the auto-mode engineering-review amendment. It supersedes any conflicting task text below.
+
+### Auto Decisions Applied
+
+Auto decision D1 — Reduce MVP scope to the deterministic harness plus self-test cassette
+
+Context: The original plan has 13 tasks and more than 12 new artifacts when fixture data/docs are counted.
+ELI10: The plan is trying to build the harness and fully seed every live-model fixture at the same time. The harness is the thing that lets us verify future seeded cases; seeding six live model cases requires an API key and manual review, so it is not necessary to prove the harness works. If we ship the harness with a deterministic self-test cassette, developers can safely seed the rest in a follow-up.
+Stakes if we pick wrong: We either block useful infrastructure on manual live-model work, or we ship a harness that does not actually gate full-loop replay.
+Recommendation: 1A because it keeps the CI gate real while deferring the API-key/manual-review work.
+Completeness: A=8/10, B=10/10
+Pros / cons:
+A) Harness + self-test cassette now; six live cassettes follow-up (recommended, human: ~1 day / AI: ~45 min, low risk, low maintenance)
+  ✅ Produces a deterministic default CI gate with no live dependency.
+  ❌ Does not immediately prove all six OCR intents against a real provider cassette.
+B) Keep six live cassettes in this plan (human: ~2-3 days / AI: ~2 hours plus API access, medium risk, medium maintenance)
+  ✅ Maximizes immediate fixture coverage.
+  ❌ Makes plan completion depend on live provider behavior and manual review.
+Net: Build the reusable gate first; seed broad live coverage as a separate, explicit follow-up.
+
+Auto decision D2 — Make geometry scoring exact for overlapping rectangles
+
+Context: The original `coverage_of` sums pairwise intersections and clamps, which overcounts overlapping candidates inside one expected rect.
+ELI10: If two redaction boxes overlap the same target, the old math can count the overlapped pixels twice. That can make a bad result look like it covered the full target. The scorer is the gate, so it should be stricter than the model.
+Stakes if we pick wrong: CI can pass a redaction that misses part of the sensitive area.
+Recommendation: 2A because exact union coverage is the simplest defensible scoring rule.
+Completeness: A=10/10, B=6/10
+Pros / cons:
+A) Implement exact axis-aligned union area helpers with overlap tests (recommended, human: ~0.5 day / AI: ~20 min, low risk, low maintenance)
+  ✅ Handles overlapping candidates and overlapping expected regions predictably.
+  ❌ Slightly more code than summed pairwise intersections.
+B) Keep pairwise sum + clamp (human: ~0 / AI: ~0, medium risk, low maintenance)
+  ✅ Smallest diff.
+  ❌ Can produce false passes.
+Net: The extra helper is worth it because this function is the core safety gate.
+
+Auto decision D3 — Move workbench visibility promotion before Layer 2/Layer 1 reuse
+
+Context: `workbench/run.rs` is currently a private module; Task 5 imports it before Task 6 promotes visibility.
+ELI10: The plan asks the implementer to write code that cannot see the helper module yet. That creates a predictable compile failure unrelated to the behavior under test. Visibility changes should happen immediately before the first reuse.
+Stakes if we pick wrong: The red/green loop fails for plumbing reasons and implementers patch ad hoc.
+Recommendation: 3A because explicit ordering keeps the plan executable.
+Completeness: A=10/10, B=5/10
+Pros / cons:
+A) Execute visibility promotion before Layer 2, or fold it into Task 5 Step 1 (recommended, human: ~10 min / AI: ~5 min, low risk, low maintenance)
+  ✅ Keeps import paths and TDD steps coherent.
+  ❌ Moves a refactor earlier than originally listed.
+B) Leave Task 6 after Task 5 (human: ~0 / AI: ~0, medium risk, low maintenance)
+  ✅ Preserves original numbering.
+  ❌ Guarantees avoidable compile churn.
+Net: Make the change easy, then make the easy change.
+
+Auto decision D4 — Store redacted request metadata in cassettes
+
+Context: The original `CassetteFile` only stores `status` and `sse_body`, but the constraints require auth stripping and image-body replacement.
+ELI10: If the cassette does not store request data, the redaction code cannot prove it stripped secrets from request data. If the recorder ever writes full requests for debugging, there is no typed shape enforcing the safe form. The cassette format should make unsafe data unrepresentable.
+Stakes if we pick wrong: A live recording can leak an API key or screenshot base64 into git.
+Recommendation: 4A because it mirrors the opencode recorded-test shape while narrowing the stored request to safe fields.
+Completeness: A=10/10, B=4/10
+Pros / cons:
+A) Add `RecordedRequest` + `RecordedResponse` with safe headers/body summary and pure redaction tests (recommended, human: ~0.5 day / AI: ~30 min, low risk, medium maintenance)
+  ✅ Makes redaction testable without live model calls.
+  ❌ Adds a few more cassette fields.
+B) Keep response-only cassettes (human: ~0 / AI: ~0, high risk, low maintenance)
+  ✅ Simpler replay code.
+  ❌ Does not satisfy the stated redaction guarantee.
+Net: Store only enough request metadata to audit replay and prove privacy.
+
+Auto decision D5 — Replace the brittle `wiremock::Request` unit test with a helper-level responder test
+
+Context: Task 7 constructs `wiremock::Request` directly and compares debug strings, which is version-fragile and does not assert the body.
+ELI10: A test that checks debug output can pass or fail for reasons unrelated to replay order. The thing we need to know is whether the responder returns interaction A, then B, and then fails loudly when exhausted. That can be tested through a small helper without depending on private `wiremock` internals.
+Stakes if we pick wrong: The cassette responder can regress while the test still gives false confidence.
+Recommendation: 5A because it tests behavior directly.
+Completeness: A=10/10, B=5/10
+Pros / cons:
+A) Factor `next_interaction_for_test`/`next_response` and assert body/order/exhaustion directly (recommended, human: ~20 min / AI: ~10 min, low risk, low maintenance)
+  ✅ Stable across `wiremock` versions.
+  ❌ Slightly exposes test-only helper code.
+B) Keep direct `Request` construction (human: ~0 / AI: ~0, medium risk, low maintenance)
+  ✅ Looks closer to the responder trait.
+  ❌ Asserts implementation detail rather than replay semantics.
+Net: Prefer explicit behavior tests over clever trait-object tests.
+
+Auto decision D6 — Layer 1 self-test is mandatory before final verification
+
+Context: Task 9 allowed the full-loop `#[tokio::test]` to be ignored if hand-authored SSE was fiddly.
+ELI10: Layer 2 proves golden-source geometry, but it does not prove the agent calls tools, validates, dry-runs, and submits through the product registry. The whole point of Layer 1 is to catch that wiring. If the Layer 1 self-test is ignored, the plan does not meet its stated goal.
+Stakes if we pick wrong: CI can miss breakage in the full authoring loop.
+Recommendation: 6A because a deterministic self-test cassette is the smallest real full-loop gate.
+Completeness: A=10/10, B=6/10
+Pros / cons:
+A) Require a passing non-ignored `layer1_selftest_replay_reaches_ready_and_scores` before final verification (recommended, human: ~0.5-1 day / AI: ~45 min, medium risk, low maintenance)
+  ✅ Proves the real product authoring path.
+  ❌ Requires either hand-authored Anthropic SSE or recorder output before completion.
+B) Allow ignored Layer 1 test until later (human: ~0 / AI: ~0, high risk, low maintenance)
+  ✅ Lets the plan land sooner.
+  ❌ Leaves the highest-risk path ungated.
+Net: A harness without an active full-loop gate is under-engineered.
+
+Auto decision D7 — Add seeded-state semantics for missing goldens/cassettes
+
+Context: Task 10 skips missing `golden_source.js` for unseeded fixtures, while the global constraints say missing cassettes under CI replay must fail.
+ELI10: Some fixtures are intentionally unseeded in the MVP, but once a fixture is marked seeded, missing files are broken, not optional. The test needs a clear source of truth so local development can skip unseeded fixtures while CI fails on missing seeded artifacts. A boolean in `meta.json` is enough.
+Stakes if we pick wrong: CI can silently skip a fixture that the team thinks is covered.
+Recommendation: 7A because explicit fixture state is boring and auditable.
+Completeness: A=10/10, B=6/10
+Pros / cons:
+A) Add `seeded: bool` to `FixtureMeta`; fail when seeded artifacts are missing or when `CI=true` expects seeded artifacts (recommended, human: ~0.5 day / AI: ~20 min, low risk, low maintenance)
+  ✅ Makes skip/fail behavior explicit.
+  ❌ Requires updating generated `meta.json`.
+B) Keep path-exists-only skipping (human: ~0 / AI: ~0, medium risk, low maintenance)
+  ✅ Less metadata.
+  ❌ Silent coverage drift is easy.
+Net: State beats inference for CI gates.
+
+Auto decision D8 — Add pure recorder-redaction tests before live proxy work
+
+Context: Task 11 starts with a live reverse-proxy spike, but privacy redaction can be tested deterministically first.
+ELI10: The hardest privacy bugs are easy to test with fake JSON: headers get removed, image base64 gets replaced, and the committed PNG hash matches metadata. We should not wait for a live Anthropic call to test that. The live spike should only answer the streaming fidelity question.
+Stakes if we pick wrong: A live recording can be written before the redaction rules are proven.
+Recommendation: 8A because complete privacy tests are cheap with AI-assisted execution.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Add pure `redact_recorded_request`/`redact_cassette` tests before the proxy spike (recommended, human: ~0.5 day / AI: ~25 min, low risk, low maintenance)
+  ✅ Proves no auth or image base64 survives in committed JSON.
+  ❌ Adds one extra test step.
+B) Test redaction only through record mode (human: ~0 / AI: ~0, medium risk, low maintenance)
+  ✅ Fewer test fixtures.
+  ❌ Requires live credentials to exercise privacy behavior.
+Net: Privacy guarantees should be unit-testable without a provider.
+
+Auto decision D9 — Keep CI workflow edits out unless current workflows do not run the gates
+
+Context: Existing `.github/workflows/ci.yml` and `.github/workflows/ci-ocr.yml` already exist; the plan only needs to document/verify that `rollshot-app` eval tests are covered.
+ELI10: Adding or rewriting CI workflows is unnecessary if the new tests are picked up by existing cargo lanes. But if the OCR lane does not build `rollshot-app --features ocr`, the plan must add the minimal workflow edit. This keeps distribution boring.
+Stakes if we pick wrong: The gate may pass locally but never run in CI.
+Recommendation: 9A because it is the smallest distribution check that still protects the goal.
+Completeness: A=9/10, B=6/10
+Pros / cons:
+A) Verify existing CI coverage and only patch workflows if needed (recommended, human: ~20 min / AI: ~10 min, low risk, low maintenance)
+  ✅ Avoids unnecessary CI churn.
+  ❌ Requires reading workflow commands during implementation.
+B) Always add a new workflow/job (human: ~0.5 day / AI: ~20 min, medium risk, medium maintenance)
+  ✅ Makes eval coverage highly visible.
+  ❌ Adds CI surface area before proving it is needed.
+Net: Boring by default: reuse the existing lanes if they already cover the gate.
+
+### NOT in Scope
+
+- Seeding provider-recorded `golden_source.js` + `cassette.json` for all six OCR intents in this MVP. Rationale: requires live provider credentials and human review; the MVP ships the recorder and a deterministic full-loop self-test so broad seeding can happen as a follow-up.
+- Adding a new standalone CI workflow unless existing `ci.yml` / `ci-ocr.yml` do not run the eval gates. Rationale: existing workflows already own default and OCR lanes; patch only if verification shows a gap.
+- Supporting providers beyond the currently wired Anthropic replay/record path. Rationale: `run_with_provider` and `AnthropicAdapter` are enough to prove the authoring path; provider-matrix coverage is follow-up.
+- Real screenshot fixtures or sanitized real screenshots. Rationale: fixture images stay synthetic by design.
+
+### What Already Exists
+
+- `crates/rollshot-app/src/result_workspace/workbench/run.rs` already builds the product authoring registry, canonical region/OCR catalogs, `prepare_vision_context`, and `AgentRunner::run_with_provider` flow. The plan must promote/reuse these helpers, not rebuild the registry.
+- `crates/rollshot-agent/tests/provider_contract.rs` already uses `wiremock` with provider adapters and fixture SSE bodies. The plan extends that pattern to ordered multi-turn replay.
+- `crates/rollshot-automation` already exposes `validate_source` and `execute_to_proposal`; Layer 2 should call these directly instead of inventing a scoring-only executor.
+- `crates/rollshot-vision/tests/*` already exercise `RealAutomationHost` with prepared region/OCR fixtures; this plan adds product-path eval coverage, not host capability coverage from scratch.
+- `learn-projects/opencode/packages/llm/test/recorded-*.ts` shows a mature cassette model: record/replay split, env-gated recording, metadata/tags, duplicate cassette detection, and redacted request/response storage. This plan adopts the shape but keeps Rollshot's CI stricter for seeded fixtures.
+
+### Test Coverage Table
+
+Task / behavior                                                   Unit  Integ  E2E / smoke  Manual only
+────────────────────────────────────────────────────────────────  ────  ─────  ───────────  ───────────
+Task 1 / scoring full cover, missed rect, false positives          ✓     —      —            no
+Task 1 / overlapping candidates and zero-area rectangles            ✓     —      —            no
+Task 2 / all six synthetic renderers are bounded and non-flat       ✓     —      —            no
+Task 4 / fixture loader matches generated expected rects/meta       ✓     —      —            no
+Task 5 / Layer 2 validates and executes golden source               ✓     ✓      —            no
+Task 7 / cassette serde, ordered replay, exhaustion failure         ✓     ✓      —            no
+Task 7 / cassette request redaction removes auth/image base64       ✓     —      —            no
+Task 8 / Layer 1 full-loop replay reaches `ReadyForReview`          —     ✓      ✓            no
+Task 10 / seeded/unseeded fixture gate and OCR-aware skip/fail      ✓     ✓      —            no
+Task 11 / recorder byte-for-byte SSE replay fidelity                —     ✓      ✓            yes, env-gated ignored test
+Task 11 / recorder writes only redacted cassette JSON               ✓     ✓      —            no
+Task 12 / docs commands and CI coverage note                        —     —      —            yes, doc review
+
+### Failure Modes
+
+- Scoring math overcounts overlap: covered by Task 1 overlap tests; handled by exact union helpers; user sees a failing eval report, not a silent pass.
+- Fixture file missing or stale: covered by Task 4 loader/staleness tests; handled by panics with file paths in tests; user sees a clear test failure.
+- OCR fixture runs without `ocr` feature: covered by Task 10; handled by explicit logged skip only for unseeded/OCR-disabled local cases; user sees skip text.
+- Seeded golden or cassette missing: covered by Task 10; handled by `seeded: true` checks and `CI=true` behavior; user sees a hard failure.
+- Cassette exhausted before the agent reaches review: covered by Task 7 responder exhaustion test and Task 8 Layer 1 replay; handled by a panic/error that names the missing model-call index; user sees a clear failure.
+- Provider SSE bytes not replayable after recording: covered by Task 11 spike/ignored live round-trip; handled by blocking recorder implementation until parsed live and replay events match; user sees spike failure.
+- Recorder writes auth header or screenshot base64: covered by Task 7/11 redaction tests; handled by safe cassette structs and redaction helpers; user sees a failing privacy test.
+- Full-loop terminal state is not `ReadyForReview`: covered by Task 8/9 Layer 1 self-test; handled by returning `Err("non-terminal-ready: ...")`; user sees a clear assertion failure.
+
+Critical gaps after review: none, provided D4/D6/D7/D8 amendments are implemented.
+
+### Worktree / Subagent Parallelization Strategy
+
+Sequential execution is preferred until Task 4 because all early tasks build the same `crates/rollshot-app/src/result_workspace/workbench/eval/` module tree and generated fixture data. After Task 4, two lanes are possible but must merge before Layer 1.
+
+| Task | Modules touched | Depends on |
+|------|-----------------|------------|
+| Task 1: Geometry scoring | `crates/rollshot-app/src/result_workspace/workbench/eval/`, `workbench/mod.rs` | — |
+| Task 2-4: Renderers + fixture data | `crates/rollshot-app/src/result_workspace/workbench/eval/`, `crates/rollshot-app/tests/eval/fixtures/` | Task 1 |
+| Task 5-6: Workbench visibility + Layer 2 | `crates/rollshot-app/src/result_workspace/workbench/` | Tasks 1-4 |
+| Task 7-8: Cassette + Layer 1 | `crates/rollshot-app/src/result_workspace/workbench/eval/`, `crates/rollshot-app/Cargo.toml` | Tasks 1-6 |
+| Task 10-11: Gate iteration + recorder | `crates/rollshot-app/src/result_workspace/workbench/eval/`, `crates/rollshot-app/Cargo.toml` | Tasks 7-8 |
+| Task 12: Docs | `docs/`, `README.md` | Task 11 for final commands |
+| Task 13: Verification | workspace | all prior |
+
+Parallel lanes:
+- Lane A: Tasks 1 → 2 → 3 → 4 → 5/6 → 7/8 → 10/11 → 13 (sequential, same module tree).
+- Lane B: Task 12 docs can draft in parallel after Task 7, but final command text waits for Task 11.
+
+Execution order: run Lane A as the main implementation lane; optionally draft Lane B docs after cassette shapes settle; merge docs before final verification.
+
+Conflict flags: Tasks 2-11 all touch `crates/rollshot-app/src/result_workspace/workbench/eval/`; do not assign them to independent subagents without a merge coordinator. `crates/rollshot-app/Cargo.toml` changes in Tasks 7 and 11 serialize dependency edits.
+
 ## File Structure
 
 Crate-internal test module tree under `rollshot-app` (all `#[cfg(test)]`):
@@ -49,6 +266,7 @@ Docs: `docs/smart-redaction-eval.md` + a README pointer.
 
 **Interfaces:**
 - Produces: `ExpectedRect { x: f32, y: f32, width: f32, height: f32, label: String }` (serde); `Thresholds { min_coverage: f32, max_false_positive_ratio: f32 }` with `Thresholds::lenient()`; `ScoreReport { per_rect_coverage: Vec<(String, f32)>, min_coverage: f32, false_positive_ratio: f32, candidate_count: usize, gate_failures: Vec<String> }` with `ScoreReport::passed(&self) -> bool`; `fn score_candidates(expected: &[ExpectedRect], candidates: &[rollshot_image_document::ImageRect], thresholds: &Thresholds) -> ScoreReport`.
+- Review amendment: coverage and false-positive area must use exact axis-aligned rectangle union area, not summed pairwise intersections. Add failing tests for overlapping candidates and zero-area rectangles before implementation.
 
 - [ ] **Step 1: Declare the module**
 
@@ -161,6 +379,24 @@ mod tests {
         assert!(!report.passed());
         assert!(report.gate_failures.iter().any(|f| f.contains("false_positive")));
     }
+
+    #[test]
+    fn overlapping_candidates_do_not_double_count_coverage() {
+        let exp = vec![expected("bar", 0.0, 0.0, 100.0, 10.0)];
+        let cands = vec![rect(0.0, 0.0, 60.0, 10.0), rect(40.0, 0.0, 60.0, 10.0)];
+        let report = score_candidates(&exp, &cands, &Thresholds::lenient());
+        assert!((report.min_coverage - 1.0).abs() < 1e-4);
+        assert!((report.false_positive_ratio - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zero_area_expected_rect_fails_cleanly() {
+        let exp = vec![expected("empty", 0.0, 0.0, 0.0, 10.0)];
+        let cands = vec![rect(0.0, 0.0, 100.0, 10.0)];
+        let report = score_candidates(&exp, &cands, &Thresholds::lenient());
+        assert_eq!(report.min_coverage, 0.0);
+        assert!(!report.passed());
+    }
 }
 ```
 
@@ -174,35 +410,77 @@ Expected: FAIL — `cannot find function score_candidates`.
 Add above the `#[cfg(test)] mod tests` block in `scoring.rs`:
 
 ```rust
-fn intersection_area(a: &ImageRect, bx: f32, by: f32, bw: f32, bh: f32) -> f32 {
+fn clipped_rect(a: &ImageRect, bx: f32, by: f32, bw: f32, bh: f32) -> Option<ImageRect> {
     let x0 = a.x.max(bx);
     let y0 = a.y.max(by);
     let x1 = (a.x + a.width).min(bx + bw);
     let y1 = (a.y + a.height).min(by + bh);
-    ((x1 - x0).max(0.0)) * ((y1 - y0).max(0.0))
+    let width = x1 - x0;
+    let height = y1 - y0;
+    (width > 0.0 && height > 0.0).then_some(ImageRect {
+        x: x0,
+        y: y0,
+        width,
+        height,
+    })
 }
 
-/// Coverage of one expected rect by the union of candidates, approximated by
-/// summed pairwise intersection clamped to the expected area. Candidates in
-/// these fixtures do not overlap each other inside an expected rect, so the
-/// sum equals the true union coverage; the clamp keeps it in [0,1] regardless.
+fn rect_union_area(rects: &[ImageRect]) -> f32 {
+    let rects: Vec<ImageRect> = rects
+        .iter()
+        .copied()
+        .filter(|r| r.width > 0.0 && r.height > 0.0)
+        .collect();
+    if rects.is_empty() {
+        return 0.0;
+    }
+
+    let mut xs = Vec::with_capacity(rects.len() * 2);
+    let mut ys = Vec::with_capacity(rects.len() * 2);
+    for r in &rects {
+        xs.push(r.x);
+        xs.push(r.x + r.width);
+        ys.push(r.y);
+        ys.push(r.y + r.height);
+    }
+    xs.sort_by(f32::total_cmp);
+    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+    ys.sort_by(f32::total_cmp);
+    ys.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+    let mut area = 0.0;
+    for xw in xs.windows(2) {
+        for yw in ys.windows(2) {
+            let (x0, x1) = (xw[0], xw[1]);
+            let (y0, y1) = (yw[0], yw[1]);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            let covered = rects.iter().any(|r| {
+                r.x <= x0
+                    && r.x + r.width >= x1
+                    && r.y <= y0
+                    && r.y + r.height >= y1
+            });
+            if covered {
+                area += (x1 - x0) * (y1 - y0);
+            }
+        }
+    }
+    area
+}
+
+/// Coverage of one expected rect by the exact union of candidate rectangles.
 fn coverage_of(expected: &ExpectedRect, candidates: &[ImageRect]) -> f32 {
     let area = expected.width * expected.height;
     if area <= 0.0 {
         return 0.0;
     }
-    let covered: f32 = candidates
+    let clipped: Vec<ImageRect> = candidates
         .iter()
-        .map(|c| {
-            intersection_area(
-                c,
-                expected.x,
-                expected.y,
-                expected.width,
-                expected.height,
-            )
-        })
-        .sum();
+        .filter_map(|c| clipped_rect(c, expected.x, expected.y, expected.width, expected.height))
+        .collect();
+    let covered = rect_union_area(&clipped);
     (covered / area).min(1.0)
 }
 
@@ -222,17 +500,16 @@ pub(crate) fn score_candidates(
     let min_coverage = if min_coverage.is_finite() { min_coverage } else { 0.0 };
 
     let total_expected_area: f32 = expected.iter().map(|e| e.width * e.height).sum();
-    let total_candidate_area: f32 = candidates.iter().map(|c| c.width * c.height).sum();
-    let inside_area: f32 = candidates
+    let total_candidate_area = rect_union_area(candidates);
+    let clipped_inside: Vec<ImageRect> = candidates
         .iter()
-        .map(|c| {
+        .flat_map(|c| {
             expected
                 .iter()
-                .map(|e| intersection_area(c, e.x, e.y, e.width, e.height))
-                .sum::<f32>()
-                .min(c.width * c.height)
+                .filter_map(|e| clipped_rect(c, e.x, e.y, e.width, e.height))
         })
-        .sum();
+        .collect();
+    let inside_area = rect_union_area(&clipped_inside);
     let outside_area = (total_candidate_area - inside_area).max(0.0);
     let false_positive_ratio = if total_expected_area > 0.0 {
         outside_area / total_expected_area
@@ -267,7 +544,7 @@ pub(crate) fn score_candidates(
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `rtk cargo test -p rollshot-app eval::scoring`
-Expected: PASS (3 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -589,7 +866,7 @@ rtk git commit -m "test(app): add five remaining eval intent renderers"
 
 **Interfaces:**
 - Consumes: `ExpectedRect` (Task 1), the six renderers (Task 3).
-- Produces: `RequiredCapability { RegionFeatures, Ocr }` (serde, snake_case); `FixtureMeta { intent: String, provider: String, model: String, required_capability: RequiredCapability }`; `fn fixtures_root() -> std::path::PathBuf`; `fn intent_specs() -> Vec<IntentSpec>` where `IntentSpec { name: &'static str, required_capability: RequiredCapability, render: fn() -> RenderedFixture }`; `fn load_expected(intent: &str) -> Vec<ExpectedRect>`; `fn load_meta(intent: &str) -> FixtureMeta`; `fn load_image(intent: &str) -> image::RgbaImage`.
+- Produces: `RequiredCapability { RegionFeatures, Ocr }` (serde, snake_case); `FixtureMeta { intent: String, provider: String, model: String, required_capability: RequiredCapability, seeded: bool }`; `fn fixtures_root() -> std::path::PathBuf`; `fn intent_specs() -> Vec<IntentSpec>` where `IntentSpec { name: &'static str, required_capability: RequiredCapability, render: fn() -> RenderedFixture }`; `fn load_expected(intent: &str) -> Vec<ExpectedRect>`; `fn load_meta(intent: &str) -> FixtureMeta`; `fn load_image(intent: &str) -> image::RgbaImage`.
 
 - [ ] **Step 1: Add the module declaration**
 
@@ -621,6 +898,9 @@ pub(crate) struct FixtureMeta {
     pub provider: String,
     pub model: String,
     pub required_capability: RequiredCapability,
+    /// True only when both `golden_source.js` and `cassette.json` are committed
+    /// and expected to gate CI for this fixture.
+    pub seeded: bool,
 }
 
 pub(crate) struct IntentSpec {
@@ -723,6 +1003,7 @@ Append to the `tests` module in `fixture.rs`:
                 provider: "anthropic".into(),
                 model: "claude-opus-4-8".into(),
                 required_capability: spec.required_capability,
+                seeded: false,
             };
             std::fs::write(
                 dir.join("meta.json"),
@@ -751,10 +1032,13 @@ rtk git commit -m "test(app): add eval fixture types, loader, and six synthetic 
 **Files:**
 - Create: `crates/rollshot-app/src/result_workspace/workbench/eval/layer2.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/workbench/eval/mod.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/workbench/mod.rs` / `run.rs` if Task 6 visibility promotion has not already been applied.
 
 **Interfaces:**
 - Consumes: `prepare_vision_context` (workbench/run.rs, already `pub`), `ImageRect`, the Layer-2 imports.
 - Produces: `fn run_golden_source(image: &image::RgbaImage, golden_js: &str) -> Result<Vec<rollshot_image_document::ImageRect>, String>` — validates the JS, runs it via `execute_to_proposal` against a product-prepared host, and returns the `AddRedaction` bounds.
+
+Review amendment: execute Task 6 before this task, or fold Task 6 Step 1 into this task before adding `layer2.rs`. `crate::result_workspace::workbench::run` is currently private unless `workbench/mod.rs` declares it `pub(crate) mod run;`.
 
 - [ ] **Step 1: Add the module declaration**
 
@@ -915,7 +1199,8 @@ rtk git commit -m "refactor(app): expose authoring wiring to crate for eval reus
 - Modify: `crates/rollshot-app/Cargo.toml`
 
 **Interfaces:**
-- Produces: `CassetteFile { version: u32, metadata: CassetteMeta, attachment: Option<AttachmentMeta>, interactions: Vec<Interaction> }`; `Interaction { status: u16, sse_body: String }`; `CassetteMeta { recorded_at: String, provider: String, model: String, substitutions: String }`; `AttachmentMeta { media_type: String, width: u32, height: u32, byte_count: u64, sha256: String }`; `struct CassetteResponder` impl `wiremock::Respond`; `fn load_cassette(intent: &str) -> CassetteFile`; `fn sha256_hex(bytes: &[u8]) -> String`.
+- Produces: `CassetteFile { version: u32, metadata: CassetteMeta, attachment: Option<AttachmentMeta>, interactions: Vec<Interaction> }`; `Interaction { request: RecordedRequest, response: RecordedResponse }`; `RecordedRequest { method: String, url_path: String, headers: BTreeMap<String, String>, body_summary: RecordedRequestBody }`; `RecordedResponse { status: u16, headers: BTreeMap<String, String>, sse_body: String }`; `CassetteMeta { recorded_at: String, provider: String, model: String, substitutions: String }`; `AttachmentMeta { media_type: String, width: u32, height: u32, byte_count: u64, sha256: String }`; `struct CassetteResponder` impl `wiremock::Respond`; `fn load_cassette(intent: &str) -> CassetteFile`; `fn sha256_hex(bytes: &[u8]) -> String`.
+- Review amendment: cassette JSON must store only redacted request data. Add pure tests proving `authorization`, `x-api-key`, and image base64 do not survive serialization.
 
 - [ ] **Step 1: Add dev-dependencies**
 
@@ -939,6 +1224,7 @@ Create `crates/rollshot-app/src/result_workspace/workbench/eval/cassette.rs`:
 ```rust
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wiremock::{Request, Respond, ResponseTemplate};
 
@@ -970,7 +1256,28 @@ pub(crate) struct AttachmentMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Interaction {
+    pub request: RecordedRequest,
+    pub response: RecordedResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RecordedRequest {
+    pub method: String,
+    pub url_path: String,
+    pub headers: BTreeMap<String, String>,
+    pub body_summary: RecordedRequestBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RecordedRequestBody {
+    JsonWithoutImage { byte_count: u64, sha256: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RecordedResponse {
     pub status: u16,
+    pub headers: BTreeMap<String, String>,
     pub sse_body: String,
 }
 
@@ -984,17 +1291,21 @@ impl CassetteResponder {
     pub fn new(interactions: Vec<Interaction>) -> Self {
         Self { interactions, cursor: AtomicUsize::new(0) }
     }
+
+    fn next_interaction(&self) -> Interaction {
+        let i = self.cursor.fetch_add(1, Ordering::SeqCst);
+        self.interactions.get(i).cloned().unwrap_or_else(|| {
+            panic!("cassette exhausted: model call {i} has no recorded interaction")
+        })
+    }
 }
 
 impl Respond for CassetteResponder {
     fn respond(&self, _req: &Request) -> ResponseTemplate {
-        let i = self.cursor.fetch_add(1, Ordering::SeqCst);
-        let interaction = self.interactions.get(i).unwrap_or_else(|| {
-            panic!("cassette exhausted: model call {i} has no recorded interaction")
-        });
-        ResponseTemplate::new(interaction.status)
+        let interaction = self.next_interaction();
+        ResponseTemplate::new(interaction.response.status)
             .insert_header("content-type", "text/event-stream")
-            .set_body_bytes(interaction.sse_body.clone().into_bytes())
+            .set_body_bytes(interaction.response.sse_body.into_bytes())
     }
 }
 
@@ -1015,22 +1326,41 @@ pub(crate) fn load_cassette(intent: &str) -> CassetteFile {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn responder_returns_interactions_in_order() {
+    fn interaction(body: &str) -> Interaction {
+        Interaction {
+            request: RecordedRequest {
+                method: "POST".into(),
+                url_path: "/v1/messages".into(),
+                headers: BTreeMap::new(),
+                body_summary: RecordedRequestBody::JsonWithoutImage {
+                    byte_count: 0,
+                    sha256: sha256_hex(b""),
+                },
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: BTreeMap::new(),
+                sse_body: body.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn responder_returns_interactions_in_order() {
         let responder = CassetteResponder::new(vec![
-            Interaction { status: 200, sse_body: "a".into() },
-            Interaction { status: 200, sse_body: "b".into() },
+            interaction("a"),
+            interaction("b"),
         ]);
-        let req = Request {
-            url: "http://x/v1/messages".parse().unwrap(),
-            method: http_types_method(),
-            headers: Default::default(),
-            body: Vec::new(),
-        };
-        let r0 = responder.respond(&req);
-        let r1 = responder.respond(&req);
-        // ResponseTemplate has no public body getter; assert via generate + body.
-        assert_ne!(format!("{r0:?}"), format!("{r1:?}"));
+        assert_eq!(responder.next_interaction().response.sse_body, "a");
+        assert_eq!(responder.next_interaction().response.sse_body, "b");
+    }
+
+    #[test]
+    #[should_panic(expected = "cassette exhausted")]
+    fn responder_panics_clearly_when_exhausted() {
+        let responder = CassetteResponder::new(vec![interaction("a")]);
+        let _ = responder.next_interaction();
+        let _ = responder.next_interaction();
     }
 
     #[test]
@@ -1040,20 +1370,15 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
-
-    // Helper isolated so the version detail lives in one place.
-    fn http_types_method() -> wiremock::http::Method {
-        wiremock::http::Method::Post
-    }
 }
 ```
 
-> NOTE for the implementer: `wiremock::Request` construction in tests varies by version. If the `Request { .. }` literal does not compile against the pinned `wiremock`, replace the `responder_returns_interactions_in_order` test with an end-to-end check that mounts the responder on a `MockServer` and issues two `reqwest` POSTs, asserting the two response bodies are `"a"` then `"b"`. Keep the `sha256_is_stable` test as-is.
+Add one more pure redaction test before the recorder task lands: build a synthetic request JSON containing an `authorization` header, `x-api-key` header, and an image base64 block; pass it through the redaction helper; serialize the resulting `CassetteFile`; assert the JSON contains neither secret header nor base64 and does contain the committed image `sha256`.
 
 - [ ] **Step 4: Run the test to verify it fails, then passes**
 
 Run: `rtk cargo test -p rollshot-app eval::cassette`
-Expected: first FAIL (missing deps / module), then after Steps 1–3 PASS. If the `Request` literal fails to compile, apply the NOTE's fallback.
+Expected: first FAIL (missing deps / module), then after Steps 1–3 PASS, including ordered replay, exhaustion, SHA-256, and redaction tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1313,6 +1638,7 @@ fn regenerate_selftest_fixture() {
             provider: "anthropic".into(),
             model: "claude-opus-4-8".into(),
             required_capability: RequiredCapability::RegionFeatures,
+            seeded: true,
         })
         .unwrap(),
     )
@@ -1350,7 +1676,7 @@ async fn layer1_selftest_replay_reaches_ready_and_scores() {
 }
 ```
 
-> If hand-framing the SSE proves fiddly, defer this `#[tokio::test]` and capture the self-test cassette via the recorder once Task 11 lands; mark the test `#[ignore]` with a comment until then. The Layer-2 cases (Step 5) already gate the deterministic core.
+> Review amendment: this `#[tokio::test]` must be non-ignored and passing before final verification. If hand-framing the SSE proves fiddly, implement Task 11's recorder first, record `selftest_region`, then return here and enable the Layer-1 self-test. The Layer-2 cases alone do not satisfy the full-loop CI-gate goal.
 
 - [ ] **Step 7: Run all deterministic eval tests**
 
@@ -1386,15 +1712,16 @@ fn layer2_gate_over_all_present_fixtures() {
 
     let ocr_enabled = cfg!(feature = "ocr");
     for spec in intent_specs() {
+        let meta = load_meta(spec.name);
         if spec.required_capability == RequiredCapability::Ocr && !ocr_enabled {
             eprintln!("SKIP eval fixture {} (ocr feature disabled)", spec.name);
             continue;
         }
         let golden_path = super::fixture::fixtures_root().join(spec.name).join("golden_source.js");
         if !golden_path.exists() {
-            // Not yet seeded from a live model; the seeding workflow is documented
-            // in docs/smart-redaction-eval.md. A missing golden is a not-yet-seeded
-            // fixture, not a gate failure.
+            if meta.seeded || std::env::var_os("CI").is_some() {
+                panic!("seeded eval fixture {} is missing golden_source.js", spec.name);
+            }
             eprintln!("SKIP eval fixture {} (golden not yet seeded)", spec.name);
             continue;
         }
@@ -1414,7 +1741,7 @@ fn layer2_gate_over_all_present_fixtures() {
 - [ ] **Step 2: Run**
 
 Run: `rtk cargo test -p rollshot-app eval::cases::layer2_gate_over_all_present_fixtures -- --nocapture`
-Expected: PASS, with SKIP lines for fixtures whose golden is not yet seeded (all six until Task 12).
+Expected: PASS, with SKIP lines for fixtures whose `meta.seeded == false` and whose golden is not yet seeded. Under `CI=true`, a missing seeded artifact is a hard failure.
 
 - [ ] **Step 3: Commit**
 
@@ -1436,25 +1763,36 @@ This task carries a genuine runtime unknown (does teed SSE replay byte-faithfull
 **Interfaces:**
 - Produces: `async fn record_cassette(intent: &str, real_base_url: &str, api_key: &str) -> Result<(), String>` — runs the live loop through a tee-ing reverse-proxy and writes a redacted `cassette.json`.
 
-- [ ] **Step 1: Spike — confirm tee-and-replay fidelity**
+- [ ] **Step 1: Add pure redaction tests before live recording**
+
+In `eval/cassette.rs` or `eval/record.rs`, add tests for the pure redaction helpers before any live proxy work:
+
+- input request headers include `authorization` and `x-api-key`; serialized `CassetteFile` output does not contain either header or value.
+- input request body includes an image base64 block; serialized output does not contain the base64 string and does contain `AttachmentMeta { media_type, width, height, byte_count, sha256 }`.
+- response SSE body is preserved byte-for-byte.
+
+Run: `rtk cargo test -p rollshot-app redaction`
+Expected: FAIL before helper implementation, PASS after implementation.
+
+- [ ] **Step 2: Spike — confirm tee-and-replay fidelity**
 
 REQUIRED SUB-SKILL: Use the `rollshot-run-spike` skill. Spike goal: stand up a minimal reverse-proxy (hyper or `reqwest` + `tokio`) at `http://127.0.0.1:0` that forwards one `POST /v1/messages` to the real Anthropic API, tees the raw streamed bytes to a `String`, returns them to the caller, and then confirm that feeding those exact bytes back through a `wiremock` `MockServer` + `AnthropicAdapter` yields the same `ModelStreamEvent`s. Success criterion: the parsed events from the live call equal the parsed events from the replayed bytes. Capture findings (chunk-boundary handling, required headers) in the spike notes. Run gated by `ANTHROPIC_API_KEY` + `--ignored`.
 
-- [ ] **Step 2: Implement the recorder using the spike's validated approach**
+- [ ] **Step 3: Implement the recorder using the spike's validated approach**
 
 Add `pub(crate) mod record;` to `eval/mod.rs`, add any proxy dep the spike validated (e.g. `hyper`/`reqwest`) to `[dev-dependencies]`, and implement `record_cassette` per the spike: build the product registry + input exactly as Layer 1 (Task 8) but point the adapter at the proxy, run `run_with_provider`, collect the teed per-turn SSE into `Interaction`s, redact (strip auth headers; replace the first request's image block with `AttachmentMeta` via `sha256_hex` of the committed PNG), and write `cassette.json` with provenance.
 
-- [ ] **Step 3: Gate it behind env**
+- [ ] **Step 4: Gate it behind env**
 
 The public entry is an `#[ignore]` test `record_one_fixture` reading `ROLLSHOT_RECORD_EVAL`, the intent name, and `ANTHROPIC_API_KEY` from env; it calls `record_cassette`. It never runs in CI.
 
-- [ ] **Step 4: Verify the recorder round-trips on the self-test**
+- [ ] **Step 5: Verify the recorder round-trips on the self-test**
 
 Run (with a key): `ROLLSHOT_RECORD_EVAL=1 EVAL_INTENT=selftest_region rtk cargo test -p rollshot-app eval::record::record_one_fixture -- --ignored --nocapture`
 Then run the Layer-1 case from Task 9 Step 6 against the recorded cassette.
 Expected: Layer-1 case PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 rtk git add crates/rollshot-app/Cargo.toml crates/rollshot-app/src/result_workspace/workbench/eval/record.rs crates/rollshot-app/src/result_workspace/workbench/eval/mod.rs
@@ -1463,12 +1801,12 @@ rtk git commit -m "test(app): add env-gated eval cassette recorder"
 
 ---
 
-### Task 12: Documentation + seed the six live fixtures
+### Task 12: Documentation + follow-up seeding instructions
 
 **Files:**
 - Create: `docs/smart-redaction-eval.md`
 - Modify: `README.md` (developer-tooling pointer)
-- Create (data, seeded manually): `golden_source.js` + `cassette.json` under each of the six `crates/rollshot-app/tests/eval/fixtures/<intent>/`.
+- No live-model fixture data is required in this MVP beyond the deterministic `selftest_region` cassette. Broad six-intent provider seeding is explicitly deferred to a follow-up.
 
 - [ ] **Step 1: Write `docs/smart-redaction-eval.md`**
 
@@ -1478,9 +1816,9 @@ Mirror `docs/bench.md` structure. Cover, with exact commands: the two-layer mode
 
 In `README.md`, under the developer-tooling section, add one line pointing to `docs/smart-redaction-eval.md` for the Smart Redaction evaluation harness.
 
-- [ ] **Step 3: Seed the six fixtures (manual, needs API key)**
+- [ ] **Step 3: Document the deferred six-fixture seeding workflow**
 
-For each intent, run the recorder, review the extracted `golden_source.js` (verify it locates the target via OCR/region features and that Layer-2 scoring passes), and commit the redacted `cassette.json` + reviewed `golden_source.js`:
+In `docs/smart-redaction-eval.md`, include the follow-up commands for seeding the six provider-backed fixtures, but do not require running them for this MVP. The documented follow-up is:
 
 ```bash
 for intent in url_bar bookmarks desktop_folders emails names account_ids; do
@@ -1490,13 +1828,13 @@ done
 rtk cargo test -p rollshot-app --features ocr eval
 ```
 
-Expected: the full OCR-enabled gate passes over all six seeded fixtures.
+Expected for the follow-up plan: the full OCR-enabled gate passes over all six seeded fixtures, and each seeded fixture flips `meta.seeded` to `true`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-rtk git add docs/smart-redaction-eval.md README.md crates/rollshot-app/tests/eval/fixtures/
-rtk git commit -m "docs: smart redaction eval harness guide and seeded fixtures"
+rtk git add docs/smart-redaction-eval.md README.md
+rtk git commit -m "docs: add smart redaction eval harness guide"
 ```
 
 ---
@@ -1511,7 +1849,7 @@ Expected: PASS; OCR fixtures logged as SKIP.
 - [ ] **Step 2: OCR-lane gate**
 
 Run: `rtk cargo test -p rollshot-app --features ocr eval`
-Expected: PASS over all seeded fixtures.
+Expected: PASS over all seeded fixtures (`selftest_region` in this MVP) and logged skips for unseeded six-intent fixtures until the follow-up seeding plan flips `meta.seeded` to `true`.
 
 - [ ] **Step 3: Format + lint**
 
@@ -1524,6 +1862,16 @@ Expected: clean.
 
 Confirm every `crates/rollshot-app/tests/eval/fixtures/*/image.png` is renderer-generated and every `cassette.json` contains `attachment` metadata with a `sha256` and no base64 image body.
 
+- [ ] **Step 5: Confirm CI coverage**
+
+Read `.github/workflows/ci.yml` and `.github/workflows/ci-ocr.yml`.
+Expected: existing lanes run the default eval tests and an OCR-enabled `rollshot-app` eval path. If not, add the smallest workflow edit that runs:
+
+```bash
+rtk cargo test -p rollshot-app eval
+rtk cargo test -p rollshot-app --features ocr eval
+```
+
 ---
 
 ## Self-Review
@@ -1531,14 +1879,15 @@ Confirm every `crates/rollshot-app/tests/eval/fixtures/*/image.png` is renderer-
 **Spec coverage:**
 - Two layers (cassette replay + golden-source scoring) → Tasks 5, 8, 9. ✓
 - Synthetic images, six intents → Tasks 2, 3, 4. ✓
-- Fixture format (`meta.json`, `image.png`, `expected_rects.json`, `cassette.json`, `golden_source.js`) → Tasks 4, 7, 9, 12. ✓
+- Fixture format (`meta.json`, `image.png`, `expected_rects.json`, `cassette.json`, `golden_source.js`) → Tasks 4, 7, 9, 12. `selftest_region` is seeded in this MVP; six provider-backed OCR fixtures remain unseeded until the follow-up. ✓
 - Cassette redaction (auth strip + image→metadata+sha256) → Task 11. ✓
 - Scoring metrics (coverage hard gate, false-positive hard gate, source validity) → Task 1; reported-only signals are surfaced via `ScoreReport`/run terminal (turns/candidate-count available from `UsageSnapshot`; not gated). ✓
 - CI placement / OCR-aware skip → Task 10, Task 13. ✓
 - Lives as crate-internal test module in `rollshot-app` → all tasks; visibility promotion Task 6. ✓
 - Docs + README → Task 12. ✓
 - Record mode env-gated + missing-cassette-fails → Tasks 10 (skip logged for not-yet-seeded), 11 (env gate). Note: "missing cassette is a hard failure in CI" applies once a fixture is seeded; before seeding, the logged skip is intentional and the constraint is satisfied because unseeded fixtures have no cassette to miss.
+- Broad six-intent live seeding → explicitly deferred in `NOT in scope`; docs include the follow-up commands. ✓
 
-**Placeholder scan:** Two tasks defer with explicit, bounded fallbacks rather than placeholders: Task 9 Step 6 (Layer-1 self-test may be `#[ignore]` until the recorder seeds its cassette) and Task 11 (spike before implementation). Both are real, justified runtime unknowns, not vague TODOs.
+**Placeholder scan:** Task 11 keeps a real spike before recorder implementation. Task 9 Step 6 is no longer optional: the Layer-1 self-test must be non-ignored and passing before final verification, either with a hand-authored cassette or with the recorder-produced self-test cassette.
 
 **Type consistency:** `ImageRect` (`x/y/width/height: f32`) is the candidate geometry across scoring/layer1/layer2; `ExpectedRect` adds `label`; `run_golden_source`/`replay_full_loop` both return `Vec<ImageRect>`; `score_candidates(&[ExpectedRect], &[ImageRect], &Thresholds)` is called identically in `layer2` tests and `cases`. `RequiredCapability` is used consistently in `fixture` and `cases`. Provider/model strings flow `meta.json` → `FixtureMeta` → `AuthorizedModelInput::new`.
