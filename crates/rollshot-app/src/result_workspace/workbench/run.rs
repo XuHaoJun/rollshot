@@ -21,11 +21,11 @@ const PHASE_B2_OCR_LIMIT: u32 = 50;
 const PHASE_B2_OCR_AREA_LIMIT: u64 = 16_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
-struct CanonicalOcrEntry {
-    name: &'static str,
-    bounds: rollshot_image_document::ImageRect,
-    query: Option<rollshot_automation::OcrQuery>,
-    unavailable_reason: Option<&'static str>,
+pub(crate) struct CanonicalOcrEntry {
+    pub(crate) name: &'static str,
+    pub(crate) bounds: rollshot_image_document::ImageRect,
+    pub(crate) query: Option<rollshot_automation::OcrQuery>,
+    pub(crate) unavailable_reason: Option<&'static str>,
 }
 
 /// Finite budget for Smart Redaction runs. `RunBudget::unlimited()` is the
@@ -52,14 +52,14 @@ pub fn smart_redaction_budget() -> RunBudget {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct CanonicalRegionFeatureEntry {
-    name: &'static str,
-    bounds: rollshot_image_document::ImageRect,
-    query: Option<rollshot_automation::RegionFeaturesQuery>,
-    unavailable_reason: Option<&'static str>,
+pub(crate) struct CanonicalRegionFeatureEntry {
+    pub(crate) name: &'static str,
+    pub(crate) bounds: rollshot_image_document::ImageRect,
+    pub(crate) query: Option<rollshot_automation::RegionFeaturesQuery>,
+    pub(crate) unavailable_reason: Option<&'static str>,
 }
 
-fn canonical_region_feature_catalog(width: u32, height: u32) -> Vec<CanonicalRegionFeatureEntry> {
+pub(crate) fn canonical_region_feature_catalog(width: u32, height: u32) -> Vec<CanonicalRegionFeatureEntry> {
     use rollshot_automation::{Region, RegionFeaturesQuery};
     use rollshot_image_document::ImageRect;
 
@@ -158,7 +158,7 @@ fn canonical_region_feature_catalog(width: u32, height: u32) -> Vec<CanonicalReg
     ]
 }
 
-fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcrEntry> {
+pub(crate) fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcrEntry> {
     use rollshot_automation::{OcrQuery, Region};
     use rollshot_image_document::ImageRect;
 
@@ -255,11 +255,11 @@ fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcrEntry> {
     ]
 }
 
-fn product_capability_handles() -> std::collections::BTreeMap<String, String> {
+pub(crate) fn product_capability_handles() -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::new()
 }
 
-fn authoring_inspection_context(
+pub(crate) fn authoring_inspection_context(
     payload_mode: PayloadMode,
     catalog: &[CanonicalRegionFeatureEntry],
     ocr_catalog: &[CanonicalOcrEntry],
@@ -420,7 +420,7 @@ impl rollshot_agent::runtime::RunEventSink for ChannelEventSink {
     }
 }
 
-fn build_authoring_tool_registry(
+pub(crate) fn build_authoring_tool_registry(
     tool_ctx: Arc<rollshot_agent::tools::ToolContext>,
     executor: Arc<dyn rollshot_automation::AutomationExecutor>,
     host: Arc<StdMutex<dyn rollshot_automation::AutomationHost>>,
