@@ -33,12 +33,36 @@ pub(crate) struct IntentSpec {
 pub(crate) fn intent_specs() -> Vec<IntentSpec> {
     use RequiredCapability::*;
     vec![
-        IntentSpec { name: "url_bar", required_capability: Ocr, render: render_url_bar },
-        IntentSpec { name: "bookmarks", required_capability: Ocr, render: render_bookmarks },
-        IntentSpec { name: "desktop_folders", required_capability: Ocr, render: render_desktop_folders },
-        IntentSpec { name: "emails", required_capability: Ocr, render: render_emails },
-        IntentSpec { name: "names", required_capability: Ocr, render: render_names },
-        IntentSpec { name: "account_ids", required_capability: Ocr, render: render_account_ids },
+        IntentSpec {
+            name: "url_bar",
+            required_capability: Ocr,
+            render: render_url_bar,
+        },
+        IntentSpec {
+            name: "bookmarks",
+            required_capability: Ocr,
+            render: render_bookmarks,
+        },
+        IntentSpec {
+            name: "desktop_folders",
+            required_capability: Ocr,
+            render: render_desktop_folders,
+        },
+        IntentSpec {
+            name: "emails",
+            required_capability: Ocr,
+            render: render_emails,
+        },
+        IntentSpec {
+            name: "names",
+            required_capability: Ocr,
+            render: render_names,
+        },
+        IntentSpec {
+            name: "account_ids",
+            required_capability: Ocr,
+            render: render_account_ids,
+        },
     ]
 }
 
@@ -48,15 +72,15 @@ pub(crate) fn fixtures_root() -> PathBuf {
 
 pub(crate) fn load_expected(intent: &str) -> Vec<ExpectedRect> {
     let path = fixtures_root().join(intent).join("expected_rects.json");
-    let data = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let data =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&data).expect("valid expected_rects.json")
 }
 
 pub(crate) fn load_meta(intent: &str) -> FixtureMeta {
     let path = fixtures_root().join(intent).join("meta.json");
-    let data = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let data =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&data).expect("valid meta.json")
 }
 

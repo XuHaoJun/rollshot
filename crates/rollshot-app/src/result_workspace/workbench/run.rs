@@ -59,7 +59,10 @@ pub(crate) struct CanonicalRegionFeatureEntry {
     pub(crate) unavailable_reason: Option<&'static str>,
 }
 
-pub(crate) fn canonical_region_feature_catalog(width: u32, height: u32) -> Vec<CanonicalRegionFeatureEntry> {
+pub(crate) fn canonical_region_feature_catalog(
+    width: u32,
+    height: u32,
+) -> Vec<CanonicalRegionFeatureEntry> {
     use rollshot_automation::{Region, RegionFeaturesQuery};
     use rollshot_image_document::ImageRect;
 

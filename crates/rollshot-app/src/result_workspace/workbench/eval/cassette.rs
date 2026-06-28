@@ -47,7 +47,15 @@ pub(crate) struct RecordedRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RecordedRequestBody {
-    JsonWithoutImage { byte_count: u64, sha256: String },
+    JsonWithImage {
+        base64: String,
+        byte_count: u64,
+        sha256: String,
+    },
+    JsonWithoutImage {
+        byte_count: u64,
+        sha256: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +119,17 @@ pub(crate) fn redact_cassette(cassette: &mut CassetteFile) {
         for key in &sensitive_headers {
             interaction.request.headers.remove(*key);
         }
+        if let RecordedRequestBody::JsonWithImage {
+            byte_count,
+            sha256,
+            ..
+        } = &interaction.request.body_summary
+        {
+            interaction.request.body_summary = RecordedRequestBody::JsonWithoutImage {
+                byte_count: *byte_count,
+                sha256: sha256.clone(),
+            };
+        }
     }
 }
 
@@ -164,6 +183,7 @@ mod tests {
     fn redaction_strips_auth_headers_and_image_base64() {
         let image_bytes = b"fake-png-data";
         let image_sha = sha256_hex(image_bytes);
+        let image_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ";
 
         let mut headers = BTreeMap::new();
         headers.insert("authorization".into(), "Bearer sk-secret-key-12345".into());
@@ -190,7 +210,8 @@ mod tests {
                     method: "POST".into(),
                     url_path: "/v1/messages".into(),
                     headers,
-                    body_summary: RecordedRequestBody::JsonWithoutImage {
+                    body_summary: RecordedRequestBody::JsonWithImage {
+                        base64: image_base64.into(),
                         byte_count: 1024,
                         sha256: sha256_hex(b"request-body"),
                     },
@@ -202,6 +223,8 @@ mod tests {
                 },
             }],
         };
+
+        let request_sha = sha256_hex(b"request-body");
 
         redact_cassette(&mut cassette);
         let json = serde_json::to_string(&cassette).unwrap();
@@ -215,8 +238,20 @@ mod tests {
             "x-api-key header survived serialization"
         );
         assert!(
+            !json.contains(image_base64),
+            "image base64 survived redaction"
+        );
+        assert!(
+            !json.contains("json_with_image"),
+            "body kind should be json_without_image after redaction"
+        );
+        assert!(
             json.contains(&image_sha),
             "image sha256 must be present in attachment metadata"
+        );
+        assert!(
+            json.contains(&request_sha),
+            "request body sha256 must be preserved"
         );
         assert!(
             json.contains("content-type"),

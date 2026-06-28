@@ -103,7 +103,10 @@ pub(crate) fn render_bookmarks() -> RenderedFixture {
         ],
         28,
     );
-    RenderedFixture { image: img, expected }
+    RenderedFixture {
+        image: img,
+        expected,
+    }
 }
 
 pub(crate) fn render_desktop_folders() -> RenderedFixture {
@@ -136,7 +139,10 @@ pub(crate) fn render_desktop_folders() -> RenderedFixture {
             label: format!("folder_{i}"),
         });
     }
-    RenderedFixture { image: img, expected }
+    RenderedFixture {
+        image: img,
+        expected,
+    }
 }
 
 pub(crate) fn render_emails() -> RenderedFixture {
@@ -155,7 +161,10 @@ pub(crate) fn render_emails() -> RenderedFixture {
         ],
         28,
     );
-    RenderedFixture { image: img, expected }
+    RenderedFixture {
+        image: img,
+        expected,
+    }
 }
 
 pub(crate) fn render_names() -> RenderedFixture {
@@ -174,7 +183,10 @@ pub(crate) fn render_names() -> RenderedFixture {
         ],
         28,
     );
-    RenderedFixture { image: img, expected }
+    RenderedFixture {
+        image: img,
+        expected,
+    }
 }
 
 pub(crate) fn render_account_ids() -> RenderedFixture {
@@ -193,7 +205,10 @@ pub(crate) fn render_account_ids() -> RenderedFixture {
         ],
         28,
     );
-    RenderedFixture { image: img, expected }
+    RenderedFixture {
+        image: img,
+        expected,
+    }
 }
 
 /// A browser chrome with a single URL field carrying obviously-fake text.
