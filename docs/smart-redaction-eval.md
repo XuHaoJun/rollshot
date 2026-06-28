@@ -239,6 +239,8 @@ Expected outcome for the follow-up plan:
   after such changes.
 - **Lenient thresholds.** The MVP thresholds are intentionally loose. They will
   tighten as the pipeline matures and more fixtures are seeded.
-- **No CI gate yet.** The eval suite is local-developer + PR-description-driven.
-  CI gating can be added once the six fixtures are seeded and thresholds are
-  calibrated.
+- **CI gate active for selftest fixture.** The eval suite runs in CI via
+  `cargo test -p rollshot-app eval` (default lane) and
+  `cargo test -p rollshot-app --features ocr eval` (OCR lane). The six
+  provider-backed fixtures are skipped until seeded; thresholds will tighten
+  as fixtures stabilize.
