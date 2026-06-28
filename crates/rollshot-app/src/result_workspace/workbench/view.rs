@@ -178,9 +178,21 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
         text("")
     };
 
+    // Mirror the reducer guard: needs an active revision to revise *from*, a
+    // proposal, and at least one correction. Otherwise the click is a no-op.
+    let revise_enabled = wb.active_revision.is_some()
+        && wb
+            .pending_proposal
+            .as_ref()
+            .map(|p| !super::review::assemble_correction_evidence(p, &wb.review).is_empty())
+            .unwrap_or(false);
+
     let actions = row![
         text(summary),
         Space::new().width(Length::Fill),
+        button(text("Ask agent to revise")).on_press_maybe(
+            revise_enabled.then_some(Message::Workbench(WorkbenchMessage::AskAgentToRevise)),
+        ),
         button(text(format!("Apply {apply} redactions"))).on_press_maybe(if apply > 0 {
             Some(Message::Workbench(WorkbenchMessage::ApplyCandidates))
         } else {

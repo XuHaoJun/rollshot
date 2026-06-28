@@ -1326,6 +1326,54 @@ mod reducer_tests {
         }
     }
 
+    fn agent_candidate(id: u64, b: ImageRect) -> ProposedCandidate {
+        ProposedCandidate {
+            id: CandidateId(id),
+            edit: ProposedEdit::AddRedaction { bounds: b },
+            confidence: 0.9,
+            label: "agent".into(),
+            rationale: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 7 },
+            },
+        }
+    }
+
+    fn active_revision_for_reducer_test() -> rollshot_preset::AutomationRevision {
+        use rollshot_preset::{
+            AutomationRevision, PresetId, RevisionId, RevisionOrigin, RevisionProvenance,
+            STORE_SCHEMA_VERSION,
+        };
+        let source = "function main(input) { return { candidates: [] }; }";
+        let validated = rollshot_automation::validate_source(
+            source,
+            &rollshot_automation::ValidationLimits::default(),
+        )
+        .unwrap();
+        AutomationRevision {
+            store_schema_version: STORE_SCHEMA_VERSION,
+            id: RevisionId("rev-1".into()),
+            preset_id: PresetId("workbench-draft".into()),
+            parent_id: None,
+            created_at: "2026-06-28T00:00:00Z".into(),
+            provenance: RevisionProvenance {
+                origin: RevisionOrigin::AgentRun,
+                note: None,
+                source_run_ref: Some("7".into()),
+            },
+            artifact: validated,
+        }
+    }
+
+    fn seed_active_revision_pending_proposal_and_rejection(ws: &mut ResultWorkspace) {
+        let wb = wb_mut(ws);
+        wb.active_revision = Some(active_revision_for_reducer_test());
+        let p = proposal(vec![agent_candidate(1, rect(10.0, 10.0, 50.0, 50.0))]);
+        wb.pending_proposal = Some(p);
+        wb.review = super::super::CandidateReview::from_candidates(&[CandidateId(1)]);
+        wb.review.mark_rejected(CandidateId(1));
+    }
+
     #[test]
     fn run_terminal_ready_for_review_populates_proposal_review_draft() {
         use rollshot_agent::domain::SessionId;
@@ -1713,5 +1761,49 @@ mod reducer_tests {
         let draft = wb(&ws).pending_draft.as_ref().expect("draft populated");
         assert_eq!(draft.parent_revision_id.as_ref().unwrap().0, "rev-parent");
         assert!(draft.revision_note.as_ref().unwrap().contains("1 rejected"));
+    }
+
+    #[test]
+    fn ask_agent_to_revise_queues_improve_run_with_correction_evidence() {
+        let mut ws = ws_with_workbench();
+        seed_active_revision_pending_proposal_and_rejection(&mut ws);
+
+        let task = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::AskAgentToRevise),
+        );
+        drop(task);
+
+        let state = wb(&ws);
+        let params = state.pending_run.as_ref().expect("pending improve run");
+        assert_eq!(params.mode, super::super::RunKind::Improve);
+        assert!(params.user_message.contains("Rejected false positives"));
+        assert!(params.active_revision_source.as_ref().unwrap().contains("function main"));
+        assert_eq!(params.parent_revision_id.as_ref().unwrap().0, "rev-1");
+        assert!(params.revision_note.as_ref().unwrap().contains("1 rejected"));
+        assert!(state.disclosure_pending);
+    }
+
+    #[test]
+    fn ask_agent_to_revise_is_noop_without_corrections() {
+        let mut ws = ws_with_workbench();
+        // Active revision + proposal present, but the review has no rejections,
+        // resizes, or manual additions → empty evidence → silent no-op.
+        // Scope the mutable borrow in a block so the local does not shadow the
+        // `wb(&ws)` accessor used below.
+        {
+            let wb = wb_mut(&mut ws);
+            wb.active_revision = Some(active_revision_for_reducer_test());
+            wb.pending_proposal = Some(proposal(vec![agent_candidate(1, rect(10.0, 10.0, 50.0, 50.0))]));
+            wb.review = super::super::CandidateReview::from_candidates(&[CandidateId(1)]);
+        }
+
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::AskAgentToRevise),
+        );
+        let state = wb(&ws);
+        assert!(state.pending_run.is_none(), "no run queued without corrections");
+        assert!(!state.disclosure_pending, "disclosure not opened");
     }
 }

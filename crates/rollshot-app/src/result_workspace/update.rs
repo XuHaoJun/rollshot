@@ -1004,8 +1004,36 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::AskAgentToRevise
-                | super::workbench::WorkbenchMessage::DiscardDraft
+                super::workbench::WorkbenchMessage::AskAgentToRevise => {
+                    if workbench.run_state.is_running() {
+                        return Task::none();
+                    }
+                    let Some(active_revision) = workbench.active_revision.as_ref() else {
+                        return Task::none();
+                    };
+                    let Some(proposal) = workbench.pending_proposal.as_ref() else {
+                        return Task::none();
+                    };
+                    let evidence =
+                        super::workbench::review::assemble_correction_evidence(proposal, &workbench.review);
+                    if evidence.is_empty() {
+                        return Task::none();
+                    }
+                    let (w, h) = state.document.image.source().dimensions();
+                    let summary = evidence.summary_line();
+                    let params = super::workbench::PendingRunParams {
+                        user_message: evidence.to_agent_message(),
+                        image_dims: (w, h),
+                        active_revision_source: Some(active_revision.artifact.source.clone()),
+                        mode: super::workbench::RunKind::Improve,
+                        parent_revision_id: Some(active_revision.id.clone()),
+                        revision_note: Some(format!("improved from {}; {summary}", active_revision.id.0)),
+                    };
+                    workbench.disclosure_pending = true;
+                    workbench.pending_run = Some(params);
+                    Task::none()
+                }
+                super::workbench::WorkbenchMessage::DiscardDraft
                 | super::workbench::WorkbenchMessage::DiscardCandidates
                 | super::workbench::WorkbenchMessage::ToggleAdvancedDetails
                 | super::workbench::WorkbenchMessage::OpenProviderSettings
