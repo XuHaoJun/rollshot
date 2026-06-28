@@ -232,6 +232,17 @@ Expected outcome for the follow-up plan:
 - The `layer2_gate_over_all_present_fixtures` test exercises all six intents
   under `--features ocr` without skipping.
 
+## Phase E improve-loop coverage
+
+Phase E does not require live cassette seeding before implementation. The first
+gate is deterministic app coverage for two correction modes:
+
+- overfire: rejected candidate evidence is fed into an improve run;
+- miss: manually added candidate evidence is fed into an improve run.
+
+Provider-backed improve cassettes should be recorded after the Phase E prompt
+and correction-evidence format stabilize.
+
 ## Known limitations
 
 - **Synthetic images only.** Fixtures use programmatically rendered images, not

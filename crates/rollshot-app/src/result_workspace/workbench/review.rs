@@ -523,6 +523,42 @@ mod evidence_tests {
     }
 
     #[test]
+    fn rejected_candidate_formats_as_overfire_feedback() {
+        let bounds = ImageRect { x: 4.0, y: 5.0, width: 6.0, height: 7.0 };
+        let p = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![agent_candidate(1, "url-bar", bounds)],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+        };
+        let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);
+        review.mark_rejected(CandidateId(1));
+        let msg = assemble_correction_evidence(&p, &review).to_agent_message();
+        assert!(msg.contains("Rejected false positives"));
+        assert!(msg.contains("label=url-bar"));
+    }
+
+    #[test]
+    fn manual_candidate_formats_as_missed_target_feedback() {
+        let bounds = ImageRect { x: 44.0, y: 55.0, width: 66.0, height: 77.0 };
+        let p = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![manual_candidate(9, bounds)],
+            confidence_summary: ConfidenceSummary::from_confidences(&[1.0]),
+            rationale_summary: None,
+            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+        };
+        let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(9)]);
+        review.mark_modified(CandidateId(9), ProposedEdit::AddRedaction { bounds });
+        let msg = assemble_correction_evidence(&p, &review).to_agent_message();
+        assert!(msg.contains("Manually added missed targets"));
+        assert!(msg.contains("id=9"));
+    }
+
+    #[test]
     fn correction_evidence_agent_message_is_deterministic_and_privacy_safe() {
         let original = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
         let p = EditProposal {
