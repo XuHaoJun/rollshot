@@ -1,4 +1,4 @@
-use super::fixture::{load_expected, load_image};
+use super::fixture::{load_expected, load_image, load_meta};
 use super::layer2::run_golden_source;
 use super::scoring::{score_candidates, Thresholds};
 
@@ -81,4 +81,44 @@ async fn layer1_selftest_replay_reaches_ready_and_scores() {
         "layer1 scoring failed: {:?}",
         report.gate_failures
     );
+}
+
+#[test]
+fn layer2_gate_over_all_present_fixtures() {
+    use super::fixture::{intent_specs, RequiredCapability};
+    use super::scoring::{score_candidates, Thresholds};
+
+    let ocr_enabled = cfg!(feature = "ocr");
+    for spec in intent_specs() {
+        let meta = load_meta(spec.name);
+        if spec.required_capability == RequiredCapability::Ocr && !ocr_enabled {
+            eprintln!("SKIP eval fixture {} (ocr feature disabled)", spec.name);
+            continue;
+        }
+        let golden_path = super::fixture::fixtures_root()
+            .join(spec.name)
+            .join("golden_source.js");
+        if !golden_path.exists() {
+            if meta.seeded || std::env::var_os("CI").is_some() {
+                panic!(
+                    "seeded eval fixture {} is missing golden_source.js",
+                    spec.name
+                );
+            }
+            eprintln!("SKIP eval fixture {} (golden not yet seeded)", spec.name);
+            continue;
+        }
+        let image = load_image(spec.name);
+        let expected = load_expected(spec.name);
+        let golden = std::fs::read_to_string(&golden_path).unwrap();
+        let cands = run_golden_source(&image, &golden)
+            .unwrap_or_else(|e| panic!("{} layer2: {e}", spec.name));
+        let report = score_candidates(&expected, &cands, &Thresholds::lenient());
+        assert!(
+            report.passed(),
+            "{} failed gate: {:?}",
+            spec.name,
+            report.gate_failures
+        );
+    }
 }
