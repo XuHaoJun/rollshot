@@ -55,6 +55,7 @@ pub fn save_revision(
     preset_id: &PresetId,
     source: &str,
     parent_rev_id: Option<&RevisionId>,
+    provenance_note: Option<&str>,
     session_id: u64,
     now: String,
 ) -> Result<(), WorkbenchError> {
@@ -64,7 +65,7 @@ pub fn save_revision(
     let rev_id = RevisionId(format!("rev-{}", chrono::Utc::now().timestamp_millis()));
     let provenance = RevisionProvenance {
         origin: RevisionOrigin::AgentRun,
-        note: None,
+        note: provenance_note.map(str::to_owned),
         source_run_ref: Some(session_id.to_string()),
     };
     store
@@ -378,12 +379,46 @@ mod save_tests {
             &preset_id,
             source,
             None,
+            None,
             42,
             "2026-01-01T00:00:00Z".into(),
         )
         .unwrap();
         let active = store.load_active_revision(&preset_id).unwrap();
         assert!(active.artifact.source.contains("function main"));
+    }
+
+    #[test]
+    fn save_revision_records_parent_and_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = PresetStore::open(tmp.path().to_path_buf());
+        let preset_id = PresetId("test-preset".into());
+        store
+            .create_preset(
+                preset_id.clone(),
+                "Test".into(),
+                "intent".into(),
+                "2026-01-01T00:00:00Z".into(),
+            )
+            .unwrap();
+        let source = r#"function main(input) { return { candidates: [] }; }"#;
+        let parent = rollshot_preset::RevisionId("rev-parent".into());
+        save_revision(
+            &store,
+            &preset_id,
+            source,
+            Some(&parent),
+            Some("improved from rev-parent; 1 rejected, 0 resized, 0 manually added"),
+            42,
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .unwrap();
+        let active = store.load_active_revision(&preset_id).unwrap();
+        assert_eq!(active.parent_id, Some(parent));
+        assert_eq!(
+            active.provenance.note.as_deref(),
+            Some("improved from rev-parent; 1 rejected, 0 resized, 0 manually added")
+        );
     }
 
     #[test]
@@ -405,6 +440,7 @@ mod save_tests {
             &store,
             &preset_id,
             bad,
+            None,
             None,
             1,
             "2026-01-01T00:00:00Z".into()

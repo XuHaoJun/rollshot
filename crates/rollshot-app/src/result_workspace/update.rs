@@ -985,7 +985,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 &store,
                                 &preset_id,
                                 &draft.source,
-                                None,
+                                draft.parent_revision_id.as_ref(),
+                                draft.revision_note.as_deref(),
                                 workbench.session.session_id.get(),
                                 chrono::Utc::now().to_rfc3339(),
                             ) {
