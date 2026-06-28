@@ -1749,7 +1749,9 @@ mod reducer_tests {
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: Some(rollshot_preset::RevisionId("rev-parent".into())),
-            revision_note: Some("improved from rev-parent; 1 rejected, 0 resized, 0 manually added".into()),
+            revision_note: Some(
+                "improved from rev-parent; 1 rejected, 0 resized, 0 manually added".into(),
+            ),
         };
         let ready = ready_for_review_with_text("done");
         let _ = update(
@@ -1778,9 +1780,17 @@ mod reducer_tests {
         let params = state.pending_run.as_ref().expect("pending improve run");
         assert_eq!(params.mode, super::super::RunKind::Improve);
         assert!(params.user_message.contains("Rejected false positives"));
-        assert!(params.active_revision_source.as_ref().unwrap().contains("function main"));
+        assert!(params
+            .active_revision_source
+            .as_ref()
+            .unwrap()
+            .contains("function main"));
         assert_eq!(params.parent_revision_id.as_ref().unwrap().0, "rev-1");
-        assert!(params.revision_note.as_ref().unwrap().contains("1 rejected"));
+        assert!(params
+            .revision_note
+            .as_ref()
+            .unwrap()
+            .contains("1 rejected"));
         assert!(state.disclosure_pending);
     }
 
@@ -1794,7 +1804,10 @@ mod reducer_tests {
         {
             let wb = wb_mut(&mut ws);
             wb.active_revision = Some(active_revision_for_reducer_test());
-            wb.pending_proposal = Some(proposal(vec![agent_candidate(1, rect(10.0, 10.0, 50.0, 50.0))]));
+            wb.pending_proposal = Some(proposal(vec![agent_candidate(
+                1,
+                rect(10.0, 10.0, 50.0, 50.0),
+            )]));
             wb.review = super::super::CandidateReview::from_candidates(&[CandidateId(1)]);
         }
 
@@ -1803,7 +1816,10 @@ mod reducer_tests {
             Message::Workbench(WorkbenchMessage::AskAgentToRevise),
         );
         let state = wb(&ws);
-        assert!(state.pending_run.is_none(), "no run queued without corrections");
+        assert!(
+            state.pending_run.is_none(),
+            "no run queued without corrections"
+        );
         assert!(!state.disclosure_pending, "disclosure not opened");
     }
 }

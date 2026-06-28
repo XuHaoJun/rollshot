@@ -86,6 +86,9 @@ pub struct WorkbenchState {
     pub pending_run: Option<PendingRunParams>,
     /// Next candidate id for manually-added missing candidates (§5.3).
     pub next_manual_candidate_id: u64,
+    /// Cached result of `assemble_correction_evidence(…).is_empty()` —
+    /// avoids per-frame Vec allocations in the view.
+    pub corrections_non_empty: bool,
 }
 
 /// Parameters captured at Send time and consumed when disclosure is confirmed.
@@ -127,7 +130,20 @@ impl Default for WorkbenchState {
             composer: String::new(),
             pending_run: None,
             next_manual_candidate_id: 1,
+            corrections_non_empty: false,
         }
+    }
+}
+
+impl WorkbenchState {
+    /// Recompute the cached `corrections_non_empty` flag from current
+    /// `pending_proposal` and `review`. Call after any mutation to either.
+    pub fn recompute_corrections_non_empty(&mut self) {
+        self.corrections_non_empty = self
+            .pending_proposal
+            .as_ref()
+            .map(|p| !review::assemble_correction_evidence(p, &self.review).is_empty())
+            .unwrap_or(false);
     }
 }
 

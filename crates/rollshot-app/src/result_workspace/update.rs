@@ -788,6 +788,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         workbench.pending_proposal = Some(ready.proposal.clone());
                         let ids: Vec<_> = ready.proposal.candidates.iter().map(|c| c.id).collect();
                         workbench.review = super::workbench::CandidateReview::from_candidates(&ids);
+                        // Fresh proposal: all candidates pending, no corrections yet.
+                        workbench.corrections_non_empty = false;
                         workbench.pending_draft = Some(super::workbench::PendingDraft {
                             source: ready.automation.source.clone(),
                             assistant_text: ready.assistant_text.clone(),
@@ -832,6 +834,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 workbench.pending_proposal = None;
                                 workbench.review = super::workbench::CandidateReview::default();
                                 workbench.selected_candidate = None;
+                                workbench.corrections_non_empty = false;
                             }
                             Err(e) => workbench.error = Some(e),
                         }
@@ -851,10 +854,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     if workbench.selected_candidate == Some(id) {
                         workbench.selected_candidate = None;
                     }
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateUnrejected(id) => {
                     workbench.review.mark_pending(id);
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateMoved { id, new_bounds } => {
@@ -862,6 +867,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         id,
                         rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds: new_bounds },
                     );
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::AddManualCandidate { bounds } => {
@@ -887,6 +893,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         id,
                         rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds },
                     );
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::NextWarning => Task::none(),
@@ -948,12 +955,11 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         workbench.payload_mode,
                     ) {
                         Ok((task, cancellation)) => {
-                            workbench.run_state =
-                                super::workbench::RunState::Running {
-                                    cancellation,
-                                    parent_revision_id,
-                                    revision_note,
-                                };
+                            workbench.run_state = super::workbench::RunState::Running {
+                                cancellation,
+                                parent_revision_id,
+                                revision_note,
+                            };
                             task
                         }
                         Err(e) => {
@@ -1015,8 +1021,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     let Some(proposal) = workbench.pending_proposal.as_ref() else {
                         return Task::none();
                     };
-                    let evidence =
-                        super::workbench::review::assemble_correction_evidence(proposal, &workbench.review);
+                    let evidence = super::workbench::review::assemble_correction_evidence(
+                        proposal,
+                        &workbench.review,
+                    );
                     if evidence.is_empty() {
                         return Task::none();
                     }
@@ -1028,7 +1036,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         active_revision_source: Some(active_revision.artifact.source.clone()),
                         mode: super::workbench::RunKind::Improve,
                         parent_revision_id: Some(active_revision.id.clone()),
-                        revision_note: Some(format!("improved from {}; {summary}", active_revision.id.0)),
+                        revision_note: Some(format!(
+                            "improved from {}; {summary}",
+                            active_revision.id.0
+                        )),
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);

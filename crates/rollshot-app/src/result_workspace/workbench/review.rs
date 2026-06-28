@@ -170,7 +170,11 @@ impl CorrectionEvidence {
         if !self.manual_added.is_empty() {
             out.push_str("- Manually added missed targets:\n");
             for m in &self.manual_added {
-                out.push_str(&format!("  - id={} bounds={}\n", m.id.0, rect_summary(m.bounds)));
+                out.push_str(&format!(
+                    "  - id={} bounds={}\n",
+                    m.id.0,
+                    rect_summary(m.bounds)
+                ));
             }
         }
         out
@@ -210,7 +214,10 @@ pub fn assemble_correction_evidence(
             continue;
         };
         if matches!(candidate.provenance.source, ProvenanceSource::Manual) {
-            evidence.manual_added.push(ManualAddedCorrection { id, bounds: corrected_bounds });
+            evidence.manual_added.push(ManualAddedCorrection {
+                id,
+                bounds: corrected_bounds,
+            });
             continue;
         }
         if let Some(original_bounds) = super::state::proposed_edit_bounds(&candidate.edit) {
@@ -486,10 +493,30 @@ mod evidence_tests {
 
     #[test]
     fn correction_evidence_records_rejected_resized_and_manual_added_bounds() {
-        let original_a = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
-        let original_b = ImageRect { x: 20.0, y: 20.0, width: 10.0, height: 10.0 };
-        let corrected_b = ImageRect { x: 22.0, y: 18.0, width: 14.0, height: 12.0 };
-        let manual = ImageRect { x: 80.0, y: 10.0, width: 12.0, height: 8.0 };
+        let original_a = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let original_b = ImageRect {
+            x: 20.0,
+            y: 20.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let corrected_b = ImageRect {
+            x: 22.0,
+            y: 18.0,
+            width: 14.0,
+            height: 12.0,
+        };
+        let manual = ImageRect {
+            x: 80.0,
+            y: 10.0,
+            width: 12.0,
+            height: 8.0,
+        };
         let p = EditProposal {
             id: ProposalId(1),
             base_document_state_id: 0,
@@ -500,7 +527,9 @@ mod evidence_tests {
             ],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9, 0.9, 1.0]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 7 },
+            },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[
             CandidateId(1),
@@ -508,8 +537,16 @@ mod evidence_tests {
             CandidateId(3),
         ]);
         review.mark_rejected(CandidateId(1));
-        review.mark_modified(CandidateId(2), ProposedEdit::AddRedaction { bounds: corrected_b });
-        review.mark_modified(CandidateId(3), ProposedEdit::AddRedaction { bounds: manual });
+        review.mark_modified(
+            CandidateId(2),
+            ProposedEdit::AddRedaction {
+                bounds: corrected_b,
+            },
+        );
+        review.mark_modified(
+            CandidateId(3),
+            ProposedEdit::AddRedaction { bounds: manual },
+        );
 
         let e = assemble_correction_evidence(&p, &review);
         assert_eq!(e.rejected.len(), 1);
@@ -524,14 +561,21 @@ mod evidence_tests {
 
     #[test]
     fn rejected_candidate_formats_as_overfire_feedback() {
-        let bounds = ImageRect { x: 4.0, y: 5.0, width: 6.0, height: 7.0 };
+        let bounds = ImageRect {
+            x: 4.0,
+            y: 5.0,
+            width: 6.0,
+            height: 7.0,
+        };
         let p = EditProposal {
             id: ProposalId(1),
             base_document_state_id: 0,
             candidates: vec![agent_candidate(1, "url-bar", bounds)],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 7 },
+            },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);
         review.mark_rejected(CandidateId(1));
@@ -542,14 +586,21 @@ mod evidence_tests {
 
     #[test]
     fn manual_candidate_formats_as_missed_target_feedback() {
-        let bounds = ImageRect { x: 44.0, y: 55.0, width: 66.0, height: 77.0 };
+        let bounds = ImageRect {
+            x: 44.0,
+            y: 55.0,
+            width: 66.0,
+            height: 77.0,
+        };
         let p = EditProposal {
             id: ProposalId(1),
             base_document_state_id: 0,
             candidates: vec![manual_candidate(9, bounds)],
             confidence_summary: ConfidenceSummary::from_confidences(&[1.0]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 7 },
+            },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(9)]);
         review.mark_modified(CandidateId(9), ProposedEdit::AddRedaction { bounds });
@@ -560,14 +611,21 @@ mod evidence_tests {
 
     #[test]
     fn correction_evidence_agent_message_is_deterministic_and_privacy_safe() {
-        let original = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        let original = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
         let p = EditProposal {
             id: ProposalId(1),
             base_document_state_id: 0,
             candidates: vec![agent_candidate(1, "email", original)],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
-            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 7 },
+            },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);
         review.mark_rejected(CandidateId(1));

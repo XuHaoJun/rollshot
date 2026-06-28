@@ -180,12 +180,8 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
 
     // Mirror the reducer guard: needs an active revision to revise *from*, a
     // proposal, and at least one correction. Otherwise the click is a no-op.
-    let revise_enabled = wb.active_revision.is_some()
-        && wb
-            .pending_proposal
-            .as_ref()
-            .map(|p| !super::review::assemble_correction_evidence(p, &wb.review).is_empty())
-            .unwrap_or(false);
+    let revise_enabled =
+        wb.active_revision.is_some() && wb.pending_proposal.is_some() && wb.corrections_non_empty;
 
     let actions = row![
         text(summary),
