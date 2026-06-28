@@ -1,7 +1,7 @@
 # Smart Redaction Agent Harness Roadmap
 
 **Date:** 2026-06-27
-**Status:** Active roadmap; Phase C complete
+**Status:** Active roadmap; Phase D complete
 
 ## Context
 
@@ -79,11 +79,18 @@ screenshot attachment alone.
     checks and recoverable mismatch feedback.
   - Source mutations emit bounded diff summaries for the run stream and
     workbench activity drawer.
+- Phase D: Evaluation Harness was implemented on
+  `feat/smart-redaction-agent-harness-roadmap`.
+  - The app has a deterministic eval harness with cassette replay and
+    golden-source geometry scoring.
+  - Synthetic fixture intents cover URL bar, bookmarks, desktop folders,
+    emails, names, and account IDs, with OCR-gated fixtures skipped until
+    seeded.
+  - The eval workflow documents fixture regeneration, live cassette recording,
+    redaction, golden-source extraction, and CI gate behavior.
 
 ### Remaining Gaps
 
-- The agent has source replacement and validation tools, but still lacks a rich
-  equivalent of "read the file and environment before editing."
 - Layout and template inspection remain unavailable in product authoring runs
   until they return truthful data.
 - `RealAutomationHost` now prepares canonical region-feature results and,
@@ -92,6 +99,9 @@ screenshot attachment alone.
   unavailable in product authoring runs.
 - `AutomationInput.capability_handles` is empty in the product workbench path,
   so fixture-style template presets cannot work there yet.
+- The six provider-backed eval fixtures are defined but not all seeded; the
+  selftest fixture is the active CI gate until the deferred seeding workflow is
+  completed.
 
 ## Roadmap
 
@@ -164,7 +174,7 @@ Move from whole-source replacement toward code-agent-style editing.
 - Include source diffs in run events and review UI so users can inspect preset
   changes like code.
 
-### Phase D: Evaluation Harness
+### Phase D: Evaluation Harness — Complete
 
 Measure whether the harness can reliably produce useful presets.
 
