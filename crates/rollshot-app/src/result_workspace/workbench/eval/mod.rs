@@ -8,6 +8,7 @@ pub(crate) mod cassette;
 pub(crate) mod fixture;
 pub(crate) mod layer1;
 pub(crate) mod layer2;
+pub(crate) mod record;
 pub(crate) mod render;
 pub(crate) mod scoring;
 
