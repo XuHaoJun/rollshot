@@ -6,6 +6,9 @@ pub mod run;
 pub mod state;
 pub mod view;
 
+#[cfg(test)]
+pub(crate) mod eval;
+
 #[allow(unused_imports)]
 pub use provider_config::{
     build_adapter, has_key, load_provider_config, provider_model_label, resolve_key,
