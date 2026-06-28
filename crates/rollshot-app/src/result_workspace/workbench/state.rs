@@ -12,6 +12,8 @@ pub enum RunState {
     Idle,
     Running {
         cancellation: RunCancellation,
+        parent_revision_id: Option<rollshot_preset::RevisionId>,
+        revision_note: Option<String>,
     },
     Terminal(RunTerminalState),
 }

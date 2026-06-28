@@ -1478,6 +1478,8 @@ mod reducer_tests {
             image_dims: (100, 100),
             active_revision_source: None,
             mode: super::super::RunKind::Author,
+            parent_revision_id: None,
+            revision_note: None,
         });
 
         let _ = update(
@@ -1620,6 +1622,8 @@ mod reducer_tests {
         let cancel = RunCancellation::new();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: cancel.clone(),
+            parent_revision_id: None,
+            revision_note: None,
         };
 
         let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::CancelRun));
@@ -1631,6 +1635,8 @@ mod reducer_tests {
         let mut ws = ws_with_workbench();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
         };
 
         let _ = update(
@@ -1660,6 +1666,8 @@ mod reducer_tests {
         let mut ws = ws_with_workbench();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
         };
         wb_mut(&mut ws).disclosure_pending = true;
         wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
@@ -1667,6 +1675,8 @@ mod reducer_tests {
             image_dims: (100, 100),
             active_revision_source: None,
             mode: super::super::RunKind::Author,
+            parent_revision_id: None,
+            revision_note: None,
         });
 
         let _ = update(
@@ -1683,5 +1693,25 @@ mod reducer_tests {
             state.run_state.is_running(),
             "run_state unchanged (no second run started)"
         );
+    }
+
+    #[test]
+    fn run_terminal_carries_lineage_into_pending_draft() {
+        let mut ws = ws_with_workbench();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: Some(rollshot_preset::RevisionId("rev-parent".into())),
+            revision_note: Some("improved from rev-parent; 1 rejected, 0 resized, 0 manually added".into()),
+        };
+        let ready = ready_for_review_with_text("done");
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunTerminal(
+                RunTerminalState::ReadyForReview(Box::new(ready)),
+            )),
+        );
+        let draft = wb(&ws).pending_draft.as_ref().expect("draft populated");
+        assert_eq!(draft.parent_revision_id.as_ref().unwrap().0, "rev-parent");
+        assert!(draft.revision_note.as_ref().unwrap().contains("1 rejected"));
     }
 }

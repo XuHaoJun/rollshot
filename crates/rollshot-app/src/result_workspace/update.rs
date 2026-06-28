@@ -772,6 +772,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     {
                         workbench.error = Some(err);
                     }
+                    let (parent_revision_id, revision_note) = match &workbench.run_state {
+                        super::workbench::RunState::Running {
+                            parent_revision_id,
+                            revision_note,
+                            ..
+                        } => (parent_revision_id.clone(), revision_note.clone()),
+                        _ => (None, None),
+                    };
                     workbench.run_state = super::workbench::RunState::Terminal(terminal);
                     if let super::workbench::RunState::Terminal(
                         rollshot_agent::driver::RunTerminalState::ReadyForReview(ref ready),
@@ -784,6 +792,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             source: ready.automation.source.clone(),
                             assistant_text: ready.assistant_text.clone(),
                             validation_summary: ready.automation.validation_summary.clone(),
+                            parent_revision_id,
+                            revision_note,
                         });
                     }
                     Task::none()
@@ -899,6 +909,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             .as_ref()
                             .map(|r| r.artifact.source.clone()),
                         mode: super::workbench::RunKind::Author,
+                        parent_revision_id: None,
+                        revision_note: None,
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);
@@ -919,6 +931,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     let Some(params) = workbench.pending_run.take() else {
                         return Task::none();
                     };
+                    let parent_revision_id = params.parent_revision_id.clone();
+                    let revision_note = params.revision_note.clone();
                     let image = state.document.image.source().clone();
                     let session_id = workbench.session.session_id;
                     let session = std::mem::replace(
@@ -935,7 +949,11 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     ) {
                         Ok((task, cancellation)) => {
                             workbench.run_state =
-                                super::workbench::RunState::Running { cancellation };
+                                super::workbench::RunState::Running {
+                                    cancellation,
+                                    parent_revision_id,
+                                    revision_note,
+                                };
                             task
                         }
                         Err(e) => {

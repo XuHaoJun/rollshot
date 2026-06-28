@@ -51,6 +51,8 @@ pub struct PendingDraft {
     pub source: String,
     pub assistant_text: String,
     pub validation_summary: rollshot_automation::ValidationSummary,
+    pub parent_revision_id: Option<rollshot_preset::RevisionId>,
+    pub revision_note: Option<String>,
 }
 
 /// Workbench mode sub-state attached to `ResultWorkspace`.
@@ -93,6 +95,8 @@ pub struct PendingRunParams {
     pub image_dims: (u32, u32),
     pub active_revision_source: Option<String>,
     pub mode: RunKind,
+    pub parent_revision_id: Option<rollshot_preset::RevisionId>,
+    pub revision_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
