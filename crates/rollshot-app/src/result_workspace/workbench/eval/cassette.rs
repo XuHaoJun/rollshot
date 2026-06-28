@@ -120,9 +120,7 @@ pub(crate) fn redact_cassette(cassette: &mut CassetteFile) {
             interaction.request.headers.remove(*key);
         }
         if let RecordedRequestBody::JsonWithImage {
-            byte_count,
-            sha256,
-            ..
+            byte_count, sha256, ..
         } = &interaction.request.body_summary
         {
             interaction.request.body_summary = RecordedRequestBody::JsonWithoutImage {
