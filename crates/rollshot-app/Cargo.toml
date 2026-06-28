@@ -67,7 +67,9 @@ zbus = { workspace = true }
 ab_glyph = "0.2"
 imageproc = { workspace = true, features = ["text"] }
 serde_json = { workspace = true }
+sha2 = "0.10"
 tempfile = "3"
+wiremock = "0.6"
 
 # Narrowed from the workspace `forbid(unsafe_code)`: the AppKit native-drag
 # bridge in `macos_native_drag.rs` is an audited unsafe boundary (mirrors
