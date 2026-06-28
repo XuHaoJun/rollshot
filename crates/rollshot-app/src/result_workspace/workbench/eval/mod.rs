@@ -10,3 +10,6 @@ pub(crate) mod layer1;
 pub(crate) mod layer2;
 pub(crate) mod render;
 pub(crate) mod scoring;
+
+#[cfg(test)]
+mod cases;

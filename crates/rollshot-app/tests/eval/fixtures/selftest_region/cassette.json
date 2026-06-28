@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "metadata": {
+    "recorded_at": "2026-06-28T00:00:00Z",
+    "provider": "anthropic",
+    "model": "claude-opus-4-8",
+    "substitutions": "Hand-authored for selftest_region eval fixture. Source content scrubbed."
+  },
+  "attachment": {
+    "media_type": "image/png",
+    "width": 800,
+    "height": 200,
+    "byte_count": 0,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "url_path": "/v1/messages",
+        "headers": {},
+        "body_summary": {
+          "kind": "json_with_image",
+          "base64": "",
+          "byte_count": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "sse_body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_self_001\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":50,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I'll replace the source with the URL bar redaction.\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_self_001\",\"name\":\"replace_source\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"source\\\":\\\"function main(input) {\\\\n  return {\\\\n    candidates: [{\\\\n      kind: 'addRedaction',\\\\n      bounds: { x: 120, y: 14, width: 600, height: 28 },\\\\n      confidence: 0.9,\\\\n      label: 'url'\\\\n    }]\\\\n  };\\\\n}\\\\n\\\",\\\"generation\\\":0}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":100}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url_path": "/v1/messages",
+        "headers": {},
+        "body_summary": {
+          "kind": "json_without_image",
+          "byte_count": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "sse_body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_self_002\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":80,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Now I'll validate the source.\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_self_002\",\"name\":\"validate_source\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"source\\\":\\\"function main(input) {\\\\n  return {\\\\n    candidates: [{\\\\n      kind: 'addRedaction',\\\\n      bounds: { x: 120, y: 14, width: 600, height: 28 },\\\\n      confidence: 0.9,\\\\n      label: 'url'\\\\n    }]\\\\n  };\\\\n}\\\\n\\\",\\\"generation\\\":1}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":80}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url_path": "/v1/messages",
+        "headers": {},
+        "body_summary": {
+          "kind": "json_without_image",
+          "byte_count": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "sse_body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_self_003\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Running dry run to verify behavior.\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_self_003\",\"name\":\"dry_run\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"source\\\":\\\"function main(input) {\\\\n  return {\\\\n    candidates: [{\\\\n      kind: 'addRedaction',\\\\n      bounds: { x: 120, y: 14, width: 600, height: 28 },\\\\n      confidence: 0.9,\\\\n      label: 'url'\\\\n    }]\\\\n  };\\\\n}\\\\n\\\",\\\"generation\\\":1}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":60}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url_path": "/v1/messages",
+        "headers": {},
+        "body_summary": {
+          "kind": "json_without_image",
+          "byte_count": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "sse_body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_self_004\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":120,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Validation and dry run both passed. Submitting for review.\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_self_004\",\"name\":\"submit_for_review\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"generation\\\":1}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":50}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+      }
+    }
+  ]
+}
