@@ -1,5 +1,6 @@
-use rollshot_edit_proposal::{lower, EditProposal, ReviewDecision};
+use rollshot_edit_proposal::{lower, CandidateId, EditProposal, ProvenanceSource, ReviewDecision};
 use rollshot_image_document::ImageDocument;
+use rollshot_image_document::ImageRect;
 use rollshot_preset::{PresetId, PresetStore, RevisionId, RevisionOrigin, RevisionProvenance};
 
 use super::state::{CandidateReview, WorkbenchError};
@@ -86,34 +87,142 @@ pub fn save_revision(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedCorrection {
+    pub id: CandidateId,
+    pub label: String,
+    pub original_bounds: ImageRect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResizedCorrection {
+    pub id: CandidateId,
+    pub label: String,
+    pub original_bounds: ImageRect,
+    pub corrected_bounds: ImageRect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManualAddedCorrection {
+    pub id: CandidateId,
+    pub bounds: ImageRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct CorrectionEvidence {
-    pub rejected_count: usize,
-    pub modified_count: usize,
-    pub added_count: usize,
+    pub rejected: Vec<RejectedCorrection>,
+    pub resized: Vec<ResizedCorrection>,
+    pub manual_added: Vec<ManualAddedCorrection>,
+}
+
+fn rect_summary(bounds: ImageRect) -> String {
+    format!(
+        "x={:.1} y={:.1} w={:.1} h={:.1}",
+        bounds.x, bounds.y, bounds.width, bounds.height
+    )
+}
+
+impl CorrectionEvidence {
+    pub fn is_empty(&self) -> bool {
+        self.rejected.is_empty() && self.resized.is_empty() && self.manual_added.is_empty()
+    }
+
+    pub fn summary_line(&self) -> String {
+        format!(
+            "{} rejected, {} resized, {} manually added",
+            self.rejected.len(),
+            self.resized.len(),
+            self.manual_added.len()
+        )
+    }
+
+    pub fn to_agent_message(&self) -> String {
+        let mut out = String::from(
+            "Improve the current Smart Redaction detector using this reviewed evidence.\n\
+             Preserve existing useful detections, remove overfires, and add missed targets.\n\n\
+             Correction evidence:\n",
+        );
+        out.push_str(&format!("- Summary: {}\n", self.summary_line()));
+        if !self.rejected.is_empty() {
+            out.push_str("- Rejected false positives:\n");
+            for r in &self.rejected {
+                out.push_str(&format!(
+                    "  - id={} label={} original={}\n",
+                    r.id.0,
+                    r.label,
+                    rect_summary(r.original_bounds)
+                ));
+            }
+        }
+        if !self.resized.is_empty() {
+            out.push_str("- Resized target corrections:\n");
+            for r in &self.resized {
+                out.push_str(&format!(
+                    "  - id={} label={} original={} corrected={}\n",
+                    r.id.0,
+                    r.label,
+                    rect_summary(r.original_bounds),
+                    rect_summary(r.corrected_bounds)
+                ));
+            }
+        }
+        if !self.manual_added.is_empty() {
+            out.push_str("- Manually added missed targets:\n");
+            for m in &self.manual_added {
+                out.push_str(&format!("  - id={} bounds={}\n", m.id.0, rect_summary(m.bounds)));
+            }
+        }
+        out
+    }
 }
 
 impl std::fmt::Display for CorrectionEvidence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} rejected, {} resized, {} manually added",
-            self.rejected_count, self.modified_count, self.added_count
-        )
+        f.write_str(&self.summary_line())
     }
 }
 
-/// Assemble correction evidence for Improve Preset (spec §8.2).
 pub fn assemble_correction_evidence(
-    _proposal: &EditProposal,
+    proposal: &EditProposal,
     review: &super::state::CandidateReview,
 ) -> CorrectionEvidence {
-    let (_, rejected_ids, modified_pairs) = review.decision_sets();
-    CorrectionEvidence {
-        rejected_count: rejected_ids.len(),
-        modified_count: modified_pairs.len(),
-        added_count: 0, // SP6.1
+    let (_accepted_ids, rejected_ids, modified_pairs) = review.decision_sets();
+    let mut evidence = CorrectionEvidence::default();
+
+    for id in rejected_ids {
+        if let Some(candidate) = proposal.candidates.iter().find(|c| c.id == id) {
+            if let Some(original_bounds) = super::state::proposed_edit_bounds(&candidate.edit) {
+                evidence.rejected.push(RejectedCorrection {
+                    id,
+                    label: candidate.label.clone(),
+                    original_bounds,
+                });
+            }
+        }
     }
+
+    for (id, corrected_edit) in modified_pairs {
+        let Some(corrected_bounds) = super::state::proposed_edit_bounds(&corrected_edit) else {
+            continue;
+        };
+        let Some(candidate) = proposal.candidates.iter().find(|c| c.id == id) else {
+            continue;
+        };
+        if matches!(candidate.provenance.source, ProvenanceSource::Manual) {
+            evidence.manual_added.push(ManualAddedCorrection { id, bounds: corrected_bounds });
+            continue;
+        }
+        if let Some(original_bounds) = super::state::proposed_edit_bounds(&candidate.edit) {
+            evidence.resized.push(ResizedCorrection {
+                id,
+                label: candidate.label.clone(),
+                original_bounds,
+                corrected_bounds,
+            });
+        }
+    }
+
+    evidence
 }
 
 #[cfg(test)]
@@ -313,48 +422,26 @@ mod evidence_tests {
     };
     use rollshot_image_document::ImageRect;
 
-    fn proposal() -> EditProposal {
-        EditProposal {
-            id: ProposalId(1),
-            base_document_state_id: 0,
-            candidates: vec![
-                ProposedCandidate {
-                    id: CandidateId(1),
-                    edit: ProposedEdit::AddRedaction {
-                        bounds: ImageRect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 10.0,
-                            height: 10.0,
-                        },
-                    },
-                    confidence: 0.9,
-                    label: "a".into(),
-                    rationale: None,
-                    provenance: Provenance {
-                        source: ProvenanceSource::Manual,
-                    },
-                },
-                ProposedCandidate {
-                    id: CandidateId(2),
-                    edit: ProposedEdit::AddRedaction {
-                        bounds: ImageRect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 10.0,
-                            height: 10.0,
-                        },
-                    },
-                    confidence: 0.9,
-                    label: "b".into(),
-                    rationale: None,
-                    provenance: Provenance {
-                        source: ProvenanceSource::Manual,
-                    },
-                },
-            ],
-            confidence_summary: ConfidenceSummary::from_confidences(&[0.9, 0.9]),
-            rationale_summary: None,
+    fn agent_candidate(id: u64, label: &str, bounds: ImageRect) -> ProposedCandidate {
+        ProposedCandidate {
+            id: CandidateId(id),
+            edit: ProposedEdit::AddRedaction { bounds },
+            confidence: 0.9,
+            label: label.into(),
+            rationale: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Agent { run_id: 7 },
+            },
+        }
+    }
+
+    fn manual_candidate(id: u64, bounds: ImageRect) -> ProposedCandidate {
+        ProposedCandidate {
+            id: CandidateId(id),
+            edit: ProposedEdit::AddRedaction { bounds },
+            confidence: 1.0,
+            label: "manual".into(),
+            rationale: Some("Manually added missing candidate".into()),
             provenance: Provenance {
                 source: ProvenanceSource::Manual,
             },
@@ -362,42 +449,63 @@ mod evidence_tests {
     }
 
     #[test]
-    fn correction_evidence_counts_reject_and_modify() {
-        let p = proposal();
+    fn correction_evidence_records_rejected_resized_and_manual_added_bounds() {
+        let original_a = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        let original_b = ImageRect { x: 20.0, y: 20.0, width: 10.0, height: 10.0 };
+        let corrected_b = ImageRect { x: 22.0, y: 18.0, width: 14.0, height: 12.0 };
+        let manual = ImageRect { x: 80.0, y: 10.0, width: 12.0, height: 8.0 };
+        let p = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![
+                agent_candidate(1, "email", original_a),
+                agent_candidate(2, "name", original_b),
+                manual_candidate(3, manual),
+            ],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9, 0.9, 1.0]),
+            rationale_summary: None,
+            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+        };
         let mut review = super::super::state::CandidateReview::from_candidates(&[
             CandidateId(1),
             CandidateId(2),
+            CandidateId(3),
         ]);
         review.mark_rejected(CandidateId(1));
-        review.mark_modified(
-            CandidateId(2),
-            ProposedEdit::AddRedaction {
-                bounds: ImageRect {
-                    x: 1.0,
-                    y: 1.0,
-                    width: 5.0,
-                    height: 5.0,
-                },
-            },
-        );
+        review.mark_modified(CandidateId(2), ProposedEdit::AddRedaction { bounds: corrected_b });
+        review.mark_modified(CandidateId(3), ProposedEdit::AddRedaction { bounds: manual });
+
         let e = assemble_correction_evidence(&p, &review);
-        assert_eq!(e.rejected_count, 1);
-        assert_eq!(e.modified_count, 1);
-        assert_eq!(e.added_count, 0);
-        assert!(format!("{e}").contains("1 rejected"));
-        assert!(format!("{e}").contains("1 resized"));
+        assert_eq!(e.rejected.len(), 1);
+        assert_eq!(e.resized.len(), 1);
+        assert_eq!(e.manual_added.len(), 1);
+        assert_eq!(e.rejected[0].original_bounds, original_a);
+        assert_eq!(e.resized[0].original_bounds, original_b);
+        assert_eq!(e.resized[0].corrected_bounds, corrected_b);
+        assert_eq!(e.manual_added[0].bounds, manual);
+        assert!(!e.is_empty());
     }
 
     #[test]
-    fn correction_evidence_all_pending_is_zero() {
-        let p = proposal();
-        let review = super::super::state::CandidateReview::from_candidates(&[
-            CandidateId(1),
-            CandidateId(2),
-        ]);
+    fn correction_evidence_agent_message_is_deterministic_and_privacy_safe() {
+        let original = ImageRect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        let p = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![agent_candidate(1, "email", original)],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: Provenance { source: ProvenanceSource::Agent { run_id: 7 } },
+        };
+        let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);
+        review.mark_rejected(CandidateId(1));
+
         let e = assemble_correction_evidence(&p, &review);
-        assert_eq!(e.rejected_count, 0);
-        assert_eq!(e.modified_count, 0);
-        assert_eq!(e.added_count, 0);
+        let msg = e.to_agent_message();
+        assert!(msg.contains("Rejected false positives"));
+        assert!(msg.contains("id=1 label=email"));
+        assert!(msg.contains("x=0.0 y=0.0 w=10.0 h=10.0"));
+        assert!(!msg.contains("data:image"));
+        assert!(!msg.contains("authorization"));
     }
 }

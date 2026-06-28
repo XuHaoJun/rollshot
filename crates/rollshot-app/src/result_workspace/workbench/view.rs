@@ -53,10 +53,9 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
             disclosure_modal(wb)
         } else {
             // ImStart sets disclosure_pending without pending_run (SP6 stub).
-            let evidence = super::review::CorrectionEvidence {
-                rejected_count: wb.review.rejected_count(),
-                modified_count: wb.review.modified_count(),
-                added_count: 0,
+            let evidence = match wb.pending_proposal.as_ref() {
+                Some(proposal) => super::review::assemble_correction_evidence(proposal, &wb.review),
+                None => super::review::CorrectionEvidence::default(),
             };
             improve_modal(&evidence)
         };
