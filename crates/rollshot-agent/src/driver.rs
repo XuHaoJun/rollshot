@@ -115,7 +115,15 @@ Authoring loop:
 4. Use dry_run on the current generation.
 5. If validation or dry_run fails, read_current_source, edit_source, and retry validation/dry-run on the new generation.
 6. Use submit_for_review only after the current generation has successful validate_source and dry_run evidence.
-7. A successful dry_run means "ready for user review", not "safe to export"."#;
+7. A successful dry_run means "ready for user review", not "safe to export".
+
+Improve runs:
+1. The user message may contain reviewed correction evidence from a previous detector run.
+2. Treat rejected candidates as false positives to remove or narrow.
+3. Treat resized candidates as geometry corrections for the intended target.
+4. Treat manually added candidates as missed targets the detector should learn to include.
+5. Preserve unrelated useful detections from the current source.
+6. Explain what changed in the detector before submit_for_review."#;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -3552,6 +3560,31 @@ pub(crate) mod tests {
                 panic!("prompt example should validate:\n{source}\n{diags:#?}")
             });
         }
+    }
+
+    #[test]
+    fn smart_redaction_system_prompt_documents_improve_runs() {
+        let system_prompt = SMART_REDACTION_SYSTEM_PROMPT;
+        assert!(
+            system_prompt.contains("Improve runs"),
+            "system prompt should document improve runs, got: {:?}",
+            system_prompt
+        );
+        assert!(
+            system_prompt.contains("Treat rejected candidates as false positives"),
+            "system prompt should explain rejected correction semantics, got: {:?}",
+            system_prompt
+        );
+        assert!(
+            system_prompt.contains("Treat manually added candidates as missed targets"),
+            "system prompt should explain manual correction semantics, got: {:?}",
+            system_prompt
+        );
+        assert!(
+            system_prompt.contains("Explain what changed in the detector before submit_for_review"),
+            "system prompt should require detector-change explanation, got: {:?}",
+            system_prompt
+        );
     }
 
     // ---- Resource bounds: cancellation between items ----
