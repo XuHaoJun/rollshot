@@ -1,0 +1,7 @@
+{
+  "intent": "names",
+  "provider": "anthropic",
+  "model": "claude-opus-4-8",
+  "required_capability": "ocr",
+  "seeded": false
+}

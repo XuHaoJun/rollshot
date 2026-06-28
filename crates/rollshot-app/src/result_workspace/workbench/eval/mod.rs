@@ -4,5 +4,6 @@
 //! full-loop cassette replay (layer1) and extracted golden-source geometry
 //! scoring (layer2). See `docs/smart-redaction-eval.md`.
 
+pub(crate) mod fixture;
 pub(crate) mod render;
 pub(crate) mod scoring;
