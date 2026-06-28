@@ -102,6 +102,12 @@ cargo run -p rollshot-dev -- stitch-folder \
 which makes it useful for matcher and stitching iteration. Core golden fixtures
 live under `crates/rollshot-core/tests/fixtures/linearscroll_v2`.
 
+## Smart Redaction Eval Harness
+
+`docs/smart-redaction-eval.md` documents the two-layer evaluation gate for the
+smart-redaction pipeline — fixture layout, recording cassettes from a live model,
+scoring thresholds, and the deferred six-fixture seeding workflow.
+
 ## Matcher Performance Checks
 
 The ordinary test suite includes a structural matcher budget test for a
