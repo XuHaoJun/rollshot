@@ -20,8 +20,7 @@
         "url_path": "/v1/messages",
         "headers": {},
         "body_summary": {
-          "kind": "json_with_image",
-          "base64": "",
+          "kind": "json_without_image",
           "byte_count": 0,
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         }
