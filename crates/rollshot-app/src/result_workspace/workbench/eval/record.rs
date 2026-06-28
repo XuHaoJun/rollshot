@@ -24,7 +24,13 @@ impl RunEventSink for NullSink {
     fn emit(&self, _event: RunEvent) {}
 }
 
-type TurnCapture = (BTreeMap<String, String>, Vec<u8>, Vec<u8>);
+type TurnCapture = (
+    BTreeMap<String, String>,
+    Vec<u8>,
+    u16,
+    BTreeMap<String, String>,
+    Vec<u8>,
+);
 
 struct TeeProxy {
     turns: Arc<Mutex<Vec<TurnCapture>>>,
@@ -104,10 +110,13 @@ impl TeeProxy {
                     }
                 };
 
-                turns
-                    .lock()
-                    .await
-                    .push((headers, req_body.to_vec(), body.to_vec()));
+                turns.lock().await.push((
+                    headers,
+                    req_body.to_vec(),
+                    status,
+                    resp_headers.clone(),
+                    body.to_vec(),
+                ));
 
                 let mut resp_builder = hyper::Response::builder().status(status);
                 for (k, v) in &resp_headers {
@@ -209,6 +218,8 @@ fn extract_image_meta(body: &[u8]) -> Option<AttachmentMeta> {
 fn build_interaction(
     req_headers: &BTreeMap<String, String>,
     req_body: &[u8],
+    resp_status: u16,
+    resp_headers: &BTreeMap<String, String>,
     resp_body: &[u8],
 ) -> Interaction {
     let body_summary = if let Some(meta) = extract_image_meta(req_body) {
@@ -228,6 +239,9 @@ fn build_interaction(
     hdrs.remove("authorization");
     hdrs.remove("x-api-key");
 
+    let mut resp_hdrs = resp_headers.clone();
+    resp_hdrs.remove("set-cookie");
+
     let sse_body = String::from_utf8_lossy(resp_body).into_owned();
 
     Interaction {
@@ -238,8 +252,8 @@ fn build_interaction(
             body_summary,
         },
         response: RecordedResponse {
-            status: 200,
-            headers: BTreeMap::new(),
+            status: resp_status,
+            headers: resp_hdrs,
             sse_body,
         },
     }
@@ -338,7 +352,9 @@ pub(crate) async fn record_cassette(
     let turns = turns_handle.lock().await;
     let interactions: Vec<Interaction> = turns
         .iter()
-        .map(|(hdrs, req_body, resp_body)| build_interaction(hdrs, req_body, resp_body))
+        .map(|(req_hdrs, req_body, resp_status, resp_hdrs, resp_body)| {
+            build_interaction(req_hdrs, req_body, *resp_status, resp_hdrs, resp_body)
+        })
         .collect();
 
     let now = chrono::Utc::now().to_rfc3339();
