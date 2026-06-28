@@ -398,14 +398,17 @@ mod tests {
             return;
         }
 
-        let config_dir = dirs::config_dir()
-            .expect("no config dir")
-            .join("rollshot");
-        let cfg = crate::result_workspace::workbench::provider_config::load_provider_config(&config_dir)
-            .expect("load provider.toml");
-        let api_key = crate::result_workspace::workbench::provider_config::resolve_key(&cfg.key_source)
-            .expect("no API key resolved from provider.toml");
-        let base_url = cfg.base_url.as_deref().unwrap_or("https://api.anthropic.com");
+        let config_dir = dirs::config_dir().expect("no config dir").join("rollshot");
+        let cfg =
+            crate::result_workspace::workbench::provider_config::load_provider_config(&config_dir)
+                .expect("load provider.toml");
+        let api_key =
+            crate::result_workspace::workbench::provider_config::resolve_key(&cfg.key_source)
+                .expect("no API key resolved from provider.toml");
+        let base_url = cfg
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com");
 
         record_cassette(&intent, base_url, &api_key, Some(&cfg.model))
             .await
