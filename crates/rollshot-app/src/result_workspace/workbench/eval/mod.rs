@@ -5,5 +5,6 @@
 //! scoring (layer2). See `docs/smart-redaction-eval.md`.
 
 pub(crate) mod fixture;
+pub(crate) mod layer2;
 pub(crate) mod render;
 pub(crate) mod scoring;
