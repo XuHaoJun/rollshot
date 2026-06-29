@@ -260,6 +260,7 @@ pub(crate) fn canonical_ocr_catalog(width: u32, height: u32) -> Vec<CanonicalOcr
     ]
 }
 
+// Phase F v1: dormant until template-creation UI adds preset-local template handles
 pub(crate) fn product_capability_handles() -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::new()
 }
@@ -1948,7 +1949,7 @@ mod reducer_tests {
             provenance: RevisionProvenance {
                 origin: RevisionOrigin::AgentRun,
                 note: None,
-                source_run_ref: Some("7".into()),
+                source_run_ref: Some("session:7".into()),
             },
             artifact: validated,
             capabilities: RevisionCapabilityMetadata::default(),
