@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use rollshot_automation::{ensure_compatible, ValidatedAutomation};
 
 use crate::domain::{
-    AutomationRevision, Preset, PresetId, PresetSummary, RevisionId, RevisionSummary,
-    STORE_SCHEMA_VERSION,
+    AutomationRevision, Preset, PresetId, PresetSummary, RevisionCapabilityMetadata, RevisionId,
+    RevisionSummary, STORE_SCHEMA_VERSION,
 };
 use crate::error::{EntityKind, Result, StoreError};
 use crate::io;
@@ -112,6 +112,11 @@ impl PresetStore {
         }
     }
 
+    pub fn template_store_path(&self, id: &PresetId) -> Result<PathBuf> {
+        validate_id(&id.0)?;
+        Ok(self.preset_dir(id).join("templates.local.json"))
+    }
+
     pub fn list_presets(&self) -> Result<Vec<PresetSummary>> {
         let dir = self.presets_dir();
         let entries = match std::fs::read_dir(&dir) {
@@ -161,6 +166,28 @@ impl PresetStore {
         provenance: crate::domain::RevisionProvenance,
         now: String,
     ) -> Result<AutomationRevision> {
+        self.add_revision_with_capabilities(
+            preset_id,
+            id,
+            parent_id,
+            artifact,
+            provenance,
+            now,
+            RevisionCapabilityMetadata::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_revision_with_capabilities(
+        &self,
+        preset_id: &PresetId,
+        id: RevisionId,
+        parent_id: Option<RevisionId>,
+        artifact: ValidatedAutomation,
+        provenance: crate::domain::RevisionProvenance,
+        now: String,
+        capabilities: RevisionCapabilityMetadata,
+    ) -> Result<AutomationRevision> {
         validate_id(&id.0)?;
         validate_id(&preset_id.0)?;
         ensure_compatible(&artifact)?;
@@ -178,6 +205,7 @@ impl PresetStore {
             created_at: now,
             provenance,
             artifact,
+            capabilities,
         };
         let bytes = serde_json::to_vec_pretty(&revision)?;
         io::write_atomic(&path, &bytes)?;
@@ -836,5 +864,25 @@ function main(input) {
             .load_revision(&PresetId("p1".into()), &RevisionId("r1".into()))
             .unwrap_err();
         assert!(matches!(err, StoreError::Corrupt { .. }));
+    }
+
+    #[test]
+    fn template_store_path_is_preset_local_and_validated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = PresetStore::open(tmp.path().to_path_buf());
+        let path = store
+            .template_store_path(&PresetId("preset-a".into()))
+            .unwrap();
+
+        assert_eq!(
+            path,
+            tmp.path()
+                .join("presets")
+                .join("preset-a")
+                .join("templates.local.json")
+        );
+        assert!(store
+            .template_store_path(&PresetId("../bad".into()))
+            .is_err());
     }
 }
