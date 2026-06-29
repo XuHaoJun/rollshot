@@ -61,23 +61,46 @@ pub fn save_revision(
     session_id: u64,
     now: String,
 ) -> Result<AutomationRevision, WorkbenchError> {
+    save_revision_with_capabilities(
+        store,
+        preset_id,
+        source,
+        parent_rev_id,
+        provenance_note,
+        session_id,
+        now,
+        rollshot_preset::RevisionCapabilityMetadata::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn save_revision_with_capabilities(
+    store: &PresetStore,
+    preset_id: &PresetId,
+    source: &str,
+    parent_rev_id: Option<&RevisionId>,
+    revision_note: Option<&str>,
+    session_id: u64,
+    now: String,
+    capabilities: rollshot_preset::RevisionCapabilityMetadata,
+) -> Result<AutomationRevision, WorkbenchError> {
     let limits = rollshot_automation::ValidationLimits::default();
-    let validated = rollshot_automation::validate_source(source, &limits)
+    let artifact = rollshot_automation::validate_source(source, &limits)
         .map_err(|_| WorkbenchError::SourceValidationFailure)?;
     let rev_id = RevisionId(format!("rev-{}", chrono::Utc::now().timestamp_millis()));
-    let provenance = RevisionProvenance {
-        origin: RevisionOrigin::AgentRun,
-        note: provenance_note.map(str::to_owned),
-        source_run_ref: Some(session_id.to_string()),
-    };
-    store
-        .add_revision(
+    let revision = store
+        .add_revision_with_capabilities(
             preset_id,
             rev_id.clone(),
             parent_rev_id.cloned(),
-            validated,
-            provenance,
+            artifact,
+            RevisionProvenance {
+                origin: RevisionOrigin::AgentRun,
+                note: revision_note.map(str::to_string),
+                source_run_ref: Some(format!("session:{session_id}")),
+            },
             now.clone(),
+            capabilities,
         )
         .map_err(|e| WorkbenchError::Store {
             message: e.to_string(),
@@ -91,7 +114,8 @@ pub fn save_revision(
         .load_active_revision(preset_id)
         .map_err(|e| WorkbenchError::Store {
             message: e.to_string(),
-        })
+        })?;
+    Ok(revision)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +486,49 @@ mod save_tests {
         assert_eq!(saved.preset_id, preset_id);
         assert_eq!(saved.provenance.note.as_deref(), Some("initial author run"));
         assert_eq!(store.load_active_revision(&preset_id).unwrap().id, saved.id);
+    }
+
+    #[test]
+    fn save_revision_records_capability_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = PresetStore::open(tmp.path().to_path_buf());
+        let preset_id = PresetId("test-preset".into());
+        store
+            .create_preset(
+                preset_id.clone(),
+                "Test".into(),
+                "intent".into(),
+                "2026-06-28T00:00:00Z".into(),
+            )
+            .unwrap();
+        let metadata = rollshot_preset::RevisionCapabilityMetadata {
+            requirements: vec![rollshot_preset::RevisionCapabilityRequirement {
+                capability: rollshot_automation::CapabilityName::TemplateMatch,
+                alias: Some("mark".into()),
+                required: true,
+            }],
+            template_handles: vec![rollshot_preset::TemplateHandleMetadata {
+                alias: "mark".into(),
+                handle: "mark".into(),
+                display_name: "mark".into(),
+                sensitivity_sensitive: false,
+                source_agent_suggested: false,
+            }],
+        };
+
+        let saved = save_revision_with_capabilities(
+            &store,
+            &preset_id,
+            r#"function main(input) { return { candidates: [] }; }"#,
+            None,
+            None,
+            7,
+            "2026-06-28T00:00:00Z".into(),
+            metadata.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(saved.capabilities, metadata);
     }
 
     #[test]

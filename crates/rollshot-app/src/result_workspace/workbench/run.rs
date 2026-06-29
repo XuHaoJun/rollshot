@@ -424,6 +424,49 @@ pub(crate) fn authoring_inspection_context(
     }
 }
 
+pub(crate) fn revision_capability_metadata(
+    validated: &rollshot_automation::ValidatedAutomation,
+    bundle: &ProductCapabilityBundle,
+) -> rollshot_preset::RevisionCapabilityMetadata {
+    let mut requirements = Vec::new();
+    for call in &validated.workflow_ir.capability_manifest.calls {
+        let exists =
+            requirements
+                .iter()
+                .any(|r: &rollshot_preset::RevisionCapabilityRequirement| {
+                    r.capability == call.capability && r.alias.is_none()
+                });
+        if !exists {
+            requirements.push(rollshot_preset::RevisionCapabilityRequirement {
+                capability: call.capability,
+                alias: None,
+                required: true,
+            });
+        }
+    }
+    let template_handles = bundle
+        .template_summaries
+        .iter()
+        .map(|summary| rollshot_preset::TemplateHandleMetadata {
+            alias: summary.handle.clone(),
+            handle: summary.handle.clone(),
+            display_name: summary.handle.clone(),
+            sensitivity_sensitive: matches!(
+                summary.sensitivity,
+                rollshot_vision::TemplateSensitivity::Sensitive
+            ),
+            source_agent_suggested: matches!(
+                summary.source,
+                rollshot_vision::TemplateSource::AgentSuggested
+            ),
+        })
+        .collect();
+    rollshot_preset::RevisionCapabilityMetadata {
+        requirements,
+        template_handles,
+    }
+}
+
 fn prepare_phase_a_region_features(
     host: &mut rollshot_vision::RealAutomationHost,
     index: &VisualIndex,
@@ -1510,6 +1553,52 @@ function main(input) {
                 );
             }
             other => panic!("expected dry-run success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_image_context_reports_template_handles_available() {
+        use rollshot_agent::tools::{InspectImageContextTool, Tool};
+
+        let mut handles = std::collections::BTreeMap::new();
+        handles.insert("mark".to_string(), "mark".to_string());
+        let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let ctx = std::sync::Arc::new(
+            rollshot_agent::tools::ToolContext::new_with_capability_handles(
+                rollshot_agent::domain::SessionId::new(1),
+                String::new(),
+                rollshot_automation::ValidationLimits::default(),
+                rollshot_automation::ExecutionPolicy::smart_redaction_default(
+                    std::time::Duration::from_secs(5),
+                    4 * 1024 * 1024,
+                    1024 * 1024,
+                ),
+                (64, 64),
+                handles,
+                &cancel,
+            ),
+        );
+        let inspection = authoring_inspection_context(
+            PayloadMode::FullScreenshot,
+            &canonical_region_feature_catalog(64, 64),
+            &canonical_ocr_catalog(64, 64),
+        );
+        let tool = InspectImageContextTool::new(ctx, inspection);
+
+        let result = tool.call(&serde_json::json!({})).await.unwrap();
+
+        match result {
+            rollshot_agent::tools::ToolOutcome::Success { result_json } => {
+                assert_eq!(
+                    result_json["capabilities"]["template_match"]["status"].as_str(),
+                    Some("available")
+                );
+                assert_eq!(
+                    result_json["capability_handles"][0]["name"].as_str(),
+                    Some("mark")
+                );
+            }
+            other => panic!("expected inspection success, got {other:?}"),
         }
     }
 

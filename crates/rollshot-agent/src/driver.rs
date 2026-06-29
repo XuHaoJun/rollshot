@@ -78,6 +78,7 @@ Rollshot JavaScript authoring guide:
 - confidence must be between 0 and 1. label must be short and non-empty.
 - Supported capability calls are rollshot.ocr(query), rollshot.layout(query) when available, rollshot.regionFeatures(query), and rollshot.templateMatch(query) only when a matching input.capabilityHandles entry exists.
 - Use only template handles listed by inspect_image_context capability_handles before calling rollshot.templateMatch. Do not invent template handles when that list is empty.
+- Refer to template handles through input.capabilityHandles.<alias>; do not hard-code raw handle strings.
 - In OCR-enabled runs, call inspect_ocr for text-driven redaction requests before writing source. inspect_ocr returns full recognized text, bounds, and confidence for canonical regions. Use OCR bounds as evidence for candidate rectangles.
 - If OCR is unavailable, treat that as a harness limitation and do not invent text evidence.
 - Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
@@ -3445,6 +3446,11 @@ pub(crate) mod tests {
             assert!(
                 system_prompt.contains("Do not invent template handles"),
                 "system prompt should forbid invented template handles, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Refer to template handles through input.capabilityHandles"),
+                "system prompt should teach alias access for template handles, got: {:?}",
                 system_prompt
             );
 

@@ -1007,7 +1007,25 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                     chrono::Utc::now().to_rfc3339(),
                                 );
                             }
-                            match super::workbench::review::save_revision(
+                            let capability_bundle =
+                                super::workbench::run::ProductCapabilityBundle::load(
+                                    &store,
+                                    Some(&preset_id),
+                                )
+                                .unwrap_or_else(|_| {
+                                    super::workbench::run::ProductCapabilityBundle::empty()
+                                });
+                            let limits = rollshot_automation::ValidationLimits::default();
+                            let metadata =
+                                rollshot_automation::validate_source(&draft.source, &limits)
+                                    .map(|validated| {
+                                        super::workbench::run::revision_capability_metadata(
+                                            &validated,
+                                            &capability_bundle,
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                            match super::workbench::review::save_revision_with_capabilities(
                                 &store,
                                 &preset_id,
                                 &draft.source,
@@ -1015,6 +1033,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 draft.revision_note.as_deref(),
                                 workbench.session.session_id.get(),
                                 chrono::Utc::now().to_rfc3339(),
+                                metadata,
                             ) {
                                 Ok(revision) => {
                                     workbench.active_revision = Some(revision);
