@@ -61,14 +61,70 @@ use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 const SMART_REDACTION_SYSTEM_PROMPT: &str = r#"You are Rollshot Smart Redaction Agent.
 Your only job is to create editable redaction candidates for the current screenshot.
-Rollshot has already captured the current screenshot for this run. Use the provided screenshot attachment, OCR/layout context, and available tools; do not ask the user to upload, attach, or take another screenshot.
+Rollshot has already captured the current screenshot for this run. Use the provided screenshot attachment, local context, and available tools; do not ask the user to upload, attach, or take another screenshot.
 
 Interpret user requests like "hide the URL bar", "hide emails", or "redact names" as redaction targets.
 For common screenshot regions such as a browser URL/address bar, infer the visible target from the current screenshot instead of asking what device or app environment the user is using.
 If the request is not about hiding or redacting visible content, refuse briefly and ask for a redaction target.
 If the redaction target is ambiguous after inspecting the available screenshot/context, ask one brief clarifying question about what visible content should be redacted.
 Do not provide general advice, product support, or workflow guidance.
-Before finishing, validate and dry-run the automation, then submit it for review."#;
+
+Rollshot JavaScript authoring guide:
+- Write exactly one synchronous function main(input). Do not use async, imports, exports, timers, eval, Function, DOM, filesystem, network, process APIs, dynamic property access, or loops that can run forever.
+- Available input fields use camelCase: input.imageWidth, input.imageHeight, input.region, input.annotations, input.capabilityHandles.
+- Return an object shaped like { candidates: [...] }.
+- Each candidate must be { kind: "addRedaction", bounds, confidence, label } with optional rationale.
+- bounds is { x, y, width, height } in image pixels. width and height must be positive.
+- confidence must be between 0 and 1. label must be short and non-empty.
+- Supported capability calls are rollshot.ocr(query), rollshot.layout(query) when available, rollshot.regionFeatures(query), and rollshot.templateMatch(query) only when a matching input.capabilityHandles entry exists.
+- Use only template handles listed by inspect_image_context capability_handles before calling rollshot.templateMatch. Do not invent template handles when that list is empty.
+- Refer to template handles through input.capabilityHandles.<alias>; do not hard-code raw handle strings.
+- In OCR-enabled runs, call inspect_ocr for text-driven redaction requests before writing source. inspect_ocr returns full recognized text, bounds, and confidence for canonical regions. Use OCR bounds as evidence for candidate rectangles.
+- If OCR is unavailable, treat that as a harness limitation and do not invent text evidence.
+- Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
+  const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+  const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+- Example empty result: function main(input) { return { candidates: [] }; }
+- Example redaction from a strip:
+  function main(input) {
+    const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
+    const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
+    const hasFeatures = features.length > 0;
+    return { candidates: hasFeatures ? [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] : [] };
+  }
+- Example OCR redaction when OCR is available:
+  function expand(rect, padding) {
+    return { x: Math.max(0, rect.x - padding), y: Math.max(0, rect.y - padding), width: rect.width + padding * 2, height: rect.height + padding * 2 };
+  }
+  function main(input) {
+    const matches = rollshot.ocr({ region: input.region, limit: 20 });
+    return { candidates: matches.map((match) => ({ kind: "addRedaction", bounds: expand(match.bounds, 6), confidence: match.confidence, label: "ocr-match" })) };
+  }
+
+Inspection loop:
+1. Call inspect_image_context before writing or replacing source.
+2. Check capability_handles before writing source that calls rollshot.templateMatch.
+3. Call inspect_ocr for text-driven redaction requests such as visible words, names, emails, ids, labels, form fields, or account-like strings.
+4. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
+5. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
+6. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
+
+Authoring loop:
+1. Use read_current_source to inspect the current source, generation, validation summary, and recent evidence before editing.
+2. Prefer edit_source with unique exact old/new text for small changes; use replace_source only when a full rewrite is clearer.
+3. Use validate_source on the current generation.
+4. Use dry_run on the current generation.
+5. If validation or dry_run fails, read_current_source, edit_source, and retry validation/dry-run on the new generation.
+6. Use submit_for_review only after the current generation has successful validate_source and dry_run evidence.
+7. A successful dry_run means "ready for user review", not "safe to export".
+
+Improve runs:
+1. The user message may contain reviewed correction evidence from a previous detector run.
+2. Treat rejected candidates as false positives to remove or narrow.
+3. Treat resized candidates as geometry corrections for the intended target.
+4. Treat manually added candidates as missed targets the detector should learn to include.
+5. Preserve unrelated useful detections from the current source.
+6. Explain what changed in the detector before submit_for_review."#;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -1059,6 +1115,18 @@ impl AgentRunner {
                     if tool_name == "request_user_input" {
                         user_input_requested = true;
                     }
+                    if matches!(tool_name.as_str(), "replace_source" | "edit_source") {
+                        if let Some(diff) = result_json
+                            .get("diff")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                        {
+                            event_sink.emit(RunEvent::SourceChanged {
+                                tool: tool_name.clone(),
+                                diff,
+                            });
+                        }
+                    }
                     if tool_name == "dry_run" {
                         if let Some(cc) =
                             result_json.get("candidate_count").and_then(|v| v.as_u64())
@@ -1168,7 +1236,8 @@ pub(crate) mod tests {
     use crate::domain::SessionId;
     use crate::runtime::{EvidenceKind, NullEventSink, RunBudget};
     use crate::tools::{
-        DryRunTool, GetContextSummaryTool, ReplaceSourceTool, SubmitForReviewTool,
+        DryRunTool, EditSourceTool, GetContextSummaryTool, InspectImageContextTool, OcrTool,
+        ReadCurrentSourceTool, RegionFeaturesTool, ReplaceSourceTool, SubmitForReviewTool,
         ToolRegistryLimits, ValidateSourceTool,
     };
     use rig_core::completion::Usage;
@@ -1243,7 +1312,11 @@ pub(crate) mod tests {
         ));
         reg.register(Arc::new(GetContextSummaryTool::new(ctx.clone())))
             .unwrap();
+        reg.register(Arc::new(ReadCurrentSourceTool::new(ctx.clone())))
+            .unwrap();
         reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
+            .unwrap();
+        reg.register(Arc::new(EditSourceTool::new(ctx.clone())))
             .unwrap();
         reg.register(Arc::new(ValidateSourceTool::new(ctx.clone())))
             .unwrap();
@@ -1347,7 +1420,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn full_author_loop() {
-        let ctx = test_ctx(valid_js());
+        let ctx = test_ctx("function main(input) { return { candidates: [] }; }");
         let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
         register_all_tools(&mut reg, &ctx);
 
@@ -1445,6 +1518,23 @@ pub(crate) mod tests {
                 "submit_for_review"
             ]
         );
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::SourceChanged {
+                    tool,
+                    diff
+                } if tool == "replace_source"
+                    && diff.old_generation == 0
+                    && diff.new_generation == 1
+                    && diff.lines.iter().any(|line| {
+                        line.kind == crate::runtime::SourceDiffLineKind::Removed
+                    })
+                    && diff.lines.iter().any(|line| {
+                        line.kind == crate::runtime::SourceDiffLineKind::Added
+                    })
+            )
+        }));
 
         // Assert generation evidence
         let draft = ctx.draft.lock().unwrap();
@@ -3132,9 +3222,74 @@ pub(crate) mod tests {
         #[tokio::test]
         async fn second_turn_request_carries_history_and_tool_schemas() {
             let ctx = test_ctx("src");
+            let inspection = crate::tools::AuthoringInspectionContext {
+                payload_mode: "full_screenshot".into(),
+                regions: vec![crate::tools::CanonicalRegionInspection {
+                    name: "top_strip".into(),
+                    bounds: Some(rollshot_image_document::ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 96.0,
+                    }),
+                    query: Some(rollshot_automation::RegionFeaturesQuery {
+                        region: rollshot_automation::Region::Rect {
+                            bounds: rollshot_image_document::ImageRect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 100.0,
+                                height: 96.0,
+                            },
+                        },
+                        limit: 1,
+                    }),
+                    unavailable_reason: None,
+                }],
+                ocr_regions: vec![crate::tools::CanonicalOcrInspection {
+                    name: "full".into(),
+                    bounds: Some(rollshot_image_document::ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 100.0,
+                    }),
+                    query: Some(rollshot_automation::OcrQuery {
+                        region: rollshot_automation::Region::Full,
+                        limit: 50,
+                    }),
+                    unavailable_reason: None,
+                }],
+                ocr_status: crate::tools::CapabilityStatus::available(),
+                layout_status: crate::tools::CapabilityStatus::unavailable(
+                    "capability_unavailable",
+                ),
+                template_match_status: crate::tools::CapabilityStatus::unavailable(
+                    "no_capability_handles",
+                ),
+            };
+            let host = Arc::new(Mutex::new(
+                rollshot_automation::FakeAutomationHost::default(),
+            ));
             let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
             reg.register(Arc::new(GetContextSummaryTool::new(ctx.clone())))
                 .unwrap();
+            reg.register(Arc::new(InspectImageContextTool::new(
+                ctx.clone(),
+                inspection.clone(),
+            )))
+            .unwrap();
+            reg.register(Arc::new(RegionFeaturesTool::new(
+                ctx.clone(),
+                host.clone(),
+                inspection.regions.clone(),
+            )))
+            .unwrap();
+            reg.register(Arc::new(OcrTool::new(
+                ctx.clone(),
+                host.clone(),
+                inspection.ocr_regions.clone(),
+            )))
+            .unwrap();
             reg.register(Arc::new(ReplaceSourceTool::new(ctx.clone())))
                 .unwrap();
 
@@ -3221,6 +3376,83 @@ pub(crate) mod tests {
                 "system prompt should prevent upload requests, got: {:?}",
                 requests[0].system_prompt
             );
+            let system_prompt = requests[0].system_prompt.as_deref().unwrap_or_default();
+            assert!(
+                system_prompt.contains("Rollshot JavaScript authoring guide"),
+                "system prompt should include authoring guide marker, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("function main(input)"),
+                "system prompt should document required source shape, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("rollshot.regionFeatures"),
+                "system prompt should document region features API, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("{ candidates:"),
+                "system prompt should document output envelope, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("validate_source"),
+                "system prompt should require validation before submit, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("dry_run"),
+                "system prompt should require dry run before submit, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt.contains("submit_for_review"),
+                "system prompt should require review submit, got: {:?}",
+                requests[0].system_prompt
+            );
+            assert!(
+                system_prompt
+                    .contains("Call inspect_image_context before writing or replacing source"),
+                "system prompt should guide inspection before source writing, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Use inspect_region_features with canonical regions"),
+                "system prompt should guide region feature inspection, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("full, top_strip, left_strip, right_strip, bottom_strip"),
+                "system prompt should list canonical region names, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Call inspect_ocr for text-driven redaction requests"),
+                "system prompt should guide OCR inspection for text-driven intents, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("inspect_ocr returns full recognized text"),
+                "system prompt should disclose full OCR text in tool results, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Use only template handles listed by inspect_image_context"),
+                "system prompt should require inspected template handles before templateMatch, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Do not invent template handles"),
+                "system prompt should forbid invented template handles, got: {:?}",
+                system_prompt
+            );
+            assert!(
+                system_prompt.contains("Refer to template handles through input.capabilityHandles"),
+                "system prompt should teach alias access for template handles, got: {:?}",
+                system_prompt
+            );
 
             // The second request must carry the prior assistant tool call and the
             // tool result so the model can continue the loop.
@@ -3258,7 +3490,107 @@ pub(crate) mod tests {
                 "tool definition must carry a real schema, got: {}",
                 summary_def.parameters
             );
+
+            let image_context_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_image_context")
+                .expect("inspect_image_context tool definition present");
+            assert_eq!(
+                image_context_def.parameters["type"].as_str(),
+                Some("object")
+            );
+
+            let region_features_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_region_features")
+                .expect("inspect_region_features tool definition present");
+            assert_eq!(
+                region_features_def.parameters["type"].as_str(),
+                Some("object")
+            );
+            assert!(
+                region_features_def
+                    .parameters
+                    .to_string()
+                    .contains("region"),
+                "inspect_region_features schema must require a canonical region argument, got: {}",
+                region_features_def.parameters
+            );
+
+            let ocr_def = second
+                .tool_definitions
+                .iter()
+                .find(|d| d.name == "inspect_ocr")
+                .expect("inspect_ocr tool definition present");
+            assert_eq!(ocr_def.parameters["type"].as_str(), Some("object"));
+            assert!(
+                ocr_def.parameters.to_string().contains("region"),
+                "inspect_ocr schema must require a canonical region argument, got: {}",
+                ocr_def.parameters
+            );
         }
+    }
+
+    #[test]
+    fn smart_redaction_prompt_examples_validate() {
+        fn example_source(start_marker: &str, end_marker: &str) -> String {
+            let after_start = SMART_REDACTION_SYSTEM_PROMPT
+                .split_once(start_marker)
+                .unwrap_or_else(|| panic!("missing prompt marker: {start_marker}"))
+                .1;
+            let example = after_start
+                .split_once(end_marker)
+                .unwrap_or_else(|| panic!("missing prompt marker: {end_marker}"))
+                .0;
+            example
+                .lines()
+                .filter_map(|line| line.strip_prefix("  "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let limits = rollshot_automation::ValidationLimits::default();
+        for source in [
+            example_source(
+                "- Example redaction from a strip:",
+                "- Example OCR redaction when OCR is available:",
+            ),
+            example_source(
+                "- Example OCR redaction when OCR is available:",
+                "Authoring loop:",
+            ),
+        ] {
+            rollshot_automation::validate_source(&source, &limits).unwrap_or_else(|diags| {
+                panic!("prompt example should validate:\n{source}\n{diags:#?}")
+            });
+        }
+    }
+
+    #[test]
+    fn smart_redaction_system_prompt_documents_improve_runs() {
+        let system_prompt = SMART_REDACTION_SYSTEM_PROMPT;
+        assert!(
+            system_prompt.contains("Improve runs"),
+            "system prompt should document improve runs, got: {:?}",
+            system_prompt
+        );
+        assert!(
+            system_prompt.contains("Treat rejected candidates as false positives"),
+            "system prompt should explain rejected correction semantics, got: {:?}",
+            system_prompt
+        );
+        assert!(
+            system_prompt.contains("Treat manually added candidates as missed targets"),
+            "system prompt should explain manual correction semantics, got: {:?}",
+            system_prompt
+        );
+        assert!(
+            system_prompt.contains("Explain what changed in the detector before submit_for_review"),
+            "system prompt should require detector-change explanation, got: {:?}",
+            system_prompt
+        );
     }
 
     // ---- Resource bounds: cancellation between items ----

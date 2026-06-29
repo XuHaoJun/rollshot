@@ -18,9 +18,9 @@ pub use self_validation::{
     self_validate, ExpectedCount, SelfValidationConfig, TemplateDecision, TemplateSelfValidation,
 };
 pub use template::{
-    ExportTemplateAssetRecord, LocalTemplateAssetRecord, TemplateAsset, TemplateBytes,
-    TemplateBytesRecord, TemplateSensitivity, TemplateSource, TemplateStore, MAX_SCORE_POSITIONS,
-    MAX_TEMPLATE_AREA, MAX_TEMPLATE_COUNT, MAX_TEMPLATE_MATCH_PIXEL_VISITS,
+    ExportTemplateAssetRecord, LocalTemplateAssetRecord, TemplateAsset, TemplateAssetSummary,
+    TemplateBytes, TemplateBytesRecord, TemplateSensitivity, TemplateSource, TemplateStore,
+    MAX_SCORE_POSITIONS, MAX_TEMPLATE_AREA, MAX_TEMPLATE_COUNT, MAX_TEMPLATE_MATCH_PIXEL_VISITS,
     MAX_TEMPLATE_STORE_BYTES,
 };
 

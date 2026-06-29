@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [features]
 action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot-macos-input", "rollshot-iced-overlay/action-guide"]
+ocr = ["rollshot-vision/ocr"]
 
 [dependencies]
 arboard = "3.4"
@@ -63,7 +64,18 @@ url = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+ab_glyph = "0.2"
+base64 = "0.22"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful"] }
+imageproc = { workspace = true, features = ["text"] }
+reqwest = { version = "0.13", features = ["stream"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
 tempfile = "3"
+wiremock = "0.6"
 
 # Narrowed from the workspace `forbid(unsafe_code)`: the AppKit native-drag
 # bridge in `macos_native_drag.rs` is an audited unsafe boundary (mirrors

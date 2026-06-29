@@ -98,6 +98,18 @@ pub struct TemplateAsset {
     pub bytes: TemplateBytes,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateAssetSummary {
+    pub handle: String,
+    pub sensitivity: TemplateSensitivity,
+    pub source: TemplateSource,
+    pub created_at_ms: u64,
+    pub bounds_in_source_image: Option<ImageRect>,
+    pub width: u32,
+    pub height: u32,
+    pub byte_len: usize,
+}
+
 #[derive(Debug)]
 pub struct TemplateStore {
     assets: BTreeMap<String, TemplateAsset>,
@@ -163,6 +175,26 @@ impl TemplateStore {
 
     pub fn get(&self, handle: &str) -> Option<&TemplateAsset> {
         self.assets.get(handle)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.assets.is_empty()
+    }
+
+    pub fn summaries(&self) -> Vec<TemplateAssetSummary> {
+        self.assets
+            .values()
+            .map(|asset| TemplateAssetSummary {
+                handle: asset.handle.clone(),
+                sensitivity: asset.sensitivity,
+                source: asset.source,
+                created_at_ms: asset.created_at_ms,
+                bounds_in_source_image: asset.bounds_in_source_image,
+                width: asset.bytes.width(),
+                height: asset.bytes.height(),
+                byte_len: asset.bytes.byte_len(),
+            })
+            .collect()
     }
 
     /// Local persistence: keeps all bytes (chrome + sensitive).
@@ -974,6 +1006,42 @@ mod tests {
                 code: "store_too_large"
             }
         );
+    }
+
+    #[test]
+    fn summaries_expose_template_metadata_without_bytes() {
+        let mut store = TemplateStore::new();
+        store
+            .insert(TemplateAsset {
+                handle: "toolbar-logo".into(),
+                sensitivity: TemplateSensitivity::Chrome,
+                source: TemplateSource::UserRect,
+                created_at_ms: 42,
+                bounds_in_source_image: Some(ImageRect {
+                    x: 4.0,
+                    y: 5.0,
+                    width: 8.0,
+                    height: 6.0,
+                }),
+                bytes: TemplateBytes::new(8, 6, vec![120u8; 8 * 6 * 4]).unwrap(),
+            })
+            .unwrap();
+
+        let summaries = store.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].handle, "toolbar-logo");
+        assert_eq!(summaries[0].width, 8);
+        assert_eq!(summaries[0].height, 6);
+        assert_eq!(summaries[0].byte_len, 8 * 6 * 4);
+        assert_eq!(summaries[0].sensitivity, TemplateSensitivity::Chrome);
+        assert_eq!(summaries[0].source, TemplateSource::UserRect);
+    }
+
+    #[test]
+    fn empty_store_reports_empty() {
+        let store = TemplateStore::new();
+        assert!(store.is_empty());
+        assert!(store.summaries().is_empty());
     }
 
     static_assertions::assert_not_impl_any!(TemplateAsset: serde::Serialize);

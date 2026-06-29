@@ -1,0 +1,30 @@
+[
+  {
+    "x": 40.0,
+    "y": 110.0,
+    "width": 180.0,
+    "height": 26.0,
+    "label": "folder_0"
+  },
+  {
+    "x": 260.0,
+    "y": 110.0,
+    "width": 180.0,
+    "height": 26.0,
+    "label": "folder_1"
+  },
+  {
+    "x": 40.0,
+    "y": 260.0,
+    "width": 180.0,
+    "height": 26.0,
+    "label": "folder_2"
+  },
+  {
+    "x": 260.0,
+    "y": 260.0,
+    "width": 180.0,
+    "height": 26.0,
+    "label": "folder_3"
+  }
+]

@@ -520,11 +520,47 @@ impl Default for RunCancellation {
 // ---------- Events ----------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDiffLineKind {
+    Context,
+    Removed,
+    Added,
+    Omitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceDiffLine {
+    pub kind: SourceDiffLineKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceDiffSummary {
+    pub old_generation: u64,
+    pub new_generation: u64,
+    pub old_source_bytes: usize,
+    pub new_source_bytes: usize,
+    pub omitted_lines: usize,
+    pub lines: Vec<SourceDiffLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RunEvent {
-    TextChunk { text: String },
-    ToolCallStart { name: String },
-    ToolCallEnd { name: String, success: bool },
+    TextChunk {
+        text: String,
+    },
+    ToolCallStart {
+        name: String,
+    },
+    ToolCallEnd {
+        name: String,
+        success: bool,
+    },
+    SourceChanged {
+        tool: String,
+        diff: SourceDiffSummary,
+    },
     TurnComplete,
 }
 
@@ -1066,6 +1102,20 @@ mod tests {
         sink.emit(RunEvent::ToolCallEnd {
             name: "edit".into(),
             success: true,
+        });
+        sink.emit(RunEvent::SourceChanged {
+            tool: "edit_source".into(),
+            diff: SourceDiffSummary {
+                old_generation: 0,
+                new_generation: 1,
+                old_source_bytes: 3,
+                new_source_bytes: 3,
+                omitted_lines: 0,
+                lines: vec![SourceDiffLine {
+                    kind: SourceDiffLineKind::Added,
+                    text: "new".into(),
+                }],
+            },
         });
         sink.emit(RunEvent::TurnComplete);
     }

@@ -772,6 +772,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     {
                         workbench.error = Some(err);
                     }
+                    let (parent_revision_id, revision_note) = match &workbench.run_state {
+                        super::workbench::RunState::Running {
+                            parent_revision_id,
+                            revision_note,
+                            ..
+                        } => (parent_revision_id.clone(), revision_note.clone()),
+                        _ => (None, None),
+                    };
                     workbench.run_state = super::workbench::RunState::Terminal(terminal);
                     if let super::workbench::RunState::Terminal(
                         rollshot_agent::driver::RunTerminalState::ReadyForReview(ref ready),
@@ -780,10 +788,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         workbench.pending_proposal = Some(ready.proposal.clone());
                         let ids: Vec<_> = ready.proposal.candidates.iter().map(|c| c.id).collect();
                         workbench.review = super::workbench::CandidateReview::from_candidates(&ids);
+                        // Fresh proposal: all candidates pending, no corrections yet.
+                        workbench.corrections_non_empty = false;
                         workbench.pending_draft = Some(super::workbench::PendingDraft {
                             source: ready.automation.source.clone(),
                             assistant_text: ready.assistant_text.clone(),
                             validation_summary: ready.automation.validation_summary.clone(),
+                            parent_revision_id,
+                            revision_note,
                         });
                     }
                     Task::none()
@@ -822,6 +834,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 workbench.pending_proposal = None;
                                 workbench.review = super::workbench::CandidateReview::default();
                                 workbench.selected_candidate = None;
+                                workbench.corrections_non_empty = false;
                             }
                             Err(e) => workbench.error = Some(e),
                         }
@@ -841,10 +854,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     if workbench.selected_candidate == Some(id) {
                         workbench.selected_candidate = None;
                     }
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateUnrejected(id) => {
                     workbench.review.mark_pending(id);
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateMoved { id, new_bounds } => {
@@ -852,12 +867,29 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         id,
                         rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds: new_bounds },
                     );
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::AddManualCandidate { bounds } => {
-                    let id =
-                        rollshot_edit_proposal::CandidateId(workbench.next_manual_candidate_id);
-                    workbench.next_manual_candidate_id += 1;
+                    let max_proposal_id = workbench
+                        .pending_proposal
+                        .as_ref()
+                        .and_then(|proposal| proposal.candidates.iter().map(|c| c.id.0).max())
+                        .unwrap_or(0);
+                    let max_review_id = workbench
+                        .review
+                        .per_candidate
+                        .keys()
+                        .map(|id| id.0)
+                        .max()
+                        .unwrap_or(0);
+                    let id = rollshot_edit_proposal::CandidateId(
+                        max_proposal_id
+                            .max(max_review_id)
+                            .max(workbench.next_manual_candidate_id.saturating_sub(1))
+                            + 1,
+                    );
+                    workbench.next_manual_candidate_id = id.0 + 1;
                     if let Some(proposal) = &mut workbench.pending_proposal {
                         use rollshot_edit_proposal::{
                             ProposedCandidate, ProposedEdit, Provenance, ProvenanceSource,
@@ -877,6 +909,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         id,
                         rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds },
                     );
+                    workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::NextWarning => Task::none(),
@@ -899,6 +932,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             .as_ref()
                             .map(|r| r.artifact.source.clone()),
                         mode: super::workbench::RunKind::Author,
+                        parent_revision_id: None,
+                        revision_note: None,
+                        preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+                        preset_store_root: crate::daemon::config::rollshot_config_dir()
+                            .map(|dir| dir.join("presets"))
+                            .unwrap_or_default(),
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);
@@ -919,6 +958,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     let Some(params) = workbench.pending_run.take() else {
                         return Task::none();
                     };
+                    let parent_revision_id = params.parent_revision_id.clone();
+                    let revision_note = params.revision_note.clone();
                     let image = state.document.image.source().clone();
                     let session_id = workbench.session.session_id;
                     let session = std::mem::replace(
@@ -934,8 +975,11 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         workbench.payload_mode,
                     ) {
                         Ok((task, cancellation)) => {
-                            workbench.run_state =
-                                super::workbench::RunState::Running { cancellation };
+                            workbench.run_state = super::workbench::RunState::Running {
+                                cancellation,
+                                parent_revision_id,
+                                revision_note,
+                            };
                             task
                         }
                         Err(e) => {
@@ -963,15 +1007,38 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                     chrono::Utc::now().to_rfc3339(),
                                 );
                             }
-                            match super::workbench::review::save_revision(
+                            let capability_bundle =
+                                super::workbench::run::ProductCapabilityBundle::load(
+                                    &store,
+                                    Some(&preset_id),
+                                )
+                                .unwrap_or_else(|_| {
+                                    super::workbench::run::ProductCapabilityBundle::empty()
+                                });
+                            let limits = rollshot_automation::ValidationLimits::default();
+                            let metadata =
+                                rollshot_automation::validate_source(&draft.source, &limits)
+                                    .map(|validated| {
+                                        super::workbench::run::revision_capability_metadata(
+                                            &validated,
+                                            &capability_bundle,
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                            match super::workbench::review::save_revision_with_capabilities(
                                 &store,
                                 &preset_id,
                                 &draft.source,
-                                None,
+                                draft.parent_revision_id.as_ref(),
+                                draft.revision_note.as_deref(),
                                 workbench.session.session_id.get(),
                                 chrono::Utc::now().to_rfc3339(),
+                                metadata,
                             ) {
-                                Ok(()) => workbench.pending_draft = None,
+                                Ok(revision) => {
+                                    workbench.active_revision = Some(revision);
+                                    workbench.pending_draft = None;
+                                }
                                 Err(e) => workbench.error = Some(e),
                             }
                         } else {
@@ -980,14 +1047,46 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::ImStart => {
-                    if workbench.pending_proposal.is_some() && !workbench.review.is_empty() {
-                        workbench.disclosure_pending = true;
+                super::workbench::WorkbenchMessage::ImStart
+                | super::workbench::WorkbenchMessage::AskAgentToRevise => {
+                    if workbench.run_state.is_running() {
+                        return Task::none();
                     }
+                    let Some(active_revision) = workbench.active_revision.as_ref() else {
+                        return Task::none();
+                    };
+                    let Some(proposal) = workbench.pending_proposal.as_ref() else {
+                        return Task::none();
+                    };
+                    let evidence = super::workbench::review::assemble_correction_evidence(
+                        proposal,
+                        &workbench.review,
+                    );
+                    if evidence.is_empty() {
+                        return Task::none();
+                    }
+                    let (w, h) = state.document.image.source().dimensions();
+                    let summary = evidence.summary_line();
+                    let params = super::workbench::PendingRunParams {
+                        user_message: evidence.to_agent_message(),
+                        image_dims: (w, h),
+                        active_revision_source: Some(active_revision.artifact.source.clone()),
+                        mode: super::workbench::RunKind::Improve,
+                        parent_revision_id: Some(active_revision.id.clone()),
+                        revision_note: Some(format!(
+                            "improved from {}; {summary}",
+                            active_revision.id.0
+                        )),
+                        preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+                        preset_store_root: crate::daemon::config::rollshot_config_dir()
+                            .map(|dir| dir.join("presets"))
+                            .unwrap_or_default(),
+                    };
+                    workbench.disclosure_pending = true;
+                    workbench.pending_run = Some(params);
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::AskAgentToRevise
-                | super::workbench::WorkbenchMessage::DiscardDraft
+                super::workbench::WorkbenchMessage::DiscardDraft
                 | super::workbench::WorkbenchMessage::DiscardCandidates
                 | super::workbench::WorkbenchMessage::ToggleAdvancedDetails
                 | super::workbench::WorkbenchMessage::OpenProviderSettings

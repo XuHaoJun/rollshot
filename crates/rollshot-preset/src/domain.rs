@@ -1,4 +1,4 @@
-use rollshot_automation::ValidatedAutomation;
+use rollshot_automation::{CapabilityName, ValidatedAutomation};
 use serde::{Deserialize, Serialize};
 
 /// On-disk envelope version for SP5 records, independent of the automation
@@ -30,6 +30,31 @@ pub struct RevisionProvenance {
     pub source_run_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateHandleMetadata {
+    pub alias: String,
+    pub handle: String,
+    pub display_name: String,
+    pub sensitivity_sensitive: bool,
+    pub source_agent_suggested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionCapabilityRequirement {
+    pub capability: CapabilityName,
+    pub alias: Option<String>,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionCapabilityMetadata {
+    pub requirements: Vec<RevisionCapabilityRequirement>,
+    pub template_handles: Vec<TemplateHandleMetadata>,
+}
+
 /// A preset: durable, user-authored configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preset {
@@ -53,6 +78,8 @@ pub struct AutomationRevision {
     pub created_at: String,
     pub provenance: RevisionProvenance,
     pub artifact: ValidatedAutomation,
+    #[serde(default)]
+    pub capabilities: RevisionCapabilityMetadata,
 }
 
 /// Lightweight projection for listing presets without loading every artifact.

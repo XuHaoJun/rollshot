@@ -7,6 +7,7 @@ on:
       - "crates/rollshot-vision/**"
       - "crates/rollshot-automation/**"
       - "crates/rollshot-image-document/**"
+      - "crates/rollshot-app/**"
       - "Cargo.toml"
       - ".github/workflows/ci-ocr.yml"
   push:
@@ -70,3 +71,5 @@ jobs:
         run: bash scripts/ci/run-ocr-test.sh cargo test -p rollshot-ocr
       - name: Test rollshot-vision (ocr)
         run: bash scripts/ci/run-ocr-test.sh cargo test -p rollshot-vision --features ocr
+      - name: Test rollshot-app eval (ocr)
+        run: bash scripts/ci/run-ocr-test.sh cargo test -p rollshot-app --features ocr eval

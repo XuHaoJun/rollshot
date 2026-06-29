@@ -53,10 +53,9 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
             disclosure_modal(wb)
         } else {
             // ImStart sets disclosure_pending without pending_run (SP6 stub).
-            let evidence = super::review::CorrectionEvidence {
-                rejected_count: wb.review.rejected_count(),
-                modified_count: wb.review.modified_count(),
-                added_count: 0,
+            let evidence = match wb.pending_proposal.as_ref() {
+                Some(proposal) => super::review::assemble_correction_evidence(proposal, &wb.review),
+                None => super::review::CorrectionEvidence::default(),
             };
             improve_modal(&evidence)
         };
@@ -139,6 +138,13 @@ fn activity_entry_view<'a>(entry: &'a super::state::ActivityEntry) -> Element<'a
             }
             text(line).size(11).into()
         }
+        super::state::ActivityEntry::SourceDiff { tool, lines } => {
+            let mut diff = column![text(format!("Source change: {tool}")).size(11)].spacing(2);
+            for line in lines {
+                diff = diff.push(text(line).size(10).font(iced::Font::MONOSPACE));
+            }
+            diff.into()
+        }
         super::state::ActivityEntry::RunStatus {
             turn,
             budget_summary,
@@ -172,9 +178,17 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
         text("")
     };
 
+    // Mirror the reducer guard: needs an active revision to revise *from*, a
+    // proposal, and at least one correction. Otherwise the click is a no-op.
+    let revise_enabled =
+        wb.active_revision.is_some() && wb.pending_proposal.is_some() && wb.corrections_non_empty;
+
     let actions = row![
         text(summary),
         Space::new().width(Length::Fill),
+        button(text("Ask agent to revise")).on_press_maybe(
+            revise_enabled.then_some(Message::Workbench(WorkbenchMessage::AskAgentToRevise)),
+        ),
         button(text(format!("Apply {apply} redactions"))).on_press_maybe(if apply > 0 {
             Some(Message::Workbench(WorkbenchMessage::ApplyCandidates))
         } else {

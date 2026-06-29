@@ -8,8 +8,9 @@ mod io;
 mod store;
 
 pub use domain::{
-    AutomationRevision, Preset, PresetId, PresetSummary, RevisionId, RevisionOrigin,
-    RevisionProvenance, RevisionSummary, STORE_SCHEMA_VERSION,
+    AutomationRevision, Preset, PresetId, PresetSummary, RevisionCapabilityMetadata,
+    RevisionCapabilityRequirement, RevisionId, RevisionOrigin, RevisionProvenance, RevisionSummary,
+    TemplateHandleMetadata, STORE_SCHEMA_VERSION,
 };
 pub use error::{EntityKind, Result, StoreError};
 pub use store::PresetStore;
@@ -62,10 +63,35 @@ function main(input) {
                 source_run_ref: None,
             },
             artifact: sample_artifact(),
+            capabilities: RevisionCapabilityMetadata::default(),
         };
 
         let json = serde_json::to_vec(&revision).unwrap();
         let decoded: AutomationRevision = serde_json::from_slice(&json).unwrap();
         assert_eq!(decoded, revision);
+    }
+
+    #[test]
+    fn revision_capabilities_default_for_legacy_json() {
+        let revision = AutomationRevision {
+            store_schema_version: STORE_SCHEMA_VERSION,
+            id: RevisionId("rev-1".into()),
+            preset_id: PresetId("preset-1".into()),
+            parent_id: None,
+            created_at: "2026-06-28T00:00:00Z".into(),
+            provenance: RevisionProvenance {
+                origin: RevisionOrigin::AgentRun,
+                note: None,
+                source_run_ref: None,
+            },
+            artifact: sample_artifact(),
+            capabilities: RevisionCapabilityMetadata::default(),
+        };
+        let mut value = serde_json::to_value(&revision).unwrap();
+        value.as_object_mut().unwrap().remove("capabilities");
+
+        let decoded: AutomationRevision = serde_json::from_value(value).unwrap();
+
+        assert_eq!(decoded.capabilities, RevisionCapabilityMetadata::default());
     }
 }

@@ -6,6 +6,9 @@ pub mod run;
 pub mod state;
 pub mod view;
 
+#[cfg(test)]
+pub(crate) mod eval;
+
 #[allow(unused_imports)]
 pub use provider_config::{
     build_adapter, has_key, load_provider_config, provider_model_label, resolve_key,
@@ -48,6 +51,8 @@ pub struct PendingDraft {
     pub source: String,
     pub assistant_text: String,
     pub validation_summary: rollshot_automation::ValidationSummary,
+    pub parent_revision_id: Option<rollshot_preset::RevisionId>,
+    pub revision_note: Option<String>,
 }
 
 /// Workbench mode sub-state attached to `ResultWorkspace`.
@@ -81,6 +86,9 @@ pub struct WorkbenchState {
     pub pending_run: Option<PendingRunParams>,
     /// Next candidate id for manually-added missing candidates (§5.3).
     pub next_manual_candidate_id: u64,
+    /// Cached result of `assemble_correction_evidence(…).is_empty()` —
+    /// avoids per-frame Vec allocations in the view.
+    pub corrections_non_empty: bool,
 }
 
 /// Parameters captured at Send time and consumed when disclosure is confirmed.
@@ -90,6 +98,10 @@ pub struct PendingRunParams {
     pub image_dims: (u32, u32),
     pub active_revision_source: Option<String>,
     pub mode: RunKind,
+    pub parent_revision_id: Option<rollshot_preset::RevisionId>,
+    pub revision_note: Option<String>,
+    pub preset_id: rollshot_preset::PresetId,
+    pub preset_store_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +132,20 @@ impl Default for WorkbenchState {
             composer: String::new(),
             pending_run: None,
             next_manual_candidate_id: 1,
+            corrections_non_empty: false,
         }
+    }
+}
+
+impl WorkbenchState {
+    /// Recompute the cached `corrections_non_empty` flag from current
+    /// `pending_proposal` and `review`. Call after any mutation to either.
+    pub fn recompute_corrections_non_empty(&mut self) {
+        self.corrections_non_empty = self
+            .pending_proposal
+            .as_ref()
+            .map(|p| !review::assemble_correction_evidence(p, &self.review).is_empty())
+            .unwrap_or(false);
     }
 }
 
