@@ -20,6 +20,8 @@ const PHASE_B2_OCR_STRIP_PX: u32 = 96;
 const PHASE_B2_OCR_LIMIT: u32 = 50;
 const PHASE_B2_OCR_AREA_LIMIT: u64 = 16_000_000;
 
+const PHASE_F_TEMPLATE_MATCH_LIMIT: u32 = 8;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalOcrEntry {
     pub(crate) name: &'static str,
@@ -309,6 +311,28 @@ impl ProductCapabilityBundle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_template_store_for_tests(
+        template_store: rollshot_vision::TemplateStore,
+    ) -> Self {
+        let template_summaries = template_store.summaries();
+        let capability_handles = template_summaries
+            .iter()
+            .map(|summary| (summary.handle.clone(), summary.handle.clone()))
+            .collect();
+        let template_match = if template_summaries.is_empty() {
+            CapabilityAvailability::unavailable("no_capability_handles")
+        } else {
+            CapabilityAvailability::available()
+        };
+        Self {
+            capability_handles,
+            template_store,
+            template_summaries,
+            availability: ProductCapabilityAvailability { template_match },
+        }
+    }
+
     pub(crate) fn load(
         store: &rollshot_preset::PresetStore,
         preset_id: Option<&rollshot_preset::PresetId>,
@@ -433,6 +457,62 @@ fn prepare_phase_b2_ocr(
     Ok(())
 }
 
+fn canonical_template_queries(
+    image_width: u32,
+    image_height: u32,
+    handles: &std::collections::BTreeMap<String, String>,
+) -> Vec<rollshot_automation::TemplateMatchQuery> {
+    let regions = canonical_region_feature_catalog(image_width, image_height);
+    handles
+        .values()
+        .flat_map(|handle| {
+            regions.iter().filter_map(move |entry| {
+                entry
+                    .query
+                    .as_ref()
+                    .map(|region_query| rollshot_automation::TemplateMatchQuery {
+                        template_handle: handle.clone(),
+                        region: region_query.region,
+                        limit: PHASE_F_TEMPLATE_MATCH_LIMIT,
+                    })
+            })
+        })
+        .collect()
+}
+
+fn prepare_phase_f_templates(
+    host: &mut rollshot_vision::RealAutomationHost,
+    index: &VisualIndex,
+    bundle: &ProductCapabilityBundle,
+) -> Result<(), WorkbenchError> {
+    for query in
+        canonical_template_queries(index.width(), index.height(), &bundle.capability_handles)
+    {
+        match host.prepare_template_match(index, &bundle.template_store, &query) {
+            Ok(()) => {}
+            Err(rollshot_automation::CapabilityError::InvalidInput { code })
+                if matches!(
+                    code,
+                    "region_too_large" | "template_larger_than_region" | "template_low_information"
+                ) =>
+            {
+                tracing::debug!(
+                    target: "rollshot::vision::template",
+                    template_handle = %query.template_handle,
+                    code,
+                    "skipped infeasible template preparation"
+                );
+            }
+            Err(e) => {
+                return Err(WorkbenchError::VisionPrepare {
+                    message: format!("templateMatch {}: {e}", query.template_handle),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run a preset's active `ValidatedAutomation` against the given image
 /// (no LLM, no upload). Builds `VisualIndex`, prepares a fresh
 /// `RealAutomationHost`, and runs the automation via `execute_to_proposal`.
@@ -442,6 +522,20 @@ pub fn run_existing_preset(
     revision: &AutomationRevision,
     policy: &ExecutionPolicy,
 ) -> Result<EditProposal, WorkbenchError> {
+    run_existing_preset_with_capabilities(
+        image,
+        revision,
+        policy,
+        &ProductCapabilityBundle::empty(),
+    )
+}
+
+pub(crate) fn run_existing_preset_with_capabilities(
+    image: &image::RgbaImage,
+    revision: &AutomationRevision,
+    policy: &ExecutionPolicy,
+    bundle: &ProductCapabilityBundle,
+) -> Result<EditProposal, WorkbenchError> {
     let (w, h) = image.dimensions();
     let index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
         message: format!("VisualIndex: {e}"),
@@ -450,6 +544,7 @@ pub fn run_existing_preset(
     prepare_phase_a_region_features(&mut host, &index)?;
     #[cfg(feature = "ocr")]
     prepare_phase_b2_ocr(&mut host, &index)?;
+    prepare_phase_f_templates(&mut host, &index, bundle)?;
     let executor = QuickJsExecutor;
     let cancellation = CancellationFlag::default();
     let input = AutomationInput {
@@ -457,7 +552,7 @@ pub fn run_existing_preset(
         image_height: h,
         region: None,
         annotations: vec![],
-        capability_handles: Default::default(),
+        capability_handles: bundle.capability_handles.clone(),
     };
     let ctx = ProposalContext {
         proposal_id: ProposalId(1),
@@ -481,6 +576,7 @@ pub fn run_existing_preset(
 
 pub fn prepare_vision_context(
     image: &image::RgbaImage,
+    bundle: &ProductCapabilityBundle,
 ) -> Result<super::VisionContext, WorkbenchError> {
     let index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
         message: format!("VisualIndex: {e}"),
@@ -489,6 +585,7 @@ pub fn prepare_vision_context(
     prepare_phase_a_region_features(&mut host, &index)?;
     #[cfg(feature = "ocr")]
     prepare_phase_b2_ocr(&mut host, &index)?;
+    prepare_phase_f_templates(&mut host, &index, bundle)?;
     Ok(super::VisionContext {
         index,
         host: Arc::new(StdMutex::new(host)),
@@ -630,6 +727,8 @@ pub fn start_agent_run(
     let user_message = params.user_message.clone();
     let image_dims = params.image_dims;
     let active_source = params.active_revision_source.clone().unwrap_or_default();
+    let preset_store_root = params.preset_store_root.clone();
+    let preset_id = params.preset_id.clone();
     let image = image.clone();
     let budget = budget.clone();
 
@@ -638,7 +737,17 @@ pub fn start_agent_run(
 
     let stream = async_stream::stream! {
         // Heavy work runs inside the spawned task (B5).
-        let vision = match prepare_vision_context(&image) {
+        let preset_store = rollshot_preset::PresetStore::open(preset_store_root);
+        let capability_bundle = match ProductCapabilityBundle::load(&preset_store, Some(&preset_id)) {
+            Ok(bundle) => bundle,
+            Err(e) => {
+                yield crate::result_workspace::Message::Workbench(
+                    super::WorkbenchMessage::RunFailed(e),
+                );
+                return;
+            }
+        };
+        let vision = match prepare_vision_context(&image, &capability_bundle) {
             Ok(v) => v,
             Err(e) => {
                 yield crate::result_workspace::Message::Workbench(
@@ -658,7 +767,7 @@ pub fn start_agent_run(
             validation_limits,
             policy,
             image_dims,
-            product_capability_handles(),
+            capability_bundle.capability_handles.clone(),
             &cancellation_for_task,
         ));
 
@@ -891,6 +1000,187 @@ function main(input) {
             capabilities: rollshot_preset::RevisionCapabilityMetadata::default(),
         }
     }
+
+    #[test]
+    fn run_existing_preset_prepares_template_handles_from_bundle() {
+        let mut image = image::RgbaImage::from_fn(80, 80, |x, y| {
+            let v = 120 + ((x * 3 + y * 5) % 23) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        for y in 0..8 {
+            for x in 0..8 {
+                let v = ((x * 17 + y * 31 + x * y * 3) % 255) as u8;
+                image.put_pixel(20 + x, 24 + y, image::Rgba([v, v, v, 255]));
+            }
+        }
+        let tpl = image::imageops::crop_imm(&image, 20, 24, 8, 8).to_image();
+        let mut store = rollshot_vision::TemplateStore::new();
+        store
+            .insert(rollshot_vision::TemplateAsset {
+                handle: "mark".into(),
+                sensitivity: rollshot_vision::TemplateSensitivity::Chrome,
+                source: rollshot_vision::TemplateSource::UserRect,
+                created_at_ms: 1,
+                bounds_in_source_image: None,
+                bytes: rollshot_vision::TemplateBytes::new(8, 8, tpl.into_raw()).unwrap(),
+            })
+            .unwrap();
+        let bundle = ProductCapabilityBundle::from_template_store_for_tests(store);
+        let source = r#"
+function main(input) {
+  const matches = rollshot.templateMatch({
+    templateHandle: input.capabilityHandles.mark,
+    region: { kind: "full" },
+    limit: 1
+  });
+  return {
+    candidates: matches.map((match) => ({
+      kind: "addRedaction",
+      bounds: match.bounds,
+      confidence: match.score,
+      label: "mark"
+    }))
+  };
+}
+"#;
+        let revision = make_revision_from_source(source);
+        let policy = ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(10),
+            100_000_000,
+            8_000_000,
+        );
+
+        let proposal =
+            run_existing_preset_with_capabilities(&image, &revision, &policy, &bundle).unwrap();
+
+        assert_eq!(proposal.candidates.len(), 1);
+    }
+
+    #[test]
+    fn infeasible_template_handle_is_skipped_not_fatal() {
+        let mut image = image::RgbaImage::from_fn(80, 80, |x, y| {
+            let v = 120 + ((x * 3 + y * 5) % 23) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        for y in 0..8 {
+            for x in 0..8 {
+                let v = ((x * 17 + y * 31 + x * y * 3) % 255) as u8;
+                image.put_pixel(20 + x, 24 + y, image::Rgba([v, v, v, 255]));
+            }
+        }
+        let tpl = image::imageops::crop_imm(&image, 20, 24, 8, 8).to_image();
+        let mut store = rollshot_vision::TemplateStore::new();
+        store
+            .insert(rollshot_vision::TemplateAsset {
+                handle: "mark".into(),
+                sensitivity: rollshot_vision::TemplateSensitivity::Chrome,
+                source: rollshot_vision::TemplateSource::UserRect,
+                created_at_ms: 1,
+                bounds_in_source_image: None,
+                bytes: rollshot_vision::TemplateBytes::new(8, 8, tpl.into_raw()).unwrap(),
+            })
+            .unwrap();
+        store
+            .insert(rollshot_vision::TemplateAsset {
+                handle: "flat".into(),
+                sensitivity: rollshot_vision::TemplateSensitivity::Chrome,
+                source: rollshot_vision::TemplateSource::UserRect,
+                created_at_ms: 2,
+                bounds_in_source_image: None,
+                bytes: rollshot_vision::TemplateBytes::new(8, 8, vec![128u8; 8 * 8 * 4]).unwrap(),
+            })
+            .unwrap();
+        let bundle = ProductCapabilityBundle::from_template_store_for_tests(store);
+        let source = r#"
+function main(input) {
+  const matches = rollshot.templateMatch({
+    templateHandle: input.capabilityHandles.mark,
+    region: { kind: "full" },
+    limit: 1
+  });
+  return { candidates: matches.map((match) => ({
+    kind: "addRedaction", bounds: match.bounds, confidence: match.score, label: "mark"
+  })) };
+}
+"#;
+        let revision = make_revision_from_source(source);
+        let policy = ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(10),
+            100_000_000,
+            8_000_000,
+        );
+
+        let proposal =
+            run_existing_preset_with_capabilities(&image, &revision, &policy, &bundle).unwrap();
+
+        assert_eq!(proposal.candidates.len(), 1);
+    }
+
+    #[test]
+    fn bundle_loaded_from_disk_drives_existing_preset_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = rollshot_preset::PresetStore::open(tmp.path().to_path_buf());
+        let preset_id = rollshot_preset::PresetId("preset-a".into());
+        store
+            .create_preset(
+                preset_id.clone(),
+                "Preset A".into(),
+                "test".into(),
+                "2026-06-28T00:00:00Z".into(),
+            )
+            .unwrap();
+
+        let mut image = image::RgbaImage::from_fn(80, 80, |x, y| {
+            let v = 120 + ((x * 3 + y * 5) % 23) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        for y in 0..8 {
+            for x in 0..8 {
+                let v = ((x * 17 + y * 31 + x * y * 3) % 255) as u8;
+                image.put_pixel(20 + x, 24 + y, image::Rgba([v, v, v, 255]));
+            }
+        }
+        let tpl = image::imageops::crop_imm(&image, 20, 24, 8, 8).to_image();
+        let mut templates = rollshot_vision::TemplateStore::new();
+        templates
+            .insert(rollshot_vision::TemplateAsset {
+                handle: "mark".into(),
+                sensitivity: rollshot_vision::TemplateSensitivity::Chrome,
+                source: rollshot_vision::TemplateSource::UserRect,
+                created_at_ms: 1,
+                bounds_in_source_image: None,
+                bytes: rollshot_vision::TemplateBytes::new(8, 8, tpl.into_raw()).unwrap(),
+            })
+            .unwrap();
+        templates
+            .save_local(&store.template_store_path(&preset_id).unwrap())
+            .unwrap();
+
+        let bundle = ProductCapabilityBundle::load(&store, Some(&preset_id)).unwrap();
+        let source = r#"
+function main(input) {
+  const matches = rollshot.templateMatch({
+    templateHandle: input.capabilityHandles.mark,
+    region: { kind: "full" },
+    limit: 1
+  });
+  return { candidates: matches.map((match) => ({
+    kind: "addRedaction", bounds: match.bounds, confidence: match.score, label: "mark"
+  })) };
+}
+"#;
+        let revision = make_revision_from_source(source);
+        let policy = ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(10),
+            100_000_000,
+            8_000_000,
+        );
+
+        let proposal =
+            run_existing_preset_with_capabilities(&image, &revision, &policy, &bundle).unwrap();
+
+        assert_eq!(proposal.candidates.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -900,14 +1190,14 @@ mod prepare_tests {
     #[test]
     fn prepare_vision_context_rejects_empty_image() {
         let empty = image::RgbaImage::new(0, 0);
-        let r = prepare_vision_context(&empty);
+        let r = prepare_vision_context(&empty, &ProductCapabilityBundle::empty());
         assert!(matches!(r, Err(WorkbenchError::VisionPrepare { .. })));
     }
 
     #[test]
     fn prepare_vision_context_succeeds_for_valid_image() {
         let img = image::RgbaImage::from_fn(8, 8, |_, _| image::Rgba([200, 200, 200, 255]));
-        let ctx = prepare_vision_context(&img).unwrap();
+        let ctx = prepare_vision_context(&img, &ProductCapabilityBundle::empty()).unwrap();
         assert_eq!(ctx.index.width(), 8);
         assert_eq!(ctx.index.height(), 8);
     }
@@ -1170,7 +1460,7 @@ mod prepare_tests {
         use rollshot_agent::tools::{DryRunTool, RegionFeaturesTool, Tool};
 
         let image = image::RgbaImage::from_fn(64, 64, |_, _| image::Rgba([160, 170, 180, 255]));
-        let vision = prepare_vision_context(&image).unwrap();
+        let vision = prepare_vision_context(&image, &ProductCapabilityBundle::empty()).unwrap();
         let catalog = canonical_region_feature_catalog(64, 64);
         let inspection = authoring_inspection_context(
             PayloadMode::FullScreenshot,
@@ -1270,7 +1560,7 @@ function main(input) {
             "alice@example.com",
         );
 
-        let vision = prepare_vision_context(&image).unwrap();
+        let vision = prepare_vision_context(&image, &ProductCapabilityBundle::empty()).unwrap();
         let region_catalog = canonical_region_feature_catalog(480, 160);
         let ocr_catalog = canonical_ocr_catalog(480, 160);
         let inspection = authoring_inspection_context(

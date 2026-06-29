@@ -15,6 +15,7 @@ use super::fixture::FixtureMeta;
 use crate::result_workspace::workbench::run::{
     authoring_inspection_context, build_authoring_tool_registry, canonical_ocr_catalog,
     canonical_region_feature_catalog, prepare_vision_context, product_capability_handles,
+    ProductCapabilityBundle,
 };
 use crate::result_workspace::workbench::PayloadMode;
 
@@ -40,7 +41,8 @@ pub(crate) async fn replay_full_loop(
         AnthropicAdapter::new("test-key", &server.uri()).map_err(|e| format!("adapter: {e:?}"))?;
 
     // 2. Build the genuine product authoring wiring.
-    let vision = prepare_vision_context(image).map_err(|e| format!("prepare: {e:?}"))?;
+    let vision = prepare_vision_context(image, &ProductCapabilityBundle::empty())
+        .map_err(|e| format!("prepare: {e:?}"))?;
     let cancellation = RunCancellation::new();
     let tool_ctx = Arc::new(ToolContext::new_with_capability_handles(
         SessionId::new(1),

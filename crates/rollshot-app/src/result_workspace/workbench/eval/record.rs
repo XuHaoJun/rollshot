@@ -16,6 +16,7 @@ use super::cassette::{
 use crate::result_workspace::workbench::run::{
     authoring_inspection_context, build_authoring_tool_registry, canonical_ocr_catalog,
     canonical_region_feature_catalog, prepare_vision_context, product_capability_handles,
+    ProductCapabilityBundle,
 };
 use crate::result_workspace::workbench::PayloadMode;
 
@@ -276,7 +277,8 @@ pub(crate) async fn record_cassette(
     let adapter =
         AnthropicAdapter::new(api_key, &proxy_url).map_err(|e| format!("adapter: {e:?}"))?;
 
-    let vision = prepare_vision_context(&image).map_err(|e| format!("prepare: {e:?}"))?;
+    let vision = prepare_vision_context(&image, &ProductCapabilityBundle::empty())
+        .map_err(|e| format!("prepare: {e:?}"))?;
     let cancellation = RunCancellation::new();
     let tool_ctx = Arc::new(ToolContext::new_with_capability_handles(
         SessionId::new(1),

@@ -6,7 +6,7 @@ use rollshot_automation_rquickjs::QuickJsExecutor;
 use rollshot_edit_proposal::{ProposalId, ProposedEdit, Provenance, ProvenanceSource};
 use rollshot_image_document::ImageRect;
 
-use crate::result_workspace::workbench::run::prepare_vision_context;
+use crate::result_workspace::workbench::run::{prepare_vision_context, ProductCapabilityBundle};
 
 pub(crate) fn run_golden_source(
     image: &image::RgbaImage,
@@ -15,7 +15,8 @@ pub(crate) fn run_golden_source(
     let (w, h) = image.dimensions();
     let automation = validate_source(golden_js, &ValidationLimits::default())
         .map_err(|e| format!("validate: {e:?}"))?;
-    let vision = prepare_vision_context(image).map_err(|e| format!("prepare: {e:?}"))?;
+    let vision = prepare_vision_context(image, &ProductCapabilityBundle::empty())
+        .map_err(|e| format!("prepare: {e:?}"))?;
 
     let input = AutomationInput {
         image_width: w,
