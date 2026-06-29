@@ -88,6 +88,9 @@ pub enum WorkbenchError {
         message: String,
     },
     Config,
+    CapabilityUnavailable {
+        message: String,
+    },
     /// `RunTerminalState::Cancelled` is not an error — return to Idle. This
     /// variant is kept for completeness but is never shown as an error.
     Cancelled,
@@ -104,6 +107,9 @@ impl std::fmt::Display for WorkbenchError {
             Self::VisionPrepare { message } => write!(f, "Vision prepare: {message}"),
             Self::Store { message } => write!(f, "Preset store: {message}"),
             Self::Config => write!(f, "Provider not configured"),
+            Self::CapabilityUnavailable { message } => {
+                write!(f, "Capability unavailable: {message}")
+            }
             Self::Cancelled => write!(f, "Cancelled"),
         }
     }

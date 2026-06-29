@@ -573,6 +573,16 @@ pub fn run_existing_preset(
     )
 }
 
+fn revision_requires_template_match(revision: &AutomationRevision) -> bool {
+    revision
+        .artifact
+        .workflow_ir
+        .capability_manifest
+        .calls
+        .iter()
+        .any(|call| call.capability == rollshot_automation::CapabilityName::TemplateMatch)
+}
+
 pub(crate) fn run_existing_preset_with_capabilities(
     image: &image::RgbaImage,
     revision: &AutomationRevision,
@@ -583,6 +593,11 @@ pub(crate) fn run_existing_preset_with_capabilities(
     let index = VisualIndex::build(image.clone()).map_err(|e| WorkbenchError::VisionPrepare {
         message: format!("VisualIndex: {e}"),
     })?;
+    if revision_requires_template_match(revision) && bundle.capability_handles.is_empty() {
+        return Err(WorkbenchError::CapabilityUnavailable {
+            message: "This preset uses template matching, but no template handles are available for this preset.".into(),
+        });
+    }
     let mut host = rollshot_vision::RealAutomationHost::new();
     prepare_phase_a_region_features(&mut host, &index)?;
     #[cfg(feature = "ocr")]
@@ -1097,6 +1112,42 @@ function main(input) {
             run_existing_preset_with_capabilities(&image, &revision, &policy, &bundle).unwrap();
 
         assert_eq!(proposal.candidates.len(), 1);
+    }
+
+    #[test]
+    fn template_using_existing_preset_without_handles_reports_capability_unavailable() {
+        let source = r#"
+function main(input) {
+  const matches = rollshot.templateMatch({
+    templateHandle: input.capabilityHandles.mark,
+    region: { kind: "full" },
+    limit: 1
+  });
+  return { candidates: matches.map((match) => ({
+    kind: "addRedaction",
+    bounds: match.bounds,
+    confidence: match.score,
+    label: "mark"
+  })) };
+}
+"#;
+        let image = image::RgbaImage::from_pixel(80, 80, image::Rgba([120, 120, 120, 255]));
+        let revision = make_revision_from_source(source);
+        let policy = ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(10),
+            100_000_000,
+            8_000_000,
+        );
+
+        let err = run_existing_preset_with_capabilities(
+            &image,
+            &revision,
+            &policy,
+            &ProductCapabilityBundle::empty(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, WorkbenchError::CapabilityUnavailable { .. }));
     }
 
     #[test]
