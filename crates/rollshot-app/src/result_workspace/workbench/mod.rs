@@ -100,6 +100,8 @@ pub struct PendingRunParams {
     pub mode: RunKind,
     pub parent_revision_id: Option<rollshot_preset::RevisionId>,
     pub revision_note: Option<String>,
+    pub preset_id: rollshot_preset::PresetId,
+    pub preset_store_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

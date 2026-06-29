@@ -262,6 +262,90 @@ pub(crate) fn product_capability_handles() -> std::collections::BTreeMap<String,
     std::collections::BTreeMap::new()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapabilityAvailability {
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
+impl CapabilityAvailability {
+    fn available() -> Self {
+        Self {
+            available: true,
+            reason: None,
+        }
+    }
+
+    fn unavailable(reason: &str) -> Self {
+        Self {
+            available: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProductCapabilityAvailability {
+    pub template_match: CapabilityAvailability,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProductCapabilityBundle {
+    pub capability_handles: std::collections::BTreeMap<String, String>,
+    pub template_store: rollshot_vision::TemplateStore,
+    pub template_summaries: Vec<rollshot_vision::TemplateAssetSummary>,
+    pub availability: ProductCapabilityAvailability,
+}
+
+impl ProductCapabilityBundle {
+    pub(crate) fn empty() -> Self {
+        Self {
+            capability_handles: std::collections::BTreeMap::new(),
+            template_store: rollshot_vision::TemplateStore::new(),
+            template_summaries: Vec::new(),
+            availability: ProductCapabilityAvailability {
+                template_match: CapabilityAvailability::unavailable("no_capability_handles"),
+            },
+        }
+    }
+
+    pub(crate) fn load(
+        store: &rollshot_preset::PresetStore,
+        preset_id: Option<&rollshot_preset::PresetId>,
+    ) -> Result<Self, WorkbenchError> {
+        let Some(preset_id) = preset_id else {
+            return Ok(Self::empty());
+        };
+        let path = store
+            .template_store_path(preset_id)
+            .map_err(|_| WorkbenchError::RuntimeFailure)?;
+        if !path.exists() {
+            return Ok(Self::empty());
+        }
+        let template_store = rollshot_vision::TemplateStore::load_local(&path).map_err(|e| {
+            WorkbenchError::VisionPrepare {
+                message: format!("template store: {e}"),
+            }
+        })?;
+        let template_summaries = template_store.summaries();
+        let capability_handles = template_summaries
+            .iter()
+            .map(|summary| (summary.handle.clone(), summary.handle.clone()))
+            .collect();
+        let template_match = if template_summaries.is_empty() {
+            CapabilityAvailability::unavailable("no_capability_handles")
+        } else {
+            CapabilityAvailability::available()
+        };
+        Ok(Self {
+            capability_handles,
+            template_store,
+            template_summaries,
+            availability: ProductCapabilityAvailability { template_match },
+        })
+    }
+}
+
 pub(crate) fn authoring_inspection_context(
     payload_mode: PayloadMode,
     catalog: &[CanonicalRegionFeatureEntry],
@@ -753,6 +837,7 @@ mod tests {
                 source_run_ref: None,
             },
             artifact: validated,
+            capabilities: rollshot_preset::RevisionCapabilityMetadata::default(),
         }
     }
 
@@ -803,6 +888,7 @@ function main(input) {
                 source_run_ref: None,
             },
             artifact: validated,
+            capabilities: rollshot_preset::RevisionCapabilityMetadata::default(),
         }
     }
 }
@@ -1255,6 +1341,79 @@ function main(input) {
             other => panic!("expected dry-run success, got {other:?}"),
         }
     }
+
+    fn textured_template_bytes() -> rollshot_vision::TemplateBytes {
+        let rgba = image::RgbaImage::from_fn(8, 8, |x, y| {
+            let v = ((x * 17 + y * 31 + x * y * 3) % 255) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        rollshot_vision::TemplateBytes::new(8, 8, rgba.into_raw()).unwrap()
+    }
+
+    #[test]
+    fn product_capability_bundle_loads_preset_template_handles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = rollshot_preset::PresetStore::open(tmp.path().to_path_buf());
+        let preset_id = rollshot_preset::PresetId("preset-a".into());
+        store
+            .create_preset(
+                preset_id.clone(),
+                "Preset A".into(),
+                "test".into(),
+                "2026-06-28T00:00:00Z".into(),
+            )
+            .unwrap();
+        let mut templates = rollshot_vision::TemplateStore::new();
+        templates
+            .insert(rollshot_vision::TemplateAsset {
+                handle: "toolbar-logo".into(),
+                sensitivity: rollshot_vision::TemplateSensitivity::Chrome,
+                source: rollshot_vision::TemplateSource::UserRect,
+                created_at_ms: 1,
+                bounds_in_source_image: None,
+                bytes: textured_template_bytes(),
+            })
+            .unwrap();
+        templates
+            .save_local(&store.template_store_path(&preset_id).unwrap())
+            .unwrap();
+
+        let bundle = ProductCapabilityBundle::load(&store, Some(&preset_id)).unwrap();
+
+        assert_eq!(
+            bundle
+                .capability_handles
+                .get("toolbar-logo")
+                .map(String::as_str),
+            Some("toolbar-logo")
+        );
+        assert_eq!(bundle.template_summaries.len(), 1);
+        assert!(bundle.availability.template_match.available);
+    }
+
+    #[test]
+    fn product_capability_bundle_reports_missing_template_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = rollshot_preset::PresetStore::open(tmp.path().to_path_buf());
+        let preset_id = rollshot_preset::PresetId("preset-a".into());
+        store
+            .create_preset(
+                preset_id.clone(),
+                "Preset A".into(),
+                "test".into(),
+                "2026-06-28T00:00:00Z".into(),
+            )
+            .unwrap();
+
+        let bundle = ProductCapabilityBundle::load(&store, Some(&preset_id)).unwrap();
+
+        assert!(bundle.capability_handles.is_empty());
+        assert!(!bundle.availability.template_match.available);
+        assert_eq!(
+            bundle.availability.template_match.reason.as_deref(),
+            Some("no_capability_handles")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1341,8 +1500,8 @@ mod reducer_tests {
 
     fn active_revision_for_reducer_test() -> rollshot_preset::AutomationRevision {
         use rollshot_preset::{
-            AutomationRevision, PresetId, RevisionId, RevisionOrigin, RevisionProvenance,
-            STORE_SCHEMA_VERSION,
+            AutomationRevision, PresetId, RevisionCapabilityMetadata, RevisionId, RevisionOrigin,
+            RevisionProvenance, STORE_SCHEMA_VERSION,
         };
         let source = "function main(input) { return { candidates: [] }; }";
         let validated = rollshot_automation::validate_source(
@@ -1362,6 +1521,7 @@ mod reducer_tests {
                 source_run_ref: Some("7".into()),
             },
             artifact: validated,
+            capabilities: RevisionCapabilityMetadata::default(),
         }
     }
 
@@ -1528,6 +1688,8 @@ mod reducer_tests {
             mode: super::super::RunKind::Author,
             parent_revision_id: None,
             revision_note: None,
+            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
         });
 
         let _ = update(
@@ -1725,6 +1887,8 @@ mod reducer_tests {
             mode: super::super::RunKind::Author,
             parent_revision_id: None,
             revision_note: None,
+            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
         });
 
         let _ = update(

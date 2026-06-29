@@ -934,6 +934,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         mode: super::workbench::RunKind::Author,
                         parent_revision_id: None,
                         revision_note: None,
+                        preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+                        preset_store_root: crate::daemon::config::rollshot_config_dir()
+                            .map(|dir| dir.join("presets"))
+                            .unwrap_or_default(),
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);
@@ -1059,6 +1063,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             "improved from {}; {summary}",
                             active_revision.id.0
                         )),
+                        preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+                        preset_store_root: crate::daemon::config::rollshot_config_dir()
+                            .map(|dir| dir.join("presets"))
+                            .unwrap_or_default(),
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);
