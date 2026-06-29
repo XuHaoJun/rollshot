@@ -2390,6 +2390,25 @@ mod reducer_tests {
     }
 
     #[test]
+    fn im_start_queues_improve_run_with_correction_evidence() {
+        let mut ws = ws_with_workbench();
+        seed_active_revision_pending_proposal_and_rejection(&mut ws);
+
+        let task = update(&mut ws, Message::Workbench(WorkbenchMessage::ImStart));
+        drop(task);
+
+        let state = wb(&ws);
+        let params = state
+            .pending_run
+            .as_ref()
+            .expect("pending improve run from banner action");
+        assert_eq!(params.mode, super::super::RunKind::Improve);
+        assert!(params.user_message.contains("Rejected false positives"));
+        assert_eq!(params.parent_revision_id.as_ref().unwrap().0, "rev-1");
+        assert!(state.disclosure_pending);
+    }
+
+    #[test]
     fn manual_candidate_uses_non_colliding_id_for_missed_target_evidence() {
         let mut ws = ws_with_workbench();
         {

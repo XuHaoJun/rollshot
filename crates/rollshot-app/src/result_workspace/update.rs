@@ -1047,13 +1047,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::ImStart => {
-                    if workbench.pending_proposal.is_some() && !workbench.review.is_empty() {
-                        workbench.disclosure_pending = true;
-                    }
-                    Task::none()
-                }
-                super::workbench::WorkbenchMessage::AskAgentToRevise => {
+                super::workbench::WorkbenchMessage::ImStart
+                | super::workbench::WorkbenchMessage::AskAgentToRevise => {
                     if workbench.run_state.is_running() {
                         return Task::none();
                     }

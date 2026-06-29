@@ -441,6 +441,7 @@ fn clear_generation_caches(ctx: &ToolContext) {
     *ctx.last_validated.lock().unwrap() = None;
     *ctx.last_dry_run_proposal.lock().unwrap() = None;
     *ctx.last_dry_run_metrics.lock().unwrap() = None;
+    *ctx.last_dry_run_source.lock().unwrap() = None;
     *ctx.pending_ready_for_review.lock().unwrap() = None;
 }
 
@@ -570,6 +571,7 @@ pub struct ToolContext {
     pub last_validated: Mutex<Option<rollshot_automation::ValidatedAutomation>>,
     pub last_dry_run_proposal: Mutex<Option<rollshot_edit_proposal::EditProposal>>,
     pub last_dry_run_metrics: Mutex<Option<rollshot_automation::ExecutionMetrics>>,
+    pub last_dry_run_source: Mutex<Option<String>>,
 }
 
 impl ToolContext {
@@ -620,6 +622,7 @@ impl ToolContext {
             last_validated: Mutex::new(None),
             last_dry_run_proposal: Mutex::new(None),
             last_dry_run_metrics: Mutex::new(None),
+            last_dry_run_source: Mutex::new(None),
         }
     }
 }
@@ -1019,6 +1022,7 @@ impl Tool for DryRunTool {
             let capability_calls = metrics.capability_calls;
             *self.ctx.last_dry_run_proposal.lock().unwrap() = Some(proposal.clone());
             *self.ctx.last_dry_run_metrics.lock().unwrap() = Some(metrics);
+            *self.ctx.last_dry_run_source.lock().unwrap() = Some(args.source.clone());
 
             Ok(ToolOutcome::Success {
                 result_json: serde_json::to_value(DryRunResult {
@@ -1088,6 +1092,21 @@ impl Tool for SubmitForReviewTool {
             let source = self.ctx.source.lock().unwrap().clone();
             let validated = self.ctx.last_validated.lock().unwrap().clone();
             let proposal = self.ctx.last_dry_run_proposal.lock().unwrap().clone();
+            let dry_run_source = self.ctx.last_dry_run_source.lock().unwrap().clone();
+
+            let source_matches = validated
+                .as_ref()
+                .map(|validated| validated.source == source)
+                .unwrap_or(false)
+                && dry_run_source
+                    .as_ref()
+                    .map(|dry_run_source| dry_run_source == &source)
+                    .unwrap_or(false);
+            if !source_matches {
+                return Err(ToolError::ArgumentDecode(
+                    "current source does not match validation and dry-run evidence".into(),
+                ));
+            }
 
             if let (Some(validated), Some(proposal)) = (validated, proposal) {
                 let dry_run_evidence = crate::driver::DryRunEvidence {
@@ -1969,6 +1988,10 @@ pub(crate) mod tests {
         "function main(input) { return [{kind: 'addRedaction', bounds: {x: 0, y: 0, width: 10, height: 10}, confidence: 0.9, label: 'test'}]; }"
     }
 
+    fn alternate_valid_js_source() -> &'static str {
+        "function main(input) { return { candidates: [] }; }"
+    }
+
     struct FakeExecutor {
         output_json: String,
     }
@@ -2340,19 +2363,21 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn submit_for_review_succeeds_with_validation_and_dry_run_evidence() {
         let ctx = test_context(valid_js_source());
-        // Record BOTH validation and dry-run evidence at generation 0, per spec
-        // §8.4 (submit requires complete current-generation evidence).
-        {
-            let mut draft = ctx.draft.lock().unwrap();
-            draft
-                .record_evidence(EvidenceKind::Validation, 0, tokio::time::Instant::now())
-                .unwrap();
-            draft
-                .record_evidence(EvidenceKind::DryRun, 0, tokio::time::Instant::now())
-                .unwrap();
-        }
+        let executor = Arc::new(FakeExecutor::with_valid_proposal());
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
 
-        let tool = SubmitForReviewTool::new(ctx);
+        ValidateSourceTool::new(ctx.clone())
+            .call(&serde_json::json!({"source": valid_js_source(), "generation": 0}))
+            .await
+            .unwrap();
+        DryRunTool::new(ctx.clone(), executor, host)
+            .call(&serde_json::json!({"source": valid_js_source(), "generation": 0}))
+            .await
+            .unwrap();
+
+        let tool = SubmitForReviewTool::new(ctx.clone());
         let args = serde_json::json!({"generation": 0});
         let result = tool.call(&args).await.unwrap();
 
@@ -2362,6 +2387,45 @@ pub(crate) mod tests {
             }
             other => panic!("expected success, got {other:?}"),
         }
+        assert!(
+            ctx.pending_ready_for_review.lock().unwrap().is_some(),
+            "submit should create the review handoff from current-source evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_rejects_evidence_for_non_current_source() {
+        let ctx = test_context(valid_js_source());
+        let executor = Arc::new(FakeExecutor::with_valid_proposal());
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+
+        ValidateSourceTool::new(ctx.clone())
+            .call(&serde_json::json!({
+                "source": alternate_valid_js_source(),
+                "generation": 0
+            }))
+            .await
+            .unwrap();
+        DryRunTool::new(ctx.clone(), executor, host)
+            .call(&serde_json::json!({
+                "source": alternate_valid_js_source(),
+                "generation": 0
+            }))
+            .await
+            .unwrap();
+
+        let err = SubmitForReviewTool::new(ctx.clone())
+            .call(&serde_json::json!({"generation": 0}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::ArgumentDecode(_)));
+        assert!(
+            ctx.pending_ready_for_review.lock().unwrap().is_none(),
+            "submit must not create a review handoff from stale source evidence"
+        );
     }
 
     #[tokio::test]
