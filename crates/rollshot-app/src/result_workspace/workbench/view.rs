@@ -43,9 +43,7 @@ fn smart_redaction_panel<'a>(
     let activity = scrollable(activity_column(wb))
         .height(Length::Fill)
         .width(Length::Fill);
-    let composer = container(composer(wb))
-        .padding(8)
-        .width(Length::Fill);
+    let composer = container(composer(wb)).padding(8).width(Length::Fill);
 
     let mut content = column![header].height(Length::Fill);
     if let Some(error) = error_message_banner(wb, inline_message) {
@@ -76,7 +74,10 @@ fn smart_redaction_panel<'a>(
 fn panel_header<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     let title = row![
         text("Smart Redaction").size(14),
-        text(super::provider_config::provider_model_label(&wb.provider_config)).size(10),
+        text(super::provider_config::provider_model_label(
+            &wb.provider_config
+        ))
+        .size(10),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -202,8 +203,9 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
 
     let selected_reject = wb.selected_candidate.map(|id| {
         if super::state::is_candidate_rejected(&wb.review, id) {
-            button(text("Undo reject"))
-                .on_press(Message::Workbench(WorkbenchMessage::CandidateUnrejected(id)))
+            button(text("Undo reject")).on_press(Message::Workbench(
+                WorkbenchMessage::CandidateUnrejected(id),
+            ))
         } else {
             button(text("Reject"))
                 .on_press(Message::Workbench(WorkbenchMessage::CandidateDeleted(id)))
@@ -258,9 +260,15 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
 
 fn candidate_chip<'a>(item: super::state::CandidateReviewItem) -> Element<'a, Message> {
     let label = if item.low_confidence && !item.rejected {
-        format!("{} ⚠ {} {}%", item.sequence, item.label, item.confidence_percent)
+        format!(
+            "{} ⚠ {} {}%",
+            item.sequence, item.label, item.confidence_percent
+        )
     } else {
-        format!("{} {} {}%", item.sequence, item.label, item.confidence_percent)
+        format!(
+            "{} {} {}%",
+            item.sequence, item.label, item.confidence_percent
+        )
     };
 
     let border = if item.rejected {
