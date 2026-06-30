@@ -31,3 +31,6 @@
 [submodule "learn-projects/rig"]
 	path = learn-projects/rig
 	url = https://github.com/0xplaygrounds/rig
+[submodule "learn-projects/iced"]
+	path = learn-projects/iced
+	url = https://github.com/iced-rs/iced.git
