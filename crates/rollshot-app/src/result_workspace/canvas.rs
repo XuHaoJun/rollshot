@@ -414,13 +414,13 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             self.draw_annotation(&mut frame, &draft);
         }
 
-        // SP6: proposed-candidate overlay. Dashed border (white, 40% alpha)
-        // or solid blue when selected. Rejected candidates are skipped.
-        // Zoom-aware: confidence badge only at scale > 0.3. Cull to visible.
+        // Smart Redaction candidate overlay. Rejected candidates are skipped.
+        // Visible candidates use confidence-colored solid borders/fills and numbered
+        // badges (1-based position) matching the review bar chips.
         if let Some(proposal) = self.pending_proposal {
             let review = self.review;
             let s = self.scale;
-            for cand in &proposal.candidates {
+            for (index, cand) in proposal.candidates.iter().enumerate() {
                 let Some(bounds) = super::workbench::proposed_edit_bounds(&cand.edit) else {
                     continue;
                 };
@@ -442,23 +442,29 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
                     width: bounds.width * s,
                     height: bounds.height * s,
                 };
-                let border_color = if is_selected {
-                    iced::Color::from_rgb(0.13, 0.40, 1.0)
-                } else {
-                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.4)
-                };
-                let stroke = canvas::Stroke::default()
-                    .with_color(border_color)
-                    .with_width(if is_selected { 2.0 } else { 1.5 });
-                draw_dashed_rect(&mut frame, rect, 6.0, 4.0, stroke);
+                let style = proposal_overlay_style(cand.confidence, is_selected);
+                let rect_path = canvas::Path::rectangle(
+                    iced::Point::new(rect.x, rect.y),
+                    iced::Size::new(rect.width, rect.height),
+                );
+                frame.fill(&rect_path, style.fill);
+                frame.stroke(
+                    &rect_path,
+                    canvas::Stroke::default()
+                        .with_color(style.border)
+                        .with_width(style.border_width),
+                );
 
                 if s > 0.3 {
-                    let label = format!("{} {:.0}%", cand.label, cand.confidence * 100.0);
+                    let sequence = index + 1;
+                    let badge_center = iced::Point::new(rect.x, rect.y);
+                    let badge = canvas::Path::circle(badge_center, 11.0);
+                    frame.fill(&badge, style.badge);
                     frame.fill_text(canvas::Text {
-                        content: label,
-                        position: iced::Point::new(rect.x, rect.y - 14.0),
+                        content: sequence.to_string(),
+                        position: iced::Point::new(badge_center.x - 3.5, badge_center.y + 4.0),
                         color: iced::Color::WHITE,
-                        size: iced::Pixels(10.0),
+                        size: iced::Pixels(11.0),
                         ..canvas::Text::default()
                     });
                 }
@@ -523,48 +529,30 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
     }
 }
 
-fn draw_dashed_rect(
-    frame: &mut canvas::Frame,
-    rect: iced::Rectangle,
-    dash: f32,
-    gap: f32,
-    stroke: canvas::Stroke,
-) {
-    let perimeter = 2.0 * (rect.width + rect.height);
-    let segments: Vec<(iced::Point, iced::Point)> = {
-        let mut segs = Vec::new();
-        let mut dist = 0.0f32;
-        while dist < perimeter {
-            let on_end = (dist + dash).min(perimeter);
-            let a = point_on_rect_perimeter(rect, dist);
-            let b = point_on_rect_perimeter(rect, on_end);
-            segs.push((a, b));
-            dist += dash + gap;
-        }
-        segs
-    };
-    let path = canvas::Path::new(|builder| {
-        for (a, b) in segments {
-            builder.move_to(a);
-            builder.line_to(b);
-        }
-    });
-    frame.stroke(&path, stroke);
+#[derive(Debug, Clone, Copy)]
+struct ProposalOverlayStyle {
+    border: iced::Color,
+    fill: iced::Color,
+    badge: iced::Color,
+    border_width: f32,
 }
 
-fn point_on_rect_perimeter(rect: iced::Rectangle, dist: f32) -> iced::Point {
-    let w = rect.width;
-    let h = rect.height;
-    let peri = 2.0 * (w + h);
-    let d = dist.rem_euclid(peri);
-    if d < w {
-        iced::Point::new(rect.x + d, rect.y)
-    } else if d < w + h {
-        iced::Point::new(rect.x + w, rect.y + (d - w))
-    } else if d < 2.0 * w + h {
-        iced::Point::new(rect.x + w - (d - w - h), rect.y + h)
+fn proposal_overlay_style(confidence: f32, selected: bool) -> ProposalOverlayStyle {
+    let low = super::workbench::state::is_low_confidence(confidence);
+    let (r, g, b) = super::workbench::state::confidence_accent(low, selected);
+    let accent = iced::Color::from_rgb(r, g, b);
+    let (fill, border_width) = if selected {
+        (iced::Color::from_rgba(0.13, 0.40, 1.0, 0.16), 2.5)
+    } else if low {
+        (iced::Color::from_rgba(0.88, 0.64, 0.0, 0.20), 2.0)
     } else {
-        iced::Point::new(rect.x, rect.y + h - (d - 2.0 * w - h))
+        (iced::Color::from_rgba(0.18, 0.75, 0.44, 0.18), 2.0)
+    };
+    ProposalOverlayStyle {
+        border: accent,
+        fill,
+        badge: accent,
+        border_width,
     }
 }
 
@@ -703,53 +691,39 @@ mod tests {
         assert_eq!(point, ImagePoint::new(60.0, 115.0));
     }
 
+    fn assert_color_close(actual: iced::Color, expected: iced::Color) {
+        assert!((actual.r - expected.r).abs() < 0.001);
+        assert!((actual.g - expected.g).abs() < 0.001);
+        assert!((actual.b - expected.b).abs() < 0.001);
+        assert!((actual.a - expected.a).abs() < 0.001);
+    }
+
     #[test]
-    fn point_on_rect_perimeter_corners_and_edge_midpoints() {
-        let rect = iced::Rectangle {
-            x: 10.0,
-            y: 20.0,
-            width: 100.0,
-            height: 50.0,
-        };
-        let peri = 2.0 * (rect.width + rect.height); // 300
+    fn proposal_overlay_style_uses_green_for_high_confidence() {
+        let style = proposal_overlay_style(0.92, false);
 
-        // Top-left corner (start of top edge)
-        let p = point_on_rect_perimeter(rect, 0.0);
-        assert!((p.x - 10.0).abs() < 1e-5 && (p.y - 20.0).abs() < 1e-5);
+        assert_color_close(style.border, iced::Color::from_rgb(0.12, 0.55, 0.36));
+        assert_color_close(style.fill, iced::Color::from_rgba(0.18, 0.75, 0.44, 0.18));
+        assert_color_close(style.badge, iced::Color::from_rgb(0.12, 0.55, 0.36));
+        assert_eq!(style.border_width, 2.0);
+    }
 
-        // Top-right corner (end of top edge)
-        let p = point_on_rect_perimeter(rect, 100.0);
-        assert!((p.x - 110.0).abs() < 1e-5 && (p.y - 20.0).abs() < 1e-5);
+    #[test]
+    fn proposal_overlay_style_uses_amber_for_low_confidence() {
+        let style = proposal_overlay_style(0.64, false);
 
-        // Bottom-right corner (end of right edge)
-        let p = point_on_rect_perimeter(rect, 150.0);
-        assert!((p.x - 110.0).abs() < 1e-5 && (p.y - 70.0).abs() < 1e-5);
+        assert_color_close(style.border, iced::Color::from_rgb(0.76, 0.49, 0.04));
+        assert_color_close(style.fill, iced::Color::from_rgba(0.88, 0.64, 0.0, 0.20));
+        assert_color_close(style.badge, iced::Color::from_rgb(0.76, 0.49, 0.04));
+    }
 
-        // Bottom-left corner (end of bottom edge)
-        let p = point_on_rect_perimeter(rect, 250.0);
-        assert!((p.x - 10.0).abs() < 1e-5 && (p.y - 70.0).abs() < 1e-5);
+    #[test]
+    fn proposal_overlay_style_uses_blue_for_selected_candidate() {
+        let style = proposal_overlay_style(0.64, true);
 
-        // Top edge midpoint
-        let p = point_on_rect_perimeter(rect, 50.0);
-        assert!((p.x - 60.0).abs() < 1e-5 && (p.y - 20.0).abs() < 1e-5);
-
-        // Right edge midpoint
-        let p = point_on_rect_perimeter(rect, 125.0);
-        assert!((p.x - 110.0).abs() < 1e-5 && (p.y - 45.0).abs() < 1e-5);
-
-        // Bottom edge midpoint
-        let p = point_on_rect_perimeter(rect, 200.0);
-        assert!((p.x - 60.0).abs() < 1e-5 && (p.y - 70.0).abs() < 1e-5);
-
-        // Left edge midpoint
-        let p = point_on_rect_perimeter(rect, 275.0);
-        assert!((p.x - 10.0).abs() < 1e-5 && (p.y - 45.0).abs() < 1e-5);
-
-        // Wraparound: dist == perimeter should equal dist == 0
-        let p_wrap = point_on_rect_perimeter(rect, peri);
-        let p_zero = point_on_rect_perimeter(rect, 0.0);
-        assert!((p_wrap.x - p_zero.x).abs() < 1e-5);
-        assert!((p_wrap.y - p_zero.y).abs() < 1e-5);
+        assert_color_close(style.border, iced::Color::from_rgb(0.13, 0.40, 1.0));
+        assert_color_close(style.badge, iced::Color::from_rgb(0.13, 0.40, 1.0));
+        assert_eq!(style.border_width, 2.5);
     }
 
     #[test]

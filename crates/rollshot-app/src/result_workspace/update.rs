@@ -788,6 +788,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         workbench.pending_proposal = Some(ready.proposal.clone());
                         let ids: Vec<_> = ready.proposal.candidates.iter().map(|c| c.id).collect();
                         workbench.review = super::workbench::CandidateReview::from_candidates(&ids);
+                        workbench.selected_candidate = None;
                         // Fresh proposal: all candidates pending, no corrections yet.
                         workbench.corrections_non_empty = false;
                         workbench.pending_draft = Some(super::workbench::PendingDraft {
@@ -1086,8 +1087,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     workbench.pending_run = Some(params);
                     Task::none()
                 }
+                super::workbench::WorkbenchMessage::DiscardCandidates => {
+                    workbench.pending_proposal = None;
+                    workbench.review = super::workbench::CandidateReview::default();
+                    workbench.selected_candidate = None;
+                    workbench.corrections_non_empty = false;
+                    Task::none()
+                }
                 super::workbench::WorkbenchMessage::DiscardDraft
-                | super::workbench::WorkbenchMessage::DiscardCandidates
                 | super::workbench::WorkbenchMessage::ToggleAdvancedDetails
                 | super::workbench::WorkbenchMessage::OpenProviderSettings
                 | super::workbench::WorkbenchMessage::DisclosureRequested(_) => Task::none(),

@@ -107,7 +107,6 @@ fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
 pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
     let original = state.original_size();
 
-    let toolbar = toolbar(state);
     let disclosure = retained_original_disclosure(state);
     let message_area = message_row(state);
 
@@ -124,14 +123,24 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
             } else {
                 canvas_area
             };
-            column![toolbar, disclosure, message_area, workspace_row, status]
-                .spacing(8)
-                .padding(8)
-                .into()
+            column![
+                toolbar(state),
+                disclosure,
+                message_area,
+                workspace_row,
+                status
+            ]
+            .spacing(8)
+            .padding(8)
+            .into()
         }
-        super::workbench::WorkspaceMode::Workbench(_) => {
+        super::workbench::WorkspaceMode::Workbench(_) => column![
+            toolbar(state),
             super::workbench::view::workbench_view(state)
-        }
+        ]
+        .spacing(8)
+        .padding(8)
+        .into(),
     };
 
     let layout: Element<'_, Message> = if let Some(prompt) = &state.pending_discard {

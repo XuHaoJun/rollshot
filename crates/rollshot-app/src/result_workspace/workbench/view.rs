@@ -11,48 +11,18 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
     };
 
     let canvas_area = super::super::view::canvas_view(state, state.original_size());
-
-    let bar = review_bar(wb);
-    let list = candidate_list(wb);
-    let composer = composer(wb);
-
-    let right_pane = scrollable(column![list, composer].spacing(8))
-        .width(Length::Fixed(280.0))
+    let main = row![canvas_area, smart_redaction_panel(wb, &state.message)]
+        .spacing(8)
         .height(Length::Fill);
 
-    // Activity drawer: a left pane of streamed ActivityEntry's (spec §6.1).
-    // The pane slot is always child 0 of the row so the canvas stays at a
-    // stable tree index (iced tracks widgets by position; reordering would
-    // reset the canvas scrollable's viewport). When there is nothing to show
-    // it collapses to a zero-width space, keeping run-existing full-canvas.
-    let show_activity = wb.run_state.is_running() || !wb.live_activity.is_empty();
-    let activity: Element<'a, Message> = if show_activity {
-        scrollable(activity_column(wb))
-            .width(Length::Fixed(260.0))
-            .height(Length::Fill)
-            .into()
-    } else {
-        Space::new().width(Length::Fixed(0.0)).into()
-    };
-    let main = row![activity, canvas_area, right_pane]
-        .spacing(4)
+    let content = column![main, review_bar(wb)]
+        .spacing(8)
         .height(Length::Fill);
-
-    let mut content = column![run_status_row(wb), bar].spacing(8).padding(8);
-
-    if let Some(banner) = error_message_banner(wb, &state.message) {
-        content = content.push(banner);
-    }
-    if let Some(banner) = result_state_banner(wb) {
-        content = content.push(banner);
-    }
-    content = content.push(main);
 
     if wb.disclosure_pending {
         let modal = if wb.pending_run.is_some() {
             disclosure_modal(wb)
         } else {
-            // ImStart sets disclosure_pending without pending_run (SP6 stub).
             let evidence = match wb.pending_proposal.as_ref() {
                 Some(proposal) => super::review::assemble_correction_evidence(proposal, &wb.review),
                 None => super::review::CorrectionEvidence::default(),
@@ -65,34 +35,79 @@ pub fn workbench_view<'a>(state: &'a ResultWorkspace) -> Element<'a, Message> {
     }
 }
 
-fn run_status_row<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
-    use super::RunState;
-    // While Running: provider/model label + Cancel (spec §6.3, plan addendum F
-    // — non-deferrable; without this a hung run is unstoppable until the 30s
-    // wall-time budget elapses). On Terminal: the terminal-state label. The
-    // CancelRun handler already existed; only the UI affordance was missing.
-    let (status, cancel) = match &wb.run_state {
-        RunState::Running { .. } => (
-            text(format!(
-                "Running: {}",
-                super::provider_config::provider_model_label(&wb.provider_config)
-            ))
-            .size(12),
-            Some(button(text("Cancel")).on_press(Message::Workbench(WorkbenchMessage::CancelRun))),
-        ),
-        RunState::Terminal(terminal) => (
-            text(super::state::terminal_state_label(terminal)).size(12),
-            None,
-        ),
-        RunState::Idle => (text("Ready").size(12), None),
+fn smart_redaction_panel<'a>(
+    wb: &'a WorkbenchState,
+    inline_message: &'a Option<super::super::InlineMessage>,
+) -> Element<'a, Message> {
+    let header = panel_header(wb);
+    let activity = scrollable(activity_column(wb))
+        .height(Length::Fill)
+        .width(Length::Fill);
+    let composer = container(composer(wb)).padding(8).width(Length::Fill);
+
+    let mut content = column![header].height(Length::Fill);
+    if let Some(error) = error_message_banner(wb, inline_message) {
+        content = content.push(error);
+    }
+    if let Some(result_state) = result_state_banner(wb) {
+        content = content.push(result_state);
+    }
+    content = content.push(activity).push(composer);
+
+    container(content)
+        .width(Length::Fixed(340.0))
+        .height(Length::Fill)
+        .style(|_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgb(
+                0.98, 0.98, 0.99,
+            ))),
+            border: iced::Border {
+                color: iced::Color::from_rgb(0.88, 0.88, 0.90),
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn panel_header<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
+    let title = row![
+        text("Smart Redaction").size(14),
+        text(super::provider_config::provider_model_label(
+            &wb.provider_config
+        ))
+        .size(10),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let status = run_status_text(wb);
+    let cancel = if wb.run_state.is_running() {
+        Some(button(text("Cancel")).on_press(Message::Workbench(WorkbenchMessage::CancelRun)))
+    } else {
+        None
     };
-    let mut r = row![status, Space::new().width(Length::Fill)]
+
+    let mut status_row = row![text(status).size(11), Space::new().width(Length::Fill)]
         .spacing(8)
         .align_y(Alignment::Center);
-    if let Some(btn) = cancel {
-        r = r.push(btn);
+    if let Some(cancel) = cancel {
+        status_row = status_row.push(cancel);
     }
-    container(r).padding(4).width(Length::Fill).into()
+
+    container(column![title, status_row].spacing(6))
+        .padding(12)
+        .width(Length::Fill)
+        .into()
+}
+
+fn run_status_text(wb: &WorkbenchState) -> String {
+    match &wb.run_state {
+        super::RunState::Running { .. } => "Running".into(),
+        super::RunState::Terminal(terminal) => super::state::terminal_state_label(terminal),
+        super::RunState::Idle => "Ready".into(),
+    }
 }
 
 fn activity_column<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
@@ -158,86 +173,146 @@ fn activity_entry_view<'a>(entry: &'a super::state::ActivityEntry) -> Element<'a
 
 fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     let proposal = wb.pending_proposal.as_ref();
-    let total = proposal.map_or(0, |p| p.candidates.len());
-    let rejected = wb.review.rejected_count();
-    let apply = total.saturating_sub(rejected);
-    let warnings = proposal.map_or(0, |p| super::state::CandidateReview::warning_count(p, 0.75));
+    let summary = super::state::candidate_review_summary(proposal, &wb.review);
 
-    let summary = if total > 0 {
-        format!("Apply {apply} redactions, skip {rejected} rejected · {warnings} warnings")
+    let summary_text = if summary.total > 0 {
+        format!(
+            "{} candidates · {} to apply · {} rejected · {} low confidence",
+            summary.total, summary.apply, summary.rejected, summary.warnings
+        )
     } else {
         "No candidates".to_string()
     };
 
-    let pending_warning = if total > 0 {
-        text(format!(
-            "{total} proposed redactions are preview-only. Apply before safe copy/save."
+    let mut chips = row![].spacing(8).align_y(Alignment::Center);
+    if let Some(proposal) = proposal {
+        for item in
+            super::state::candidate_review_items(proposal, &wb.review, wb.selected_candidate)
+        {
+            chips = chips.push(candidate_chip(item));
+        }
+    }
+    let chips = scrollable(chips)
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new(),
         ))
-        .size(11)
-    } else {
-        text("")
-    };
+        .width(Length::Fill);
 
-    // Mirror the reducer guard: needs an active revision to revise *from*, a
-    // proposal, and at least one correction. Otherwise the click is a no-op.
     let revise_enabled =
         wb.active_revision.is_some() && wb.pending_proposal.is_some() && wb.corrections_non_empty;
 
-    let actions = row![
-        text(summary),
-        Space::new().width(Length::Fill),
-        button(text("Ask agent to revise")).on_press_maybe(
-            revise_enabled.then_some(Message::Workbench(WorkbenchMessage::AskAgentToRevise)),
-        ),
-        button(text(format!("Apply {apply} redactions"))).on_press_maybe(if apply > 0 {
-            Some(Message::Workbench(WorkbenchMessage::ApplyCandidates))
+    let selected_reject = wb.selected_candidate.map(|id| {
+        if super::state::is_candidate_rejected(&wb.review, id) {
+            button(text("Undo reject")).on_press(Message::Workbench(
+                WorkbenchMessage::CandidateUnrejected(id),
+            ))
         } else {
-            None
-        }),
-        button(text("Next warning")).on_press_maybe(if warnings > 0 {
-            Some(Message::Workbench(WorkbenchMessage::NextWarning))
-        } else {
-            None
-        }),
+            button(text("Reject"))
+                .on_press(Message::Workbench(WorkbenchMessage::CandidateDeleted(id)))
+        }
+    });
+
+    let mut actions = row![].spacing(8).align_y(Alignment::Center);
+    if let Some(reject) = selected_reject {
+        actions = actions.push(reject);
+    }
+    if proposal.is_some() {
+        actions = actions.push(
+            button(text("Discard all"))
+                .on_press(Message::Workbench(WorkbenchMessage::DiscardCandidates)),
+        );
+    }
+    actions = actions.push(button(text("Revise")).on_press_maybe(
+        revise_enabled.then_some(Message::Workbench(WorkbenchMessage::AskAgentToRevise)),
+    ));
+    actions = actions.push(
+        button(text(format!("Apply {} redactions", summary.apply)))
+            .style(button::primary)
+            .on_press_maybe(if summary.apply > 0 {
+                Some(Message::Workbench(WorkbenchMessage::ApplyCandidates))
+            } else {
+                None
+            }),
+    );
+
+    let mut bar = row![
+        column![text(summary_text).size(13), chips]
+            .spacing(6)
+            .width(Length::Fill),
+        actions,
     ]
     .spacing(12)
     .align_y(Alignment::Center);
 
-    container(column![pending_warning, actions].spacing(4))
-        .padding(8)
+    if summary.warnings > 0 {
+        bar = bar.push(
+            button(text("Next warning"))
+                .on_press(Message::Workbench(WorkbenchMessage::NextWarning)),
+        );
+    }
+
+    container(bar)
+        .padding(10)
         .width(Length::Fill)
+        .height(Length::Fixed(88.0))
         .into()
 }
 
-fn candidate_list<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
-    use super::state::CandidateReviewState;
-    let Some(proposal) = wb.pending_proposal.as_ref() else {
-        return text("No candidates").into();
+fn candidate_chip<'a>(item: super::state::CandidateReviewItem) -> Element<'a, Message> {
+    let label = if item.low_confidence && !item.rejected {
+        format!(
+            "{} ⚠ {} {}%",
+            item.sequence, item.label, item.confidence_percent
+        )
+    } else {
+        format!(
+            "{} {} {}%",
+            item.sequence, item.label, item.confidence_percent
+        )
     };
-    let mut col = column![].spacing(4).padding(8);
-    for cand in &proposal.candidates {
-        let is_rejected = matches!(
-            wb.review.per_candidate.get(&cand.id),
-            Some(CandidateReviewState::Rejected)
-        );
-        let r = row![
-            text(format!("{} {:.0}%", cand.label, cand.confidence * 100.0)).size(11),
-            Space::new().width(Length::Fill),
-            button(text("Jump")).on_press(Message::Workbench(WorkbenchMessage::CandidateSelected(
-                cand.id
-            ))),
-            button(text(if is_rejected { "Undo" } else { "Reject" })).on_press(Message::Workbench(
-                if is_rejected {
-                    WorkbenchMessage::CandidateUnrejected(cand.id)
-                } else {
-                    WorkbenchMessage::CandidateDeleted(cand.id)
-                }
-            )),
-        ]
-        .spacing(8);
-        col = col.push(r);
-    }
-    scrollable(col).height(Length::Fill).into()
+
+    let border = if item.rejected {
+        iced::Color::from_rgb(0.82, 0.82, 0.84)
+    } else {
+        let (r, g, b) = super::state::confidence_accent(item.low_confidence, item.selected);
+        iced::Color::from_rgb(r, g, b)
+    };
+    let background = if item.rejected {
+        iced::Color::from_rgb(0.96, 0.96, 0.97)
+    } else if item.low_confidence {
+        iced::Color::from_rgb(1.0, 0.96, 0.86)
+    } else {
+        iced::Color::from_rgb(0.94, 0.98, 0.95)
+    };
+
+    let chip = container(text(label).size(11))
+        .padding([4, 9])
+        .style(move |_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(background)),
+            border: iced::Border {
+                color: border,
+                width: if item.selected { 2.0 } else { 1.0 },
+                radius: 12.0.into(),
+            },
+            text_color: Some(if item.rejected {
+                iced::Color::from_rgb(0.55, 0.55, 0.58)
+            } else {
+                iced::Color::from_rgb(0.11, 0.11, 0.12)
+            }),
+            ..Default::default()
+        });
+
+    button(chip)
+        .padding(0)
+        .style(|_theme, _status| iced::widget::button::Style {
+            background: None,
+            text_color: iced::Color::from_rgb(0.11, 0.11, 0.12),
+            ..Default::default()
+        })
+        .on_press(Message::Workbench(WorkbenchMessage::CandidateSelected(
+            item.id,
+        )))
+        .into()
 }
 
 fn composer<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {

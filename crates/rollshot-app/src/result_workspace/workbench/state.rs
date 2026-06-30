@@ -148,6 +148,108 @@ pub fn proposed_edit_bounds(edit: &ProposedEdit) -> Option<ImageRect> {
     }
 }
 
+pub const LOW_CONFIDENCE_THRESHOLD: f32 = 0.75;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateReviewItem {
+    pub id: CandidateId,
+    pub sequence: usize,
+    pub label: String,
+    pub confidence_percent: u8,
+    pub low_confidence: bool,
+    pub rejected: bool,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CandidateReviewSummary {
+    pub total: usize,
+    pub apply: usize,
+    pub rejected: usize,
+    pub warnings: usize,
+}
+
+pub fn confidence_percent(confidence: f32) -> u8 {
+    (confidence.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+pub fn is_low_confidence(confidence: f32) -> bool {
+    confidence < LOW_CONFIDENCE_THRESHOLD
+}
+
+/// Shared accent (border/badge) color for confidence overlays AND review-bar
+/// chips, so the canvas boxes and the bottom chips can never drift apart
+/// (critique requirement: chips numbered/colored to match the canvas boxes).
+/// RGB only — no iced dependency in this module; call sites wrap in
+/// `iced::Color::from_rgb`. `selected` (blue) wins over confidence; otherwise
+/// amber when low-confidence, else green. The rejected-grey override is a
+/// per-surface concern and stays in the chip.
+pub fn confidence_accent(low_confidence: bool, selected: bool) -> (f32, f32, f32) {
+    if selected {
+        (0.13, 0.40, 1.0)
+    } else if low_confidence {
+        (0.76, 0.49, 0.04)
+    } else {
+        (0.12, 0.55, 0.36)
+    }
+}
+
+pub fn is_candidate_rejected(review: &CandidateReview, id: CandidateId) -> bool {
+    matches!(
+        review.per_candidate.get(&id),
+        Some(CandidateReviewState::Rejected)
+    )
+}
+
+pub fn candidate_review_items(
+    proposal: &EditProposal,
+    review: &CandidateReview,
+    selected: Option<CandidateId>,
+) -> Vec<CandidateReviewItem> {
+    proposal
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| CandidateReviewItem {
+            id: candidate.id,
+            sequence: index + 1,
+            label: candidate.label.clone(),
+            confidence_percent: confidence_percent(candidate.confidence),
+            low_confidence: is_low_confidence(candidate.confidence),
+            rejected: is_candidate_rejected(review, candidate.id),
+            selected: selected == Some(candidate.id),
+        })
+        .collect()
+}
+
+pub fn candidate_review_summary(
+    proposal: Option<&EditProposal>,
+    review: &CandidateReview,
+) -> CandidateReviewSummary {
+    let Some(proposal) = proposal else {
+        return CandidateReviewSummary::default();
+    };
+    let total = proposal.candidates.len();
+    let rejected = review.rejected_count();
+    // Warnings count low-confidence candidates that WILL apply — a rejected
+    // low-confidence candidate is already handled and must not inflate the
+    // count or be a "Next warning" jump target. (Note: `CandidateReview::
+    // warning_count` counts all sub-threshold candidates and is intentionally
+    // left unchanged — it is still used by `apply_skip_summary` and the
+    // empty/all-low-confidence result-state messaging.)
+    let warnings = proposal
+        .candidates
+        .iter()
+        .filter(|c| is_low_confidence(c.confidence) && !is_candidate_rejected(review, c.id))
+        .count();
+    CandidateReviewSummary {
+        total,
+        apply: total.saturating_sub(rejected),
+        rejected,
+        warnings,
+    }
+}
+
 impl CandidateReview {
     pub fn from_candidates(candidates: &[CandidateId]) -> Self {
         Self {
@@ -476,6 +578,150 @@ mod tests {
                 if tool == "edit_source" && lines.iter().any(|line| line == "+ new")
         ));
         assert!(event_to_activity_entry(&RunEvent::TurnComplete).is_none());
+    }
+
+    #[test]
+    fn candidate_review_items_number_and_classify_candidates() {
+        use rollshot_edit_proposal::{
+            ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate, ProposedEdit,
+            Provenance, ProvenanceSource,
+        };
+
+        let proposal = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![
+                ProposedCandidate {
+                    id: cid(10),
+                    edit: ProposedEdit::AddRedaction {
+                        bounds: rect(0.0, 0.0),
+                    },
+                    confidence: 0.92,
+                    label: "url bar".into(),
+                    rationale: None,
+                    provenance: Provenance {
+                        source: ProvenanceSource::Manual,
+                    },
+                },
+                ProposedCandidate {
+                    id: cid(20),
+                    edit: ProposedEdit::AddRedaction {
+                        bounds: rect(10.0, 10.0),
+                    },
+                    confidence: 0.64,
+                    label: "name".into(),
+                    rationale: None,
+                    provenance: Provenance {
+                        source: ProvenanceSource::Manual,
+                    },
+                },
+            ],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.92, 0.64]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        };
+        let mut review = CandidateReview::from_candidates(&[cid(10), cid(20)]);
+        review.mark_rejected(cid(20));
+
+        let items = candidate_review_items(&proposal, &review, Some(cid(10)));
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].sequence, 1);
+        assert_eq!(items[0].id, cid(10));
+        assert_eq!(items[0].label, "url bar");
+        assert_eq!(items[0].confidence_percent, 92);
+        assert!(!items[0].low_confidence);
+        assert!(!items[0].rejected);
+        assert!(items[0].selected);
+
+        assert_eq!(items[1].sequence, 2);
+        assert_eq!(items[1].id, cid(20));
+        assert_eq!(items[1].confidence_percent, 64);
+        assert!(items[1].low_confidence);
+        assert!(items[1].rejected);
+        assert!(!items[1].selected);
+    }
+
+    #[test]
+    fn candidate_review_summary_counts_apply_reject_and_warnings() {
+        use rollshot_edit_proposal::{
+            ConfidenceSummary, EditProposal, ProposalId, ProposedCandidate, ProposedEdit,
+            Provenance, ProvenanceSource,
+        };
+
+        // cid(1): high-confidence, will apply. cid(2): low-confidence AND rejected
+        // — must NOT count as a warning (it will not apply). cid(3): low-confidence
+        // and still pending — the only will-apply warning.
+        let proposal = EditProposal {
+            id: ProposalId(1),
+            base_document_state_id: 0,
+            candidates: vec![
+                ProposedCandidate {
+                    id: cid(1),
+                    edit: ProposedEdit::AddRedaction {
+                        bounds: rect(0.0, 0.0),
+                    },
+                    confidence: 0.91,
+                    label: "email".into(),
+                    rationale: None,
+                    provenance: Provenance {
+                        source: ProvenanceSource::Manual,
+                    },
+                },
+                ProposedCandidate {
+                    id: cid(2),
+                    edit: ProposedEdit::AddRedaction {
+                        bounds: rect(10.0, 10.0),
+                    },
+                    confidence: 0.58,
+                    label: "account".into(),
+                    rationale: None,
+                    provenance: Provenance {
+                        source: ProvenanceSource::Manual,
+                    },
+                },
+                ProposedCandidate {
+                    id: cid(3),
+                    edit: ProposedEdit::AddRedaction {
+                        bounds: rect(20.0, 20.0),
+                    },
+                    confidence: 0.60,
+                    label: "phone".into(),
+                    rationale: None,
+                    provenance: Provenance {
+                        source: ProvenanceSource::Manual,
+                    },
+                },
+            ],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.91, 0.58, 0.60]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        };
+        let mut review = CandidateReview::from_candidates(&[cid(1), cid(2), cid(3)]);
+        review.mark_rejected(cid(2));
+
+        let summary = candidate_review_summary(Some(&proposal), &review);
+
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.apply, 2);
+        assert_eq!(summary.rejected, 1);
+        // Only cid(3): low-confidence and still pending. cid(2) is low-confidence
+        // but rejected, so it is excluded from the will-apply warning count.
+        assert_eq!(summary.warnings, 1);
+    }
+
+    #[test]
+    fn confidence_accent_is_shared_by_overlays_and_chips() {
+        // Single source of truth so canvas badges and review-bar chips never drift
+        // (critique requirement: chips numbered/colored to match the canvas boxes).
+        assert_eq!(confidence_accent(false, false), (0.12, 0.55, 0.36)); // green
+        assert_eq!(confidence_accent(true, false), (0.76, 0.49, 0.04)); // amber
+        assert_eq!(confidence_accent(true, true), (0.13, 0.40, 1.0)); // selected → blue
+        assert_eq!(confidence_accent(false, true), (0.13, 0.40, 1.0)); // selected wins
     }
 
     #[test]
