@@ -1972,6 +1972,7 @@ mod reducer_tests {
         use rollshot_agent::runtime::UsageSnapshot;
 
         let mut ws = ws_with_workbench();
+        wb_mut(&mut ws).selected_candidate = Some(CandidateId(99));
         let p = proposal(vec![
             candidate(1, rect(10.0, 10.0, 50.0, 50.0)),
             candidate(2, rect(100.0, 100.0, 30.0, 30.0)),
@@ -2015,6 +2016,10 @@ mod reducer_tests {
         assert_eq!(state.review.per_candidate.len(), 2);
         assert!(state.pending_draft.is_some(), "draft populated");
         assert_eq!(state.pending_draft.as_ref().unwrap().assistant_text, "done");
+        assert!(
+            state.selected_candidate.is_none(),
+            "fresh proposal clears stale selection"
+        );
         assert!(matches!(
             state.run_state,
             super::super::RunState::Terminal(_)
@@ -2040,6 +2045,36 @@ mod reducer_tests {
             ws.document.image.annotations().len(),
             1,
             "annotation committed"
+        );
+    }
+
+    #[test]
+    fn discard_candidates_clears_pending_review_state_without_applying() {
+        let mut ws = ws_with_workbench();
+        let p = proposal(vec![candidate(1, rect(10.0, 10.0, 50.0, 50.0))]);
+        let review = super::super::CandidateReview::from_candidates(&[CandidateId(1)]);
+        wb_mut(&mut ws).pending_proposal = Some(p);
+        wb_mut(&mut ws).review = review;
+        wb_mut(&mut ws).selected_candidate = Some(CandidateId(1));
+        wb_mut(&mut ws).corrections_non_empty = true;
+
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::DiscardCandidates),
+        );
+
+        let state = wb(&ws);
+        assert!(state.pending_proposal.is_none(), "proposal cleared");
+        assert!(state.review.is_empty(), "review cleared");
+        assert!(state.selected_candidate.is_none(), "selection cleared");
+        assert!(
+            !state.corrections_non_empty,
+            "revision evidence cache cleared"
+        );
+        assert_eq!(
+            ws.document.image.annotations().len(),
+            0,
+            "discard does not apply annotations"
         );
     }
 
