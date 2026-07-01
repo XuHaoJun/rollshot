@@ -6,6 +6,8 @@ use iced::advanced::{mouse, Clipboard, Shell};
 use iced::{alignment, Color, Element, Event, Length, Point, Rectangle, Size};
 use rollshot_image_document::{ImagePoint, ImageRect};
 
+use crate::diagnostics::TARGET_OCR_TEXT;
+
 use super::ocr_text::{OcrSelection, OcrTextDocument, TextCursor};
 use super::update::Message;
 
@@ -106,6 +108,19 @@ where
                     }),
                 ));
             }
+            tracing::debug!(
+                target: TARGET_OCR_TEXT,
+                scale = self.scale,
+                layer_width = self.width,
+                layer_height = self.height,
+                visible_x = self.visible.x,
+                visible_y = self.visible.y,
+                visible_width = self.visible.width,
+                visible_height = self.visible.height,
+                document_items = document.visible_items().len(),
+                laid_out_items = state.paragraphs.len(),
+                "ocr layer layout"
+            );
         }
         layout::Node::new(Size::new(self.width, self.height))
     }
@@ -128,27 +143,75 @@ where
 
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale)
-                else {
+                let bounds = layout.bounds();
+                let Some(point) = image_point_from_cursor(cursor, bounds, self.scale) else {
+                    log_cursor_mapping_miss("press", cursor, bounds, self.scale, self.visible);
                     return;
                 };
-                if let Some(hit) = hit_test(document, &state.paragraphs, self.scale, point) {
+                if let Some(hit) = hit_test(
+                    document,
+                    &state.paragraphs,
+                    self.scale,
+                    point,
+                    Some("press"),
+                ) {
+                    log_cursor_mapping(
+                        "press",
+                        cursor,
+                        bounds,
+                        self.scale,
+                        self.visible,
+                        point,
+                        Some(hit),
+                    );
                     state.dragging = true;
                     shell.publish(Message::OcrSelectionStarted(hit).into());
                     shell.capture_event();
+                } else {
+                    log_cursor_mapping(
+                        "press",
+                        cursor,
+                        bounds,
+                        self.scale,
+                        self.visible,
+                        point,
+                        None,
+                    );
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if !state.dragging {
                     return;
                 }
-                let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale)
-                else {
+                let bounds = layout.bounds();
+                let Some(point) = image_point_from_cursor(cursor, bounds, self.scale) else {
+                    log_cursor_mapping_miss("drag", cursor, bounds, self.scale, self.visible);
                     shell.capture_event();
                     return;
                 };
-                if let Some(hit) = hit_test(document, &state.paragraphs, self.scale, point) {
+                if let Some(hit) =
+                    hit_test(document, &state.paragraphs, self.scale, point, Some("drag"))
+                {
+                    log_cursor_mapping(
+                        "drag",
+                        cursor,
+                        bounds,
+                        self.scale,
+                        self.visible,
+                        point,
+                        Some(hit),
+                    );
                     shell.publish(Message::OcrSelectionChanged(hit).into());
+                } else {
+                    log_cursor_mapping(
+                        "drag",
+                        cursor,
+                        bounds,
+                        self.scale,
+                        self.visible,
+                        point,
+                        None,
+                    );
                 }
                 shell.capture_event();
             }
@@ -157,13 +220,39 @@ where
                     return;
                 }
                 state.dragging = false;
-                let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale)
-                else {
+                let bounds = layout.bounds();
+                let Some(point) = image_point_from_cursor(cursor, bounds, self.scale) else {
+                    log_cursor_mapping_miss("release", cursor, bounds, self.scale, self.visible);
                     shell.capture_event();
                     return;
                 };
-                if let Some(hit) = hit_test(document, &state.paragraphs, self.scale, point) {
+                if let Some(hit) = hit_test(
+                    document,
+                    &state.paragraphs,
+                    self.scale,
+                    point,
+                    Some("release"),
+                ) {
+                    log_cursor_mapping(
+                        "release",
+                        cursor,
+                        bounds,
+                        self.scale,
+                        self.visible,
+                        point,
+                        Some(hit),
+                    );
                     shell.publish(Message::OcrSelectionFinished(hit).into());
+                } else {
+                    log_cursor_mapping(
+                        "release",
+                        cursor,
+                        bounds,
+                        self.scale,
+                        self.visible,
+                        point,
+                        None,
+                    );
                 }
                 shell.capture_event();
             }
@@ -193,7 +282,7 @@ where
             self.selection,
             self.scale,
             origin,
-            state.paragraphs.iter().map(|(index, _)| *index),
+            &state.paragraphs,
         );
 
         for (index, paragraph) in &state.paragraphs {
@@ -231,7 +320,7 @@ where
             return mouse::Interaction::default();
         };
         let state = tree.state.downcast_ref::<State<Renderer>>();
-        if hit_test(document, &state.paragraphs, self.scale, point).is_some() {
+        if hit_test(document, &state.paragraphs, self.scale, point, None).is_some() {
             mouse::Interaction::Text
         } else {
             mouse::Interaction::default()
@@ -263,11 +352,73 @@ fn image_point_from_cursor(
     })
 }
 
+fn log_cursor_mapping(
+    phase: &'static str,
+    cursor: mouse::Cursor,
+    bounds: Rectangle,
+    scale: f32,
+    visible: ImageRect,
+    point: ImagePoint,
+    hit: Option<TextCursor>,
+) {
+    let screen = cursor.position();
+    let local = cursor.position_in(bounds);
+    tracing::debug!(
+        target: TARGET_OCR_TEXT,
+        phase,
+        scale,
+        screen_x = screen.map(|p| p.x),
+        screen_y = screen.map(|p| p.y),
+        layer_x = bounds.x,
+        layer_y = bounds.y,
+        layer_width = bounds.width,
+        layer_height = bounds.height,
+        local_x = local.map(|p| p.x),
+        local_y = local.map(|p| p.y),
+        image_x = point.x,
+        image_y = point.y,
+        visible_x = visible.x,
+        visible_y = visible.y,
+        visible_width = visible.width,
+        visible_height = visible.height,
+        hit_item_index = hit.map(|cursor| cursor.item_index),
+        hit_char_index = hit.map(|cursor| cursor.char_index),
+        "ocr cursor mapping"
+    );
+}
+
+fn log_cursor_mapping_miss(
+    phase: &'static str,
+    cursor: mouse::Cursor,
+    bounds: Rectangle,
+    scale: f32,
+    visible: ImageRect,
+) {
+    let screen = cursor.position();
+    tracing::debug!(
+        target: TARGET_OCR_TEXT,
+        phase,
+        scale,
+        screen_x = screen.map(|p| p.x),
+        screen_y = screen.map(|p| p.y),
+        layer_x = bounds.x,
+        layer_y = bounds.y,
+        layer_width = bounds.width,
+        layer_height = bounds.height,
+        visible_x = visible.x,
+        visible_y = visible.y,
+        visible_width = visible.width,
+        visible_height = visible.height,
+        "ocr cursor outside layer"
+    );
+}
+
 fn hit_test<ParagraphT>(
     document: &OcrTextDocument,
     paragraphs: &[(usize, ParagraphT)],
     scale: f32,
     point: ImagePoint,
+    phase: Option<&'static str>,
 ) -> Option<TextCursor>
 where
     ParagraphT: Paragraph<Font = iced::Font>,
@@ -285,7 +436,35 @@ where
             .hit_test(local)
             .map(|hit| super::ocr_text::char_index_for_byte_offset(&item.text, hit.cursor()))
             .unwrap_or_else(|| super::ocr_text::character_index_for_axis_aligned_item(item, point));
+        if let Some(phase) = phase {
+            tracing::trace!(
+                target: TARGET_OCR_TEXT,
+                phase,
+                item_index = *index,
+                text_chars = item.text.chars().count(),
+                item_x = item.bounds.x,
+                item_y = item.bounds.y,
+                item_width = item.bounds.width,
+                item_height = item.bounds.height,
+                point_x = point.x,
+                point_y = point.y,
+                paragraph_local_x = local.x,
+                paragraph_local_y = local.y,
+                char_index,
+                "ocr hit test matched item"
+            );
+        }
         return Some(TextCursor::new(*index, char_index));
+    }
+    if let Some(phase) = phase {
+        tracing::trace!(
+            target: TARGET_OCR_TEXT,
+            phase,
+            point_x = point.x,
+            point_y = point.y,
+            paragraphs = paragraphs.len(),
+            "ocr hit test missed"
+        );
     }
     None
 }
@@ -296,9 +475,9 @@ fn draw_selection<Renderer>(
     selection: Option<OcrSelection>,
     scale: f32,
     origin: Point,
-    visible_indices: impl IntoIterator<Item = usize>,
+    paragraphs: &[(usize, Renderer::Paragraph)],
 ) where
-    Renderer: renderer::Renderer,
+    Renderer: renderer::Renderer + text::Renderer<Font = iced::Font>,
 {
     let Some(selection) = selection else {
         return;
@@ -310,33 +489,71 @@ fn draw_selection<Renderer>(
         b: 0.95,
         a: 0.28,
     };
-    for index in visible_indices {
-        let item = &document.visible_items()[index];
-        if index < start.item_index || index > end.item_index {
+    for (index, paragraph) in paragraphs {
+        let item = &document.visible_items()[*index];
+        if *index < start.item_index || *index > end.item_index {
             continue;
         }
         let chars = item.text.chars().count().max(1);
-        let start_frac = if index == start.item_index {
-            start.char_index as f32 / chars as f32
+        let start_char = if *index == start.item_index {
+            start.char_index
         } else {
-            0.0
+            0
         };
-        let end_frac = if index == end.item_index {
-            end.char_index as f32 / chars as f32
+        let end_char = if *index == end.item_index {
+            end.char_index
         } else {
-            1.0
+            item.text.chars().count()
         };
+        let start_frac = start_char as f32 / chars as f32;
+        let end_frac = end_char as f32 / chars as f32;
         if end_frac <= start_frac {
             continue;
         }
-        let x = item.bounds.x + item.bounds.width * start_frac;
-        let w = item.bounds.width * (end_frac - start_frac);
+        let fallback_start_x = item.bounds.width * start_frac * scale;
+        let fallback_end_x = item.bounds.width * end_frac * scale;
+        let start_x = paragraph
+            .grapheme_position(0, start_char)
+            .map(|point| point.x)
+            .unwrap_or(fallback_start_x);
+        let end_x = paragraph
+            .grapheme_position(0, end_char)
+            .map(|point| point.x)
+            .unwrap_or(fallback_end_x);
+        let width = (end_x - start_x).max(0.0);
+        if width <= 0.0 {
+            continue;
+        }
+        tracing::trace!(
+            target: TARGET_OCR_TEXT,
+            item_index = *index,
+            scale,
+            origin_x = origin.x,
+            origin_y = origin.y,
+            item_x = item.bounds.x,
+            item_y = item.bounds.y,
+            item_width = item.bounds.width,
+            item_height = item.bounds.height,
+            start_char,
+            end_char,
+            start_frac,
+            end_frac,
+            paragraph_start_x = start_x,
+            paragraph_end_x = end_x,
+            fallback_start_x,
+            fallback_end_x,
+            highlight_x = origin.x + item.bounds.x * scale + start_x,
+            highlight_y = origin.y + item.bounds.y * scale,
+            highlight_width = width,
+            highlight_height = item.bounds.height * scale,
+            "ocr selection highlight"
+        );
         renderer.fill_quad(
             renderer::Quad {
                 bounds: Rectangle {
-                    x: origin.x + x * scale,
+                    x: origin.x + item.bounds.x * scale + start_x,
                     y: origin.y + item.bounds.y * scale,
-                    width: w * scale,
+                    width,
                     height: item.bounds.height * scale,
                 },
                 ..renderer::Quad::default()
