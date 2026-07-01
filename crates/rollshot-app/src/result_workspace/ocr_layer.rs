@@ -469,6 +469,76 @@ where
     None
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SelectionHighlight {
+    bounds: Rectangle,
+    start_char: usize,
+    end_char: usize,
+    start_frac: f32,
+    end_frac: f32,
+    paragraph_start_x: f32,
+    paragraph_end_x: f32,
+    fallback_start_x: f32,
+    fallback_end_x: f32,
+}
+
+fn selection_highlight(
+    item_index: usize,
+    item: &super::ocr_text::OcrTextItem,
+    start: TextCursor,
+    end: TextCursor,
+    scale: f32,
+    origin: Point,
+    grapheme_x: impl Fn(usize) -> Option<f32>,
+) -> Option<SelectionHighlight> {
+    if item_index < start.item_index || item_index > end.item_index {
+        return None;
+    }
+
+    let chars = item.text.chars().count().max(1);
+    let start_char = if item_index == start.item_index {
+        start.char_index
+    } else {
+        0
+    };
+    let end_char = if item_index == end.item_index {
+        end.char_index
+    } else {
+        item.text.chars().count()
+    };
+    let start_frac = start_char as f32 / chars as f32;
+    let end_frac = end_char as f32 / chars as f32;
+    if end_frac <= start_frac {
+        return None;
+    }
+
+    let fallback_start_x = item.bounds.width * start_frac * scale;
+    let fallback_end_x = item.bounds.width * end_frac * scale;
+    let paragraph_start_x = grapheme_x(start_char).unwrap_or(fallback_start_x);
+    let paragraph_end_x = grapheme_x(end_char).unwrap_or(fallback_end_x);
+    let width = (paragraph_end_x - paragraph_start_x).max(0.0);
+    if width <= 0.0 {
+        return None;
+    }
+
+    Some(SelectionHighlight {
+        bounds: Rectangle {
+            x: origin.x + item.bounds.x * scale + paragraph_start_x,
+            y: origin.y + item.bounds.y * scale,
+            width,
+            height: item.bounds.height * scale,
+        },
+        start_char,
+        end_char,
+        start_frac,
+        end_frac,
+        paragraph_start_x,
+        paragraph_end_x,
+        fallback_start_x,
+        fallback_end_x,
+    })
+}
+
 fn draw_selection<Renderer>(
     renderer: &mut Renderer,
     document: &OcrTextDocument,
@@ -491,39 +561,11 @@ fn draw_selection<Renderer>(
     };
     for (index, paragraph) in paragraphs {
         let item = &document.visible_items()[*index];
-        if *index < start.item_index || *index > end.item_index {
+        let Some(highlight) = selection_highlight(*index, item, start, end, scale, origin, |idx| {
+            paragraph.grapheme_position(0, idx).map(|point| point.x)
+        }) else {
             continue;
-        }
-        let chars = item.text.chars().count().max(1);
-        let start_char = if *index == start.item_index {
-            start.char_index
-        } else {
-            0
         };
-        let end_char = if *index == end.item_index {
-            end.char_index
-        } else {
-            item.text.chars().count()
-        };
-        let start_frac = start_char as f32 / chars as f32;
-        let end_frac = end_char as f32 / chars as f32;
-        if end_frac <= start_frac {
-            continue;
-        }
-        let fallback_start_x = item.bounds.width * start_frac * scale;
-        let fallback_end_x = item.bounds.width * end_frac * scale;
-        let start_x = paragraph
-            .grapheme_position(0, start_char)
-            .map(|point| point.x)
-            .unwrap_or(fallback_start_x);
-        let end_x = paragraph
-            .grapheme_position(0, end_char)
-            .map(|point| point.x)
-            .unwrap_or(fallback_end_x);
-        let width = (end_x - start_x).max(0.0);
-        if width <= 0.0 {
-            continue;
-        }
         tracing::trace!(
             target: TARGET_OCR_TEXT,
             item_index = *index,
@@ -534,28 +576,23 @@ fn draw_selection<Renderer>(
             item_y = item.bounds.y,
             item_width = item.bounds.width,
             item_height = item.bounds.height,
-            start_char,
-            end_char,
-            start_frac,
-            end_frac,
-            paragraph_start_x = start_x,
-            paragraph_end_x = end_x,
-            fallback_start_x,
-            fallback_end_x,
-            highlight_x = origin.x + item.bounds.x * scale + start_x,
-            highlight_y = origin.y + item.bounds.y * scale,
-            highlight_width = width,
-            highlight_height = item.bounds.height * scale,
+            start_char = highlight.start_char,
+            end_char = highlight.end_char,
+            start_frac = highlight.start_frac,
+            end_frac = highlight.end_frac,
+            paragraph_start_x = highlight.paragraph_start_x,
+            paragraph_end_x = highlight.paragraph_end_x,
+            fallback_start_x = highlight.fallback_start_x,
+            fallback_end_x = highlight.fallback_end_x,
+            highlight_x = highlight.bounds.x,
+            highlight_y = highlight.bounds.y,
+            highlight_width = highlight.bounds.width,
+            highlight_height = highlight.bounds.height,
             "ocr selection highlight"
         );
         renderer.fill_quad(
             renderer::Quad {
-                bounds: Rectangle {
-                    x: origin.x + item.bounds.x * scale + start_x,
-                    y: origin.y + item.bounds.y * scale,
-                    width,
-                    height: item.bounds.height * scale,
-                },
+                bounds: highlight.bounds,
                 ..renderer::Quad::default()
             },
             color,
@@ -565,7 +602,51 @@ fn draw_selection<Renderer>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::ocr_text::{OcrItemId, OcrTextItem};
     use super::*;
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> ImageRect {
+        ImageRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn item(text: &str, bounds: ImageRect) -> OcrTextItem {
+        OcrTextItem {
+            id: OcrItemId(0),
+            text: text.to_string(),
+            confidence: 0.95,
+            bounds,
+            quad: [
+                ImagePoint {
+                    x: bounds.x,
+                    y: bounds.y,
+                },
+                ImagePoint {
+                    x: bounds.x + bounds.width,
+                    y: bounds.y,
+                },
+                ImagePoint {
+                    x: bounds.x + bounds.width,
+                    y: bounds.y + bounds.height,
+                },
+                ImagePoint {
+                    x: bounds.x,
+                    y: bounds.y + bounds.height,
+                },
+            ],
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
 
     #[test]
     fn cursor_mapping_uses_widget_local_coordinates() {
@@ -603,5 +684,54 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn selection_highlight_uses_grapheme_positions_not_average_width() {
+        let item = item("wide", rect(20.0, 30.0, 100.0, 10.0));
+        let origin = Point::new(7.0, 11.0);
+        let scale = 2.0;
+        let grapheme_x = [0.0, 5.0, 17.0, 29.0, 40.0];
+
+        let highlight = selection_highlight(
+            0,
+            &item,
+            TextCursor::new(0, 1),
+            TextCursor::new(0, 3),
+            scale,
+            origin,
+            |idx| grapheme_x.get(idx).copied(),
+        )
+        .unwrap();
+
+        assert_close(highlight.bounds.x, 52.0);
+        assert_close(highlight.bounds.y, 71.0);
+        assert_close(highlight.bounds.width, 24.0);
+        assert_close(highlight.bounds.height, 20.0);
+        assert_close(highlight.fallback_start_x, 50.0);
+        assert_close(highlight.fallback_end_x, 150.0);
+    }
+
+    #[test]
+    fn selection_highlight_falls_back_to_axis_aligned_average_width() {
+        let item = item("wide", rect(20.0, 30.0, 100.0, 10.0));
+        let origin = Point::new(7.0, 11.0);
+        let scale = 2.0;
+
+        let highlight = selection_highlight(
+            0,
+            &item,
+            TextCursor::new(0, 1),
+            TextCursor::new(0, 3),
+            scale,
+            origin,
+            |_| None,
+        )
+        .unwrap();
+
+        assert_close(highlight.bounds.x, 97.0);
+        assert_close(highlight.bounds.y, 71.0);
+        assert_close(highlight.bounds.width, 100.0);
+        assert_close(highlight.bounds.height, 20.0);
     }
 }
