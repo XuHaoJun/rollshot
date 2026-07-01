@@ -47,6 +47,7 @@ pub struct OcrDetection {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    pub quad: [(f32, f32); 4],
     pub text: String,
     pub confidence: f32,
 }
@@ -182,10 +183,28 @@ impl OcrEngine {
 
         let mut out = Vec::with_capacity(result.text_blocks.len());
         for block in &result.text_blocks {
-            if block.box_points.is_empty() {
+            if block.box_points.len() != 4 {
                 continue;
             }
             let (x, y, w, h) = aabb(&block.box_points);
+            let quad = [
+                (
+                    block.box_points[0].x as f32 / scale,
+                    block.box_points[0].y as f32 / scale,
+                ),
+                (
+                    block.box_points[1].x as f32 / scale,
+                    block.box_points[1].y as f32 / scale,
+                ),
+                (
+                    block.box_points[2].x as f32 / scale,
+                    block.box_points[2].y as f32 / scale,
+                ),
+                (
+                    block.box_points[3].x as f32 / scale,
+                    block.box_points[3].y as f32 / scale,
+                ),
+            ];
             // Invert the upscale → input-native coordinates (eng-review D6/D15).
             let (x, y, w, h) = (x / scale, y / scale, w / scale, h / scale);
             if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
@@ -199,6 +218,7 @@ impl OcrEngine {
                 y,
                 w,
                 h,
+                quad,
                 text: block.text.clone(),
                 confidence: block.text_score,
             });
@@ -322,6 +342,24 @@ mod tests {
         assert!(working <= MAX_UPSCALED_PIXELS as f32 + 1024.0);
         // Input already over the budget is used at native size — never downscaled.
         assert_eq!(effective_scale(8000, 4000, 1.5), 1.0);
+    }
+
+    #[test]
+    fn detection_preserves_four_point_quad_after_upscale_inversion() {
+        let mut engine = OcrEngine::new().unwrap();
+        let (img, _) = text_image(300, 90, 12, 28, 32.0, "acct 12345");
+        let detections = engine.detect(&img, &OcrRegionQuery::default()).unwrap();
+        let first = detections.first().expect("expected OCR text");
+
+        assert_eq!(first.quad.len(), 4);
+        for p in first.quad {
+            assert!(p.0.is_finite());
+            assert!(p.1.is_finite());
+            assert!(p.0 >= 0.0);
+            assert!(p.1 >= 0.0);
+            assert!(p.0 <= img.width() as f32);
+            assert!(p.1 <= img.height() as f32);
+        }
     }
 
     #[test]

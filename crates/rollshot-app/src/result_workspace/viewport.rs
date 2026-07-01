@@ -1,3 +1,5 @@
+#[cfg(feature = "ocr")]
+use iced::Rectangle;
 use iced::{Point, Size, Vector};
 
 // ---------------------------------------------------------------------------
@@ -169,6 +171,21 @@ pub fn step_zoom(mode: ZoomMode, dir: ZoomDirection) -> ZoomMode {
     ZoomMode::Custom(new_pct.clamp(25, 400))
 }
 
+/// Scale an image-space `ImageRect` to canvas-space `iced::Rectangle`.
+#[cfg(feature = "ocr")]
+#[allow(dead_code)]
+pub fn image_rect_to_canvas_rect(
+    rect: rollshot_image_document::ImageRect,
+    scale: f32,
+) -> Rectangle {
+    Rectangle {
+        x: rect.x * scale,
+        y: rect.y * scale,
+        width: rect.width * scale,
+        height: rect.height * scale,
+    }
+}
+
 /// Default fallback for the device max 2D texture dimension. Long screenshots
 /// whose width or height exceed this would upload as a single GPU texture that
 /// the device cannot allocate, rendering blank (spec §9.6). When neither axis
@@ -229,6 +246,25 @@ pub fn anchored_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(feature = "ocr")]
+    fn image_rect_to_canvas_rect_scales_without_scroll() {
+        let rect = image_rect_to_canvas_rect(
+            rollshot_image_document::ImageRect {
+                x: 10.0,
+                y: 20.0,
+                width: 30.0,
+                height: 40.0,
+            },
+            2.0,
+        );
+
+        assert_eq!(rect.x, 20.0);
+        assert_eq!(rect.y, 40.0);
+        assert_eq!(rect.width, 60.0);
+        assert_eq!(rect.height, 80.0);
+    }
 
     // -- Plan-required tests (verbatim from spec) ----------------------------
 

@@ -27,6 +27,8 @@ pub enum Tool {
     Number,
     Text,
     Redact,
+    #[cfg(feature = "ocr")]
+    OcrText,
 }
 
 /// An in-progress pointer gesture. Exactly ONE document edit is submitted on
@@ -524,6 +526,8 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
                 _ => mouse::Interaction::Grab,
             },
             None if self.editor.tool == Tool::Select => mouse::Interaction::default(),
+            #[cfg(feature = "ocr")]
+            None if self.editor.tool == Tool::OcrText => mouse::Interaction::default(),
             None => mouse::Interaction::Crosshair,
         }
     }

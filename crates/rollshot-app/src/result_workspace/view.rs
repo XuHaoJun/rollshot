@@ -66,38 +66,44 @@ fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
     let copy_label = super::secure_sharing::copy_label(&state.document);
     let save_label = super::secure_sharing::save_label(&state.document);
 
-    row![
+    let mut tools = row![
         button(text("Close")).on_press(Message::RequestClose),
         text(state.document.display_name()).width(Length::Fill),
         tool_button(ICON_SELECT, "Select", "V", Tool::Select, state),
         tool_button(ICON_NUMBER, "Number", "N", Tool::Number, state),
         tool_button(ICON_TEXT, "Text", "T", Tool::Text, state),
         tool_button(ICON_REDACT, "Redact", "R", Tool::Redact, state),
-        button(text("Smart Redaction")).on_press(Message::SmartRedaction),
-        tooltip(
+    ];
+
+    #[cfg(feature = "ocr")]
+    {
+        tools = tools.push(tool_button("OCR", "OCR Text", "O", Tool::OcrText, state));
+    }
+
+    tools = tools
+        .push(button(text("Smart Redaction")).on_press(Message::SmartRedaction))
+        .push(tooltip(
             undo_btn,
             text(shortcut_label("Undo", "Ctrl+Z")),
-            tooltip::Position::Bottom
-        ),
-        tooltip(
+            tooltip::Position::Bottom,
+        ))
+        .push(tooltip(
             redo_btn,
             text(shortcut_label("Redo", "Ctrl+Shift+Z")),
-            tooltip::Position::Bottom
-        ),
-        icon_button(
+            tooltip::Position::Bottom,
+        ))
+        .push(icon_button(
             ICON_NAVIGATOR,
             "Navigator".to_string(),
             Message::ToggleNavigator,
             state.editor.navigator_open,
-        ),
-        button(text(copy_label)).on_press(Message::Copy),
-        button(text("\u{25BE}")).on_press(Message::ToggleCopyMenu),
-        button(text(save_label)).on_press(Message::SaveAs),
-        reveal_button(state),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+        ))
+        .push(button(text(copy_label)).on_press(Message::Copy))
+        .push(button(text("\u{25BE}")).on_press(Message::ToggleCopyMenu))
+        .push(button(text(save_label)).on_press(Message::SaveAs))
+        .push(reveal_button(state));
+
+    tools.spacing(8).align_y(Alignment::Center).into()
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +252,28 @@ pub(crate) fn canvas_view<'a>(
 
     let layered = iced::widget::stack![img, overlay];
 
+    #[cfg(feature = "ocr")]
+    let layered = {
+        if state.editor.tool == Tool::OcrText {
+            let visible = super::canvas::visible_image_rect(
+                state.viewport.scroll_offset,
+                state.viewport_bounds,
+                geometry.scale,
+                geometry.image_origin,
+            );
+            let ocr_layer = super::ocr_layer::ocr_text_layer(
+                state.ocr_text.document(),
+                state.ocr_text.selection().copied(),
+                geometry.scale,
+                visible,
+                geometry.rendered_size,
+            );
+            iced::widget::stack![layered, ocr_layer]
+        } else {
+            layered
+        }
+    };
+
     let layered: Element<'_, Message> = if let Some(draft) = &state.editor.text_draft {
         let editor = text_editor(&draft.content)
             .id(state.text_editor_id.clone())
@@ -334,7 +362,7 @@ fn status_bar(state: &ResultWorkspace, image_size: Size) -> Element<'_, Message>
     let dims = format!("{} × {}", image_size.width as u32, image_size.height as u32);
     let zoom_label = zoom_label(state);
 
-    row![
+    let status = row![
         text(dims),
         text(zoom_label).width(Length::Fill),
         button(text("Fit Width")).on_press(Message::SetZoom(ZoomMode::FitWidth)),
@@ -343,10 +371,16 @@ fn status_bar(state: &ResultWorkspace, image_size: Size) -> Element<'_, Message>
         button(text("100%")).on_press(Message::SetZoom(ZoomMode::ActualSize)),
         button(text("-")).on_press(Message::ZoomStep(ZoomDirection::Out)),
         button(text("+")).on_press(Message::ZoomStep(ZoomDirection::In)),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+    ];
+
+    #[cfg(feature = "ocr")]
+    let status = if state.editor.tool == Tool::OcrText {
+        status.push(button(text("Copy all OCR text")).on_press(Message::CopyAllOcrText))
+    } else {
+        status
+    };
+
+    status.spacing(8).align_y(Alignment::Center).into()
 }
 
 fn zoom_label(state: &ResultWorkspace) -> String {

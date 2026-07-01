@@ -2,6 +2,10 @@ pub mod actions;
 pub(crate) mod canvas;
 mod document;
 mod navigator;
+#[cfg(feature = "ocr")]
+pub(crate) mod ocr_layer;
+#[cfg(feature = "ocr")]
+pub(crate) mod ocr_text;
 mod secure_sharing;
 mod update;
 mod view;
@@ -90,6 +94,9 @@ pub struct ResultWorkspace {
     pub editor: canvas::EditorState,
     /// Workspace mode: Normal or Workbench (Smart Redaction).
     pub mode: workbench::WorkspaceMode,
+    /// OCR text state (selectable text overlay).
+    #[cfg(feature = "ocr")]
+    pub ocr_text: ocr_text::OcrTextState,
     /// Identity of the inline text editor widget, for focus operations.
     #[allow(dead_code)]
     pub text_editor_id: iced::widget::Id,
@@ -133,6 +140,8 @@ impl ResultWorkspace {
                 viewport::is_tall_image(source_size),
             ),
             mode: workbench::WorkspaceMode::Normal,
+            #[cfg(feature = "ocr")]
+            ocr_text: ocr_text::OcrTextState::idle(),
             text_editor_id: iced::widget::Id::unique(),
             document,
             message,

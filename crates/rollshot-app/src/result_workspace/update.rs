@@ -34,6 +34,8 @@ pub enum Message {
     DismissMessage,
     /// User pressed "Copy".
     Copy,
+    /// User pressed the platform copy shortcut.
+    KeyboardCopy,
     /// User pressed "Copy Original" (unflattened source).
     CopyOriginal,
     /// Background clipboard write completed.
@@ -108,11 +110,150 @@ pub enum Message {
     /// Messages forwarded from the workbench sub-state.
     #[allow(dead_code)] // SP6 scaffolding: constructed by later tasks
     Workbench(super::workbench::WorkbenchMessage),
+    #[cfg(feature = "ocr")]
+    OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    OcrSelectionStarted(super::ocr_text::TextCursor),
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    OcrSelectionChanged(super::ocr_text::TextCursor),
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    OcrSelectionFinished(super::ocr_text::TextCursor),
+    #[cfg(feature = "ocr")]
+    SelectAllOcrText,
+    #[cfg(feature = "ocr")]
+    CopyOcrSelection,
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    CopyAllOcrText,
+    #[cfg(feature = "ocr")]
+    CopyOcrFinished(Result<(), String>),
+}
+
+impl PartialEq for Message {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::RequestClose, Self::RequestClose) => true,
+            (Self::ConfirmDiscard, Self::ConfirmDiscard) => true,
+            (Self::KeepUnsaved, Self::KeepUnsaved) => true,
+            (Self::DismissMessage, Self::DismissMessage) => true,
+            (Self::Copy, Self::Copy) => true,
+            (Self::KeyboardCopy, Self::KeyboardCopy) => true,
+            (Self::CopyOriginal, Self::CopyOriginal) => true,
+            (
+                Self::CopyFinished {
+                    result: a_result,
+                    safe_output: a_safe,
+                },
+                Self::CopyFinished {
+                    result: b_result,
+                    safe_output: b_safe,
+                },
+            ) => a_result == b_result && a_safe == b_safe,
+            (Self::SaveAs, Self::SaveAs) => true,
+            (Self::SavePathChosen(a), Self::SavePathChosen(b)) => a == b,
+            (
+                Self::SaveFinished {
+                    result: a_result,
+                    saved_state_id: a_id,
+                    safe_output: a_safe,
+                },
+                Self::SaveFinished {
+                    result: b_result,
+                    saved_state_id: b_id,
+                    safe_output: b_safe,
+                },
+            ) => a_result == b_result && a_id == b_id && a_safe == b_safe,
+            (Self::Reveal, Self::Reveal) => true,
+            (Self::RevealFinished(a), Self::RevealFinished(b)) => a == b,
+            (Self::Tick(a), Self::Tick(b)) => *a == *b,
+            (Self::SetZoom(a), Self::SetZoom(b)) => a == b,
+            (Self::ZoomStep(a), Self::ZoomStep(b)) => a == b,
+            (
+                Self::ViewportChanged {
+                    bounds: a_bounds,
+                    offset: a_offset,
+                },
+                Self::ViewportChanged {
+                    bounds: b_bounds,
+                    offset: b_offset,
+                },
+            ) => a_bounds == b_bounds && a_offset == b_offset,
+            (Self::ModifiersChanged(a), Self::ModifiersChanged(b)) => a == b,
+            (Self::PointerMoved(a), Self::PointerMoved(b)) => a == b,
+            (Self::ModalScrimPressed, Self::ModalScrimPressed) => true,
+            (Self::WheelScrolled(a), Self::WheelScrolled(b)) => a == b,
+            (Self::SelectTool(a), Self::SelectTool(b)) => a == b,
+            (Self::Undo, Self::Undo) => true,
+            (Self::Redo, Self::Redo) => true,
+            (Self::DeleteSelected, Self::DeleteSelected) => true,
+            (Self::EscapePressed, Self::EscapePressed) => true,
+            (Self::ToggleNavigator, Self::ToggleNavigator) => true,
+            (Self::NavigatorJump(a), Self::NavigatorJump(b)) => a == b,
+            (Self::ToggleCopyMenu, Self::ToggleCopyMenu) => true,
+            (Self::CanvasPressed(a), Self::CanvasPressed(b)) => a == b,
+            (Self::CanvasMoved(a), Self::CanvasMoved(b)) => a == b,
+            (Self::CanvasReleased(a), Self::CanvasReleased(b)) => a == b,
+            (Self::TextDraftAction(a), Self::TextDraftAction(b)) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
+            (Self::CommitTextDraft, Self::CommitTextDraft) => true,
+            (Self::ConfirmUnredactedAction, Self::ConfirmUnredactedAction) => true,
+            (Self::CancelUnredactedAction, Self::CancelUnredactedAction) => true,
+            (Self::SmartRedaction, Self::SmartRedaction) => true,
+            (Self::Workbench(a), Self::Workbench(b)) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
+            #[cfg(feature = "ocr")]
+            (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::OcrSelectionStarted(a), Self::OcrSelectionStarted(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::OcrSelectionChanged(a), Self::OcrSelectionChanged(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::OcrSelectionFinished(a), Self::OcrSelectionFinished(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::SelectAllOcrText, Self::SelectAllOcrText) => true,
+            #[cfg(feature = "ocr")]
+            (Self::CopyOcrSelection, Self::CopyOcrSelection) => true,
+            #[cfg(feature = "ocr")]
+            (Self::CopyAllOcrText, Self::CopyAllOcrText) => true,
+            #[cfg(feature = "ocr")]
+            (Self::CopyOcrFinished(a), Self::CopyOcrFinished(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Gesture helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "ocr")]
+fn redactions(document: &ImageDocument) -> Vec<Annotation> {
+    document
+        .annotations()
+        .iter()
+        .filter(|annotation| matches!(annotation, Annotation::OpaqueRedaction { .. }))
+        .cloned()
+        .collect()
+}
+
+#[cfg(feature = "ocr")]
+fn prepare_ocr_task(state: &mut super::ResultWorkspace) -> Task<Message> {
+    state.ocr_text.begin_prepare();
+    let image = state.document.image.source().clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || super::ocr_text::prepare_product_ocr(&image))
+                .await
+                .unwrap_or(Err(super::ocr_text::ProductOcrError::Detect))
+        },
+        Message::OcrPrepared,
+    )
+}
 
 fn current_scale(state: &super::ResultWorkspace) -> f32 {
     geometry_for(
@@ -157,6 +298,8 @@ pub(crate) fn direct_manipulation_hit(
                 })
         }
         Tool::Number | Tool::Text => None,
+        #[cfg(feature = "ocr")]
+        Tool::OcrText => None,
     }
 }
 
@@ -287,6 +430,8 @@ pub(crate) fn handle_canvas_pressed(
             });
             Task::none()
         }
+        #[cfg(feature = "ocr")]
+        Tool::OcrText => Task::none(),
     }
 }
 
@@ -385,6 +530,8 @@ pub(crate) fn handle_canvas_released(
 pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
     let task = update_inner(state, message);
     refresh_navigator(state);
+    #[cfg(feature = "ocr")]
+    refresh_ocr_redaction_mask(state);
     task
 }
 
@@ -394,6 +541,12 @@ fn refresh_navigator(state: &mut super::ResultWorkspace) {
         state.editor.navigator_items = state.document.image.navigator_items();
         state.editor.navigator_items_state = Some(current);
     }
+}
+
+#[cfg(feature = "ocr")]
+fn refresh_ocr_redaction_mask(state: &mut super::ResultWorkspace) {
+    let redactions = redactions(&state.document.image);
+    state.ocr_text.refresh_redactions(&redactions);
 }
 
 fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
@@ -435,6 +588,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 result,
                 safe_output,
             })
+        }
+        Message::KeyboardCopy => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return update_inner(state, Message::CopyOcrSelection);
+            }
+            update_inner(state, Message::Copy)
         }
         Message::CopyOriginal => {
             state.editor.copy_menu_open = false;
@@ -568,18 +728,40 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ModalScrimPressed => Task::none(),
         Message::WheelScrolled(delta) => handle_wheel(state, delta),
         Message::SelectTool(tool) => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText && tool != Tool::OcrText {
+                return Task::none();
+            }
             commit_text_draft(state);
+            #[cfg(feature = "ocr")]
+            if tool == Tool::OcrText {
+                state.editor.drag = None;
+                state.editor.selection = None;
+                state.editor.tool = Tool::OcrText;
+                if state.ocr_text.document().is_none() {
+                    return prepare_ocr_task(state);
+                }
+                return Task::none();
+            }
             state.editor.tool = tool;
             state.editor.drag = None;
             Task::none()
         }
         Message::Undo => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
             commit_text_draft(state);
             let _ = state.document.image.undo();
             prune_stale_selection(state);
             Task::none()
         }
         Message::Redo => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
             commit_text_draft(state);
             let _ = state.document.image.redo();
             prune_stale_selection(state);
@@ -595,6 +777,15 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::EscapePressed => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                if state.ocr_text.selection().is_some() {
+                    state.ocr_text.set_selection(None);
+                    return Task::none();
+                }
+                state.editor.tool = Tool::Select;
+                return Task::none();
+            }
             if state.pending_unredacted_action.is_some() {
                 state.pending_unredacted_action = None;
             } else if state.editor.copy_menu_open {
@@ -681,6 +872,97 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::CanvasMoved(point) => handle_canvas_moved(state, point),
         Message::CanvasReleased(point) => handle_canvas_released(state, point),
+        #[cfg(feature = "ocr")]
+        Message::OcrPrepared(Ok(items)) => {
+            if state.editor.tool != Tool::OcrText {
+                return Task::none();
+            }
+            let redactions = redactions(&state.document.image);
+            state.ocr_text.finish_prepare(items, &redactions);
+            state.message = None;
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::OcrPrepared(Err(error)) => {
+            state.ocr_text.fail_prepare(error.clone());
+            state.editor.tool = Tool::Select;
+            state.message = Some(InlineMessage::Error(error.message().to_string()));
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::OcrSelectionStarted(cursor) => {
+            state
+                .ocr_text
+                .set_selection(Some(super::ocr_text::OcrSelection::range(cursor, cursor)));
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::OcrSelectionChanged(cursor) | Message::OcrSelectionFinished(cursor) => {
+            if let Some(selection) = state.ocr_text.selection().copied() {
+                state
+                    .ocr_text
+                    .set_selection(Some(super::ocr_text::OcrSelection::range(
+                        selection.anchor,
+                        cursor,
+                    )));
+            }
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::SelectAllOcrText => {
+            if state.editor.tool != Tool::OcrText {
+                return Task::none();
+            }
+            if let Some(document) = state.ocr_text.document() {
+                state
+                    .ocr_text
+                    .set_selection(Some(super::ocr_text::OcrSelection::range(
+                        super::ocr_text::TextCursor::new(0, 0),
+                        document.end_cursor(),
+                    )));
+            }
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyOcrSelection => {
+            let Some(document) = state.ocr_text.document() else {
+                state.message = Some(InlineMessage::Error("No OCR text selected".into()));
+                return Task::none();
+            };
+            let Some(selection) = state.ocr_text.selection() else {
+                state.message = Some(InlineMessage::Error("No OCR text selected".into()));
+                return Task::none();
+            };
+            let text = document.selected_text(selection);
+            if text.is_empty() {
+                state.message = Some(InlineMessage::Error("No OCR text selected".into()));
+                return Task::none();
+            }
+            Task::done(Message::CopyOcrFinished(super::actions::copy_text(&text)))
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyAllOcrText => {
+            let Some(document) = state.ocr_text.document() else {
+                state.message = Some(InlineMessage::Error("No OCR text available".into()));
+                return Task::none();
+            };
+            let text = document.copy_all_text();
+            if text.is_empty() {
+                state.message = Some(InlineMessage::Error("No OCR text available".into()));
+                return Task::none();
+            }
+            Task::done(Message::CopyOcrFinished(super::actions::copy_text(&text)))
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyOcrFinished(Ok(())) => {
+            state.message = Some(InlineMessage::success("Copied OCR text".into()));
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyOcrFinished(Err(error)) => {
+            state.message = Some(InlineMessage::Error(error));
+            Task::none()
+        }
         Message::SmartRedaction => {
             let mut wb = super::workbench::WorkbenchState::default();
             if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
@@ -1220,7 +1502,9 @@ pub(crate) fn map_key_press(
         keyboard::Key::Character(c) if command => match c.as_str() {
             "z" if modifiers.shift() => Some(Message::Redo),
             "z" => Some(Message::Undo),
-            "c" => Some(Message::Copy),
+            "c" => Some(Message::KeyboardCopy),
+            #[cfg(feature = "ocr")]
+            "a" => Some(Message::SelectAllOcrText),
             _ => None,
         },
         keyboard::Key::Character(c) if !modifiers.alt() => match c.as_str() {
@@ -1228,6 +1512,8 @@ pub(crate) fn map_key_press(
             "n" => Some(Message::SelectTool(Tool::Number)),
             "t" => Some(Message::SelectTool(Tool::Text)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
+            #[cfg(feature = "ocr")]
+            "o" => Some(Message::SelectTool(Tool::OcrText)),
             _ => None,
         },
         _ => None,
@@ -2266,48 +2552,54 @@ mod tests {
     fn key_mapping_routes_tools_undo_redo_delete_copy() {
         use keyboard::{key::Named, Key};
         let none = keyboard::Modifiers::default();
-        assert!(matches!(
+        assert_eq!(
             map_key_press(&Key::Character("n".into()), none, false),
             Some(Message::SelectTool(Tool::Number))
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             map_key_press(&Key::Character("z".into()), zmod(), false),
             Some(Message::Undo)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             map_key_press(
                 &Key::Character("z".into()),
                 zmod() | keyboard::Modifiers::SHIFT,
-                false
+                false,
             ),
             Some(Message::Redo)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             map_key_press(&Key::Named(Named::Delete), none, false),
             Some(Message::DeleteSelected)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             map_key_press(&Key::Character("c".into()), zmod(), false),
-            Some(Message::Copy)
-        ));
+            Some(Message::KeyboardCopy)
+        );
     }
 
     #[test]
     fn captured_keys_are_ignored_except_escape() {
         use keyboard::{key::Named, Key};
         let none = keyboard::Modifiers::default();
-        assert!(map_key_press(&Key::Character("n".into()), none, true).is_none());
-        assert!(map_key_press(&Key::Named(Named::Backspace), none, true).is_none());
-        assert!(matches!(
+        assert_eq!(map_key_press(&Key::Character("n".into()), none, true), None);
+        assert_eq!(
+            map_key_press(&Key::Named(Named::Backspace), none, true),
+            None
+        );
+        assert_eq!(
             map_key_press(&Key::Named(Named::Escape), none, true),
             Some(Message::EscapePressed)
-        ));
+        );
     }
 
     #[test]
     fn plain_characters_do_not_fire_with_command_modifiers_held() {
         use keyboard::Key;
-        assert!(map_key_press(&Key::Character("n".into()), zmod(), false).is_none());
+        assert_eq!(
+            map_key_press(&Key::Character("n".into()), zmod(), false),
+            None
+        );
     }
 
     // -- unredacted-action confirmation (Task 3) ----------------------------
@@ -2384,5 +2676,278 @@ mod tests {
         assert_eq!(state.pending_unredacted_action, None);
         // Esc cancelled the blocking dialog; it must not have escalated to close.
         assert!(state.pending_discard.is_none());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn copy_without_ocr_selection_shows_error() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state.ocr_text.set_ready_for_tests(vec![]);
+
+        let _ = update(&mut state, Message::CopyOcrSelection);
+
+        assert_eq!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("No OCR text selected")
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn toolbar_copy_in_ocr_mode_still_uses_image_copy_path() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state.ocr_text.set_ready_for_tests(vec![]);
+
+        let _ = update(&mut state, Message::Copy);
+
+        assert_ne!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("No OCR text selected")
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn command_c_maps_to_keyboard_copy() {
+        let msg = map_key_press(
+            &keyboard::Key::Character("c".into()),
+            keyboard::Modifiers::CTRL,
+            false,
+        );
+
+        assert_eq!(msg, Some(Message::KeyboardCopy));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn keyboard_copy_in_ocr_mode_uses_ocr_selection() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state.ocr_text.set_ready_for_tests(vec![]);
+
+        let _ = update(&mut state, Message::KeyboardCopy);
+
+        assert_eq!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("No OCR text selected")
+        );
+    }
+
+    // -- OCR text mode (Task 4) -----------------------------------------------
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn selecting_ocr_tool_clears_annotation_drag_and_requests_prepare() {
+        let mut state = workspace();
+        state.editor.drag = Some(DragState::Pan {
+            last_pointer: Point::new(10.0, 10.0),
+        });
+
+        let _ = update(&mut state, Message::SelectTool(Tool::OcrText));
+
+        assert_eq!(state.editor.tool, Tool::OcrText);
+        assert!(state.editor.drag.is_none());
+        assert!(state.ocr_text.is_preparing_or_ready());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn canvas_press_in_ocr_text_mode_does_not_start_annotation_drag() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(12.0, 12.0), Instant::now());
+
+        assert!(state.editor.drag.is_none());
+        assert!(state.ocr_text.selection().is_none());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn keyboard_copy_in_ocr_mode_routes_to_copy_ocr_selection() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+        state.ocr_text.set_selection(Some(
+            crate::result_workspace::ocr_text::OcrSelection::range(
+                crate::result_workspace::ocr_text::TextCursor::new(0, 0),
+                crate::result_workspace::ocr_text::TextCursor::new(0, 6),
+            ),
+        ));
+
+        let _task = update(&mut state, Message::KeyboardCopy);
+        assert!(
+            state.message.is_none(),
+            "keyboard copy in OCR mode with valid selection does not set an error"
+        );
+
+        let _task = update(&mut state, Message::CopyOcrFinished(Ok(())));
+        assert_eq!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("Copied OCR text"),
+            "CopyOcrFinished(Ok) shows success message"
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn tool_switching_is_blocked_in_ocr_mode() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+
+        let _ = update(&mut state, Message::SelectTool(Tool::Select));
+        assert_eq!(state.editor.tool, Tool::OcrText, "tool switch blocked");
+
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        assert_eq!(state.editor.tool, Tool::OcrText, "tool switch blocked");
+
+        let _ = update(&mut state, Message::SelectTool(Tool::OcrText));
+        assert_eq!(
+            state.editor.tool,
+            Tool::OcrText,
+            "OcrText → OcrText is a no-op"
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn undo_redo_are_blocked_in_ocr_mode() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let before = state.document.image.state_id();
+
+        let _ = update(&mut state, Message::Undo);
+        assert_eq!(
+            state.document.image.state_id(),
+            before,
+            "undo blocked in OCR mode"
+        );
+
+        let _ = update(&mut state, Message::Redo);
+        assert_eq!(
+            state.document.image.state_id(),
+            before,
+            "redo blocked in OCR mode"
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn escape_clears_ocr_selection_before_leaving_ocr_mode() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+        state.ocr_text.set_selection(Some(
+            crate::result_workspace::ocr_text::OcrSelection::range(
+                crate::result_workspace::ocr_text::TextCursor::new(0, 0),
+                crate::result_workspace::ocr_text::TextCursor::new(0, 3),
+            ),
+        ));
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert_eq!(state.editor.tool, Tool::OcrText);
+        assert!(state.ocr_text.selection().is_none());
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert_eq!(state.editor.tool, Tool::Select);
     }
 }

@@ -1401,6 +1401,7 @@ impl Tool for OcrTool {
                         .into_iter()
                         .map(|m| OcrMatchSummary {
                             bounds: m.bounds,
+                            quad: m.quad,
                             text: m.text,
                             confidence: m.confidence,
                         })
@@ -1509,6 +1510,7 @@ pub struct InspectRegionFeaturesResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct OcrMatchSummary {
     pub bounds: rollshot_image_document::ImageRect,
+    pub quad: [rollshot_image_document::ImagePoint; 4],
     pub text: String,
     pub confidence: f32,
 }
@@ -2573,6 +2575,12 @@ pub(crate) mod tests {
                     width: 120.0,
                     height: 24.0,
                 },
+                quad: [
+                    rollshot_image_document::ImagePoint { x: 10.0, y: 20.0 },
+                    rollshot_image_document::ImagePoint { x: 130.0, y: 20.0 },
+                    rollshot_image_document::ImagePoint { x: 130.0, y: 44.0 },
+                    rollshot_image_document::ImagePoint { x: 10.0, y: 44.0 },
+                ],
                 text: "alice@example.com".into(),
                 confidence: 0.92,
             }],

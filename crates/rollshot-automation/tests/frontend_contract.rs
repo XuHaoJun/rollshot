@@ -51,11 +51,47 @@ fn fake_host_enforces_query_limits() {
         ocr_results: vec![
             OcrMatch {
                 bounds,
+                quad: [
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y + bounds.height,
+                    },
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y + bounds.height,
+                    },
+                ],
                 text: "one".into(),
                 confidence: 0.9,
             },
             OcrMatch {
                 bounds,
+                quad: [
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y + bounds.height,
+                    },
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y + bounds.height,
+                    },
+                ],
                 text: "two".into(),
                 confidence: 0.8,
             },

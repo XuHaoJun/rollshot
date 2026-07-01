@@ -18,6 +18,8 @@ use crate::rect::{region_to_pixel_rect, PixelRect};
 use crate::region_features::{dominant_rgba, edge_density, MAX_REGION_FEATURES_AREA};
 use crate::template::{prepare_template_match as prepare_template_results, TemplateStore};
 #[cfg(feature = "ocr")]
+use rollshot_image_document::ImagePoint;
+#[cfg(feature = "ocr")]
 use rollshot_ocr::{OcrEngine, OcrRegionQuery};
 
 #[derive(Debug, Clone)]
@@ -201,8 +203,13 @@ impl RealAutomationHost {
                 if !bounds.is_finite() || d.w <= 0.0 || d.h <= 0.0 {
                     return None;
                 }
+                let quad = d.quad.map(|(x, y)| ImagePoint {
+                    x: x + ox,
+                    y: y + oy,
+                });
                 Some(OcrMatch {
                     bounds,
+                    quad,
                     text: d.text,
                     confidence: d.confidence,
                 })
@@ -738,5 +745,35 @@ mod ocr_tests {
                 code: "non_finite_region"
             }
         );
+    }
+
+    #[test]
+    fn prepare_then_ocr_maps_quad_to_full_image_bounds() {
+        use rollshot_automation::{AutomationHost, OcrQuery, Region};
+        use rollshot_image_document::ImageRect;
+
+        let image = text_scene(640, 160, 30, 60, 48.0, "secret 123");
+        let index = VisualIndex::build(image).unwrap();
+        let mut host = RealAutomationHost::new();
+        let query = OcrQuery {
+            region: Region::Rect {
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 240.0,
+                    height: 80.0,
+                },
+            },
+            limit: 10,
+        };
+
+        host.prepare_ocr(&index, &query).unwrap();
+        let matches = host.ocr(query).unwrap();
+        let first = matches.first().expect("expected OCR match");
+
+        assert_eq!(first.quad.len(), 4);
+        assert!(first.quad.iter().all(|p| p.x >= 10.0 && p.y >= 10.0));
+        assert!(first.bounds.x >= 10.0);
+        assert!(first.bounds.y >= 10.0);
     }
 }
