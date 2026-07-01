@@ -1,4 +1,6 @@
-use iced::{Point, Rectangle, Size, Vector};
+#[cfg(feature = "ocr")]
+use iced::Rectangle;
+use iced::{Point, Size, Vector};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,6 +172,8 @@ pub fn step_zoom(mode: ZoomMode, dir: ZoomDirection) -> ZoomMode {
 }
 
 /// Scale an image-space `ImageRect` to canvas-space `iced::Rectangle`.
+#[cfg(feature = "ocr")]
+#[allow(dead_code)]
 pub fn image_rect_to_canvas_rect(
     rect: rollshot_image_document::ImageRect,
     scale: f32,
@@ -244,6 +248,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "ocr")]
     fn image_rect_to_canvas_rect_scales_without_scroll() {
         let rect = image_rect_to_canvas_rect(
             rollshot_image_document::ImageRect {

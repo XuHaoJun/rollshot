@@ -9,7 +9,7 @@ use rollshot_automation::{
     AutomationHost, CapabilityError, LayoutQuery, LayoutRegion, OcrMatch, OcrQuery, RegionFeatures,
     RegionFeaturesQuery, TemplateMatch, TemplateMatchQuery,
 };
-use rollshot_image_document::{ImagePoint, ImageRect};
+use rollshot_image_document::ImageRect;
 
 use crate::index::VisualIndex;
 #[cfg(feature = "ocr")]
@@ -17,6 +17,8 @@ use crate::rect::MAX_OCR_AREA;
 use crate::rect::{region_to_pixel_rect, PixelRect};
 use crate::region_features::{dominant_rgba, edge_density, MAX_REGION_FEATURES_AREA};
 use crate::template::{prepare_template_match as prepare_template_results, TemplateStore};
+#[cfg(feature = "ocr")]
+use rollshot_image_document::ImagePoint;
 #[cfg(feature = "ocr")]
 use rollshot_ocr::{OcrEngine, OcrRegionQuery};
 
@@ -748,7 +750,7 @@ mod ocr_tests {
     #[test]
     fn prepare_then_ocr_maps_quad_to_full_image_bounds() {
         use rollshot_automation::{AutomationHost, OcrQuery, Region};
-        use rollshot_image_document::{ImagePoint, ImageRect};
+        use rollshot_image_document::ImageRect;
 
         let image = text_scene(640, 160, 30, 60, 48.0, "secret 123");
         let index = VisualIndex::build(image).unwrap();

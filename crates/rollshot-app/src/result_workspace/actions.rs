@@ -17,6 +17,7 @@ pub fn copy_image(image: &RgbaImage) -> Result<(), String> {
         .map_err(|e| format!("clipboard write error: {e}"))
 }
 
+#[cfg(feature = "ocr")]
 pub fn copy_text(text: &str) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?;
     clipboard

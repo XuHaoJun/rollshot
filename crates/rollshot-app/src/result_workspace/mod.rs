@@ -4,6 +4,7 @@ mod document;
 mod navigator;
 #[cfg(feature = "ocr")]
 pub(crate) mod ocr_layer;
+#[cfg(feature = "ocr")]
 pub(crate) mod ocr_text;
 mod secure_sharing;
 mod update;

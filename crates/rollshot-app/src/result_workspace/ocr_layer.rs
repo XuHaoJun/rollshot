@@ -88,17 +88,23 @@ where
                 if !item.bounds.intersects(&self.visible) {
                     continue;
                 }
-                state.paragraphs.push((index, Renderer::Paragraph::with_text(text::Text {
-                    content: item.text.as_str(),
-                    bounds: Size::new(item.bounds.width * self.scale, item.bounds.height * self.scale),
-                    size: iced::Pixels((item.bounds.height * self.scale).max(8.0)),
-                    line_height: text::LineHeight::Relative(1.0),
-                    font: renderer.default_font(),
-                    align_x: text::Alignment::Left,
-                    align_y: alignment::Vertical::Center,
-                    shaping: text::Shaping::Advanced,
-                    wrapping: text::Wrapping::None,
-                })));
+                state.paragraphs.push((
+                    index,
+                    Renderer::Paragraph::with_text(text::Text {
+                        content: item.text.as_str(),
+                        bounds: Size::new(
+                            item.bounds.width * self.scale,
+                            item.bounds.height * self.scale,
+                        ),
+                        size: iced::Pixels((item.bounds.height * self.scale).max(8.0)),
+                        line_height: text::LineHeight::Relative(1.0),
+                        font: renderer.default_font(),
+                        align_x: text::Alignment::Left,
+                        align_y: alignment::Vertical::Center,
+                        shaping: text::Shaping::Advanced,
+                        wrapping: text::Wrapping::None,
+                    }),
+                ));
             }
         }
         layout::Node::new(Size::new(self.width, self.height))
@@ -246,7 +252,8 @@ where
     }
 }
 
-impl<'a, MessageT, Theme, Renderer> From<OcrTextLayer<'a>> for Element<'a, MessageT, Theme, Renderer>
+impl<'a, MessageT, Theme, Renderer> From<OcrTextLayer<'a>>
+    for Element<'a, MessageT, Theme, Renderer>
 where
     MessageT: From<Message> + Clone + 'a,
     Renderer: renderer::Renderer + text::Renderer<Font = iced::Font> + 'static + 'a,
