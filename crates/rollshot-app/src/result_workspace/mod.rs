@@ -2,6 +2,7 @@ pub mod actions;
 pub(crate) mod canvas;
 mod document;
 mod navigator;
+pub(crate) mod ocr_text;
 mod secure_sharing;
 mod update;
 mod view;
