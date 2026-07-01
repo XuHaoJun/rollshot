@@ -34,6 +34,8 @@ pub enum Message {
     DismissMessage,
     /// User pressed "Copy".
     Copy,
+    /// User pressed the platform copy shortcut.
+    KeyboardCopy,
     /// User pressed "Copy Original" (unflattened source).
     CopyOriginal,
     /// Background clipboard write completed.
@@ -138,6 +140,7 @@ impl PartialEq for Message {
             (Self::KeepUnsaved, Self::KeepUnsaved) => true,
             (Self::DismissMessage, Self::DismissMessage) => true,
             (Self::Copy, Self::Copy) => true,
+            (Self::KeyboardCopy, Self::KeyboardCopy) => true,
             (Self::CopyOriginal, Self::CopyOriginal) => true,
             (
                 Self::CopyFinished {
@@ -569,10 +572,6 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Copy => {
-            #[cfg(feature = "ocr")]
-            if state.editor.tool == Tool::OcrText {
-                return update_inner(state, Message::CopyOcrSelection);
-            }
             if let super::workbench::WorkspaceMode::Workbench(ref wb) = state.mode {
                 if super::workbench::state::has_pending_candidates(wb) {
                     state.message = Some(InlineMessage::Error(format!(
@@ -589,6 +588,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 result,
                 safe_output,
             })
+        }
+        Message::KeyboardCopy => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return update_inner(state, Message::CopyOcrSelection);
+            }
+            update_inner(state, Message::Copy)
         }
         Message::CopyOriginal => {
             state.editor.copy_menu_open = false;
@@ -1496,7 +1502,7 @@ pub(crate) fn map_key_press(
         keyboard::Key::Character(c) if command => match c.as_str() {
             "z" if modifiers.shift() => Some(Message::Redo),
             "z" => Some(Message::Undo),
-            "c" => Some(Message::Copy),
+            "c" => Some(Message::KeyboardCopy),
             #[cfg(feature = "ocr")]
             "a" => Some(Message::SelectAllOcrText),
             _ => None,
@@ -2568,7 +2574,7 @@ mod tests {
         );
         assert_eq!(
             map_key_press(&Key::Character("c".into()), zmod(), false),
-            Some(Message::Copy)
+            Some(Message::KeyboardCopy)
         );
     }
 
@@ -2687,6 +2693,48 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn toolbar_copy_in_ocr_mode_still_uses_image_copy_path() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state.ocr_text.set_ready_for_tests(vec![]);
+
+        let _ = update(&mut state, Message::Copy);
+
+        assert_ne!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("No OCR text selected")
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn command_c_maps_to_keyboard_copy() {
+        let msg = map_key_press(
+            &keyboard::Key::Character("c".into()),
+            keyboard::Modifiers::CTRL,
+            false,
+        );
+
+        assert_eq!(msg, Some(Message::KeyboardCopy));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn keyboard_copy_in_ocr_mode_uses_ocr_selection() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state.ocr_text.set_ready_for_tests(vec![]);
+
+        let _ = update(&mut state, Message::KeyboardCopy);
+
+        assert_eq!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("No OCR text selected")
+        );
+    }
+
     // -- OCR text mode (Task 4) -----------------------------------------------
 
     #[cfg(feature = "ocr")]
@@ -2737,7 +2785,7 @@ mod tests {
 
     #[cfg(feature = "ocr")]
     #[test]
-    fn copy_in_ocr_mode_routes_to_copy_ocr_selection() {
+    fn keyboard_copy_in_ocr_mode_routes_to_copy_ocr_selection() {
         let mut state = workspace();
         state.editor.tool = Tool::OcrText;
         state
@@ -2766,10 +2814,10 @@ mod tests {
             ),
         ));
 
-        let _task = update(&mut state, Message::Copy);
+        let _task = update(&mut state, Message::KeyboardCopy);
         assert!(
             state.message.is_none(),
-            "Copy in OCR mode with valid selection does not set an error"
+            "keyboard copy in OCR mode with valid selection does not set an error"
         );
 
         let _task = update(&mut state, Message::CopyOcrFinished(Ok(())));

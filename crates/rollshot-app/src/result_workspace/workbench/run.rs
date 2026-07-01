@@ -1456,21 +1456,23 @@ mod prepare_tests {
         let registry = build_authoring_tool_registry(ctx, executor, host, inspection).unwrap();
         let names = registry.tool_names();
 
-        assert_eq!(
-            names,
-            vec![
-                "replace_source",
-                "validate_source",
-                "submit_for_review",
-                "request_user_input",
-                "inspect_context_summary",
-                "read_current_source",
-                "inspect_image_context",
-                "edit_source",
-                "inspect_region_features",
-                "dry_run",
-            ]
-        );
+        let mut expected = vec![
+            "replace_source",
+            "validate_source",
+            "submit_for_review",
+            "request_user_input",
+            "inspect_context_summary",
+            "read_current_source",
+            "inspect_image_context",
+            "edit_source",
+            "inspect_region_features",
+        ];
+        #[cfg(feature = "ocr")]
+        expected.push("inspect_ocr");
+        expected.push("dry_run");
+
+        assert_eq!(names, expected);
+        #[cfg(not(feature = "ocr"))]
         assert!(!names.contains(&"inspect_ocr"));
         assert!(!names.contains(&"inspect_layout"));
     }

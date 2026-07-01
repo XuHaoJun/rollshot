@@ -484,6 +484,13 @@ pub fn character_index_for_axis_aligned_item(item: &OcrTextItem, point: ImagePoi
     ((chars as f32) * t).round() as usize
 }
 
+pub fn char_index_for_byte_offset(text: &str, byte_offset: usize) -> usize {
+    let end = byte_offset.min(text.len());
+    text.char_indices()
+        .take_while(|(index, _)| *index < end)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +687,12 @@ mod tests {
             character_index_for_axis_aligned_item(&item, ImagePoint { x: 70.0, y: 12.0 }),
             6
         );
+    }
+
+    #[test]
+    fn byte_offsets_from_text_layout_are_converted_to_character_indices() {
+        assert_eq!(char_index_for_byte_offset("你好ab", "你好".len()), 2);
+        assert_eq!(char_index_for_byte_offset("éclair", "é".len()), 1);
+        assert_eq!(char_index_for_byte_offset("secret", 3), 3);
     }
 }

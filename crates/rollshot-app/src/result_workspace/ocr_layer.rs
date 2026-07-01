@@ -284,7 +284,7 @@ where
         );
         let char_index = paragraph
             .hit_test(local)
-            .map(|hit| hit.cursor())
+            .map(|hit| super::ocr_text::char_index_for_byte_offset(&item.text, hit.cursor()))
             .unwrap_or_else(|| super::ocr_text::character_index_for_axis_aligned_item(item, point));
         return Some(TextCursor::new(*index, char_index));
     }
