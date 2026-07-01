@@ -255,6 +255,16 @@ fn prepare_ocr_task(state: &mut super::ResultWorkspace) -> Task<Message> {
     )
 }
 
+#[cfg(feature = "ocr")]
+fn ocr_ready_message(document: &super::ocr_text::OcrTextDocument) -> String {
+    let visible_count = document.visible_items().len();
+    match visible_count {
+        0 => "OCR complete: no visible text found".to_string(),
+        1 => "OCR complete: 1 text block ready".to_string(),
+        n => format!("OCR complete: {n} text blocks ready"),
+    }
+}
+
 fn current_scale(state: &super::ResultWorkspace) -> f32 {
     geometry_for(
         state.viewport.zoom,
@@ -884,7 +894,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             let redactions = redactions(&state.document.image);
             state.ocr_text.finish_prepare(items, &redactions);
-            state.message = None;
+            if let Some(document) = state.ocr_text.document() {
+                state.message = Some(InlineMessage::success(ocr_ready_message(document)));
+            }
             Task::none()
         }
         #[cfg(feature = "ocr")]
@@ -1597,6 +1609,22 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "ocr")]
+    fn ocr_item(id: u64, text: &str, bounds: ImageRect) -> super::super::ocr_text::OcrTextItem {
+        super::super::ocr_text::OcrTextItem {
+            id: super::super::ocr_text::OcrItemId(id),
+            text: text.into(),
+            confidence: 0.95,
+            bounds,
+            quad: [
+                ImagePoint::new(bounds.x, bounds.y),
+                ImagePoint::new(bounds.x + bounds.width, bounds.y),
+                ImagePoint::new(bounds.x + bounds.width, bounds.y + bounds.height),
+                ImagePoint::new(bounds.x, bounds.y + bounds.height),
+            ],
+        }
+    }
+
     // -- payload routing tests (Task 15) --------------------------------------
 
     #[test]
@@ -1804,6 +1832,58 @@ mod tests {
         state.message = Some(InlineMessage::Error("boom".to_string()));
         let _ = update(&mut state, Message::Tick(Instant::now()));
         assert!(matches!(state.message, Some(InlineMessage::Error(_))));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn ocr_prepare_success_reports_visible_text_count() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+
+        let _ = update(
+            &mut state,
+            Message::OcrPrepared(Ok(vec![
+                ocr_item(
+                    0,
+                    "hello",
+                    ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                ),
+                ocr_item(
+                    1,
+                    "world",
+                    ImageRect {
+                        x: 1.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                ),
+            ])),
+        );
+
+        assert_eq!(
+            state.message_text().as_deref(),
+            Some("OCR complete: 2 text blocks ready")
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn ocr_prepare_success_reports_when_no_visible_text_is_available() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+
+        let _ = update(&mut state, Message::OcrPrepared(Ok(Vec::new())));
+
+        assert_eq!(
+            state.message_text().as_deref(),
+            Some("OCR complete: no visible text found")
+        );
     }
 
     #[test]
