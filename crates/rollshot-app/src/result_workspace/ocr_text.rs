@@ -427,6 +427,15 @@ pub fn prepare_product_ocr(_image: &image::RgbaImage) -> Result<Vec<OcrTextItem>
     Err(ProductOcrError::Disabled)
 }
 
+pub fn character_index_for_axis_aligned_item(item: &OcrTextItem, point: ImagePoint) -> usize {
+    let chars = item.text.chars().count();
+    if chars == 0 || item.bounds.width <= 0.0 {
+        return 0;
+    }
+    let t = ((point.x - item.bounds.x) / item.bounds.width).clamp(0.0, 1.0);
+    ((chars as f32) * t).round() as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,5 +573,22 @@ mod tests {
 
         assert_eq!(doc.selected_text(&forward), doc.selected_text(&backward));
         assert_eq!(doc.selected_text(&forward), "lpha beta\ngam");
+    }
+
+    #[test]
+    fn axis_aligned_hit_test_maps_x_to_character_index() {
+        let item = item(1, "secret", rect(10.0, 10.0, 60.0, 12.0));
+        assert_eq!(
+            character_index_for_axis_aligned_item(&item, ImagePoint { x: 10.0, y: 12.0 }),
+            0
+        );
+        assert_eq!(
+            character_index_for_axis_aligned_item(&item, ImagePoint { x: 40.0, y: 12.0 }),
+            3
+        );
+        assert_eq!(
+            character_index_for_axis_aligned_item(&item, ImagePoint { x: 70.0, y: 12.0 }),
+            6
+        );
     }
 }

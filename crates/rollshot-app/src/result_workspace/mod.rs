@@ -2,6 +2,8 @@ pub mod actions;
 pub(crate) mod canvas;
 mod document;
 mod navigator;
+#[cfg(feature = "ocr")]
+pub(crate) mod ocr_layer;
 pub(crate) mod ocr_text;
 mod secure_sharing;
 mod update;
