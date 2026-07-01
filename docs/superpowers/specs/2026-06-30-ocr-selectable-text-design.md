@@ -11,6 +11,9 @@ text" is a secondary fallback, not the primary interaction.
 The OCR data stays ephemeral in the result workspace. It is not written into
 `rollshot-image-document`, saved files, history, or diagnostics.
 
+OCR must respect redaction annotations: text covered by a redaction is never
+rendered, selectable, or copyable, recomputed against the current redactions.
+
 ## Goals
 
 - Add a dedicated OCR Text mode in the result workspace.
@@ -31,6 +34,25 @@ The OCR data stays ephemeral in the result workspace. It is not written into
 - Using a DOM, webview, or iframe inside Rollshot.
 - Replacing Smart Redaction's existing agent OCR capability path.
 - Building a generic OCR platform settings UI in this first feature.
+
+## Product Review Decisions (2026-07-01)
+
+Locked during `/plan-ceo-review`:
+
+1. Redaction safety is a hard invariant, not a byproduct of mode exclusivity.
+   OCR items covered by a redaction annotation are excluded from render,
+   selection, and copy, recomputed as redactions change. Mode exclusivity
+   governs the pointer; annotation-masking governs the data.
+2. The feature ships opt-in behind the `ocr` build feature. When the app is
+   built without `ocr`, the OCR Text tool is omitted from the toolbar entirely
+   (compile-time gated), not shown permanently disabled.
+3. v1 selection fidelity targets axis-aligned line/block and cross-line
+   selection. Rotated-text character hit-testing and the low-confidence
+   interaction tier are deferred to v2.
+4. No top-level "Copy Text" toolbar button. Ctrl/Cmd+C is the primary copy
+   path; copy-all is a separate explicit, labeled in-mode action.
+5. Clean selection across tile seams on long captures is a v1 acceptance bar,
+   not a footnote.
 
 ## Context
 
@@ -64,18 +86,21 @@ When the user activates OCR Text:
 2. The canvas enters OCR Text mode.
 3. Annotation selection, annotation dragging, redaction creation, text-note
    editing, and pan-drag behavior are disabled for left-button OCR selection.
-4. Recognized text is shown as a selectable overlay.
+4. Recognized text is shown as a selectable overlay. Text covered by a
+   redaction annotation is excluded from the overlay entirely.
 5. Dragging across text creates a selection with a visible highlight.
-6. Ctrl/Cmd+C copies the selected OCR text.
+6. Ctrl/Cmd+C copies the selected OCR text. With no selection it shows "No OCR
+   text selected" rather than silently copying everything.
 7. Ctrl/Cmd+A selects all OCR text.
 8. Escape clears OCR selection first. If no OCR selection exists, Escape leaves
    OCR Text mode and returns to Select. If already in Select with no draft, the
    existing close behavior applies.
 
-The existing image Copy button remains image-copy by default. OCR Text mode adds
-a visible "Copy Text" action that copies selected OCR text when present and all
-OCR text when no selection exists. Keyboard copy remains the primary expected
-path for selected text.
+The existing image Copy button remains image-copy by default and is not
+duplicated with an OCR variant in the toolbar. Keyboard copy (Ctrl/Cmd+C) is the
+primary path for selected OCR text. "Copy all OCR text" is a separate, explicitly
+labeled in-mode action (surfaced contextually while OCR Text mode is active, e.g.
+the status bar), never a silent fallback of an empty copy.
 
 ## Architecture
 
@@ -96,6 +121,9 @@ It owns:
 - Selection state.
 - Pure helpers for hit-testing, range construction, selected-text formatting,
   select-all, and copy-all.
+- Redaction-aware filtering: OCR items intersecting redaction annotation bounds
+  are excluded from render, selection, and copy, recomputed against the current
+  redactions rather than only at OCR time.
 
 `ResultWorkspace` gets an `ocr_text` field. The field is UI/session state, like
 `EditorState`; it does not belong in `ResultDocument` or
@@ -191,10 +219,10 @@ Selection is ordered by a normalized text stream:
 Line breaks are inserted between normalized OCR lines. Text fragments on the
 same line are separated by spaces when their geometry indicates a visible gap.
 
-Rotated text is supported at the OCR item level. Rotations under three degrees
-are snapped to horizontal for display and hit-testing. Larger rotations use the
-OCR quadrilateral for coarse hit-testing and a local unrotated paragraph for
-character hit-testing. The selection result must remain deterministic.
+v1 targets axis-aligned text. Rotations under three degrees are snapped to
+horizontal for display and hit-testing. Larger rotations are deferred to v2: in
+v1 they are not character-selectable (at most coarse quad-level block
+selection). The selection result must remain deterministic.
 
 ### Clipboard
 
@@ -223,9 +251,10 @@ Debug implementations for OCR cache state must avoid printing recognized text.
 
 ## Error Handling
 
-If OCR is unavailable because the app was built without the `ocr` feature, the
-toolbar shows the OCR Text tool disabled with tooltip text explaining that OCR
-is unavailable in this build.
+When the app is built without the `ocr` feature, the OCR Text tool is omitted
+from the toolbar entirely (compile-time gated). A build-time-absent capability
+is not shown as a permanently disabled control, which would imply it could be
+enabled in-app.
 
 If OCR fails, the workspace remains usable and returns to Select mode. The
 error message should identify the stable category without exposing OCR text.
@@ -260,6 +289,9 @@ Add rendering-adjacent tests where possible for:
 - Image-coordinate to canvas-local transforms.
 - Selection highlight rectangles under zoom.
 - Visible-region culling for long screenshots.
+- Selection continuity across tile seams on long captures (a range spanning a
+  tile boundary copies as one clean run).
+- Redaction-covered OCR items are excluded from selection and copy.
 
 OCR backend integration tests should remain in the OCR feature lane.
 
@@ -278,8 +310,8 @@ OCR backend integration tests should remain in the OCR feature lane.
 ## Product Decisions
 
 - OCR Text mode starts OCR immediately on activation when no cache is ready.
-- Low-confidence OCR text below 0.30 is shown as faint overlay text but does
-  not participate in default select-all or copy-all. Users can still drag over
-  it explicitly to include it in a manual selection.
 - Copied text uses Rollshot normalized reading order, not backend output order.
-- Builds without the `ocr` feature show a disabled OCR Text toolbar item.
+- Builds without the `ocr` feature omit the OCR Text toolbar item entirely
+  (compile-time gated), rather than showing it disabled.
+- The low-confidence interaction tier (faint overlay for text below 0.30 with
+  drag-only inclusion) is deferred to v2.
