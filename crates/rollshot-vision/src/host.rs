@@ -9,7 +9,7 @@ use rollshot_automation::{
     AutomationHost, CapabilityError, LayoutQuery, LayoutRegion, OcrMatch, OcrQuery, RegionFeatures,
     RegionFeaturesQuery, TemplateMatch, TemplateMatchQuery,
 };
-use rollshot_image_document::ImageRect;
+use rollshot_image_document::{ImagePoint, ImageRect};
 
 use crate::index::VisualIndex;
 #[cfg(feature = "ocr")]
@@ -201,8 +201,13 @@ impl RealAutomationHost {
                 if !bounds.is_finite() || d.w <= 0.0 || d.h <= 0.0 {
                     return None;
                 }
+                let quad = d.quad.map(|(x, y)| ImagePoint {
+                    x: x + ox,
+                    y: y + oy,
+                });
                 Some(OcrMatch {
                     bounds,
+                    quad,
                     text: d.text,
                     confidence: d.confidence,
                 })
@@ -738,5 +743,35 @@ mod ocr_tests {
                 code: "non_finite_region"
             }
         );
+    }
+
+    #[test]
+    fn prepare_then_ocr_maps_quad_to_full_image_bounds() {
+        use rollshot_automation::{AutomationHost, OcrQuery, Region};
+        use rollshot_image_document::{ImagePoint, ImageRect};
+
+        let image = text_scene(640, 160, 30, 60, 48.0, "secret 123");
+        let index = VisualIndex::build(image).unwrap();
+        let mut host = RealAutomationHost::new();
+        let query = OcrQuery {
+            region: Region::Rect {
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 240.0,
+                    height: 80.0,
+                },
+            },
+            limit: 10,
+        };
+
+        host.prepare_ocr(&index, &query).unwrap();
+        let matches = host.ocr(query).unwrap();
+        let first = matches.first().expect("expected OCR match");
+
+        assert_eq!(first.quad.len(), 4);
+        assert!(first.quad.iter().all(|p| p.x >= 10.0 && p.y >= 10.0));
+        assert!(first.bounds.x >= 10.0);
+        assert!(first.bounds.y >= 10.0);
     }
 }

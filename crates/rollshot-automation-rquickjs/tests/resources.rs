@@ -104,6 +104,12 @@ function main(input) {
     let mut host = FakeAutomationHost {
         ocr_results: vec![OcrMatch {
             bounds: ImageRect::from_corners(ImagePoint::new(0.0, 0.0), ImagePoint::new(1.0, 1.0)),
+            quad: [
+                ImagePoint { x: 0.0, y: 0.0 },
+                ImagePoint { x: 1.0, y: 0.0 },
+                ImagePoint { x: 1.0, y: 1.0 },
+                ImagePoint { x: 0.0, y: 1.0 },
+            ],
             text: "x".repeat(4_096),
             confidence: 1.0,
         }],

@@ -121,6 +121,12 @@ function main(input) {
                 ImagePoint::new(10.0, 10.0),
                 ImagePoint::new(20.0, 20.0),
             ),
+            quad: [
+                ImagePoint { x: 10.0, y: 10.0 },
+                ImagePoint { x: 20.0, y: 10.0 },
+                ImagePoint { x: 20.0, y: 20.0 },
+                ImagePoint { x: 10.0, y: 20.0 },
+            ],
             text: "secret@example.com".into(),
             confidence: 0.95,
         }],
@@ -321,11 +327,47 @@ function main(input) {
         results: vec![
             OcrMatch {
                 bounds,
+                quad: [
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y + bounds.height,
+                    },
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y + bounds.height,
+                    },
+                ],
                 text: "one".into(),
                 confidence: 1.0,
             },
             OcrMatch {
                 bounds,
+                quad: [
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y,
+                    },
+                    ImagePoint {
+                        x: bounds.x + bounds.width,
+                        y: bounds.y + bounds.height,
+                    },
+                    ImagePoint {
+                        x: bounds.x,
+                        y: bounds.y + bounds.height,
+                    },
+                ],
                 text: "two".into(),
                 confidence: 1.0,
             },
@@ -380,6 +422,24 @@ function main(input) {
                 width: 1.0,
                 height: 1.0,
             },
+            quad: [
+                ImagePoint {
+                    x: f32::NAN,
+                    y: 0.0,
+                },
+                ImagePoint {
+                    x: f32::NAN,
+                    y: 0.0,
+                },
+                ImagePoint {
+                    x: f32::NAN,
+                    y: 1.0,
+                },
+                ImagePoint {
+                    x: f32::NAN,
+                    y: 1.0,
+                },
+            ],
             text: "bad".into(),
             confidence: 1.0,
         }],

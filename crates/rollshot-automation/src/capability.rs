@@ -33,6 +33,7 @@ pub struct OcrQuery {
 #[serde(rename_all = "camelCase")]
 pub struct OcrMatch {
     pub bounds: ImageRect,
+    pub quad: [ImagePoint; 4],
     pub text: String,
     pub confidence: f32,
 }
