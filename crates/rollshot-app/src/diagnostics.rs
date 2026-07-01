@@ -3,6 +3,8 @@ pub(crate) const TARGET_APP: &str = "rollshot::app";
 #[allow(dead_code)]
 pub(crate) const TARGET_FILTER: &str = "rollshot::app::filter";
 #[allow(dead_code)]
+pub(crate) const TARGET_OCR_TEXT: &str = "rollshot::app::ocr_text";
+#[allow(dead_code)]
 pub(crate) const TARGET_SAVE: &str = "rollshot::save";
 
 use std::fs::{File, OpenOptions};
