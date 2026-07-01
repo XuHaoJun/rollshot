@@ -722,6 +722,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ModalScrimPressed => Task::none(),
         Message::WheelScrolled(delta) => handle_wheel(state, delta),
         Message::SelectTool(tool) => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText && tool != Tool::OcrText {
+                return Task::none();
+            }
             commit_text_draft(state);
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
@@ -738,12 +742,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Undo => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
             commit_text_draft(state);
             let _ = state.document.image.undo();
             prune_stale_selection(state);
             Task::none()
         }
         Message::Redo => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
             commit_text_draft(state);
             let _ = state.document.image.redo();
             prune_stale_selection(state);
@@ -1462,27 +1474,12 @@ pub(crate) fn map_key_press(
     key: &keyboard::Key,
     modifiers: keyboard::Modifiers,
     captured: bool,
-    tool: Tool,
 ) -> Option<Message> {
     use keyboard::key::Named;
     if matches!(key, keyboard::Key::Named(Named::Escape)) {
         return Some(Message::EscapePressed);
     }
     if captured {
-        return None;
-    }
-    #[cfg(feature = "ocr")]
-    if tool == Tool::OcrText {
-        let command = zoom_modifier_held(modifiers);
-        if command {
-            if let keyboard::Key::Character(c) = key {
-                return match c.as_str() {
-                    "a" => Some(Message::SelectAllOcrText),
-                    "c" => Some(Message::CopyOcrSelection),
-                    _ => None,
-                };
-            }
-        }
         return None;
     }
     let command = zoom_modifier_held(modifiers);
@@ -1523,12 +1520,7 @@ pub(crate) fn subscription(state: &super::ResultWorkspace) -> Subscription<Messa
                 Some(Message::ModifiersChanged(m))
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                map_key_press(
-                    &key,
-                    modifiers,
-                    status == iced::event::Status::Captured,
-                    Tool::Select,
-                )
+                map_key_press(&key, modifiers, status == iced::event::Status::Captured)
             }
             _ => None,
         }),
@@ -2549,11 +2541,11 @@ mod tests {
         use keyboard::{key::Named, Key};
         let none = keyboard::Modifiers::default();
         assert_eq!(
-            map_key_press(&Key::Character("n".into()), none, false, Tool::Select),
+            map_key_press(&Key::Character("n".into()), none, false),
             Some(Message::SelectTool(Tool::Number))
         );
         assert_eq!(
-            map_key_press(&Key::Character("z".into()), zmod(), false, Tool::Select),
+            map_key_press(&Key::Character("z".into()), zmod(), false),
             Some(Message::Undo)
         );
         assert_eq!(
@@ -2561,16 +2553,15 @@ mod tests {
                 &Key::Character("z".into()),
                 zmod() | keyboard::Modifiers::SHIFT,
                 false,
-                Tool::Select,
             ),
             Some(Message::Redo)
         );
         assert_eq!(
-            map_key_press(&Key::Named(Named::Delete), none, false, Tool::Select),
+            map_key_press(&Key::Named(Named::Delete), none, false),
             Some(Message::DeleteSelected)
         );
         assert_eq!(
-            map_key_press(&Key::Character("c".into()), zmod(), false, Tool::Select),
+            map_key_press(&Key::Character("c".into()), zmod(), false),
             Some(Message::Copy)
         );
     }
@@ -2579,16 +2570,13 @@ mod tests {
     fn captured_keys_are_ignored_except_escape() {
         use keyboard::{key::Named, Key};
         let none = keyboard::Modifiers::default();
+        assert_eq!(map_key_press(&Key::Character("n".into()), none, true), None);
         assert_eq!(
-            map_key_press(&Key::Character("n".into()), none, true, Tool::Select),
+            map_key_press(&Key::Named(Named::Backspace), none, true),
             None
         );
         assert_eq!(
-            map_key_press(&Key::Named(Named::Backspace), none, true, Tool::Select),
-            None
-        );
-        assert_eq!(
-            map_key_press(&Key::Named(Named::Escape), none, true, Tool::Select),
+            map_key_press(&Key::Named(Named::Escape), none, true),
             Some(Message::EscapePressed)
         );
     }
@@ -2597,7 +2585,7 @@ mod tests {
     fn plain_characters_do_not_fire_with_command_modifiers_held() {
         use keyboard::Key;
         assert_eq!(
-            map_key_press(&Key::Character("n".into()), zmod(), false, Tool::Select),
+            map_key_press(&Key::Character("n".into()), zmod(), false),
             None
         );
     }
@@ -2678,6 +2666,21 @@ mod tests {
         assert!(state.pending_discard.is_none());
     }
 
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn copy_without_ocr_selection_shows_error() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state.ocr_text.set_ready_for_tests(vec![]);
+
+        let _ = update(&mut state, Message::CopyOcrSelection);
+
+        assert_eq!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("No OCR text selected")
+        );
+    }
+
     // -- OCR text mode (Task 4) -----------------------------------------------
 
     #[cfg(feature = "ocr")]
@@ -2728,28 +2731,124 @@ mod tests {
 
     #[cfg(feature = "ocr")]
     #[test]
-    fn command_c_in_ocr_mode_maps_to_copy_ocr_selection() {
-        let msg = map_key_press(
-            &keyboard::Key::Character("c".into()),
-            keyboard::Modifiers::CTRL,
-            false,
-            Tool::OcrText,
-        );
+    fn copy_in_ocr_mode_routes_to_copy_ocr_selection() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+        state.ocr_text.set_selection(Some(
+            crate::result_workspace::ocr_text::OcrSelection::range(
+                crate::result_workspace::ocr_text::TextCursor::new(0, 0),
+                crate::result_workspace::ocr_text::TextCursor::new(0, 6),
+            ),
+        ));
 
-        assert_eq!(msg, Some(Message::CopyOcrSelection));
+        let _task = update(&mut state, Message::Copy);
+        assert!(
+            state.message.is_none(),
+            "Copy in OCR mode with valid selection does not set an error"
+        );
     }
 
     #[cfg(feature = "ocr")]
     #[test]
-    fn command_a_in_ocr_mode_maps_to_select_all_ocr_text() {
-        let msg = map_key_press(
-            &keyboard::Key::Character("a".into()),
-            keyboard::Modifiers::CTRL,
-            false,
+    fn tool_switching_is_blocked_in_ocr_mode() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+
+        let _ = update(&mut state, Message::SelectTool(Tool::Select));
+        assert_eq!(state.editor.tool, Tool::OcrText, "tool switch blocked");
+
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        assert_eq!(state.editor.tool, Tool::OcrText, "tool switch blocked");
+
+        let _ = update(&mut state, Message::SelectTool(Tool::OcrText));
+        assert_eq!(
+            state.editor.tool,
             Tool::OcrText,
+            "OcrText → OcrText is a no-op"
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn undo_redo_are_blocked_in_ocr_mode() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
+        let before = state.document.image.state_id();
+
+        let _ = update(&mut state, Message::Undo);
+        assert_eq!(
+            state.document.image.state_id(),
+            before,
+            "undo blocked in OCR mode"
         );
 
-        assert_eq!(msg, Some(Message::SelectAllOcrText));
+        let _ = update(&mut state, Message::Redo);
+        assert_eq!(
+            state.document.image.state_id(),
+            before,
+            "redo blocked in OCR mode"
+        );
     }
 
     #[cfg(feature = "ocr")]

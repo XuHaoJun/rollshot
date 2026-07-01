@@ -5,13 +5,23 @@ use rollshot_image_document::{Annotation, ImagePoint, ImageRect};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OcrItemId(pub u64);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct OcrTextItem {
     pub id: OcrItemId,
     pub text: String,
     pub confidence: f32,
     pub bounds: ImageRect,
     pub quad: [ImagePoint; 4],
+}
+
+impl std::fmt::Debug for OcrTextItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OcrTextItem")
+            .field("id", &self.id)
+            .field("confidence", &self.confidence)
+            .field("bounds", &self.bounds)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +61,18 @@ impl OcrSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct OcrTextDocument {
     visible_items: Vec<OcrTextItem>,
     line_break_after: Vec<bool>,
+}
+
+impl std::fmt::Debug for OcrTextDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OcrTextDocument")
+            .field("visible_item_count", &self.visible_items.len())
+            .finish()
+    }
 }
 
 impl OcrTextDocument {
@@ -277,7 +295,7 @@ impl ProductOcrError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum OcrTextStatus {
     Idle,
     Preparing,
@@ -285,12 +303,33 @@ pub enum OcrTextStatus {
     Failed(ProductOcrError),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for OcrTextStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OcrTextStatus::Idle => "Idle",
+            OcrTextStatus::Preparing => "Preparing",
+            OcrTextStatus::Ready(_) => "Ready",
+            OcrTextStatus::Failed(_) => "Failed",
+        })
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct OcrTextState {
     status: OcrTextStatus,
     selection: Option<OcrSelection>,
     raw_items: Vec<OcrTextItem>,
     redaction_signature: u64,
+}
+
+impl std::fmt::Debug for OcrTextState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OcrTextState")
+            .field("status", &self.status_name())
+            .field("has_selection", &self.selection.is_some())
+            .field("raw_item_count", &self.raw_items.len())
+            .finish()
+    }
 }
 
 impl OcrTextState {
@@ -300,6 +339,15 @@ impl OcrTextState {
             selection: None,
             raw_items: Vec::new(),
             redaction_signature: 0,
+        }
+    }
+
+    fn status_name(&self) -> &'static str {
+        match &self.status {
+            OcrTextStatus::Idle => "idle",
+            OcrTextStatus::Preparing => "preparing",
+            OcrTextStatus::Ready(_) => "ready",
+            OcrTextStatus::Failed(_) => "failed",
         }
     }
 
@@ -573,6 +621,48 @@ mod tests {
 
         assert_eq!(doc.selected_text(&forward), doc.selected_text(&backward));
         assert_eq!(doc.selected_text(&forward), "lpha beta\ngam");
+    }
+
+    #[test]
+    fn redacted_item_cannot_be_selected_after_initial_filtering() {
+        let items = vec![
+            item(1, "public", rect(0.0, 0.0, 60.0, 12.0)),
+            item(2, "private", rect(0.0, 30.0, 70.0, 12.0)),
+        ];
+        let redactions = vec![Annotation::OpaqueRedaction {
+            id: AnnotationId(9),
+            bounds: rect(0.0, 25.0, 90.0, 25.0),
+        }];
+        let doc = OcrTextDocument::from_items(items, &redactions);
+
+        assert_eq!(doc.copy_all_text(), "public");
+        assert!(doc
+            .visible_items()
+            .iter()
+            .all(|item| item.text != "private"));
+    }
+
+    #[test]
+    fn redaction_refresh_removes_stale_selection() {
+        let items = vec![
+            item(1, "public", rect(0.0, 0.0, 60.0, 12.0)),
+            item(2, "private", rect(0.0, 30.0, 70.0, 12.0)),
+        ];
+        let mut state = OcrTextState::idle();
+        state.finish_prepare(items, &[]);
+        state.set_selection(Some(OcrSelection::range(
+            TextCursor::new(1, 0),
+            TextCursor::new(1, 7),
+        )));
+
+        let redactions = vec![Annotation::OpaqueRedaction {
+            id: AnnotationId(9),
+            bounds: rect(0.0, 25.0, 90.0, 25.0),
+        }];
+        state.refresh_redactions(&redactions);
+
+        assert!(state.selection().is_none());
+        assert_eq!(state.document().unwrap().copy_all_text(), "public");
     }
 
     #[test]
