@@ -868,6 +868,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::CanvasReleased(point) => handle_canvas_released(state, point),
         #[cfg(feature = "ocr")]
         Message::OcrPrepared(Ok(items)) => {
+            if state.editor.tool != Tool::OcrText {
+                return Task::none();
+            }
             let redactions = redactions(&state.document.image);
             state.ocr_text.finish_prepare(items, &redactions);
             state.message = None;
@@ -901,6 +904,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         #[cfg(feature = "ocr")]
         Message::SelectAllOcrText => {
+            if state.editor.tool != Tool::OcrText {
+                return Task::none();
+            }
             if let Some(document) = state.ocr_text.document() {
                 state
                     .ocr_text
@@ -2764,6 +2770,13 @@ mod tests {
         assert!(
             state.message.is_none(),
             "Copy in OCR mode with valid selection does not set an error"
+        );
+
+        let _task = update(&mut state, Message::CopyOcrFinished(Ok(())));
+        assert_eq!(
+            state.message.as_ref().map(InlineMessage::text),
+            Some("Copied OCR text"),
+            "CopyOcrFinished(Ok) shows success message"
         );
     }
 
