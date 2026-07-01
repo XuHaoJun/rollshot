@@ -17,6 +17,13 @@ pub fn copy_image(image: &RgbaImage) -> Result<(), String> {
         .map_err(|e| format!("clipboard write error: {e}"))
 }
 
+pub fn copy_text(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| format!("clipboard write error: {e}"))
+}
+
 /// Show an async save-file dialog and return the chosen path, or `None` if the
 /// user cancelled.
 pub async fn prompt_save_as(default_dir: PathBuf, default_name: String) -> Option<PathBuf> {

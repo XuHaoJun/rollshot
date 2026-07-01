@@ -108,11 +108,55 @@ pub enum Message {
     /// Messages forwarded from the workbench sub-state.
     #[allow(dead_code)] // SP6 scaffolding: constructed by later tasks
     Workbench(super::workbench::WorkbenchMessage),
+    #[cfg(feature = "ocr")]
+    OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    OcrSelectionStarted(super::ocr_text::TextCursor),
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    OcrSelectionChanged(super::ocr_text::TextCursor),
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    OcrSelectionFinished(super::ocr_text::TextCursor),
+    #[cfg(feature = "ocr")]
+    SelectAllOcrText,
+    #[cfg(feature = "ocr")]
+    CopyOcrSelection,
+    #[cfg(feature = "ocr")]
+    #[allow(dead_code)]
+    CopyAllOcrText,
+    #[cfg(feature = "ocr")]
+    CopyOcrFinished(Result<(), String>),
 }
 
 // ---------------------------------------------------------------------------
 // Gesture helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "ocr")]
+fn redactions(document: &ImageDocument) -> Vec<Annotation> {
+    document
+        .annotations()
+        .iter()
+        .filter(|annotation| matches!(annotation, Annotation::OpaqueRedaction { .. }))
+        .cloned()
+        .collect()
+}
+
+#[cfg(feature = "ocr")]
+fn prepare_ocr_task(state: &mut super::ResultWorkspace) -> Task<Message> {
+    state.ocr_text.begin_prepare();
+    let image = state.document.image.source().clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || super::ocr_text::prepare_product_ocr(&image))
+                .await
+                .unwrap_or(Err(super::ocr_text::ProductOcrError::Detect))
+        },
+        Message::OcrPrepared,
+    )
+}
 
 fn current_scale(state: &super::ResultWorkspace) -> f32 {
     geometry_for(
@@ -157,6 +201,8 @@ pub(crate) fn direct_manipulation_hit(
                 })
         }
         Tool::Number | Tool::Text => None,
+        #[cfg(feature = "ocr")]
+        Tool::OcrText => None,
     }
 }
 
@@ -287,6 +333,8 @@ pub(crate) fn handle_canvas_pressed(
             });
             Task::none()
         }
+        #[cfg(feature = "ocr")]
+        Tool::OcrText => Task::none(),
     }
 }
 
@@ -569,6 +617,17 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::WheelScrolled(delta) => handle_wheel(state, delta),
         Message::SelectTool(tool) => {
             commit_text_draft(state);
+            #[cfg(feature = "ocr")]
+            if tool == Tool::OcrText {
+                commit_text_draft(state);
+                state.editor.drag = None;
+                state.editor.selection = None;
+                state.editor.tool = Tool::OcrText;
+                if state.ocr_text.document().is_none() {
+                    return prepare_ocr_task(state);
+                }
+                return Task::none();
+            }
             state.editor.tool = tool;
             state.editor.drag = None;
             Task::none()
@@ -595,6 +654,15 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::EscapePressed => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                if state.ocr_text.selection().is_some() {
+                    state.ocr_text.set_selection(None);
+                    return Task::none();
+                }
+                state.editor.tool = Tool::Select;
+                return Task::none();
+            }
             if state.pending_unredacted_action.is_some() {
                 state.pending_unredacted_action = None;
             } else if state.editor.copy_menu_open {
@@ -681,6 +749,91 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::CanvasMoved(point) => handle_canvas_moved(state, point),
         Message::CanvasReleased(point) => handle_canvas_released(state, point),
+        #[cfg(feature = "ocr")]
+        Message::OcrPrepared(Ok(items)) => {
+            let redactions = redactions(&state.document.image);
+            state.ocr_text.finish_prepare(items, &redactions);
+            state.message = None;
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::OcrPrepared(Err(error)) => {
+            state.ocr_text.fail_prepare(error.clone());
+            state.editor.tool = Tool::Select;
+            state.message = Some(InlineMessage::Error(error.message().to_string()));
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::OcrSelectionStarted(cursor) => {
+            state
+                .ocr_text
+                .set_selection(Some(super::ocr_text::OcrSelection::range(cursor, cursor)));
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::OcrSelectionChanged(cursor) | Message::OcrSelectionFinished(cursor) => {
+            if let Some(selection) = state.ocr_text.selection().copied() {
+                state
+                    .ocr_text
+                    .set_selection(Some(super::ocr_text::OcrSelection::range(
+                        selection.anchor,
+                        cursor,
+                    )));
+            }
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::SelectAllOcrText => {
+            if let Some(document) = state.ocr_text.document() {
+                state
+                    .ocr_text
+                    .set_selection(Some(super::ocr_text::OcrSelection::range(
+                        super::ocr_text::TextCursor::new(0, 0),
+                        document.end_cursor(),
+                    )));
+            }
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyOcrSelection => {
+            let Some(document) = state.ocr_text.document() else {
+                state.message = Some(InlineMessage::Error("No OCR text selected".into()));
+                return Task::none();
+            };
+            let Some(selection) = state.ocr_text.selection() else {
+                state.message = Some(InlineMessage::Error("No OCR text selected".into()));
+                return Task::none();
+            };
+            let text = document.selected_text(selection);
+            if text.is_empty() {
+                state.message = Some(InlineMessage::Error("No OCR text selected".into()));
+                return Task::none();
+            }
+            Task::done(Message::CopyOcrFinished(super::actions::copy_text(&text)))
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyAllOcrText => {
+            let Some(document) = state.ocr_text.document() else {
+                state.message = Some(InlineMessage::Error("No OCR text available".into()));
+                return Task::none();
+            };
+            let text = document.copy_all_text();
+            if text.is_empty() {
+                state.message = Some(InlineMessage::Error("No OCR text available".into()));
+                return Task::none();
+            }
+            Task::done(Message::CopyOcrFinished(super::actions::copy_text(&text)))
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyOcrFinished(Ok(())) => {
+            state.message = Some(InlineMessage::success("Copied OCR text".into()));
+            Task::none()
+        }
+        #[cfg(feature = "ocr")]
+        Message::CopyOcrFinished(Err(error)) => {
+            state.message = Some(InlineMessage::Error(error));
+            Task::none()
+        }
         Message::SmartRedaction => {
             let mut wb = super::workbench::WorkbenchState::default();
             if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
@@ -1232,6 +1385,37 @@ pub(crate) fn map_key_press(
         },
         _ => None,
     }
+}
+
+#[cfg(feature = "ocr")]
+#[allow(dead_code)]
+pub(crate) fn map_key_press_ocr(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    captured: bool,
+    tool: Tool,
+) -> Option<Message> {
+    if tool != Tool::OcrText {
+        return map_key_press(key, modifiers, captured);
+    }
+    use keyboard::key::Named;
+    if matches!(key, keyboard::Key::Named(Named::Escape)) {
+        return Some(Message::EscapePressed);
+    }
+    if captured {
+        return None;
+    }
+    let command = zoom_modifier_held(modifiers);
+    if command {
+        if let keyboard::Key::Character(c) = key {
+            return match c.as_str() {
+                "a" => Some(Message::SelectAllOcrText),
+                "c" => Some(Message::CopyOcrSelection),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,5 +2568,118 @@ mod tests {
         assert_eq!(state.pending_unredacted_action, None);
         // Esc cancelled the blocking dialog; it must not have escalated to close.
         assert!(state.pending_discard.is_none());
+    }
+
+    // -- OCR text mode (Task 4) -----------------------------------------------
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn selecting_ocr_tool_clears_annotation_drag_and_requests_prepare() {
+        let mut state = workspace();
+        state.editor.drag = Some(DragState::Pan {
+            last_pointer: Point::new(10.0, 10.0),
+        });
+
+        let _ = update(&mut state, Message::SelectTool(Tool::OcrText));
+
+        assert_eq!(state.editor.tool, Tool::OcrText);
+        assert!(state.editor.drag.is_none());
+        assert!(state.ocr_text.is_preparing_or_ready());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn canvas_press_in_ocr_text_mode_does_not_start_annotation_drag() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(12.0, 12.0), Instant::now());
+
+        assert!(state.editor.drag.is_none());
+        assert!(state.ocr_text.selection().is_none());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn command_c_in_ocr_mode_maps_to_copy_ocr_selection() {
+        let msg = map_key_press_ocr(
+            &keyboard::Key::Character("c".into()),
+            keyboard::Modifiers::CTRL,
+            false,
+            Tool::OcrText,
+        );
+
+        assert!(matches!(msg, Some(Message::CopyOcrSelection)));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn command_a_in_ocr_mode_maps_to_select_all_ocr_text() {
+        let msg = map_key_press_ocr(
+            &keyboard::Key::Character("a".into()),
+            keyboard::Modifiers::CTRL,
+            false,
+            Tool::OcrText,
+        );
+
+        assert!(matches!(msg, Some(Message::SelectAllOcrText)));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn escape_clears_ocr_selection_before_leaving_ocr_mode() {
+        let mut state = workspace();
+        state.editor.tool = Tool::OcrText;
+        state
+            .ocr_text
+            .set_ready_for_tests(vec![crate::result_workspace::ocr_text::OcrTextItem {
+                id: crate::result_workspace::ocr_text::OcrItemId(0),
+                text: "secret".into(),
+                confidence: 0.95,
+                bounds: ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 18.0,
+                },
+                quad: [
+                    ImagePoint { x: 10.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 10.0 },
+                    ImagePoint { x: 90.0, y: 28.0 },
+                    ImagePoint { x: 10.0, y: 28.0 },
+                ],
+            }]);
+        state.ocr_text.set_selection(Some(
+            crate::result_workspace::ocr_text::OcrSelection::range(
+                crate::result_workspace::ocr_text::TextCursor::new(0, 0),
+                crate::result_workspace::ocr_text::TextCursor::new(0, 3),
+            ),
+        ));
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert_eq!(state.editor.tool, Tool::OcrText);
+        assert!(state.ocr_text.selection().is_none());
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert_eq!(state.editor.tool, Tool::Select);
     }
 }

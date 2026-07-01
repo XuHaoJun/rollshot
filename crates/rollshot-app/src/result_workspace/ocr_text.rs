@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-use rollshot_image_document::{Annotation, AnnotationId, ImagePoint, ImageRect};
+use rollshot_image_document::{Annotation, ImagePoint, ImageRect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OcrItemId(pub u64);
@@ -78,6 +78,7 @@ impl OcrTextDocument {
         }
     }
 
+    #[allow(dead_code)]
     pub fn visible_items(&self) -> &[OcrTextItem] {
         &self.visible_items
     }
@@ -98,6 +99,7 @@ impl OcrTextDocument {
         }
     }
 
+    #[allow(dead_code)]
     pub fn selection_is_valid(&self, selection: &OcrSelection) -> bool {
         let (start, end) = selection.normalized();
         let Some(last) = self.visible_items.len().checked_sub(1) else {
@@ -257,6 +259,7 @@ fn iou(a: ImageRect, b: ImageRect) -> f32 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductOcrError {
+    #[allow(dead_code)]
     Disabled,
     SessionInit,
     Detect,
@@ -271,6 +274,103 @@ impl ProductOcrError {
             Self::Detect => "OCR detection failed",
             Self::InvalidRegion => "OCR region is invalid",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OcrTextStatus {
+    Idle,
+    Preparing,
+    Ready(OcrTextDocument),
+    Failed(ProductOcrError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrTextState {
+    status: OcrTextStatus,
+    selection: Option<OcrSelection>,
+    raw_items: Vec<OcrTextItem>,
+    redaction_signature: u64,
+}
+
+impl OcrTextState {
+    pub fn idle() -> Self {
+        Self {
+            status: OcrTextStatus::Idle,
+            selection: None,
+            raw_items: Vec::new(),
+            redaction_signature: 0,
+        }
+    }
+
+    pub fn begin_prepare(&mut self) {
+        self.status = OcrTextStatus::Preparing;
+        self.selection = None;
+        self.raw_items.clear();
+        self.redaction_signature = 0;
+    }
+
+    pub fn finish_prepare(&mut self, items: Vec<OcrTextItem>, redactions: &[Annotation]) {
+        self.redaction_signature = redaction_signature(redactions);
+        self.raw_items = items.clone();
+        self.status = OcrTextStatus::Ready(OcrTextDocument::from_items(items, redactions));
+        self.selection = None;
+    }
+
+    pub fn fail_prepare(&mut self, error: ProductOcrError) {
+        self.status = OcrTextStatus::Failed(error);
+        self.selection = None;
+        self.raw_items.clear();
+        self.redaction_signature = 0;
+    }
+
+    #[allow(dead_code)]
+    pub fn is_preparing_or_ready(&self) -> bool {
+        matches!(
+            &self.status,
+            OcrTextStatus::Preparing | OcrTextStatus::Ready(_)
+        )
+    }
+
+    pub fn document(&self) -> Option<&OcrTextDocument> {
+        match &self.status {
+            OcrTextStatus::Ready(document) => Some(document),
+            _ => None,
+        }
+    }
+
+    pub fn selection(&self) -> Option<&OcrSelection> {
+        self.selection.as_ref()
+    }
+
+    pub fn set_selection(&mut self, selection: Option<OcrSelection>) {
+        self.selection = selection;
+    }
+
+    #[allow(dead_code)]
+    pub fn refresh_redactions(&mut self, redactions: &[Annotation]) {
+        if !matches!(&self.status, OcrTextStatus::Ready(_)) {
+            return;
+        }
+        let signature = redaction_signature(redactions);
+        if signature == self.redaction_signature {
+            return;
+        }
+
+        self.redaction_signature = signature;
+        let document = OcrTextDocument::from_items(self.raw_items.clone(), redactions);
+        self.selection = self
+            .selection
+            .filter(|selection| document.selection_is_valid(selection));
+        self.status = OcrTextStatus::Ready(document);
+    }
+
+    #[cfg(test)]
+    pub fn set_ready_for_tests(&mut self, items: Vec<OcrTextItem>) {
+        self.raw_items = items.clone();
+        self.status = OcrTextStatus::Ready(OcrTextDocument::from_items(items, &[]));
+        self.redaction_signature = 0;
+        self.selection = None;
     }
 }
 
@@ -330,6 +430,7 @@ pub fn prepare_product_ocr(_image: &image::RgbaImage) -> Result<Vec<OcrTextItem>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rollshot_image_document::AnnotationId;
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> ImageRect {
         ImageRect {
