@@ -327,6 +327,11 @@ pub(crate) fn save_payload(state: &super::ResultWorkspace) -> RgbaImage {
     }
 }
 
+#[cfg(feature = "ocr")]
+fn copy_ocr_text_task(text: String) -> Task<Message> {
+    iced::clipboard::write(text).chain(Task::done(Message::CopyOcrFinished(Ok(()))))
+}
+
 // ---------------------------------------------------------------------------
 // Gesture handlers
 // ---------------------------------------------------------------------------
@@ -938,7 +943,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.message = Some(InlineMessage::Error("No OCR text selected".into()));
                 return Task::none();
             }
-            Task::done(Message::CopyOcrFinished(super::actions::copy_text(&text)))
+            copy_ocr_text_task(text)
         }
         #[cfg(feature = "ocr")]
         Message::CopyAllOcrText => {
@@ -951,7 +956,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.message = Some(InlineMessage::Error("No OCR text available".into()));
                 return Task::none();
             }
-            Task::done(Message::CopyOcrFinished(super::actions::copy_text(&text)))
+            copy_ocr_text_task(text)
         }
         #[cfg(feature = "ocr")]
         Message::CopyOcrFinished(Ok(())) => {

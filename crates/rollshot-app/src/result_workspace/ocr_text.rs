@@ -631,6 +631,20 @@ mod tests {
     }
 
     #[test]
+    fn whole_document_selection_copies_all_text() {
+        let items = vec![
+            item(1, "alpha", rect(10.0, 10.0, 50.0, 12.0)),
+            item(2, "beta", rect(70.0, 10.0, 40.0, 12.0)),
+            item(3, "gamma", rect(10.0, 40.0, 60.0, 12.0)),
+        ];
+        let doc = OcrTextDocument::from_items(items, &[]);
+        let selection = OcrSelection::range(TextCursor::new(0, 0), doc.end_cursor());
+
+        assert_eq!(doc.selected_text(&selection), doc.copy_all_text());
+        assert_eq!(doc.selected_text(&selection), "alpha beta\ngamma");
+    }
+
+    #[test]
     fn redacted_item_cannot_be_selected_after_initial_filtering() {
         let items = vec![
             item(1, "public", rect(0.0, 0.0, 60.0, 12.0)),

@@ -128,12 +128,9 @@ where
 
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let Some(local) = cursor.position_over(layout.bounds()) else {
+                let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale)
+                else {
                     return;
-                };
-                let point = ImagePoint {
-                    x: local.x / self.scale,
-                    y: local.y / self.scale,
                 };
                 if let Some(hit) = hit_test(document, &state.paragraphs, self.scale, point) {
                     state.dragging = true;
@@ -145,13 +142,10 @@ where
                 if !state.dragging {
                     return;
                 }
-                let Some(local) = cursor.position_over(layout.bounds()) else {
+                let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale)
+                else {
                     shell.capture_event();
                     return;
-                };
-                let point = ImagePoint {
-                    x: local.x / self.scale,
-                    y: local.y / self.scale,
                 };
                 if let Some(hit) = hit_test(document, &state.paragraphs, self.scale, point) {
                     shell.publish(Message::OcrSelectionChanged(hit).into());
@@ -163,13 +157,10 @@ where
                     return;
                 }
                 state.dragging = false;
-                let Some(local) = cursor.position_over(layout.bounds()) else {
+                let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale)
+                else {
                     shell.capture_event();
                     return;
-                };
-                let point = ImagePoint {
-                    x: local.x / self.scale,
-                    y: local.y / self.scale,
                 };
                 if let Some(hit) = hit_test(document, &state.paragraphs, self.scale, point) {
                     shell.publish(Message::OcrSelectionFinished(hit).into());
@@ -236,14 +227,10 @@ where
         let Some(document) = self.document else {
             return mouse::Interaction::default();
         };
-        let Some(local) = cursor.position_over(layout.bounds()) else {
+        let Some(point) = image_point_from_cursor(cursor, layout.bounds(), self.scale) else {
             return mouse::Interaction::default();
         };
         let state = tree.state.downcast_ref::<State<Renderer>>();
-        let point = ImagePoint {
-            x: local.x / self.scale,
-            y: local.y / self.scale,
-        };
         if hit_test(document, &state.paragraphs, self.scale, point).is_some() {
             mouse::Interaction::Text
         } else {
@@ -262,6 +249,18 @@ where
     fn from(layer: OcrTextLayer<'a>) -> Self {
         Element::new(layer)
     }
+}
+
+fn image_point_from_cursor(
+    cursor: mouse::Cursor,
+    bounds: Rectangle,
+    scale: f32,
+) -> Option<ImagePoint> {
+    let local = cursor.position_in(bounds)?;
+    Some(ImagePoint {
+        x: local.x / scale,
+        y: local.y / scale,
+    })
 }
 
 fn hit_test<ParagraphT>(
@@ -343,6 +342,49 @@ fn draw_selection<Renderer>(
                 ..renderer::Quad::default()
             },
             color,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_mapping_uses_widget_local_coordinates() {
+        let bounds = Rectangle {
+            x: 300.0,
+            y: 200.0,
+            width: 400.0,
+            height: 300.0,
+        };
+
+        let point = image_point_from_cursor(
+            mouse::Cursor::Available(Point::new(340.0, 230.0)),
+            bounds,
+            2.0,
+        )
+        .unwrap();
+
+        assert_eq!(point, ImagePoint { x: 20.0, y: 15.0 });
+    }
+
+    #[test]
+    fn cursor_mapping_rejects_points_outside_layer_bounds() {
+        let bounds = Rectangle {
+            x: 300.0,
+            y: 200.0,
+            width: 400.0,
+            height: 300.0,
+        };
+
+        assert_eq!(
+            image_point_from_cursor(
+                mouse::Cursor::Available(Point::new(299.0, 230.0)),
+                bounds,
+                2.0,
+            ),
+            None
         );
     }
 }
