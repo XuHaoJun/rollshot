@@ -130,6 +130,100 @@ pub enum Message {
     CopyOcrFinished(Result<(), String>),
 }
 
+impl PartialEq for Message {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::RequestClose, Self::RequestClose) => true,
+            (Self::ConfirmDiscard, Self::ConfirmDiscard) => true,
+            (Self::KeepUnsaved, Self::KeepUnsaved) => true,
+            (Self::DismissMessage, Self::DismissMessage) => true,
+            (Self::Copy, Self::Copy) => true,
+            (Self::CopyOriginal, Self::CopyOriginal) => true,
+            (
+                Self::CopyFinished {
+                    result: a_result,
+                    safe_output: a_safe,
+                },
+                Self::CopyFinished {
+                    result: b_result,
+                    safe_output: b_safe,
+                },
+            ) => a_result == b_result && a_safe == b_safe,
+            (Self::SaveAs, Self::SaveAs) => true,
+            (Self::SavePathChosen(a), Self::SavePathChosen(b)) => a == b,
+            (
+                Self::SaveFinished {
+                    result: a_result,
+                    saved_state_id: a_id,
+                    safe_output: a_safe,
+                },
+                Self::SaveFinished {
+                    result: b_result,
+                    saved_state_id: b_id,
+                    safe_output: b_safe,
+                },
+            ) => a_result == b_result && a_id == b_id && a_safe == b_safe,
+            (Self::Reveal, Self::Reveal) => true,
+            (Self::RevealFinished(a), Self::RevealFinished(b)) => a == b,
+            (Self::Tick(a), Self::Tick(b)) => *a == *b,
+            (Self::SetZoom(a), Self::SetZoom(b)) => a == b,
+            (Self::ZoomStep(a), Self::ZoomStep(b)) => a == b,
+            (
+                Self::ViewportChanged {
+                    bounds: a_bounds,
+                    offset: a_offset,
+                },
+                Self::ViewportChanged {
+                    bounds: b_bounds,
+                    offset: b_offset,
+                },
+            ) => a_bounds == b_bounds && a_offset == b_offset,
+            (Self::ModifiersChanged(a), Self::ModifiersChanged(b)) => a == b,
+            (Self::PointerMoved(a), Self::PointerMoved(b)) => a == b,
+            (Self::ModalScrimPressed, Self::ModalScrimPressed) => true,
+            (Self::WheelScrolled(a), Self::WheelScrolled(b)) => a == b,
+            (Self::SelectTool(a), Self::SelectTool(b)) => a == b,
+            (Self::Undo, Self::Undo) => true,
+            (Self::Redo, Self::Redo) => true,
+            (Self::DeleteSelected, Self::DeleteSelected) => true,
+            (Self::EscapePressed, Self::EscapePressed) => true,
+            (Self::ToggleNavigator, Self::ToggleNavigator) => true,
+            (Self::NavigatorJump(a), Self::NavigatorJump(b)) => a == b,
+            (Self::ToggleCopyMenu, Self::ToggleCopyMenu) => true,
+            (Self::CanvasPressed(a), Self::CanvasPressed(b)) => a == b,
+            (Self::CanvasMoved(a), Self::CanvasMoved(b)) => a == b,
+            (Self::CanvasReleased(a), Self::CanvasReleased(b)) => a == b,
+            (Self::TextDraftAction(a), Self::TextDraftAction(b)) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
+            (Self::CommitTextDraft, Self::CommitTextDraft) => true,
+            (Self::ConfirmUnredactedAction, Self::ConfirmUnredactedAction) => true,
+            (Self::CancelUnredactedAction, Self::CancelUnredactedAction) => true,
+            (Self::SmartRedaction, Self::SmartRedaction) => true,
+            (Self::Workbench(a), Self::Workbench(b)) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
+            #[cfg(feature = "ocr")]
+            (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::OcrSelectionStarted(a), Self::OcrSelectionStarted(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::OcrSelectionChanged(a), Self::OcrSelectionChanged(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::OcrSelectionFinished(a), Self::OcrSelectionFinished(b)) => a == b,
+            #[cfg(feature = "ocr")]
+            (Self::SelectAllOcrText, Self::SelectAllOcrText) => true,
+            #[cfg(feature = "ocr")]
+            (Self::CopyOcrSelection, Self::CopyOcrSelection) => true,
+            #[cfg(feature = "ocr")]
+            (Self::CopyAllOcrText, Self::CopyAllOcrText) => true,
+            #[cfg(feature = "ocr")]
+            (Self::CopyOcrFinished(a), Self::CopyOcrFinished(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Gesture helpers
 // ---------------------------------------------------------------------------
@@ -433,6 +527,8 @@ pub(crate) fn handle_canvas_released(
 pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
     let task = update_inner(state, message);
     refresh_navigator(state);
+    #[cfg(feature = "ocr")]
+    refresh_ocr_redaction_mask(state);
     task
 }
 
@@ -442,6 +538,12 @@ fn refresh_navigator(state: &mut super::ResultWorkspace) {
         state.editor.navigator_items = state.document.image.navigator_items();
         state.editor.navigator_items_state = Some(current);
     }
+}
+
+#[cfg(feature = "ocr")]
+fn refresh_ocr_redaction_mask(state: &mut super::ResultWorkspace) {
+    let redactions = redactions(&state.document.image);
+    state.ocr_text.refresh_redactions(&redactions);
 }
 
 fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
@@ -467,6 +569,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Copy => {
+            #[cfg(feature = "ocr")]
+            if state.editor.tool == Tool::OcrText {
+                return update_inner(state, Message::CopyOcrSelection);
+            }
             if let super::workbench::WorkspaceMode::Workbench(ref wb) = state.mode {
                 if super::workbench::state::has_pending_candidates(wb) {
                     state.message = Some(InlineMessage::Error(format!(
@@ -619,7 +725,6 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             commit_text_draft(state);
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
-                commit_text_draft(state);
                 state.editor.drag = None;
                 state.editor.selection = None;
                 state.editor.tool = Tool::OcrText;
@@ -1357,12 +1462,27 @@ pub(crate) fn map_key_press(
     key: &keyboard::Key,
     modifiers: keyboard::Modifiers,
     captured: bool,
+    tool: Tool,
 ) -> Option<Message> {
     use keyboard::key::Named;
     if matches!(key, keyboard::Key::Named(Named::Escape)) {
         return Some(Message::EscapePressed);
     }
     if captured {
+        return None;
+    }
+    #[cfg(feature = "ocr")]
+    if tool == Tool::OcrText {
+        let command = zoom_modifier_held(modifiers);
+        if command {
+            if let keyboard::Key::Character(c) = key {
+                return match c.as_str() {
+                    "a" => Some(Message::SelectAllOcrText),
+                    "c" => Some(Message::CopyOcrSelection),
+                    _ => None,
+                };
+            }
+        }
         return None;
     }
     let command = zoom_modifier_held(modifiers);
@@ -1374,6 +1494,8 @@ pub(crate) fn map_key_press(
             "z" if modifiers.shift() => Some(Message::Redo),
             "z" => Some(Message::Undo),
             "c" => Some(Message::Copy),
+            #[cfg(feature = "ocr")]
+            "a" => Some(Message::SelectAllOcrText),
             _ => None,
         },
         keyboard::Key::Character(c) if !modifiers.alt() => match c.as_str() {
@@ -1381,41 +1503,12 @@ pub(crate) fn map_key_press(
             "n" => Some(Message::SelectTool(Tool::Number)),
             "t" => Some(Message::SelectTool(Tool::Text)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
+            #[cfg(feature = "ocr")]
+            "o" => Some(Message::SelectTool(Tool::OcrText)),
             _ => None,
         },
         _ => None,
     }
-}
-
-#[cfg(feature = "ocr")]
-#[allow(dead_code)]
-pub(crate) fn map_key_press_ocr(
-    key: &keyboard::Key,
-    modifiers: keyboard::Modifiers,
-    captured: bool,
-    tool: Tool,
-) -> Option<Message> {
-    if tool != Tool::OcrText {
-        return map_key_press(key, modifiers, captured);
-    }
-    use keyboard::key::Named;
-    if matches!(key, keyboard::Key::Named(Named::Escape)) {
-        return Some(Message::EscapePressed);
-    }
-    if captured {
-        return None;
-    }
-    let command = zoom_modifier_held(modifiers);
-    if command {
-        if let keyboard::Key::Character(c) = key {
-            return match c.as_str() {
-                "a" => Some(Message::SelectAllOcrText),
-                "c" => Some(Message::CopyOcrSelection),
-                _ => None,
-            };
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1430,7 +1523,12 @@ pub(crate) fn subscription(state: &super::ResultWorkspace) -> Subscription<Messa
                 Some(Message::ModifiersChanged(m))
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                map_key_press(&key, modifiers, status == iced::event::Status::Captured)
+                map_key_press(
+                    &key,
+                    modifiers,
+                    status == iced::event::Status::Captured,
+                    Tool::Select,
+                )
             }
             _ => None,
         }),
@@ -2450,48 +2548,58 @@ mod tests {
     fn key_mapping_routes_tools_undo_redo_delete_copy() {
         use keyboard::{key::Named, Key};
         let none = keyboard::Modifiers::default();
-        assert!(matches!(
-            map_key_press(&Key::Character("n".into()), none, false),
+        assert_eq!(
+            map_key_press(&Key::Character("n".into()), none, false, Tool::Select),
             Some(Message::SelectTool(Tool::Number))
-        ));
-        assert!(matches!(
-            map_key_press(&Key::Character("z".into()), zmod(), false),
+        );
+        assert_eq!(
+            map_key_press(&Key::Character("z".into()), zmod(), false, Tool::Select),
             Some(Message::Undo)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             map_key_press(
                 &Key::Character("z".into()),
                 zmod() | keyboard::Modifiers::SHIFT,
-                false
+                false,
+                Tool::Select,
             ),
             Some(Message::Redo)
-        ));
-        assert!(matches!(
-            map_key_press(&Key::Named(Named::Delete), none, false),
+        );
+        assert_eq!(
+            map_key_press(&Key::Named(Named::Delete), none, false, Tool::Select),
             Some(Message::DeleteSelected)
-        ));
-        assert!(matches!(
-            map_key_press(&Key::Character("c".into()), zmod(), false),
+        );
+        assert_eq!(
+            map_key_press(&Key::Character("c".into()), zmod(), false, Tool::Select),
             Some(Message::Copy)
-        ));
+        );
     }
 
     #[test]
     fn captured_keys_are_ignored_except_escape() {
         use keyboard::{key::Named, Key};
         let none = keyboard::Modifiers::default();
-        assert!(map_key_press(&Key::Character("n".into()), none, true).is_none());
-        assert!(map_key_press(&Key::Named(Named::Backspace), none, true).is_none());
-        assert!(matches!(
-            map_key_press(&Key::Named(Named::Escape), none, true),
+        assert_eq!(
+            map_key_press(&Key::Character("n".into()), none, true, Tool::Select),
+            None
+        );
+        assert_eq!(
+            map_key_press(&Key::Named(Named::Backspace), none, true, Tool::Select),
+            None
+        );
+        assert_eq!(
+            map_key_press(&Key::Named(Named::Escape), none, true, Tool::Select),
             Some(Message::EscapePressed)
-        ));
+        );
     }
 
     #[test]
     fn plain_characters_do_not_fire_with_command_modifiers_held() {
         use keyboard::Key;
-        assert!(map_key_press(&Key::Character("n".into()), zmod(), false).is_none());
+        assert_eq!(
+            map_key_press(&Key::Character("n".into()), zmod(), false, Tool::Select),
+            None
+        );
     }
 
     // -- unredacted-action confirmation (Task 3) ----------------------------
@@ -2621,27 +2729,27 @@ mod tests {
     #[cfg(feature = "ocr")]
     #[test]
     fn command_c_in_ocr_mode_maps_to_copy_ocr_selection() {
-        let msg = map_key_press_ocr(
+        let msg = map_key_press(
             &keyboard::Key::Character("c".into()),
             keyboard::Modifiers::CTRL,
             false,
             Tool::OcrText,
         );
 
-        assert!(matches!(msg, Some(Message::CopyOcrSelection)));
+        assert_eq!(msg, Some(Message::CopyOcrSelection));
     }
 
     #[cfg(feature = "ocr")]
     #[test]
     fn command_a_in_ocr_mode_maps_to_select_all_ocr_text() {
-        let msg = map_key_press_ocr(
+        let msg = map_key_press(
             &keyboard::Key::Character("a".into()),
             keyboard::Modifiers::CTRL,
             false,
             Tool::OcrText,
         );
 
-        assert!(matches!(msg, Some(Message::SelectAllOcrText)));
+        assert_eq!(msg, Some(Message::SelectAllOcrText));
     }
 
     #[cfg(feature = "ocr")]
