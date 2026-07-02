@@ -54,6 +54,9 @@ mod tests {
             .chunks_exact(4)
             .find(|pixel| pixel[0] > 0)
             .unwrap();
-        assert_eq!(argb_pixel, [rgba_pixel[3], rgba_pixel[0], rgba_pixel[1], rgba_pixel[2]]);
+        assert_eq!(
+            argb_pixel,
+            [rgba_pixel[3], rgba_pixel[0], rgba_pixel[1], rgba_pixel[2]]
+        );
     }
 }
