@@ -6,6 +6,8 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod tray_icon;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod process;
 
 pub fn run() -> Result<(), String> {
