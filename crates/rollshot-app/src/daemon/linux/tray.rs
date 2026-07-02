@@ -3,11 +3,12 @@ use std::sync::mpsc::Sender;
 
 pub struct DaemonTrayItem {
     events: Sender<DaemonEvent>,
+    icon: ksni::Icon,
 }
 
 impl DaemonTrayItem {
-    pub(crate) fn new(events: Sender<DaemonEvent>) -> Self {
-        Self { events }
+    pub(crate) fn new(events: Sender<DaemonEvent>, icon: ksni::Icon) -> Self {
+        Self { events, icon }
     }
 
     fn activate_capture(&mut self) {
@@ -29,7 +30,11 @@ impl ksni::Tray for DaemonTrayItem {
     }
 
     fn icon_name(&self) -> String {
-        "camera-photo".into()
+        "rollshot".into()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        vec![self.icon.clone()]
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -62,8 +67,9 @@ impl TrayGuard {
         if !rollshot_linux_desktop::sni_host_available() {
             return Err("KDE StatusNotifierHost is unavailable".into());
         }
+        let icon = crate::daemon::tray_icon::normal_ksni_icon()?;
         use ksni::blocking::TrayMethods;
-        let handle = DaemonTrayItem::new(events)
+        let handle = DaemonTrayItem::new(events, icon)
             .spawn()
             .map_err(|error| format!("failed to register Rollshot tray: {error}"))?;
         Ok(Self { handle })
@@ -80,10 +86,18 @@ impl Drop for TrayGuard {
 mod tests {
     use super::*;
 
+    fn test_icon() -> ksni::Icon {
+        ksni::Icon {
+            width: 1,
+            height: 1,
+            data: vec![255, 0, 0, 0],
+        }
+    }
+
     #[test]
     fn capture_menu_item_sends_capture_event() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut item = DaemonTrayItem::new(tx);
+        let mut item = DaemonTrayItem::new(tx, test_icon());
         item.activate_capture();
         assert!(matches!(rx.recv().unwrap(), DaemonEvent::CaptureRegion));
     }
@@ -91,7 +105,7 @@ mod tests {
     #[test]
     fn quit_menu_item_sends_quit_event() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut item = DaemonTrayItem::new(tx);
+        let mut item = DaemonTrayItem::new(tx, test_icon());
         item.activate_quit();
         assert!(matches!(rx.recv().unwrap(), DaemonEvent::Quit));
     }
@@ -99,7 +113,7 @@ mod tests {
     #[test]
     fn menu_contains_only_capture_and_quit() {
         let (tx, _rx) = std::sync::mpsc::channel();
-        let item = DaemonTrayItem::new(tx);
+        let item = DaemonTrayItem::new(tx, test_icon());
         let menu = ksni::Tray::menu(&item);
         let labels: Vec<&str> = menu
             .iter()
@@ -109,5 +123,16 @@ mod tests {
             })
             .collect();
         assert_eq!(labels, ["Capture Region", "Quit Rollshot"]);
+    }
+
+    #[test]
+    fn tray_exposes_embedded_icon_pixmap() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let item = DaemonTrayItem::new(tx, test_icon());
+        let pixmaps = ksni::Tray::icon_pixmap(&item);
+        assert_eq!(pixmaps.len(), 1);
+        assert_eq!(pixmaps[0].width, 1);
+        assert_eq!(pixmaps[0].height, 1);
+        assert_eq!(pixmaps[0].data, [255, 0, 0, 0]);
     }
 }
