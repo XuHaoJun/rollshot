@@ -13,6 +13,21 @@ pub(crate) fn daemon_event_for(id: &str) -> Option<DaemonEvent> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrayVisualConfig {
+    uses_icon: bool,
+    icon_is_template: bool,
+    uses_title: bool,
+}
+
+fn normal_tray_visual_config() -> TrayVisualConfig {
+    TrayVisualConfig {
+        uses_icon: true,
+        icon_is_template: true,
+        uses_title: false,
+    }
+}
+
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 use winit::event_loop::EventLoopProxy;
@@ -40,12 +55,21 @@ impl TrayGuard {
             }
         }));
 
-        // Title-only status item: no embedded icon asset is required and the
-        // item stays visible in the menu bar on macOS.
-        let tray = TrayIconBuilder::new()
+        let icon = crate::daemon::tray_icon::normal_tray_icon()?;
+        let visual = normal_tray_visual_config();
+        let mut builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_title("Rollshot")
-            .with_tooltip("Rollshot")
+            .with_tooltip("Rollshot");
+        if visual.uses_icon {
+            builder = builder.with_icon(icon);
+        }
+        if visual.icon_is_template {
+            builder = builder.with_icon_as_template(true);
+        }
+        if visual.uses_title {
+            builder = builder.with_title("Rollshot");
+        }
+        let tray = builder
             .build()
             .map_err(|error| format!("failed to create macOS tray icon: {error}"))?;
 
@@ -71,5 +95,13 @@ mod tests {
         ));
         assert!(matches!(daemon_event_for(QUIT_ID), Some(DaemonEvent::Quit)));
         assert!(daemon_event_for("unknown").is_none());
+    }
+
+    #[test]
+    fn normal_tray_uses_template_icon_without_title() {
+        let config = normal_tray_visual_config();
+        assert!(config.uses_icon);
+        assert!(config.icon_is_template);
+        assert!(!config.uses_title);
     }
 }

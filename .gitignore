@@ -22,3 +22,6 @@ spikes/*/target/
 
 # ONNX Runtime static lib (provisioned by CI or manual download, ~90MB).
 .ort/
+
+# Python virtual environment for tray icon generator.
+.venv/
