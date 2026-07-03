@@ -50,24 +50,41 @@ impl Default for ProviderConfig {
     }
 }
 
-fn provider_config_path(config_dir: &Path) -> PathBuf {
-    config_dir.join("provider.toml")
+#[derive(Deserialize)]
+struct ConfigFile {
+    provider: Option<ProviderConfig>,
+}
+
+fn config_file_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("config.toml")
 }
 
 pub fn load_provider_config(config_dir: &Path) -> Result<ProviderConfig, String> {
-    let path = provider_config_path(config_dir);
+    let path = config_file_path(config_dir);
     match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).map_err(|_| "invalid provider.toml".to_string()),
+        Ok(text) => toml::from_str::<ConfigFile>(&text)
+            .map(|file| file.provider.unwrap_or_default())
+            .map_err(|_| "invalid config.toml provider section".to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ProviderConfig::default()),
-        Err(e) => Err(format!("failed to read provider.toml: {e}")),
+        Err(e) => Err(format!("failed to read config.toml: {e}")),
     }
 }
 
 pub fn save_provider_config(config_dir: &Path, cfg: &ProviderConfig) -> Result<(), String> {
     std::fs::create_dir_all(config_dir).map_err(|_| "create config dir".to_string())?;
-    let path = provider_config_path(config_dir);
-    let text = toml::to_string_pretty(cfg).map_err(|_| "serialize provider config".to_string())?;
-    std::fs::write(&path, text).map_err(|_| "write provider.toml".to_string())
+    let path = config_file_path(config_dir);
+    let mut root = match std::fs::read_to_string(&path) {
+        Ok(text) => text
+            .parse::<toml::Table>()
+            .map_err(|_| "invalid config.toml".to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("failed to read config.toml: {e}")),
+    };
+    let provider =
+        toml::Value::try_from(cfg).map_err(|_| "serialize provider config".to_string())?;
+    root.insert("provider".into(), provider);
+    let text = toml::to_string_pretty(&root).map_err(|_| "serialize config.toml".to_string())?;
+    std::fs::write(&path, text).map_err(|_| "write config.toml".to_string())
 }
 
 /// Resolve the API key from the given source. Returns None if unavailable.
@@ -130,22 +147,84 @@ mod tests {
     }
 
     #[test]
-    fn load_round_trip() {
+    fn load_reads_provider_section_from_config_toml() {
         let tmp = tempfile::tempdir().unwrap();
-        let original = ProviderConfig {
-            provider: ProviderKind::OpenAI,
-            model: "gpt-4o".into(),
-            base_url: Some("https://api.openai.com/v1".into()),
-            key_source: KeySource::Env("OPENAI_API_KEY".into()),
-        };
-        save_provider_config(tmp.path(), &original).unwrap();
+        fs::write(
+            tmp.path().join("config.toml"),
+            r#"
+[daemon]
+capture_region_hotkey = "Alt+Shift+6"
+
+[provider]
+provider = "OpenAI"
+model = "gpt-4o"
+base_url = "https://api.openai.com/v1"
+key_source = { Env = "OPENAI_API_KEY" }
+"#,
+        )
+        .unwrap();
+
         let loaded = load_provider_config(tmp.path()).unwrap();
+
         assert_eq!(loaded.provider, ProviderKind::OpenAI);
         assert_eq!(loaded.model, "gpt-4o");
         assert_eq!(
             loaded.base_url.as_deref(),
             Some("https://api.openai.com/v1")
         );
+        assert!(matches!(loaded.key_source, KeySource::Env(ref v) if v == "OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn load_config_without_provider_section_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("config.toml"),
+            r#"
+[daemon]
+capture_region_hotkey = "Alt+Shift+6"
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_provider_config(tmp.path()).unwrap();
+
+        assert_eq!(cfg.provider, ProviderKind::Anthropic);
+        assert_eq!(cfg.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn save_round_trip_uses_config_toml_and_preserves_daemon_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("config.toml"),
+            r#"
+[daemon]
+capture_region_hotkey = "Alt+Shift+6"
+"#,
+        )
+        .unwrap();
+        let original = ProviderConfig {
+            provider: ProviderKind::OpenAI,
+            model: "gpt-4o".into(),
+            base_url: Some("https://api.openai.com/v1".into()),
+            key_source: KeySource::Env("OPENAI_API_KEY".into()),
+        };
+
+        save_provider_config(tmp.path(), &original).unwrap();
+        let loaded = load_provider_config(tmp.path()).unwrap();
+
+        assert_eq!(loaded.provider, ProviderKind::OpenAI);
+        assert_eq!(loaded.model, "gpt-4o");
+        assert_eq!(
+            loaded.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        let text = fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+        assert!(text.contains("[daemon]"));
+        assert!(text.contains("capture_region_hotkey = \"Alt+Shift+6\""));
+        assert!(text.contains("[provider]"));
+        assert!(!tmp.path().join("provider.toml").exists());
     }
 
     #[test]
@@ -164,7 +243,7 @@ mod tests {
     #[test]
     fn load_invalid_toml_returns_err() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("provider.toml"), "not = valid = toml").unwrap();
+        fs::write(tmp.path().join("config.toml"), "not = valid = toml").unwrap();
         assert!(load_provider_config(tmp.path()).is_err());
     }
 

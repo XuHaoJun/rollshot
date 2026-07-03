@@ -416,13 +416,19 @@ Optional configuration:
 ```toml
 [daemon]
 capture_region_hotkey = "Alt+Shift+6"
+
+[provider]
+provider = "Anthropic"
+model = "claude-sonnet-4-6"
+key_source = { Env = "ANTHROPIC_API_KEY" }
+# base_url = "https://api.anthropic.com"
 ```
 
 Save it as `$XDG_CONFIG_HOME/rollshot/config.toml` (normally
-`~/.config/rollshot/config.toml`) and restart the daemon. The first release
-targets KDE Plasma 6 on Wayland. If portal shortcut registration fails, the
-tray remains usable. Version 1 shortcut syntax requires at least one modifier
-and an ASCII letter/digit or `F1`–`F24` base key.
+`~/.config/rollshot/config.toml`) and restart the daemon. See
+`docs/config.md` for every supported parameter, default, and syntax rule. The
+first release targets KDE Plasma 6 on Wayland. If portal shortcut registration
+fails, the tray remains usable.
 
 ### System tray daemon (macOS)
 
@@ -439,6 +445,7 @@ The global shortcut defaults to **Command+Shift+6**. Override it in
     [daemon]
     capture_region_hotkey = "Command+Shift+6"
 
+See `docs/config.md` for every supported parameter, default, and syntax rule.
 If the shortcut cannot be registered (e.g. another app owns it), the daemon
 logs a warning and keeps working through the menu. Starting a second daemon
 exits immediately without a second menu item. The shortcut uses Carbon hotkey

@@ -117,11 +117,12 @@ and golden source are committed.
 
 ### Step 3: Record a cassette from a live model
 
-Recording uses the Rollshot provider configuration at the platform config path
-(`dirs::config_dir()/rollshot/provider.toml`) and resolves the configured key
-source at runtime. Configure the app provider settings first, then run the
-recorder. It talks to the configured Anthropic-compatible endpoint through a
-local reverse-proxy that captures every request/response pair.
+Recording uses the `[provider]` section in Rollshot's platform config file
+(`dirs::config_dir()/rollshot/config.toml`) and resolves the configured key
+source at runtime. See `docs/config.md` for the supported provider parameters.
+Configure the app provider settings first, then run the recorder. It talks to
+the configured Anthropic-compatible endpoint through a local reverse-proxy that
+captures every request/response pair.
 
 ```bash
 ROLLSHOT_RECORD_EVAL=1 EVAL_INTENT=<intent> \

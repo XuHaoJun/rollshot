@@ -37,7 +37,7 @@ pub struct LoadedConfig {
 
 #[derive(Deserialize)]
 struct ConfigFile {
-    daemon: RawDaemonConfig,
+    daemon: Option<RawDaemonConfig>,
 }
 
 #[derive(Deserialize)]
@@ -202,7 +202,14 @@ pub fn load_from(path: &Path, platform: Platform) -> LoadedConfig {
         }
     };
 
-    match raw.daemon.capture_region_hotkey.parse() {
+    let Some(raw_daemon) = raw.daemon else {
+        return LoadedConfig {
+            config: fallback,
+            warning: None,
+        };
+    };
+
+    match raw_daemon.capture_region_hotkey.parse() {
         Ok(capture_region_hotkey) => LoadedConfig {
             config: DaemonConfig {
                 capture_region_hotkey,
@@ -247,6 +254,30 @@ mod tests {
         assert_eq!(
             loaded.config.capture_region_hotkey.to_string(),
             "Control+Alt+7"
+        );
+        assert!(loaded.warning.is_none());
+    }
+
+    #[test]
+    fn provider_only_file_uses_daemon_default_without_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[provider]
+provider = "Anthropic"
+model = "claude-sonnet-4-6"
+key_source = { Env = "ANTHROPIC_API_KEY" }
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(
+            loaded.config.capture_region_hotkey.to_string(),
+            "Alt+Shift+6"
         );
         assert!(loaded.warning.is_none());
     }

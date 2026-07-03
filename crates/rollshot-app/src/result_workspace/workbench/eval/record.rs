@@ -403,10 +403,10 @@ mod tests {
         let config_dir = dirs::config_dir().expect("no config dir").join("rollshot");
         let cfg =
             crate::result_workspace::workbench::provider_config::load_provider_config(&config_dir)
-                .expect("load provider.toml");
+                .expect("load config.toml provider section");
         let api_key =
             crate::result_workspace::workbench::provider_config::resolve_key(&cfg.key_source)
-                .expect("no API key resolved from provider.toml");
+                .expect("no API key resolved from config.toml provider section");
         let base_url = cfg
             .base_url
             .as_deref()
