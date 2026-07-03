@@ -9,24 +9,18 @@ and PipeWire support.
 
 ## Features
 
-- **Interactive screenshots and scrolling captures**: use the active iced
-  desktop app to switch capture modes, drag-select a region, and finish or
-  cancel from the overlay.
-- **Live stitched preview**: watch the long screenshot grow while scrolling
-  inside the selected region.
-- **Bidirectional stitching**: the Rust stitching core supports vertical and
-  horizontal movement in either direction, ignores duplicate frames, and uses
-  multiple matching strategies for difficult content.
-- **Native platform capture**: ScreenCaptureKit is the default backend on macOS;
-  Linux supports Wayland capture through XDG Desktop Portal and PipeWire, with
-  KDE-specific native screenshot integration.
-- **Result workflow**: completed captures are auto-saved as PNG files and opened
-  in a result workspace with zoom, pan, Save As, and reveal-in-file-manager
-  controls. macOS also presents a draggable floating thumbnail after capture.
-- **Developer diagnostics and offline stitching**: the internal `rollshot-dev`
-  tool inspects backend availability with `probe` and stitches pre-recorded
-  frame folders for matcher development. Product capture remains in
-  `rollshot-app`.
+- **Scrolling screenshots**: capture a selected region and watch the stitched
+  image grow live as you scroll.
+- **Regular screenshots**: capture a region or fullscreen shot from the app,
+  tray, or global shortcut where supported.
+- **Native macOS and Linux capture**: uses ScreenCaptureKit on macOS and
+  Wayland portal/PipeWire or KDE-native capture on Linux.
+- **In-app editing**: zoom, pan, copy, save, reveal, annotate with
+  numbers or text, and redact sensitive areas with safe export controls.
+- **Smart Redaction**: use an LLM agent to propose redactions, then save the
+  reviewed logic as a reusable code preset for repeatable edits.
+- **Action Guide recording**: optionally record a desktop workflow, edit the
+  detected steps, and export a guide or GIF.
 
 ## Workspace
 
