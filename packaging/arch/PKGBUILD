@@ -1,0 +1,46 @@
+# Maintainer: Rollshot maintainers
+pkgname=rollshot
+pkgver=${ROLLSHOT_PKGVER:-0.1.0_internal.latest.local}
+pkgrel=1
+pkgdesc="Screenshot and scrolling-capture tool"
+arch=('x86_64')
+url="https://github.com/xuhaojun/rollshot"
+license=('MIT')
+depends=(
+  'dbus'
+  'gcc-libs'
+  'glibc'
+  'libpipewire'
+  'libxkbcommon'
+  'mesa'
+  'wayland'
+)
+makedepends=(
+  'cargo'
+  'clang'
+  'pkgconf'
+  'rust'
+)
+source=()
+sha256sums=()
+
+build() {
+  cd "$startdir/../.."
+  cargo build --release -p rollshot-app
+}
+
+package() {
+  cd "$startdir/../.."
+
+  install -Dm755 target/release/rollshot-app \
+    "$pkgdir/usr/bin/rollshot-app"
+
+  install -Dm644 packaging/linux/dev.rollshot.io.desktop \
+    "$pkgdir/usr/share/applications/dev.rollshot.io.desktop"
+
+  find assets/tray/generated/hicolor -type f | while read -r icon; do
+    icon_path="${icon#assets/tray/generated/hicolor/}"
+    icon_dir="${icon_path%/*}"
+    install -Dm644 "$icon" "$pkgdir/usr/share/icons/hicolor/$icon_dir/dev.rollshot.io.${icon##*.}"
+  done
+}

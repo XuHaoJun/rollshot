@@ -1,0 +1,172 @@
+name: Internal Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    name: Release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.meta.outputs.channel }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      package_version: ${{ steps.meta.outputs.package_version }}
+      source_sha: ${{ steps.meta.outputs.source_sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate release metadata
+        id: meta
+        run: |
+          mkdir -p dist
+          python3 scripts/release/metadata.py \
+            --output-json dist/rollshot-release-metadata.json \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: dist/rollshot-release-metadata.json
+
+  arch:
+    name: Arch package
+    runs-on: ubuntu-24.04
+    needs: metadata
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm git cargo rust clang pkgconf dbus libpipewire libxkbcommon mesa wayland
+      - name: Build package
+        env:
+          ROLLSHOT_PKGVER: ${{ needs.metadata.outputs.package_version }}
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          cd packaging/arch
+          su builder -c "ROLLSHOT_PKGVER=$ROLLSHOT_PKGVER makepkg --noconfirm"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp rollshot-*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/rollshot-arch-x86_64.pkg.tar.zst"
+          cd "$GITHUB_WORKSPACE/dist"
+          sha256sum rollshot-arch-x86_64.pkg.tar.zst > rollshot-arch-x86_64.pkg.tar.zst.sha256
+      - name: Verify package contents
+        run: |
+          pacman -Qlp dist/rollshot-arch-x86_64.pkg.tar.zst | tee dist/arch-package-files.txt
+          grep -F '/usr/bin/rollshot-app' dist/arch-package-files.txt
+          grep -F '/usr/share/applications/dev.rollshot.io.desktop' dist/arch-package-files.txt
+          grep -F '/usr/share/icons/hicolor/scalable/apps/dev.rollshot.io.svg' dist/arch-package-files.txt
+      - name: Upload Arch artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-release
+          path: |
+            dist/rollshot-arch-x86_64.pkg.tar.zst
+            dist/rollshot-arch-x86_64.pkg.tar.zst.sha256
+
+  macos:
+    name: macOS Apple Silicon artifacts
+    runs-on: macos-14
+    needs: metadata
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build rollshot-app
+        run: cargo build --release -p rollshot-app
+      - name: Build macOS artifacts
+        run: |
+          python3 scripts/release/macos_bundle.py \
+            --binary target/release/rollshot-app \
+            --out-dir dist \
+            --version "${{ needs.metadata.outputs.package_version }}"
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: |
+            dist/Rollshot-macos-aarch64.app.zip
+            dist/Rollshot-macos-aarch64.app.zip.sha256
+            dist/Rollshot-macos-aarch64.dmg
+            dist/Rollshot-macos-aarch64.dmg.sha256
+
+  publish:
+    name: Publish GitHub prerelease
+    runs-on: ubuntu-24.04
+    needs: [metadata, arch, macos]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Move rolling release tag
+        if: needs.metadata.outputs.channel == 'rolling'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f internal-latest "${{ needs.metadata.outputs.source_sha }}"
+          git push --force origin refs/tags/internal-latest
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Internal Rollshot prerelease.
+
+          Source commit: `${{ needs.metadata.outputs.source_sha }}`
+          Channel: `${{ needs.metadata.outputs.channel }}`
+
+          Supported artifacts:
+          - Arch Linux x86_64 package
+          - macOS Apple Silicon app zip and DMG
+
+          macOS artifacts are ad-hoc signed and not notarized. Use right-click Open or System Settings > Privacy & Security > Open Anyway on first launch.
+          NOTES
+      - name: Replace rolling release assets
+        if: needs.metadata.outputs.channel == 'rolling'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ needs.metadata.outputs.release_tag }}" >/dev/null 2>&1; then
+            gh release edit "${{ needs.metadata.outputs.release_tag }}" \
+              --title "${{ needs.metadata.outputs.release_name }}" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --target "${{ needs.metadata.outputs.source_sha }}"
+            for asset in $(gh release view "${{ needs.metadata.outputs.release_tag }}" --json assets --jq '.assets[].name'); do
+              gh release delete-asset "${{ needs.metadata.outputs.release_tag }}" "$asset" --yes
+            done
+          fi
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.metadata.outputs.release_tag }}" \
+            --title "${{ needs.metadata.outputs.release_name }}" \
+            --notes-file release-notes.md \
+            --prerelease \
+            --target "${{ needs.metadata.outputs.source_sha }}" \
+            dist/rollshot-release-metadata.json \
+            dist/rollshot-arch-x86_64.pkg.tar.zst \
+            dist/rollshot-arch-x86_64.pkg.tar.zst.sha256 \
+            dist/Rollshot-macos-aarch64.app.zip \
+            dist/Rollshot-macos-aarch64.app.zip.sha256 \
+            dist/Rollshot-macos-aarch64.dmg \
+            dist/Rollshot-macos-aarch64.dmg.sha256 \
+          || gh release upload "${{ needs.metadata.outputs.release_tag }}" \
+            --clobber \
+            dist/rollshot-release-metadata.json \
+            dist/rollshot-arch-x86_64.pkg.tar.zst \
+            dist/rollshot-arch-x86_64.pkg.tar.zst.sha256 \
+            dist/Rollshot-macos-aarch64.app.zip \
+            dist/Rollshot-macos-aarch64.app.zip.sha256 \
+            dist/Rollshot-macos-aarch64.dmg \
+            dist/Rollshot-macos-aarch64.dmg.sha256
