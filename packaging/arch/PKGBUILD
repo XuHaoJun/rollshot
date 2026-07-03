@@ -39,6 +39,8 @@ package() {
     "$pkgdir/usr/share/applications/dev.rollshot.io.desktop"
 
   find assets/tray/generated/hicolor -type f | while read -r icon; do
-    install -Dm644 "$icon" "$pkgdir/usr/share/icons/hicolor/${icon#assets/tray/generated/hicolor/}"
+    icon_path="${icon#assets/tray/generated/hicolor/}"
+    icon_dir="${icon_path%/*}"
+    install -Dm644 "$icon" "$pkgdir/usr/share/icons/hicolor/$icon_dir/dev.rollshot.io.${icon##*.}"
   done
 }

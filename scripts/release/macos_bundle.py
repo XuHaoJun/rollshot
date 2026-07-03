@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
-import os
 import plistlib
 import shutil
 import subprocess
@@ -9,6 +8,24 @@ from pathlib import Path
 
 
 BUNDLE_ID = "io.rollshot.dev"
+
+
+def install_app_icon(*, iconset: Path, resources: Path) -> None:
+    if not iconset.exists():
+        return
+
+    bundled_iconset = resources / "rollshot.iconset"
+    shutil.copytree(iconset, bundled_iconset)
+
+    icns = resources / "rollshot.icns"
+    generated_icns = iconset.with_suffix(".icns")
+    if generated_icns.exists():
+        shutil.copy2(generated_icns, icns)
+        return
+
+    iconutil = shutil.which("iconutil")
+    if iconutil is not None:
+        run([iconutil, "-c", "icns", "-o", str(icns), str(iconset)])
 
 
 def create_bundle(*, binary: Path, iconset: Path, out_dir: Path, version: str) -> Path:
@@ -26,8 +43,7 @@ def create_bundle(*, binary: Path, iconset: Path, out_dir: Path, version: str) -
     shutil.copy2(binary, target_binary)
     target_binary.chmod(0o755)
 
-    if iconset.exists():
-        shutil.copytree(iconset, resources / "rollshot.iconset")
+    install_app_icon(iconset=iconset, resources=resources)
 
     plist = {
         "CFBundleDevelopmentRegion": "en",

@@ -63,7 +63,7 @@ jobs:
           pacman -Qlp dist/rollshot-arch-x86_64.pkg.tar.zst | tee dist/arch-package-files.txt
           grep -F '/usr/bin/rollshot-app' dist/arch-package-files.txt
           grep -F '/usr/share/applications/dev.rollshot.io.desktop' dist/arch-package-files.txt
-          grep -F '/usr/share/icons/hicolor/scalable/apps/rollshot.svg' dist/arch-package-files.txt
+          grep -F '/usr/share/icons/hicolor/scalable/apps/dev.rollshot.io.svg' dist/arch-package-files.txt
       - name: Upload Arch artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -102,6 +102,16 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [metadata, arch, macos]
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Move rolling release tag
+        if: needs.metadata.outputs.channel == 'rolling'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f internal-latest "${{ needs.metadata.outputs.source_sha }}"
+          git push --force origin refs/tags/internal-latest
       - uses: actions/download-artifact@v4
         with:
           path: dist
