@@ -35,6 +35,7 @@ rollshot-image-document = { path = "../rollshot-image-document" }
 rollshot-preset = { path = "../rollshot-preset" }
 rollshot-vision = { path = "../rollshot-vision" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 clap = { workspace = true }
