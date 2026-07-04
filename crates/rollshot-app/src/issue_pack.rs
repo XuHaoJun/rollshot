@@ -494,6 +494,112 @@ fn swap_folder(tmp_dir: &Path, final_dir: &Path) -> Result<(), IssuePackError> {
     std::fs::rename(tmp_dir, final_dir).map_err(|e| IssuePackError::Io(e.to_string()))
 }
 
+pub(crate) fn export_zip(
+    input: &IssuePackInput,
+    destination_parent: &Path,
+) -> Result<IssuePackExportResult, IssuePackError> {
+    let mut result = export_folder(input, destination_parent)?;
+    let zip_path = result.directory.with_extension("zip");
+    zip_directory(&result.directory, &zip_path)?;
+    result.zip_path = Some(zip_path);
+    Ok(result)
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) fn export_zip_with_action_guide(
+    input: &IssuePackInput,
+    action: Option<ActionGuideExportSource<'_>>,
+    destination_parent: &Path,
+) -> Result<IssuePackExportResult, IssuePackError> {
+    let mut result = export_folder_with_action_guide(input, action, destination_parent)?;
+    let zip_path = result.directory.with_extension("zip");
+    zip_directory(&result.directory, &zip_path)?;
+    result.zip_path = Some(zip_path);
+    Ok(result)
+}
+
+fn zip_directory(source_dir: &Path, zip_path: &Path) -> Result<(), IssuePackError> {
+    tracing::info!(
+        target: TARGET_ISSUE_PACK_EXPORT,
+        mode = "zip",
+        "issue pack zip start"
+    );
+    let result = zip_directory_inner(source_dir, zip_path);
+    match &result {
+        Ok(()) => tracing::info!(
+            target: TARGET_ISSUE_PACK_EXPORT,
+            mode = "zip",
+            "issue pack zip complete"
+        ),
+        Err(error) => tracing::error!(
+            target: TARGET_ISSUE_PACK_EXPORT,
+            mode = "zip",
+            error_category = error.category(),
+            "issue pack zip failed"
+        ),
+    }
+    result
+}
+
+fn zip_directory_inner(source_dir: &Path, zip_path: &Path) -> Result<(), IssuePackError> {
+    let tmp_zip = zip_path.with_extension("zip.tmp");
+    if tmp_zip.exists() {
+        std::fs::remove_file(&tmp_zip).map_err(|e| IssuePackError::Io(e.to_string()))?;
+    }
+    let file = std::fs::File::create(&tmp_zip).map_err(|e| IssuePackError::Io(e.to_string()))?;
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    add_dir_to_zip(&mut writer, source_dir, source_dir, options)?;
+    writer
+        .finish()
+        .map_err(|e| IssuePackError::Io(e.to_string()))?;
+    if zip_path.exists() {
+        std::fs::remove_file(zip_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_zip);
+            IssuePackError::Io(e.to_string())
+        })?;
+    }
+    std::fs::rename(&tmp_zip, zip_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_zip);
+        IssuePackError::Io(e.to_string())
+    })?;
+    Ok(())
+}
+
+fn add_dir_to_zip(
+    writer: &mut zip::ZipWriter<std::fs::File>,
+    root: &Path,
+    dir: &Path,
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), IssuePackError> {
+    let mut entries = std::fs::read_dir(dir)
+        .map_err(|e| IssuePackError::Io(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| IssuePackError::Io(e.to_string()))?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            add_dir_to_zip(writer, root, &path, options)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| IssuePackError::Io(e.to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        writer
+            .start_file(rel, options)
+            .map_err(|e| IssuePackError::Io(e.to_string()))?;
+        let mut file = std::fs::File::open(&path).map_err(|e| IssuePackError::Io(e.to_string()))?;
+        std::io::copy(&mut file, writer).map_err(|e| IssuePackError::Io(e.to_string()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +788,49 @@ mod tests {
         assert_eq!(json["ocr"]["snippet_count"], 1);
         assert_eq!(json["assets"][0]["path"], "issue.md");
         assert_eq!(json["assets"][1]["path"], "manifest.json");
+    }
+
+    #[test]
+    fn export_zip_contains_same_relative_layout_as_folder() {
+        let input = base_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let result = export_zip(&input, tmp.path()).unwrap();
+        let zip_path = result.zip_path.clone().expect("zip path");
+        assert!(zip_path.exists());
+
+        let file = std::fs::File::open(zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        names.sort();
+
+        assert!(
+            names.contains(&"images/final-redacted.png".to_string()),
+            "names = {names:?}"
+        );
+        assert!(names.contains(&"issue.md".to_string()), "names = {names:?}");
+        assert!(
+            names.contains(&"manifest.json".to_string()),
+            "names = {names:?}"
+        );
+    }
+
+    #[test]
+    fn export_zip_replaces_stale_zip_atomically() {
+        let input = base_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let first = export_zip(&input, tmp.path()).unwrap();
+        let zip_path = first.zip_path.clone().expect("zip path");
+        std::fs::write(&zip_path, b"stale").unwrap();
+
+        let second = export_zip(&input, tmp.path()).unwrap();
+
+        assert_eq!(second.zip_path.as_ref(), Some(&zip_path));
+        let file = std::fs::File::open(zip_path).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        assert!(archive.len() >= 3);
     }
 }
 
