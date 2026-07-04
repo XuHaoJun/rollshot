@@ -22,10 +22,12 @@ AI-generated full bug-report narrative.
 
 Include:
 
-- `Export Issue Pack` from Result Workspace for a screenshot or long screenshot.
-- `Export Issue Pack` from Action Guide Review for a reviewed session.
-- Folder export.
-- ZIP export after the folder export succeeds.
+- Visible `Export Bug Report...` command from Result Workspace for a screenshot
+  or long screenshot. The generated artifact remains a Local Issue Pack.
+- Visible `Export Bug Report...` command from Action Guide Review for a
+  reviewed session. The generated artifact remains a Local Issue Pack.
+- Folder export as the primary export action.
+- ZIP export as a secondary action after the folder export succeeds.
 - Deterministic GitHub-flavored Markdown `issue.md`.
 - `manifest.json` with schema version, creation timestamp, Rollshot version,
   platform metadata, export mode, redaction status, OCR summary, and asset list.
@@ -40,13 +42,17 @@ Conservative defaults:
 
 - English template only.
 - GitHub-flavored Markdown.
-- Folder export is required; ZIP export is also exposed.
+- Folder export is required and presented as the primary action; ZIP export is
+  also exposed as a secondary packaging action.
 - Action Guide steps are embedded into `issue.md` and the existing
   `action-guide/steps.md` is included.
 - Result Workspace packs require a final image.
 - Action Guide-only packs are allowed when reviewed steps and keyframes exist.
 - Non-sensitive platform metadata is included by default.
 - GUI first; no CLI export path in the first release.
+- Visible command names describe the user job (`Export Bug Report...`); internal
+  model names, folder names, and manifest export mode continue to use Issue Pack
+  terminology.
 
 ## Architecture
 
@@ -119,6 +125,7 @@ pub struct IssuePackInput {
     pub final_image: Option<SafeImageAsset>,
     pub action_guide: Option<ActionGuideIssueAssets>,
     pub ocr_snippets: Vec<OcrSnippet>,
+    pub evidence_review: EvidenceReviewSummary,
     pub redaction: RedactionSummary,
 }
 
@@ -151,7 +158,10 @@ The exact Rust names can change during implementation, but the behavior should
 preserve these boundaries:
 
 - The renderer receives a prepared model and does not inspect UI state.
-- UI code is responsible for asking the user to review redactions before export.
+- UI code is responsible for requiring the user to review included evidence
+  before export. For Result Workspace images this includes redaction review; for
+  Action Guide keyframes this confirms that reviewed keyframes are acceptable to
+  share and does not imply automatic redaction.
 - Export code writes only relative links in Markdown and manifest asset paths.
 - Optional asset failures become warnings when the pack remains valid.
 
@@ -167,6 +177,12 @@ Required top-level fields:
   "created_at": "2026-07-04T15:30:00+08:00",
   "rollshot_version": "0.0.0-dev",
   "export_mode": "local_issue_pack",
+  "evidence_review": {
+    "required": true,
+    "completed": true,
+    "result_workspace_images_reviewed": true,
+    "action_guide_keyframes_reviewed": false
+  },
   "platform": {
     "os": "linux",
     "arch": "x86_64"
@@ -192,11 +208,11 @@ Required top-level fields:
 
 The manifest must accurately list every file included in the exported folder or
 ZIP. It must not claim that Rollshot found every sensitive region. If no
-redactions exist, `redaction_count` is `0`, `review_completed` records the user
-confirmation, and user-facing text says the image was reviewed, not that it is
-sensitive-free. Action Guide keyframes must be listed as reviewed keyframe
-assets, not redacted assets, unless they are produced by a future redaction
-pipeline.
+redactions exist, `redaction_count` is `0`, `evidence_review.completed` records
+the user confirmation, and user-facing text says the image was reviewed, not
+that it is sensitive-free. Action Guide keyframes must be listed as reviewed
+keyframe assets, not redacted assets, unless they are produced by a future
+redaction pipeline.
 
 ## Markdown
 
@@ -284,12 +300,13 @@ omitted rather than replaced with an error placeholder.
 
 Result Workspace flow:
 
-1. User clicks `Export Issue Pack`.
+1. User clicks `Export Bug Report...`.
 2. App blocks export if Smart Redaction workbench has pending candidates, using
    the same policy as safe copy/save.
 3. App opens a compact Issue Pack review panel.
-4. User confirms redaction review.
-5. User chooses folder export or ZIP export.
+4. User explicitly confirms evidence review. The export actions remain disabled
+   until this confirmation is checked.
+5. User chooses primary folder export or secondary ZIP export.
 6. App builds a flattened safe image from the current document.
 7. App writes the pack into a temporary sibling directory.
 8. App swaps the temporary directory into place only after required files have
@@ -300,11 +317,12 @@ Result Workspace flow:
 Action Guide flow:
 
 1. User reviews, renames, deletes, or changes keyframes in Timeline Workspace.
-2. User clicks `Export Issue Pack`.
+2. User clicks `Export Bug Report...`.
 3. App opens the same compact review panel, adapted for Action Guide assets.
-4. User confirms evidence review. For Action Guide-only packs, this confirms
-   that reviewed keyframes are acceptable to share; it does not claim keyframes
-   were automatically redacted.
+4. User explicitly confirms evidence review. For Action Guide-only packs, this
+   confirms that reviewed keyframes are acceptable to share; it does not claim
+   keyframes were automatically redacted. Export actions remain disabled until
+   this confirmation is checked.
 5. App writes the pack into a temporary sibling directory.
 6. App calls the existing guide export path for `action-guide/steps.md`,
    `session.json`, and `keyframes/*.png`.
@@ -323,13 +341,13 @@ Terminal states:
 - Exported.
 - Exported with warnings.
 - Cancelled by user.
-- Blocked because redaction review was not confirmed.
+- Blocked because evidence review was not confirmed.
 - Failed to write required files.
 
 Blocking failures:
 
 - User cancels before write.
-- Redaction review is not confirmed.
+- Evidence review is not confirmed.
 - Output folder cannot be created.
 - `issue.md` cannot be written.
 - `manifest.json` cannot be written.
@@ -353,7 +371,10 @@ The export must follow secure sharing semantics:
 - Retained original capture files are not included by default.
 - Result Workspace safe image export must not overwrite the retained original.
 - The Issue Pack review panel must require an explicit redaction review
-  confirmation before writing files.
+  confirmation before writing files when Result Workspace images are included.
+- The Issue Pack review panel must require explicit evidence review confirmation
+  before any export. Export buttons are disabled until the user checks this
+  confirmation.
 - If redactions exist, the UI says Result Workspace images will be flattened and
   retained originals will not be included.
 - If no redactions exist, the UI says: "No redactions are currently applied.
@@ -361,20 +382,21 @@ The export must follow secure sharing semantics:
 - No UI copy, manifest field, or Markdown text claims that all sensitive
   information has been detected.
 
-Action Guide keyframes are reviewed evidence images. The first release does not
-attempt to redact Action Guide keyframes automatically. The review confirmation
-and manifest make that explicit.
+Action Guide keyframes are reviewed evidence images, not safe redacted outputs.
+The first release does not attempt to redact Action Guide keyframes
+automatically. The review confirmation, UI copy, and manifest must say that
+plainly.
 
 ## UI
 
 Result Workspace toolbar:
 
-- Add `Export Issue Pack` near existing copy/save/reveal controls.
+- Add `Export Bug Report...` near existing copy/save/reveal controls.
 - Reuse existing inline message behavior for success, warning, and error states.
 
 Action Guide Review toolbar:
 
-- Add `Export Issue Pack` beside `Export Guide` and `Export GIF`.
+- Add `Export Bug Report...` beside `Export Guide` and `Export GIF`.
 
 Review panel:
 
@@ -393,12 +415,25 @@ Safety:
   Retained originals will not be included.
   Review redactions before export.
 
+Confirmation:
+  [ ] I reviewed the images and keyframes included in this bug report.
+
 [Review Redactions] [Export Folder] [Export ZIP] [Cancel]
 ```
 
+`Export Folder` is the primary action. `Export ZIP` is secondary and remains
+available only after the same evidence-review confirmation is checked.
+
 For Action Guide-only packs, replace final screenshot text with reviewed
 keyframes and clarify that keyframes should be checked before sharing and are
-not automatically redacted.
+not automatically redacted:
+
+```text
+Safety:
+  Action Guide keyframes are reviewed evidence images.
+  Keyframes are not automatically redacted.
+  Review every keyframe before sharing.
+```
 
 No first-release wizard is added. Existing Result Workspace and Timeline
 Workspace remain the editing/review surfaces; Issue Pack is the final packaging
@@ -423,6 +458,9 @@ Integration/update tests:
   existing copy/save behavior.
 - Result Workspace Issue Pack image uses flattened pixels.
 - Action Guide Issue Pack export uses reviewed titles and selected keyframes.
+- Export actions stay disabled until evidence review is explicitly confirmed.
+- Action Guide-only UI and manifest say keyframes are reviewed evidence and are
+  not automatically redacted.
 - Cancel path writes nothing.
 
 Verification commands:
