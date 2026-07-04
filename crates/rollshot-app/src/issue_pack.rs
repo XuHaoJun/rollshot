@@ -64,6 +64,33 @@ pub(crate) struct ActionGuideIssueAssets {
     pub include_gif: bool,
 }
 
+#[cfg(feature = "action-guide")]
+pub(crate) struct ActionGuideExportSource<'a> {
+    pub guide: &'a rollshot_action::Guide,
+    pub store: &'a rollshot_action::FrameStore,
+    pub region: rollshot_action::CaptureRegion,
+    pub capability: rollshot_action::InputCapability,
+    pub source_kind: rollshot_action::InputSourceKind,
+    pub include_gif: bool,
+}
+
+#[cfg(feature = "action-guide")]
+impl ActionGuideIssueAssets {
+    pub(crate) fn from_guide(guide: &rollshot_action::Guide, include_gif: bool) -> Self {
+        let steps = guide
+            .steps()
+            .iter()
+            .enumerate()
+            .map(|(i, step)| IssuePackStep {
+                index: i + 1,
+                title: step.title.clone(),
+                keyframe_path: format!("action-guide/keyframes/{:03}.png", i + 1),
+            })
+            .collect();
+        Self { steps, include_gif }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssuePackInput {
     pub title: Option<String>,
@@ -333,7 +360,35 @@ pub(crate) fn export_folder(
     input: &IssuePackInput,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
+    export_folder_impl(input, None, destination_parent)
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) fn export_folder_with_action_guide(
+    input: &IssuePackInput,
+    action: Option<ActionGuideExportSource<'_>>,
+    destination_parent: &Path,
+) -> Result<IssuePackExportResult, IssuePackError> {
+    export_folder_impl(input, action, destination_parent)
+}
+
+#[cfg(not(feature = "action-guide"))]
+type ActionGuideExportSource<'a> = std::marker::PhantomData<&'a ()>;
+
+fn export_folder_impl(
+    input: &IssuePackInput,
+    #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource<'_>>,
+    #[cfg(not(feature = "action-guide"))] _action: Option<ActionGuideExportSource<'_>>,
+    destination_parent: &Path,
+) -> Result<IssuePackExportResult, IssuePackError> {
     validate(input)?;
+    tracing::info!(
+        target: TARGET_ISSUE_PACK_EXPORT,
+        mode = "folder",
+        has_final_image = input.final_image.is_some(),
+        has_action_guide = input.action_guide.is_some(),
+        "issue pack export start"
+    );
     let folder_name = issue_pack_folder_name(input.created_at);
     let final_dir = destination_parent.join(&folder_name);
     let tmp_dir = destination_parent.join(format!(".{folder_name}.tmp"));
@@ -342,14 +397,33 @@ pub(crate) fn export_folder(
         std::fs::remove_dir_all(&tmp_dir).map_err(|e| IssuePackError::Io(e.to_string()))?;
     }
 
-    let warnings = Vec::new();
-    let build_result =
-        build_folder(input, &tmp_dir, &warnings).and_then(|()| swap_folder(&tmp_dir, &final_dir));
+    let mut warnings = Vec::new();
+    let build_result = build_folder(
+        input,
+        &tmp_dir,
+        &mut warnings,
+        #[cfg(feature = "action-guide")]
+        action,
+    )
+    .and_then(|()| swap_folder(&tmp_dir, &final_dir));
+
     if let Err(error) = build_result {
         let _ = std::fs::remove_dir_all(&tmp_dir);
+        tracing::error!(
+            target: TARGET_ISSUE_PACK_EXPORT,
+            mode = "folder",
+            error_category = error.category(),
+            "issue pack export failed"
+        );
         return Err(error);
     }
 
+    tracing::info!(
+        target: TARGET_ISSUE_PACK_EXPORT,
+        mode = "folder",
+        warning_count = warnings.len(),
+        "issue pack export complete"
+    );
     Ok(IssuePackExportResult {
         markdown_path: final_dir.join("issue.md"),
         manifest_path: final_dir.join("manifest.json"),
@@ -362,7 +436,8 @@ pub(crate) fn export_folder(
 fn build_folder(
     input: &IssuePackInput,
     tmp_dir: &Path,
-    warnings: &[IssuePackWarning],
+    warnings: &mut Vec<IssuePackWarning>,
+    #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource<'_>>,
 ) -> Result<(), IssuePackError> {
     std::fs::create_dir_all(tmp_dir).map_err(|e| IssuePackError::Io(e.to_string()))?;
 
@@ -375,9 +450,38 @@ fn build_folder(
             .map_err(|e| IssuePackError::Encode(e.to_string()))?;
     }
 
+    #[cfg(feature = "action-guide")]
+    if let Some(action) = action {
+        rollshot_action::export_guide(
+            action.guide,
+            action.store,
+            action.region,
+            action.capability,
+            action.source_kind,
+            tmp_dir,
+        )
+        .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
+
+        if action.include_gif {
+            let gif_path = tmp_dir.join("action-guide/guide.gif");
+            if let Err(error) = rollshot_action::export_gif(
+                action.guide,
+                action.store,
+                rollshot_action::GifOptions::default(),
+                &gif_path,
+            ) {
+                warnings.push(IssuePackWarning {
+                    code: "gif_export_failed".to_string(),
+                    message: format!("GIF export failed: {error}"),
+                });
+            }
+        }
+    }
+
     std::fs::write(tmp_dir.join("issue.md"), render_issue_markdown(input))
         .map_err(|e| IssuePackError::Io(e.to_string()))?;
-    let manifest = render_manifest_json(input, warnings, false)?;
+    let include_gif = tmp_dir.join("action-guide/guide.gif").exists();
+    let manifest = render_manifest_json(input, warnings, include_gif)?;
     std::fs::write(tmp_dir.join("manifest.json"), manifest)
         .map_err(|e| IssuePackError::Io(e.to_string()))?;
     Ok(())
@@ -578,5 +682,143 @@ mod tests {
         assert_eq!(json["ocr"]["snippet_count"], 1);
         assert_eq!(json["assets"][0]["path"], "issue.md");
         assert_eq!(json["assets"][1]["path"], "manifest.json");
+    }
+}
+
+#[cfg(all(test, feature = "action-guide"))]
+mod action_guide_tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+    use rollshot_action::{
+        ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
+        FrameStore, Guide, InputCapability, InputSourceKind, Recording, StoreConfig,
+    };
+
+    fn region() -> CaptureRegion {
+        CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        }
+    }
+
+    fn black() -> RgbaImage {
+        RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]))
+    }
+
+    fn quadrant() -> RgbaImage {
+        let mut image = black();
+        for y in 0..4 {
+            for x in 0..4 {
+                image.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        image
+    }
+
+    fn recording() -> Recording {
+        let detector = DetectorConfig {
+            diff_threshold: 0.01,
+            area_threshold: 0.05,
+            cooldown_ms: 0,
+            ..DetectorConfig::default()
+        };
+        let mut recorder = ActionRecorder::new(region(), StoreConfig::default(), detector);
+        recorder.ingest_frame(black(), 0);
+        for i in 1..=6 {
+            recorder.ingest_frame(quadrant(), i * 100);
+        }
+        let recording = recorder.finish();
+        assert!(!recording.candidates.is_empty());
+        recording
+    }
+
+    fn action_input() -> (
+        IssuePackInput,
+        Guide,
+        FrameStore,
+        CaptureRegion,
+        InputCapability,
+        InputSourceKind,
+    ) {
+        let recording = recording();
+        let guide = Guide::from_candidates(recording.candidates);
+        let store = recording.store;
+        let mut input = super::tests::base_input();
+        input.final_image = None;
+        input.evidence_review.result_workspace_images_reviewed = false;
+        input.evidence_review.action_guide_keyframes_reviewed = true;
+        input.redaction.result_workspace_images_are_flattened = false;
+        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, true));
+        (
+            input,
+            guide,
+            store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+        )
+    }
+
+    #[test]
+    fn export_folder_includes_action_guide_folder() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result.directory.join("action-guide/steps.md").exists());
+        assert!(result.directory.join("action-guide/session.json").exists());
+        assert!(result
+            .directory
+            .join("action-guide/keyframes/001.png")
+            .exists());
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(
+            md.contains("![](action-guide/keyframes/001.png)"),
+            "md = {md}"
+        );
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"action_keyframe\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn action_guide_only_missing_keyframe_rolls_back_temp_output() {
+        let (mut input, _guide, store, region, capability, source_kind) = action_input();
+        let guide = Guide::from_candidates(vec![CandidateStep {
+            id: 1,
+            kind: CandidateKind::Click,
+            reason: DetectReason::ClickConfirmed,
+            at_ms: 0,
+            keyframe: 9999,
+            nearby: vec![9999],
+        }]);
+        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, false));
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let err = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("export failed"), "err = {err}");
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
     }
 }
