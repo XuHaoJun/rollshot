@@ -18,6 +18,7 @@ mod macos_product;
 mod macos_recording_tray;
 // Registered on every target so the pure drag placement/result helpers compile
 // and unit-test on Linux; the AppKit bridge inside it is macOS-gated.
+mod issue_pack;
 mod macos_native_drag;
 mod macos_thumbnail;
 mod post_capture;
