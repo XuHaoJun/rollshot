@@ -20,7 +20,7 @@ mod models;
 mod recorder;
 
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
-pub use error::{DetectError, ExportError, GifError};
+pub use error::{DetectError, ExportError, GifError, VideoError};
 pub use events::EventAggregator;
 pub use export::{export_guide, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};

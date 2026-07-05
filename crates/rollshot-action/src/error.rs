@@ -53,6 +53,37 @@ pub enum GifError {
     },
 }
 
+/// Summary-MP4 export failure. On any error, no file is left at the target path
+/// and the editable session stays intact.
+#[derive(Debug, thiserror::Error)]
+pub enum VideoError {
+    #[error("cannot export an MP4 for a guide with no steps")]
+    Empty,
+    #[error("step {index} keyframe pixels were not retained")]
+    KeyframeMissing { index: usize },
+    #[error("FFmpeg binary is not usable at {path}")]
+    InvalidFfmpeg { path: String },
+    #[error("failed to spawn FFmpeg at {path}: {source}")]
+    Spawn {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write raw frames to FFmpeg stdin: {source}")]
+    Stdin {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("FFmpeg exited unsuccessfully with status {status}: {stderr}")]
+    Exit { status: String, stderr: String },
+    #[error("MP4 I/O error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +117,19 @@ mod tests {
         );
         let missing = GifError::KeyframeMissing { index: 2 };
         assert!(missing.to_string().contains("step 2"), "{missing}");
+    }
+
+    #[test]
+    fn video_error_messages_are_descriptive() {
+        assert_eq!(
+            VideoError::Empty.to_string(),
+            "cannot export an MP4 for a guide with no steps"
+        );
+        let missing = VideoError::KeyframeMissing { index: 3 };
+        assert!(missing.to_string().contains("step 3"), "{missing}");
+        let invalid = VideoError::InvalidFfmpeg {
+            path: "/missing/ffmpeg".to_string(),
+        };
+        assert!(invalid.to_string().contains("/missing/ffmpeg"), "{invalid}");
     }
 }
