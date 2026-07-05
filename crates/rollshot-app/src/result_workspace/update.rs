@@ -1031,6 +1031,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::IssuePackReviewRedactions => {
             state.issue_pack = None;
+            state.mode = super::workbench::WorkspaceMode::Normal;
             state.editor.tool = Tool::Redact;
             Task::none()
         }
@@ -3260,6 +3261,24 @@ mod tests {
 
         assert!(state.issue_pack.is_none());
         assert!(state.message.as_ref().unwrap().text().contains("Apply"));
+    }
+
+    #[test]
+    fn issue_pack_review_redactions_from_workbench_returns_to_normal_redact_mode() {
+        let mut state = workspace();
+        state.mode = super::super::workbench::WorkspaceMode::Workbench(
+            super::super::workbench::WorkbenchState::default(),
+        );
+        let _ = update(&mut state, Message::ExportBugReport);
+
+        let _ = update(&mut state, Message::IssuePackReviewRedactions);
+
+        assert!(state.issue_pack.is_none());
+        assert_eq!(state.editor.tool, Tool::Redact);
+        assert!(matches!(
+            state.mode,
+            super::super::workbench::WorkspaceMode::Normal
+        ));
     }
 
     #[test]
