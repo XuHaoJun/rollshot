@@ -433,6 +433,7 @@ fn export_folder_impl(
     })
 }
 
+#[allow(clippy::ptr_arg)]
 fn build_folder(
     input: &IssuePackInput,
     tmp_dir: &Path,
