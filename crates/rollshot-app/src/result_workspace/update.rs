@@ -1082,7 +1082,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if let Some(dialog) = &mut state.issue_pack {
                 dialog.pending_kind = None;
             }
-            state.message = Some(InlineMessage::Error(error));
+            state.message = Some(InlineMessage::Error(format!(
+                "{error}\nIf the folder export succeeded, it is still available."
+            )));
             Task::none()
         }
         Message::IssuePackCancel => {

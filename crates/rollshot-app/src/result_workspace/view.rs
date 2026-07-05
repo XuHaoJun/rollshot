@@ -528,10 +528,25 @@ fn issue_pack_modal<'a>(
         .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
         .style(button::secondary);
 
+    #[cfg(feature = "ocr")]
+    let has_visible_ocr = state
+        .ocr_text
+        .document()
+        .map(|d| d.visible_items().len())
+        .unwrap_or(0)
+        > 0;
+    #[cfg(not(feature = "ocr"))]
+    let has_visible_ocr = false;
+    let included_text = if has_visible_ocr {
+        "Included: issue.md, manifest.json, final flattened screenshot, OCR snippets"
+    } else {
+        "Included: issue.md, manifest.json, final flattened screenshot"
+    };
+
     let dialog = container(
         column![
             text("Issue Pack Export").size(18),
-            text("Included: issue.md, manifest.json, final flattened screenshot"),
+            text(included_text),
             text("Safety:"),
             safety,
             checkbox(dialog.review_confirmed)
