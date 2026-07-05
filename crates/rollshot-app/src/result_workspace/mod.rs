@@ -68,6 +68,31 @@ impl InlineMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Issue Pack dialog
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssuePackKind {
+    Folder,
+    Zip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssuePackDialog {
+    pub review_confirmed: bool,
+    pub pending_kind: Option<IssuePackKind>,
+}
+
+impl IssuePackDialog {
+    pub(crate) fn new() -> Self {
+        Self {
+            review_confirmed: false,
+            pending_kind: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Workspace
 // ---------------------------------------------------------------------------
 
@@ -94,6 +119,8 @@ pub struct ResultWorkspace {
     pub editor: canvas::EditorState,
     /// Workspace mode: Normal or Workbench (Smart Redaction).
     pub mode: workbench::WorkspaceMode,
+    /// Open Issue Pack export dialog, if any.
+    pub issue_pack: Option<IssuePackDialog>,
     /// OCR text state (selectable text overlay).
     #[cfg(feature = "ocr")]
     pub ocr_text: ocr_text::OcrTextState,
@@ -140,6 +167,7 @@ impl ResultWorkspace {
                 viewport::is_tall_image(source_size),
             ),
             mode: workbench::WorkspaceMode::Normal,
+            issue_pack: None,
             #[cfg(feature = "ocr")]
             ocr_text: ocr_text::OcrTextState::idle(),
             text_editor_id: iced::widget::Id::unique(),
