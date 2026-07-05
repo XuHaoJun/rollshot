@@ -1,6 +1,7 @@
 #![allow(dead_code)] // scaffolding: consumed by later Action Guide MP4 tasks
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -150,6 +151,140 @@ fn load_manifest(root: &Path) -> Result<ManagedFfmpegManifest, String> {
         .map_err(|error| format!("failed to parse managed FFmpeg manifest: {error}"))
 }
 
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("failed to open archive: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|error| format!("failed to hash archive: {error}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub(crate) fn verify_archive_sha(path: &Path, expected: &str) -> Result<(), String> {
+    let actual = sha256_file(path)?;
+    if actual != expected {
+        return Err(format!(
+            "managed FFmpeg sha256 mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn build_manifest(
+    metadata: ManagedFfmpegMetadata,
+    binary_path: PathBuf,
+    ffmpeg_version_line: String,
+) -> ManagedFfmpegManifest {
+    ManagedFfmpegManifest {
+        schema_version: 1,
+        platform: metadata.platform.to_string(),
+        version: metadata.version.to_string(),
+        source_url: metadata.source_url.to_string(),
+        license: metadata.license.to_string(),
+        license_url: metadata.license_url.to_string(),
+        archive_sha256: metadata.archive_sha256.to_string(),
+        archive_size: metadata.archive_size,
+        binary_path,
+        ffmpeg_version_line,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+pub(crate) fn write_manifest(root: &Path, manifest: &ManagedFfmpegManifest) -> Result<(), String> {
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("failed to create managed FFmpeg directory: {error}"))?;
+    let path = manifest_path(root);
+    let text = serde_json::to_string_pretty(manifest)
+        .map_err(|error| format!("failed to encode managed FFmpeg manifest: {error}"))?;
+    std::fs::write(&path, text)
+        .map_err(|error| format!("failed to write managed FFmpeg manifest: {error}"))
+}
+
+pub(crate) fn download_managed_ffmpeg() -> Result<PathBuf, String> {
+    let metadata = pinned_metadata_for_current_platform()
+        .ok_or_else(|| "managed FFmpeg is not available for this platform".to_string())?;
+    let root = managed_root()?;
+    let download_dir = root.join("downloads");
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|error| format!("failed to create FFmpeg download directory: {error}"))?;
+
+    let archive = ffmpeg_sidecar::download::download_ffmpeg_package_with_progress(
+        metadata.source_url,
+        &download_dir,
+        |event| match event {
+            ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::Starting => {
+                tracing::info!(
+                    target: "rollshot::action::ffmpeg",
+                    source_url = metadata.source_url,
+                    "managed FFmpeg download started"
+                );
+            }
+            ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::Downloading {
+                total_bytes,
+                downloaded_bytes,
+            } => {
+                tracing::info!(
+                    target: "rollshot::action::ffmpeg",
+                    total_bytes,
+                    downloaded_bytes,
+                    "managed FFmpeg download progress"
+                );
+            }
+            ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::UnpackingArchive => {
+                tracing::info!(
+                    target: "rollshot::action::ffmpeg",
+                    "managed FFmpeg unpacking archive"
+                );
+            }
+            ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::Done => {
+                tracing::info!(
+                    target: "rollshot::action::ffmpeg",
+                    "managed FFmpeg download complete"
+                );
+            }
+        },
+    )
+    .map_err(|error| format!("failed to download managed FFmpeg: {error}"))?;
+
+    if let Err(error) = verify_archive_sha(&archive, metadata.archive_sha256) {
+        let _ = std::fs::remove_file(&archive);
+        return Err(error);
+    }
+
+    let bin_dir = root.join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|error| format!("failed to create FFmpeg bin directory: {error}"))?;
+    ffmpeg_sidecar::download::unpack_ffmpeg_without_extras(&archive, &bin_dir)
+        .map_err(|error| format!("failed to unpack managed FFmpeg: {error}"))?;
+    let binary = managed_binary_path(&root);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&binary)
+            .map_err(|error| format!("failed to inspect managed FFmpeg: {error}"))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&binary, perms)
+            .map_err(|error| format!("failed to set FFmpeg executable bit: {error}"))?;
+    }
+
+    let version_line = validate_ffmpeg(&binary)?;
+    let manifest = build_manifest(metadata, binary.clone(), version_line);
+    write_manifest(&root, &manifest)?;
+    Ok(binary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +349,57 @@ mod tests {
     fn validate_ffmpeg_rejects_missing_path() {
         let result = validate_ffmpeg(Path::new("/definitely/missing/ffmpeg"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sha256_file_detects_content() {
+        let dir = tempdir();
+        let path = dir.join("archive.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn verify_archive_sha_rejects_mismatch() {
+        let dir = tempdir();
+        let path = dir.join("archive.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let result = verify_archive_sha(&path, "0000");
+        assert!(result.unwrap_err().contains("sha256 mismatch"));
+    }
+
+    #[test]
+    fn write_manifest_persists_valid_json() {
+        let dir = tempdir();
+        let binary = dir.join("bin/ffmpeg");
+        let manifest = build_manifest(
+            LINUX_X86_64_METADATA,
+            binary.clone(),
+            "ffmpeg version 6.0.1-static".to_string(),
+        );
+        write_manifest(&dir, &manifest).unwrap();
+        let restored = load_manifest(&dir).unwrap();
+        assert_eq!(restored.binary_path, binary);
+        assert_eq!(
+            restored.archive_sha256,
+            LINUX_X86_64_METADATA.archive_sha256
+        );
+    }
+
+    fn tempdir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rollshot-managed-ffmpeg-{nanos}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
