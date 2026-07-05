@@ -417,6 +417,47 @@ pub fn terminal_state_label(state: &RunTerminalState) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn workbench_with_pending_candidate() -> super::WorkbenchState {
+    use rollshot_edit_proposal::{
+        ConfidenceSummary, ProposalId, ProposedCandidate, Provenance, ProvenanceSource,
+    };
+
+    let id = CandidateId(1);
+    let proposal = EditProposal {
+        id: ProposalId(1),
+        base_document_state_id: 0,
+        candidates: vec![ProposedCandidate {
+            id,
+            edit: ProposedEdit::AddRedaction {
+                bounds: ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+            },
+            confidence: 0.9,
+            label: "pending redaction".into(),
+            rationale: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        }],
+        confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+        rationale_summary: None,
+        provenance: Provenance {
+            source: ProvenanceSource::Manual,
+        },
+    };
+
+    super::WorkbenchState {
+        pending_proposal: Some(proposal),
+        review: CandidateReview::from_candidates(&[id]),
+        ..super::WorkbenchState::default()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rollshot_edit_proposal::{CandidateId, ProposedEdit};

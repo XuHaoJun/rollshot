@@ -107,6 +107,22 @@ pub enum Message {
     CancelUnredactedAction,
     /// Smart Redaction toolbar button pressed.
     SmartRedaction,
+    /// Export a bug-report Issue Pack from the result workspace.
+    ExportBugReport,
+    /// Toggle the review-confirmed checkbox in the Issue Pack dialog.
+    IssuePackReviewChanged(bool),
+    /// Switch to the redaction tool from the Issue Pack dialog.
+    IssuePackReviewRedactions,
+    /// Begin exporting an Issue Pack to a folder.
+    IssuePackExportFolder,
+    /// Begin exporting an Issue Pack to a ZIP file.
+    IssuePackExportZip,
+    /// The async folder-picker returned (None = cancelled).
+    IssuePackFolderChosen(Option<PathBuf>),
+    /// Background Issue Pack export completed.
+    IssuePackFinished(Result<crate::issue_pack::IssuePackExportResult, String>),
+    /// Close the Issue Pack dialog without exporting.
+    IssuePackCancel,
     /// Messages forwarded from the workbench sub-state.
     #[allow(dead_code)] // SP6 scaffolding: constructed by later tasks
     Workbench(super::workbench::WorkbenchMessage),
@@ -203,6 +219,14 @@ impl PartialEq for Message {
             (Self::ConfirmUnredactedAction, Self::ConfirmUnredactedAction) => true,
             (Self::CancelUnredactedAction, Self::CancelUnredactedAction) => true,
             (Self::SmartRedaction, Self::SmartRedaction) => true,
+            (Self::ExportBugReport, Self::ExportBugReport) => true,
+            (Self::IssuePackReviewChanged(a), Self::IssuePackReviewChanged(b)) => a == b,
+            (Self::IssuePackReviewRedactions, Self::IssuePackReviewRedactions) => true,
+            (Self::IssuePackExportFolder, Self::IssuePackExportFolder) => true,
+            (Self::IssuePackExportZip, Self::IssuePackExportZip) => true,
+            (Self::IssuePackFolderChosen(a), Self::IssuePackFolderChosen(b)) => a == b,
+            (Self::IssuePackFinished(a), Self::IssuePackFinished(b)) => a == b,
+            (Self::IssuePackCancel, Self::IssuePackCancel) => true,
             (Self::Workbench(a), Self::Workbench(b)) => {
                 std::mem::discriminant(a) == std::mem::discriminant(b)
             }
@@ -990,6 +1014,84 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.mode = super::workbench::WorkspaceMode::Workbench(wb);
             Task::none()
         }
+        Message::ExportBugReport => {
+            if block_pending_candidates(state) {
+                return Task::none();
+            }
+            commit_text_draft(state);
+            state.issue_pack = Some(super::IssuePackDialog::new());
+            state.message = None;
+            Task::none()
+        }
+        Message::IssuePackReviewChanged(confirmed) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.review_confirmed = confirmed;
+            }
+            Task::none()
+        }
+        Message::IssuePackReviewRedactions => {
+            state.issue_pack = None;
+            state.mode = super::workbench::WorkspaceMode::Normal;
+            state.editor.tool = Tool::Redact;
+            Task::none()
+        }
+        Message::IssuePackExportFolder => {
+            begin_issue_pack_export(state, super::IssuePackKind::Folder)
+        }
+        Message::IssuePackExportZip => begin_issue_pack_export(state, super::IssuePackKind::Zip),
+        Message::IssuePackFolderChosen(None) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.pending_kind = None;
+            }
+            Task::none()
+        }
+        Message::IssuePackFolderChosen(Some(parent)) => {
+            let kind = state
+                .issue_pack
+                .as_ref()
+                .and_then(|dialog| dialog.pending_kind)
+                .unwrap_or(super::IssuePackKind::Folder);
+            let input = result_issue_pack_input(state);
+            let result = match kind {
+                super::IssuePackKind::Folder => crate::issue_pack::export_folder(&input, &parent),
+                super::IssuePackKind::Zip => crate::issue_pack::export_zip(&input, &parent),
+            };
+            update_inner(
+                state,
+                Message::IssuePackFinished(result.map_err(|e| e.to_string())),
+            )
+        }
+        Message::IssuePackFinished(Ok(result)) => {
+            let mut text = match result.zip_path.as_ref() {
+                Some(path) => format!("Exported bug report ZIP to {}", path.display()),
+                None => format!("Exported bug report to {}", result.directory.display()),
+            };
+            if !result.warnings.is_empty() {
+                let warning_text = result
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                text = format!("{text}\nWarnings: {warning_text}");
+            }
+            state.issue_pack = None;
+            state.message = Some(InlineMessage::success(text));
+            Task::none()
+        }
+        Message::IssuePackFinished(Err(error)) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.pending_kind = None;
+            }
+            state.message = Some(InlineMessage::Error(format!(
+                "{error}\nIf the folder export succeeded, it is still available."
+            )));
+            Task::none()
+        }
+        Message::IssuePackCancel => {
+            state.issue_pack = None;
+            Task::none()
+        }
         Message::Workbench(msg) => {
             let workbench = match &mut state.mode {
                 super::workbench::WorkspaceMode::Workbench(wb) => wb,
@@ -1427,6 +1529,116 @@ fn commit_text_draft(state: &mut super::ResultWorkspace) {
             let _ = state.document.image.set_text(id, text);
         }
     }
+}
+
+fn block_pending_candidates(state: &mut super::ResultWorkspace) -> bool {
+    if let super::workbench::WorkspaceMode::Workbench(ref wb) = state.mode {
+        if super::workbench::state::has_pending_candidates(wb) {
+            state.message = Some(InlineMessage::Error(format!(
+                "{}\nApply them before safe export.",
+                super::workbench::state::apply_skip_summary(wb)
+            )));
+            return true;
+        }
+    }
+    false
+}
+
+fn result_issue_pack_input(state: &super::ResultWorkspace) -> crate::issue_pack::IssuePackInput {
+    let redaction_count = state
+        .document
+        .image
+        .annotations()
+        .iter()
+        .filter(|annotation| matches!(annotation, Annotation::OpaqueRedaction { .. }))
+        .count();
+    crate::issue_pack::IssuePackInput {
+        title: None,
+        created_at: chrono::Local::now(),
+        rollshot_version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: crate::issue_pack::PlatformInfo::current(),
+        final_image: Some(crate::issue_pack::SafeImageAsset {
+            file_name: "final-redacted.png".to_string(),
+            pixels: state.document.image.flatten(),
+            derived_from_original: true,
+        }),
+        action_guide: None,
+        ocr_snippets: result_ocr_snippets(state),
+        evidence_review: crate::issue_pack::EvidenceReviewSummary {
+            required: true,
+            completed: state
+                .issue_pack
+                .as_ref()
+                .is_some_and(|dialog| dialog.review_confirmed),
+            result_workspace_images_reviewed: state
+                .issue_pack
+                .as_ref()
+                .is_some_and(|dialog| dialog.review_confirmed),
+            action_guide_keyframes_reviewed: false,
+        },
+        redaction: crate::issue_pack::RedactionSummary {
+            review_required: true,
+            review_completed: state
+                .issue_pack
+                .as_ref()
+                .is_some_and(|dialog| dialog.review_confirmed),
+            result_workspace_images_are_flattened: true,
+            original_pixels_included: false,
+            redaction_count,
+        },
+    }
+}
+
+#[cfg(feature = "ocr")]
+fn result_ocr_snippets(state: &super::ResultWorkspace) -> Vec<crate::issue_pack::OcrSnippet> {
+    state
+        .ocr_text
+        .document()
+        .map(|document| {
+            document
+                .visible_items()
+                .iter()
+                .take(12)
+                .map(|item| crate::issue_pack::OcrSnippet {
+                    text: item.text.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(feature = "ocr"))]
+fn result_ocr_snippets(_state: &super::ResultWorkspace) -> Vec<crate::issue_pack::OcrSnippet> {
+    Vec::new()
+}
+
+fn begin_issue_pack_export(
+    state: &mut super::ResultWorkspace,
+    kind: super::IssuePackKind,
+) -> Task<Message> {
+    let Some(dialog) = &mut state.issue_pack else {
+        return Task::none();
+    };
+    if !dialog.review_confirmed {
+        state.message = Some(InlineMessage::Error(
+            "Review the images included in this bug report before export.".to_string(),
+        ));
+        return Task::none();
+    }
+    dialog.pending_kind = Some(kind);
+    let default_dir = crate::storage::Platform::current()
+        .and_then(crate::storage::default_output_dir)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    Task::perform(
+        async move {
+            rfd::AsyncFileDialog::new()
+                .set_directory(default_dir)
+                .pick_folder()
+                .await
+                .map(|h| h.path().to_path_buf())
+        },
+        Message::IssuePackFolderChosen,
+    )
 }
 
 /// The platform zoom modifier: Cmd on macOS, Ctrl on Linux.
@@ -3034,5 +3246,99 @@ mod tests {
 
         let _ = update(&mut state, Message::EscapePressed);
         assert_eq!(state.editor.tool, Tool::Select);
+    }
+
+    // -- issue pack export (Task 5) ------------------------------------------
+
+    #[test]
+    fn issue_pack_request_blocks_pending_smart_redaction_candidates() {
+        let mut state = workspace();
+        state.mode = super::super::workbench::WorkspaceMode::Workbench(
+            super::super::workbench::state::workbench_with_pending_candidate(),
+        );
+
+        let _ = update(&mut state, Message::ExportBugReport);
+
+        assert!(state.issue_pack.is_none());
+        assert!(state.message.as_ref().unwrap().text().contains("Apply"));
+    }
+
+    #[test]
+    fn issue_pack_review_redactions_from_workbench_returns_to_normal_redact_mode() {
+        let mut state = workspace();
+        state.mode = super::super::workbench::WorkspaceMode::Workbench(
+            super::super::workbench::WorkbenchState::default(),
+        );
+        let _ = update(&mut state, Message::ExportBugReport);
+
+        let _ = update(&mut state, Message::IssuePackReviewRedactions);
+
+        assert!(state.issue_pack.is_none());
+        assert_eq!(state.editor.tool, Tool::Redact);
+        assert!(matches!(
+            state.mode,
+            super::super::workbench::WorkspaceMode::Normal
+        ));
+    }
+
+    #[test]
+    fn issue_pack_export_requires_review_confirmation() {
+        let mut state = workspace();
+        let _ = update(&mut state, Message::ExportBugReport);
+        assert!(state
+            .issue_pack
+            .as_ref()
+            .is_some_and(|dialog| !dialog.review_confirmed));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = update(
+            &mut state,
+            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+        );
+
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
+        assert!(state.message.as_ref().unwrap().text().contains("review"));
+    }
+
+    #[test]
+    fn issue_pack_folder_export_writes_flattened_result_image() {
+        let mut state = workspace();
+        state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            })
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        let _ = update(
+            &mut state,
+            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+        );
+
+        let final_image = tmp
+            .path()
+            .join("rollshot-issue-pack-")
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("rollshot-issue-pack-")
+            })
+            .unwrap()
+            .join("images/final-redacted.png");
+        let decoded = image::open(final_image).unwrap().to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 0, 255]);
     }
 }

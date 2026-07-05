@@ -1,7 +1,7 @@
 use super::viewport::{geometry_for, ZoomDirection, ZoomMode};
 use iced::widget::{
-    button, column, container, image as image_widget, mouse_area, opaque, row, scrollable, text,
-    text_editor, tooltip, Space,
+    button, checkbox, column, container, image as image_widget, mouse_area, opaque, row,
+    scrollable, stack, text, text_editor, tooltip, Space,
 };
 use iced::{keyboard, mouse, Alignment, Color, Element, Length, Size, Vector};
 
@@ -101,7 +101,8 @@ fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
         .push(button(text(copy_label)).on_press(Message::Copy))
         .push(button(text("\u{25BE}")).on_press(Message::ToggleCopyMenu))
         .push(button(text(save_label)).on_press(Message::SaveAs))
-        .push(reveal_button(state));
+        .push(reveal_button(state))
+        .push(button(text("Export Bug Report...")).on_press(Message::ExportBugReport));
 
     tools.spacing(8).align_y(Alignment::Center).into()
 }
@@ -147,6 +148,12 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
         .spacing(8)
         .padding(8)
         .into(),
+    };
+
+    let body = if state.issue_pack.is_some() {
+        issue_pack_modal(body, state)
+    } else {
+        body
     };
 
     let layout: Element<'_, Message> = if let Some(prompt) = &state.pending_discard {
@@ -483,6 +490,104 @@ fn unredacted_action_modal<'a>(
         .on_press(Message::ModalScrimPressed),
     );
     iced::widget::stack![base, scrim].into()
+}
+
+fn issue_pack_modal<'a>(
+    base: Element<'a, Message>,
+    state: &'a ResultWorkspace,
+) -> Element<'a, Message> {
+    let dialog = state.issue_pack.as_ref().expect("checked by caller");
+    let redactions = state
+        .document
+        .image
+        .annotations()
+        .iter()
+        .filter(|annotation| {
+            matches!(
+                annotation,
+                rollshot_image_document::Annotation::OpaqueRedaction { .. }
+            )
+        })
+        .count();
+    let safety = if redactions > 0 {
+        column![
+            text("Result Workspace images will be flattened."),
+            text("Retained originals will not be included."),
+            text("Review redactions before export."),
+        ]
+    } else {
+        column![text(
+            "No redactions are currently applied. Review the image before sharing."
+        )]
+    };
+    let export_enabled = dialog.review_confirmed && dialog.pending_kind.is_none();
+    let folder = button(text("Export Folder"))
+        .on_press_maybe(export_enabled.then_some(Message::IssuePackExportFolder))
+        .style(button::primary);
+    let zip = button(text("Export ZIP"))
+        .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
+        .style(button::secondary);
+
+    #[cfg(feature = "ocr")]
+    let has_visible_ocr = state
+        .ocr_text
+        .document()
+        .map(|d| d.visible_items().len())
+        .unwrap_or(0)
+        > 0;
+    #[cfg(not(feature = "ocr"))]
+    let has_visible_ocr = false;
+    let included_text = if has_visible_ocr {
+        "Included: issue.md, manifest.json, final flattened screenshot, OCR snippets"
+    } else {
+        "Included: issue.md, manifest.json, final flattened screenshot"
+    };
+
+    let dialog = container(
+        column![
+            text("Issue Pack Export").size(18),
+            text(included_text),
+            text("Safety:"),
+            safety,
+            checkbox(dialog.review_confirmed)
+                .label("I reviewed the images included in this bug report.")
+                .on_toggle(Message::IssuePackReviewChanged),
+            row![
+                button(text("Review Redactions")).on_press(Message::IssuePackReviewRedactions),
+                folder,
+                zip,
+                button(text("Cancel")).on_press(Message::IssuePackCancel),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12),
+    )
+    .padding(20)
+    .width(Length::Fixed(460.0))
+    .style(container::rounded_box);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::IssuePackCancel),
+    );
+    stack![base, scrim].into()
 }
 
 #[cfg(test)]

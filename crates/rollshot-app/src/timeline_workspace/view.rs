@@ -1,6 +1,6 @@
 use iced::widget::{
-    button, column, container, image, mouse_area, opaque, row, scrollable, stack, text, text_input,
-    Space,
+    button, checkbox, column, container, image, mouse_area, opaque, row, scrollable, stack, text,
+    text_input, Space,
 };
 use iced::{mouse, Alignment, Color, Element, Length, Theme};
 
@@ -16,6 +16,12 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
     .spacing(8)
     .padding(12)
     .into();
+
+    let body = if state.issue_pack.is_some() {
+        issue_pack_modal(body, state)
+    } else {
+        body
+    };
 
     if state.pending_discard {
         discard_modal(body)
@@ -61,6 +67,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         button(text("Export Guide"))
             .on_press(Message::ExportRequested)
             .style(button::primary),
+        button(text("Export Bug Report..."))
+            .on_press(Message::ExportBugReport)
+            .style(button::secondary),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
@@ -171,6 +180,73 @@ fn strip_row(state: &TimelineWorkspace) -> Element<'_, Message> {
     )
     .height(Length::Fixed(120.0))
     .into()
+}
+
+fn issue_pack_modal<'a>(
+    base: Element<'a, Message>,
+    state: &'a TimelineWorkspace,
+) -> Element<'a, Message> {
+    let dialog = state.issue_pack.as_ref().expect("checked by caller");
+    let export_enabled = dialog.review_confirmed && dialog.pending_kind.is_none();
+    let steps = state.guide.steps().len();
+
+    let dialog_view = container(
+        column![
+            text("Issue Pack Export").size(18),
+            text(format!(
+                "Included: issue.md, manifest.json, {steps} Action Guide steps"
+            )),
+            text("Safety:"),
+            column![
+                text("Action Guide keyframes are reviewed evidence images."),
+                text("Keyframes are not automatically redacted."),
+                text("Review every keyframe before sharing."),
+            ],
+            checkbox(dialog.include_gif)
+                .label("Include guide.gif when GIF export succeeds")
+                .on_toggle(Message::IssuePackIncludeGifChanged),
+            checkbox(dialog.review_confirmed)
+                .label("I reviewed the images and keyframes included in this bug report.")
+                .on_toggle(Message::IssuePackReviewChanged),
+            row![
+                button(text("Export Folder"))
+                    .on_press_maybe(export_enabled.then_some(Message::IssuePackExportFolder))
+                    .style(button::primary),
+                button(text("Export ZIP"))
+                    .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
+                    .style(button::secondary),
+                button(text("Cancel")).on_press(Message::IssuePackCancel),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12),
+    )
+    .padding(20)
+    .width(Length::Fixed(500.0))
+    .style(container::rounded_box);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog_view))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::IssuePackCancel),
+    );
+    stack![base, scrim].into()
 }
 
 fn discard_modal(base: Element<'_, Message>) -> Element<'_, Message> {
