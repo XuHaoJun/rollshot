@@ -79,24 +79,36 @@ fn make_terminal_like_canvas(width: u32, height: u32) -> RgbaImage {
 
     for y in 0..height {
         let row = y / 18;
-        let row_bg = if row % 2 == 0 { 18 } else { 22 };
+        let row_hash = row.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let feature_offset = row_hash % 11;
+        let y_hash = y.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let gradient = ((y_hash >> 8) % 256) as u8;
         for x in 0..width {
-            img.put_pixel(x, y, Rgba([row_bg, row_bg + 2, row_bg + 6, 255]));
+            let x_hash = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((y_hash ^ x_hash) % 41) as u8;
+            let row_bg = gradient.wrapping_add(noise);
+            img.put_pixel(
+                x,
+                y,
+                Rgba([row_bg, row_bg.wrapping_add(2), row_bg.wrapping_add(6), 255]),
+            );
         }
 
-        if y % 18 == 13 {
+        if y % 18 == (13 + feature_offset) % 18 {
             let prompt_w = 16 + (row % 11) * 3;
+            let prompt_tint = (row_hash % 41) as u8;
             for x in 18..(18 + prompt_w).min(width.saturating_sub(18)) {
-                img.put_pixel(x, y, Rgba([80, 190, 120, 255]));
+                img.put_pixel(x, y, Rgba([80 + prompt_tint, 190, 120, 255]));
             }
         }
 
-        if y % 18 == 14 {
+        if y % 18 == (14 + feature_offset) % 18 {
             let text_start = 48 + (row % 7) * 5;
             let text_end = (text_start + 180 + (row % 17) * 9).min(width.saturating_sub(24));
+            let text_tint = ((row_hash >> 8) % 31) as u8;
             for x in text_start..text_end {
                 if (x + row * 13) % 9 < 6 {
-                    let tone = 130 + ((row * 19 + x / 5) % 90) as u8;
+                    let tone = 130 + text_tint + ((row * 19 + x / 5) % 60) as u8;
                     img.put_pixel(x, y, Rgba([tone, tone, tone, 255]));
                 }
             }
@@ -260,7 +272,8 @@ fn fast_scroll_beyond_default_search_ratio_recovers_via_relaxed_pass() {
     // The default `max_search_ratio` (0.4) only reaches ~128 px on a
     // 320-tall frame. A 200 px scroll lands outside that envelope, so
     // every regular matcher misses. The relaxed coarse pass widens the
-    // ratio to ~0.85 (≈272 px), which must recover the offset.
+    // search to the geometry-derived overlap ceiling (height - min_overlap),
+    // which must recover the offset.
     let canvas = make_scroll_canvas(320, 1200);
     let first = crop_frame(&canvas, 0, 320);
     let scrolled = crop_frame(&canvas, 200, 320);
