@@ -27,6 +27,29 @@ use rollshot_action::{
     Recording,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssuePackKind {
+    Folder,
+    Zip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssuePackDialog {
+    pub review_confirmed: bool,
+    pub pending_kind: Option<IssuePackKind>,
+    pub include_gif: bool,
+}
+
+impl IssuePackDialog {
+    pub(crate) fn new() -> Self {
+        Self {
+            review_confirmed: false,
+            pending_kind: None,
+            include_gif: true,
+        }
+    }
+}
+
 /// One nearby-strip thumbnail: a retained frame id and its prebuilt iced handle.
 pub(crate) struct StripFrame {
     pub id: FrameId,
@@ -45,6 +68,8 @@ pub struct TimelineWorkspace {
     pub(crate) selected: Option<usize>,
     /// Inline banner (export error / advisory). `None` when clear.
     pub(crate) message: Option<String>,
+    /// Issue Pack export dialog state, if open.
+    pub(crate) issue_pack: Option<IssuePackDialog>,
     /// True while the discard confirmation modal is shown.
     pub(crate) pending_discard: bool,
     /// Cached handle for the selected step's current keyframe.
@@ -73,6 +98,7 @@ impl TimelineWorkspace {
             source_kind,
             selected,
             message: None,
+            issue_pack: None,
             pending_discard: false,
             keyframe_handle: None,
             strip: Vec::new(),

@@ -19,6 +19,22 @@ pub enum Message {
     ExportDirChosen(Option<PathBuf>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
+    /// Export a bug-report Issue Pack from the timeline workspace.
+    ExportBugReport,
+    /// Toggle the review-confirmed checkbox in the Issue Pack dialog.
+    IssuePackReviewChanged(bool),
+    /// Toggle whether to include the Action Guide GIF in the Issue Pack.
+    IssuePackIncludeGifChanged(bool),
+    /// Begin exporting an Issue Pack to a folder.
+    IssuePackExportFolder,
+    /// Begin exporting an Issue Pack to a ZIP file.
+    IssuePackExportZip,
+    /// The async folder-picker returned (None = cancelled).
+    IssuePackFolderChosen(Option<PathBuf>),
+    /// Background Issue Pack export completed.
+    IssuePackFinished(Result<crate::issue_pack::IssuePackExportResult, String>),
+    /// Close the Issue Pack dialog without exporting.
+    IssuePackCancel,
     #[cfg(target_os = "macos")]
     OpenInputMonitoringSettings,
     DismissBanner,
@@ -128,6 +144,85 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             // Export Guide afterwards.
             Task::none()
         }
+        Message::ExportBugReport => {
+            state.message = None;
+            state.issue_pack = Some(super::IssuePackDialog::new());
+            Task::none()
+        }
+        Message::IssuePackReviewChanged(confirmed) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.review_confirmed = confirmed;
+            }
+            Task::none()
+        }
+        Message::IssuePackIncludeGifChanged(include) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.include_gif = include;
+            }
+            Task::none()
+        }
+        Message::IssuePackExportFolder => {
+            begin_issue_pack_export(state, super::IssuePackKind::Folder)
+        }
+        Message::IssuePackExportZip => begin_issue_pack_export(state, super::IssuePackKind::Zip),
+        Message::IssuePackFolderChosen(None) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.pending_kind = None;
+            }
+            Task::none()
+        }
+        Message::IssuePackFolderChosen(Some(parent)) => {
+            let kind = state
+                .issue_pack
+                .as_ref()
+                .and_then(|dialog| dialog.pending_kind)
+                .unwrap_or(super::IssuePackKind::Folder);
+            let input = timeline_issue_pack_input(state);
+            let action = timeline_issue_pack_action(state);
+            let result = match kind {
+                super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
+                    &input,
+                    Some(action),
+                    &parent,
+                ),
+                super::IssuePackKind::Zip => {
+                    crate::issue_pack::export_zip_with_action_guide(&input, Some(action), &parent)
+                }
+            };
+            update(
+                state,
+                Message::IssuePackFinished(result.map_err(|e| e.to_string())),
+            )
+        }
+        Message::IssuePackFinished(Ok(result)) => {
+            let mut text = match result.zip_path.as_ref() {
+                Some(path) => format!("Bug report ZIP saved to {}", path.display()),
+                None => format!("Bug report saved to {}", result.directory.display()),
+            };
+            if !result.warnings.is_empty() {
+                let warning_text = result
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                text = format!("{text}\nWarnings: {warning_text}");
+            }
+            state.issue_pack = None;
+            state.message = Some(text);
+            Task::none()
+        }
+        Message::IssuePackFinished(Err(error)) => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.pending_kind = None;
+            }
+            state.message = Some(error);
+            Task::none()
+        }
+        Message::IssuePackCancel => {
+            state.issue_pack = None;
+            Task::none()
+        }
         #[cfg(target_os = "macos")]
         Message::OpenInputMonitoringSettings => {
             rollshot_macos_input::open_input_monitoring_settings();
@@ -179,6 +274,77 @@ async fn pick_gif_save_path(default_dir: PathBuf) -> Option<PathBuf> {
         .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
+}
+
+fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::IssuePackInput {
+    let include_gif = state
+        .issue_pack
+        .as_ref()
+        .is_some_and(|dialog| dialog.include_gif);
+    let reviewed = state
+        .issue_pack
+        .as_ref()
+        .is_some_and(|dialog| dialog.review_confirmed);
+    crate::issue_pack::IssuePackInput {
+        title: None,
+        created_at: chrono::Local::now(),
+        rollshot_version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: crate::issue_pack::PlatformInfo::current(),
+        final_image: None,
+        action_guide: Some(crate::issue_pack::ActionGuideIssueAssets::from_guide(
+            &state.guide,
+            include_gif,
+        )),
+        ocr_snippets: Vec::new(),
+        evidence_review: crate::issue_pack::EvidenceReviewSummary {
+            required: true,
+            completed: reviewed,
+            result_workspace_images_reviewed: false,
+            action_guide_keyframes_reviewed: reviewed,
+        },
+        redaction: crate::issue_pack::RedactionSummary {
+            review_required: false,
+            review_completed: reviewed,
+            result_workspace_images_are_flattened: false,
+            original_pixels_included: false,
+            redaction_count: 0,
+        },
+    }
+}
+
+fn timeline_issue_pack_action(
+    state: &TimelineWorkspace,
+) -> crate::issue_pack::ActionGuideExportSource<'_> {
+    let include_gif = state
+        .issue_pack
+        .as_ref()
+        .is_some_and(|dialog| dialog.include_gif);
+    crate::issue_pack::ActionGuideExportSource {
+        guide: &state.guide,
+        store: &state.store,
+        region: state.region,
+        capability: state.capability,
+        source_kind: state.source_kind,
+        include_gif,
+    }
+}
+
+fn begin_issue_pack_export(
+    state: &mut TimelineWorkspace,
+    kind: super::IssuePackKind,
+) -> Task<Message> {
+    let Some(dialog) = &mut state.issue_pack else {
+        return Task::none();
+    };
+    if !dialog.review_confirmed {
+        state.message = Some("Review every keyframe before sharing.".to_string());
+        return Task::none();
+    }
+    dialog.pending_kind = Some(kind);
+    Task::perform(
+        pick_export_dir(picker_default_dir()),
+        Message::IssuePackFolderChosen,
+    )
 }
 
 #[cfg(test)]
@@ -386,5 +552,61 @@ mod tests {
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::ExportGifPathChosen(None));
         assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn issue_pack_export_requires_keyframe_review_confirmation() {
+        let mut state = ws(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(
+            &mut state,
+            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+        );
+
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
+        assert!(state.message.as_ref().unwrap().contains("review"));
+    }
+
+    #[test]
+    fn issue_pack_folder_export_uses_reviewed_titles_and_keyframes() {
+        let mut state = ws(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+
+        let _ = update(
+            &mut state,
+            Message::TitleChanged("Open Settings".to_string()),
+        );
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        let _ = update(
+            &mut state,
+            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+        );
+
+        let pack = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("rollshot-issue-pack-")
+            })
+            .unwrap();
+        let md = std::fs::read_to_string(pack.join("issue.md")).unwrap();
+        assert!(md.contains("Open Settings"), "md = {md}");
+        assert!(pack.join("action-guide/steps.md").exists());
+        assert!(pack.join("action-guide/session.json").exists());
+    }
+
+    #[test]
+    fn issue_pack_cancel_writes_nothing() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackCancel);
+
+        assert!(state.issue_pack.is_none());
     }
 }
