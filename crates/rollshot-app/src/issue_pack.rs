@@ -832,6 +832,42 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         assert!(archive.len() >= 3);
     }
+
+    #[test]
+    fn manifest_never_claims_sensitive_content_was_detected() {
+        let input = base_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let result = export_folder(&input, tmp.path()).unwrap();
+        let all_text = format!(
+            "{}\n{}",
+            std::fs::read_to_string(result.directory.join("issue.md")).unwrap(),
+            std::fs::read_to_string(result.directory.join("manifest.json")).unwrap()
+        );
+
+        assert!(!all_text.to_lowercase().contains("sensitive-free"));
+        assert!(!all_text.to_lowercase().contains("all sensitive"));
+        assert!(!all_text.to_lowercase().contains("detected every"));
+    }
+
+    #[test]
+    fn manifest_serializes_gif_export_failure_warning() {
+        let input = base_input();
+        let warnings = vec![IssuePackWarning {
+            code: "gif_export_failed".to_string(),
+            message: "GIF export failed: disk full".to_string(),
+        }];
+        let json = render_manifest_json(&input, &warnings, false).unwrap();
+
+        assert!(json.contains("\"warnings\""), "json = {json}");
+        assert!(
+            json.contains("\"code\": \"gif_export_failed\""),
+            "json = {json}"
+        );
+        assert!(
+            json.contains("\"message\": \"GIF export failed: disk full\""),
+            "json = {json}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "action-guide"))]
@@ -969,5 +1005,31 @@ mod action_guide_tests {
 
         assert!(err.to_string().contains("export failed"), "err = {err}");
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn action_keyframes_are_listed_as_reviewed_evidence_not_redacted_assets() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+
+        assert!(
+            manifest.contains("\"action_keyframe\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            !manifest.contains("redacted_keyframe"),
+            "manifest = {manifest}"
+        );
     }
 }
