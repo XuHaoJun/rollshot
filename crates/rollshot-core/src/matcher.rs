@@ -421,7 +421,39 @@ fn axis_fast_path_candidate(
     Some(candidate)
 }
 
-const RELAXED_SEARCH_RATIO: f32 = 0.85;
+fn relaxed_search_limits(prev: &PreparedFrame, config: &StitchConfig) -> Option<(i32, i32)> {
+    let (width, height) = prev.dimensions();
+    let max_dx = overlap_limited_offset(width, config.min_overlap);
+    let max_dy = overlap_limited_offset(height, config.min_overlap);
+    if max_dx <= 0 && max_dy <= 0 {
+        return None;
+    }
+
+    let (current_max_dx, current_max_dy) = normal_search_limits(prev, config);
+    let tolerance = COARSE_DOWNSAMPLE_STEP as i32;
+    if current_max_dx + tolerance >= max_dx && current_max_dy + tolerance >= max_dy {
+        return None;
+    }
+
+    Some((max_dx, max_dy))
+}
+
+fn normal_search_limits(prev: &PreparedFrame, config: &StitchConfig) -> (i32, i32) {
+    let (width, height) = prev.dimensions();
+    let ratio_dx = ratio_limited_offset(width, config.max_search_ratio);
+    let ratio_dy = ratio_limited_offset(height, config.max_search_ratio);
+    let overlap_dx = overlap_limited_offset(width, config.min_overlap);
+    let overlap_dy = overlap_limited_offset(height, config.min_overlap);
+    (ratio_dx.min(overlap_dx), ratio_dy.min(overlap_dy))
+}
+
+fn ratio_limited_offset(dim: u32, ratio: f32) -> i32 {
+    ((dim as f32 * ratio) as i32).max(0)
+}
+
+fn overlap_limited_offset(dim: u32, min_overlap: u32) -> i32 {
+    dim.saturating_sub(min_overlap) as i32
+}
 
 fn relaxed_coarse_candidate(
     prev: &PreparedFrame,
@@ -431,16 +463,17 @@ fn relaxed_coarse_candidate(
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Option<MotionCandidate> {
-    // No point retrying if the standard pass already searches near the
-    // geometric ceiling.
-    if config.max_search_ratio >= RELAXED_SEARCH_RATIO - 0.05 {
-        return None;
-    }
+    let (max_dx, max_dy) = relaxed_search_limits(prev, config)?;
 
-    let mut relaxed_cfg = config.clone();
-    relaxed_cfg.max_search_ratio = RELAXED_SEARCH_RATIO;
-
-    let coarse = coarse_candidates(prev, curr, locked_axis, &relaxed_cfg);
+    let coarse = coarse_candidates_for_axes_with_limits(
+        prev,
+        curr,
+        locked_axis,
+        dual_search_axes(),
+        max_dx,
+        max_dy,
+        config,
+    );
     metrics.coarse_candidates = metrics.coarse_candidates.max(coarse.len());
     if coarse.is_empty() {
         return None;
@@ -451,13 +484,15 @@ fn relaxed_coarse_candidate(
     // refinement, which lands on a single-pixel offset that the verifier can
     // accept on the same min_overlap budget.
     let mut candidates = coarse.clone();
-    candidates.extend(template_candidates(
+    candidates.extend(template_candidates_for_axes_with_limits(
         prev,
         curr,
-        locked_axis,
         last_motion,
         &coarse,
-        &relaxed_cfg,
+        dual_search_axes(),
+        max_dx,
+        max_dy,
+        config,
         metrics,
     ));
 
@@ -633,6 +668,32 @@ fn template_candidates_for_axes(
     config: &StitchConfig,
     metrics: &mut StitchMetrics,
 ) -> Vec<MotionCandidate> {
+    let (max_dx, max_dy) = normal_search_limits(prev, config);
+    template_candidates_for_axes_with_limits(
+        prev,
+        curr,
+        last_motion,
+        coarse,
+        axes,
+        max_dx,
+        max_dy,
+        config,
+        metrics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn template_candidates_for_axes_with_limits(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    last_motion: (i32, i32),
+    coarse: &[MotionCandidate],
+    axes: &[SearchAxis],
+    max_dx_px: i32,
+    max_dy_px: i32,
+    config: &StitchConfig,
+    metrics: &mut StitchMetrics,
+) -> Vec<MotionCandidate> {
     let mut out = Vec::new();
     let (width, height) = prev.dimensions();
     let roi = content_roi(width, height);
@@ -640,9 +701,19 @@ fn template_candidates_for_axes(
 
     for axis in axes {
         let seed = template_seed(*axis, last_motion, coarse);
-        if let Some(candidate) =
-            search_template_axis(prev, curr, *axis, match_region, seed, config, metrics)
-        {
+        let max_offset = match axis {
+            SearchAxis::Vertical => max_dy_px,
+            SearchAxis::Horizontal => max_dx_px,
+        };
+        if let Some(candidate) = search_template_axis_with_limit(
+            prev,
+            curr,
+            *axis,
+            match_region,
+            seed,
+            max_offset,
+            metrics,
+        ) {
             out.push(candidate);
         }
     }
@@ -650,13 +721,13 @@ fn template_candidates_for_axes(
     out
 }
 
-fn search_template_axis(
+fn search_template_axis_with_limit(
     prev: &PreparedFrame,
     curr: &PreparedFrame,
     axis: SearchAxis,
     region: Region,
     last_offset: i32,
-    config: &StitchConfig,
+    max_offset: i32,
     metrics: &mut StitchMetrics,
 ) -> Option<MotionCandidate> {
     let (width, height) = prev.dimensions();
@@ -664,14 +735,7 @@ fn search_template_axis(
         return None;
     }
 
-    let max_offset = match axis {
-        SearchAxis::Vertical => (height as i32 - config.min_overlap as i32).max(0),
-        SearchAxis::Horizontal => (width as i32 - config.min_overlap as i32).max(0),
-    };
-    let max_offset = max_offset.min(match axis {
-        SearchAxis::Vertical => (height as f32 * config.max_search_ratio) as i32,
-        SearchAxis::Horizontal => (width as f32 * config.max_search_ratio) as i32,
-    });
+    let max_offset = max_offset.max(0);
     if max_offset <= 0 {
         return None;
     }
@@ -819,13 +883,25 @@ fn coarse_candidates_for_axes(
     axes: &[SearchAxis],
     config: &StitchConfig,
 ) -> Vec<MotionCandidate> {
-    let (width, height) = prev.dimensions();
+    let (max_dx, max_dy) = normal_search_limits(prev, config);
+    coarse_candidates_for_axes_with_limits(prev, curr, locked_axis, axes, max_dx, max_dy, config)
+}
+
+fn coarse_candidates_for_axes_with_limits(
+    prev: &PreparedFrame,
+    curr: &PreparedFrame,
+    locked_axis: Option<ScrollAxis>,
+    axes: &[SearchAxis],
+    max_dx_px: i32,
+    max_dy_px: i32,
+    config: &StitchConfig,
+) -> Vec<MotionCandidate> {
     let step = COARSE_DOWNSAMPLE_STEP as i32;
     let (sample_w, sample_h) = prev.coarse_dims;
     let prev_samples = prev.coarse();
     let curr_samples = curr.coarse();
-    let max_dx = ((width as f32 * config.max_search_ratio) as i32 / step).max(0);
-    let max_dy = ((height as f32 * config.max_search_ratio) as i32 / step).max(0);
+    let max_dx = (max_dx_px / step).max(0);
+    let max_dy = (max_dy_px / step).max(0);
 
     let mut out = Vec::new();
     for axis in axes {

@@ -74,12 +74,206 @@ fn duplicate_frame_returns_duplicate_without_growing() {
     assert_eq!(stitcher.stats().frame_count, 1);
 }
 
+fn make_terminal_like_canvas(width: u32, height: u32) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([12, 14, 18, 255]));
+
+    for y in 0..height {
+        let row = y / 18;
+        let row_hash = row.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let feature_offset = row_hash % 11;
+        let y_hash = y.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let gradient = ((y_hash >> 8) % 256) as u8;
+        for x in 0..width {
+            let x_hash = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((y_hash ^ x_hash) % 41) as u8;
+            let row_bg = gradient.wrapping_add(noise);
+            img.put_pixel(
+                x,
+                y,
+                Rgba([row_bg, row_bg.wrapping_add(2), row_bg.wrapping_add(6), 255]),
+            );
+        }
+
+        if y % 18 == (13 + feature_offset) % 18 {
+            let prompt_w = 16 + (row % 11) * 3;
+            let prompt_tint = (row_hash % 41) as u8;
+            for x in 18..(18 + prompt_w).min(width.saturating_sub(18)) {
+                img.put_pixel(x, y, Rgba([80 + prompt_tint, 190, 120, 255]));
+            }
+        }
+
+        if y % 18 == (14 + feature_offset) % 18 {
+            let text_start = 48 + (row % 7) * 5;
+            let text_end = (text_start + 180 + (row % 17) * 9).min(width.saturating_sub(24));
+            let text_tint = ((row_hash >> 8) % 31) as u8;
+            for x in text_start..text_end {
+                if (x + row * 13) % 9 < 6 {
+                    let tone = 130 + text_tint + ((row * 19 + x / 5) % 60) as u8;
+                    img.put_pixel(x, y, Rgba([tone, tone, tone, 255]));
+                }
+            }
+        }
+
+        if y % 72 == 3 {
+            let color = [
+                (60 + (row * 23) % 160) as u8,
+                (70 + (row * 31) % 150) as u8,
+                (90 + (row * 37) % 130) as u8,
+                255,
+            ];
+            for x in 30..width.saturating_sub(30) {
+                if (x / 4 + row) % 3 != 0 {
+                    img.put_pixel(x, y, Rgba(color));
+                }
+            }
+        }
+    }
+
+    img
+}
+
+#[test]
+fn large_scroll_beyond_old_relaxed_ratio_appends_when_overlap_verifies() {
+    const W: u32 = 720;
+    const FRAME_H: u32 = 900;
+    const OFFSET: u32 = 800;
+    const EXPECTED_OVERLAP: u32 = FRAME_H - OFFSET;
+
+    let canvas = make_terminal_like_canvas(W, 2200);
+    let first = crop_frame(&canvas, 0, FRAME_H);
+    let scrolled = crop_frame(&canvas, OFFSET, FRAME_H);
+
+    let mut config = StitchConfig::default();
+    config.fast_hnsw.enabled = false;
+    assert_eq!(config.min_overlap, 64);
+    assert_eq!(
+        (FRAME_H as f32 * 0.85) as u32,
+        765,
+        "test must stay beyond the old fixed relaxed search ceiling"
+    );
+    assert!(
+        OFFSET > (FRAME_H as f32 * 0.85) as u32,
+        "OFFSET={OFFSET} must exceed old 85% ceiling"
+    );
+    assert!(
+        EXPECTED_OVERLAP >= config.min_overlap,
+        "test must leave enough configured overlap"
+    );
+
+    let mut stitcher = Stitcher::new(config.clone());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::Appended {
+            direction,
+            added,
+            estimate,
+        } => {
+            assert_eq!(direction, AppendDirection::Bottom);
+            assert_eq!(estimate.axis, ScrollAxis::Vertical);
+            assert_eq!(estimate.dx, 0);
+            assert!(
+                (OFFSET - 2..=OFFSET + 2).contains(&added),
+                "added = {added}, expected {OFFSET}"
+            );
+            assert!(
+                (OFFSET as i32 - 2..=OFFSET as i32 + 2).contains(&estimate.dy),
+                "estimate.dy = {}, expected {OFFSET}",
+                estimate.dy
+            );
+            assert!(
+                (EXPECTED_OVERLAP - 2..=EXPECTED_OVERLAP + 2).contains(&estimate.overlap.height),
+                "overlap height {} not close to expected {}",
+                estimate.overlap.height,
+                EXPECTED_OVERLAP
+            );
+            assert_eq!(estimate.overlap.width, W);
+            assert_eq!(estimate.overlap.curr_y, 0);
+            assert!(
+                (OFFSET - 2..=OFFSET + 2).contains(&estimate.overlap.prev_y),
+                "overlap prev_y = {}, expected {OFFSET}",
+                estimate.overlap.prev_y
+            );
+        }
+        other => panic!("expected Appended for verifiable large scroll, got {other:?}"),
+    }
+
+    let stats = stitcher.stats();
+    assert_eq!(stats.frame_count, 2);
+    assert!(
+        (FRAME_H + OFFSET - 2..=FRAME_H + OFFSET + 2).contains(&stats.total_height),
+        "total_height = {}, expected about {}",
+        stats.total_height,
+        FRAME_H + OFFSET
+    );
+}
+
+#[test]
+fn large_scroll_below_min_overlap_does_not_append_or_grow_canvas() {
+    const W: u32 = 720;
+    const FRAME_H: u32 = 900;
+
+    let mut config = StitchConfig::default();
+    config.fast_hnsw.enabled = false;
+    let offset = FRAME_H - config.min_overlap + 1;
+    assert_eq!(FRAME_H - offset, config.min_overlap - 1);
+
+    let canvas = make_terminal_like_canvas(W, 2200);
+    let first = crop_frame(&canvas, 0, FRAME_H);
+    let scrolled = crop_frame(&canvas, offset, FRAME_H);
+
+    let mut stitcher = Stitcher::new(config.clone());
+    assert_eq!(stitcher.push_frame(first), StitchOutcome::FirstFrame);
+    let before_stats = stitcher.stats();
+    let before_dims = stitcher
+        .full_image()
+        .expect("first frame should be stored")
+        .dimensions();
+
+    match stitcher.push_frame(scrolled) {
+        StitchOutcome::NoMatch { best_estimate, .. } => {
+            if let Some(estimate) = best_estimate {
+                assert!(
+                    estimate.overlap.height >= config.min_overlap,
+                    "best estimate exposed below-floor overlap: {} < {}",
+                    estimate.overlap.height,
+                    config.min_overlap
+                );
+            }
+        }
+        StitchOutcome::AxisChanged { .. } => {
+            panic!("below-min-overlap vertical scroll changed axis")
+        }
+        StitchOutcome::Appended { .. } => {
+            panic!("below-min-overlap large scroll must not append")
+        }
+        StitchOutcome::NoProgress { .. } => {
+            panic!("below-min-overlap large scroll must not report no progress")
+        }
+        StitchOutcome::Duplicate | StitchOutcome::FirstFrame => {
+            panic!("unexpected outcome for below-min-overlap large scroll")
+        }
+    }
+
+    let after_stats = stitcher.stats();
+    assert_eq!(after_stats.frame_count, before_stats.frame_count);
+    assert_eq!(after_stats.total_height, before_stats.total_height);
+    assert_eq!(after_stats.total_width, before_stats.total_width);
+    assert_eq!(after_stats.last_append, before_stats.last_append);
+    let after_dims = stitcher
+        .full_image()
+        .expect("canvas should still be stored")
+        .dimensions();
+    assert_eq!(after_dims, before_dims);
+}
+
 #[test]
 fn fast_scroll_beyond_default_search_ratio_recovers_via_relaxed_pass() {
     // The default `max_search_ratio` (0.4) only reaches ~128 px on a
     // 320-tall frame. A 200 px scroll lands outside that envelope, so
     // every regular matcher misses. The relaxed coarse pass widens the
-    // ratio to ~0.85 (≈272 px), which must recover the offset.
+    // search to the geometry-derived overlap ceiling (height - min_overlap),
+    // which must recover the offset.
     let canvas = make_scroll_canvas(320, 1200);
     let first = crop_frame(&canvas, 0, 320);
     let scrolled = crop_frame(&canvas, 200, 320);
