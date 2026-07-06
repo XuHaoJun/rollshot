@@ -210,17 +210,54 @@ pub(crate) fn write_manifest(root: &Path, manifest: &ManagedFfmpegManifest) -> R
         .map_err(|error| format!("failed to write managed FFmpeg manifest: {error}"))
 }
 
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn new(root: &Path) -> Result<Self, String> {
+        let tmp_root = root.join("tmp");
+        std::fs::create_dir_all(&tmp_root)
+            .map_err(|error| format!("failed to create FFmpeg tmp directory: {error}"))?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = tmp_root.join(format!("scratch-{nanos}-{}", std::process::id()));
+        std::fs::create_dir(&path)
+            .map_err(|error| format!("failed to create FFmpeg scratch directory: {error}"))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                tracing::warn!(
+                    target: "rollshot::action::ffmpeg",
+                    scratch_dir = ?self.path,
+                    error = %error,
+                    "failed to remove FFmpeg scratch directory"
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn download_managed_ffmpeg() -> Result<PathBuf, String> {
     let metadata = pinned_metadata_for_current_platform()
         .ok_or_else(|| "managed FFmpeg is not available for this platform".to_string())?;
     let root = managed_root()?;
-    let download_dir = root.join("downloads");
-    std::fs::create_dir_all(&download_dir)
-        .map_err(|error| format!("failed to create FFmpeg download directory: {error}"))?;
+    let scratch = ScratchDir::new(&root)?;
 
     let archive = ffmpeg_sidecar::download::download_ffmpeg_package_with_progress(
         metadata.source_url,
-        &download_dir,
+        scratch.path(),
         |event| match event {
             ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::Starting => {
                 tracing::info!(
@@ -257,31 +294,59 @@ pub(crate) fn download_managed_ffmpeg() -> Result<PathBuf, String> {
     .map_err(|error| format!("failed to download managed FFmpeg: {error}"))?;
 
     if let Err(error) = verify_archive_sha(&archive, metadata.archive_sha256) {
-        let _ = std::fs::remove_file(&archive);
+        if let Err(remove_error) = std::fs::remove_file(&archive) {
+            tracing::warn!(
+                target: "rollshot::action::ffmpeg",
+                archive_path = ?archive,
+                error = %remove_error,
+                "failed to remove mismatched managed FFmpeg archive"
+            );
+        }
         return Err(error);
     }
 
     let bin_dir = root.join("bin");
     std::fs::create_dir_all(&bin_dir)
         .map_err(|error| format!("failed to create FFmpeg bin directory: {error}"))?;
-    ffmpeg_sidecar::download::unpack_ffmpeg_without_extras(&archive, &bin_dir)
-        .map_err(|error| format!("failed to unpack managed FFmpeg: {error}"))?;
     let binary = managed_binary_path(&root);
+    ffmpeg_sidecar::download::unpack_ffmpeg_without_extras(&archive, &bin_dir).map_err(
+        |error| {
+            let _ = std::fs::remove_file(&binary);
+            format!("failed to unpack managed FFmpeg: {error}")
+        },
+    )?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&binary)
-            .map_err(|error| format!("failed to inspect managed FFmpeg: {error}"))?
-            .permissions();
+        let mut perms = match std::fs::metadata(&binary) {
+            Ok(metadata) => metadata.permissions(),
+            Err(error) => {
+                let _ = std::fs::remove_file(&binary);
+                return Err(format!("failed to inspect managed FFmpeg: {error}"));
+            }
+        };
         perms.set_mode(0o755);
-        std::fs::set_permissions(&binary, perms)
-            .map_err(|error| format!("failed to set FFmpeg executable bit: {error}"))?;
+        if let Err(error) = std::fs::set_permissions(&binary, perms) {
+            let _ = std::fs::remove_file(&binary);
+            return Err(format!("failed to set FFmpeg executable bit: {error}"));
+        }
     }
 
-    let version_line = validate_ffmpeg(&binary)?;
+    let version_line = match validate_ffmpeg(&binary) {
+        Ok(line) => line,
+        Err(error) => {
+            let _ = std::fs::remove_file(&binary);
+            return Err(error);
+        }
+    };
+
     let manifest = build_manifest(metadata, binary.clone(), version_line);
-    write_manifest(&root, &manifest)?;
+    if let Err(error) = write_manifest(&root, &manifest) {
+        let _ = std::fs::remove_file(&binary);
+        return Err(error);
+    }
+
     Ok(binary)
 }
 
@@ -354,7 +419,7 @@ mod tests {
     #[test]
     fn sha256_file_detects_content() {
         let dir = tempdir();
-        let path = dir.join("archive.bin");
+        let path = dir.path().join("archive.bin");
         std::fs::write(&path, b"abc").unwrap();
         assert_eq!(
             sha256_file(&path).unwrap(),
@@ -365,7 +430,7 @@ mod tests {
     #[test]
     fn verify_archive_sha_rejects_mismatch() {
         let dir = tempdir();
-        let path = dir.join("archive.bin");
+        let path = dir.path().join("archive.bin");
         std::fs::write(&path, b"abc").unwrap();
         let result = verify_archive_sha(&path, "0000");
         assert!(result.unwrap_err().contains("sha256 mismatch"));
@@ -374,14 +439,14 @@ mod tests {
     #[test]
     fn write_manifest_persists_valid_json() {
         let dir = tempdir();
-        let binary = dir.join("bin/ffmpeg");
+        let binary = dir.path().join("bin/ffmpeg");
         let manifest = build_manifest(
             LINUX_X86_64_METADATA,
             binary.clone(),
             "ffmpeg version 6.0.1-static".to_string(),
         );
-        write_manifest(&dir, &manifest).unwrap();
-        let restored = load_manifest(&dir).unwrap();
+        write_manifest(dir.path(), &manifest).unwrap();
+        let restored = load_manifest(dir.path()).unwrap();
         assert_eq!(restored.binary_path, binary);
         assert_eq!(
             restored.archive_sha256,
@@ -389,17 +454,21 @@ mod tests {
         );
     }
 
-    fn tempdir() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!(
-            "rollshot-managed-ffmpeg-{nanos}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    #[test]
+    fn scratch_dir_creates_under_root_tmp_and_cleans_up() {
+        let root = tempdir();
+        {
+            let scratch = ScratchDir::new(root.path()).unwrap();
+            assert!(scratch.path().starts_with(root.path().join("tmp")));
+            assert!(scratch.path().exists());
+        }
+        let tmp = root.path().join("tmp");
+        assert!(tmp.exists());
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("failed to create temp dir")
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
