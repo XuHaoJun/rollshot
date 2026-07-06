@@ -22,4 +22,4 @@ pub use geometry::{ImagePoint, ImageRect, Rgba8};
 pub use hit::{hit_test_annotation, redaction_handles, Hit, HitPart, ResizeHandle};
 pub use navigator::NavigatorItem;
 pub use shapes::{annotation_bounds, annotation_shapes, text_plate_rect, RenderShape, TextAnchor};
-pub use text::measure_block;
+pub use text::{draw_text_block, measure_block};

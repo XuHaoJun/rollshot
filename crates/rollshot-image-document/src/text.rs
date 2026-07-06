@@ -69,6 +69,21 @@ pub fn measure_block(text: &str, px: f32, bold: bool) -> (f32, f32) {
 }
 
 /// Rasterize a text block onto `img` with its top-left at `top_left`.
+///
+/// This is the public wrapper for downstream headless renderers that need the
+/// same deterministic vendored-font path as annotation flattening.
+pub fn draw_text_block(
+    img: &mut RgbaImage,
+    top_left: ImagePoint,
+    text: &str,
+    px: f32,
+    bold: bool,
+    color: Rgba8,
+) {
+    draw_block(img, top_left, text, px, bold, color);
+}
+
+/// Rasterize a text block onto `img` with its top-left at `top_left`.
 pub(crate) fn draw_block(
     img: &mut RgbaImage,
     top_left: ImagePoint,
