@@ -25,8 +25,8 @@ fs4 = { workspace = true }
 iced = { version = "0.14", features = ["advanced", "canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
-rollshot-action = { path = "../rollshot-action", optional = true }
 sha2 = "0.10"
+rollshot-action = { path = "../rollshot-action", optional = true }
 rollshot-agent = { path = "../rollshot-agent" }
 rollshot-automation = { path = "../rollshot-automation" }
 rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }

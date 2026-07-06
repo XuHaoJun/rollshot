@@ -1,5 +1,3 @@
-#![allow(dead_code)] // scaffolding: consumed by later Action Guide MP4 tasks
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -353,6 +351,30 @@ pub(crate) fn download_managed_ffmpeg() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    /// RAII guard that restores an environment variable to its original value on drop.
+    struct EnvVarGuard {
+        name: &'static str,
+        old_value: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.old_value.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     #[test]
     fn linux_metadata_is_pinned_and_auditable() {
@@ -400,14 +422,9 @@ mod tests {
     #[test]
     fn managed_root_can_be_overridden_for_tests() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let old_root = std::env::var_os("ROLLSHOT_FFMPEG_ROOT");
         let root = PathBuf::from("/tmp/rollshot-managed-test-root");
-        std::env::set_var("ROLLSHOT_FFMPEG_ROOT", &root);
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", &root);
         assert_eq!(managed_root().unwrap(), root);
-        match old_root {
-            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG_ROOT", value),
-            None => std::env::remove_var("ROLLSHOT_FFMPEG_ROOT"),
-        }
     }
 
     #[test]

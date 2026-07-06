@@ -20,11 +20,9 @@ pub enum Message {
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
     ExportMp4Requested,
-    #[allow(dead_code)] // wired to async picker / export in a later MP4 task
     ExportMp4PathChosen(Option<PathBuf>),
     FfmpegUseSystem,
     FfmpegDownloadManaged,
-    #[allow(dead_code)] // wired to download completion in a later MP4 task
     FfmpegDownloadFinished(Result<PathBuf, String>),
     FfmpegSetupCancel,
     /// Export a bug-report Issue Pack from the timeline workspace.
@@ -469,6 +467,30 @@ mod tests {
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
     use crate::timeline_workspace::{FfmpegSetupDialog, TimelineWorkspace};
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
+    use std::ffi::{OsStr, OsString};
+
+    /// RAII guard that restores an environment variable to its original value on drop.
+    struct EnvVarGuard {
+        name: &'static str,
+        old_value: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.old_value.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -767,13 +789,10 @@ mod tests {
     #[test]
     fn export_mp4_missing_ffmpeg_opens_setup_and_writes_nothing() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let old_path = std::env::var_os("PATH");
-        let old_ffmpeg = std::env::var_os("ROLLSHOT_FFMPEG");
-        let old_root = std::env::var_os("ROLLSHOT_FFMPEG_ROOT");
         let root = tempfile::tempdir().unwrap();
-        std::env::set_var("PATH", "");
-        std::env::set_var("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
-        std::env::set_var("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _ffmpeg_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
         let mut state = ws(recording_from_frames());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("summary.mp4");
@@ -781,44 +800,17 @@ mod tests {
         assert!(!path.exists());
         assert!(state.ffmpeg_setup.is_some());
         assert!(state.message.is_none());
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match old_ffmpeg {
-            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG", value),
-            None => std::env::remove_var("ROLLSHOT_FFMPEG"),
-        }
-        match old_root {
-            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG_ROOT", value),
-            None => std::env::remove_var("ROLLSHOT_FFMPEG_ROOT"),
-        }
     }
 
     #[test]
     fn export_mp4_requested_opens_setup_when_ffmpeg_missing() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let old_path = std::env::var_os("PATH");
-        let old_ffmpeg = std::env::var_os("ROLLSHOT_FFMPEG");
-        let old_root = std::env::var_os("ROLLSHOT_FFMPEG_ROOT");
         let root = tempfile::tempdir().unwrap();
-        std::env::set_var("PATH", "");
-        std::env::set_var("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
-        std::env::set_var("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _ffmpeg_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::ExportMp4Requested);
         assert!(state.ffmpeg_setup.is_some());
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match old_ffmpeg {
-            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG", value),
-            None => std::env::remove_var("ROLLSHOT_FFMPEG"),
-        }
-        match old_root {
-            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG_ROOT", value),
-            None => std::env::remove_var("ROLLSHOT_FFMPEG_ROOT"),
-        }
     }
 }

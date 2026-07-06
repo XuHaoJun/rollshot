@@ -164,7 +164,6 @@ pub fn export_video(
     })
 }
 
-#[allow(dead_code)]
 fn repeat_count(frame_dwell_ms: u32, fps: u32) -> u32 {
     let fps = fps.max(1) as u64;
     let dwell = frame_dwell_ms as u64;
@@ -172,7 +171,6 @@ fn repeat_count(frame_dwell_ms: u32, fps: u32) -> u32 {
     frames.max(1) as u32
 }
 
-#[allow(dead_code)]
 fn even_dimension(value: u32) -> u32 {
     if value <= 2 {
         2
@@ -183,7 +181,6 @@ fn even_dimension(value: u32) -> u32 {
     }
 }
 
-#[allow(dead_code)]
 fn downscale(image: &RgbaImage, max_width: u32) -> RgbaImage {
     let width = image.width();
     if width == 0 || max_width == 0 || width <= max_width {
