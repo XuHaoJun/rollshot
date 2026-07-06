@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use iced::Task;
-use rollshot_action::{export_gif, export_guide, export_video, GifOptions, VideoOptions};
+use rollshot_action::{
+    export_gif, export_guide, export_storyboard, export_video, GifOptions, StoryboardOptions,
+    VideoOptions,
+};
 
 use super::TimelineWorkspace;
 
@@ -19,6 +22,8 @@ pub enum Message {
     ExportDirChosen(Option<PathBuf>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
+    ExportStoryboardRequested,
+    ExportStoryboardPathChosen(Option<PathBuf>),
     ExportMp4Requested,
     ExportMp4PathChosen(Option<PathBuf>),
     FfmpegUseSystem,
@@ -148,6 +153,44 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             // Unlike guide export, GIF export does NOT exit — the user can still
             // Export Guide afterwards.
+            Task::none()
+        }
+        Message::ExportStoryboardRequested => {
+            state.message = None;
+            Task::perform(
+                pick_storyboard_save_path(picker_default_dir()),
+                Message::ExportStoryboardPathChosen,
+            )
+        }
+        Message::ExportStoryboardPathChosen(None) => Task::none(),
+        Message::ExportStoryboardPathChosen(Some(path)) => {
+            match export_storyboard(
+                &state.guide,
+                &state.store,
+                StoryboardOptions::default(),
+                &path,
+            ) {
+                Ok(result) => {
+                    tracing::info!(
+                        target: "rollshot::action::export",
+                        path = %result.path.display(),
+                        steps = result.step_count,
+                        width = result.width,
+                        height = result.height,
+                        "storyboard exported"
+                    );
+                    state.message = Some(format!("Storyboard saved to {}", result.path.display()));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::action::export",
+                        %error,
+                        path = %path.display(),
+                        "storyboard export failed"
+                    );
+                    state.message = Some(format!("Storyboard export failed: {error}"));
+                }
+            }
             Task::none()
         }
         Message::ExportBugReport => {
@@ -373,6 +416,16 @@ async fn pick_gif_save_path(default_dir: PathBuf) -> Option<PathBuf> {
         .set_directory(default_dir)
         .set_file_name("summary.gif")
         .add_filter("GIF image", &["gif"])
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+async fn pick_storyboard_save_path(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .set_file_name("storyboard.png")
+        .add_filter("PNG image", &["png"])
         .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
@@ -816,6 +869,50 @@ mod tests {
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::ExportMp4Requested);
         assert!(state.ffmpeg_setup.is_some());
+    }
+
+    #[test]
+    fn export_storyboard_path_chosen_writes_file_and_keeps_window_open() {
+        let mut state = ws(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("storyboard.png");
+        let _ = update(
+            &mut state,
+            Message::ExportStoryboardPathChosen(Some(path.clone())),
+        );
+        assert!(path.exists(), "Storyboard PNG should be written");
+        assert!(
+            state
+                .message
+                .as_ref()
+                .is_some_and(|m| m.contains("Storyboard saved")),
+            "success banner expected, got {:?}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn export_storyboard_empty_guide_sets_error_and_writes_nothing() {
+        let mut state = ws(synthetic_recording(0));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("storyboard.png");
+        let _ = update(
+            &mut state,
+            Message::ExportStoryboardPathChosen(Some(path.clone())),
+        );
+        assert!(!path.exists(), "empty guide must not write a storyboard");
+        assert!(
+            state.message.as_ref().is_some_and(|m| m.contains("failed")),
+            "failure banner expected, got {:?}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn export_storyboard_cancelled_picker_is_a_no_op() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportStoryboardPathChosen(None));
+        assert!(state.message.is_none());
     }
 
     #[test]
