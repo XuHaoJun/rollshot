@@ -409,7 +409,7 @@ mod tests {
             &guide,
             &store,
             VideoOptions::default(),
-            Path::new("/bin/false"),
+            Path::new("/bin/sh"),
             &path,
         );
         assert!(matches!(
