@@ -23,6 +23,12 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
         body
     };
 
+    let body = if state.ffmpeg_setup.is_some() {
+        ffmpeg_setup_modal(body, state)
+    } else {
+        body
+    };
+
     if state.pending_discard {
         discard_modal(body)
     } else {
@@ -63,6 +69,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             .style(button::secondary),
         button(text("Export GIF"))
             .on_press(Message::ExportGifRequested)
+            .style(button::secondary),
+        button(text("Export MP4"))
+            .on_press(Message::ExportMp4Requested)
             .style(button::secondary),
         button(text("Export Guide"))
             .on_press(Message::ExportRequested)
@@ -245,6 +254,90 @@ fn issue_pack_modal<'a>(
         )
         .interaction(mouse::Interaction::Idle)
         .on_press(Message::IssuePackCancel),
+    );
+    stack![base, scrim].into()
+}
+
+fn ffmpeg_setup_modal<'a>(
+    base: Element<'a, Message>,
+    state: &'a TimelineWorkspace,
+) -> Element<'a, Message> {
+    let dialog = state.ffmpeg_setup.as_ref().expect("checked by caller");
+    let managed = dialog.info.managed_download.as_ref();
+    let managed_enabled = managed.is_some() && !dialog.downloading;
+    let details = if let Some(meta) = managed {
+        column![
+            text(format!("Source: {}", meta.source_url))
+                .size(12)
+                .width(Length::Fill),
+            text(format!("Version: {}", meta.version))
+                .size(12)
+                .width(Length::Fill),
+            text(format!("License: {} ({})", meta.license, meta.license_url))
+                .size(12)
+                .width(Length::Fill),
+            text(format!("Archive size: {} bytes", meta.archive_size))
+                .size(12)
+                .width(Length::Fill),
+            text(format!("SHA256: {}", meta.archive_sha256))
+                .size(12)
+                .width(Length::Fill),
+            text(format!(
+                "Install location: {}",
+                dialog.info.install_location.display()
+            ))
+            .size(12)
+            .width(Length::Fill),
+        ]
+    } else {
+        column![text("Managed FFmpeg is not available for this platform.")]
+    };
+
+    let dialog_view = container(
+        column![
+            text("FFmpeg is required to export MP4").size(18),
+            details.spacing(6),
+            row![
+                button(text("Use system FFmpeg / install manually"))
+                    .on_press(Message::FfmpegUseSystem)
+                    .style(button::secondary),
+                button(text(if dialog.downloading {
+                    "Downloading..."
+                } else {
+                    "Download managed FFmpeg"
+                }))
+                .on_press_maybe(managed_enabled.then_some(Message::FfmpegDownloadManaged))
+                .style(button::primary),
+                button(text("Cancel")).on_press(Message::FfmpegSetupCancel),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12),
+    )
+    .padding(20)
+    .width(Length::Fixed(620.0))
+    .style(container::rounded_box);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog_view))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::FfmpegSetupCancel),
     );
     stack![base, scrim].into()
 }

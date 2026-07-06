@@ -19,6 +19,14 @@ pub enum Message {
     ExportDirChosen(Option<PathBuf>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
+    ExportMp4Requested,
+    #[allow(dead_code)] // wired to async picker / export in a later MP4 task
+    ExportMp4PathChosen(Option<PathBuf>),
+    FfmpegUseSystem,
+    FfmpegDownloadManaged,
+    #[allow(dead_code)] // wired to download completion in a later MP4 task
+    FfmpegDownloadFinished(Result<PathBuf, String>),
+    FfmpegSetupCancel,
     /// Export a bug-report Issue Pack from the timeline workspace.
     ExportBugReport,
     /// Toggle the review-confirmed checkbox in the Issue Pack dialog.
@@ -233,6 +241,21 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.message = None;
             Task::none()
         }
+        Message::FfmpegSetupCancel => {
+            state.ffmpeg_setup = None;
+            Task::none()
+        }
+        Message::FfmpegUseSystem => {
+            state.ffmpeg_setup = None;
+            state.message = Some(
+                "Install FFmpeg or set ROLLSHOT_FFMPEG, then try Export MP4 again.".to_string(),
+            );
+            Task::none()
+        }
+        Message::ExportMp4Requested
+        | Message::ExportMp4PathChosen(_)
+        | Message::FfmpegDownloadManaged
+        | Message::FfmpegDownloadFinished(_) => Task::none(),
     }
 }
 
@@ -351,7 +374,7 @@ fn begin_issue_pack_export(
 mod tests {
     use super::*;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
-    use crate::timeline_workspace::TimelineWorkspace;
+    use crate::timeline_workspace::{FfmpegSetupDialog, TimelineWorkspace};
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
 
     fn ws(recording: rollshot_action::Recording) -> TimelineWorkspace {
@@ -608,5 +631,34 @@ mod tests {
         let _ = update(&mut state, Message::IssuePackCancel);
 
         assert!(state.issue_pack.is_none());
+    }
+
+    #[test]
+    fn ffmpeg_setup_cancel_closes_dialog() {
+        let mut state = ws(recording_from_frames());
+        state.ffmpeg_setup = Some(FfmpegSetupDialog {
+            info: crate::managed_ffmpeg::FfmpegSetupInfo {
+                managed_download: None,
+                install_location: PathBuf::from("/tmp/ffmpeg"),
+            },
+            downloading: false,
+        });
+        let _ = update(&mut state, Message::FfmpegSetupCancel);
+        assert!(state.ffmpeg_setup.is_none());
+    }
+
+    #[test]
+    fn use_system_ffmpeg_sets_actionable_message() {
+        let mut state = ws(recording_from_frames());
+        state.ffmpeg_setup = Some(FfmpegSetupDialog {
+            info: crate::managed_ffmpeg::FfmpegSetupInfo {
+                managed_download: None,
+                install_location: PathBuf::from("/tmp/ffmpeg"),
+            },
+            downloading: false,
+        });
+        let _ = update(&mut state, Message::FfmpegUseSystem);
+        assert!(state.ffmpeg_setup.is_none());
+        assert!(state.message.as_ref().unwrap().contains("ROLLSHOT_FFMPEG"));
     }
 }
