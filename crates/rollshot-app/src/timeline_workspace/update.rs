@@ -308,9 +308,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             Task::none()
         }
         Message::FfmpegDownloadManaged => {
-            if let Some(dialog) = &mut state.ffmpeg_setup {
-                dialog.downloading = true;
+            let Some(dialog) = &mut state.ffmpeg_setup else {
+                return Task::none();
+            };
+            if dialog.downloading || dialog.info.managed_download.is_none() {
+                return Task::none();
             }
+            dialog.downloading = true;
             Task::perform(
                 download_managed_ffmpeg_task(),
                 Message::FfmpegDownloadFinished,
@@ -812,5 +816,25 @@ mod tests {
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::ExportMp4Requested);
         assert!(state.ffmpeg_setup.is_some());
+    }
+
+    #[test]
+    fn duplicate_ffmpeg_download_request_is_a_no_op_while_downloading() {
+        let mut state = ws(recording_from_frames());
+        state.ffmpeg_setup = Some(FfmpegSetupDialog {
+            info: crate::managed_ffmpeg::FfmpegSetupInfo {
+                managed_download: Some(crate::managed_ffmpeg::LINUX_X86_64_METADATA),
+                install_location: PathBuf::from("/tmp/ffmpeg"),
+            },
+            downloading: true,
+        });
+
+        let task = update(&mut state, Message::FfmpegDownloadManaged);
+
+        assert_eq!(task.units(), 0);
+        assert!(state
+            .ffmpeg_setup
+            .as_ref()
+            .is_some_and(|dialog| dialog.downloading));
     }
 }

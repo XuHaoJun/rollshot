@@ -77,9 +77,7 @@ pub(crate) fn resolve_ffmpeg() -> FfmpegResolution {
 
     let root = managed_root().unwrap_or_else(|_| std::env::temp_dir().join("rollshot/ffmpeg"));
     if let Ok(manifest) = load_manifest(&root) {
-        if manifest.schema_version == 1
-            && pinned_metadata_for_current_platform()
-                .is_some_and(|meta| manifest.platform == meta.platform)
+        if manifest_matches_current_metadata(&manifest)
             && validate_ffmpeg(&manifest.binary_path).is_ok()
         {
             return FfmpegResolution::Available(manifest.binary_path);
@@ -90,6 +88,20 @@ pub(crate) fn resolve_ffmpeg() -> FfmpegResolution {
         managed_download: pinned_metadata_for_current_platform(),
         install_location: root,
     })
+}
+
+fn manifest_matches_current_metadata(manifest: &ManagedFfmpegManifest) -> bool {
+    let Some(metadata) = pinned_metadata_for_current_platform() else {
+        return false;
+    };
+    manifest.schema_version == 1
+        && manifest.platform == metadata.platform
+        && manifest.version == metadata.version
+        && manifest.source_url == metadata.source_url
+        && manifest.license == metadata.license
+        && manifest.license_url == metadata.license_url
+        && manifest.archive_sha256 == metadata.archive_sha256
+        && manifest.archive_size == metadata.archive_size
 }
 
 fn managed_root() -> Result<PathBuf, String> {
@@ -471,6 +483,35 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn resolve_ignores_manifest_when_pinned_metadata_changed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = tempdir();
+        let binary = root.path().join("bin/ffmpeg");
+        fake_ffmpeg(&binary);
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let _ffmpeg_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let manifest = ManagedFfmpegManifest {
+            schema_version: 1,
+            platform: LINUX_X86_64_METADATA.platform.to_string(),
+            version: "5.1.0".to_string(),
+            source_url: "https://example.invalid/old-ffmpeg.tar.xz".to_string(),
+            license: LINUX_X86_64_METADATA.license.to_string(),
+            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
+            archive_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            archive_size: 1,
+            binary_path: binary,
+            ffmpeg_version_line: "ffmpeg version 5.1.0-static".to_string(),
+            installed_at: "2026-07-05T00:00:00+00:00".to_string(),
+        };
+        write_manifest(root.path(), &manifest).unwrap();
+
+        assert!(matches!(resolve_ffmpeg(), FfmpegResolution::NeedsSetup(_)));
+    }
+
     #[test]
     fn scratch_dir_creates_under_root_tmp_and_cleans_up() {
         let root = tempdir();
@@ -486,6 +527,20 @@ mod tests {
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("failed to create temp dir")
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg fake'; exit 0; fi\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -115,7 +115,7 @@ pub fn export_video(
     })?;
 
     // Drain stderr while raw frames are written so FFmpeg cannot block on a full stderr pipe.
-    let stderr_handle = child.take_stderr().map(|mut stderr| {
+    let mut stderr_handle = child.take_stderr().map(|mut stderr| {
         std::thread::spawn(move || {
             let mut text = String::new();
             let _ = stderr.read_to_string(&mut text);
@@ -130,14 +130,28 @@ pub fn export_video(
         for image in images {
             let frame = normalize_to(&image, width, height);
             for _ in 0..repeat {
-                stdin
-                    .write_all(frame.as_raw())
-                    .map_err(|source| VideoError::Stdin { source })?;
+                if let Err(source) = stdin.write_all(frame.as_raw()) {
+                    drop(stdin);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(handle) = stderr_handle.take() {
+                        let _ = handle.join();
+                    }
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(VideoError::Stdin { source });
+                }
             }
         }
-        stdin
-            .flush()
-            .map_err(|source| VideoError::Stdin { source })?;
+        if let Err(source) = stdin.flush() {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(handle) = stderr_handle.take() {
+                let _ = handle.join();
+            }
+            let _ = std::fs::remove_file(&tmp);
+            return Err(VideoError::Stdin { source });
+        }
     }
 
     let status = child.wait().map_err(|source| VideoError::Io {
@@ -145,6 +159,7 @@ pub fn export_video(
         source,
     })?;
     let stderr_text = stderr_handle
+        .take()
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
     if !status.success() {
@@ -278,6 +293,19 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn early_exit_ffmpeg(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            path,
+            "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\nprintf 'partial mp4' > \"$out\"\nexit 1\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
     #[test]
     fn repeat_count_rounds_up_and_never_returns_zero() {
         assert_eq!(repeat_count(1500, 30), 45);
@@ -402,6 +430,26 @@ mod tests {
         let path = dir.join("summary.mp4");
         export_video(&guide, &store, VideoOptions::default(), &ffmpeg, &path).expect("export");
         assert_eq!(std::fs::read(&path).unwrap(), b"fake mp4");
+        assert!(!temp_mp4_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_cleans_temp_file_when_ffmpeg_closes_stdin_early() {
+        let mut store = FrameStore::new(StoreConfig::default());
+        let frame = RgbaImage::from_pixel(2048, 2048, Rgba([12, 34, 56, 255]));
+        let id = store.ingest(frame, 0);
+        store.retain_window(id);
+        let guide = one_step_guide(id);
+        let dir = tempfile_dir();
+        let ffmpeg = dir.join("ffmpeg");
+        early_exit_ffmpeg(&ffmpeg);
+        let path = dir.join("summary.mp4");
+
+        let result = export_video(&guide, &store, VideoOptions::default(), &ffmpeg, &path);
+
+        assert!(result.is_err());
+        assert!(!path.exists());
         assert!(!temp_mp4_path(&path).exists());
     }
 
