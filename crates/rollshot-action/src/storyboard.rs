@@ -114,7 +114,7 @@ pub fn export_storyboard(
 
     let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, WHITE);
     let mut y = opts.outer_padding;
-    for card in &cards {
+    for (i, card) in cards.iter().enumerate() {
         draw_card(&mut canvas, opts.outer_padding, y, card_width, card.height);
 
         let content_x = opts.outer_padding + opts.card_padding;
@@ -136,7 +136,10 @@ pub fn export_storyboard(
             i64::from(content_y),
         );
 
-        y += card.height + opts.card_spacing;
+        y += card.height;
+        if i + 1 < cards.len() {
+            y += opts.card_spacing;
+        }
     }
 
     write_png_atomic(out_path, &canvas)?;
@@ -191,6 +194,7 @@ fn fit_label(label: &str, max_width: f32) -> String {
     }
 
     let ellipsis = "...";
+    let label = label.trim_end();
     let mut fitted = String::new();
     for ch in label.chars() {
         let candidate = format!("{fitted}{ch}{ellipsis}");
