@@ -88,6 +88,7 @@ tokio-util = "0.7"
 schemars = "1"
 wiremock = "0.6"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+ffmpeg-sidecar = { version = "2.5.2", default-features = false, features = ["download_ffmpeg"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

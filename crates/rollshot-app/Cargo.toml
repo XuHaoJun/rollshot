@@ -20,10 +20,12 @@ async-stream = "0.3"
 chrono = "0.4"
 dirs = "6"
 etcetera = { workspace = true }
+ffmpeg-sidecar = { workspace = true }
 fs4 = { workspace = true }
 iced = { version = "0.14", features = ["advanced", "canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
+sha2 = "0.10"
 rollshot-action = { path = "../rollshot-action", optional = true }
 rollshot-agent = { path = "../rollshot-agent" }
 rollshot-automation = { path = "../rollshot-automation" }
@@ -75,7 +77,6 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-grac
 imageproc = { workspace = true, features = ["text"] }
 reqwest = { version = "0.13", features = ["stream"] }
 serde_json = { workspace = true }
-sha2 = "0.10"
 tempfile = "3"
 wiremock = "0.6"
 

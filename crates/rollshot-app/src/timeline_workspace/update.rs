@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::Task;
-use rollshot_action::{export_gif, export_guide, GifOptions};
+use rollshot_action::{export_gif, export_guide, export_video, GifOptions, VideoOptions};
 
 use super::TimelineWorkspace;
 
@@ -19,6 +19,12 @@ pub enum Message {
     ExportDirChosen(Option<PathBuf>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
+    ExportMp4Requested,
+    ExportMp4PathChosen(Option<PathBuf>),
+    FfmpegUseSystem,
+    FfmpegDownloadManaged,
+    FfmpegDownloadFinished(Result<PathBuf, String>),
+    FfmpegSetupCancel,
     /// Export a bug-report Issue Pack from the timeline workspace.
     ExportBugReport,
     /// Toggle the review-confirmed checkbox in the Issue Pack dialog.
@@ -233,6 +239,102 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.message = None;
             Task::none()
         }
+        Message::FfmpegSetupCancel => {
+            state.ffmpeg_setup = None;
+            Task::none()
+        }
+        Message::FfmpegUseSystem => {
+            state.ffmpeg_setup = None;
+            state.message = Some(
+                "Install FFmpeg or set ROLLSHOT_FFMPEG, then try Export MP4 again.".to_string(),
+            );
+            Task::none()
+        }
+        Message::ExportMp4Requested => {
+            state.message = None;
+            match crate::managed_ffmpeg::resolve_ffmpeg() {
+                crate::managed_ffmpeg::FfmpegResolution::Available(_) => Task::perform(
+                    pick_mp4_save_path(picker_default_dir()),
+                    Message::ExportMp4PathChosen,
+                ),
+                crate::managed_ffmpeg::FfmpegResolution::NeedsSetup(info) => {
+                    state.ffmpeg_setup = Some(super::FfmpegSetupDialog {
+                        info,
+                        downloading: false,
+                    });
+                    Task::none()
+                }
+            }
+        }
+        Message::ExportMp4PathChosen(None) => Task::none(),
+        Message::ExportMp4PathChosen(Some(path)) => {
+            let ffmpeg = match crate::managed_ffmpeg::resolve_ffmpeg() {
+                crate::managed_ffmpeg::FfmpegResolution::Available(path) => path,
+                crate::managed_ffmpeg::FfmpegResolution::NeedsSetup(info) => {
+                    state.ffmpeg_setup = Some(super::FfmpegSetupDialog {
+                        info,
+                        downloading: false,
+                    });
+                    return Task::none();
+                }
+            };
+            match export_video(
+                &state.guide,
+                &state.store,
+                VideoOptions::default(),
+                &ffmpeg,
+                &path,
+            ) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "rollshot::action::export",
+                        path = %path.display(),
+                        ffmpeg = %ffmpeg.display(),
+                        "mp4 exported"
+                    );
+                    state.message = Some(format!("MP4 saved to {}", path.display()));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::action::export",
+                        %error,
+                        path = %path.display(),
+                        ffmpeg = %ffmpeg.display(),
+                        "mp4 export failed"
+                    );
+                    state.message = Some(format!("MP4 export failed: {error}"));
+                }
+            }
+            Task::none()
+        }
+        Message::FfmpegDownloadManaged => {
+            let Some(dialog) = &mut state.ffmpeg_setup else {
+                return Task::none();
+            };
+            if dialog.downloading || dialog.info.managed_download.is_none() {
+                return Task::none();
+            }
+            dialog.downloading = true;
+            Task::perform(
+                download_managed_ffmpeg_task(),
+                Message::FfmpegDownloadFinished,
+            )
+        }
+        Message::FfmpegDownloadFinished(Ok(path)) => {
+            state.ffmpeg_setup = None;
+            state.message = Some(format!("Managed FFmpeg installed at {}", path.display()));
+            Task::perform(
+                pick_mp4_save_path(picker_default_dir()),
+                Message::ExportMp4PathChosen,
+            )
+        }
+        Message::FfmpegDownloadFinished(Err(error)) => {
+            if let Some(dialog) = &mut state.ffmpeg_setup {
+                dialog.downloading = false;
+            }
+            state.message = Some(format!("Managed FFmpeg download failed: {error}"));
+            Task::none()
+        }
     }
 }
 
@@ -274,6 +376,22 @@ async fn pick_gif_save_path(default_dir: PathBuf) -> Option<PathBuf> {
         .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
+}
+
+async fn pick_mp4_save_path(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .set_file_name("summary.mp4")
+        .add_filter("MP4 video", &["mp4"])
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+async fn download_managed_ffmpeg_task() -> Result<PathBuf, String> {
+    tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
+        .await
+        .map_err(|error| format!("managed FFmpeg download task failed: {error}"))?
 }
 
 fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::IssuePackInput {
@@ -351,8 +469,34 @@ fn begin_issue_pack_export(
 mod tests {
     use super::*;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
-    use crate::timeline_workspace::TimelineWorkspace;
+    use crate::timeline_workspace::{FfmpegSetupDialog, TimelineWorkspace};
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
+    use std::ffi::{OsStr, OsString};
+
+    /// RAII guard that restores an environment variable to its original value on drop.
+    struct EnvVarGuard {
+        name: &'static str,
+        old_value: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.old_value.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn ws(recording: rollshot_action::Recording) -> TimelineWorkspace {
         TimelineWorkspace::new(
@@ -608,5 +752,89 @@ mod tests {
         let _ = update(&mut state, Message::IssuePackCancel);
 
         assert!(state.issue_pack.is_none());
+    }
+
+    #[test]
+    fn ffmpeg_setup_cancel_closes_dialog() {
+        let mut state = ws(recording_from_frames());
+        state.ffmpeg_setup = Some(FfmpegSetupDialog {
+            info: crate::managed_ffmpeg::FfmpegSetupInfo {
+                managed_download: None,
+                install_location: PathBuf::from("/tmp/ffmpeg"),
+            },
+            downloading: false,
+        });
+        let _ = update(&mut state, Message::FfmpegSetupCancel);
+        assert!(state.ffmpeg_setup.is_none());
+    }
+
+    #[test]
+    fn use_system_ffmpeg_sets_actionable_message() {
+        let mut state = ws(recording_from_frames());
+        state.ffmpeg_setup = Some(FfmpegSetupDialog {
+            info: crate::managed_ffmpeg::FfmpegSetupInfo {
+                managed_download: None,
+                install_location: PathBuf::from("/tmp/ffmpeg"),
+            },
+            downloading: false,
+        });
+        let _ = update(&mut state, Message::FfmpegUseSystem);
+        assert!(state.ffmpeg_setup.is_none());
+        assert!(state.message.as_ref().unwrap().contains("ROLLSHOT_FFMPEG"));
+    }
+
+    #[test]
+    fn export_mp4_cancelled_picker_is_a_no_op() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportMp4PathChosen(None));
+        assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn export_mp4_missing_ffmpeg_opens_setup_and_writes_nothing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _ffmpeg_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let mut state = ws(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("summary.mp4");
+        let _ = update(&mut state, Message::ExportMp4PathChosen(Some(path.clone())));
+        assert!(!path.exists());
+        assert!(state.ffmpeg_setup.is_some());
+        assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn export_mp4_requested_opens_setup_when_ffmpeg_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _ffmpeg_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportMp4Requested);
+        assert!(state.ffmpeg_setup.is_some());
+    }
+
+    #[test]
+    fn duplicate_ffmpeg_download_request_is_a_no_op_while_downloading() {
+        let mut state = ws(recording_from_frames());
+        state.ffmpeg_setup = Some(FfmpegSetupDialog {
+            info: crate::managed_ffmpeg::FfmpegSetupInfo {
+                managed_download: Some(crate::managed_ffmpeg::LINUX_X86_64_METADATA),
+                install_location: PathBuf::from("/tmp/ffmpeg"),
+            },
+            downloading: true,
+        });
+
+        let task = update(&mut state, Message::FfmpegDownloadManaged);
+
+        assert_eq!(task.units(), 0);
+        assert!(state
+            .ffmpeg_setup
+            .as_ref()
+            .is_some_and(|dialog| dialog.downloading));
     }
 }

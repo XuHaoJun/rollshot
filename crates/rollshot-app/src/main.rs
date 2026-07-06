@@ -4,6 +4,8 @@ pub mod daemon;
 mod diagnostics;
 mod launch;
 #[cfg(feature = "action-guide")]
+mod managed_ffmpeg;
+#[cfg(feature = "action-guide")]
 mod timeline_workspace;
 
 use clap::Parser;

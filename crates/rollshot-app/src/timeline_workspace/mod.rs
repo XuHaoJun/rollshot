@@ -34,6 +34,12 @@ pub(crate) enum IssuePackKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FfmpegSetupDialog {
+    pub info: crate::managed_ffmpeg::FfmpegSetupInfo,
+    pub downloading: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssuePackDialog {
     pub review_confirmed: bool,
     pub pending_kind: Option<IssuePackKind>,
@@ -70,6 +76,8 @@ pub struct TimelineWorkspace {
     pub(crate) message: Option<String>,
     /// Issue Pack export dialog state, if open.
     pub(crate) issue_pack: Option<IssuePackDialog>,
+    /// FFmpeg setup/download dialog state, if MP4 export needs FFmpeg.
+    pub(crate) ffmpeg_setup: Option<FfmpegSetupDialog>,
     /// True while the discard confirmation modal is shown.
     pub(crate) pending_discard: bool,
     /// Cached handle for the selected step's current keyframe.
@@ -99,6 +107,7 @@ impl TimelineWorkspace {
             selected,
             message: None,
             issue_pack: None,
+            ffmpeg_setup: None,
             pending_discard: false,
             keyframe_handle: None,
             strip: Vec::new(),

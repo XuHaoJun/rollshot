@@ -18,9 +18,10 @@ mod input;
 mod metrics;
 mod models;
 mod recorder;
+mod video;
 
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
-pub use error::{DetectError, ExportError, GifError};
+pub use error::{DetectError, ExportError, GifError, VideoError};
 pub use events::EventAggregator;
 pub use export::{export_guide, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
@@ -34,3 +35,4 @@ pub use models::{
     MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
 };
 pub use recorder::{ActionRecorder, Recording};
+pub use video::{export_video, VideoOptions};
