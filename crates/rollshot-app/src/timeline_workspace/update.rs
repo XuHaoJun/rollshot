@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::Task;
-use rollshot_action::{export_gif, export_guide, GifOptions};
+use rollshot_action::{export_gif, export_guide, export_video, GifOptions, VideoOptions};
 
 use super::TimelineWorkspace;
 
@@ -252,10 +252,87 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             );
             Task::none()
         }
-        Message::ExportMp4Requested
-        | Message::ExportMp4PathChosen(_)
-        | Message::FfmpegDownloadManaged
-        | Message::FfmpegDownloadFinished(_) => Task::none(),
+        Message::ExportMp4Requested => {
+            state.message = None;
+            match crate::managed_ffmpeg::resolve_ffmpeg() {
+                crate::managed_ffmpeg::FfmpegResolution::Available(_) => Task::perform(
+                    pick_mp4_save_path(picker_default_dir()),
+                    Message::ExportMp4PathChosen,
+                ),
+                crate::managed_ffmpeg::FfmpegResolution::NeedsSetup(info) => {
+                    state.ffmpeg_setup = Some(super::FfmpegSetupDialog {
+                        info,
+                        downloading: false,
+                    });
+                    Task::none()
+                }
+            }
+        }
+        Message::ExportMp4PathChosen(None) => Task::none(),
+        Message::ExportMp4PathChosen(Some(path)) => {
+            let ffmpeg = match crate::managed_ffmpeg::resolve_ffmpeg() {
+                crate::managed_ffmpeg::FfmpegResolution::Available(path) => path,
+                crate::managed_ffmpeg::FfmpegResolution::NeedsSetup(info) => {
+                    state.ffmpeg_setup = Some(super::FfmpegSetupDialog {
+                        info,
+                        downloading: false,
+                    });
+                    return Task::none();
+                }
+            };
+            match export_video(
+                &state.guide,
+                &state.store,
+                VideoOptions::default(),
+                &ffmpeg,
+                &path,
+            ) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "rollshot::action::export",
+                        path = %path.display(),
+                        ffmpeg = %ffmpeg.display(),
+                        "mp4 exported"
+                    );
+                    state.message = Some(format!("MP4 saved to {}", path.display()));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::action::export",
+                        %error,
+                        path = %path.display(),
+                        ffmpeg = %ffmpeg.display(),
+                        "mp4 export failed"
+                    );
+                    state.message = Some(format!("MP4 export failed: {error}"));
+                }
+            }
+            Task::none()
+        }
+        Message::FfmpegDownloadManaged => {
+            if let Some(dialog) = &mut state.ffmpeg_setup {
+                dialog.downloading = true;
+            }
+            Task::perform(
+                download_managed_ffmpeg_task(),
+                Message::FfmpegDownloadFinished,
+            )
+        }
+        Message::FfmpegDownloadFinished(Ok(path)) => {
+            state.ffmpeg_setup = None;
+            state.message = Some(format!("Managed FFmpeg installed at {}", path.display()));
+            Task::perform(
+                pick_mp4_save_path(picker_default_dir()),
+                Message::ExportMp4PathChosen,
+            )
+        }
+        Message::FfmpegDownloadFinished(Err(error)) => {
+            if let Some(dialog) = &mut state.ffmpeg_setup {
+                dialog.downloading = false;
+            }
+            state.message = Some(format!("Managed FFmpeg download failed: {error}"));
+            Task::none()
+        }
     }
 }
 
@@ -297,6 +374,22 @@ async fn pick_gif_save_path(default_dir: PathBuf) -> Option<PathBuf> {
         .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
+}
+
+async fn pick_mp4_save_path(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .set_file_name("summary.mp4")
+        .add_filter("MP4 video", &["mp4"])
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+async fn download_managed_ffmpeg_task() -> Result<PathBuf, String> {
+    tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
+        .await
+        .map_err(|error| format!("managed FFmpeg download task failed: {error}"))?
 }
 
 fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::IssuePackInput {
@@ -376,6 +469,8 @@ mod tests {
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
     use crate::timeline_workspace::{FfmpegSetupDialog, TimelineWorkspace};
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn ws(recording: rollshot_action::Recording) -> TimelineWorkspace {
         TimelineWorkspace::new(
@@ -660,5 +755,70 @@ mod tests {
         let _ = update(&mut state, Message::FfmpegUseSystem);
         assert!(state.ffmpeg_setup.is_none());
         assert!(state.message.as_ref().unwrap().contains("ROLLSHOT_FFMPEG"));
+    }
+
+    #[test]
+    fn export_mp4_cancelled_picker_is_a_no_op() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportMp4PathChosen(None));
+        assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn export_mp4_missing_ffmpeg_opens_setup_and_writes_nothing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_ffmpeg = std::env::var_os("ROLLSHOT_FFMPEG");
+        let old_root = std::env::var_os("ROLLSHOT_FFMPEG_ROOT");
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("PATH", "");
+        std::env::set_var("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        std::env::set_var("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let mut state = ws(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("summary.mp4");
+        let _ = update(&mut state, Message::ExportMp4PathChosen(Some(path.clone())));
+        assert!(!path.exists());
+        assert!(state.ffmpeg_setup.is_some());
+        assert!(state.message.is_none());
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_ffmpeg {
+            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG", value),
+            None => std::env::remove_var("ROLLSHOT_FFMPEG"),
+        }
+        match old_root {
+            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG_ROOT", value),
+            None => std::env::remove_var("ROLLSHOT_FFMPEG_ROOT"),
+        }
+    }
+
+    #[test]
+    fn export_mp4_requested_opens_setup_when_ffmpeg_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_ffmpeg = std::env::var_os("ROLLSHOT_FFMPEG");
+        let old_root = std::env::var_os("ROLLSHOT_FFMPEG_ROOT");
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("PATH", "");
+        std::env::set_var("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        std::env::set_var("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::ExportMp4Requested);
+        assert!(state.ffmpeg_setup.is_some());
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_ffmpeg {
+            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG", value),
+            None => std::env::remove_var("ROLLSHOT_FFMPEG"),
+        }
+        match old_root {
+            Some(value) => std::env::set_var("ROLLSHOT_FFMPEG_ROOT", value),
+            None => std::env::remove_var("ROLLSHOT_FFMPEG_ROOT"),
+        }
     }
 }
