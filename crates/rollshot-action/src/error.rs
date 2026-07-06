@@ -84,6 +84,30 @@ pub enum VideoError {
     },
 }
 
+/// Storyboard PNG export failure. On any error, no file is left at the target
+/// path and the editable session stays intact.
+#[derive(Debug, thiserror::Error)]
+pub enum StoryboardError {
+    #[error("cannot export a storyboard for a guide with no steps")]
+    Empty,
+    #[error("step {index} keyframe pixels were not retained")]
+    KeyframeMissing { index: usize },
+    #[error("storyboard canvas is too large to render")]
+    CanvasTooLarge,
+    #[error("failed to encode storyboard PNG at {path}: {source}")]
+    Encode {
+        path: String,
+        #[source]
+        source: image::ImageError,
+    },
+    #[error("storyboard I/O error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +155,22 @@ mod tests {
             path: "/missing/ffmpeg".to_string(),
         };
         assert!(invalid.to_string().contains("/missing/ffmpeg"), "{invalid}");
+    }
+
+    #[test]
+    fn storyboard_error_messages_are_descriptive() {
+        assert_eq!(
+            StoryboardError::Empty.to_string(),
+            "cannot export a storyboard for a guide with no steps"
+        );
+        let missing = StoryboardError::KeyframeMissing { index: 4 };
+        assert!(missing.to_string().contains("step 4"), "{missing}");
+        let too_large = StoryboardError::CanvasTooLarge;
+        assert!(
+            too_large
+                .to_string()
+                .contains("storyboard canvas is too large"),
+            "{too_large}"
+        );
     }
 }
