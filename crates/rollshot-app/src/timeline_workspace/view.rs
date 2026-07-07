@@ -70,6 +70,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         button(text("Export GIF"))
             .on_press(Message::ExportGifRequested)
             .style(button::secondary),
+        button(text("Export Storyboard"))
+            .on_press(Message::ExportStoryboardRequested)
+            .style(button::secondary),
         button(text("Export MP4"))
             .on_press(Message::ExportMp4Requested)
             .style(button::secondary),
