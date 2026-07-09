@@ -133,6 +133,7 @@ pub struct CandidateStep {
 pub struct GuideStep {
     pub index: usize,
     pub title: String,
+    pub caption: String,
     pub kind: CandidateKind,
     pub reason: DetectReason,
     pub at_ms: Millis,

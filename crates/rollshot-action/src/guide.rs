@@ -19,6 +19,7 @@ impl Guide {
             .map(|(i, c)| GuideStep {
                 index: i + 1,
                 title: default_title(c.kind).to_string(),
+                caption: String::new(),
                 kind: c.kind,
                 reason: c.reason,
                 at_ms: c.at_ms,
@@ -43,6 +44,18 @@ impl Guide {
         match self.steps.iter_mut().find(|s| s.index == index) {
             Some(step) => {
                 step.title = title;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Set a step's optional Storyboard/Issue Pack caption. Returns false if
+    /// `index` is unknown.
+    pub fn set_caption(&mut self, index: usize, caption: String) -> bool {
+        match self.steps.iter_mut().find(|s| s.index == index) {
+            Some(step) => {
+                step.caption = caption;
                 true
             }
             None => false,
@@ -139,6 +152,35 @@ mod tests {
             !g.replace_keyframe(1, 99),
             "frame not in nearby strip is rejected"
         );
+        assert_eq!(g.steps()[0].keyframe, 6);
+    }
+
+    #[test]
+    fn from_candidates_initializes_empty_captions() {
+        let g = Guide::from_candidates(vec![cand(0, CandidateKind::Click, 5, vec![5])]);
+        assert_eq!(g.steps()[0].caption, "");
+    }
+
+    #[test]
+    fn set_caption_persists_and_unknown_index_is_rejected() {
+        let mut g = Guide::from_candidates(vec![cand(0, CandidateKind::Click, 5, vec![5])]);
+        assert!(g.set_caption(
+            1,
+            "Settings close but the value is not saved.".to_string()
+        ));
+        assert_eq!(
+            g.steps()[0].caption,
+            "Settings close but the value is not saved."
+        );
+        assert!(!g.set_caption(99, "ignored".to_string()));
+    }
+
+    #[test]
+    fn replace_keyframe_preserves_caption() {
+        let mut g = Guide::from_candidates(vec![cand(0, CandidateKind::Click, 5, vec![4, 5, 6])]);
+        assert!(g.set_caption(1, "The save action loses state.".to_string()));
+        assert!(g.replace_keyframe(1, 6));
+        assert_eq!(g.steps()[0].caption, "The save action loses state.");
         assert_eq!(g.steps()[0].keyframe, 6);
     }
 }
