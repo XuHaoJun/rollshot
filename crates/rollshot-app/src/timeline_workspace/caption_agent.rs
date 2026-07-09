@@ -1,4 +1,4 @@
-use futures_util::StreamExt;
+use iced::futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -324,7 +324,7 @@ mod tests {
 #[cfg(test)]
 mod provider_tests {
     use super::*;
-    use futures_util::stream;
+    use iced::futures::stream;
     use rollshot_agent::model::{ModelError, ModelRequest, ModelStreamEvent};
     use rollshot_agent::StreamBounds;
     use std::future::Future;
@@ -347,7 +347,7 @@ mod provider_tests {
                         Output = Result<
                             Pin<
                                 Box<
-                                    dyn futures_util::Stream<
+                                    dyn iced::futures::Stream<
                                             Item = Result<ModelStreamEvent, ModelError>,
                                         > + Send,
                                 >,
@@ -367,7 +367,7 @@ mod provider_tests {
                 Ok(Box::pin(stream::iter(events))
                     as Pin<
                         Box<
-                            dyn futures_util::Stream<Item = Result<ModelStreamEvent, ModelError>>
+                            dyn iced::futures::Stream<Item = Result<ModelStreamEvent, ModelError>>
                                 + Send,
                         >,
                     >)
