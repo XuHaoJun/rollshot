@@ -50,6 +50,17 @@ impl Guide {
         }
     }
 
+    /// Set a step's title and caption together when accepting a proposal.
+    /// Returns false if no step with this index exists.
+    pub fn set_title_and_caption(&mut self, index: usize, title: String, caption: String) -> bool {
+        let Some(step) = self.steps.iter_mut().find(|s| s.index == index) else {
+            return false;
+        };
+        step.title = title;
+        step.caption = caption;
+        true
+    }
+
     /// Set a step's optional Storyboard/Issue Pack caption. Returns false if
     /// `index` is unknown.
     pub fn set_caption(&mut self, index: usize, caption: String) -> bool {

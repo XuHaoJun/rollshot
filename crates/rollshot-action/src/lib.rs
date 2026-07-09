@@ -6,6 +6,7 @@
 //! only privacy-filtered data: never raw key codes, typed text, device names,
 //! or device paths. See `docs/superpowers/specs/2026-06-15-action-guide-capture-design.md`.
 
+pub mod caption_proposal;
 mod detector;
 mod diagnostics;
 mod error;
@@ -21,6 +22,10 @@ mod recorder;
 mod storyboard;
 mod video;
 
+pub use caption_proposal::{
+    CaptionApplyOutcome, CaptionProposal, CaptionProposalId, CaptionProposalProvenance,
+    CaptionSuggestion, CaptionSuggestionDraft, CaptionSuggestionId, CaptionSuggestionStatus,
+};
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
 pub use error::{DetectError, ExportError, GifError, StoryboardError, VideoError};
 pub use events::EventAggregator;
