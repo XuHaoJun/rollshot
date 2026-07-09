@@ -5,6 +5,7 @@ use rollshot_action::{
     export_gif, export_guide, export_storyboard, export_video, render_storyboard, GifOptions,
     StoryboardOptions, VideoOptions,
 };
+use rollshot_image_document::ImagePoint;
 
 use super::TimelineWorkspace;
 
@@ -52,6 +53,12 @@ pub enum Message {
     #[cfg(target_os = "macos")]
     OpenInputMonitoringSettings,
     DismissBanner,
+    AnnotateStepRequested,
+    AnnotationCanvasPressed(rollshot_image_document::ImagePoint),
+    AnnotationCanvasMoved(rollshot_image_document::ImagePoint),
+    AnnotationCanvasReleased(rollshot_image_document::ImagePoint),
+    AnnotationDone,
+    AnnotationCancel,
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -326,6 +333,90 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.message = None;
             Task::none()
         }
+        Message::AnnotateStepRequested => {
+            state.message = None;
+            let Some(step) = state.selected_step().cloned() else {
+                state.message = Some("Select a step before annotating.".to_string());
+                return Task::none();
+            };
+            match state.presentation.document_for_step(&step, &state.store) {
+                Some(doc) => {
+                    tracing::info!(
+                        target: "rollshot::action::annotation",
+                        source = step.source,
+                        keyframe = step.keyframe,
+                        "annotation session opened"
+                    );
+                    state.annotation_session = Some(super::annotation::StepAnnotationSession::new(
+                        step.source,
+                        step.keyframe,
+                        doc.document.source(),
+                    ));
+                }
+                None => {
+                    state.message = Some(
+                        "Cannot annotate this step because its keyframe is unavailable."
+                            .to_string(),
+                    );
+                }
+            }
+            Task::none()
+        }
+        Message::AnnotationCanvasPressed(point) => {
+            if let Some(session) = &mut state.annotation_session {
+                session.draft = Some(super::annotation::AnnotationDraft::Number {
+                    tip: clamp_annotation_point(point, session.width, session.height),
+                    bubble: clamp_annotation_point(point, session.width, session.height),
+                });
+            }
+            Task::none()
+        }
+        Message::AnnotationCanvasMoved(point) => {
+            if let Some(session) = &mut state.annotation_session {
+                if let Some(super::annotation::AnnotationDraft::Number { bubble, .. }) =
+                    &mut session.draft
+                {
+                    *bubble = clamp_annotation_point(point, session.width, session.height);
+                }
+            }
+            Task::none()
+        }
+        Message::AnnotationCanvasReleased(point) => {
+            let Some(session) = &mut state.annotation_session else {
+                return Task::none();
+            };
+            let release = clamp_annotation_point(point, session.width, session.height);
+            let source = session.source;
+            let tip = match session.draft.take() {
+                Some(super::annotation::AnnotationDraft::Number { tip, .. }) => tip,
+                None => release,
+            };
+            let Some(step) = state
+                .guide
+                .steps()
+                .iter()
+                .find(|step| step.source == source)
+                .cloned()
+            else {
+                state.annotation_session = None;
+                state.message = Some(
+                    "Annotation session closed because the step no longer exists.".to_string(),
+                );
+                return Task::none();
+            };
+            if let Some(doc) = state.presentation.document_for_step(&step, &state.store) {
+                doc.document.add_number_callout(tip, release);
+            }
+            Task::none()
+        }
+        Message::AnnotationDone => {
+            state.annotation_session = None;
+            Task::none()
+        }
+        Message::AnnotationCancel => {
+            state.annotation_session = None;
+            Task::none()
+        }
         Message::FfmpegSetupCancel => {
             state.ffmpeg_setup = None;
             Task::none()
@@ -568,6 +659,10 @@ fn begin_issue_pack_export(
         pick_export_dir(picker_default_dir()),
         Message::IssuePackFolderChosen,
     )
+}
+
+fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePoint {
+    point.clamp_to(width, height)
 }
 
 #[cfg(test)]
@@ -1083,5 +1178,59 @@ mod tests {
         assert_eq!(second.step_count, state.guide.steps().len());
         assert_eq!(second.width, 800);
         assert!(second.height >= first_height);
+    }
+
+    #[test]
+    fn annotate_step_opens_session_for_selected_keyframe() {
+        let mut state = ws(recording_from_frames());
+
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+
+        let session = state.annotation_session.as_ref().expect("session open");
+        let step = state.selected_step().unwrap();
+        assert_eq!(session.source, step.source);
+        assert_eq!(session.keyframe, step.keyframe);
+        assert_eq!(session.width, 32);
+        assert_eq!(session.height, 32);
+    }
+
+    #[test]
+    fn annotation_drag_commits_number_callout() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasPressed(rollshot_image_document::ImagePoint::new(4.0, 4.0)),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasMoved(rollshot_image_document::ImagePoint::new(20.0, 20.0)),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(20.0, 20.0)),
+        );
+
+        assert!(state.presentation.has_annotations(source));
+        let doc = state.presentation.doc(source).unwrap();
+        assert_eq!(doc.document.annotations().len(), 1);
+    }
+
+    #[test]
+    fn annotation_done_closes_session_without_dropping_document() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+
+        let _ = update(&mut state, Message::AnnotationDone);
+
+        assert!(state.annotation_session.is_none());
+        assert!(state.presentation.has_annotations(source));
     }
 }

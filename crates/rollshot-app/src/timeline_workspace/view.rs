@@ -29,6 +29,12 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
         body
     };
 
+    let body = if state.annotation_session.is_some() {
+        annotation_modal(body, state)
+    } else {
+        body
+    };
+
     let body = if state.ffmpeg_setup.is_some() {
         ffmpeg_setup_modal(body, state)
     } else {
@@ -161,6 +167,9 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 text_input("Step title", &step.title).on_input(Message::TitleChanged),
                 text("Caption").size(12),
                 text_input("Step caption", &step.caption).on_input(Message::CaptionChanged),
+                button(text("Annotate Step"))
+                    .on_press(Message::AnnotateStepRequested)
+                    .style(button::secondary),
                 button(text("Delete step"))
                     .on_press(Message::DeleteStep)
                     .style(button::danger),
@@ -340,6 +349,87 @@ fn storyboard_preview_modal<'a>(
     stack![base, scrim].into()
 }
 
+fn annotation_modal<'a>(
+    base: Element<'a, Message>,
+    state: &'a TimelineWorkspace,
+) -> Element<'a, Message> {
+    let session = state
+        .annotation_session
+        .as_ref()
+        .expect("checked by caller");
+    let doc = state
+        .presentation
+        .doc(session.source)
+        .expect("session has presentation doc");
+    let max_w = 720.0;
+    let max_h = 480.0;
+    let scale = (max_w / session.width as f32)
+        .min(max_h / session.height as f32)
+        .clamp(0.1, 1.0);
+    let rendered = iced::Size::new(session.width as f32 * scale, session.height as f32 * scale);
+    let img = image(session.handle.clone())
+        .width(Length::Fixed(rendered.width))
+        .height(Length::Fixed(rendered.height));
+    let overlay = iced::widget::canvas(super::annotation::NumberAnnotationCanvas {
+        document: &doc.document,
+        draft: session.draft,
+        scale,
+    })
+    .width(Length::Fixed(rendered.width))
+    .height(Length::Fixed(rendered.height));
+
+    let dialog_view = container(
+        column![
+            row![
+                text("Annotate Step").size(18),
+                Space::new().width(Length::Fill),
+                text("Number callout").size(12),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            container(iced::widget::stack![img, overlay])
+                .width(Length::Fixed(rendered.width))
+                .height(Length::Fixed(rendered.height))
+                .style(container::rounded_box),
+            row![
+                button(text("Done"))
+                    .on_press(Message::AnnotationDone)
+                    .style(button::primary),
+                button(text("Close")).on_press(Message::AnnotationCancel),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12),
+    )
+    .padding(20)
+    .width(Length::Fixed(780.0))
+    .style(container::rounded_box);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog_view))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::AnnotationCancel),
+    );
+
+    stack![base, scrim].into()
+}
+
 fn ffmpeg_setup_modal<'a>(
     base: Element<'a, Message>,
     state: &'a TimelineWorkspace,
@@ -514,6 +604,15 @@ mod tests {
         );
         assert!(preview.storyboard_preview.is_some());
         let _ = view(&preview);
+
+        // Annotation modal.
+        let mut annotated = ws(recording_from_frames(), InputCapability::SemanticEvents);
+        let _ = crate::timeline_workspace::update::update(
+            &mut annotated,
+            Message::AnnotateStepRequested,
+        );
+        assert!(annotated.annotation_session.is_some());
+        let _ = view(&annotated);
 
         // Empty guide / no selection.
         let empty = ws(synthetic_recording(0), InputCapability::SemanticEvents);

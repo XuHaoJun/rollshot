@@ -96,10 +96,8 @@ pub struct TimelineWorkspace {
     /// Storyboard preview modal state, if open.
     pub(crate) storyboard_preview: Option<StoryboardPreviewState>,
     /// Per-step annotation documents keyed by `GuideStep.source`.
-    #[expect(dead_code)]
     pub(crate) presentation: annotation::ActionGuidePresentation,
     /// Active annotation editing session, if the modal is open.
-    #[expect(dead_code)]
     pub(crate) annotation_session: Option<annotation::StepAnnotationSession>,
 }
 
