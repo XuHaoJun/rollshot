@@ -114,11 +114,15 @@ pub(crate) fn issue_pack_folder_name(created_at: DateTime<Local>) -> String {
     format!("rollshot-issue-pack-{}", created_at.format("%Y-%m-%d-%H%M"))
 }
 
-pub(crate) fn render_issue_markdown(input: &IssuePackInput) -> String {
+pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: bool) -> String {
     let mut md = String::from("# Bug Report\n\n");
     md.push_str("## Summary\n\n[Write a short summary]\n\n");
     md.push_str("## Steps to reproduce\n\n");
     if let Some(action) = &input.action_guide {
+        if include_storyboard {
+            md.push_str("Overview:\n\n");
+            md.push_str("![](action-guide/storyboard.png)\n\n");
+        }
         for step in &action.steps {
             md.push_str(&format!(
                 "{}. {}\n\n   ![]({})\n\n",
@@ -159,7 +163,11 @@ pub(crate) fn render_issue_markdown(input: &IssuePackInput) -> String {
     md
 }
 
-pub(crate) fn manifest_assets(input: &IssuePackInput, include_gif: bool) -> Vec<AssetEntry> {
+pub(crate) fn manifest_assets(
+    input: &IssuePackInput,
+    include_gif: bool,
+    include_storyboard: bool,
+) -> Vec<AssetEntry> {
     let mut assets = vec![
         AssetEntry {
             kind: "issue_markdown".to_string(),
@@ -185,6 +193,12 @@ pub(crate) fn manifest_assets(input: &IssuePackInput, include_gif: bool) -> Vec<
             kind: "action_session".to_string(),
             path: "action-guide/session.json".to_string(),
         });
+        if include_storyboard {
+            assets.push(AssetEntry {
+                kind: "action_storyboard".to_string(),
+                path: "action-guide/storyboard.png".to_string(),
+            });
+        }
         for step in &action.steps {
             assets.push(AssetEntry {
                 kind: "action_keyframe".to_string(),
@@ -319,6 +333,7 @@ fn render_manifest_json(
     input: &IssuePackInput,
     warnings: &[IssuePackWarning],
     include_gif: bool,
+    include_storyboard: bool,
 ) -> Result<String, IssuePackError> {
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
@@ -346,7 +361,7 @@ fn render_manifest_json(
             original_pixels_included: input.redaction.original_pixels_included,
             redaction_count: input.redaction.redaction_count,
         },
-        assets: manifest_assets(input, include_gif),
+        assets: manifest_assets(input, include_gif, include_storyboard),
         ocr: OcrManifest {
             included: !input.ocr_snippets.is_empty(),
             snippet_count: input.ocr_snippets.len(),
@@ -463,6 +478,19 @@ fn build_folder(
         )
         .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
 
+        let storyboard_path = tmp_dir.join("action-guide/storyboard.png");
+        if let Err(error) = rollshot_action::export_storyboard(
+            action.guide,
+            action.store,
+            rollshot_action::StoryboardOptions::default(),
+            &storyboard_path,
+        ) {
+            warnings.push(IssuePackWarning {
+                code: "storyboard_export_failed".to_string(),
+                message: format!("Storyboard export failed: {error}"),
+            });
+        }
+
         if action.include_gif {
             let gif_path = tmp_dir.join("action-guide/guide.gif");
             if let Err(error) = rollshot_action::export_gif(
@@ -479,10 +507,14 @@ fn build_folder(
         }
     }
 
-    std::fs::write(tmp_dir.join("issue.md"), render_issue_markdown(input))
-        .map_err(|e| IssuePackError::Io(e.to_string()))?;
     let include_gif = tmp_dir.join("action-guide/guide.gif").exists();
-    let manifest = render_manifest_json(input, warnings, include_gif)?;
+    let include_storyboard = tmp_dir.join("action-guide/storyboard.png").exists();
+    std::fs::write(
+        tmp_dir.join("issue.md"),
+        render_issue_markdown(input, include_storyboard),
+    )
+    .map_err(|e| IssuePackError::Io(e.to_string()))?;
+    let manifest = render_manifest_json(input, warnings, include_gif, include_storyboard)?;
     std::fs::write(tmp_dir.join("manifest.json"), manifest)
         .map_err(|e| IssuePackError::Io(e.to_string()))?;
     Ok(())
@@ -649,7 +681,7 @@ mod tests {
 
     #[test]
     fn renders_screenshot_only_markdown_with_relative_link() {
-        let md = render_issue_markdown(&base_input());
+        let md = render_issue_markdown(&base_input(), false);
         assert!(md.contains("![](images/final-redacted.png)"), "md = {md}");
         assert!(
             !md.contains("/tmp/"),
@@ -677,7 +709,7 @@ mod tests {
                 },
             ],
         });
-        let md = render_issue_markdown(&input);
+        let md = render_issue_markdown(&input, false);
         assert!(md.contains("1. Open Settings"), "md = {md}");
         assert!(
             md.contains("![](action-guide/keyframes/001.png)"),
@@ -692,7 +724,7 @@ mod tests {
         input.ocr_snippets = vec![OcrSnippet {
             text: "Failed to save settings".to_string(),
         }];
-        let md = render_issue_markdown(&input);
+        let md = render_issue_markdown(&input, false);
         assert!(md.contains("## OCR snippets"), "md = {md}");
         assert!(md.contains("- Failed to save settings"), "md = {md}");
     }
@@ -708,7 +740,7 @@ mod tests {
                 keyframe_path: "action-guide/keyframes/001.png".to_string(),
             }],
         });
-        let assets = manifest_assets(&input, true);
+        let assets = manifest_assets(&input, true, false);
         let paths: Vec<_> = assets.iter().map(|a| a.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -857,7 +889,7 @@ mod tests {
             code: "gif_export_failed".to_string(),
             message: "GIF export failed: disk full".to_string(),
         }];
-        let json = render_manifest_json(&input, &warnings, false).unwrap();
+        let json = render_manifest_json(&input, &warnings, false, false).unwrap();
 
         assert!(json.contains("\"warnings\""), "json = {json}");
         assert!(
@@ -867,6 +899,78 @@ mod tests {
         assert!(
             json.contains("\"message\": \"GIF export failed: disk full\""),
             "json = {json}"
+        );
+    }
+
+    fn action_guide_input_with_one_step(include_gif: bool) -> IssuePackInput {
+        let mut input = base_input();
+        input.final_image = None;
+        input.action_guide = Some(ActionGuideIssueAssets {
+            include_gif,
+            steps: vec![IssuePackStep {
+                index: 1,
+                title: "Open Settings".to_string(),
+                keyframe_path: "action-guide/keyframes/001.png".to_string(),
+            }],
+        });
+        input.evidence_review.result_workspace_images_reviewed = false;
+        input.evidence_review.action_guide_keyframes_reviewed = true;
+        input.redaction.result_workspace_images_are_flattened = false;
+        input
+    }
+
+    #[test]
+    fn renders_storyboard_overview_when_action_storyboard_exists() {
+        let input = action_guide_input_with_one_step(false);
+        let md = render_issue_markdown(&input, true);
+
+        assert!(
+            md.contains("Overview:\n\n![](action-guide/storyboard.png)"),
+            "md = {md}"
+        );
+        assert!(md.contains("1. Open Settings"), "md = {md}");
+        assert!(
+            md.contains("![](action-guide/keyframes/001.png)"),
+            "md = {md}"
+        );
+    }
+
+    #[test]
+    fn omits_storyboard_overview_when_action_storyboard_is_absent() {
+        let input = action_guide_input_with_one_step(false);
+        let md = render_issue_markdown(&input, false);
+
+        assert!(!md.contains("action-guide/storyboard.png"), "md = {md}");
+        assert!(md.contains("1. Open Settings"), "md = {md}");
+    }
+
+    #[test]
+    fn manifest_assets_include_storyboard_only_when_present() {
+        let input = action_guide_input_with_one_step(true);
+
+        let without_storyboard = manifest_assets(&input, true, false);
+        assert!(
+            !without_storyboard
+                .iter()
+                .any(|asset| asset.kind == "action_storyboard"),
+            "assets = {without_storyboard:?}"
+        );
+
+        let with_storyboard = manifest_assets(&input, true, true);
+        let paths: Vec<_> = with_storyboard
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"action-guide/storyboard.png"),
+            "paths = {paths:?}"
+        );
+        assert!(
+            with_storyboard
+                .iter()
+                .any(|asset| asset.kind == "action_storyboard"
+                    && asset.path == "action-guide/storyboard.png"),
+            "assets = {with_storyboard:?}"
         );
     }
 }
@@ -948,39 +1052,6 @@ mod action_guide_tests {
     }
 
     #[test]
-    fn export_folder_includes_action_guide_folder() {
-        let (input, guide, store, region, capability, source_kind) = action_input();
-        let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-        };
-
-        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
-
-        assert!(result.directory.join("action-guide/steps.md").exists());
-        assert!(result.directory.join("action-guide/session.json").exists());
-        assert!(result
-            .directory
-            .join("action-guide/keyframes/001.png")
-            .exists());
-        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
-        assert!(
-            md.contains("![](action-guide/keyframes/001.png)"),
-            "md = {md}"
-        );
-        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
-        assert!(
-            manifest.contains("\"action_keyframe\""),
-            "manifest = {manifest}"
-        );
-    }
-
-    #[test]
     fn action_guide_only_missing_keyframe_rolls_back_temp_output() {
         let (mut input, _guide, store, region, capability, source_kind) = action_input();
         let guide = Guide::from_candidates(vec![CandidateStep {
@@ -1031,6 +1102,226 @@ mod action_guide_tests {
         assert!(
             !manifest.contains("redacted_keyframe"),
             "manifest = {manifest}"
+        );
+    }
+
+    fn many_step_action_input(
+        count: usize,
+    ) -> (
+        IssuePackInput,
+        Guide,
+        FrameStore,
+        CaptureRegion,
+        InputCapability,
+        InputSourceKind,
+    ) {
+        let mut store = FrameStore::new(StoreConfig {
+            ring_capacity: count + 16,
+            analysis_capacity: 8,
+            analysis_width: 384,
+            window_before: 0,
+            window_after: 0,
+            nearby_max: 1,
+        });
+        let mut candidates = Vec::with_capacity(count);
+        for i in 0..count {
+            let id = store.ingest(quadrant(), i as u64 * 100);
+            store.retain_window(id);
+            candidates.push(CandidateStep {
+                id,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: i as u64 * 100,
+                keyframe: id,
+                nearby: vec![id],
+            });
+        }
+        let guide = Guide::from_candidates(candidates);
+        let mut input = super::tests::base_input();
+        input.final_image = None;
+        input.evidence_review.result_workspace_images_reviewed = false;
+        input.evidence_review.action_guide_keyframes_reviewed = true;
+        input.redaction.result_workspace_images_are_flattened = false;
+        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, false));
+        (
+            input,
+            guide,
+            store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+        )
+    }
+
+    #[test]
+    fn export_folder_includes_action_guide_folder() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result.directory.join("action-guide/steps.md").exists());
+        assert!(result.directory.join("action-guide/session.json").exists());
+        assert!(result
+            .directory
+            .join("action-guide/keyframes/001.png")
+            .exists());
+        assert!(result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert!(
+            result.warnings.is_empty(),
+            "warnings = {:?}",
+            result.warnings
+        );
+
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(
+            md.contains("![](action-guide/keyframes/001.png)"),
+            "md = {md}"
+        );
+        assert!(
+            md.contains("Overview:\n\n![](action-guide/storyboard.png)"),
+            "md = {md}"
+        );
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"action_keyframe\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            manifest.contains("\"action-guide/storyboard.png\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn storyboard_export_failure_warns_without_blocking_issue_pack() {
+        // 260 steps at default keyframe size exceeds StoryboardOptions::default().max_canvas_pixels
+        let (input, guide, store, region, capability, source_kind) = many_step_action_input(260);
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result.directory.join("action-guide/steps.md").exists());
+        assert!(result
+            .directory
+            .join("action-guide/keyframes/001.png")
+            .exists());
+        assert!(!result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code, "storyboard_export_failed");
+
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(!md.contains("action-guide/storyboard.png"), "md = {md}");
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"storyboard_export_failed\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            !manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn combined_screenshot_and_action_guide_includes_storyboard() {
+        let (mut input, guide, store, region, capability, source_kind) = action_input();
+        // Restore the final_image that action_input() clears
+        input.final_image = Some(SafeImageAsset {
+            file_name: "final-redacted.png".to_string(),
+            pixels: RgbaImage::from_pixel(2, 2, Rgba([1, 2, 3, 255])),
+            derived_from_original: true,
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert!(result.directory.join("images/final-redacted.png").exists());
+
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(
+            md.contains("Overview:\n\n![](action-guide/storyboard.png)"),
+            "md = {md}"
+        );
+        assert!(md.contains("![](images/final-redacted.png)"), "md = {md}");
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            manifest.contains("\"final_redacted_image\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn export_zip_with_action_guide_includes_storyboard() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_zip_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let zip_path = result.zip_path.clone().expect("zip path");
+        let file = std::fs::File::open(zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        names.sort();
+
+        assert!(
+            names.contains(&"action-guide/storyboard.png".to_string()),
+            "names = {names:?}"
         );
     }
 }
