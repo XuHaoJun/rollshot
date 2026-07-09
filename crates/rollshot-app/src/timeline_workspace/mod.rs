@@ -99,6 +99,13 @@ pub struct TimelineWorkspace {
     pub(crate) presentation: annotation::ActionGuidePresentation,
     /// Active annotation editing session, if the modal is open.
     pub(crate) annotation_session: Option<annotation::StepAnnotationSession>,
+    /// Pending agent caption suggestions, if generated for the current guide.
+    pub(crate) caption_proposal: Option<rollshot_action::CaptionProposal>,
+    /// True while a caption suggestion run is active.
+    pub(crate) caption_suggestions_running: bool,
+    /// Monotonic local run id for caption proposal provenance.
+    #[allow(dead_code)] // set by the agent runner in a later task
+    pub(crate) caption_agent_run_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -129,6 +136,9 @@ impl TimelineWorkspace {
             storyboard_preview: None,
             presentation: annotation::ActionGuidePresentation::new(),
             annotation_session: None,
+            caption_proposal: None,
+            caption_suggestions_running: false,
+            caption_agent_run_id: 0,
         };
         ws.rebuild_selection_handles();
         ws

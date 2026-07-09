@@ -173,6 +173,7 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 button(text("Delete step"))
                     .on_press(Message::DeleteStep)
                     .style(button::danger),
+                caption_proposal_panel(state),
             ]
             .spacing(8)
             .into()
@@ -212,6 +213,72 @@ fn strip_row(state: &TimelineWorkspace) -> Element<'_, Message> {
     )
     .height(Length::Fixed(120.0))
     .into()
+}
+
+fn caption_proposal_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
+    let Some(proposal) = &state.caption_proposal else {
+        return container(column![]).into();
+    };
+
+    let mut items = column![row![
+        text("Suggested captions").size(13),
+        Space::new().width(Length::Fill),
+        button(text("Accept all"))
+            .on_press_maybe(
+                proposal
+                    .has_pending()
+                    .then_some(Message::AcceptAllCaptionSuggestions)
+            )
+            .style(button::secondary),
+        button(text("Dismiss")).on_press(Message::DismissCaptionProposal),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)]
+    .spacing(8);
+
+    for suggestion in &proposal.suggestions {
+        let status = match suggestion.status {
+            rollshot_action::CaptionSuggestionStatus::Pending => "Pending",
+            rollshot_action::CaptionSuggestionStatus::Accepted => "Accepted",
+            rollshot_action::CaptionSuggestionStatus::Rejected => "Rejected",
+            rollshot_action::CaptionSuggestionStatus::Stale => "Stale",
+        };
+        let title = suggestion
+            .suggested_title
+            .as_deref()
+            .unwrap_or(&suggestion.base.title);
+        let pending = suggestion.status == rollshot_action::CaptionSuggestionStatus::Pending;
+        items = items.push(
+            container(
+                column![
+                    row![
+                        text(format!("Step {}", suggestion.base.index)).size(12),
+                        Space::new().width(Length::Fill),
+                        text(status).size(12),
+                    ]
+                    .align_y(Alignment::Center),
+                    text(title).size(13),
+                    text(&suggestion.suggested_caption).size(12),
+                    row![
+                        button(text("Accept"))
+                            .on_press_maybe(
+                                pending.then_some(Message::AcceptCaptionSuggestion(suggestion.id))
+                            )
+                            .style(button::primary),
+                        button(text("Reject")).on_press_maybe(
+                            pending.then_some(Message::RejectCaptionSuggestion(suggestion.id))
+                        ),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(4),
+            )
+            .padding(8)
+            .style(container::rounded_box),
+        );
+    }
+
+    container(items).width(Length::Fill).into()
 }
 
 fn issue_pack_modal<'a>(

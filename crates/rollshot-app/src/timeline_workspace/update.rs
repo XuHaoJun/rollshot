@@ -59,6 +59,12 @@ pub enum Message {
     AnnotationCanvasReleased(rollshot_image_document::ImagePoint),
     AnnotationDone,
     AnnotationCancel,
+    #[allow(dead_code)] // constructed by the agent runner in a later task
+    CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
+    AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId),
+    RejectCaptionSuggestion(rollshot_action::CaptionSuggestionId),
+    AcceptAllCaptionSuggestions,
+    DismissCaptionProposal,
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -426,6 +432,64 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::AnnotationCancel => {
             state.annotation_session = None;
+            Task::none()
+        }
+        Message::CaptionProposalLoaded(Ok(proposal)) => {
+            state.caption_suggestions_running = false;
+            state.caption_proposal = Some(proposal);
+            state.message = Some("Caption suggestions ready for review.".to_string());
+            Task::none()
+        }
+        Message::CaptionProposalLoaded(Err(error)) => {
+            state.caption_suggestions_running = false;
+            state.message = Some(format!("Caption suggestions failed: {error}"));
+            Task::none()
+        }
+        Message::AcceptCaptionSuggestion(id) => {
+            let Some(proposal) = &mut state.caption_proposal else {
+                return Task::none();
+            };
+            match proposal.apply(&mut state.guide, id) {
+                rollshot_action::CaptionApplyOutcome::Applied => {
+                    state.message = Some("Caption suggestion accepted.".to_string());
+                }
+                rollshot_action::CaptionApplyOutcome::Stale => {
+                    state.message =
+                        Some("Caption suggestion is stale; regenerate suggestions.".to_string());
+                }
+                rollshot_action::CaptionApplyOutcome::Missing
+                | rollshot_action::CaptionApplyOutcome::NotPending => {}
+            }
+            Task::none()
+        }
+        Message::RejectCaptionSuggestion(id) => {
+            if let Some(proposal) = &mut state.caption_proposal {
+                proposal.reject(id);
+            }
+            Task::none()
+        }
+        Message::AcceptAllCaptionSuggestions => {
+            if let Some(proposal) = &mut state.caption_proposal {
+                let outcomes = proposal.apply_all(&mut state.guide);
+                let applied = outcomes
+                    .iter()
+                    .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Applied)
+                    .count();
+                let stale = outcomes
+                    .iter()
+                    .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Stale)
+                    .count();
+                state.message = Some(match stale {
+                    0 => format!("Accepted {applied} caption suggestions."),
+                    _ => format!(
+                        "Accepted {applied} caption suggestions; {stale} stale suggestions skipped."
+                    ),
+                });
+            }
+            Task::none()
+        }
+        Message::DismissCaptionProposal => {
+            state.caption_proposal = None;
             Task::none()
         }
         Message::FfmpegSetupCancel => {
@@ -1373,6 +1437,112 @@ mod tests {
         assert_eq!(
             state.message.as_deref(),
             Some("Step annotations were cleared because the keyframe changed.")
+        );
+    }
+
+    fn caption_proposal_for_first_step(
+        state: &TimelineWorkspace,
+    ) -> rollshot_action::CaptionProposal {
+        rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            &state.guide,
+            vec![rollshot_action::CaptionSuggestionDraft {
+                step_source: state.guide.steps()[0].source,
+                title: Some("Open Settings".to_string()),
+                caption: "The settings panel appears.".to_string(),
+                confidence: 0.8,
+                rationale: Some("The click begins the settings flow.".to_string()),
+            }],
+        )
+    }
+
+    #[test]
+    fn caption_proposal_loaded_stores_review_state() {
+        let mut state = ws(synthetic_recording(1));
+        state.caption_suggestions_running = true;
+        let proposal = caption_proposal_for_first_step(&state);
+
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+
+        assert!(state.caption_proposal.is_some());
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Caption suggestions ready for review.".to_string())
+        );
+    }
+
+    #[test]
+    fn caption_proposal_loaded_error_clears_running_state() {
+        let mut state = ws(synthetic_recording(1));
+        state.caption_suggestions_running = true;
+
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Err("invalid caption JSON".to_string())),
+        );
+
+        assert!(state.caption_proposal.is_none());
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Caption suggestions failed: invalid caption JSON".to_string())
+        );
+    }
+
+    #[test]
+    fn accepting_caption_suggestion_updates_guide() {
+        let mut state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let step = state.selected_step().unwrap();
+        assert_eq!(step.title, "Open Settings");
+        assert_eq!(step.caption, "The settings panel appears.");
+    }
+
+    #[test]
+    fn rejecting_caption_suggestion_does_not_update_guide() {
+        let mut state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+
+        let _ = update(
+            &mut state,
+            Message::RejectCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let step = state.selected_step().unwrap();
+        assert_eq!(step.title, "Click");
+        assert_eq!(step.caption, "");
+    }
+
+    #[test]
+    fn accepting_stale_caption_suggestion_shows_message() {
+        let mut state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::TitleChanged("Manual title".to_string()),
+        );
+
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        assert_eq!(state.selected_step().unwrap().title, "Manual title");
+        assert_eq!(state.selected_step().unwrap().caption, "");
+        assert_eq!(
+            state.message,
+            Some("Caption suggestion is stale; regenerate suggestions.".to_string())
         );
     }
 
