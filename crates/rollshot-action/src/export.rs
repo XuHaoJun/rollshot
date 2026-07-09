@@ -26,10 +26,17 @@ pub struct SessionManifest {
 pub struct ManifestStep {
     pub index: usize,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
     pub kind: CandidateKind,
     pub reason: DetectReason,
     pub at_ms: Millis,
     pub keyframe_file: String,
+}
+
+fn non_empty_caption(caption: &str) -> Option<&str> {
+    let caption = caption.trim();
+    (!caption.is_empty()).then_some(caption)
 }
 
 /// Export `guide` into `out_dir/action-guide/`. Returns the created directory.
@@ -122,10 +129,16 @@ fn build(
                 path: png_path.display().to_string(),
                 source,
             })?;
-        md.push_str(&format!("{n}. {}\n\n   ![]({rel})\n\n", step.title));
+        let caption = non_empty_caption(&step.caption);
+        md.push_str(&format!("{n}. {}\n\n", step.title));
+        if let Some(caption) = caption {
+            md.push_str(&format!("   {caption}\n\n"));
+        }
+        md.push_str(&format!("   ![]({rel})\n\n"));
         steps.push(ManifestStep {
             index: step.index,
             title: step.title.clone(),
+            caption: caption.map(str::to_string),
             kind: step.kind,
             reason: step.reason,
             at_ms: step.at_ms,
@@ -313,6 +326,11 @@ mod tests {
         assert_eq!(parsed.input_capability, InputCapability::SemanticEvents);
         assert_eq!(parsed.steps.len(), 1);
         assert_eq!(parsed.steps[0].title, "Enter text");
+        assert_eq!(parsed.steps[0].caption, None);
+        assert!(
+            !json.contains("\"caption\""),
+            "empty captions should be omitted: {json}"
+        );
         // Safe, static labels are allowed to appear.
         assert!(json.contains("semantic-events"), "json = {json}");
         assert!(json.contains("Enter text"), "json = {json}");
@@ -387,5 +405,64 @@ mod tests {
         assert_eq!(guide.steps().len(), 2, "editable guide is preserved");
 
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn export_guide_includes_non_empty_step_caption() {
+        let (mut guide, store) = one_step_recording();
+        assert!(guide.set_caption(
+            1,
+            "The settings dialog closes, but the new value is not persisted.".to_string()
+        ));
+        let out = temp_dir("export-caption");
+
+        let dir = export_guide(
+            &guide,
+            &store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+            &out,
+        )
+        .expect("export succeeds");
+
+        let md = std::fs::read_to_string(dir.join("steps.md")).unwrap();
+        assert!(
+            md.contains("The settings dialog closes, but the new value is not persisted."),
+            "md = {md}"
+        );
+
+        let json = std::fs::read_to_string(dir.join("session.json")).unwrap();
+        let parsed: SessionManifest = serde_json::from_str(&json).expect("manifest parses");
+        assert_eq!(
+            parsed.steps[0].caption.as_deref(),
+            Some("The settings dialog closes, but the new value is not persisted.")
+        );
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn session_manifest_deserializes_without_caption_field() {
+        let json = r#"{
+  "region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+  "input_source": "linux-evdev",
+  "input_capability": "semantic-events",
+  "steps": [
+    {
+      "index": 1,
+      "title": "Click",
+      "kind": "click",
+      "reason": "click-confirmed",
+      "at_ms": 0,
+      "keyframe_file": "keyframes/001.png"
+    }
+  ]
+}"#;
+
+        let parsed: SessionManifest = serde_json::from_str(json).expect("manifest parses");
+
+        assert_eq!(parsed.steps.len(), 1);
+        assert_eq!(parsed.steps[0].caption, None);
     }
 }

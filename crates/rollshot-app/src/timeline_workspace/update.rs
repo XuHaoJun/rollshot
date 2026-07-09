@@ -12,6 +12,7 @@ use super::TimelineWorkspace;
 pub enum Message {
     SelectStep(usize),
     TitleChanged(String),
+    CaptionChanged(String),
     DeleteStep,
     ReplaceKeyframe(rollshot_action::FrameId),
     DiscardRequested,
@@ -65,6 +66,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         Message::TitleChanged(title) => {
             if let Some(index) = state.selected {
                 state.guide.rename(index, title);
+            }
+            Task::none()
+        }
+        Message::CaptionChanged(caption) => {
+            if let Some(index) = state.selected {
+                state.guide.set_caption(index, caption);
             }
             Task::none()
         }
@@ -622,6 +629,40 @@ mod tests {
         let mut state = ws(synthetic_recording(2));
         let _ = update(&mut state, Message::SelectStep(99));
         assert_eq!(state.selected, Some(1));
+    }
+
+    #[test]
+    fn caption_changed_updates_selected_step() {
+        let mut state = ws(synthetic_recording(2));
+
+        let _ = update(
+            &mut state,
+            Message::CaptionChanged("The save action loses the selected value.".to_string()),
+        );
+
+        assert_eq!(
+            state.selected_step().unwrap().caption,
+            "The save action loses the selected value."
+        );
+    }
+
+    #[test]
+    fn replace_keyframe_preserves_selected_step_caption() {
+        let mut state = ws(synthetic_recording(1));
+        let _ = update(
+            &mut state,
+            Message::CaptionChanged("The selected value is lost.".to_string()),
+        );
+        let step = state.selected_step().unwrap();
+        let target = *step.nearby.iter().find(|&&f| f != step.keyframe).unwrap();
+
+        let _ = update(&mut state, Message::ReplaceKeyframe(target));
+
+        assert_eq!(
+            state.selected_step().unwrap().caption,
+            "The selected value is lost."
+        );
+        assert_eq!(state.selected_step().unwrap().keyframe, target);
     }
 
     #[test]

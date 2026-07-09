@@ -159,6 +159,8 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                     .align_x(Alignment::Center)
                     .align_y(Alignment::Center),
                 text_input("Step title", &step.title).on_input(Message::TitleChanged),
+                text("Caption").size(12),
+                text_input("Step caption", &step.caption).on_input(Message::CaptionChanged),
                 button(text("Delete step"))
                     .on_press(Message::DeleteStep)
                     .style(button::danger),

@@ -55,6 +55,7 @@ pub(crate) struct OcrSnippet {
 pub(crate) struct IssuePackStep {
     pub index: usize,
     pub title: String,
+    pub caption: Option<String>,
     pub keyframe_path: String,
 }
 
@@ -75,6 +76,12 @@ pub(crate) struct ActionGuideExportSource<'a> {
 }
 
 #[cfg(feature = "action-guide")]
+fn non_empty_caption(caption: &str) -> Option<String> {
+    let caption = caption.trim();
+    (!caption.is_empty()).then(|| caption.to_string())
+}
+
+#[cfg(feature = "action-guide")]
 impl ActionGuideIssueAssets {
     pub(crate) fn from_guide(guide: &rollshot_action::Guide, include_gif: bool) -> Self {
         let steps = guide
@@ -84,6 +91,7 @@ impl ActionGuideIssueAssets {
             .map(|(i, step)| IssuePackStep {
                 index: i + 1,
                 title: step.title.clone(),
+                caption: non_empty_caption(&step.caption),
                 keyframe_path: format!("action-guide/keyframes/{:03}.png", i + 1),
             })
             .collect();
@@ -124,10 +132,11 @@ pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: 
             md.push_str("![](action-guide/storyboard.png)\n\n");
         }
         for step in &action.steps {
-            md.push_str(&format!(
-                "{}. {}\n\n   ![]({})\n\n",
-                step.index, step.title, step.keyframe_path
-            ));
+            md.push_str(&format!("{}. {}\n\n", step.index, step.title));
+            if let Some(caption) = &step.caption {
+                md.push_str(&format!("   {caption}\n\n"));
+            }
+            md.push_str(&format!("   ![]({})\n\n", step.keyframe_path));
         }
     } else {
         md.push_str("[Write the steps to reproduce]\n\n");
@@ -700,11 +709,13 @@ mod tests {
                 IssuePackStep {
                     index: 1,
                     title: "Open Settings".to_string(),
+                    caption: None,
                     keyframe_path: "action-guide/keyframes/001.png".to_string(),
                 },
                 IssuePackStep {
                     index: 2,
                     title: "Click Save".to_string(),
+                    caption: None,
                     keyframe_path: "action-guide/keyframes/002.png".to_string(),
                 },
             ],
@@ -737,6 +748,7 @@ mod tests {
             steps: vec![IssuePackStep {
                 index: 1,
                 title: "Open Settings".to_string(),
+                caption: None,
                 keyframe_path: "action-guide/keyframes/001.png".to_string(),
             }],
         });
@@ -910,6 +922,7 @@ mod tests {
             steps: vec![IssuePackStep {
                 index: 1,
                 title: "Open Settings".to_string(),
+                caption: None,
                 keyframe_path: "action-guide/keyframes/001.png".to_string(),
             }],
         });
@@ -917,6 +930,34 @@ mod tests {
         input.evidence_review.action_guide_keyframes_reviewed = true;
         input.redaction.result_workspace_images_are_flattened = false;
         input
+    }
+
+    #[test]
+    fn issue_markdown_includes_action_step_caption_when_present() {
+        let mut input = action_guide_input_with_one_step(false);
+        input.action_guide.as_mut().unwrap().steps[0].caption =
+            Some("The dialog closes but the setting is not saved.".to_string());
+
+        let md = render_issue_markdown(&input, true);
+
+        assert!(
+            md.contains("The dialog closes but the setting is not saved."),
+            "md = {md}"
+        );
+        assert!(
+            md.contains("1. Open Settings\n\n   The dialog closes but the setting is not saved.\n\n   ![](action-guide/keyframes/001.png)"),
+            "md = {md}"
+        );
+    }
+
+    #[test]
+    fn issue_markdown_omits_empty_action_step_caption() {
+        let mut input = action_guide_input_with_one_step(false);
+        input.action_guide.as_mut().unwrap().steps[0].caption = None;
+
+        let md = render_issue_markdown(&input, true);
+
+        assert!(md.contains("1. Open Settings\n\n   ![](action-guide/keyframes/001.png)"));
     }
 
     #[test]
@@ -1049,6 +1090,20 @@ mod action_guide_tests {
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
         )
+    }
+
+    #[test]
+    fn action_guide_issue_assets_maps_non_empty_captions() {
+        let recording = recording();
+        let mut guide = Guide::from_candidates(recording.candidates);
+        assert!(guide.set_caption(1, "The value is lost after Save.".to_string()));
+
+        let assets = ActionGuideIssueAssets::from_guide(&guide, false);
+
+        assert_eq!(
+            assets.steps[0].caption.as_deref(),
+            Some("The value is lost after Save.")
+        );
     }
 
     #[test]

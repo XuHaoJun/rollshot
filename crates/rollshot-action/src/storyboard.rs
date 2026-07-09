@@ -13,6 +13,9 @@ use crate::guide::Guide;
 
 const LABEL_FONT_PX: f32 = 26.0;
 const LABEL_GAP: u32 = 10;
+const CAPTION_FONT_PX: f32 = 20.0;
+const CAPTION_GAP: u32 = 8;
+const CAPTION_COLOR: Rgba8 = Rgba8::new(71, 79, 92, 255);
 const BORDER: Rgba<u8> = Rgba([218, 223, 232, 255]);
 const CARD_BACKGROUND: Rgba<u8> = Rgba([250, 251, 253, 255]);
 const TEXT_COLOR: Rgba8 = Rgba8::new(20, 24, 31, 255);
@@ -100,15 +103,31 @@ pub fn render_storyboard(
         let label = fit_label(&label, content_width as f32);
         let (_, label_height) = measure_block(&label, LABEL_FONT_PX, true);
         let label_height = label_height.ceil() as u32;
+
+        let caption = non_empty_caption(&step.caption)
+            .map(|caption| fit_caption(caption, content_width as f32));
+        let caption_height = caption
+            .as_ref()
+            .map(|caption| measure_block(caption, CAPTION_FONT_PX, false).1.ceil() as u32)
+            .unwrap_or(0);
+        let text_height = if caption.is_some() {
+            label_height
+                .checked_add(CAPTION_GAP)
+                .and_then(|height| height.checked_add(caption_height))
+                .ok_or(StoryboardError::CanvasTooLarge)?
+        } else {
+            label_height
+        };
         let card_height = opts
             .card_padding
             .checked_mul(2)
-            .and_then(|height| height.checked_add(label_height))
+            .and_then(|height| height.checked_add(text_height))
             .and_then(|height| height.checked_add(LABEL_GAP))
             .and_then(|height| height.checked_add(image.height()))
             .ok_or(StoryboardError::CanvasTooLarge)?;
         cards.push(Card {
             label,
+            caption,
             image,
             height: card_height,
         });
@@ -151,7 +170,21 @@ pub fn render_storyboard(
             TEXT_COLOR,
         );
         let (_, label_height) = measure_block(&card.label, LABEL_FONT_PX, true);
-        content_y += label_height.ceil() as u32 + LABEL_GAP;
+        content_y += label_height.ceil() as u32;
+        if let Some(caption) = &card.caption {
+            content_y += CAPTION_GAP;
+            draw_text_block(
+                &mut canvas,
+                ImagePoint::new(content_x as f32, content_y as f32),
+                caption,
+                CAPTION_FONT_PX,
+                false,
+                CAPTION_COLOR,
+            );
+            let (_, caption_height) = measure_block(caption, CAPTION_FONT_PX, false);
+            content_y += caption_height.ceil() as u32;
+        }
+        content_y += LABEL_GAP;
         image::imageops::replace(
             &mut canvas,
             &card.image,
@@ -175,6 +208,7 @@ pub fn render_storyboard(
 
 struct Card {
     label: String,
+    caption: Option<String>,
     image: RgbaImage,
     height: u32,
 }
@@ -211,16 +245,24 @@ fn draw_card(canvas: &mut RgbaImage, x: u32, y: u32, width: u32, height: u32) {
 }
 
 fn fit_label(label: &str, max_width: f32) -> String {
-    if measure_block(label, LABEL_FONT_PX, true).0 <= max_width {
-        return label.to_string();
+    fit_text(label, max_width, LABEL_FONT_PX, true)
+}
+
+fn fit_caption(caption: &str, max_width: f32) -> String {
+    fit_text(caption.trim(), max_width, CAPTION_FONT_PX, false)
+}
+
+fn fit_text(text: &str, max_width: f32, px: f32, bold: bool) -> String {
+    if measure_block(text, px, bold).0 <= max_width {
+        return text.to_string();
     }
 
     let ellipsis = "...";
-    let label = label.trim_end();
+    let text = text.trim_end();
     let mut fitted = String::new();
-    for ch in label.chars() {
+    for ch in text.chars() {
         let candidate = format!("{fitted}{ch}{ellipsis}");
-        if measure_block(&candidate, LABEL_FONT_PX, true).0 > max_width {
+        if measure_block(&candidate, px, bold).0 > max_width {
             break;
         }
         fitted.push(ch);
@@ -230,6 +272,11 @@ fn fit_label(label: &str, max_width: f32) -> String {
     } else {
         format!("{fitted}{ellipsis}")
     }
+}
+
+fn non_empty_caption(caption: &str) -> Option<&str> {
+    let caption = caption.trim();
+    (!caption.is_empty()).then_some(caption)
 }
 
 fn write_png_atomic(path: &Path, image: &RgbaImage) -> Result<(), StoryboardError> {
@@ -507,5 +554,87 @@ mod tests {
             result,
             Err(StoryboardError::KeyframeMissing { index: 1 })
         ));
+    }
+
+    #[test]
+    fn captions_increase_storyboard_card_height() {
+        let recording = recording();
+        let keyframe = recording.store.retained_ids_for_test()[0];
+        let mut guide = guide_with_steps(keyframe, 1);
+
+        let without_caption = render_storyboard(
+            &guide,
+            &recording.store,
+            StoryboardOptions {
+                max_width: 320,
+                max_canvas_pixels: 1_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+        )
+        .expect("render without caption");
+
+        assert!(guide.set_caption(
+            1,
+            "The Save button closes the dialog without persisting the change.".to_string()
+        ));
+        let with_caption = render_storyboard(
+            &guide,
+            &recording.store,
+            StoryboardOptions {
+                max_width: 320,
+                max_canvas_pixels: 1_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+        )
+        .expect("render with caption");
+
+        assert!(
+            with_caption.height > without_caption.height,
+            "caption should add text height"
+        );
+        assert_eq!(with_caption.step_count, 1);
+    }
+
+    #[test]
+    fn long_captions_are_elided_to_fit_card_width() {
+        let caption = fit_caption(
+            "The settings dialog closes but the saved preference is not present after reopening the same panel",
+            180.0,
+        );
+
+        assert!(caption.ends_with("..."), "caption = {caption}");
+        assert!(
+            measure_block(&caption, CAPTION_FONT_PX, false).0 <= 180.0,
+            "caption should fit measured width: {caption}"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_captions_are_omitted_from_storyboard_layout() {
+        let recording = recording();
+        let keyframe = recording.store.retained_ids_for_test()[0];
+        let mut guide = guide_with_steps(keyframe, 1);
+        let opts = StoryboardOptions {
+            max_width: 320,
+            max_canvas_pixels: 1_000_000,
+            outer_padding: 12,
+            card_spacing: 10,
+            card_padding: 8,
+            show_titles: true,
+        };
+
+        let without_caption = render_storyboard(&guide, &recording.store, opts.clone())
+            .expect("render without caption");
+        assert!(guide.set_caption(1, "    ".to_string()));
+        let whitespace_caption = render_storyboard(&guide, &recording.store, opts)
+            .expect("render with whitespace caption");
+
+        assert_eq!(whitespace_caption.height, without_caption.height);
     }
 }
