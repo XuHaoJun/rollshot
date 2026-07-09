@@ -1628,4 +1628,66 @@ mod tests {
             Some("Configure an agent provider before suggesting captions.".to_string())
         );
     }
+
+    #[test]
+    fn accepted_caption_suggestion_is_used_by_storyboard_renderer() {
+        let mut state = ws(recording_from_frames());
+        let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            &state.guide,
+            vec![rollshot_action::CaptionSuggestionDraft {
+                step_source: state.guide.steps()[0].source,
+                title: Some("Open Preferences".to_string()),
+                caption: "The preferences window is opened for configuration.".to_string(),
+                confidence: 0.8,
+                rationale: None,
+            }],
+        );
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let rendered = render_timeline_storyboard(&state, storyboard_preview_options())
+            .expect("storyboard renders after accepting caption");
+
+        assert_eq!(rendered.step_count, state.guide.steps().len());
+        assert_eq!(
+            state.guide.steps()[0].caption,
+            "The preferences window is opened for configuration."
+        );
+    }
+
+    #[test]
+    fn accepted_caption_suggestion_is_used_by_issue_pack_input() {
+        let mut state = ws(recording_from_frames());
+        let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            &state.guide,
+            vec![rollshot_action::CaptionSuggestionDraft {
+                step_source: state.guide.steps()[0].source,
+                title: Some("Open Preferences".to_string()),
+                caption: "The preferences window is opened for configuration.".to_string(),
+                confidence: 0.8,
+                rationale: None,
+            }],
+        );
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let input = timeline_issue_pack_input(&state);
+        let first_step = &input.action_guide.as_ref().unwrap().steps[0];
+
+        assert_eq!(first_step.title, "Open Preferences");
+        assert_eq!(
+            first_step.caption.as_deref(),
+            Some("The preferences window is opened for configuration.")
+        );
+    }
 }
