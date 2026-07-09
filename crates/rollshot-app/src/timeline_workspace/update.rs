@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use iced::Task;
 use rollshot_action::{
-    export_gif, export_guide, export_storyboard, export_video, render_storyboard, GifOptions,
-    StoryboardOptions, VideoOptions,
+    export_gif, export_guide, export_video, render_storyboard_steps, GifOptions, StoryboardError,
+    StoryboardOptions, StoryboardRenderResult, StoryboardStep, VideoOptions,
 };
 use rollshot_image_document::ImagePoint;
 
@@ -83,6 +83,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             Task::none()
         }
         Message::DeleteStep => {
+            let deleted_source = state.selected_step().map(|step| step.source);
             if let Some(index) = state.selected {
                 if state.guide.delete(index) {
                     let len = state.guide.steps().len();
@@ -90,12 +91,27 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.rebuild_selection_handles();
                 }
             }
+            if let Some(source) = deleted_source {
+                state.presentation.clear_for_source(source);
+            }
+            state
+                .presentation
+                .retain_sources(state.guide.steps().iter().map(|step| step.source));
             Task::none()
         }
         Message::ReplaceKeyframe(frame) => {
             if let Some(index) = state.selected {
+                let source = state.selected_step().map(|step| step.source);
                 if state.guide.replace_keyframe(index, frame) {
                     state.rebuild_selection_handles();
+                    if let Some(source) = source {
+                        if state.presentation.clear_for_source(source) {
+                            state.message = Some(
+                                "Step annotations were cleared because the keyframe changed."
+                                    .to_string(),
+                            );
+                        }
+                    }
                 }
             }
             Task::none()
@@ -173,7 +189,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::PreviewStoryboardRequested => {
             state.message = None;
-            match render_storyboard(&state.guide, &state.store, storyboard_preview_options()) {
+            match render_timeline_storyboard(state, storyboard_preview_options()) {
                 Ok(rendered) => {
                     tracing::info!(
                         target: "rollshot::action::preview",
@@ -215,22 +231,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::ExportStoryboardPathChosen(None) => Task::none(),
         Message::ExportStoryboardPathChosen(Some(path)) => {
-            match export_storyboard(
-                &state.guide,
-                &state.store,
-                StoryboardOptions::default(),
-                &path,
-            ) {
+            match write_storyboard_png(state, &path) {
                 Ok(result) => {
                     tracing::info!(
                         target: "rollshot::action::export",
-                        path = %result.path.display(),
+                        path = %path.display(),
                         steps = result.step_count,
                         width = result.width,
                         height = result.height,
                         "storyboard exported"
                     );
-                    state.message = Some(format!("Storyboard saved to {}", result.path.display()));
+                    state.message = Some(format!("Storyboard saved to {}", path.display()));
                 }
                 Err(error) => {
                     tracing::error!(
@@ -544,6 +555,82 @@ fn storyboard_preview_options() -> StoryboardOptions {
         max_canvas_pixels: 12_000_000,
         ..StoryboardOptions::default()
     }
+}
+
+fn render_timeline_storyboard(
+    state: &TimelineWorkspace,
+    opts: StoryboardOptions,
+) -> Result<StoryboardRenderResult, StoryboardError> {
+    if state.guide.is_empty() {
+        return Err(StoryboardError::Empty);
+    }
+
+    let mut images = Vec::with_capacity(state.guide.steps().len());
+    for (i, step) in state.guide.steps().iter().enumerate() {
+        let frame = state
+            .store
+            .retained(step.keyframe)
+            .ok_or(StoryboardError::KeyframeMissing { index: i + 1 })?;
+        let image = match state.presentation.doc(step.source) {
+            Some(doc)
+                if doc.keyframe == step.keyframe && !doc.document.annotations().is_empty() =>
+            {
+                doc.document.flatten()
+            }
+            _ => frame.image.clone(),
+        };
+        images.push(image);
+    }
+
+    let steps: Vec<_> = state
+        .guide
+        .steps()
+        .iter()
+        .zip(images.iter())
+        .map(|(step, image)| StoryboardStep {
+            index: step.index,
+            title: &step.title,
+            caption: {
+                let caption = step.caption.trim();
+                (!caption.is_empty()).then_some(caption)
+            },
+            image,
+        })
+        .collect();
+
+    render_storyboard_steps(&steps, opts)
+}
+
+fn write_storyboard_png(
+    state: &TimelineWorkspace,
+    path: &Path,
+) -> Result<StoryboardRenderResult, StoryboardError> {
+    let rendered = render_timeline_storyboard(state, StoryboardOptions::default())?;
+    write_storyboard_png_atomic(path, &rendered.image)?;
+    Ok(rendered)
+}
+
+fn write_storyboard_png_atomic(
+    path: &Path,
+    image: &image::RgbaImage,
+) -> Result<(), StoryboardError> {
+    let tmp = path.with_extension("png.tmp");
+    image
+        .save_with_format(&tmp, image::ImageFormat::Png)
+        .map_err(|source| {
+            let _ = std::fs::remove_file(&tmp);
+            StoryboardError::Encode {
+                path: tmp.display().to_string(),
+                source,
+            }
+        })?;
+    std::fs::rename(&tmp, path).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        StoryboardError::Io {
+            path: path.display().to_string(),
+            source,
+        }
+    })
 }
 
 async fn pick_export_dir(default_dir: PathBuf) -> Option<PathBuf> {
@@ -1232,5 +1319,70 @@ mod tests {
 
         assert!(state.annotation_session.is_none());
         assert!(state.presentation.has_annotations(source));
+    }
+
+    #[test]
+    fn storyboard_render_uses_flattened_annotation_pixels() {
+        let mut state = ws(recording_from_frames());
+        let before = render_timeline_storyboard(&state, storyboard_preview_options())
+            .expect("render before annotation")
+            .image;
+        let source = state.selected_step().unwrap().source;
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        assert!(state.presentation.has_annotations(source));
+
+        let after = render_timeline_storyboard(&state, storyboard_preview_options())
+            .expect("render after annotation")
+            .image;
+
+        assert_ne!(
+            before.as_raw(),
+            after.as_raw(),
+            "annotated render should differ from raw keyframe render"
+        );
+    }
+
+    #[test]
+    fn replacing_keyframe_clears_step_annotations_and_shows_banner() {
+        let mut state = ws(recording_from_frames());
+        let source = state.selected_step().unwrap().source;
+        let replacement = state
+            .strip
+            .iter()
+            .find(|f| Some(f.id) != state.selected_step().map(|step| step.keyframe))
+            .expect("replacement frame")
+            .id;
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        assert!(state.presentation.has_annotations(source));
+
+        let _ = update(&mut state, Message::ReplaceKeyframe(replacement));
+
+        assert!(!state.presentation.has_annotations(source));
+        assert_eq!(
+            state.message.as_deref(),
+            Some("Step annotations were cleared because the keyframe changed.")
+        );
+    }
+
+    #[test]
+    fn storyboard_export_error_leaves_no_target_file() {
+        let state = ws(recording_from_frames());
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("missing-parent");
+        let target = target_dir.join("storyboard.png");
+
+        let result = write_storyboard_png(&state, &target);
+
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert!(!target.with_extension("png.tmp").exists());
     }
 }
