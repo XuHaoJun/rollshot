@@ -17,6 +17,7 @@
 //! ```
 
 mod annotation;
+mod caption_agent;
 mod update;
 mod view;
 
@@ -104,7 +105,6 @@ pub struct TimelineWorkspace {
     /// True while a caption suggestion run is active.
     pub(crate) caption_suggestions_running: bool,
     /// Monotonic local run id for caption proposal provenance.
-    #[allow(dead_code)] // set by the agent runner in a later task
     pub(crate) caption_agent_run_id: u64,
 }
 

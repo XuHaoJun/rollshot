@@ -5,6 +5,7 @@
 
 use crate::models::{default_title, CandidateStep, FrameId, GuideStep};
 
+#[derive(Clone)]
 pub struct Guide {
     steps: Vec<GuideStep>,
 }

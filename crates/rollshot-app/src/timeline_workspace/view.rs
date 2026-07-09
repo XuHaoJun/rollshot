@@ -170,6 +170,16 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 button(text("Annotate Step"))
                     .on_press(Message::AnnotateStepRequested)
                     .style(button::secondary),
+                button(text(if state.caption_suggestions_running {
+                    "Suggesting Captions..."
+                } else {
+                    "Suggest Captions"
+                }))
+                .on_press_maybe(
+                    (!state.caption_suggestions_running)
+                        .then_some(Message::SuggestCaptionsRequested),
+                )
+                .style(button::secondary),
                 button(text("Delete step"))
                     .on_press(Message::DeleteStep)
                     .style(button::danger),

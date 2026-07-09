@@ -59,12 +59,12 @@ pub enum Message {
     AnnotationCanvasReleased(rollshot_image_document::ImagePoint),
     AnnotationDone,
     AnnotationCancel,
-    #[allow(dead_code)] // constructed by the agent runner in a later task
     CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
     AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId),
     RejectCaptionSuggestion(rollshot_action::CaptionSuggestionId),
     AcceptAllCaptionSuggestions,
     DismissCaptionProposal,
+    SuggestCaptionsRequested,
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -492,6 +492,53 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.caption_proposal = None;
             Task::none()
         }
+        Message::SuggestCaptionsRequested => {
+            if state.caption_suggestions_running {
+                return Task::none();
+            }
+            if state.guide.is_empty() {
+                state.message = Some("No reviewed steps to caption.".to_string());
+                return Task::none();
+            }
+            state.caption_agent_run_id = state.caption_agent_run_id.saturating_add(1);
+            let run_id = state.caption_agent_run_id;
+            let guide = state.guide.clone();
+            let cfg = match crate::daemon::config::rollshot_config_dir()
+                .map_err(|_| "Rollshot config directory is unavailable.".to_string())
+                .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
+            {
+                Ok(cfg) => cfg,
+                Err(error) => {
+                    state.message = Some(format!("Caption suggestions failed: {error}"));
+                    return Task::none();
+                }
+            };
+            if !crate::result_workspace::workbench::has_key(&cfg) {
+                state.message =
+                    Some("Configure an agent provider before suggesting captions.".to_string());
+                return Task::none();
+            }
+            let model = cfg.model.clone();
+            let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    state.message = Some(format!("Caption suggestions failed: {error}"));
+                    return Task::none();
+                }
+            };
+            state.caption_suggestions_running = true;
+            state.message = Some("Suggesting captions...".to_string());
+            tracing::info!(
+                target: "rollshot::action::caption_agent",
+                run_id,
+                step_count = guide.steps().len(),
+                "caption suggestion run started"
+            );
+            Task::perform(
+                super::caption_agent::suggest_captions_task(run_id, model, adapter, guide),
+                Message::CaptionProposalLoaded,
+            )
+        }
         Message::FfmpegSetupCancel => {
             state.ffmpeg_setup = None;
             Task::none()
@@ -838,6 +885,12 @@ mod tests {
         fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
             let old_value = std::env::var_os(name);
             std::env::set_var(name, value);
+            Self { name, old_value }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::remove_var(name);
             Self { name, old_value }
         }
     }
@@ -1558,5 +1611,21 @@ mod tests {
         assert!(result.is_err());
         assert!(!target.exists());
         assert!(!target.with_extension("png.tmp").exists());
+    }
+
+    #[test]
+    fn suggest_captions_without_provider_key_shows_recoverable_message() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(synthetic_recording(1));
+
+        let _ = update(&mut state, Message::SuggestCaptionsRequested);
+
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Configure an agent provider before suggesting captions.".to_string())
+        );
     }
 }
