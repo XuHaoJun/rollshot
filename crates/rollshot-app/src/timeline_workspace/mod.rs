@@ -39,6 +39,14 @@ pub(crate) struct FfmpegSetupDialog {
     pub downloading: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct StoryboardPreviewState {
+    pub handle: iced::widget::image::Handle,
+    pub width: u32,
+    pub height: u32,
+    pub step_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssuePackDialog {
     pub review_confirmed: bool,
@@ -84,6 +92,8 @@ pub struct TimelineWorkspace {
     pub(crate) keyframe_handle: Option<iced::widget::image::Handle>,
     /// Cached nearby-strip thumbnails for the selected step.
     pub(crate) strip: Vec<StripFrame>,
+    /// Storyboard preview modal state, if open.
+    pub(crate) storyboard_preview: Option<StoryboardPreviewState>,
 }
 
 impl TimelineWorkspace {
@@ -111,6 +121,7 @@ impl TimelineWorkspace {
             pending_discard: false,
             keyframe_handle: None,
             strip: Vec::new(),
+            storyboard_preview: None,
         };
         ws.rebuild_selection_handles();
         ws
