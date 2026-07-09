@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use iced::Task;
 use rollshot_action::{
-    export_gif, export_guide, export_storyboard, export_video, GifOptions, StoryboardOptions,
-    VideoOptions,
+    export_gif, export_guide, export_storyboard, export_video, render_storyboard, GifOptions,
+    StoryboardOptions, VideoOptions,
 };
 
 use super::TimelineWorkspace;
@@ -24,6 +24,8 @@ pub enum Message {
     ExportGifPathChosen(Option<PathBuf>),
     ExportStoryboardRequested,
     ExportStoryboardPathChosen(Option<PathBuf>),
+    PreviewStoryboardRequested,
+    PreviewStoryboardClosed,
     ExportMp4Requested,
     ExportMp4PathChosen(Option<PathBuf>),
     FfmpegUseSystem,
@@ -155,8 +157,43 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             // Export Guide afterwards.
             Task::none()
         }
+        Message::PreviewStoryboardRequested => {
+            state.message = None;
+            match render_storyboard(&state.guide, &state.store, storyboard_preview_options()) {
+                Ok(rendered) => {
+                    tracing::info!(
+                        target: "rollshot::action::preview",
+                        steps = rendered.step_count,
+                        width = rendered.width,
+                        height = rendered.height,
+                        "storyboard preview rendered"
+                    );
+                    state.storyboard_preview = Some(super::StoryboardPreviewState {
+                        handle: super::build_handle(&rendered.image),
+                        width: rendered.width,
+                        height: rendered.height,
+                        step_count: rendered.step_count,
+                    });
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::action::preview",
+                        %error,
+                        "storyboard preview failed"
+                    );
+                    state.storyboard_preview = None;
+                    state.message = Some(format!("Storyboard preview failed: {error}"));
+                }
+            }
+            Task::none()
+        }
+        Message::PreviewStoryboardClosed => {
+            state.storyboard_preview = None;
+            Task::none()
+        }
         Message::ExportStoryboardRequested => {
             state.message = None;
+            state.storyboard_preview = None;
             Task::perform(
                 pick_storyboard_save_path(picker_default_dir()),
                 Message::ExportStoryboardPathChosen,
@@ -401,6 +438,14 @@ fn export_to(state: &TimelineWorkspace, out_dir: &Path) -> Result<PathBuf, Strin
 /// Initial directory for the folder picker: the user's Pictures dir, or temp.
 fn picker_default_dir() -> PathBuf {
     dirs::picture_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+fn storyboard_preview_options() -> StoryboardOptions {
+    StoryboardOptions {
+        max_width: 800,
+        max_canvas_pixels: 12_000_000,
+        ..StoryboardOptions::default()
+    }
 }
 
 async fn pick_export_dir(default_dir: PathBuf) -> Option<PathBuf> {
@@ -933,5 +978,69 @@ mod tests {
             .ffmpeg_setup
             .as_ref()
             .is_some_and(|dialog| dialog.downloading));
+    }
+
+    #[test]
+    fn preview_storyboard_request_stores_rendered_preview() {
+        let mut state = ws(recording_from_frames());
+
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+
+        let preview = state.storyboard_preview.as_ref().expect("preview state");
+        assert_eq!(preview.step_count, state.guide.steps().len());
+        assert_eq!(preview.width, 800);
+        assert!(preview.height > 0);
+        assert!(
+            state.message.is_none(),
+            "unexpected banner: {:?}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn preview_storyboard_empty_guide_sets_recoverable_message() {
+        let mut state = ws(synthetic_recording(0));
+
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+
+        assert!(state.storyboard_preview.is_none());
+        assert!(
+            state
+                .message
+                .as_ref()
+                .is_some_and(|message| message.contains("Storyboard preview failed")),
+            "failure banner expected, got {:?}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn preview_storyboard_close_clears_preview_state() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        assert!(state.storyboard_preview.is_some());
+
+        let _ = update(&mut state, Message::PreviewStoryboardClosed);
+
+        assert!(state.storyboard_preview.is_none());
+    }
+
+    #[test]
+    fn preview_storyboard_reopen_reflects_renamed_steps() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        let first_height = state.storyboard_preview.as_ref().unwrap().height;
+
+        let _ = update(&mut state, Message::PreviewStoryboardClosed);
+        let _ = update(
+            &mut state,
+            Message::TitleChanged("A much longer title that changes label measurement".to_string()),
+        );
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+
+        let second = state.storyboard_preview.as_ref().expect("preview state");
+        assert_eq!(second.step_count, state.guide.steps().len());
+        assert_eq!(second.width, 800);
+        assert!(second.height >= first_height);
     }
 }
