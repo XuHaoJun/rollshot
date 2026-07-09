@@ -1211,6 +1211,7 @@ mod action_guide_tests {
 
     #[test]
     fn storyboard_export_failure_warns_without_blocking_issue_pack() {
+        // 260 steps at default keyframe size exceeds StoryboardOptions::default().max_canvas_pixels
         let (input, guide, store, region, capability, source_kind) = many_step_action_input(260);
         let tmp = tempfile::tempdir().unwrap();
         let action = ActionGuideExportSource {
@@ -1246,6 +1247,51 @@ mod action_guide_tests {
         );
         assert!(
             !manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn combined_screenshot_and_action_guide_includes_storyboard() {
+        let (mut input, guide, store, region, capability, source_kind) = action_input();
+        // Restore the final_image that action_input() clears
+        input.final_image = Some(SafeImageAsset {
+            file_name: "final-redacted.png".to_string(),
+            pixels: RgbaImage::from_pixel(2, 2, Rgba([1, 2, 3, 255])),
+            derived_from_original: true,
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert!(result.directory.join("images/final-redacted.png").exists());
+
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(
+            md.contains("Overview:\n\n![](action-guide/storyboard.png)"),
+            "md = {md}"
+        );
+        assert!(md.contains("![](images/final-redacted.png)"), "md = {md}");
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            manifest.contains("\"final_redacted_image\""),
             "manifest = {manifest}"
         );
     }
