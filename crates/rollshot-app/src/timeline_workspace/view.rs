@@ -506,7 +506,7 @@ mod tests {
 
         // Storyboard preview modal.
         let mut preview = ws(recording_from_frames(), InputCapability::SemanticEvents);
-        crate::timeline_workspace::update::update(
+        let _ = crate::timeline_workspace::update::update(
             &mut preview,
             Message::PreviewStoryboardRequested,
         );
