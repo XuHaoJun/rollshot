@@ -52,6 +52,14 @@ pub struct StoryboardExportResult {
     pub step_count: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct StoryboardStep<'a> {
+    pub index: usize,
+    pub title: &'a str,
+    pub caption: Option<&'a str>,
+    pub image: &'a RgbaImage,
+}
+
 #[derive(Debug, Clone)]
 pub struct StoryboardRenderResult {
     pub image: RgbaImage,
@@ -85,6 +93,30 @@ pub fn render_storyboard(
         return Err(StoryboardError::Empty);
     }
 
+    let mut steps = Vec::with_capacity(guide.steps().len());
+    for (i, step) in guide.steps().iter().enumerate() {
+        let retained = store
+            .retained(step.keyframe)
+            .ok_or(StoryboardError::KeyframeMissing { index: i + 1 })?;
+        steps.push(StoryboardStep {
+            index: step.index,
+            title: &step.title,
+            caption: non_empty_caption(&step.caption),
+            image: &retained.image,
+        });
+    }
+
+    render_storyboard_steps(&steps, opts)
+}
+
+pub fn render_storyboard_steps(
+    steps: &[StoryboardStep<'_>],
+    opts: StoryboardOptions,
+) -> Result<StoryboardRenderResult, StoryboardError> {
+    if steps.is_empty() {
+        return Err(StoryboardError::Empty);
+    }
+
     let canvas_width = opts.max_width;
     let card_width = canvas_width
         .checked_sub(opts.outer_padding.saturating_mul(2))
@@ -93,18 +125,17 @@ pub fn render_storyboard(
         .checked_sub(opts.card_padding.saturating_mul(2))
         .ok_or(StoryboardError::CanvasTooLarge)?;
 
-    let mut cards = Vec::with_capacity(guide.steps().len());
-    for (i, step) in guide.steps().iter().enumerate() {
-        let retained = store
-            .retained(step.keyframe)
-            .ok_or(StoryboardError::KeyframeMissing { index: i + 1 })?;
-        let image = downscale(&retained.image, content_width);
-        let label = step_label(i + 1, &step.title, opts.show_titles);
+    let mut cards = Vec::with_capacity(steps.len());
+    for step in steps {
+        let image = downscale(step.image, content_width);
+        let label = step_label(step.index, step.title, opts.show_titles);
         let label = fit_label(&label, content_width as f32);
         let (_, label_height) = measure_block(&label, LABEL_FONT_PX, true);
         let label_height = label_height.ceil() as u32;
 
-        let caption = non_empty_caption(&step.caption)
+        let caption = step
+            .caption
+            .and_then(non_empty_caption)
             .map(|caption| fit_caption(caption, content_width as f32));
         let caption_height = caption
             .as_ref()
@@ -133,6 +164,15 @@ pub fn render_storyboard(
         });
     }
 
+    render_cards(cards, opts, canvas_width, card_width)
+}
+
+fn render_cards(
+    cards: Vec<Card>,
+    opts: StoryboardOptions,
+    canvas_width: u32,
+    card_width: u32,
+) -> Result<StoryboardRenderResult, StoryboardError> {
     let mut canvas_height = opts
         .outer_padding
         .checked_mul(2)
@@ -158,39 +198,7 @@ pub fn render_storyboard(
     let mut y = opts.outer_padding;
     for (i, card) in cards.iter().enumerate() {
         draw_card(&mut canvas, opts.outer_padding, y, card_width, card.height);
-
-        let content_x = opts.outer_padding + opts.card_padding;
-        let mut content_y = y + opts.card_padding;
-        draw_text_block(
-            &mut canvas,
-            ImagePoint::new(content_x as f32, content_y as f32),
-            &card.label,
-            LABEL_FONT_PX,
-            true,
-            TEXT_COLOR,
-        );
-        let (_, label_height) = measure_block(&card.label, LABEL_FONT_PX, true);
-        content_y += label_height.ceil() as u32;
-        if let Some(caption) = &card.caption {
-            content_y += CAPTION_GAP;
-            draw_text_block(
-                &mut canvas,
-                ImagePoint::new(content_x as f32, content_y as f32),
-                caption,
-                CAPTION_FONT_PX,
-                false,
-                CAPTION_COLOR,
-            );
-            let (_, caption_height) = measure_block(caption, CAPTION_FONT_PX, false);
-            content_y += caption_height.ceil() as u32;
-        }
-        content_y += LABEL_GAP;
-        image::imageops::replace(
-            &mut canvas,
-            &card.image,
-            i64::from(content_x),
-            i64::from(content_y),
-        );
+        draw_card_content(&mut canvas, &opts, y, card);
 
         y += card.height;
         if i + 1 < cards.len() {
@@ -204,6 +212,41 @@ pub fn render_storyboard(
         height: canvas_height,
         step_count: cards.len(),
     })
+}
+
+fn draw_card_content(canvas: &mut RgbaImage, opts: &StoryboardOptions, y: u32, card: &Card) {
+    let content_x = opts.outer_padding + opts.card_padding;
+    let mut content_y = y + opts.card_padding;
+    draw_text_block(
+        canvas,
+        ImagePoint::new(content_x as f32, content_y as f32),
+        &card.label,
+        LABEL_FONT_PX,
+        true,
+        TEXT_COLOR,
+    );
+    let (_, label_height) = measure_block(&card.label, LABEL_FONT_PX, true);
+    content_y += label_height.ceil() as u32;
+    if let Some(caption) = &card.caption {
+        content_y += CAPTION_GAP;
+        draw_text_block(
+            canvas,
+            ImagePoint::new(content_x as f32, content_y as f32),
+            caption,
+            CAPTION_FONT_PX,
+            false,
+            CAPTION_COLOR,
+        );
+        let (_, caption_height) = measure_block(caption, CAPTION_FONT_PX, false);
+        content_y += caption_height.ceil() as u32;
+    }
+    content_y += LABEL_GAP;
+    image::imageops::replace(
+        canvas,
+        &card.image,
+        i64::from(content_x),
+        i64::from(content_y),
+    );
 }
 
 struct Card {
@@ -613,6 +656,49 @@ mod tests {
             measure_block(&caption, CAPTION_FONT_PX, false).0 <= 180.0,
             "caption should fit measured width: {caption}"
         );
+    }
+
+    #[test]
+    fn renders_storyboard_from_explicit_steps() {
+        let image = quadrant();
+        let steps = vec![StoryboardStep {
+            index: 1,
+            title: "Click Save",
+            caption: Some("The dialog closes but the value is not persisted."),
+            image: &image,
+        }];
+
+        let result = render_storyboard_steps(
+            &steps,
+            StoryboardOptions {
+                max_width: 320,
+                max_canvas_pixels: 1_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+        )
+        .expect("render explicit steps");
+
+        assert_eq!(result.width, 320);
+        assert_eq!(result.step_count, 1);
+        assert_eq!(result.image.width(), result.width);
+        assert_eq!(result.image.height(), result.height);
+        assert!(
+            result
+                .image
+                .pixels()
+                .any(|pixel| pixel.0 != [255, 255, 255, 255]),
+            "render should contain card, text, and image pixels"
+        );
+    }
+
+    #[test]
+    fn explicit_step_render_rejects_empty_steps() {
+        let result = render_storyboard_steps(&[], StoryboardOptions::default());
+
+        assert!(matches!(result, Err(StoryboardError::Empty)));
     }
 
     #[test]

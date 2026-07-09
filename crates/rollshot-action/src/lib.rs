@@ -37,7 +37,7 @@ pub use models::{
 };
 pub use recorder::{ActionRecorder, Recording};
 pub use storyboard::{
-    export_storyboard, render_storyboard, StoryboardExportResult, StoryboardOptions,
-    StoryboardRenderResult,
+    export_storyboard, render_storyboard, render_storyboard_steps, StoryboardExportResult,
+    StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
 pub use video::{export_video, VideoOptions};
