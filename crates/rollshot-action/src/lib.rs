@@ -36,5 +36,8 @@ pub use models::{
     MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
 };
 pub use recorder::{ActionRecorder, Recording};
-pub use storyboard::{export_storyboard, StoryboardExportResult, StoryboardOptions};
+pub use storyboard::{
+    export_storyboard, render_storyboard, StoryboardExportResult, StoryboardOptions,
+    StoryboardRenderResult,
+};
 pub use video::{export_video, VideoOptions};

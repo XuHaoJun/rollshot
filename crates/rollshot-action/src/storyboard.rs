@@ -49,12 +49,35 @@ pub struct StoryboardExportResult {
     pub step_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoryboardRenderResult {
+    pub image: RgbaImage,
+    pub width: u32,
+    pub height: u32,
+    pub step_count: usize,
+}
+
 pub fn export_storyboard(
     guide: &Guide,
     store: &FrameStore,
     opts: StoryboardOptions,
     out_path: &Path,
 ) -> Result<StoryboardExportResult, StoryboardError> {
+    let rendered = render_storyboard(guide, store, opts)?;
+    write_png_atomic(out_path, &rendered.image)?;
+    Ok(StoryboardExportResult {
+        path: out_path.to_path_buf(),
+        width: rendered.width,
+        height: rendered.height,
+        step_count: rendered.step_count,
+    })
+}
+
+pub fn render_storyboard(
+    guide: &Guide,
+    store: &FrameStore,
+    opts: StoryboardOptions,
+) -> Result<StoryboardRenderResult, StoryboardError> {
     if guide.is_empty() {
         return Err(StoryboardError::Empty);
     }
@@ -142,9 +165,8 @@ pub fn export_storyboard(
         }
     }
 
-    write_png_atomic(out_path, &canvas)?;
-    Ok(StoryboardExportResult {
-        path: out_path.to_path_buf(),
+    Ok(StoryboardRenderResult {
+        image: canvas,
         width: canvas_width,
         height: canvas_height,
         step_count: cards.len(),
@@ -427,5 +449,63 @@ mod tests {
 
         assert!(matches!(result, Err(StoryboardError::CanvasTooLarge)));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn renders_storyboard_in_memory_without_writing_a_file() {
+        let recording = recording();
+        let keyframe = recording.store.retained_ids_for_test()[0];
+        let mut guide = guide_with_steps(keyframe, 2);
+        assert!(guide.rename(1, "Open settings".to_string()));
+        assert!(guide.rename(2, "Save changes".to_string()));
+
+        let result = render_storyboard(
+            &guide,
+            &recording.store,
+            StoryboardOptions {
+                max_width: 320,
+                max_canvas_pixels: 1_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+        )
+        .expect("render storyboard");
+
+        assert_eq!(result.width, 320);
+        assert_eq!(result.image.width(), result.width);
+        assert_eq!(result.image.height(), result.height);
+        assert_eq!(result.step_count, 2);
+        assert!(
+            result
+                .image
+                .pixels()
+                .any(|pixel| pixel.0 != [255, 255, 255, 255]),
+            "render should contain labels/cards/images"
+        );
+    }
+
+    #[test]
+    fn render_empty_guide_is_rejected() {
+        let recording = recording();
+        let guide = Guide::from_candidates(Vec::new());
+
+        let result = render_storyboard(&guide, &recording.store, StoryboardOptions::default());
+
+        assert!(matches!(result, Err(StoryboardError::Empty)));
+    }
+
+    #[test]
+    fn render_missing_keyframe_is_rejected() {
+        let store = FrameStore::new(StoreConfig::default());
+        let guide = guide_with_steps(999, 1);
+
+        let result = render_storyboard(&guide, &store, StoryboardOptions::default());
+
+        assert!(matches!(
+            result,
+            Err(StoryboardError::KeyframeMissing { index: 1 })
+        ));
     }
 }
