@@ -23,6 +23,12 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
         body
     };
 
+    let body = if state.storyboard_preview.is_some() {
+        storyboard_preview_modal(body, state)
+    } else {
+        body
+    };
+
     let body = if state.ffmpeg_setup.is_some() {
         ffmpeg_setup_modal(body, state)
     } else {
@@ -69,6 +75,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             .style(button::secondary),
         button(text("Export GIF"))
             .on_press(Message::ExportGifRequested)
+            .style(button::secondary),
+        button(text("Preview Storyboard"))
+            .on_press(Message::PreviewStoryboardRequested)
             .style(button::secondary),
         button(text("Export Storyboard"))
             .on_press(Message::ExportStoryboardRequested)
@@ -261,6 +270,74 @@ fn issue_pack_modal<'a>(
     stack![base, scrim].into()
 }
 
+fn storyboard_preview_modal<'a>(
+    base: Element<'a, Message>,
+    state: &'a TimelineWorkspace,
+) -> Element<'a, Message> {
+    let preview = state
+        .storyboard_preview
+        .as_ref()
+        .expect("checked by caller");
+    let preview_image = image(preview.handle.clone())
+        .width(Length::Fill)
+        .height(Length::Shrink);
+
+    let dialog_view = container(
+        column![
+            row![
+                text("Preview Storyboard").size(18),
+                Space::new().width(Length::Fill),
+                text(format!(
+                    "{} steps · {}×{}",
+                    preview.step_count, preview.width, preview.height
+                ))
+                .size(12),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            container(scrollable(preview_image))
+                .width(Length::Fill)
+                .height(Length::Fixed(520.0))
+                .style(container::rounded_box),
+            row![
+                button(text("Export PNG"))
+                    .on_press(Message::ExportStoryboardRequested)
+                    .style(button::primary),
+                button(text("Close")).on_press(Message::PreviewStoryboardClosed),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12),
+    )
+    .padding(20)
+    .width(Length::Fixed(760.0))
+    .style(container::rounded_box);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog_view))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::PreviewStoryboardClosed),
+    );
+
+    stack![base, scrim].into()
+}
+
 fn ffmpeg_setup_modal<'a>(
     base: Element<'a, Message>,
     state: &'a TimelineWorkspace,
@@ -426,6 +503,15 @@ mod tests {
         degraded.message = Some("export failed: disk full".to_string());
         degraded.pending_discard = true;
         let _ = view(&degraded);
+
+        // Storyboard preview modal.
+        let mut preview = ws(recording_from_frames(), InputCapability::SemanticEvents);
+        crate::timeline_workspace::update::update(
+            &mut preview,
+            Message::PreviewStoryboardRequested,
+        );
+        assert!(preview.storyboard_preview.is_some());
+        let _ = view(&preview);
 
         // Empty guide / no selection.
         let empty = ws(synthetic_recording(0), InputCapability::SemanticEvents);

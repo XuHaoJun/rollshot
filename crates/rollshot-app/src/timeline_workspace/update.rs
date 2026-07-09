@@ -990,7 +990,11 @@ mod tests {
         assert_eq!(preview.step_count, state.guide.steps().len());
         assert_eq!(preview.width, 800);
         assert!(preview.height > 0);
-        assert!(state.message.is_none(), "unexpected banner: {:?}", state.message);
+        assert!(
+            state.message.is_none(),
+            "unexpected banner: {:?}",
+            state.message
+        );
     }
 
     #[test]
