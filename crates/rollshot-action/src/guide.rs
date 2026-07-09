@@ -164,10 +164,7 @@ mod tests {
     #[test]
     fn set_caption_persists_and_unknown_index_is_rejected() {
         let mut g = Guide::from_candidates(vec![cand(0, CandidateKind::Click, 5, vec![5])]);
-        assert!(g.set_caption(
-            1,
-            "Settings close but the value is not saved.".to_string()
-        ));
+        assert!(g.set_caption(1, "Settings close but the value is not saved.".to_string()));
         assert_eq!(
             g.steps()[0].caption,
             "Settings close but the value is not saved."

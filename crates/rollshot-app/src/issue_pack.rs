@@ -75,6 +75,7 @@ pub(crate) struct ActionGuideExportSource<'a> {
     pub include_gif: bool,
 }
 
+#[cfg(feature = "action-guide")]
 fn non_empty_caption(caption: &str) -> Option<String> {
     let caption = caption.trim();
     (!caption.is_empty()).then(|| caption.to_string())
