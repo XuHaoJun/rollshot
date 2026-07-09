@@ -478,6 +478,19 @@ fn build_folder(
         )
         .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
 
+        let storyboard_path = tmp_dir.join("action-guide/storyboard.png");
+        if let Err(error) = rollshot_action::export_storyboard(
+            action.guide,
+            action.store,
+            rollshot_action::StoryboardOptions::default(),
+            &storyboard_path,
+        ) {
+            warnings.push(IssuePackWarning {
+                code: "storyboard_export_failed".to_string(),
+                message: format!("Storyboard export failed: {error}"),
+            });
+        }
+
         if action.include_gif {
             let gif_path = tmp_dir.join("action-guide/guide.gif");
             if let Err(error) = rollshot_action::export_gif(
@@ -911,9 +924,15 @@ mod tests {
         let input = action_guide_input_with_one_step(false);
         let md = render_issue_markdown(&input, true);
 
-        assert!(md.contains("Overview:\n\n![](action-guide/storyboard.png)"), "md = {md}");
+        assert!(
+            md.contains("Overview:\n\n![](action-guide/storyboard.png)"),
+            "md = {md}"
+        );
         assert!(md.contains("1. Open Settings"), "md = {md}");
-        assert!(md.contains("![](action-guide/keyframes/001.png)"), "md = {md}");
+        assert!(
+            md.contains("![](action-guide/keyframes/001.png)"),
+            "md = {md}"
+        );
     }
 
     #[test]
@@ -938,7 +957,10 @@ mod tests {
         );
 
         let with_storyboard = manifest_assets(&input, true, true);
-        let paths: Vec<_> = with_storyboard.iter().map(|asset| asset.path.as_str()).collect();
+        let paths: Vec<_> = with_storyboard
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
         assert!(
             paths.contains(&"action-guide/storyboard.png"),
             "paths = {paths:?}"
@@ -1030,39 +1052,6 @@ mod action_guide_tests {
     }
 
     #[test]
-    fn export_folder_includes_action_guide_folder() {
-        let (input, guide, store, region, capability, source_kind) = action_input();
-        let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-        };
-
-        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
-
-        assert!(result.directory.join("action-guide/steps.md").exists());
-        assert!(result.directory.join("action-guide/session.json").exists());
-        assert!(result
-            .directory
-            .join("action-guide/keyframes/001.png")
-            .exists());
-        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
-        assert!(
-            md.contains("![](action-guide/keyframes/001.png)"),
-            "md = {md}"
-        );
-        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
-        assert!(
-            manifest.contains("\"action_keyframe\""),
-            "manifest = {manifest}"
-        );
-    }
-
-    #[test]
     fn action_guide_only_missing_keyframe_rolls_back_temp_output() {
         let (mut input, _guide, store, region, capability, source_kind) = action_input();
         let guide = Guide::from_candidates(vec![CandidateStep {
@@ -1113,6 +1102,180 @@ mod action_guide_tests {
         assert!(
             !manifest.contains("redacted_keyframe"),
             "manifest = {manifest}"
+        );
+    }
+
+    fn many_step_action_input(
+        count: usize,
+    ) -> (
+        IssuePackInput,
+        Guide,
+        FrameStore,
+        CaptureRegion,
+        InputCapability,
+        InputSourceKind,
+    ) {
+        let mut store = FrameStore::new(StoreConfig {
+            ring_capacity: count + 16,
+            analysis_capacity: 8,
+            analysis_width: 384,
+            window_before: 0,
+            window_after: 0,
+            nearby_max: 1,
+        });
+        let mut candidates = Vec::with_capacity(count);
+        for i in 0..count {
+            let id = store.ingest(quadrant(), i as u64 * 100);
+            store.retain_window(id);
+            candidates.push(CandidateStep {
+                id,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: i as u64 * 100,
+                keyframe: id,
+                nearby: vec![id],
+            });
+        }
+        let guide = Guide::from_candidates(candidates);
+        let mut input = super::tests::base_input();
+        input.final_image = None;
+        input.evidence_review.result_workspace_images_reviewed = false;
+        input.evidence_review.action_guide_keyframes_reviewed = true;
+        input.redaction.result_workspace_images_are_flattened = false;
+        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, false));
+        (
+            input,
+            guide,
+            store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+        )
+    }
+
+    #[test]
+    fn export_folder_includes_action_guide_folder() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result.directory.join("action-guide/steps.md").exists());
+        assert!(result.directory.join("action-guide/session.json").exists());
+        assert!(result
+            .directory
+            .join("action-guide/keyframes/001.png")
+            .exists());
+        assert!(result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert!(
+            result.warnings.is_empty(),
+            "warnings = {:?}",
+            result.warnings
+        );
+
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(
+            md.contains("![](action-guide/keyframes/001.png)"),
+            "md = {md}"
+        );
+        assert!(
+            md.contains("Overview:\n\n![](action-guide/storyboard.png)"),
+            "md = {md}"
+        );
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"action_keyframe\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            manifest.contains("\"action-guide/storyboard.png\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn storyboard_export_failure_warns_without_blocking_issue_pack() {
+        let (input, guide, store, region, capability, source_kind) = many_step_action_input(260);
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+
+        assert!(result.directory.join("action-guide/steps.md").exists());
+        assert!(result
+            .directory
+            .join("action-guide/keyframes/001.png")
+            .exists());
+        assert!(!result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code, "storyboard_export_failed");
+
+        let md = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(!md.contains("action-guide/storyboard.png"), "md = {md}");
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"storyboard_export_failed\""),
+            "manifest = {manifest}"
+        );
+        assert!(
+            !manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    #[test]
+    fn export_zip_with_action_guide_includes_storyboard() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let tmp = tempfile::tempdir().unwrap();
+        let action = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+        };
+
+        let result = export_zip_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let zip_path = result.zip_path.clone().expect("zip path");
+        let file = std::fs::File::open(zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        names.sort();
+
+        assert!(
+            names.contains(&"action-guide/storyboard.png".to_string()),
+            "names = {names:?}"
         );
     }
 }
