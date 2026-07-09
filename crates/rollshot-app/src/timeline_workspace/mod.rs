@@ -16,6 +16,7 @@
 //! Done  (exit; temporary assets dropped on app exit)
 //! ```
 
+mod annotation;
 mod update;
 mod view;
 
@@ -94,6 +95,12 @@ pub struct TimelineWorkspace {
     pub(crate) strip: Vec<StripFrame>,
     /// Storyboard preview modal state, if open.
     pub(crate) storyboard_preview: Option<StoryboardPreviewState>,
+    /// Per-step annotation documents keyed by `GuideStep.source`.
+    #[expect(dead_code)]
+    pub(crate) presentation: annotation::ActionGuidePresentation,
+    /// Active annotation editing session, if the modal is open.
+    #[expect(dead_code)]
+    pub(crate) annotation_session: Option<annotation::StepAnnotationSession>,
 }
 
 impl TimelineWorkspace {
@@ -122,6 +129,8 @@ impl TimelineWorkspace {
             keyframe_handle: None,
             strip: Vec::new(),
             storyboard_preview: None,
+            presentation: annotation::ActionGuidePresentation::new(),
+            annotation_session: None,
         };
         ws.rebuild_selection_handles();
         ws
