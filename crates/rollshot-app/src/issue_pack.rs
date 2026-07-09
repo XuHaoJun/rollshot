@@ -73,6 +73,7 @@ pub(crate) struct ActionGuideExportSource<'a> {
     pub capability: rollshot_action::InputCapability,
     pub source_kind: rollshot_action::InputSourceKind,
     pub include_gif: bool,
+    pub storyboard_image: Option<image::RgbaImage>,
 }
 
 #[cfg(feature = "action-guide")]
@@ -488,12 +489,20 @@ fn build_folder(
         .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
 
         let storyboard_path = tmp_dir.join("action-guide/storyboard.png");
-        if let Err(error) = rollshot_action::export_storyboard(
-            action.guide,
-            action.store,
-            rollshot_action::StoryboardOptions::default(),
-            &storyboard_path,
-        ) {
+        let storyboard_result = if let Some(image) = action.storyboard_image.as_ref() {
+            write_optional_storyboard_image(&storyboard_path, image)
+                .map_err(|error| error.to_string())
+        } else {
+            rollshot_action::export_storyboard(
+                action.guide,
+                action.store,
+                rollshot_action::StoryboardOptions::default(),
+                &storyboard_path,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        };
+        if let Err(error) = storyboard_result {
             warnings.push(IssuePackWarning {
                 code: "storyboard_export_failed".to_string(),
                 message: format!("Storyboard export failed: {error}"),
@@ -534,6 +543,27 @@ fn swap_folder(tmp_dir: &Path, final_dir: &Path) -> Result<(), IssuePackError> {
         std::fs::remove_dir_all(final_dir).map_err(|e| IssuePackError::Io(e.to_string()))?;
     }
     std::fs::rename(tmp_dir, final_dir).map_err(|e| IssuePackError::Io(e.to_string()))
+}
+
+#[cfg(feature = "action-guide")]
+fn write_optional_storyboard_image(
+    path: &Path,
+    image: &RgbaImage,
+) -> Result<(), image::ImageError> {
+    let tmp = path.with_extension("png.tmp");
+    match image.save_with_format(&tmp, image::ImageFormat::Png) {
+        Ok(()) => {
+            if let Err(error) = std::fs::rename(&tmp, path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(image::ImageError::IoError(error));
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn export_zip(
@@ -1126,6 +1156,7 @@ mod action_guide_tests {
             capability,
             source_kind,
             include_gif: false,
+            storyboard_image: None,
         };
 
         let err = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap_err();
@@ -1145,6 +1176,7 @@ mod action_guide_tests {
             capability,
             source_kind,
             include_gif: false,
+            storyboard_image: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
@@ -1219,6 +1251,7 @@ mod action_guide_tests {
             capability,
             source_kind,
             include_gif: false,
+            storyboard_image: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
@@ -1276,6 +1309,7 @@ mod action_guide_tests {
             capability,
             source_kind,
             include_gif: false,
+            storyboard_image: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
@@ -1323,6 +1357,7 @@ mod action_guide_tests {
             capability,
             source_kind,
             include_gif: false,
+            storyboard_image: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
@@ -1362,6 +1397,7 @@ mod action_guide_tests {
             capability,
             source_kind,
             include_gif: false,
+            storyboard_image: None,
         };
 
         let result = export_zip_with_action_guide(&input, Some(action), tmp.path()).unwrap();
@@ -1378,5 +1414,32 @@ mod action_guide_tests {
             names.contains(&"action-guide/storyboard.png".to_string()),
             "names = {names:?}"
         );
+    }
+
+    #[test]
+    fn action_guide_issue_pack_uses_supplied_storyboard_image() {
+        let (input, guide, store, region, capability, source_kind) = action_input();
+        let temp = tempfile::tempdir().unwrap();
+        let storyboard = image::RgbaImage::from_pixel(16, 16, image::Rgba([17, 34, 51, 255]));
+        let source = ActionGuideExportSource {
+            guide: &guide,
+            store: &store,
+            region,
+            capability,
+            source_kind,
+            include_gif: false,
+            storyboard_image: Some(storyboard),
+        };
+
+        let result =
+            export_folder_with_action_guide(&input, Some(source), temp.path()).expect("issue pack");
+
+        let decoded =
+            image::ImageReader::open(result.directory.join("action-guide/storyboard.png"))
+                .unwrap()
+                .decode()
+                .unwrap()
+                .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [17, 34, 51, 255]);
     }
 }

@@ -720,6 +720,9 @@ fn timeline_issue_pack_action(
         .issue_pack
         .as_ref()
         .is_some_and(|dialog| dialog.include_gif);
+    let storyboard_image = render_timeline_storyboard(state, StoryboardOptions::default())
+        .ok()
+        .map(|r| r.image);
     crate::issue_pack::ActionGuideExportSource {
         guide: &state.guide,
         store: &state.store,
@@ -727,6 +730,7 @@ fn timeline_issue_pack_action(
         capability: state.capability,
         source_kind: state.source_kind,
         include_gif,
+        storyboard_image,
     }
 }
 
