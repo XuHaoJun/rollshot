@@ -6,6 +6,7 @@
 //! only privacy-filtered data: never raw key codes, typed text, device names,
 //! or device paths. See `docs/superpowers/specs/2026-06-15-action-guide-capture-design.md`.
 
+pub mod callout_proposal;
 pub mod caption_proposal;
 mod detector;
 mod diagnostics;
@@ -22,6 +23,11 @@ mod recorder;
 mod storyboard;
 mod video;
 
+pub use callout_proposal::{
+    CalloutApplyOutcome, CalloutProposal, CalloutProposalError, CalloutProposalId,
+    CalloutProposalProvenance, CalloutSuggestion, CalloutSuggestionBase, CalloutSuggestionDraft,
+    CalloutSuggestionId, CalloutSuggestionStatus,
+};
 pub use caption_proposal::{
     CaptionApplyOutcome, CaptionProposal, CaptionProposalId, CaptionProposalProvenance,
     CaptionSuggestion, CaptionSuggestionDraft, CaptionSuggestionId, CaptionSuggestionStatus,

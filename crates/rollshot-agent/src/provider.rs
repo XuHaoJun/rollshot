@@ -107,6 +107,18 @@ fn build_completion_request(request: ModelRequest) -> Result<CompletionRequest, 
         chat_history.push(Message::user(&request.prompt));
     }
 
+    if !request.attachments.is_empty() {
+        let images = request
+            .attachments
+            .iter()
+            .map(attachment_to_rig)
+            .collect::<Vec<_>>();
+        chat_history.push(Message::User {
+            content: rig_core::OneOrMany::many(images)
+                .map_err(|e| ModelError::ProtocolFailure(e.to_string()))?,
+        });
+    }
+
     let chat_history = rig_core::OneOrMany::many(chat_history)
         .map_err(|e| ModelError::ProtocolFailure(e.to_string()))?;
 
@@ -197,6 +209,14 @@ fn sanitize_error(msg: &str) -> String {
     } else {
         msg.to_string()
     }
+}
+
+fn attachment_to_rig(attachment: &crate::model::ModelAttachment) -> UserContent {
+    let media_type = match attachment.media_type() {
+        crate::domain::MediaType::Png => rig_core::message::ImageMediaType::PNG,
+        crate::domain::MediaType::Jpeg => rig_core::message::ImageMediaType::JPEG,
+    };
+    UserContent::image_raw(attachment.bytes().to_vec(), Some(media_type), None)
 }
 
 pub struct OpenAIAdapter {
@@ -381,5 +401,113 @@ where
                 },
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_request() -> ModelRequest {
+        ModelRequest {
+            model: "vision-model".into(),
+            prompt: "Locate the target".into(),
+            history: vec![],
+            turn: 1,
+            tool_definitions: vec![],
+            system_prompt: None,
+            max_tokens: Some(100),
+            attachments: vec![crate::model::ModelAttachment::new(
+                crate::domain::MediaType::Png,
+                1,
+                1,
+                std::sync::Arc::from([1_u8, 2_u8]),
+            )],
+        }
+    }
+
+    fn assert_has_raw_png(request: CompletionRequest) {
+        let last = request.chat_history.iter().last().expect("image message");
+        let Message::User { content } = last else {
+            panic!("last message must be user image")
+        };
+        assert!(matches!(
+            content.iter().next().expect("image content"),
+            UserContent::Image(rig_core::message::Image {
+                data: rig_core::message::DocumentSourceKind::Raw(bytes),
+                media_type: Some(rig_core::message::ImageMediaType::PNG),
+                ..
+            }) if bytes == &vec![1, 2]
+        ));
+    }
+
+    #[test]
+    fn provider_request_contains_image() {
+        assert_has_raw_png(build_completion_request(image_request()).unwrap());
+    }
+
+    #[test]
+    fn openai_provider_request_contains_image_and_serial_tool_calls() {
+        let request = build_openai_completion_request(image_request()).unwrap();
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({"parallel_tool_calls": false}))
+        );
+        assert_has_raw_png(request);
+    }
+
+    #[test]
+    fn text_only_request_preserves_previous_chat_history() {
+        let request = ModelRequest {
+            model: "m".into(),
+            prompt: "hello".into(),
+            history: vec![],
+            turn: 1,
+            tool_definitions: vec![],
+            system_prompt: None,
+            max_tokens: None,
+            attachments: vec![],
+        };
+        let result = build_completion_request(request).unwrap();
+        assert_eq!(result.chat_history.iter().count(), 1);
+        let last = result.chat_history.iter().next().unwrap();
+        let Message::User { content } = last else {
+            panic!("expected user message")
+        };
+        assert!(matches!(
+            content.iter().next().unwrap(),
+            UserContent::Text(t) if t.text == "hello"
+        ));
+    }
+
+    #[test]
+    fn image_request_debug_redacts_raw_bytes() {
+        let request = image_request();
+        let debug = format!("{request:?}");
+        assert!(
+            !debug.contains("AQI="),
+            "debug must not contain base64 of attachment bytes: {debug}"
+        );
+        assert!(
+            !debug.contains("1, 2]"),
+            "debug must not contain raw attachment bytes: {debug}"
+        );
+    }
+
+    #[test]
+    fn jpeg_attachment_maps_to_rig_jpeg() {
+        let attachment = crate::model::ModelAttachment::new(
+            crate::domain::MediaType::Jpeg,
+            1,
+            1,
+            std::sync::Arc::from([0xff_u8, 0xd8_u8]),
+        );
+        assert!(matches!(
+            attachment_to_rig(&attachment),
+            UserContent::Image(rig_core::message::Image {
+                media_type: Some(rig_core::message::ImageMediaType::JPEG),
+                ..
+            })
+        ));
     }
 }

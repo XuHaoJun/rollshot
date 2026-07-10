@@ -166,6 +166,7 @@ async fn suggest_captions_with_timeout(
                 .to_string(),
         ),
         max_tokens: Some(1200),
+        attachments: vec![],
     };
 
     let mut stream = tokio::time::timeout_at(deadline, adapter.stream(request, bounds))

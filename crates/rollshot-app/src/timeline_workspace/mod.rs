@@ -17,6 +17,7 @@
 //! ```
 
 mod annotation;
+mod callout_agent;
 mod caption_agent;
 mod update;
 mod view;
@@ -72,6 +73,59 @@ pub(crate) struct StripFrame {
     pub handle: iced::widget::image::Handle,
 }
 
+/// State machine for the agent callout suggestion flow.
+///
+/// ```text
+///   Idle ──► Running ──► Pending       (proposal ready for review)
+///               │     ──► NoSuggestion  (model declined with a reason)
+///               │     ──► Failed        (provider/protocol/budget error)
+///               └────────► Idle          (user cancelled)
+///   Pending / NoSuggestion / Failed ──► Idle  (accepted, rejected, or replaced keyframe)
+/// ```
+///
+/// `run_id` is the monotonic local id from `callout_agent_run_id`. The
+/// loaded arm in `update.rs` only accepts a result whose `run_id` matches
+/// the current `Running` state, which protects against late completions
+/// from older cancelled or timed-out runs overwriting newer ones.
+#[derive(Debug)]
+#[allow(dead_code)] // Variants are read by Task 8's view; only the update path uses them in Task 7.
+pub(crate) enum CalloutSuggestionState {
+    Idle,
+    Running {
+        run_id: u64,
+        cancellation: rollshot_agent::runtime::RunCancellation,
+    },
+    Pending(rollshot_action::CalloutProposal),
+    NoSuggestion {
+        reason: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl CalloutSuggestionState {
+    /// `true` while a callout run is in flight. The view disables manual
+    /// annotation tools and the canvas mutator while this is true.
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+
+    /// `true` when a proposal is ready for review. The view shows the
+    /// `Accept`/`Reject` controls and the ghost canvas projection.
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+
+    /// The pending proposal, if one is staged for review.
+    pub(crate) fn proposal(&self) -> Option<&rollshot_action::CalloutProposal> {
+        match self {
+            Self::Pending(proposal) => Some(proposal),
+            _ => None,
+        }
+    }
+}
+
 /// The Action Guide review/export workspace. Owns the editable guide and the
 /// frame store moved out of the finished `Recording`.
 pub struct TimelineWorkspace {
@@ -106,6 +160,12 @@ pub struct TimelineWorkspace {
     pub(crate) caption_suggestions_running: bool,
     /// Monotonic local run id for caption proposal provenance.
     pub(crate) caption_agent_run_id: u64,
+    /// Current callout suggestion state. See [`CalloutSuggestionState`].
+    #[allow(dead_code)] // Read by Task 8's view; only the update path uses it in Task 7.
+    pub(crate) callout_suggestion: CalloutSuggestionState,
+    /// Monotonic local run id for callout suggestion provenance.
+    #[allow(dead_code)] // Read by Task 8's view; only the update path uses it in Task 7.
+    pub(crate) callout_agent_run_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -139,6 +199,8 @@ impl TimelineWorkspace {
             caption_proposal: None,
             caption_suggestions_running: false,
             caption_agent_run_id: 0,
+            callout_suggestion: CalloutSuggestionState::Idle,
+            callout_agent_run_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
