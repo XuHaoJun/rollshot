@@ -2,6 +2,59 @@ use serde::{Deserialize, Serialize};
 
 // ---------- Public model types (no Rig types) ----------
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelAttachment {
+    media_type: crate::domain::MediaType,
+    width: u32,
+    height: u32,
+    bytes: std::sync::Arc<[u8]>,
+}
+
+#[allow(dead_code)] // Accessors used by provider adapters in later tasks
+impl ModelAttachment {
+    pub(crate) fn new(
+        media_type: crate::domain::MediaType,
+        width: u32,
+        height: u32,
+        bytes: std::sync::Arc<[u8]>,
+    ) -> Self {
+        Self {
+            media_type,
+            width,
+            height,
+            bytes,
+        }
+    }
+
+    pub(crate) fn media_type(&self) -> crate::domain::MediaType {
+        self.media_type
+    }
+
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl std::fmt::Debug for ModelAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelAttachment")
+            .field("media_type", &self.media_type)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("byte_count", &self.bytes.len())
+            .field("bytes", &"<redacted-attachment>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequest {
     pub model: String,
@@ -11,6 +64,7 @@ pub struct ModelRequest {
     pub tool_definitions: Vec<ToolDefinition>,
     pub system_prompt: Option<String>,
     pub max_tokens: Option<u64>,
+    pub attachments: Vec<ModelAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +184,7 @@ fn rig_call_model_to_request(
         tool_definitions,
         system_prompt: None,
         max_tokens: None,
+        attachments: vec![],
     }
 }
 
@@ -861,5 +916,39 @@ pub(crate) mod tests {
         assert!(
             matches!(&completions[0], ModelStreamEvent::ToolCallComplete { id, name, .. } if id == "tc_1" && name == "add")
         );
+    }
+
+    // ---- Test 9: ModelAttachment Debug redaction ----
+
+    #[test]
+    fn model_attachment_debug_redacts_bytes() {
+        let attachment = ModelAttachment::new(
+            crate::domain::MediaType::Png,
+            2,
+            3,
+            std::sync::Arc::from(b"PRIVATE_IMAGE_BYTES".as_slice()),
+        );
+
+        let debug = format!("{attachment:?}");
+        assert!(debug.contains("Png"));
+        assert!(debug.contains("byte_count"));
+        assert!(!debug.contains("PRIVATE_IMAGE_BYTES"));
+    }
+
+    // ---- Test 10: ModelRequest::attachments is empty for text-only requests ----
+
+    #[test]
+    fn text_request_has_no_attachments() {
+        let request = ModelRequest {
+            model: "m".into(),
+            prompt: "p".into(),
+            history: vec![],
+            turn: 1,
+            tool_definitions: vec![],
+            system_prompt: None,
+            max_tokens: None,
+            attachments: vec![],
+        };
+        assert!(request.attachments.is_empty());
     }
 }

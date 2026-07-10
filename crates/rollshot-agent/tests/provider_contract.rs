@@ -55,6 +55,7 @@ fn test_request(tools: Vec<ToolDefinition>) -> ModelRequest {
         tool_definitions: tools,
         system_prompt: None,
         max_tokens: None,
+        attachments: vec![],
     }
 }
 

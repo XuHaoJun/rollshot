@@ -89,6 +89,10 @@ pub enum InputError {
     UnsupportedMediaType,
     #[error("too many attachments: got {got}, max {max}")]
     AttachmentCountOverflow { got: usize, max: usize },
+    #[error("declared byte count {declared} does not match actual payload length {actual}")]
+    ByteCountMismatch { declared: u64, actual: u64 },
+    #[error("attachment dimensions must be non-zero: {width}x{height}")]
+    InvalidDimensions { width: u32, height: u32 },
     #[error("attachment too large: {bytes} bytes exceeds {max} byte limit")]
     PerAttachmentOverflow { bytes: u64, max: u64 },
     #[error("total attachment bytes {bytes} exceeds {max} byte limit")]
@@ -123,6 +127,25 @@ impl AuthorizedModelInput {
                 max: MAX_ATTACHMENTS,
             });
         }
+        for (desc, payload) in descriptors.iter().zip(attachment_bytes.iter()) {
+            if desc.width == 0 || desc.height == 0 {
+                return Err(InputError::InvalidDimensions {
+                    width: desc.width,
+                    height: desc.height,
+                });
+            }
+            let actual =
+                u64::try_from(payload.len()).map_err(|_| InputError::PerAttachmentOverflow {
+                    bytes: desc.byte_count,
+                    max: MAX_BYTES_PER_ATTACHMENT,
+                })?;
+            if actual != desc.byte_count {
+                return Err(InputError::ByteCountMismatch {
+                    declared: desc.byte_count,
+                    actual,
+                });
+            }
+        }
         for desc in &descriptors {
             if desc.byte_count > MAX_BYTES_PER_ATTACHMENT {
                 return Err(InputError::PerAttachmentOverflow {
@@ -152,6 +175,23 @@ impl AuthorizedModelInput {
 
     pub fn attachments(&self) -> &[Vec<u8>] {
         &self.attachments
+    }
+
+    #[allow(dead_code)] // Used by the callout runner in a later task
+    pub(crate) fn take_model_attachments(&mut self) -> Vec<crate::model::ModelAttachment> {
+        self.manifest
+            .descriptors
+            .iter()
+            .zip(std::mem::take(&mut self.attachments))
+            .map(|(descriptor, bytes)| {
+                crate::model::ModelAttachment::new(
+                    descriptor.media_type,
+                    descriptor.width,
+                    descriptor.height,
+                    std::sync::Arc::from(bytes),
+                )
+            })
+            .collect()
     }
 }
 
@@ -362,7 +402,7 @@ mod tests {
                 height: 1,
                 byte_count: oversize,
             }],
-            vec![vec![0u8; 1]],
+            vec![vec![0u8; oversize as usize]],
         );
         match result.unwrap_err() {
             InputError::PerAttachmentOverflow { bytes, max } => {
@@ -413,7 +453,7 @@ mod tests {
                     byte_count: big,
                 },
             ],
-            vec![vec![0u8; 1]; 5],
+            vec![vec![0u8; big as usize]; 5],
         );
         match result.unwrap_err() {
             InputError::TotalByteOverflow { bytes, max } => {
@@ -456,7 +496,7 @@ mod tests {
                 height: 10,
                 byte_count: 50,
             }],
-            vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
+            vec![vec![0xDE; 50]],
         )
         .unwrap();
         let dbg = format!("{input:?}");
@@ -529,5 +569,76 @@ mod tests {
         let dbg = format!("{session:?}");
         assert!(dbg.contains("q"));
         assert!(dbg.contains("a"));
+    }
+
+    #[test]
+    fn authorized_input_builds_model_attachments_without_revalidation() {
+        let mut input = AuthorizedModelInput::new(
+            "anthropic".into(),
+            "vision-model".into(),
+            "inspect".into(),
+            vec![AttachmentDescriptor {
+                media_type: MediaType::Png,
+                width: 2,
+                height: 3,
+                byte_count: 4,
+            }],
+            vec![vec![1, 2, 3, 4]],
+        )
+        .unwrap();
+
+        let attachments = input.take_model_attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].media_type(), MediaType::Png);
+        assert_eq!(attachments[0].bytes(), &[1, 2, 3, 4]);
+        assert!(input.attachments().is_empty());
+    }
+
+    #[test]
+    fn rejects_declared_byte_count_that_does_not_match_payload() {
+        let error = AuthorizedModelInput::new(
+            "anthropic".into(),
+            "m".into(),
+            "p".into(),
+            vec![AttachmentDescriptor {
+                media_type: MediaType::Png,
+                width: 1,
+                height: 1,
+                byte_count: 1,
+            }],
+            vec![vec![1, 2]],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            InputError::ByteCountMismatch {
+                declared: 1,
+                actual: 2
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_zero_sized_attachment_dimensions() {
+        let error = AuthorizedModelInput::new(
+            "anthropic".into(),
+            "m".into(),
+            "p".into(),
+            vec![AttachmentDescriptor {
+                media_type: MediaType::Png,
+                width: 0,
+                height: 1,
+                byte_count: 1,
+            }],
+            vec![vec![1]],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            InputError::InvalidDimensions {
+                width: 0,
+                height: 1
+            }
+        );
     }
 }

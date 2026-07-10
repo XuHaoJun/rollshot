@@ -872,6 +872,7 @@ impl AgentRunner {
             tool_definitions: tool_definitions.to_vec(),
             system_prompt: Some(SMART_REDACTION_SYSTEM_PROMPT.to_string()),
             max_tokens: None,
+            attachments: vec![],
         };
 
         let mut stream = provider
