@@ -27,7 +27,7 @@ This phase completes the visual-proposal portion of the Action Guide Storyboard 
 - Agent-controlled bubble placement or annotation numbering.
 - Prompt-driven annotation.
 - URL, file-ID, video, PDF, or general-purpose media input.
-- Replacing Rollshot's provider abstraction with Rig providers.
+- Replacing Rollshot's provider-neutral request, event, authorization, or error contracts with Rig types.
 - Exposing Rig types through Rollshot public APIs.
 - Automatically applying agent output to an `ImageDocument`.
 
@@ -80,7 +80,7 @@ Ownership remains explicit:
 - `rollshot-action` owns the step-bound callout proposal, provenance, status transitions, and staleness checks that depend on Guide identity.
 - `rollshot-app` owns selected-step orchestration and annotation-modal interaction.
 - `rollshot-image-document` remains the only source of truth for committed annotations and history.
-- Rig remains an internal sans-I/O turn state machine. Rollshot does not adopt Rig provider types or provider implementations.
+- Rig remains internal. The existing Rollshot adapters may continue using Rig provider clients and image conversion internally, while Rollshot-owned request, event, authorization, error, budget, and privacy contracts remain the public boundary.
 
 ## Provider-Neutral Image Input
 
@@ -105,7 +105,7 @@ pub struct ModelAttachment {
 - Anthropic and OpenAI adapters convert the provider-neutral attachment into their native image payloads.
 - Provider adapters must report unsupported image input as a recoverable provider/model capability failure. The app must not fall back to a text-only coordinate guess.
 
-Rig 0.39.0 image messages and provider conversions are reference implementations for media representation and payload mapping. Rollshot retains its own public contract, streaming adapters, authorization, and privacy rules.
+Rig 0.39.0 image messages and provider conversions are the internal transport used by the existing adapters. Rollshot retains its own public contract, adapter behavior, authorization, and privacy rules; no Rig message or provider type crosses that boundary.
 
 ## Bounded Agent Run
 
