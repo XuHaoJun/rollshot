@@ -20,6 +20,24 @@
 - Use stable `rollshot::app::storyboard_copy` tracing with structured fields; never log pixels, title/caption text, paths, or clipboard payloads.
 - Check the shared Linux and macOS Timeline paths. If only one clipboard runtime can be tested, record the unchecked platform and risk.
 
+## What Already Exists
+
+- `result_workspace::actions::copy_image` already converts `RgbaImage` to arboard RGBA image data and writes it; move this code instead of creating another backend.
+- Result Workspace already owns safe/original copy policy and `CopyFinished` messaging; preserve those behaviors and change only the helper path.
+- `render_timeline_storyboard`, `render_storyboard_steps`, preview options, and export defaults already produce the exact Storyboard content; refactor input ownership without adding a renderer.
+- `ActionGuidePresentation` already selects flattened annotated frames while `FrameStore` owns reviewed raw keyframes; reuse the same selection rules.
+- The preview modal and its Export/Close actions already exist in shared Linux/macOS iced code.
+- arboard 3.6.1 explicitly permits Clipboard instances on separate threads. Its Linux backend owns platform-specific clipboard hosting; retain the current `set_image` semantics rather than adding a Rollshot clipboard daemon.
+
+## NOT in Scope
+
+- Timeline-header or keyboard-shortcut Copy entry points: the preview modal is the single reviewed-output entry point.
+- Reduced-resolution, adaptive, or user-selectable clipboard quality: Copy must match Export PNG defaults.
+- Persistent global Clipboard ownership or a Rollshot clipboard daemon: existing arboard behavior remains authoritative.
+- Clipboard formats other than one RGBA image: no Markdown, HTML, text, PDF, or file-reference payload.
+- Compact/grid layout, batch sharing, telemetry, or clipboard history: none is required to copy the current Storyboard.
+- Refactoring FrameStore or ImageDocument to `Arc`: synchronous snapshot clone/flatten remains bounded to an explicit Copy click.
+
 ---
 
 ## File Structure
@@ -282,11 +300,62 @@ pub(crate) async fn render_and_copy(
 ) -> Result<StoryboardCopyResult, String>;
 ```
 
-Tests must assert the callback receives the same width/height as `render_storyboard_input(input, StoryboardOptions::default())`, annotations are present, and a renderer error never invokes the callback. Use an `AtomicBool` or `Cell<bool>` fake; do not access the real clipboard.
+Tests must assert the callback receives the exact pixels produced by `render_storyboard_input(input, StoryboardOptions::default())`, annotations are present, clipboard failure is returned with the `Couldn't copy Storyboard:` prefix, and a renderer error never invokes the callback. Use `Rc<RefCell<Option<RgbaImage>>>` for the synchronous test callback and `Cell<bool>` for the no-call assertion; do not access the real clipboard.
+
+```rust
+#[test]
+fn copy_pipeline_matches_export_quality_pixels() {
+    let input = one_step_input();
+    let expected = render_storyboard_input(
+        &input,
+        rollshot_action::StoryboardOptions::default(),
+    ).unwrap();
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let output = std::rc::Rc::clone(&captured);
+
+    let result = render_and_copy_with(input, move |image| {
+        *output.borrow_mut() = Some(image.clone());
+        Ok(())
+    }).unwrap();
+
+    assert_eq!(captured.borrow().as_ref(), Some(&expected.image));
+    assert_eq!((result.width, result.height), (expected.width, expected.height));
+    assert_eq!(result.step_count, expected.step_count);
+}
+
+#[test]
+fn renderer_failure_does_not_call_clipboard() {
+    let called = std::cell::Cell::new(false);
+    let result = render_and_copy_with(
+        StoryboardCopyInput { steps: vec![] },
+        |_| { called.set(true); Ok(()) },
+    );
+    assert!(result.is_err());
+    assert!(!called.get());
+}
+```
+
+Define `one_step_input()` in the same test module with a 4x4 synthetic RGBA image, title, and caption so the expected output is deterministic.
 
 - [ ] **Step 6: Implement the copy task**
 
-`render_and_copy_with` renders with `StoryboardOptions::default()`, maps the typed renderer error to a safe string, invokes the supplied callback once, and returns only `StoryboardCopyResult`. Construct the metadata before the callback returns, then drop `StoryboardRenderResult::image` inside the worker; never send the bitmap through an iced message. `render_and_copy` calls it with `crate::image_clipboard::copy_rgba_image` and prefixes clipboard failures with `Couldn't copy Storyboard:`.
+`render_and_copy_with` renders with `StoryboardOptions::default()`, maps the typed renderer error to a safe string, invokes the supplied callback once, and returns only `StoryboardCopyResult`. Construct the metadata before the callback returns, then drop `StoryboardRenderResult::image` inside the worker; never send the bitmap through an iced message.
+
+`render_and_copy` must explicitly move synchronous CPU/clipboard work to Tokio's blocking pool:
+
+```rust
+pub(crate) async fn render_and_copy(
+    input: StoryboardCopyInput,
+) -> Result<StoryboardCopyResult, String> {
+    tokio::task::spawn_blocking(move || {
+        render_and_copy_with(input, crate::image_clipboard::copy_rgba_image)
+    })
+    .await
+    .map_err(|_| "Storyboard copy worker failed.".to_string())?
+}
+```
+
+Prefix clipboard failures inside `render_and_copy_with` with `Couldn't copy Storyboard:`. Do not use `arboard::SetExtLinux::wait()`: waiting forever would prevent the iced completion message, and the existing app helper already relies on arboard's default Linux hosting behavior.
 
 - [ ] **Step 7: Run focused and regression tests**
 
@@ -364,6 +433,15 @@ Expected: FAIL because the preview state and messages do not contain Copy lifecy
 - [ ] **Step 3: Add state and messages**
 
 Add `copy_state: StoryboardCopyState` to `StoryboardPreviewState` and `storyboard_copy_operation_id: u64` to `TimelineWorkspace`. Initialize preview state with `Idle` and the workspace counter with `0`.
+
+Place this maintained state diagram in the enum's doc comment:
+
+```text
+Idle ───────────────► Copying(id) ──success──► Copied(id) ──delay──► Idle
+ ▲                         │
+ │                         └─failure────────► Failed(id) ──retry──► Copying(new id)
+ └──────────────── modal close drops the entire preview state ────────────────
+```
 
 Add messages:
 
@@ -601,3 +679,52 @@ rtk git commit -m "fix(action): harden storyboard clipboard copy"
 ```
 
 If no fix was required, do not create an empty commit.
+
+---
+
+## Test Coverage Matrix
+
+| Task / behavior | Unit | Integration | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / RGBA-to-arboard dimensions and byte order | yes | no | no | no |
+| Task 1 / Result Workspace helper migration | existing unit/state tests | app module regression | no | real paste unchanged |
+| Task 2 / reviewed order, captions, raw/flattened frames | yes | Timeline synthetic recording | no | no |
+| Task 2 / Copy pixels equal export-quality render | exact synthetic pixel equality | renderer adapter | no | no |
+| Task 2 / renderer and clipboard errors | yes | injectable callback | no | no |
+| Task 3 / ID allocation, duplicate suppression, retry, late completion/clear | yes | Timeline update state | no | no |
+| Task 4 / modal labels, enablement, and local error | yes | preview modal state | no | visual layout |
+| Task 5 / Linux and macOS clipboard interoperability | prior automated suites | full app flow | platform paste smoke | target-app behavior |
+
+Automated tests use synthetic images, synthetic recordings, direct messages, and injected copy callbacks. They do not require a compositor, display server, native clipboard, wall-clock sleep, network, or real capture session.
+
+## Failure Modes
+
+| New codepath | Production failure | Test | Handling | User result |
+|---|---|---|---|---|
+| Shared clipboard conversion | dimensions/bytes are mapped incorrectly | Task 1 Steps 1-4 | pure borrowed `ImageData` conversion | prevented by exact unit assertion |
+| Result Workspace helper move | safe/original copy policy changes accidentally | Task 1 Steps 5-6 | call sites only; payload selection untouched | existing messages and policy remain |
+| Storyboard snapshot | Guide empty or reviewed keyframe missing | Task 2 Steps 1-3 | typed `StoryboardError` before task launch | modal-local retryable failure |
+| Export-quality render | final canvas exceeds 24M pixels | Task 2 Steps 5-7 | renderer error, callback not invoked | `Failed` with Retry; no downsample |
+| Blocking worker | worker panics or Tokio join fails | Task 2 Step 6 | fixed `Storyboard copy worker failed.` error | modal-local failure |
+| Clipboard backend | unavailable, occupied, or rejects image | Task 2 Steps 5-7; Task 5 smoke | prefixed recoverable error | `Couldn't copy Storyboard` and Retry |
+| Concurrent/retried Copy | older completion arrives after newer request | Task 3 Step 5 | operation-ID equality guard | old result silently ignored by design |
+| Modal close | task finishes after preview state is dropped | Task 3 Step 5 | absent modal guard | no stale UI resurrection |
+| Delayed success clear | timer from old success fires during newer state | Task 3 Step 5 | operation-ID equality guard | newer state remains visible |
+| Linux clipboard hosting | pasted data disappears or target rejects image/png | Task 5 Step 3 | arboard default hosting plus runtime paste check | implementation cannot claim Linux completion if smoke fails |
+| macOS pasteboard | background-thread write or target paste fails | Task 5 Step 4 | arboard Send/Sync contract plus runtime paste check | platform risk explicitly reported |
+
+No identified failure is both untested and silently unhandled.
+
+## Performance and Resource Review
+
+- Snapshot clone/flatten is synchronous and explicit; it is the minimum ownership transfer needed for a `'static` iced task without refactoring FrameStore/ImageDocument to shared ownership.
+- Storyboard layout, rasterization, and arboard write run in `tokio::task::spawn_blocking`, not directly inside an async future or iced update.
+- The copy pipeline owns one image per reviewed step and one final canvas. The final canvas remains capped at 24,000,000 pixels (about 96 MiB RGBA).
+- The final bitmap is consumed inside the blocking worker and only width/height/step count return through the iced message queue.
+- `ImageData` borrows the final bitmap for `set_image`; Rollshot creates no extra RGBA copy. Linux arboard may internally encode PNG, which is platform-owned and bounded by the final-canvas cap.
+- Duplicate clicks are suppressed while `Copying`, so one modal cannot create parallel full-canvas renders or competing clipboard writes.
+- Bubble/layout algorithms and capture/stitching hot paths are unchanged; no benchmark suite is required.
+
+## Execution Strategy
+
+Sequential execution, no parallelization opportunity. All behavioral tasks modify `crates/rollshot-app`, Tasks 2-4 repeatedly touch Timeline Workspace state/update/view, and each task consumes the previous task's interface. Fresh subagents may execute tasks one at a time, but concurrent edits or commits in the shared checkout would create avoidable conflicts. No root workspace or distribution artifact changes are planned.
