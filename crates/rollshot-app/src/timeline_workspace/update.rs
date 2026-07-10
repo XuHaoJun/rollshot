@@ -59,6 +59,12 @@ pub enum Message {
     AnnotationCanvasReleased(rollshot_image_document::ImagePoint),
     AnnotationDone,
     AnnotationCancel,
+    CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
+    AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId),
+    RejectCaptionSuggestion(rollshot_action::CaptionSuggestionId),
+    AcceptAllCaptionSuggestions,
+    DismissCaptionProposal,
+    SuggestCaptionsRequested,
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -428,6 +434,111 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.annotation_session = None;
             Task::none()
         }
+        Message::CaptionProposalLoaded(Ok(proposal)) => {
+            state.caption_suggestions_running = false;
+            state.caption_proposal = Some(proposal);
+            state.message = Some("Caption suggestions ready for review.".to_string());
+            Task::none()
+        }
+        Message::CaptionProposalLoaded(Err(error)) => {
+            state.caption_suggestions_running = false;
+            state.message = Some(format!("Caption suggestions failed: {error}"));
+            Task::none()
+        }
+        Message::AcceptCaptionSuggestion(id) => {
+            let Some(proposal) = &mut state.caption_proposal else {
+                return Task::none();
+            };
+            match proposal.apply(&mut state.guide, id) {
+                rollshot_action::CaptionApplyOutcome::Applied => {
+                    state.message = Some("Caption suggestion accepted.".to_string());
+                }
+                rollshot_action::CaptionApplyOutcome::Stale => {
+                    state.message =
+                        Some("Caption suggestion is stale; regenerate suggestions.".to_string());
+                }
+                rollshot_action::CaptionApplyOutcome::Missing
+                | rollshot_action::CaptionApplyOutcome::NotPending => {}
+            }
+            Task::none()
+        }
+        Message::RejectCaptionSuggestion(id) => {
+            if let Some(proposal) = &mut state.caption_proposal {
+                proposal.reject(id);
+            }
+            Task::none()
+        }
+        Message::AcceptAllCaptionSuggestions => {
+            if let Some(proposal) = &mut state.caption_proposal {
+                let outcomes = proposal.apply_all(&mut state.guide);
+                let applied = outcomes
+                    .iter()
+                    .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Applied)
+                    .count();
+                let stale = outcomes
+                    .iter()
+                    .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Stale)
+                    .count();
+                state.message = Some(match stale {
+                    0 => format!("Accepted {applied} caption suggestions."),
+                    _ => format!(
+                        "Accepted {applied} caption suggestions; {stale} stale suggestions skipped."
+                    ),
+                });
+            }
+            Task::none()
+        }
+        Message::DismissCaptionProposal => {
+            state.caption_proposal = None;
+            Task::none()
+        }
+        Message::SuggestCaptionsRequested => {
+            if state.caption_suggestions_running {
+                return Task::none();
+            }
+            if state.guide.is_empty() {
+                state.message = Some("No reviewed steps to caption.".to_string());
+                return Task::none();
+            }
+            state.caption_agent_run_id = state.caption_agent_run_id.saturating_add(1);
+            let run_id = state.caption_agent_run_id;
+            let guide = state.guide.clone();
+            let cfg = match crate::daemon::config::rollshot_config_dir()
+                .map_err(|_| "Rollshot config directory is unavailable.".to_string())
+                .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
+            {
+                Ok(cfg) => cfg,
+                Err(error) => {
+                    state.message = Some(format!("Caption suggestions failed: {error}"));
+                    return Task::none();
+                }
+            };
+            if !crate::result_workspace::workbench::has_key(&cfg) {
+                state.message =
+                    Some("Configure an agent provider before suggesting captions.".to_string());
+                return Task::none();
+            }
+            let model = cfg.model.clone();
+            let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    state.message = Some(format!("Caption suggestions failed: {error}"));
+                    return Task::none();
+                }
+            };
+            state.caption_suggestions_running = true;
+            state.message = Some("Suggesting captions...".to_string());
+            tracing::info!(
+                target: "rollshot::action::caption_agent",
+                run_id,
+                step_count = guide.steps().len(),
+                "caption suggestion run started"
+            );
+            Task::perform(
+                super::caption_agent::suggest_captions_task(run_id, model, adapter, guide),
+                Message::CaptionProposalLoaded,
+            )
+        }
         Message::FfmpegSetupCancel => {
             state.ffmpeg_setup = None;
             Task::none()
@@ -774,6 +885,12 @@ mod tests {
         fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
             let old_value = std::env::var_os(name);
             std::env::set_var(name, value);
+            Self { name, old_value }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::remove_var(name);
             Self { name, old_value }
         }
     }
@@ -1376,6 +1493,112 @@ mod tests {
         );
     }
 
+    fn caption_proposal_for_first_step(
+        state: &TimelineWorkspace,
+    ) -> rollshot_action::CaptionProposal {
+        rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            &state.guide,
+            vec![rollshot_action::CaptionSuggestionDraft {
+                step_source: state.guide.steps()[0].source,
+                title: Some("Open Settings".to_string()),
+                caption: "The settings panel appears.".to_string(),
+                confidence: 0.8,
+                rationale: Some("The click begins the settings flow.".to_string()),
+            }],
+        )
+    }
+
+    #[test]
+    fn caption_proposal_loaded_stores_review_state() {
+        let mut state = ws(synthetic_recording(1));
+        state.caption_suggestions_running = true;
+        let proposal = caption_proposal_for_first_step(&state);
+
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+
+        assert!(state.caption_proposal.is_some());
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Caption suggestions ready for review.".to_string())
+        );
+    }
+
+    #[test]
+    fn caption_proposal_loaded_error_clears_running_state() {
+        let mut state = ws(synthetic_recording(1));
+        state.caption_suggestions_running = true;
+
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Err("invalid caption JSON".to_string())),
+        );
+
+        assert!(state.caption_proposal.is_none());
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Caption suggestions failed: invalid caption JSON".to_string())
+        );
+    }
+
+    #[test]
+    fn accepting_caption_suggestion_updates_guide() {
+        let mut state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let step = state.selected_step().unwrap();
+        assert_eq!(step.title, "Open Settings");
+        assert_eq!(step.caption, "The settings panel appears.");
+    }
+
+    #[test]
+    fn rejecting_caption_suggestion_does_not_update_guide() {
+        let mut state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+
+        let _ = update(
+            &mut state,
+            Message::RejectCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let step = state.selected_step().unwrap();
+        assert_eq!(step.title, "Click");
+        assert_eq!(step.caption, "");
+    }
+
+    #[test]
+    fn accepting_stale_caption_suggestion_shows_message() {
+        let mut state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::TitleChanged("Manual title".to_string()),
+        );
+
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        assert_eq!(state.selected_step().unwrap().title, "Manual title");
+        assert_eq!(state.selected_step().unwrap().caption, "");
+        assert_eq!(
+            state.message,
+            Some("Caption suggestion is stale; regenerate suggestions.".to_string())
+        );
+    }
+
     #[test]
     fn storyboard_export_error_leaves_no_target_file() {
         let state = ws(recording_from_frames());
@@ -1388,5 +1611,83 @@ mod tests {
         assert!(result.is_err());
         assert!(!target.exists());
         assert!(!target.with_extension("png.tmp").exists());
+    }
+
+    #[test]
+    fn suggest_captions_without_provider_key_shows_recoverable_message() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(synthetic_recording(1));
+
+        let _ = update(&mut state, Message::SuggestCaptionsRequested);
+
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Configure an agent provider before suggesting captions.".to_string())
+        );
+    }
+
+    #[test]
+    fn accepted_caption_suggestion_is_used_by_storyboard_renderer() {
+        let mut state = ws(recording_from_frames());
+        let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            &state.guide,
+            vec![rollshot_action::CaptionSuggestionDraft {
+                step_source: state.guide.steps()[0].source,
+                title: Some("Open Preferences".to_string()),
+                caption: "The preferences window is opened for configuration.".to_string(),
+                confidence: 0.8,
+                rationale: None,
+            }],
+        );
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let rendered = render_timeline_storyboard(&state, storyboard_preview_options())
+            .expect("storyboard renders after accepting caption");
+
+        assert_eq!(rendered.step_count, state.guide.steps().len());
+        assert_eq!(
+            state.guide.steps()[0].caption,
+            "The preferences window is opened for configuration."
+        );
+    }
+
+    #[test]
+    fn accepted_caption_suggestion_is_used_by_issue_pack_input() {
+        let mut state = ws(recording_from_frames());
+        let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            &state.guide,
+            vec![rollshot_action::CaptionSuggestionDraft {
+                step_source: state.guide.steps()[0].source,
+                title: Some("Open Preferences".to_string()),
+                caption: "The preferences window is opened for configuration.".to_string(),
+                confidence: 0.8,
+                rationale: None,
+            }],
+        );
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+        );
+
+        let input = timeline_issue_pack_input(&state);
+        let first_step = &input.action_guide.as_ref().unwrap().steps[0];
+
+        assert_eq!(first_step.title, "Open Preferences");
+        assert_eq!(
+            first_step.caption.as_deref(),
+            Some("The preferences window is opened for configuration.")
+        );
     }
 }
