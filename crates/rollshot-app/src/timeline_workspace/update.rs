@@ -484,10 +484,32 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             Task::none()
         }
         Message::AnnotationDone => {
+            // Closing the annotation session must also clear any pending
+            // callout state: an accepted or rejected proposal is no longer
+            // reachable, and a still-running run's late result would be
+            // dropped by the run_id guard anyway. Reset both the state and
+            // the local run id so a fresh request gets a fresh run id.
+            state.callout_suggestion = super::CalloutSuggestionState::Idle;
+            state.callout_agent_run_id = 0;
             state.annotation_session = None;
             Task::none()
         }
         Message::AnnotationCancel => {
+            // The scrim and the explicit "Close" button both arrive here. If
+            // a callout run is in flight, cancel it first so the async task
+            // exits cleanly. A pending proposal is discarded — the user
+            // chose to close the modal, so any in-flight review is dropped.
+            match &state.callout_suggestion {
+                super::CalloutSuggestionState::Running { cancellation, .. } => {
+                    cancellation.cancel();
+                }
+                super::CalloutSuggestionState::Pending(_)
+                | super::CalloutSuggestionState::NoSuggestion { .. }
+                | super::CalloutSuggestionState::Failed { .. } => {}
+                super::CalloutSuggestionState::Idle => {}
+            }
+            state.callout_suggestion = super::CalloutSuggestionState::Idle;
+            state.callout_agent_run_id = 0;
             state.annotation_session = None;
             Task::none()
         }
@@ -2781,5 +2803,215 @@ mod tests {
             other => panic!("expected Running, got {other:?}"),
         }
         assert_eq!(state.callout_agent_run_id, 1);
+    }
+
+    // ---- Task 8: view/state predicates and modal close routing ----
+
+    #[test]
+    fn callout_state_predicates_cover_running_pending_and_terminal() {
+        let mut state = ws(recording_from_frames());
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Idle;
+        assert!(!state.callout_suggestion.is_running());
+        assert!(!state.callout_suggestion.is_pending());
+        assert!(state.callout_suggestion.proposal().is_none());
+
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Running {
+            run_id: 1,
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        };
+        assert!(state.callout_suggestion.is_running());
+        assert!(!state.callout_suggestion.is_pending());
+
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+        assert!(state.callout_suggestion.is_pending());
+        assert!(state.callout_suggestion.proposal().is_some());
+
+        state.callout_suggestion =
+            crate::timeline_workspace::CalloutSuggestionState::NoSuggestion { reason: None };
+        assert!(!state.callout_suggestion.is_pending());
+        assert!(state.callout_suggestion.proposal().is_none());
+
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Failed {
+            message: "boom".to_string(),
+        };
+        assert!(!state.callout_suggestion.is_pending());
+    }
+
+    #[test]
+    fn running_callout_state_disables_mutation_predicate() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Running {
+            run_id: 1,
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        };
+
+        // The view predicate: while a callout is running, mutation must be
+        // disabled. The canvas enforces this via `mutation_allowed`, so the
+        // pure state predicate here is `is_running() || is_pending()`.
+        let mutation_allowed =
+            !state.callout_suggestion.is_running() && !state.callout_suggestion.is_pending();
+
+        assert!(!mutation_allowed, "Running must disable mutation");
+    }
+
+    #[test]
+    fn pending_callout_state_enables_accept_and_reject_predicates() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+
+        assert!(state.callout_suggestion.is_pending());
+        assert!(state.callout_suggestion.proposal().is_some());
+    }
+
+    #[test]
+    fn rejecting_callout_proposal_restores_idle_state() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+
+        let _ = update(&mut state, Message::RejectCalloutSuggestion);
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn accepting_callout_proposal_disappears_from_state() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+        assert!(state.callout_suggestion.is_pending());
+
+        let _ = update(&mut state, Message::AcceptCalloutSuggestion);
+
+        assert!(!state.callout_suggestion.is_pending());
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn annotation_done_clears_pending_callout_state() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+        state.callout_agent_run_id = 5;
+
+        let _ = update(&mut state, Message::AnnotationDone);
+
+        assert!(state.annotation_session.is_none());
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert_eq!(state.callout_agent_run_id, 0);
+    }
+
+    #[test]
+    fn annotation_done_clears_no_suggestion_and_failed_states() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion =
+            crate::timeline_workspace::CalloutSuggestionState::NoSuggestion { reason: None };
+        state.callout_agent_run_id = 3;
+
+        let _ = update(&mut state, Message::AnnotationDone);
+
+        assert!(state.annotation_session.is_none());
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert_eq!(state.callout_agent_run_id, 0);
+    }
+
+    #[test]
+    fn annotation_cancel_during_running_callout_invokes_cancellation() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let cancellation = rollshot_agent::runtime::RunCancellation::new();
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Running {
+            run_id: 1,
+            cancellation: cancellation.clone(),
+        };
+        state.callout_agent_run_id = 1;
+
+        let _ = update(&mut state, Message::AnnotationCancel);
+
+        assert!(
+            cancellation.is_cancelled(),
+            "running callout must be cancelled"
+        );
+        assert!(state.annotation_session.is_none());
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert_eq!(state.callout_agent_run_id, 0);
+    }
+
+    #[test]
+    fn annotation_cancel_discards_pending_proposal() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+
+        let _ = update(&mut state, Message::AnnotationCancel);
+
+        assert!(state.annotation_session.is_none());
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn annotation_cancel_when_idle_just_closes_session() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+
+        let _ = update(&mut state, Message::AnnotationCancel);
+
+        assert!(state.annotation_session.is_none());
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
     }
 }

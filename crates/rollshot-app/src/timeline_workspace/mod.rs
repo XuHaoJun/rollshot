@@ -104,6 +104,28 @@ pub(crate) enum CalloutSuggestionState {
     },
 }
 
+impl CalloutSuggestionState {
+    /// `true` while a callout run is in flight. The view disables manual
+    /// annotation tools and the canvas mutator while this is true.
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+
+    /// `true` when a proposal is ready for review. The view shows the
+    /// `Accept`/`Reject` controls and the ghost canvas projection.
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+
+    /// The pending proposal, if one is staged for review.
+    pub(crate) fn proposal(&self) -> Option<&rollshot_action::CalloutProposal> {
+        match self {
+            Self::Pending(proposal) => Some(proposal),
+            _ => None,
+        }
+    }
+}
+
 /// The Action Guide review/export workspace. Owns the editable guide and the
 /// frame store moved out of the finished `Recording`.
 pub struct TimelineWorkspace {

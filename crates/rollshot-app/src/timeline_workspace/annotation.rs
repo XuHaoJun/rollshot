@@ -132,6 +132,13 @@ pub(crate) struct NumberAnnotationCanvas<'a> {
     pub document: &'a ImageDocument,
     pub draft: Option<AnnotationDraft>,
     pub scale: f32,
+    /// Optional non-mutating ghost projection of a pending callout
+    /// proposal. The canvas renders it with reduced alpha and a small
+    /// `Suggested` label so the user can review before accepting.
+    pub suggested: Option<Annotation>,
+    /// When `false`, the canvas does not publish pointer events; manual
+    /// annotation tools and canvas mutation are suspended.
+    pub mutation_allowed: bool,
 }
 
 impl NumberAnnotationCanvas<'_> {
@@ -140,6 +147,15 @@ impl NumberAnnotationCanvas<'_> {
     }
 
     fn draw_annotation(&self, frame: &mut canvas::Frame, annotation: &Annotation) {
+        self.draw_annotation_with_alpha(frame, annotation, 1.0);
+    }
+
+    fn draw_annotation_with_alpha(
+        &self,
+        frame: &mut canvas::Frame,
+        annotation: &Annotation,
+        alpha: f32,
+    ) {
         for shape in annotation_shapes(annotation) {
             match shape {
                 RenderShape::Circle {
@@ -153,11 +169,11 @@ impl NumberAnnotationCanvas<'_> {
                         Point::new(center.x * self.scale, center.y * self.scale),
                         radius * self.scale,
                     );
-                    frame.fill(&path, rgba(fill));
+                    frame.fill(&path, rgba_alpha(fill, alpha));
                     frame.stroke(
                         &path,
                         canvas::Stroke::default()
-                            .with_color(rgba(outline))
+                            .with_color(rgba_alpha(outline, alpha))
                             .with_width(outline_width * self.scale),
                     );
                 }
@@ -177,7 +193,7 @@ impl NumberAnnotationCanvas<'_> {
                         ));
                         builder.close();
                     });
-                    frame.fill(&path, rgba(color));
+                    frame.fill(&path, rgba_alpha(color, alpha));
                 }
                 RenderShape::Label {
                     anchor,
@@ -190,7 +206,7 @@ impl NumberAnnotationCanvas<'_> {
                     frame.fill_text(canvas::Text {
                         content,
                         position: Point::new(anchor.x * self.scale, anchor.y * self.scale),
-                        color: rgba(color),
+                        color: rgba_alpha(color, alpha),
                         size: iced::Pixels(px * self.scale),
                         align_x: text::Alignment::Center,
                         align_y: alignment::Vertical::Center,
@@ -212,7 +228,7 @@ impl NumberAnnotationCanvas<'_> {
                         Point::new(rect.x * self.scale, rect.y * self.scale),
                         iced::Size::new(rect.width * self.scale, rect.height * self.scale),
                     );
-                    frame.fill(&path, rgba(color));
+                    frame.fill(&path, rgba_alpha(color, alpha));
                 }
                 RenderShape::Label {
                     anchor,
@@ -225,7 +241,7 @@ impl NumberAnnotationCanvas<'_> {
                     frame.fill_text(canvas::Text {
                         content,
                         position: Point::new(anchor.x * self.scale, anchor.y * self.scale),
-                        color: rgba(color),
+                        color: rgba_alpha(color, alpha),
                         size: iced::Pixels(px * self.scale),
                         align_x: text::Alignment::Left,
                         align_y: alignment::Vertical::Top,
@@ -247,8 +263,8 @@ impl NumberAnnotationCanvas<'_> {
     }
 }
 
-fn rgba(c: Rgba8) -> Color {
-    Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
+fn rgba_alpha(c: Rgba8, alpha: f32) -> Color {
+    Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 / 255.0) * alpha)
 }
 
 fn draft_annotation(document: &ImageDocument, draft: AnnotationDraft) -> Option<Annotation> {
@@ -270,6 +286,32 @@ fn draft_annotation(document: &ImageDocument, draft: AnnotationDraft) -> Option<
     }
 }
 
+/// Project a pending callout proposal into a temporary [`Annotation`] for
+/// ghost rendering. The helper is pure projection only: it does not call
+/// `add_number_callout` and never mutates the document's `state_id`,
+/// annotations, undo, or redo stacks. The returned annotation uses the
+/// number the document would assign on accept and the deterministic
+/// bubble placed by [`rollshot_image_document::place_number_callout_bubble`].
+pub(crate) fn suggested_callout_annotation(
+    document: &ImageDocument,
+    suggestion: &rollshot_action::CalloutSuggestion,
+    width: u32,
+    height: u32,
+) -> Annotation {
+    let bubble = rollshot_image_document::place_number_callout_bubble(
+        suggestion.tip,
+        width,
+        height,
+        document.annotations(),
+    );
+    Annotation::NumberCallout {
+        id: AnnotationId(0),
+        number: document.next_number(),
+        tip: suggestion.tip,
+        bubble,
+    }
+}
+
 impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
     type State = ();
 
@@ -280,6 +322,9 @@ impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<super::Message>> {
+        if !self.mutation_allowed {
+            return None;
+        }
         match event {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let local = cursor.position_in(bounds)?;
@@ -327,6 +372,23 @@ impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
         {
             self.draw_annotation(&mut frame, &draft);
         }
+        if let Some(suggested) = &self.suggested {
+            // Ghost projection: render the pending proposal with reduced alpha
+            // so the user can distinguish it from a committed annotation.
+            self.draw_annotation_with_alpha(&mut frame, suggested, 0.5);
+            // Small label above the canvas content so the user knows the
+            // ghost is a suggestion, not a committed annotation.
+            frame.fill_text(canvas::Text {
+                content: "Suggested".to_string(),
+                position: Point::new(8.0, 8.0),
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.9),
+                size: iced::Pixels(12.0),
+                align_x: text::Alignment::Left,
+                align_y: alignment::Vertical::Top,
+                font: iced::Font::with_name(rollshot_image_document::style::FONT_FAMILY_NAME),
+                ..canvas::Text::default()
+            });
+        }
         vec![frame.into_geometry()]
     }
 
@@ -336,7 +398,11 @@ impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
         _bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        mouse::Interaction::Crosshair
+        if self.mutation_allowed {
+            mouse::Interaction::Crosshair
+        } else {
+            mouse::Interaction::Idle
+        }
     }
 }
 
@@ -506,8 +572,218 @@ mod tests {
                 current: ImagePoint::new(12.0, 10.0),
             }),
             scale: 0.5,
+            suggested: None,
+            mutation_allowed: true,
         };
 
         assert_eq!(canvas.scale, 0.5);
+    }
+
+    fn suggestion(tip: ImagePoint, width: u32, height: u32) -> rollshot_action::CalloutSuggestion {
+        rollshot_action::CalloutSuggestion {
+            id: rollshot_action::CalloutSuggestionId(1),
+            base: rollshot_action::CalloutSuggestionBase {
+                step_source: 42,
+                keyframe: 0,
+                document_state_id: 0,
+                image_width: width,
+                image_height: height,
+            },
+            tip,
+            confidence: 0.75,
+            rationale: Some("test".to_string()),
+            provenance: rollshot_action::CalloutProposalProvenance::Agent { run_id: 1 },
+            status: rollshot_action::CalloutSuggestionStatus::Pending,
+        }
+    }
+
+    #[test]
+    fn suggested_callout_annotation_uses_next_number_from_document() {
+        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        document.add_number_callout(ImagePoint::new(4.0, 4.0), ImagePoint::new(12.0, 12.0));
+        let expected_number = document.next_number();
+        let suggestion = suggestion(ImagePoint::new(20.0, 20.0), 64, 48);
+
+        let annotation = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
+
+        match annotation {
+            Annotation::NumberCallout { number, .. } => {
+                assert_eq!(number, expected_number);
+            }
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggested_callout_annotation_preserves_tip_from_suggestion() {
+        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        let tip = ImagePoint::new(20.0, 30.0);
+        let suggestion = suggestion(tip, 64, 48);
+
+        let annotation = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
+
+        match annotation {
+            Annotation::NumberCallout {
+                tip: returned_tip, ..
+            } => assert_eq!(returned_tip, tip),
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggested_callout_annotation_uses_placement_bubble() {
+        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        let tip = ImagePoint::new(20.0, 20.0);
+        let suggestion = suggestion(tip, 64, 48);
+        let expected_bubble = rollshot_image_document::place_number_callout_bubble(
+            tip,
+            64,
+            48,
+            document.annotations(),
+        );
+
+        let annotation = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
+
+        match annotation {
+            Annotation::NumberCallout { bubble, .. } => {
+                assert_eq!(bubble, expected_bubble);
+            }
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggested_callout_annotation_does_not_mutate_document() {
+        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        document.add_number_callout(ImagePoint::new(4.0, 4.0), ImagePoint::new(12.0, 12.0));
+        let baseline_state_id = document.state_id();
+        let baseline_annotations = document.annotations().to_vec();
+        let baseline_undo = document.can_undo();
+        let baseline_redo = document.can_redo();
+        let baseline_next_number = document.next_number();
+        let suggestion = suggestion(ImagePoint::new(20.0, 20.0), 64, 48);
+
+        let _ = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
+
+        assert_eq!(document.state_id(), baseline_state_id);
+        assert_eq!(document.annotations(), baseline_annotations);
+        assert_eq!(document.can_undo(), baseline_undo);
+        assert_eq!(document.can_redo(), baseline_redo);
+        assert_eq!(document.next_number(), baseline_next_number);
+    }
+
+    #[test]
+    fn number_annotation_canvas_carries_suggested_and_mutation_allowed() {
+        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        let suggestion = suggestion(ImagePoint::new(20.0, 20.0), 64, 48);
+        let projected = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
+
+        let canvas = NumberAnnotationCanvas {
+            document: &document,
+            draft: None,
+            scale: 0.5,
+            suggested: Some(projected),
+            mutation_allowed: false,
+        };
+
+        assert!(
+            canvas.suggested.is_some(),
+            "suggested ghost should be present"
+        );
+        assert!(!canvas.mutation_allowed, "mutation should be disabled");
+    }
+
+    #[test]
+    fn number_annotation_canvas_skips_event_publication_when_mutation_disabled() {
+        use iced::mouse;
+        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        let canvas = NumberAnnotationCanvas {
+            document: &document,
+            draft: None,
+            scale: 1.0,
+            suggested: None,
+            mutation_allowed: false,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 48.0,
+        };
+        let cursor = mouse::Cursor::Available(Point::new(8.0, 8.0));
+
+        let action = <NumberAnnotationCanvas<'_> as canvas::Program<super::super::Message>>::update(
+            &canvas,
+            &mut (),
+            &canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor,
+        );
+
+        assert!(
+            action.is_none(),
+            "mutation-disabled canvas must not publish pointer events"
+        );
+    }
+
+    #[test]
+    fn number_annotation_canvas_publishes_events_when_mutation_allowed() {
+        use iced::mouse;
+        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            48,
+            ::image::Rgba([0, 0, 0, 255]),
+        ));
+        let canvas = NumberAnnotationCanvas {
+            document: &document,
+            draft: None,
+            scale: 1.0,
+            suggested: None,
+            mutation_allowed: true,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 48.0,
+        };
+        let cursor = mouse::Cursor::Available(Point::new(8.0, 8.0));
+
+        let action = <NumberAnnotationCanvas<'_> as canvas::Program<super::super::Message>>::update(
+            &canvas,
+            &mut (),
+            &canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor,
+        );
+
+        assert!(
+            action.is_some(),
+            "mutation-allowed canvas should publish pointer events"
+        );
     }
 }

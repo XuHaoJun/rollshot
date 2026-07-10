@@ -158,6 +158,7 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 Some(handle) => image(handle.clone()).into(),
                 None => text("(keyframe unavailable)").into(),
             };
+            let callout_running = state.callout_suggestion.is_running();
             column![
                 container(keyframe)
                     .width(Length::Fill)
@@ -170,6 +171,13 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 button(text("Annotate Step"))
                     .on_press(Message::AnnotateStepRequested)
                     .style(button::secondary),
+                button(text(if callout_running {
+                    "Suggesting Callout..."
+                } else {
+                    "Suggest Callout"
+                }))
+                .on_press_maybe((!callout_running).then_some(Message::SuggestCalloutRequested),)
+                .style(button::secondary),
                 button(text(if state.caption_suggestions_running {
                     "Suggesting Captions..."
                 } else {
@@ -447,64 +455,149 @@ fn annotation_modal<'a>(
     let img = image(session.handle.clone())
         .width(Length::Fixed(rendered.width))
         .height(Length::Fixed(rendered.height));
+    let callout = &state.callout_suggestion;
+    let is_running = callout.is_running();
+    let is_pending = callout.is_pending();
+    let mutation_allowed = !is_running && !is_pending;
+    // The ghost is only meaningful when the user can review a proposal.
+    let suggested = callout.proposal().map(|proposal| {
+        super::annotation::suggested_callout_annotation(
+            &doc.document,
+            &proposal.suggestion,
+            session.width,
+            session.height,
+        )
+    });
     let overlay = iced::widget::canvas(super::annotation::NumberAnnotationCanvas {
         document: &doc.document,
-        draft: session.draft,
+        draft: if mutation_allowed {
+            session.draft
+        } else {
+            None
+        },
         scale,
+        suggested,
+        mutation_allowed,
     })
     .width(Length::Fixed(rendered.width))
     .height(Length::Fixed(rendered.height));
 
     let tool = session.tool;
-    let tool_row = row![
-        button(text("Number"))
-            .on_press(Message::AnnotationToolChanged(
-                super::annotation::AnnotationTool::Number
-            ))
+    let tool_row: Element<Message> = if is_running {
+        row![
+            text("Suggesting callout...").size(13),
+            Space::new().width(Length::Fill),
+            button(text("Cancel"))
+                .on_press(Message::CancelCalloutSuggestion)
+                .style(button::secondary),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else if is_pending {
+        row![
+            text("Suggested").size(13),
+            Space::new().width(Length::Fill),
+            button(text("Accept"))
+                .on_press(Message::AcceptCalloutSuggestion)
+                .style(button::primary),
+            button(text("Reject"))
+                .on_press(Message::RejectCalloutSuggestion)
+                .style(button::secondary),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else if let super::CalloutSuggestionState::NoSuggestion { reason } = callout {
+        let label = match reason {
+            Some(text) => format!("No suggestion: {text}"),
+            None => "No suggestion returned.".to_string(),
+        };
+        row![
+            text(label).size(13),
+            Space::new().width(Length::Fill),
+            button(text("Retry"))
+                .on_press_maybe(
+                    (!state.callout_suggestion.is_running())
+                        .then_some(Message::SuggestCalloutRequested),
+                )
+                .style(button::secondary),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else if let super::CalloutSuggestionState::Failed { message } = callout {
+        row![
+            text(format!("Callout failed: {message}")).size(13),
+            Space::new().width(Length::Fill),
+            button(text("Retry"))
+                .on_press_maybe(
+                    (!state.callout_suggestion.is_running())
+                        .then_some(Message::SuggestCalloutRequested),
+                )
+                .style(button::secondary),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        let number_btn = button(text("Number"))
+            .on_press_maybe(mutation_allowed.then_some(Message::AnnotationToolChanged(
+                super::annotation::AnnotationTool::Number,
+            )))
             .style(if tool == super::annotation::AnnotationTool::Number {
                 button::primary
             } else {
                 button::secondary
-            }),
-        button(text("Text"))
-            .on_press(Message::AnnotationToolChanged(
-                super::annotation::AnnotationTool::Text
-            ))
+            });
+        let text_btn = button(text("Text"))
+            .on_press_maybe(mutation_allowed.then_some(Message::AnnotationToolChanged(
+                super::annotation::AnnotationTool::Text,
+            )))
             .style(if tool == super::annotation::AnnotationTool::Text {
                 button::primary
             } else {
                 button::secondary
-            }),
-        button(text("Redact"))
-            .on_press(Message::AnnotationToolChanged(
-                super::annotation::AnnotationTool::Redaction
-            ))
+            });
+        let redact_btn = button(text("Redact"))
+            .on_press_maybe(mutation_allowed.then_some(Message::AnnotationToolChanged(
+                super::annotation::AnnotationTool::Redaction,
+            )))
             .style(if tool == super::annotation::AnnotationTool::Redaction {
                 button::primary
             } else {
                 button::secondary
-            }),
-        Space::new().width(Length::Fill),
-        button(text("Undo"))
-            .on_press_maybe(doc.document.can_undo().then_some(Message::AnnotationUndo))
-            .style(button::secondary),
-        button(text("Redo"))
-            .on_press_maybe(doc.document.can_redo().then_some(Message::AnnotationRedo))
-            .style(button::secondary),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-
-    let text_controls: Element<Message> = if tool == super::annotation::AnnotationTool::Text {
-        text_input("Text note", &session.text_note)
-            .on_input(Message::AnnotationTextChanged)
-            .into()
-    } else {
-        Space::new()
-            .width(Length::Fill)
-            .height(Length::Fixed(0.0))
-            .into()
+            });
+        let undo_btn = button(text("Undo")).on_press_maybe(
+            (mutation_allowed && doc.document.can_undo()).then_some(Message::AnnotationUndo),
+        );
+        let redo_btn = button(text("Redo")).on_press_maybe(
+            (mutation_allowed && doc.document.can_redo()).then_some(Message::AnnotationRedo),
+        );
+        row![
+            number_btn,
+            text_btn,
+            redact_btn,
+            Space::new().width(Length::Fill),
+            undo_btn.style(button::secondary),
+            redo_btn.style(button::secondary),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
     };
+
+    let text_controls: Element<Message> =
+        if tool == super::annotation::AnnotationTool::Text && mutation_allowed {
+            text_input("Text note", &session.text_note)
+                .on_input(Message::AnnotationTextChanged)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Fill)
+                .height(Length::Fixed(0.0))
+                .into()
+        };
 
     let dialog_view = container(
         column![
