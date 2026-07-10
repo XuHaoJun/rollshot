@@ -455,15 +455,73 @@ fn annotation_modal<'a>(
     .width(Length::Fixed(rendered.width))
     .height(Length::Fixed(rendered.height));
 
+    let tool = session.tool;
+    let tool_row = row![
+        button(text("Number"))
+            .on_press(Message::AnnotationToolChanged(
+                super::annotation::AnnotationTool::Number
+            ))
+            .style(if tool == super::annotation::AnnotationTool::Number {
+                button::primary
+            } else {
+                button::secondary
+            }),
+        button(text("Text"))
+            .on_press(Message::AnnotationToolChanged(
+                super::annotation::AnnotationTool::Text
+            ))
+            .style(if tool == super::annotation::AnnotationTool::Text {
+                button::primary
+            } else {
+                button::secondary
+            }),
+        button(text("Redact"))
+            .on_press(Message::AnnotationToolChanged(
+                super::annotation::AnnotationTool::Redaction
+            ))
+            .style(if tool == super::annotation::AnnotationTool::Redaction {
+                button::primary
+            } else {
+                button::secondary
+            }),
+        Space::new().width(Length::Fill),
+        button(text("Undo"))
+            .on_press_maybe(doc.document.can_undo().then_some(Message::AnnotationUndo))
+            .style(button::secondary),
+        button(text("Redo"))
+            .on_press_maybe(doc.document.can_redo().then_some(Message::AnnotationRedo))
+            .style(button::secondary),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let text_controls: Element<Message> = if tool == super::annotation::AnnotationTool::Text {
+        text_input("Text note", &session.text_note)
+            .on_input(Message::AnnotationTextChanged)
+            .into()
+    } else {
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into()
+    };
+
     let dialog_view = container(
         column![
             row![
                 text("Annotate Step").size(18),
                 Space::new().width(Length::Fill),
-                text("Number callout").size(12),
+                text(match session.tool {
+                    super::annotation::AnnotationTool::Number => "Number callout",
+                    super::annotation::AnnotationTool::Text => "Text note",
+                    super::annotation::AnnotationTool::Redaction => "Opaque redaction",
+                })
+                .size(12),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
+            tool_row,
+            text_controls,
             container(iced::widget::stack![img, overlay])
                 .width(Length::Fixed(rendered.width))
                 .height(Length::Fixed(rendered.height))
@@ -638,6 +696,7 @@ fn discard_modal(base: Element<'_, Message>) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline_workspace::annotation::AnnotationTool;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
     use crate::timeline_workspace::TimelineWorkspace;
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
@@ -689,6 +748,18 @@ mod tests {
             Message::AnnotateStepRequested,
         );
         assert!(annotated.annotation_session.is_some());
+        let _ = view(&annotated);
+
+        // Annotation modal — every tool state.
+        let _ = crate::timeline_workspace::update::update(
+            &mut annotated,
+            Message::AnnotationToolChanged(AnnotationTool::Text),
+        );
+        let _ = view(&annotated);
+        let _ = crate::timeline_workspace::update::update(
+            &mut annotated,
+            Message::AnnotationToolChanged(AnnotationTool::Redaction),
+        );
         let _ = view(&annotated);
 
         // Empty guide / no selection.
