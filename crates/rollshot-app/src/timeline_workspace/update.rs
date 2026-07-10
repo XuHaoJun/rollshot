@@ -69,6 +69,27 @@ pub enum Message {
     AcceptAllCaptionSuggestions,
     DismissCaptionProposal,
     SuggestCaptionsRequested,
+    /// Begin an agent callout suggestion run for the currently selected step.
+    /// The view wires this in Task 8; Task 7 only verifies the state machine
+    /// and the late-result race protection.
+    #[allow(dead_code)]
+    SuggestCalloutRequested,
+    /// Cancel the in-flight callout suggestion run and transition to Idle.
+    #[allow(dead_code)]
+    CancelCalloutSuggestion,
+    /// Reject the pending callout proposal and discard it.
+    #[allow(dead_code)]
+    RejectCalloutSuggestion,
+    /// Accept the pending callout proposal and commit it as an annotation.
+    #[allow(dead_code)]
+    AcceptCalloutSuggestion,
+    /// Background callout suggestion run completed. The `run_id` must match
+    /// the current `Running` state; otherwise the result is dropped (late).
+    #[allow(dead_code)]
+    CalloutSuggestionLoaded {
+        run_id: u64,
+        result: Result<super::callout_agent::CalloutTaskResult, String>,
+    },
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -124,6 +145,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     }
                 }
             }
+            // Replacing the keyframe discards any pending callout: the
+            // document is re-built, the keyframe no longer matches, and any
+            // user-pending proposal would target a stale frame.
+            match &state.callout_suggestion {
+                super::CalloutSuggestionState::Running { cancellation, .. } => {
+                    cancellation.cancel();
+                }
+                super::CalloutSuggestionState::Pending(_)
+                | super::CalloutSuggestionState::NoSuggestion { .. }
+                | super::CalloutSuggestionState::Failed { .. } => {}
+                super::CalloutSuggestionState::Idle => {}
+            }
+            state.callout_suggestion = super::CalloutSuggestionState::Idle;
+            state.callout_agent_run_id = 0;
             Task::none()
         }
         Message::DiscardRequested | Message::CloseRequested => {
@@ -560,6 +595,210 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 super::caption_agent::suggest_captions_task(run_id, model, adapter, guide),
                 Message::CaptionProposalLoaded,
             )
+        }
+        Message::SuggestCalloutRequested => {
+            if matches!(
+                state.callout_suggestion,
+                super::CalloutSuggestionState::Running { .. }
+            ) {
+                return Task::none();
+            }
+            let Some(step) = state.selected_step().cloned() else {
+                state.message = Some("Select a step before suggesting a callout.".to_string());
+                return Task::none();
+            };
+            let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
+                state.message = Some(
+                    "Cannot suggest a callout because the keyframe is unavailable.".to_string(),
+                );
+                return Task::none();
+            };
+            let image = doc.document.source().clone();
+            let document_state_id = doc.document.state_id();
+            let cfg = match crate::daemon::config::rollshot_config_dir()
+                .map_err(|_| "Rollshot config directory is unavailable.".to_string())
+                .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
+            {
+                Ok(cfg) => cfg,
+                Err(error) => {
+                    state.message = Some(format!("Callout suggestion failed: {error}"));
+                    return Task::none();
+                }
+            };
+            if !crate::result_workspace::workbench::has_key(&cfg) {
+                state.message =
+                    Some("Configure an agent provider before suggesting a callout.".to_string());
+                return Task::none();
+            }
+            let provider_name = format!("{}", cfg.provider);
+            let model = cfg.model.clone();
+            let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    state.message = Some(format!("Callout suggestion failed: {error}"));
+                    return Task::none();
+                }
+            };
+            state.callout_agent_run_id = state.callout_agent_run_id.saturating_add(1);
+            let run_id = state.callout_agent_run_id;
+            let cancellation = rollshot_agent::runtime::RunCancellation::new();
+            let task_cancellation = cancellation.clone();
+            state.callout_suggestion = super::CalloutSuggestionState::Running {
+                run_id,
+                cancellation,
+            };
+            state.message = Some("Suggesting callout...".to_string());
+            tracing::info!(
+                target: "rollshot::action::callout_agent",
+                run_id,
+                step_index = step.index,
+                keyframe = step.keyframe,
+                "callout suggestion run started"
+            );
+            let input = super::callout_agent::CalloutTaskInput {
+                run_id,
+                step,
+                document_state_id,
+                image,
+            };
+            Task::perform(
+                super::callout_agent::suggest_callout_task(
+                    input,
+                    provider_name,
+                    model,
+                    adapter,
+                    task_cancellation,
+                ),
+                move |result| Message::CalloutSuggestionLoaded { run_id, result },
+            )
+        }
+        Message::CalloutSuggestionLoaded { run_id, result } => {
+            // Only accept the result if the current state is Running with the
+            // matching run_id. This is the late-result race protection: a
+            // cancelled or timed-out older run must not overwrite a newer
+            // proposal.
+            let expected_id = match &state.callout_suggestion {
+                super::CalloutSuggestionState::Running { run_id, .. } => Some(*run_id),
+                _ => None,
+            };
+            if expected_id != Some(run_id) {
+                tracing::debug!(
+                    target: "rollshot::action::callout_agent",
+                    late_run_id = run_id,
+                    expected_run_id = ?expected_id,
+                    "ignoring late callout suggestion result"
+                );
+                return Task::none();
+            }
+            match result {
+                Ok(super::callout_agent::CalloutTaskResult::Proposal(proposal)) => {
+                    tracing::info!(
+                        target: "rollshot::action::callout_agent",
+                        run_id,
+                        "callout suggestion ready for review"
+                    );
+                    state.callout_suggestion = super::CalloutSuggestionState::Pending(proposal);
+                    state.message = Some("Callout suggestion ready for review.".to_string());
+                }
+                Ok(super::callout_agent::CalloutTaskResult::NoSuggestion { reason }) => {
+                    let message = match &reason {
+                        Some(text) => format!("Callout suggestion: {text}"),
+                        None => "Callout suggestion: no suggestion returned.".to_string(),
+                    };
+                    state.callout_suggestion =
+                        super::CalloutSuggestionState::NoSuggestion { reason };
+                    state.message = Some(message);
+                }
+                Err(message) => {
+                    tracing::error!(
+                        target: "rollshot::action::callout_agent",
+                        run_id,
+                        error = %message,
+                        "callout suggestion failed"
+                    );
+                    state.callout_suggestion = super::CalloutSuggestionState::Failed { message };
+                    state.message = Some(
+                        "Callout suggestion failed. See the annotation modal for details."
+                            .to_string(),
+                    );
+                }
+            }
+            Task::none()
+        }
+        Message::CancelCalloutSuggestion => {
+            if let super::CalloutSuggestionState::Running {
+                run_id,
+                cancellation,
+            } = &state.callout_suggestion
+            {
+                tracing::info!(
+                    target: "rollshot::action::callout_agent",
+                    run_id,
+                    "callout suggestion cancelled by user"
+                );
+                cancellation.cancel();
+                state.callout_suggestion = super::CalloutSuggestionState::Idle;
+                state.message = Some("Callout suggestion cancelled.".to_string());
+            }
+            Task::none()
+        }
+        Message::RejectCalloutSuggestion => {
+            if let super::CalloutSuggestionState::Pending(mut proposal) = std::mem::replace(
+                &mut state.callout_suggestion,
+                super::CalloutSuggestionState::Idle,
+            ) {
+                // `reject()` returns `false` if the proposal is no longer
+                // pending; the user explicitly chose to discard it, so any
+                // state mismatch is informational and the tip is dropped.
+                let _ = proposal.reject();
+            }
+            state.message = Some("Callout suggestion rejected.".to_string());
+            Task::none()
+        }
+        Message::AcceptCalloutSuggestion => {
+            let Some(step) = state.selected_step().cloned() else {
+                state.message = Some("Select a step before accepting a callout.".to_string());
+                return Task::none();
+            };
+            let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
+                state.message = Some(
+                    "Cannot accept a callout because the keyframe is unavailable.".to_string(),
+                );
+                return Task::none();
+            };
+            let state_id = doc.document.state_id();
+            let image = doc.document.source();
+            let image_width = image.width();
+            let image_height = image.height();
+            let super::CalloutSuggestionState::Pending(mut proposal) = std::mem::replace(
+                &mut state.callout_suggestion,
+                super::CalloutSuggestionState::Idle,
+            ) else {
+                return Task::none();
+            };
+            match proposal.validate_acceptance(Some(&step), state_id, image_width, image_height) {
+                rollshot_action::CalloutApplyOutcome::Ready => {
+                    let tip = proposal.suggestion.tip;
+                    doc.document.add_number_callout(tip, tip);
+                    proposal.mark_applied();
+                    state.message = Some("Callout suggestion accepted.".to_string());
+                }
+                rollshot_action::CalloutApplyOutcome::Missing => {
+                    state.message =
+                        Some("Callout suggestion is stale; the step is missing.".to_string());
+                }
+                rollshot_action::CalloutApplyOutcome::Stale => {
+                    state.callout_suggestion = super::CalloutSuggestionState::Failed {
+                        message: "Callout suggestion is stale; regenerate it.".to_string(),
+                    };
+                    state.message = Some("Callout suggestion is stale; regenerate it.".to_string());
+                    return Task::none();
+                }
+                rollshot_action::CalloutApplyOutcome::NotPending => {
+                    state.message = Some("Callout suggestion is no longer pending.".to_string());
+                }
+            }
+            Task::none()
         }
         Message::FfmpegSetupCancel => {
             state.ffmpeg_setup = None;
@@ -2074,5 +2313,473 @@ mod tests {
             first_step.caption.as_deref(),
             Some("The preferences window is opened for configuration.")
         );
+    }
+
+    // ---------- Callout suggestion flow ----------
+
+    /// Build a valid CalloutProposal for the workspace's currently selected
+    /// step, using the presentation document's `state_id` and image
+    /// dimensions. Used by the focused update tests to drive the late-result
+    /// race and accept/reject paths.
+    fn callout_proposal(state: &mut TimelineWorkspace) -> rollshot_action::CalloutProposal {
+        let tip = callout_default_tip(state);
+        callout_proposal_with_run_and_tip(state, 1, tip)
+    }
+
+    fn callout_proposal_with_run(
+        state: &mut TimelineWorkspace,
+        run_id: u64,
+    ) -> rollshot_action::CalloutProposal {
+        let tip = callout_default_tip(state);
+        callout_proposal_with_run_and_tip(state, run_id, tip)
+    }
+
+    fn callout_default_tip(state: &mut TimelineWorkspace) -> rollshot_image_document::ImagePoint {
+        let step = state.selected_step().cloned().expect("selected step");
+        let doc = state
+            .presentation
+            .document_for_step(&step, &state.store)
+            .expect("presentation document");
+        let image = doc.document.source();
+        rollshot_image_document::ImagePoint::new(
+            (image.width() as f32 / 4.0).max(0.5),
+            (image.height() as f32 / 4.0).max(0.5),
+        )
+    }
+
+    fn callout_proposal_with_run_and_tip(
+        state: &mut TimelineWorkspace,
+        run_id: u64,
+        tip: rollshot_image_document::ImagePoint,
+    ) -> rollshot_action::CalloutProposal {
+        let step = state.selected_step().cloned().expect("selected step");
+        let doc = state
+            .presentation
+            .document_for_step(&step, &state.store)
+            .expect("presentation document");
+        let image = doc.document.source();
+        rollshot_action::CalloutProposal::from_agent_draft(
+            rollshot_action::CalloutProposalId(run_id),
+            run_id,
+            &step,
+            doc.document.state_id(),
+            image.width(),
+            image.height(),
+            rollshot_action::CalloutSuggestionDraft {
+                tip,
+                confidence: 0.75,
+                rationale: Some("test rationale".to_string()),
+            },
+        )
+        .expect("valid proposal")
+    }
+
+    #[test]
+    fn new_workspace_has_idle_callout_state() {
+        let state = ws(synthetic_recording(1));
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert_eq!(state.callout_agent_run_id, 0);
+    }
+
+    #[test]
+    fn suggest_callout_without_selection_sets_recoverable_message() {
+        let mut state = ws(synthetic_recording(0));
+        // Ensure no provider key so the no-selection path is reached first.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("Select a step")));
+    }
+
+    #[test]
+    fn suggest_callout_without_provider_key_shows_recoverable_message() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert_eq!(state.callout_agent_run_id, 0);
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("Configure an agent provider")));
+    }
+
+    #[test]
+    fn suggest_callout_while_running_is_a_no_op() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        state.callout_agent_run_id = 7;
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Running {
+            run_id: 7,
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        };
+
+        let task = update(&mut state, Message::SuggestCalloutRequested);
+
+        assert_eq!(task.units(), 0);
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Running { run_id: 7, .. }
+        ));
+        assert_eq!(state.callout_agent_run_id, 7);
+    }
+
+    #[test]
+    fn callout_suggestion_loaded_proposal_stores_pending() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        // Replay the SuggestCalloutRequested so state transitions to Running.
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+        let run_id = state.callout_agent_run_id;
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Running { .. }
+        ));
+
+        let proposal = callout_proposal(&mut state);
+        let result = Ok(super::super::callout_agent::CalloutTaskResult::Proposal(
+            proposal,
+        ));
+        let _ = update(
+            &mut state,
+            Message::CalloutSuggestionLoaded { run_id, result },
+        );
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Pending(_)
+        ));
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("ready for review")));
+    }
+
+    #[test]
+    fn callout_suggestion_loaded_no_suggestion_stores_no_suggestion() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+        let run_id = state.callout_agent_run_id;
+
+        let result = Ok(
+            super::super::callout_agent::CalloutTaskResult::NoSuggestion {
+                reason: Some("no clear target".to_string()),
+            },
+        );
+        let _ = update(
+            &mut state,
+            Message::CalloutSuggestionLoaded { run_id, result },
+        );
+
+        match &state.callout_suggestion {
+            crate::timeline_workspace::CalloutSuggestionState::NoSuggestion { reason } => {
+                assert_eq!(reason.as_deref(), Some("no clear target"));
+            }
+            other => panic!("expected NoSuggestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn callout_suggestion_loaded_failure_stores_failed() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+        let run_id = state.callout_agent_run_id;
+
+        let result: Result<_, String> = Err("callout provider failed".to_string());
+        let _ = update(
+            &mut state,
+            Message::CalloutSuggestionLoaded { run_id, result },
+        );
+
+        match &state.callout_suggestion {
+            crate::timeline_workspace::CalloutSuggestionState::Failed { message } => {
+                assert_eq!(message, "callout provider failed");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_callout_suggestion_resets_state() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Running { .. }
+        ));
+
+        let _ = update(&mut state, Message::CancelCalloutSuggestion);
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn cancel_callout_suggestion_when_idle_is_a_no_op() {
+        let mut state = ws(recording_from_frames());
+
+        let _ = update(&mut state, Message::CancelCalloutSuggestion);
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn replacing_keyframe_during_running_callout_cancels() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+        let run_id = state.callout_agent_run_id;
+        let step = state.selected_step().unwrap();
+        let replacement = *step
+            .nearby
+            .iter()
+            .find(|&&f| f != step.keyframe)
+            .expect("replacement frame id");
+
+        let _ = update(&mut state, Message::ReplaceKeyframe(replacement));
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        assert_eq!(state.callout_agent_run_id, 0);
+        // The old run's result is ignored because the state was reset to Idle.
+        let proposal = callout_proposal(&mut state);
+        let result = Ok(super::super::callout_agent::CalloutTaskResult::Proposal(
+            proposal,
+        ));
+        let _ = update(
+            &mut state,
+            Message::CalloutSuggestionLoaded {
+                run_id,
+                result: result.clone(),
+            },
+        );
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn replacing_keyframe_discards_pending_callout() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+        let step = state.selected_step().unwrap();
+        let replacement = *step
+            .nearby
+            .iter()
+            .find(|&&f| f != step.keyframe)
+            .expect("replacement frame id");
+
+        let _ = update(&mut state, Message::ReplaceKeyframe(replacement));
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn stale_callout_run_completion_cannot_replace_newer_run() {
+        let mut state = ws(recording_from_frames());
+        state.callout_agent_run_id = 2;
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Running {
+            run_id: 2,
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+        };
+
+        let old = Ok(super::super::callout_agent::CalloutTaskResult::Proposal(
+            callout_proposal_with_run(&mut state, 1),
+        ));
+        let _ = update(
+            &mut state,
+            Message::CalloutSuggestionLoaded {
+                run_id: 1,
+                result: old,
+            },
+        );
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Running { run_id: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn document_edit_makes_pending_callout_stale() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let initial_state_id = state
+            .presentation
+            .doc(state.selected_step().unwrap().source)
+            .unwrap()
+            .document
+            .state_id();
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+
+        // Edit the document so the proposal's captured `state_id` is stale.
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        let new_state_id = state
+            .presentation
+            .doc(state.selected_step().unwrap().source)
+            .unwrap()
+            .document
+            .state_id();
+        assert_ne!(initial_state_id, new_state_id);
+
+        let _ = update(&mut state, Message::AcceptCalloutSuggestion);
+
+        // The proposal was stale; the document was not mutated.
+        match &state.callout_suggestion {
+            crate::timeline_workspace::CalloutSuggestionState::Failed { message } => {
+                assert!(message.contains("stale"), "message = {message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let doc = state
+            .presentation
+            .doc(state.selected_step().unwrap().source)
+            .unwrap();
+        // The manual annotation should be the only one — accept did NOT add a
+        // callout on top of the stale proposal.
+        assert_eq!(doc.document.annotations().len(), 1);
+    }
+
+    #[test]
+    fn reject_callout_suggestion_does_not_mutate_document() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let annotations_before = state
+            .presentation
+            .doc(state.selected_step().unwrap().source)
+            .unwrap()
+            .document
+            .annotations()
+            .len();
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+
+        let _ = update(&mut state, Message::RejectCalloutSuggestion);
+
+        assert!(matches!(
+            state.callout_suggestion,
+            crate::timeline_workspace::CalloutSuggestionState::Idle
+        ));
+        let annotations_after = state
+            .presentation
+            .doc(state.selected_step().unwrap().source)
+            .unwrap()
+            .document
+            .annotations()
+            .len();
+        assert_eq!(annotations_before, annotations_after);
+    }
+
+    #[test]
+    fn accept_callout_suggestion_commits_one_undoable_callout() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal(&mut state),
+        );
+
+        let _ = update(&mut state, Message::AcceptCalloutSuggestion);
+
+        let doc = state.presentation.doc(source).unwrap();
+        assert_eq!(doc.document.annotations().len(), 1);
+        assert!(matches!(
+            doc.document.annotations()[0],
+            rollshot_image_document::Annotation::NumberCallout { .. }
+        ));
+        let _ = update(&mut state, Message::AnnotationUndo);
+        let doc = state.presentation.doc(source).unwrap();
+        assert_eq!(doc.document.annotations().len(), 0);
+        let _ = update(&mut state, Message::AnnotationRedo);
+        let doc = state.presentation.doc(source).unwrap();
+        assert_eq!(doc.document.annotations().len(), 1);
+    }
+
+    #[test]
+    fn suggest_callout_requested_transitions_to_running() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+
+        let _ = update(&mut state, Message::SuggestCalloutRequested);
+
+        match &state.callout_suggestion {
+            crate::timeline_workspace::CalloutSuggestionState::Running { run_id, .. } => {
+                assert_eq!(*run_id, 1);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+        assert_eq!(state.callout_agent_run_id, 1);
     }
 }
