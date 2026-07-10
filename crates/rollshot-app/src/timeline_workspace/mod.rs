@@ -19,6 +19,7 @@
 mod annotation;
 mod callout_agent;
 mod caption_agent;
+mod storyboard_copy;
 mod update;
 mod view;
 

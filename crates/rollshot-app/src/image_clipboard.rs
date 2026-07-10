@@ -9,8 +9,8 @@ pub(crate) fn image_data(image: &image::RgbaImage) -> arboard::ImageData<'_> {
 }
 
 pub(crate) fn copy_rgba_image(image: &image::RgbaImage) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|error| format!("clipboard error: {error}"))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("clipboard error: {error}"))?;
     clipboard
         .set_image(image_data(image))
         .map_err(|error| format!("clipboard write error: {error}"))
@@ -22,11 +22,7 @@ mod tests {
 
     #[test]
     fn image_data_preserves_dimensions_and_rgba_order() {
-        let image = image::RgbaImage::from_raw(
-            2,
-            1,
-            vec![1, 2, 3, 4, 5, 6, 7, 8],
-        ).unwrap();
+        let image = image::RgbaImage::from_raw(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
 
         let data = image_data(&image);
 

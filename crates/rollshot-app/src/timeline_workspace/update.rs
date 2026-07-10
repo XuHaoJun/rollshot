@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use iced::Task;
 use rollshot_action::{
-    export_gif, export_guide, export_video, render_storyboard_steps, GifOptions, StoryboardError,
-    StoryboardOptions, StoryboardRenderResult, StoryboardStep, VideoOptions,
+    export_gif, export_guide, export_video, GifOptions, StoryboardError, StoryboardOptions,
+    StoryboardRenderResult, VideoOptions,
 };
 use rollshot_image_document::ImagePoint;
 
@@ -961,44 +961,12 @@ fn render_timeline_storyboard(
     state: &TimelineWorkspace,
     opts: StoryboardOptions,
 ) -> Result<StoryboardRenderResult, StoryboardError> {
-    if state.guide.is_empty() {
-        return Err(StoryboardError::Empty);
-    }
-
-    let mut images = Vec::with_capacity(state.guide.steps().len());
-    for (i, step) in state.guide.steps().iter().enumerate() {
-        let frame = state
-            .store
-            .retained(step.keyframe)
-            .ok_or(StoryboardError::KeyframeMissing { index: i + 1 })?;
-        let image = match state.presentation.doc(step.source) {
-            Some(doc)
-                if doc.keyframe == step.keyframe && !doc.document.annotations().is_empty() =>
-            {
-                doc.document.flatten()
-            }
-            _ => frame.image.clone(),
-        };
-        images.push(image);
-    }
-
-    let steps: Vec<_> = state
-        .guide
-        .steps()
-        .iter()
-        .zip(images.iter())
-        .map(|(step, image)| StoryboardStep {
-            index: step.index,
-            title: &step.title,
-            caption: {
-                let caption = step.caption.trim();
-                (!caption.is_empty()).then_some(caption)
-            },
-            image,
-        })
-        .collect();
-
-    render_storyboard_steps(&steps, opts)
+    let input = super::storyboard_copy::snapshot_storyboard(
+        &state.guide,
+        &state.store,
+        &state.presentation,
+    )?;
+    super::storyboard_copy::render_storyboard_input(&input, opts)
 }
 
 fn write_storyboard_png(
