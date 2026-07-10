@@ -126,6 +126,32 @@ Improve runs:
 5. Preserve unrelated useful detections from the current source.
 6. Explain what changed in the detector before submit_for_review."#;
 
+// TODO(task-4): replace with the Action Guide agent callout profile prompt.
+const CALLOUT_SYSTEM_PROMPT: &str = "";
+
+pub(crate) enum AgentTaskProfile {
+    SmartRedaction,
+    #[allow(dead_code)]
+    Callout,
+}
+
+impl AgentTaskProfile {
+    pub(crate) fn system_prompt(&self) -> &'static str {
+        match self {
+            Self::SmartRedaction => SMART_REDACTION_SYSTEM_PROMPT,
+            Self::Callout => CALLOUT_SYSTEM_PROMPT,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn terminal_tools(&self) -> &'static [&'static str] {
+        match self {
+            Self::SmartRedaction => &["submit_for_review", "request_user_input"],
+            Self::Callout => &["submit_callout_suggestion"],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub max_turns: usize,
@@ -870,7 +896,7 @@ impl AgentRunner {
             history: history_msgs,
             turn: turn_index,
             tool_definitions: tool_definitions.to_vec(),
-            system_prompt: Some(SMART_REDACTION_SYSTEM_PROMPT.to_string()),
+            system_prompt: Some(AgentTaskProfile::SmartRedaction.system_prompt().to_string()),
             max_tokens: None,
             attachments: vec![],
         };
@@ -1245,6 +1271,32 @@ pub(crate) mod tests {
     use rig_core::streaming::StreamedAssistantContent;
     use std::sync::Arc;
     use std::sync::Mutex;
+
+    // ---- Task profile parity ----
+
+    #[test]
+    fn smart_redaction_profile_matches_existing_prompt_and_tools() {
+        assert_eq!(
+            AgentTaskProfile::SmartRedaction.system_prompt(),
+            SMART_REDACTION_SYSTEM_PROMPT,
+        );
+        assert_eq!(
+            AgentTaskProfile::SmartRedaction.terminal_tools(),
+            &["submit_for_review", "request_user_input"],
+        );
+    }
+
+    #[test]
+    fn callout_profile_advertises_only_submit_callout_suggestion() {
+        assert_eq!(
+            AgentTaskProfile::Callout.system_prompt(),
+            CALLOUT_SYSTEM_PROMPT,
+        );
+        assert_eq!(
+            AgentTaskProfile::Callout.terminal_tools(),
+            &["submit_callout_suggestion"],
+        );
+    }
 
     // ---- Stream item builders ----
 
