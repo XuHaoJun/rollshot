@@ -12,7 +12,6 @@ pub(crate) struct StoryboardCopyInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct StoryboardCopyResult {
     pub width: u32,
     pub height: u32,
@@ -73,13 +72,12 @@ pub(crate) fn render_storyboard_input(
     rollshot_action::render_storyboard_steps(&steps, options)
 }
 
-#[allow(dead_code)]
 pub(crate) fn render_and_copy_with(
     input: StoryboardCopyInput,
     copy: impl FnOnce(&image::RgbaImage) -> Result<(), String>,
 ) -> Result<StoryboardCopyResult, String> {
     let result = render_storyboard_input(&input, rollshot_action::StoryboardOptions::default())
-        .map_err(|e| format!("Couldn't copy Storyboard: {e}"))?;
+        .map_err(|e| format!("Couldn't render Storyboard: {e}"))?;
     copy(&result.image).map_err(|e| format!("Couldn't copy Storyboard: {e}"))?;
     Ok(StoryboardCopyResult {
         width: result.width,
@@ -88,7 +86,6 @@ pub(crate) fn render_and_copy_with(
     })
 }
 
-#[allow(dead_code)]
 pub(crate) async fn render_and_copy(
     input: StoryboardCopyInput,
 ) -> Result<StoryboardCopyResult, String> {

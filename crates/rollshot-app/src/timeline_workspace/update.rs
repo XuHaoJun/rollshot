@@ -289,6 +289,11 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             ) {
                 Ok(input) => input,
                 Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::app::storyboard_copy",
+                        error = %error,
+                        "storyboard snapshot failed during copy request"
+                    );
                     state.storyboard_copy_operation_id =
                         state.storyboard_copy_operation_id.saturating_add(1);
                     let operation_id = state.storyboard_copy_operation_id;
@@ -3223,6 +3228,60 @@ mod tests {
             StoryboardCopyState::Copying { operation_id: 6 }
         );
         assert!(task.units() > 0, "should return a render-and-copy task");
+    }
+
+    #[test]
+    fn duplicate_copy_request_while_copying_does_not_increment_id() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        assert!(state.storyboard_preview.is_some());
+
+        state.storyboard_copy_operation_id = 5;
+        state.storyboard_preview.as_mut().unwrap().copy_state =
+            StoryboardCopyState::Copying { operation_id: 5 };
+
+        let task = update(&mut state, Message::CopyStoryboardRequested);
+        assert_eq!(
+            task.units(),
+            0,
+            "duplicate request should return a no-op task"
+        );
+        assert_eq!(
+            state.storyboard_copy_operation_id, 5,
+            "operation_id should not increment"
+        );
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Copying { operation_id: 5 },
+            "state should remain Copying"
+        );
+    }
+
+    #[test]
+    fn copy_finished_error_transitions_to_failed() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        assert!(state.storyboard_preview.is_some());
+
+        state.storyboard_preview.as_mut().unwrap().copy_state =
+            StoryboardCopyState::Copying { operation_id: 1 };
+
+        let _ = update(
+            &mut state,
+            Message::CopyStoryboardFinished {
+                operation_id: 1,
+                result: Err("disk full".to_string()),
+            },
+        );
+
+        let preview = state.storyboard_preview.unwrap();
+        assert_eq!(
+            preview.copy_state,
+            StoryboardCopyState::Failed {
+                operation_id: 1,
+                message: "disk full".to_string()
+            }
+        );
     }
 
     #[test]
