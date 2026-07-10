@@ -212,7 +212,41 @@ impl NumberAnnotationCanvas<'_> {
                         ..canvas::Text::default()
                     });
                 }
-                RenderShape::Rect { .. } | RenderShape::Label { .. } => {}
+                RenderShape::Rect { rect, color } => {
+                    let path = canvas::Path::rectangle(
+                        Point::new(rect.x * self.scale, rect.y * self.scale),
+                        iced::Size::new(rect.width * self.scale, rect.height * self.scale),
+                    );
+                    frame.fill(&path, rgba(color));
+                }
+                RenderShape::Label {
+                    anchor,
+                    anchor_kind: TextAnchor::TopLeft,
+                    content,
+                    px,
+                    bold,
+                    color,
+                } => {
+                    frame.fill_text(canvas::Text {
+                        content,
+                        position: Point::new(anchor.x * self.scale, anchor.y * self.scale),
+                        color: rgba(color),
+                        size: iced::Pixels(px * self.scale),
+                        align_x: text::Alignment::Left,
+                        align_y: alignment::Vertical::Top,
+                        font: if bold {
+                            iced::Font {
+                                weight: iced::font::Weight::Bold,
+                                ..iced::Font::with_name(
+                                    rollshot_image_document::style::FONT_FAMILY_NAME,
+                                )
+                            }
+                        } else {
+                            iced::Font::with_name(rollshot_image_document::style::FONT_FAMILY_NAME)
+                        },
+                        ..canvas::Text::default()
+                    });
+                }
             }
         }
     }
@@ -220,6 +254,25 @@ impl NumberAnnotationCanvas<'_> {
 
 fn rgba(c: Rgba8) -> Color {
     Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
+}
+
+fn draft_annotation(document: &ImageDocument, draft: AnnotationDraft) -> Option<Annotation> {
+    match draft {
+        AnnotationDraft::Number { tip, bubble } => Some(Annotation::NumberCallout {
+            id: AnnotationId(0),
+            number: document.annotations().len() as u32 + 1,
+            tip,
+            bubble,
+        }),
+        AnnotationDraft::Redaction { .. } => {
+            draft
+                .redaction_rect()
+                .map(|bounds| Annotation::OpaqueRedaction {
+                    id: AnnotationId(0),
+                    bounds,
+                })
+        }
+    }
 }
 
 impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
@@ -273,13 +326,10 @@ impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
         for annotation in self.document.annotations() {
             self.draw_annotation(&mut frame, annotation);
         }
-        if let Some(AnnotationDraft::Number { tip, bubble }) = self.draft {
-            let draft = Annotation::NumberCallout {
-                id: AnnotationId(0),
-                number: self.document.annotations().len() as u32 + 1,
-                tip,
-                bubble,
-            };
+        if let Some(draft) = self
+            .draft
+            .and_then(|draft| draft_annotation(self.document, draft))
+        {
             self.draw_annotation(&mut frame, &draft);
         }
         vec![frame.into_geometry()]
@@ -403,5 +453,66 @@ mod tests {
                 height: 6.0,
             })
         );
+    }
+
+    #[test]
+    fn draft_annotation_converts_redaction_draft_to_opaque_redaction() {
+        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            64,
+            ::image::Rgba([10, 20, 30, 255]),
+        ));
+        let annotation = draft_annotation(
+            &document,
+            AnnotationDraft::Redaction {
+                start: ImagePoint::new(12.0, 9.0),
+                current: ImagePoint::new(2.0, 3.0),
+            },
+        )
+        .expect("draft annotation");
+
+        assert!(matches!(
+            annotation,
+            Annotation::OpaqueRedaction { bounds, .. }
+                if bounds
+                    == (rollshot_image_document::ImageRect {
+                        x: 2.0,
+                        y: 3.0,
+                        width: 10.0,
+                        height: 6.0,
+                    })
+        ));
+    }
+
+    #[test]
+    fn number_annotation_canvas_accepts_mixed_annotations_and_redaction_draft() {
+        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            64,
+            ::image::Rgba([10, 20, 30, 255]),
+        ));
+        document.add_number_callout(ImagePoint::new(8.0, 8.0), ImagePoint::new(24.0, 24.0));
+        document
+            .add_text_note(ImagePoint::new(4.0, 40.0), "Check this label".to_string())
+            .unwrap();
+        document
+            .add_redaction(rollshot_image_document::ImageRect {
+                x: 32.0,
+                y: 8.0,
+                width: 16.0,
+                height: 12.0,
+            })
+            .unwrap();
+
+        let canvas = NumberAnnotationCanvas {
+            document: &document,
+            draft: Some(AnnotationDraft::Redaction {
+                start: ImagePoint::new(1.0, 1.0),
+                current: ImagePoint::new(12.0, 10.0),
+            }),
+            scale: 0.5,
+        };
+
+        assert_eq!(canvas.scale, 0.5);
     }
 }
