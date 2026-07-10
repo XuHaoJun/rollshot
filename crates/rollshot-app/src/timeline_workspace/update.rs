@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use iced::Task;
 use rollshot_action::{
-    export_gif, export_guide, export_video, render_storyboard_steps, GifOptions, StoryboardError,
-    StoryboardOptions, StoryboardRenderResult, StoryboardStep, VideoOptions,
+    export_gif, export_guide, export_video, GifOptions, StoryboardError, StoryboardOptions,
+    StoryboardRenderResult, VideoOptions,
 };
 use rollshot_image_document::ImagePoint;
 
-use super::TimelineWorkspace;
+use super::{StoryboardCopyState, TimelineWorkspace};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -28,6 +28,14 @@ pub enum Message {
     ExportStoryboardPathChosen(Option<PathBuf>),
     PreviewStoryboardRequested,
     PreviewStoryboardClosed,
+    CopyStoryboardRequested,
+    CopyStoryboardFinished {
+        operation_id: u64,
+        result: Result<super::storyboard_copy::StoryboardCopyResult, String>,
+    },
+    ClearStoryboardCopyFeedback {
+        operation_id: u64,
+    },
     ExportMp4Requested,
     ExportMp4PathChosen(Option<PathBuf>),
     FfmpegUseSystem,
@@ -248,6 +256,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                         width: rendered.width,
                         height: rendered.height,
                         step_count: rendered.step_count,
+                        copy_state: StoryboardCopyState::Idle,
                     });
                 }
                 Err(error) => {
@@ -264,6 +273,99 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::PreviewStoryboardClosed => {
             state.storyboard_preview = None;
+            Task::none()
+        }
+        Message::CopyStoryboardRequested => {
+            let Some(preview) = &state.storyboard_preview else {
+                return Task::none();
+            };
+            if matches!(preview.copy_state, StoryboardCopyState::Copying { .. }) {
+                return Task::none();
+            }
+            let input = match super::storyboard_copy::snapshot_storyboard(
+                &state.guide,
+                &state.store,
+                &state.presentation,
+            ) {
+                Ok(input) => input,
+                Err(error) => {
+                    tracing::error!(
+                        target: "rollshot::app::storyboard_copy",
+                        error = %error,
+                        "storyboard snapshot failed during copy request"
+                    );
+                    state.storyboard_copy_operation_id =
+                        state.storyboard_copy_operation_id.saturating_add(1);
+                    let operation_id = state.storyboard_copy_operation_id;
+                    state.storyboard_preview.as_mut().unwrap().copy_state =
+                        StoryboardCopyState::Failed {
+                            operation_id,
+                            message: error.to_string(),
+                        };
+                    return Task::none();
+                }
+            };
+            state.storyboard_copy_operation_id =
+                state.storyboard_copy_operation_id.saturating_add(1);
+            let operation_id = state.storyboard_copy_operation_id;
+            state.storyboard_preview.as_mut().unwrap().copy_state =
+                StoryboardCopyState::Copying { operation_id };
+            Task::perform(
+                super::storyboard_copy::render_and_copy(input),
+                move |result| Message::CopyStoryboardFinished {
+                    operation_id,
+                    result,
+                },
+            )
+        }
+        Message::CopyStoryboardFinished {
+            operation_id,
+            result,
+        } => {
+            let Some(preview) = &mut state.storyboard_preview else {
+                return Task::none();
+            };
+            let current_id = match &preview.copy_state {
+                StoryboardCopyState::Copying { operation_id: id } => *id,
+                _ => return Task::none(),
+            };
+            if current_id != operation_id {
+                return Task::none();
+            }
+            match result {
+                Ok(copy_result) => {
+                    tracing::info!(
+                        target: "rollshot::app::storyboard_copy",
+                        width = copy_result.width,
+                        height = copy_result.height,
+                        step_count = copy_result.step_count,
+                        "storyboard copied"
+                    );
+                    preview.copy_state = StoryboardCopyState::Copied { operation_id };
+                    let clear_id = operation_id;
+                    Task::perform(
+                        async { tokio::time::sleep(std::time::Duration::from_secs(2)).await },
+                        move |_| Message::ClearStoryboardCopyFeedback {
+                            operation_id: clear_id,
+                        },
+                    )
+                }
+                Err(error) => {
+                    preview.copy_state = StoryboardCopyState::Failed {
+                        operation_id,
+                        message: error,
+                    };
+                    Task::none()
+                }
+            }
+        }
+        Message::ClearStoryboardCopyFeedback { operation_id } => {
+            let Some(preview) = &mut state.storyboard_preview else {
+                return Task::none();
+            };
+            if preview.copy_state == (StoryboardCopyState::Copied { operation_id }) {
+                preview.copy_state = StoryboardCopyState::Idle;
+            }
             Task::none()
         }
         Message::ExportStoryboardRequested => {
@@ -961,44 +1063,12 @@ fn render_timeline_storyboard(
     state: &TimelineWorkspace,
     opts: StoryboardOptions,
 ) -> Result<StoryboardRenderResult, StoryboardError> {
-    if state.guide.is_empty() {
-        return Err(StoryboardError::Empty);
-    }
-
-    let mut images = Vec::with_capacity(state.guide.steps().len());
-    for (i, step) in state.guide.steps().iter().enumerate() {
-        let frame = state
-            .store
-            .retained(step.keyframe)
-            .ok_or(StoryboardError::KeyframeMissing { index: i + 1 })?;
-        let image = match state.presentation.doc(step.source) {
-            Some(doc)
-                if doc.keyframe == step.keyframe && !doc.document.annotations().is_empty() =>
-            {
-                doc.document.flatten()
-            }
-            _ => frame.image.clone(),
-        };
-        images.push(image);
-    }
-
-    let steps: Vec<_> = state
-        .guide
-        .steps()
-        .iter()
-        .zip(images.iter())
-        .map(|(step, image)| StoryboardStep {
-            index: step.index,
-            title: &step.title,
-            caption: {
-                let caption = step.caption.trim();
-                (!caption.is_empty()).then_some(caption)
-            },
-            image,
-        })
-        .collect();
-
-    render_storyboard_steps(&steps, opts)
+    let input = super::storyboard_copy::snapshot_storyboard(
+        &state.guide,
+        &state.store,
+        &state.presentation,
+    )?;
+    super::storyboard_copy::render_storyboard_input(&input, opts)
 }
 
 fn write_storyboard_png(
@@ -1244,7 +1314,7 @@ mod tests {
     use super::*;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
     use crate::timeline_workspace::{
-        annotation::AnnotationTool, FfmpegSetupDialog, TimelineWorkspace,
+        annotation::AnnotationTool, FfmpegSetupDialog, StoryboardCopyState, TimelineWorkspace,
     };
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
     use std::ffi::{OsStr, OsString};
@@ -3078,5 +3148,178 @@ mod tests {
             state.callout_suggestion,
             crate::timeline_workspace::CalloutSuggestionState::Idle
         ));
+    }
+
+    // ---- Storyboard copy state machine ----
+
+    fn workspace_with_open_preview() -> TimelineWorkspace {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        assert!(state.storyboard_preview.is_some());
+        state
+    }
+
+    fn copy_result() -> crate::timeline_workspace::storyboard_copy::StoryboardCopyResult {
+        crate::timeline_workspace::storyboard_copy::StoryboardCopyResult {
+            width: 1200,
+            height: 800,
+            step_count: 1,
+        }
+    }
+
+    #[test]
+    fn storyboard_copy_state_starts_idle_when_preview_opens() {
+        let state = workspace_with_open_preview();
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Idle
+        );
+    }
+
+    #[test]
+    fn older_copy_completion_cannot_replace_newer_operation() {
+        let mut state = workspace_with_open_preview();
+        state.storyboard_copy_operation_id = 2;
+        state.storyboard_preview.as_mut().unwrap().copy_state =
+            StoryboardCopyState::Copying { operation_id: 2 };
+
+        let _ = update(
+            &mut state,
+            Message::CopyStoryboardFinished {
+                operation_id: 1,
+                result: Ok(copy_result()),
+            },
+        );
+
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Copying { operation_id: 2 }
+        );
+    }
+
+    #[test]
+    fn completion_after_preview_close_is_ignored() {
+        let mut state = workspace_with_open_preview();
+        let _ = update(&mut state, Message::PreviewStoryboardClosed);
+        let _ = update(
+            &mut state,
+            Message::CopyStoryboardFinished {
+                operation_id: 1,
+                result: Ok(copy_result()),
+            },
+        );
+        assert!(state.storyboard_preview.is_none());
+    }
+
+    #[test]
+    fn retry_after_failure_allocates_new_operation_id() {
+        let mut state = workspace_with_open_preview();
+        state.storyboard_copy_operation_id = 5;
+        state.storyboard_preview.as_mut().unwrap().copy_state = StoryboardCopyState::Failed {
+            operation_id: 5,
+            message: "previous failure".to_string(),
+        };
+
+        let task = update(&mut state, Message::CopyStoryboardRequested);
+
+        assert_eq!(state.storyboard_copy_operation_id, 6);
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Copying { operation_id: 6 }
+        );
+        assert!(task.units() > 0, "should return a render-and-copy task");
+    }
+
+    #[test]
+    fn duplicate_copy_request_while_copying_does_not_increment_id() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        assert!(state.storyboard_preview.is_some());
+
+        state.storyboard_copy_operation_id = 5;
+        state.storyboard_preview.as_mut().unwrap().copy_state =
+            StoryboardCopyState::Copying { operation_id: 5 };
+
+        let task = update(&mut state, Message::CopyStoryboardRequested);
+        assert_eq!(
+            task.units(),
+            0,
+            "duplicate request should return a no-op task"
+        );
+        assert_eq!(
+            state.storyboard_copy_operation_id, 5,
+            "operation_id should not increment"
+        );
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Copying { operation_id: 5 },
+            "state should remain Copying"
+        );
+    }
+
+    #[test]
+    fn copy_finished_error_transitions_to_failed() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::PreviewStoryboardRequested);
+        assert!(state.storyboard_preview.is_some());
+
+        state.storyboard_preview.as_mut().unwrap().copy_state =
+            StoryboardCopyState::Copying { operation_id: 1 };
+
+        let _ = update(
+            &mut state,
+            Message::CopyStoryboardFinished {
+                operation_id: 1,
+                result: Err("disk full".to_string()),
+            },
+        );
+
+        let preview = state.storyboard_preview.unwrap();
+        assert_eq!(
+            preview.copy_state,
+            StoryboardCopyState::Failed {
+                operation_id: 1,
+                message: "disk full".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn old_clear_cannot_erase_newer_copied_state() {
+        let mut state = workspace_with_open_preview();
+        state.storyboard_preview.as_mut().unwrap().copy_state =
+            StoryboardCopyState::Copied { operation_id: 2 };
+
+        let _ = update(
+            &mut state,
+            Message::ClearStoryboardCopyFeedback { operation_id: 1 },
+        );
+
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Copied { operation_id: 2 }
+        );
+    }
+
+    #[test]
+    fn old_clear_cannot_erase_newer_failed_state() {
+        let mut state = workspace_with_open_preview();
+        state.storyboard_preview.as_mut().unwrap().copy_state = StoryboardCopyState::Failed {
+            operation_id: 2,
+            message: "new failure".to_string(),
+        };
+
+        let _ = update(
+            &mut state,
+            Message::ClearStoryboardCopyFeedback { operation_id: 1 },
+        );
+
+        assert_eq!(
+            state.storyboard_preview.unwrap().copy_state,
+            StoryboardCopyState::Failed {
+                operation_id: 2,
+                message: "new failure".to_string(),
+            }
+        );
     }
 }

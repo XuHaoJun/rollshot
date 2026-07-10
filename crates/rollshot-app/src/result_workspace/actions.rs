@@ -1,21 +1,7 @@
 use image::RgbaImage;
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostics::TARGET_SAVE;
-
-/// Copy the full-resolution image to the system clipboard.
-pub fn copy_image(image: &RgbaImage) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?;
-    let image_data = arboard::ImageData {
-        width: image.width() as usize,
-        height: image.height() as usize,
-        bytes: Cow::from(image.as_raw().as_slice()),
-    };
-    clipboard
-        .set_image(image_data)
-        .map_err(|e| format!("clipboard write error: {e}"))
-}
 
 /// Show an async save-file dialog and return the chosen path, or `None` if the
 /// user cancelled.

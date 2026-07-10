@@ -19,6 +19,7 @@
 mod annotation;
 mod callout_agent;
 mod caption_agent;
+mod storyboard_copy;
 mod update;
 mod view;
 
@@ -42,12 +43,29 @@ pub(crate) struct FfmpegSetupDialog {
     pub downloading: bool,
 }
 
+/// Copy image operation state machine for the storyboard preview modal.
+///
+/// ```text
+/// Idle ───────────────► Copying(id) ──success──► Copied(id) ──delay──► Idle
+///  ▲                         │
+///  │                         └─failure────────► Failed(id) ──retry──► Copying(new id)
+///  └──────────────── modal close drops the entire preview state ────────────────
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoryboardCopyState {
+    Idle,
+    Copying { operation_id: u64 },
+    Copied { operation_id: u64 },
+    Failed { operation_id: u64, message: String },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct StoryboardPreviewState {
     pub handle: iced::widget::image::Handle,
     pub width: u32,
     pub height: u32,
     pub step_count: usize,
+    pub copy_state: StoryboardCopyState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +184,9 @@ pub struct TimelineWorkspace {
     /// Monotonic local run id for callout suggestion provenance.
     #[allow(dead_code)] // Read by Task 8's view; only the update path uses it in Task 7.
     pub(crate) callout_agent_run_id: u64,
+    /// Monotonic operation id for storyboard copy provenance and late-result
+    /// race protection. Incremented on each [`CopyStoryboardRequested`].
+    pub(crate) storyboard_copy_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -201,6 +222,7 @@ impl TimelineWorkspace {
             caption_agent_run_id: 0,
             callout_suggestion: CalloutSuggestionState::Idle,
             callout_agent_run_id: 0,
+            storyboard_copy_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws

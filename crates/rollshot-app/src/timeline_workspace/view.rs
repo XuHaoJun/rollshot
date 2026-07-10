@@ -366,6 +366,40 @@ fn issue_pack_modal<'a>(
     stack![base, scrim].into()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoryboardCopyPresentation<'a> {
+    label: &'a str,
+    enabled: bool,
+    error: Option<&'a str>,
+}
+
+fn storyboard_copy_presentation(
+    state: &super::StoryboardCopyState,
+) -> StoryboardCopyPresentation<'_> {
+    match state {
+        super::StoryboardCopyState::Idle => StoryboardCopyPresentation {
+            label: "Copy Image",
+            enabled: true,
+            error: None,
+        },
+        super::StoryboardCopyState::Copying { .. } => StoryboardCopyPresentation {
+            label: "Copying...",
+            enabled: false,
+            error: None,
+        },
+        super::StoryboardCopyState::Copied { .. } => StoryboardCopyPresentation {
+            label: "Copied",
+            enabled: false,
+            error: None,
+        },
+        super::StoryboardCopyState::Failed { message, .. } => StoryboardCopyPresentation {
+            label: "Retry",
+            enabled: true,
+            error: Some(message.as_str()),
+        },
+    }
+}
+
 fn storyboard_preview_modal<'a>(
     base: Element<'a, Message>,
     state: &'a TimelineWorkspace,
@@ -377,6 +411,7 @@ fn storyboard_preview_modal<'a>(
     let preview_image = image(preview.handle.clone())
         .width(Length::Fill)
         .height(Length::Shrink);
+    let presentation = storyboard_copy_presentation(&preview.copy_state);
 
     let dialog_view = container(
         column![
@@ -395,7 +430,25 @@ fn storyboard_preview_modal<'a>(
                 .width(Length::Fill)
                 .height(Length::Fixed(520.0))
                 .style(container::rounded_box),
+            {
+                let error_element: Element<'_, Message> = if let Some(error) = presentation.error {
+                    text(error).size(12).into()
+                } else {
+                    Space::new()
+                        .width(Length::Fill)
+                        .height(Length::Fixed(0.0))
+                        .into()
+                };
+                error_element
+            },
             row![
+                button(text(presentation.label))
+                    .on_press_maybe(
+                        presentation
+                            .enabled
+                            .then_some(Message::CopyStoryboardRequested)
+                    )
+                    .style(button::secondary),
                 button(text("Export PNG"))
                     .on_press(Message::ExportStoryboardRequested)
                     .style(button::primary),
@@ -791,7 +844,7 @@ mod tests {
     use super::*;
     use crate::timeline_workspace::annotation::AnnotationTool;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
-    use crate::timeline_workspace::TimelineWorkspace;
+    use crate::timeline_workspace::{StoryboardCopyState, TimelineWorkspace};
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
 
     fn ws(recording: rollshot_action::Recording, capability: InputCapability) -> TimelineWorkspace {
@@ -806,6 +859,31 @@ mod tests {
             capability,
             InputSourceKind::LinuxEvdev,
         )
+    }
+
+    #[test]
+    fn copy_presentation_matches_lifecycle() {
+        assert_eq!(
+            storyboard_copy_presentation(&StoryboardCopyState::Idle).label,
+            "Copy Image"
+        );
+        assert!(
+            !storyboard_copy_presentation(&StoryboardCopyState::Copying { operation_id: 1 })
+                .enabled
+        );
+        assert_eq!(
+            storyboard_copy_presentation(&StoryboardCopyState::Copied { operation_id: 1 }).label,
+            "Copied"
+        );
+        let failed = StoryboardCopyState::Failed {
+            operation_id: 1,
+            message: "clipboard unavailable".into(),
+        };
+        assert_eq!(storyboard_copy_presentation(&failed).label, "Retry");
+        assert_eq!(
+            storyboard_copy_presentation(&failed).error,
+            Some("clipboard unavailable")
+        );
     }
 
     #[test]
