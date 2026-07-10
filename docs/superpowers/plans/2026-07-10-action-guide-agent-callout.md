@@ -21,6 +21,28 @@
 - The Timeline Workspace and annotation modal remain shared between Linux and macOS; introduce no platform-specific behavior.
 - Follow TDD: each behavior starts with a focused failing test and ends with the smallest implementation that passes it.
 
+## What Already Exists
+
+- `AuthorizedModelInput` already owns attachment count/type/size authorization and privacy-safe `Debug`; extend it instead of creating a second image-input gate.
+- `ModelRequest`, `ProviderAdapter`, `AnthropicAdapter`, and `OpenAIAdapter` already form the Rollshot-owned provider boundary while using Rig internally; preserve that boundary.
+- Rig `AgentRun` already provides sans-I/O turn/tool-call sequencing; reuse it for the callout profile instead of writing an app-local loop.
+- `RunBudget`, `BudgetTracker`, and `RunCancellation` already cover model, token, tool, attachment, and wall-time limits; define a tight callout budget with these types.
+- `CaptionProposal` already establishes provenance and stale proposal status patterns; mirror the pattern without forcing callouts into the caption model.
+- `ImageDocument::state_id`, `add_number_callout`, undo/redo, `annotation_bounds`, and Number Callout style tokens already solve committed-edit identity, history, collision bounds, and visuals.
+- Timeline Workspace already loads provider configuration, owns per-step `ImageDocument`s, and renders the shared Linux/macOS annotation modal; extend these flows instead of adding a second modal.
+
+## NOT in Scope
+
+- Multi-step or batch callout generation: selected-step-only keeps image authorization, cost, and review bounded.
+- More than one suggestion per run: numbering and partial acceptance are deferred until single-target quality is validated.
+- Text Note or Opaque Redaction suggestions: redaction carries separate privacy claims and review requirements.
+- Agent-selected bubble positions or numbers: Rollshot retains deterministic layout and document numbering.
+- User-entered callout prompts: the first version infers intent from reviewed step metadata.
+- URL, file-ID, video, PDF, or arbitrary media transport: the provider contract accepts one authorized PNG/JPEG only.
+- Replacing Rollshot request/event/error contracts with Rig types: Rig remains internal transport/state machinery.
+- Provider/model capability discovery UI: unsupported image input remains a recoverable error until provider metadata exists.
+- Telemetry, batch-cost analytics, and hosted evaluation infrastructure: the phase uses contract tests and one privacy-safe smoke test.
+
 ---
 
 ## File Structure
@@ -28,17 +50,19 @@
 - Modify `crates/rollshot-agent/src/domain.rs`: convert authorized attachments into redacted provider-neutral model attachments.
 - Modify `crates/rollshot-agent/src/model.rs`: define `ModelAttachment` and add `attachments` to `ModelRequest`.
 - Modify `crates/rollshot-agent/src/provider.rs`: convert attachments to Rig `UserContent::Image` for existing Anthropic/OpenAI adapters.
+- Modify `crates/rollshot-agent/src/driver.rs`: preserve existing request literals, extract task profiles, and add the callout runner by reusing streamed-turn machinery.
 - Create `crates/rollshot-agent/src/callout.rs`: bounded callout task profile, terminal schema, output validation, and Rig turn/tool lifecycle.
 - Modify `crates/rollshot-agent/src/lib.rs`: export Rollshot-owned callout runner/output types.
 - Create `crates/rollshot-action/src/callout_proposal.rs`: step-bound proposal, provenance, accept/reject/stale policy.
 - Modify `crates/rollshot-action/src/lib.rs`: export callout proposal types.
 - Create `crates/rollshot-image-document/src/callout_placement.rs`: deterministic bubble-placement function.
-- Modify `crates/rollshot-image-document/src/lib.rs`: export the placement function/options.
+- Modify `crates/rollshot-image-document/src/lib.rs`: export the placement function.
 - Create `crates/rollshot-app/src/timeline_workspace/callout_agent.rs`: encode the selected keyframe, authorize it, and run the bounded callout task.
 - Modify `crates/rollshot-app/src/timeline_workspace/mod.rs`: callout run/proposal/modal state.
 - Modify `crates/rollshot-app/src/timeline_workspace/update.rs`: request, cancellation, load, accept, reject, close, and stale transitions.
 - Modify `crates/rollshot-app/src/timeline_workspace/annotation.rs`: ghost-callout Canvas rendering.
 - Modify `crates/rollshot-app/src/timeline_workspace/view.rs`: selected-step action and modal loading/review controls.
+- Modify `crates/rollshot-app/src/timeline_workspace/caption_agent.rs`: keep the existing caption request explicitly text-only.
 
 ---
 
@@ -47,10 +71,11 @@
 **Files:**
 - Modify: `crates/rollshot-agent/src/model.rs`
 - Modify: `crates/rollshot-agent/src/domain.rs`
-- Modify: every `ModelRequest { ... }` literal under `crates/rollshot-agent/src/` and `crates/rollshot-app/src/timeline_workspace/caption_agent.rs`
+- Modify: `crates/rollshot-agent/src/driver.rs`
+- Modify: `crates/rollshot-app/src/timeline_workspace/caption_agent.rs`
 
 **Interfaces:**
-- Produces: `ModelAttachment`, `ModelRequest::attachments`, and `AuthorizedModelInput::model_attachments()`.
+- Produces: `ModelAttachment`, `ModelRequest::attachments`, and consuming `AuthorizedModelInput::take_model_attachments()`.
 - Consumes: existing `MediaType`, `AttachmentDescriptor`, and validated attachment bytes.
 
 - [ ] **Step 1: Write failing model attachment redaction tests**
@@ -146,7 +171,7 @@ Add to `domain.rs` tests:
 ```rust
 #[test]
 fn authorized_input_builds_model_attachments_without_revalidation() {
-    let input = AuthorizedModelInput::new(
+    let mut input = AuthorizedModelInput::new(
         "anthropic".into(),
         "vision-model".into(),
         "inspect".into(),
@@ -159,25 +184,62 @@ fn authorized_input_builds_model_attachments_without_revalidation() {
         vec![vec![1, 2, 3, 4]],
     ).unwrap();
 
-    let attachments = input.model_attachments();
+    let attachments = input.take_model_attachments();
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].media_type(), MediaType::Png);
     assert_eq!(attachments[0].bytes(), &[1, 2, 3, 4]);
+    assert!(input.attachments().is_empty());
+}
+```
+
+Add two authorization regression tests before implementation:
+
+```rust
+#[test]
+fn rejects_declared_byte_count_that_does_not_match_payload() {
+    let error = AuthorizedModelInput::new(
+        "anthropic".into(), "m".into(), "p".into(),
+        vec![AttachmentDescriptor {
+            media_type: MediaType::Png,
+            width: 1,
+            height: 1,
+            byte_count: 1,
+        }],
+        vec![vec![1, 2]],
+    ).unwrap_err();
+    assert_eq!(error, InputError::ByteCountMismatch { declared: 1, actual: 2 });
+}
+
+#[test]
+fn rejects_zero_sized_attachment_dimensions() {
+    let error = AuthorizedModelInput::new(
+        "anthropic".into(), "m".into(), "p".into(),
+        vec![AttachmentDescriptor {
+            media_type: MediaType::Png,
+            width: 0,
+            height: 1,
+            byte_count: 1,
+        }],
+        vec![vec![1]],
+    ).unwrap_err();
+    assert_eq!(error, InputError::InvalidDimensions { width: 0, height: 1 });
 }
 ```
 
 - [ ] **Step 5: Add the authorized conversion and run tests**
 
+Add `InputError::ByteCountMismatch { declared, actual }` and `InputError::InvalidDimensions { width, height }`. In `AuthorizedModelInput::new`, compare each descriptor with its paired payload using checked `usize` to `u64` conversion, reject zero dimensions, and calculate limits from the actual verified lengths. This closes the existing trust gap where a caller could declare one byte while supplying a much larger buffer.
+
 Add to `AuthorizedModelInput`:
 
 ```rust
-pub(crate) fn model_attachments(&self) -> Vec<crate::model::ModelAttachment> {
-    self.manifest.descriptors.iter().zip(&self.attachments)
+pub(crate) fn take_model_attachments(&mut self) -> Vec<crate::model::ModelAttachment> {
+    self.manifest.descriptors.iter().zip(std::mem::take(&mut self.attachments))
         .map(|(descriptor, bytes)| crate::model::ModelAttachment::new(
             descriptor.media_type,
             descriptor.width,
             descriptor.height,
-            std::sync::Arc::from(bytes.clone()),
+            std::sync::Arc::from(bytes),
         ))
         .collect()
 }
@@ -194,7 +256,7 @@ Run: `rtk cargo test -p rollshot-agent`
 Expected: PASS.
 
 ```bash
-rtk git add crates/rollshot-agent/src/model.rs crates/rollshot-agent/src/domain.rs crates/rollshot-agent/src crates/rollshot-app/src/timeline_workspace/caption_agent.rs
+rtk git add crates/rollshot-agent/src/model.rs crates/rollshot-agent/src/domain.rs crates/rollshot-agent/src/driver.rs crates/rollshot-app/src/timeline_workspace/caption_agent.rs
 rtk git commit -m "feat(agent): add authorized model attachments"
 ```
 
@@ -235,10 +297,10 @@ fn image_request() -> ModelRequest {
 }
 
 fn assert_has_raw_png(request: CompletionRequest) {
-    let last = request.chat_history.last();
+    let last = request.chat_history.iter().last().expect("image message");
     let Message::User { content } = last else { panic!("last message must be user image") };
     assert!(matches!(
-        content.first(),
+        content.iter().next().expect("image content"),
         UserContent::Image(rig_core::message::Image {
             data: rig_core::message::DocumentSourceKind::Raw(bytes),
             media_type: Some(rig_core::message::ImageMediaType::PNG),
@@ -299,7 +361,26 @@ Keep raw bytes internal and let Rig's existing provider conversions perform prov
 
 - [ ] **Step 4: Add text-only regression and redaction assertions**
 
-Assert an empty attachment list produces the exact previous chat history. Assert `format!("{:?}", image_request())` does not contain the raw byte sentinel or a base64 representation of it.
+Assert an empty attachment list produces the exact previous chat history. Assert `format!("{:?}", image_request())` does not contain the raw byte sentinel or a base64 representation of it. Add this JPEG mapping test so both allowed media types are covered:
+
+```rust
+#[test]
+fn jpeg_attachment_maps_to_rig_jpeg() {
+    let attachment = crate::model::ModelAttachment::new(
+        crate::domain::MediaType::Jpeg,
+        1,
+        1,
+        std::sync::Arc::from([0xff_u8, 0xd8_u8]),
+    );
+    assert!(matches!(
+        attachment_to_rig(&attachment),
+        UserContent::Image(rig_core::message::Image {
+            media_type: Some(rig_core::message::ImageMediaType::JPEG),
+            ..
+        })
+    ));
+}
+```
 
 - [ ] **Step 5: Run provider and full crate tests**
 
@@ -321,7 +402,70 @@ rtk git commit -m "feat(agent): send authorized images to providers"
 
 ---
 
-### Task 3: Bounded Callout Agent Profile
+### Task 3: Extract Bounded Agent Task Profile
+
+**Files:**
+- Modify: `crates/rollshot-agent/src/driver.rs`
+
+**Interfaces:**
+- Consumes: the existing Smart Redaction system prompt and terminal-tool set.
+- Produces: internal `AgentTaskProfile` lookups used by existing behavior and Task 4.
+
+- [ ] **Step 1: Write failing profile parity tests**
+
+Add tests asserting `SmartRedaction.system_prompt()` equals `SMART_REDACTION_SYSTEM_PROMPT`, its terminal tools are exactly `submit_for_review` and `request_user_input`, and `Callout` advertises only `submit_callout_suggestion`.
+
+- [ ] **Step 2: Run the focused test and verify it fails**
+
+Run: `rtk cargo test -p rollshot-agent task_profile`
+
+Expected: FAIL because `AgentTaskProfile` does not exist.
+
+- [ ] **Step 3: Add the internal profile enum**
+
+```rust
+pub(crate) enum AgentTaskProfile {
+    SmartRedaction,
+    Callout,
+}
+
+impl AgentTaskProfile {
+    pub(crate) fn system_prompt(&self) -> &'static str {
+        match self {
+            Self::SmartRedaction => SMART_REDACTION_SYSTEM_PROMPT,
+            Self::Callout => CALLOUT_SYSTEM_PROMPT,
+        }
+    }
+
+    pub(crate) fn terminal_tools(&self) -> &'static [&'static str] {
+        match self {
+            Self::SmartRedaction => &["submit_for_review", "request_user_input"],
+            Self::Callout => &["submit_callout_suggestion"],
+        }
+    }
+}
+```
+
+Define `CALLOUT_SYSTEM_PROMPT` beside the existing Smart Redaction prompt in `driver.rs`; Task 4 uses the profile accessor and does not duplicate the prompt.
+
+Route the existing runner through `AgentTaskProfile::SmartRedaction`; do not change its public signature or terminal mapping.
+
+- [ ] **Step 4: Run the complete existing agent suite**
+
+Run: `rtk cargo test -p rollshot-agent`
+
+Expected: PASS, proving the structural refactor preserves current behavior.
+
+- [ ] **Step 5: Commit the behavior-preserving refactor**
+
+```bash
+rtk git add crates/rollshot-agent/src/driver.rs
+rtk git commit -m "refactor(agent): extract bounded task profile"
+```
+
+---
+
+### Task 4: Bounded Callout Agent Profile
 
 **Files:**
 - Create: `crates/rollshot-agent/src/callout.rs`
@@ -330,7 +474,7 @@ rtk git commit -m "feat(agent): send authorized images to providers"
 
 **Interfaces:**
 - Consumes: `AuthorizedModelInput`, `ProviderAdapter`, `RunBudget`, `RunCancellation`, and Rig `AgentRun`.
-- Produces: `run_callout_with_provider(input, provider, budget, cancellation) -> CalloutRunTerminal`.
+- Produces: `AgentRunner::run_callout_with_provider(input, provider, budget, cancellation) -> CalloutRunTerminal`.
 
 - [ ] **Step 1: Write failing terminal payload validation tests**
 
@@ -400,43 +544,15 @@ Use a scripted `ProviderAdapter` stream to cover:
 
 The advertised tool name must be exactly `submit_callout_suggestion`, with `additionalProperties: false` at every object level.
 
-- [ ] **Step 5: Extract the two task-profile variables from the existing driver**
+- [ ] **Step 5: Implement the callout runner**
 
-Add an internal profile enum to `driver.rs`:
-
-```rust
-pub(crate) enum AgentTaskProfile {
-    SmartRedaction,
-    Callout,
-}
-
-impl AgentTaskProfile {
-    pub(crate) fn system_prompt(&self) -> &'static str {
-        match self {
-            Self::SmartRedaction => SMART_REDACTION_SYSTEM_PROMPT,
-            Self::Callout => crate::callout::CALLOUT_SYSTEM_PROMPT,
-        }
-    }
-
-    pub(crate) fn terminal_tools(&self) -> &'static [&'static str] {
-        match self {
-            Self::SmartRedaction => &["submit_for_review", "request_user_input"],
-            Self::Callout => &["submit_callout_suggestion"],
-        }
-    }
-}
-```
-
-Replace the hard-coded Smart Redaction prompt and terminal-tool set in shared model/tool turns with profile lookups. Existing `run_with_provider` always passes `SmartRedaction`, so its public behavior and terminal states remain unchanged.
-
-- [ ] **Step 6: Implement the callout runner**
-
-In `callout.rs`, drive `rig_core::agent::run::AgentRun` with `max_turns(2)`, the callout profile, and exactly one tool definition. Charge one attachment before the first model call, attach `input.model_attachments()` only to the first `ModelRequest`, and use an empty attachment list on any second turn.
+Keep callout data/schema/decoding in `callout.rs`, but implement the loop as `AgentRunner::run_callout_with_provider` in `driver.rs` so it reuses the existing private streamed-turn assembly, budget charging, cancellation checks, and Rig tool-result threading. Do not copy `run_model_turn_with_provider` into the new module. Drive `rig_core::agent::run::AgentRun` with `max_turns(2)`, `AgentTaskProfile::Callout`, and exactly one tool definition. Own the input mutably, charge one attachment before the first model call, attach `input.take_model_attachments()` only to the first `ModelRequest`, and use an empty attachment list on any second turn. This moves the authorized PNG buffer into `Arc<[u8]>` without cloning it; Rig conversion performs the single transport copy required by `image_raw`.
 
 Expose:
 
 ```rust
 pub async fn run_callout_with_provider(
+    &self,
     input: crate::domain::AuthorizedModelInput,
     provider: &dyn crate::ProviderAdapter,
     budget: crate::runtime::RunBudget,
@@ -446,7 +562,32 @@ pub async fn run_callout_with_provider(
 
 Map detailed provider/protocol messages only to privacy-safe tracing events; terminal values carry no provider payload or prompt text.
 
-- [ ] **Step 7: Export types, run contract/privacy tests, and commit**
+Define and use this exact product budget rather than `RunBudget::unlimited()`:
+
+```rust
+pub fn callout_run_budget() -> crate::runtime::RunBudget {
+    crate::runtime::RunBudget {
+        wall_time: std::time::Duration::from_secs(30),
+        model_calls: 2,
+        input_tokens: 32_000,
+        output_tokens: 1_000,
+        cost: f64::MAX,
+        tool_calls: 1,
+        per_tool_calls: 1,
+        argument_bytes: 4_096,
+        result_bytes: 4_096,
+        source_bytes: 0,
+        attachments: 1,
+        validation_attempts: 0,
+        dry_run_attempts: 0,
+        capability_calls: 0,
+        candidate_count: 0,
+        affected_area: 0,
+    }
+}
+```
+
+- [ ] **Step 6: Export types, run contract/privacy tests, and commit**
 
 Add `pub mod callout;` and re-export the function/types from `lib.rs`.
 
@@ -468,12 +609,11 @@ rtk git commit -m "feat(agent): add bounded callout suggestion run"
 
 ---
 
-### Task 4: Step-Bound Callout Proposal Policy
+### Task 5: Step-Bound Callout Proposal Policy
 
 **Files:**
 - Create: `crates/rollshot-action/src/callout_proposal.rs`
 - Modify: `crates/rollshot-action/src/lib.rs`
-- Modify: `crates/rollshot-action/Cargo.toml` only if `rollshot-image-document` is not already a dependency
 
 **Interfaces:**
 - Consumes: `GuideStep`, `CandidateId`, `FrameId`, `ImagePoint`, and agent draft output.
@@ -481,7 +621,7 @@ rtk git commit -m "feat(agent): add bounded callout suggestion run"
 
 - [ ] **Step 1: Write failing proposal construction tests**
 
-Cover a valid in-bounds tip, missing step source, non-finite tip, edge-exclusive bounds (`x == width` is invalid), invalid confidence, trimmed rationale, and agent provenance.
+Cover a valid in-bounds tip, non-finite tip, edge-exclusive bounds (`x == width` is invalid), invalid confidence, oversized rationale, trimmed rationale, and agent provenance.
 
 Define the draft and constructor exactly as:
 
@@ -501,6 +641,22 @@ pub fn from_agent_draft(
     image_height: u32,
     draft: CalloutSuggestionDraft,
 ) -> Result<CalloutProposal, CalloutProposalError>
+```
+
+Use these explicit construction failures:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CalloutProposalError {
+    #[error("callout tip must be finite")]
+    NonFiniteTip,
+    #[error("callout tip is outside the source image")]
+    TipOutOfBounds,
+    #[error("callout confidence must be finite and within 0..=1")]
+    InvalidConfidence,
+    #[error("callout rationale exceeds 500 characters")]
+    RationaleTooLong,
+}
 ```
 
 - [ ] **Step 2: Run tests and verify they fail**
@@ -558,13 +714,13 @@ Run: `rtk cargo test -p rollshot-action callout_proposal`
 Expected: PASS.
 
 ```bash
-rtk git add crates/rollshot-action/src/callout_proposal.rs crates/rollshot-action/src/lib.rs crates/rollshot-action/Cargo.toml Cargo.lock
+rtk git add crates/rollshot-action/src/callout_proposal.rs crates/rollshot-action/src/lib.rs
 rtk git commit -m "feat(action): add callout proposal policy"
 ```
 
 ---
 
-### Task 5: Deterministic Bubble Placement
+### Task 6: Deterministic Bubble Placement
 
 **Files:**
 - Create: `crates/rollshot-image-document/src/callout_placement.rs`
@@ -576,7 +732,7 @@ rtk git commit -m "feat(action): add callout proposal policy"
 
 - [ ] **Step 1: Write failing placement tests**
 
-Use a fixed `CalloutPlacementOptions` with `offset = 32.0`, `bubble_radius = 12.0`, and `tip_protection_radius = 16.0`. Cover center preference for upper-right, each image corner, overlap avoidance with an existing Number Callout, deterministic upper-right tie-breaking, and a tiny image that requires clamping.
+Cover center preference for upper-right, each image corner, overlap avoidance with an existing Number Callout, deterministic upper-right tie-breaking, and a tiny image that requires clamping. Tests must derive bubble radius from the existing Number Callout style token rather than introducing a second visual radius.
 
 - [ ] **Step 2: Run tests and verify they fail**
 
@@ -589,23 +745,15 @@ Expected: FAIL because the module does not exist.
 Expose:
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CalloutPlacementOptions {
-    pub offset: f32,
-    pub bubble_radius: f32,
-    pub tip_protection_radius: f32,
-}
-
 pub fn place_number_callout_bubble(
     tip: ImagePoint,
     image_width: u32,
     image_height: u32,
     annotations: &[Annotation],
-    options: CalloutPlacementOptions,
 ) -> ImagePoint
 ```
 
-Generate candidates in upper-right, upper-left, lower-right, lower-left order. Score axis-aligned bubble bounds against the protected tip square and annotation render bounds; choose minimum overlap with stable first-candidate tie-breaking. Clamp the upper-right candidate when none fit.
+Keep placement constants private because this phase has one product behavior: offset `NUMBER_BUBBLE_RADIUS * 2.5`, bubble extent `NUMBER_BUBBLE_RADIUS + NUMBER_BUBBLE_OUTLINE_WIDTH`, and tip protection radius `NUMBER_BUBBLE_RADIUS`. Generate candidates in upper-right, upper-left, lower-right, lower-left order. Score axis-aligned bubble bounds against the protected tip square and existing `annotation_bounds`; choose minimum overlap with stable first-candidate tie-breaking. Clamp the upper-right candidate when none fit.
 
 - [ ] **Step 4: Run crate tests and commit**
 
@@ -620,7 +768,7 @@ rtk git commit -m "feat(document): place suggested callout bubbles"
 
 ---
 
-### Task 6: Timeline Callout Agent Orchestration
+### Task 7: Timeline Callout Agent Orchestration
 
 **Files:**
 - Create: `crates/rollshot-app/src/timeline_workspace/callout_agent.rs`
@@ -628,7 +776,7 @@ rtk git commit -m "feat(document): place suggested callout bubbles"
 - Modify: `crates/rollshot-app/src/timeline_workspace/update.rs`
 
 **Interfaces:**
-- Consumes: selected `GuideStep`, original retained keyframe, current annotation `state_id`, provider adapter/config, and Task 3 runner.
+- Consumes: selected `GuideStep`, original retained keyframe, current annotation `state_id`, provider adapter/config, and Task 4 runner.
 - Produces: `suggest_callout_task(...) -> CalloutTaskResult` and workspace run state.
 
 - [ ] **Step 1: Write failing prompt and PNG authorization tests**
@@ -662,50 +810,59 @@ Expected: FAIL because the module does not exist.
 Encode with:
 
 ```rust
+let image_width = input.image.width();
+let image_height = input.image.height();
 let mut png = Vec::new();
-image::DynamicImage::ImageRgba8(input.image.clone())
+image::DynamicImage::ImageRgba8(input.image)
     .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
     .map_err(|error| format!("PNG encode failed: {error}"))?;
 ```
 
-Construct one `AuthorizedModelInput` descriptor, invoke `run_callout_with_provider`, and map only `Suggested` into `CalloutProposal::from_agent_draft`. Map `NoSuggestion` separately; map cancelled/budget/provider/protocol terminals to fixed recoverable messages without forwarding sensitive provider text.
+Construct one `AuthorizedModelInput` descriptor, invoke `AgentRunner::new(AgentConfig { max_turns: 2, ..Default::default() }).run_callout_with_provider(...)` with `callout_run_budget()`, and map only `Suggested` into `CalloutProposal::from_agent_draft`. Map `NoSuggestion` separately; map cancelled/budget/provider/protocol terminals to fixed recoverable messages without forwarding sensitive provider text.
 
 - [ ] **Step 4: Add workspace state and cancellation ownership**
 
-Add to `TimelineWorkspace`:
+Add one state enum instead of independent booleans/options that can represent contradictory states:
 
 ```rust
-pub(crate) callout_proposal: Option<rollshot_action::CalloutProposal>,
-pub(crate) callout_suggestion_running: bool,
+pub(crate) enum CalloutSuggestionState {
+    Idle,
+    Running {
+        run_id: u64,
+        cancellation: rollshot_agent::runtime::RunCancellation,
+    },
+    Pending(rollshot_action::CalloutProposal),
+    NoSuggestion { reason: Option<String> },
+    Failed { message: String },
+}
+
+pub(crate) callout_suggestion: CalloutSuggestionState,
 pub(crate) callout_agent_run_id: u64,
-pub(crate) callout_cancellation: Option<rollshot_agent::runtime::RunCancellation>,
 ```
 
-Initialize them to `None`, `false`, `0`, and `None`. Add these state tests in `update.rs` using the existing `ws` and `synthetic_recording` helpers:
+Initialize them to `Idle` and `0`. Add an ASCII state-transition diagram as a doc comment above the enum (`Idle -> Running -> Pending/NoSuggestion/Failed -> Idle`) and these state tests in `update.rs` using the existing `ws` and `synthetic_recording` helpers:
 
 ```rust
 #[test]
 fn new_workspace_has_idle_callout_state() {
     let state = ws(synthetic_recording(1));
-    assert!(state.callout_proposal.is_none());
-    assert!(!state.callout_suggestion_running);
+    assert!(matches!(state.callout_suggestion, CalloutSuggestionState::Idle));
     assert_eq!(state.callout_agent_run_id, 0);
-    assert!(state.callout_cancellation.is_none());
 }
 
 #[test]
 fn replacing_keyframe_discards_pending_callout() {
     let mut state = ws(synthetic_recording(1));
-    state.callout_proposal = Some(callout_proposal(&state));
+    state.callout_suggestion = CalloutSuggestionState::Pending(callout_proposal(&state));
     let replacement = state.strip.iter().map(|frame| frame.id)
         .find(|id| Some(*id) != state.selected_step().map(|step| step.keyframe))
         .expect("nearby replacement");
     let _ = update(&mut state, Message::ReplaceKeyframe(replacement));
-    assert!(state.callout_proposal.is_none());
+    assert!(matches!(state.callout_suggestion, CalloutSuggestionState::Idle));
 }
 ```
 
-Define the test-only `callout_proposal(&TimelineWorkspace)` helper in Task 6 alongside the other proposal fixtures, using the selected step, its presentation document `state_id`, and image dimensions.
+Define the test-only `callout_proposal(&TimelineWorkspace)` helper in Task 7 alongside the other proposal fixtures, using the selected step, its presentation document `state_id`, and image dimensions.
 
 - [ ] **Step 5: Add request/load/cancel update messages**
 
@@ -713,17 +870,50 @@ Add:
 
 ```rust
 SuggestCalloutRequested,
-CalloutSuggestionLoaded(Result<super::callout_agent::CalloutTaskResult, String>),
 CancelCalloutSuggestion,
 RejectCalloutSuggestion,
 AcceptCalloutSuggestion,
 ```
 
-`SuggestCalloutRequested` must ensure a selected step, create its presentation document, snapshot `state_id`, clone the original retained image, load/build the configured provider exactly as caption suggestions do, open the annotation session, store one cancellation token, and launch `Task::perform`.
+Add this run-aware completion message:
+
+```rust
+CalloutSuggestionLoaded {
+    run_id: u64,
+    result: Result<super::callout_agent::CalloutTaskResult, String>,
+},
+```
+
+`SuggestCalloutRequested` must ensure a selected step, create its presentation document, snapshot `state_id`, clone the original retained image, load/build the configured provider exactly as caption suggestions do, open the annotation session, store `Running { run_id, cancellation }`, and launch `Task::perform`. Capture `run_id` in the task mapper. The loaded arm must accept a result only when the current state is `Running` with the same `run_id`; this prevents a cancelled or timed-out older request from overwriting a newer proposal.
 
 - [ ] **Step 6: Add focused update tests**
 
-Cover missing selection, missing provider key, duplicate request suppression, successful proposal storage, no-suggestion message, cancellation cleanup, keyframe replacement cleanup, document edit staleness, reject with no mutation, and accept with one undoable callout.
+Cover missing selection, missing provider key, duplicate request suppression, successful proposal storage, no-suggestion message, cancellation cleanup, keyframe replacement cleanup, document edit staleness, reject with no mutation, accept with one undoable callout, and this late-result race:
+
+```rust
+#[test]
+fn stale_callout_run_completion_cannot_replace_newer_run() {
+    let mut state = ws(synthetic_recording(1));
+    state.callout_agent_run_id = 2;
+    state.callout_suggestion = CalloutSuggestionState::Running {
+        run_id: 2,
+        cancellation: rollshot_agent::runtime::RunCancellation::new(),
+    };
+    let old = Ok(super::callout_agent::CalloutTaskResult::Proposal(
+        callout_proposal_with_run(&mut state, 1)
+    ));
+
+    let _ = update(&mut state, Message::CalloutSuggestionLoaded {
+        run_id: 1,
+        result: old,
+    });
+
+    assert!(matches!(
+        state.callout_suggestion,
+        CalloutSuggestionState::Running { run_id: 2, .. }
+    ));
+}
+```
 
 - [ ] **Step 7: Run update tests and commit**
 
@@ -738,7 +928,7 @@ rtk git commit -m "feat(action): run selected-step callout suggestions"
 
 ---
 
-### Task 7: Ghost Preview and Modal Review Controls
+### Task 8: Ghost Preview and Modal Review Controls
 
 **Files:**
 - Modify: `crates/rollshot-app/src/timeline_workspace/annotation.rs`
@@ -772,7 +962,7 @@ Expected: FAIL because the helper does not exist.
 
 - [ ] **Step 3: Extend the Canvas with an optional ghost**
 
-Add `pub suggested: Option<Annotation>` to `NumberAnnotationCanvas`. Render committed annotations with existing colors, then render the suggestion with reduced alpha and a dashed/segmented outline implemented with iced Canvas paths. Do not add it to `ImageDocument`.
+Add `pub suggested: Option<Annotation>` to `NumberAnnotationCanvas`. Render committed annotations with existing colors, then render the suggestion with reduced alpha and a small `Suggested` label above the canvas. Do not invent dashed-path geometry and do not add the ghost to `ImageDocument`.
 
 - [ ] **Step 4: Add the selected-step and modal controls**
 
@@ -807,7 +997,7 @@ rtk git commit -m "feat(action): review suggested callouts in annotation modal"
 
 ---
 
-### Task 8: Cross-Crate Verification and Real-Provider Smoke Test
+### Task 9: Cross-Crate Verification and Real-Provider Smoke Test
 
 **Files:**
 - Modify only files required to correct failures introduced by Tasks 1-7; do not perform adjacent refactors.
@@ -844,7 +1034,7 @@ Expected: PASS; sentinel absent from emitted output.
 
 - [ ] **Step 4: Perform one real-provider smoke test**
 
-With an already configured vision-capable Anthropic or OpenAI model, open an Action Guide, select one step, request a callout, verify the ghost appears, accept it, undo it, and export Storyboard preview. Confirm the original keyframe remains unchanged and the exported Storyboard contains the accepted callout before undo only.
+With an already configured vision-capable Anthropic or OpenAI model, open an Action Guide, select one step, request a callout, and verify the ghost appears without changing undo state. Accept it, open Storyboard preview and confirm the callout is present, close preview, undo the callout, reopen preview and confirm it is absent. Confirm the original keyframe remains unchanged throughout.
 
 Record only provider name, model name, pass/fail, and failure category in the PR notes. Do not record the screenshot, prompt, rationale, coordinates, or provider payload.
 
@@ -865,3 +1055,73 @@ rtk git commit -m "fix(action): harden agent callout integration"
 ```
 
 If no fixes were needed, do not create an empty commit.
+
+---
+
+## Test Coverage Matrix
+
+| Task / behavior | Unit | Integration | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / authorized image metadata, byte counts, limits, redacted Debug | yes | no | no | no |
+| Task 2 / PNG/JPEG conversion into Rig requests; text-only regression | yes | provider request fixture | no | no |
+| Task 3 / Smart Redaction profile parity after structural extraction | yes | full agent suite | no | no |
+| Task 4 / bounded turns, terminal schema, no-suggestion, cancel, budgets | yes | scripted provider + Rig loop | no | no |
+| Task 5 / proposal validation, provenance, status, restored `state_id` | yes | no | no | no |
+| Task 6 / placement corners, overlap, ties, tiny images | yes | no | no | no |
+| Task 7 / PNG authorization, provider setup, run identity, stale acceptance | yes | Timeline update flow | no | no |
+| Task 8 / ghost purity, modal controls, accept/reject/close | yes | shared iced state flow | no | visual appearance |
+| Task 9 / complete selected-step workflow with vision provider | prior suites | cross-crate suites | one real-provider smoke | provider/model matrix |
+
+No automated test depends on network, real time, screen capture, or native GUI state. Scripted provider streams and synthetic recordings cover CI; the real-provider check is explicitly isolated to Task 9.
+
+## Failure Modes
+
+| New codepath | Realistic production failure | Test coverage | Planned handling | User-visible result |
+|---|---|---|---|---|
+| Authorized attachment creation | descriptor lies about byte count or dimensions | Task 1 Steps 4-5 | `InputError::ByteCountMismatch` / `InvalidDimensions` | recoverable suggestion failure |
+| Rig image conversion | provider/model rejects image content | Task 2 request fixtures; Task 7 terminal mapping | `ModelError` maps to `CalloutRunTerminal::ProviderFailure` | retry/close error, never text guess |
+| Bounded callout loop | model ends without terminal tool or sends malformed/multiple calls | Task 4 Steps 1-6 | `ProtocolFailure` | recoverable suggestion failure |
+| Budget/cancellation | model stalls or user closes modal | Task 4 lifecycle tests; Task 7 update tests | wall-time/turn/token/attachment budget and one `RunCancellation` | cancelled or timeout message; no proposal |
+| Async completion | old cancelled run finishes after a newer run | Task 7 Step 6 | compare loaded `run_id` with current run | old result silently ignored by design; current run remains visible |
+| Proposal acceptance | step, keyframe, dimensions, or document state changed | Task 5 Steps 4-5; Task 7 Step 6 | mark `Stale`, never edit document | regenerate message |
+| Bubble placement | target lies near edge or overlaps annotations | Task 6 Steps 1-4 | deterministic alternatives then clamp | valid in-bounds ghost/annotation |
+| Ghost rendering | preview accidentally mutates document/history | Task 8 Steps 1-3 | construct temporary `Annotation` only | no hidden edit; Accept remains explicit |
+| Provider credentials | configured provider has no resolvable key | Task 7 Step 6 | existing provider setup guard | clear configuration message |
+| PNG encoding | selected frame cannot encode or exceeds authorized byte limit | Task 7 Steps 1-3 | `Result` error before provider call | recoverable suggestion failure |
+
+No identified failure is both untested and silently unhandled.
+
+## Performance and Resource Bounds
+
+- This path handles one user-selected frame per explicit request, not a capture hot loop.
+- PNG encoding runs inside the iced async task, not in the synchronous `update` arm; the UI enters `Running` before encoding begins.
+- The retained frame clone is the one unavoidable full-RGBA ownership transfer into the `'static` task. Do not create another RGBA clone during encoding.
+- `AuthorizedModelInput::take_model_attachments()` moves the encoded PNG into `Arc<[u8]>`; do not clone the PNG before provider conversion.
+- Existing authorization caps encoded input at 10 MiB per attachment and one callout run caps attachments at one.
+- The provider conversion makes one byte copy for Rig `image_raw`; no base64 string is retained by Rollshot after request construction.
+- At most two model calls and one tool call can be in flight for a run, with a 30-second wall-time ceiling.
+- Cancellation drops task-owned frame/PNG buffers when the provider future exits. The late-result `run_id` guard prevents state resurrection even if provider cancellation is not immediate.
+- Bubble placement is O(number of committed annotations) over four candidates; no spatial index is warranted for the small per-step annotation graph.
+
+## Task Dependencies and Execution Strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| 1: Authorized attachments | `rollshot-agent`, caption request literal in `rollshot-app` | — |
+| 2: Rig image conversion | `rollshot-agent` | 1 |
+| 3: Task-profile extraction | `rollshot-agent` | 1 (request literals must compile) |
+| 4: Bounded callout runner | `rollshot-agent` | 2, 3 |
+| 5: Proposal policy | `rollshot-action` | — |
+| 6: Bubble placement | `rollshot-image-document` | — |
+| 7: App orchestration | `rollshot-app` | 4, 5, 6 |
+| 8: Ghost/modal UX | `rollshot-app` | 7 |
+| 9: Verification | workspace | 8 |
+
+Parallel-safe conceptual lanes:
+
+- Lane A: Task 1 → Task 2 → Task 3 → Task 4, sequential because all modify `rollshot-agent`.
+- Lane B: Task 5, independent in `rollshot-action`.
+- Lane C: Task 6, independent in `rollshot-image-document`.
+- Lane D: Task 7 → Task 8 → Task 9 after A, B, and C complete.
+
+Repository rules prohibit worktrees unless explicitly requested, and concurrent commits in one shared checkout are unsafe. Execute lanes A, B, and C with fresh subagents but serialize their edit/commit phases on this branch; then execute Lane D sequentially. There are no root workspace-member changes. Lane B already depends on `rollshot-image-document` at the Cargo level but does not edit Lane C's files, so source conflicts are not expected.
