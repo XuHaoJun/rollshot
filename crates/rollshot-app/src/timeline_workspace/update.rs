@@ -407,6 +407,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             let tip = match session.draft.take() {
                 Some(super::annotation::AnnotationDraft::Number { tip, .. }) => tip,
                 None => release,
+                Some(super::annotation::AnnotationDraft::Redaction { .. }) => {
+                    return Task::none();
+                }
             };
             let Some(step) = state
                 .guide

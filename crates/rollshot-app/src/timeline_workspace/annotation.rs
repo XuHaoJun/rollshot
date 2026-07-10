@@ -71,9 +71,37 @@ impl ActionGuidePresentation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum AnnotationTool {
+    Number,
+    Text,
+    Redaction,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum AnnotationDraft {
-    Number { tip: ImagePoint, bubble: ImagePoint },
+    Number {
+        tip: ImagePoint,
+        bubble: ImagePoint,
+    },
+    #[allow(dead_code)]
+    Redaction {
+        start: ImagePoint,
+        current: ImagePoint,
+    },
+}
+
+impl AnnotationDraft {
+    #[allow(dead_code)]
+    pub(crate) fn redaction_rect(&self) -> Option<rollshot_image_document::ImageRect> {
+        match self {
+            AnnotationDraft::Redaction { start, current } => Some(
+                rollshot_image_document::ImageRect::from_corners(*start, *current),
+            ),
+            AnnotationDraft::Number { .. } => None,
+        }
+    }
 }
 
 pub(crate) struct StepAnnotationSession {
@@ -83,6 +111,10 @@ pub(crate) struct StepAnnotationSession {
     pub handle: image::Handle,
     pub width: u32,
     pub height: u32,
+    #[allow(dead_code)]
+    pub tool: AnnotationTool,
+    #[allow(dead_code)]
+    pub text_note: String,
     pub draft: Option<AnnotationDraft>,
 }
 
@@ -94,6 +126,8 @@ impl StepAnnotationSession {
             handle: super::build_handle(image),
             width: image.width(),
             height: image.height(),
+            tool: AnnotationTool::Number,
+            text_note: String::new(),
             draft: None,
         }
     }
@@ -339,5 +373,35 @@ mod tests {
         presentation.retain_sources(std::iter::empty());
 
         assert!(!presentation.has_annotations(step.source));
+    }
+
+    #[test]
+    fn annotation_session_defaults_to_number_tool_with_empty_text() {
+        let image = ::image::RgbaImage::from_pixel(16, 12, ::image::Rgba([0, 0, 0, 255]));
+        let session = StepAnnotationSession::new(7, 3, &image);
+
+        assert_eq!(session.tool, AnnotationTool::Number);
+        assert_eq!(session.text_note, "");
+        assert_eq!(session.width, 16);
+        assert_eq!(session.height, 12);
+        assert!(session.draft.is_none());
+    }
+
+    #[test]
+    fn redaction_draft_rect_normalizes_drag_direction() {
+        let draft = AnnotationDraft::Redaction {
+            start: ImagePoint::new(12.0, 9.0),
+            current: ImagePoint::new(2.0, 3.0),
+        };
+
+        assert_eq!(
+            draft.redaction_rect(),
+            Some(rollshot_image_document::ImageRect {
+                x: 2.0,
+                y: 3.0,
+                width: 10.0,
+                height: 6.0,
+            })
+        );
     }
 }
