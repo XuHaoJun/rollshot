@@ -622,7 +622,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             commit_text_draft(state);
             let safe_output = state.has_secure_redactions();
-            let result = super::actions::copy_image(&copy_payload(state));
+            let result = crate::image_clipboard::copy_rgba_image(&copy_payload(state));
             Task::done(Message::CopyFinished {
                 result,
                 safe_output,
@@ -643,7 +643,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Some(super::secure_sharing::UnredactedAction::CopyOriginal);
                 Task::none()
             } else {
-                let result = super::actions::copy_image(&copy_original_payload(state));
+                let result = crate::image_clipboard::copy_rgba_image(&copy_original_payload(state));
                 Task::done(Message::CopyFinished {
                     result,
                     safe_output: false,
@@ -888,7 +888,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::ConfirmUnredactedAction => match state.pending_unredacted_action.take() {
             Some(super::secure_sharing::UnredactedAction::CopyOriginal) => {
-                let result = super::actions::copy_image(&copy_original_payload(state));
+                let result = crate::image_clipboard::copy_rgba_image(&copy_original_payload(state));
                 Task::done(Message::CopyFinished {
                     result,
                     safe_output: false,
