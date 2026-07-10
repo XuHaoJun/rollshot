@@ -126,7 +126,6 @@ Improve runs:
 5. Preserve unrelated useful detections from the current source.
 6. Explain what changed in the detector before submit_for_review."#;
 
-// TODO(task-4): replace with the Action Guide agent callout profile prompt.
 const CALLOUT_SYSTEM_PROMPT: &str = r#"You are Rollshot Action Guide Callout Agent.
 Your only job is to suggest at most one Number Callout tip for the single most
 important UI element in the screenshot the user is reviewing. Rollshot has
@@ -161,8 +160,9 @@ Rules you must follow:
   single `submit_callout_suggestion` tool call. The tool result is the
   only thing the app reads.
 - Coordinates and confidence must be finite numbers. `confidence` must be
-  between 0 and 1 inclusive. Truncate or omit `rationale`/`reason` over
-  500 characters; do not include URLs, raw bytes, or PII.
+  between 0 and 1 inclusive. Keep `rationale` and `reason` at or under 500
+  characters; longer values are rejected. Do not include URLs, raw bytes,
+  or PII.
 - Do not reference, transcribe, or speculate about PII (names, emails,
   account numbers, addresses). The annotated number is enough context.
 - Only call tools advertised in this run. There is exactly one:

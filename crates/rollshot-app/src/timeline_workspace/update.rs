@@ -801,7 +801,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             match proposal.validate_acceptance(Some(&step), state_id, image_width, image_height) {
                 rollshot_action::CalloutApplyOutcome::Ready => {
                     let tip = proposal.suggestion.tip;
-                    doc.document.add_number_callout(tip, tip);
+                    let bubble = rollshot_image_document::place_number_callout_bubble(
+                        tip,
+                        image_width,
+                        image_height,
+                        doc.document.annotations(),
+                    );
+                    doc.document.add_number_callout(tip, bubble);
                     proposal.mark_applied();
                     state.message = Some("Callout suggestion accepted.".to_string());
                 }
@@ -2766,24 +2772,83 @@ mod tests {
         let mut state = ws(recording_from_frames());
         let _ = update(&mut state, Message::AnnotateStepRequested);
         let source = state.selected_step().unwrap().source;
+        let step = state.selected_step().cloned().unwrap();
+        let tip = callout_default_tip(&mut state);
         state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
-            callout_proposal(&mut state),
+            callout_proposal_with_run_and_tip(&mut state, 1, tip),
+        );
+        let doc = state
+            .presentation
+            .document_for_step(&step, &state.store)
+            .unwrap();
+        let expected_bubble = rollshot_image_document::place_number_callout_bubble(
+            tip,
+            doc.document.source().width(),
+            doc.document.source().height(),
+            doc.document.annotations(),
         );
 
         let _ = update(&mut state, Message::AcceptCalloutSuggestion);
 
         let doc = state.presentation.doc(source).unwrap();
         assert_eq!(doc.document.annotations().len(), 1);
-        assert!(matches!(
-            doc.document.annotations()[0],
-            rollshot_image_document::Annotation::NumberCallout { .. }
-        ));
+        match &doc.document.annotations()[0] {
+            rollshot_image_document::Annotation::NumberCallout {
+                tip: got_tip,
+                bubble,
+                ..
+            } => {
+                assert_eq!(*got_tip, tip);
+                assert_eq!(*bubble, expected_bubble);
+            }
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
         let _ = update(&mut state, Message::AnnotationUndo);
         let doc = state.presentation.doc(source).unwrap();
         assert_eq!(doc.document.annotations().len(), 0);
         let _ = update(&mut state, Message::AnnotationRedo);
         let doc = state.presentation.doc(source).unwrap();
         assert_eq!(doc.document.annotations().len(), 1);
+    }
+
+    #[test]
+    fn accepted_callout_bubble_differs_from_tip_for_central_tip() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let step = state.selected_step().cloned().unwrap();
+        let doc = state
+            .presentation
+            .document_for_step(&step, &state.store)
+            .unwrap();
+        let image = doc.document.source();
+        let center_x = image.width() as f32 / 2.0;
+        let center_y = image.height() as f32 / 2.0;
+        let tip = rollshot_image_document::ImagePoint::new(center_x - 1.0, center_y - 1.0);
+        state.callout_suggestion = crate::timeline_workspace::CalloutSuggestionState::Pending(
+            callout_proposal_with_run_and_tip(&mut state, 1, tip),
+        );
+
+        let _ = update(&mut state, Message::AcceptCalloutSuggestion);
+
+        let doc = state.presentation.doc(source).unwrap();
+        assert_eq!(doc.document.annotations().len(), 1);
+        match &doc.document.annotations()[0] {
+            rollshot_image_document::Annotation::NumberCallout {
+                tip: got_tip,
+                bubble,
+                ..
+            } => {
+                assert_ne!(
+                    *bubble, *got_tip,
+                    "committed bubble must not be drawn on top of the tip"
+                );
+            }
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
     }
 
     #[test]
