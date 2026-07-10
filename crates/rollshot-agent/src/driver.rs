@@ -52,8 +52,8 @@ use crate::model::drive_streamed_turn;
 use crate::model::{emit_tool_call_completions, ModelStreamEvent};
 use crate::provider::{ProviderAdapter, StreamBounds};
 use crate::runtime::{
-    BudgetDimension, BudgetError, BudgetTracker, RunBudget, RunCancellation, RunEvent,
-    RunEventSink, UsageSnapshot,
+    BudgetDimension, BudgetError, BudgetTracker, NullEventSink, RunBudget, RunCancellation,
+    RunEvent, RunEventSink, UsageSnapshot,
 };
 use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
@@ -127,7 +127,50 @@ Improve runs:
 6. Explain what changed in the detector before submit_for_review."#;
 
 // TODO(task-4): replace with the Action Guide agent callout profile prompt.
-const CALLOUT_SYSTEM_PROMPT: &str = "";
+const CALLOUT_SYSTEM_PROMPT: &str = r#"You are Rollshot Action Guide Callout Agent.
+Your only job is to suggest at most one Number Callout tip for the single most
+important UI element in the screenshot the user is reviewing. Rollshot has
+already authorized the screenshot for this run as an image attachment; do not
+ask the user to upload, attach, or take another screenshot.
+
+You have exactly one terminal tool: `submit_callout_suggestion`. The tool
+accepts one of two payloads:
+
+  1. A single Number Callout tip:
+     {
+       "result": "suggestion",
+       "tip": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+       "confidence": <0.0..=1.0>,
+       "rationale": <string <= 500 chars, optional>
+     }
+     `x` and `y` are normalized image-fraction coordinates of the
+     important UI element, not the bubble. Rollshot owns bubble placement
+     and numbering.
+
+  2. A no-suggestion report when no element is worth a callout:
+     {
+       "result": "no_suggestion",
+       "reason": <string <= 500 chars, optional>
+     }
+
+Rules you must follow:
+- Choose at most one tip. Never select the bubble position or the callout
+  number — Rollshot assigns those deterministically. Do not return
+  bubble coordinates, number, or numbering hints.
+- Do not output any prose, reasoning, JSON, or commentary outside the
+  single `submit_callout_suggestion` tool call. The tool result is the
+  only thing the app reads.
+- Coordinates and confidence must be finite numbers. `confidence` must be
+  between 0 and 1 inclusive. Truncate or omit `rationale`/`reason` over
+  500 characters; do not include URLs, raw bytes, or PII.
+- Do not reference, transcribe, or speculate about PII (names, emails,
+  account numbers, addresses). The annotated number is enough context.
+- Only call tools advertised in this run. There is exactly one:
+  `submit_callout_suggestion`. Do not invent tool handles, function
+  names, or capability identifiers.
+- If the screenshot is too small, too low-contrast, or shows no
+  meaningful UI, return `no_suggestion` with a short reason. Do not
+  guess."#;
 
 pub(crate) enum AgentTaskProfile {
     SmartRedaction,
@@ -863,22 +906,7 @@ impl AgentRunner {
         input: &AuthorizedModelInput,
         last_assistant_text: &mut String,
     ) -> Result<(), DriverError> {
-        if cancellation.is_cancelled() {
-            return Err(DriverError::Cancelled);
-        }
-
-        tracker.check_wall_time(tokio::time::Instant::now())?;
-
         let turn_index = rig_run.turn();
-        // Cap the per-stream deadline so an unbounded wall-time budget
-        // (Duration::MAX) cannot overflow the instant arithmetic. The tracker
-        // still enforces the real wall-time budget between stream items.
-        let now = tokio::time::Instant::now();
-        let remaining = tracker
-            .remaining_wall_time(now)
-            .min(std::time::Duration::from_secs(3600));
-        let deadline = now + remaining;
-        let bounds = StreamBounds::new(cancellation.clone(), deadline);
 
         // Faithfully reconstruct the conversation Rig has accumulated (prior
         // user/assistant turns, the assistant's tool calls, and the latest tool
@@ -900,6 +928,55 @@ impl AgentRunner {
             max_tokens: None,
             attachments: vec![],
         };
+
+        self.drive_streamed_turn(
+            rig_run,
+            tool_names,
+            provider,
+            event_sink,
+            tracker,
+            total_assistant_bytes,
+            max_assistant_bytes,
+            cancellation,
+            request,
+            last_assistant_text,
+        )
+        .await
+    }
+
+    /// Stream one provider turn into the rig state machine. Shared by the
+    /// Smart Redaction driver (`run_with_provider`) and the callout runner
+    /// (`run_callout_with_provider`) so both paths reuse the same
+    /// budget charging, cancellation, and Rig tool-result threading.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_streamed_turn(
+        &self,
+        rig_run: &mut rig_core::agent::run::AgentRun,
+        tool_names: &BTreeSet<String>,
+        provider: &dyn ProviderAdapter,
+        event_sink: &dyn RunEventSink,
+        tracker: &mut BudgetTracker,
+        total_assistant_bytes: &mut usize,
+        max_assistant_bytes: usize,
+        cancellation: &RunCancellation,
+        request: crate::model::ModelRequest,
+        last_assistant_text: &mut String,
+    ) -> Result<(), DriverError> {
+        if cancellation.is_cancelled() {
+            return Err(DriverError::Cancelled);
+        }
+
+        tracker.check_wall_time(tokio::time::Instant::now())?;
+
+        // Cap the per-stream deadline so an unbounded wall-time budget
+        // (Duration::MAX) cannot overflow the instant arithmetic. The tracker
+        // still enforces the real wall-time budget between stream items.
+        let now = tokio::time::Instant::now();
+        let remaining = tracker
+            .remaining_wall_time(now)
+            .min(std::time::Duration::from_secs(3600));
+        let deadline = now + remaining;
+        let bounds = StreamBounds::new(cancellation.clone(), deadline);
 
         let mut stream = provider
             .stream(request, bounds)
@@ -1251,6 +1328,300 @@ impl AgentRunner {
             .map_err(|e| DriverError::AgentProtocolFailure(e.to_string()))?;
 
         Ok(None)
+    }
+
+    /// Bounded callout runner. Returns a `CalloutRunTerminal` that never
+    /// carries provider payload, prompt text, attachment bytes, or image
+    /// coordinates. Reuses `drive_streamed_turn` and the rig state machine
+    /// for streamed-turn assembly, budget charging, cancellation, and
+    /// tool-result threading.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_callout_with_provider(
+        &self,
+        mut input: crate::domain::AuthorizedModelInput,
+        provider: &dyn ProviderAdapter,
+        budget: RunBudget,
+        cancellation: &RunCancellation,
+    ) -> crate::callout::CalloutRunTerminal {
+        use crate::callout::{
+            decode_submission, submit_callout_suggestion_definition,
+            submit_callout_suggestion_tool_arc, CalloutRunTerminal, SUBMIT_CALLOUT_SUGGESTION,
+        };
+        use crate::tools::ToolRegistryLimits;
+
+        // ---- Pre-flight ----
+
+        if cancellation.is_cancelled() {
+            return CalloutRunTerminal::Cancelled;
+        }
+
+        // Take the authorized attachments ONCE; charge the attachments budget
+        // once. Any later turns must NOT carry the attachment.
+        let attachments = input.take_model_attachments();
+        let attachment_count = attachments.len() as u32;
+
+        let start = tokio::time::Instant::now();
+        let mut tracker = BudgetTracker::new(budget, start);
+
+        if let Err(err) = tracker.charge(UsageSnapshot {
+            attachments: attachment_count,
+            ..UsageSnapshot::default()
+        }) {
+            return map_budget_error_to_callout(err);
+        }
+
+        let tool_definitions = vec![submit_callout_suggestion_definition()];
+        let tool_names: BTreeSet<String> =
+            tool_definitions.iter().map(|t| t.name.clone()).collect();
+
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        if let Err(e) = registry.register(submit_callout_suggestion_tool_arc()) {
+            tracing::error!(
+                target: "rollshot::agent::callout",
+                error = %e,
+                "failed to register callout stub tool"
+            );
+            return CalloutRunTerminal::ProtocolFailure;
+        }
+
+        let mut rig_run = rig_core::agent::run::AgentRun::new(rig_core::message::Message::user(
+            &input.user_message,
+        ))
+        .max_turns(self.config.max_turns);
+
+        let mut total_assistant_bytes: usize = 0;
+        let max_assistant_bytes = self.config.max_assistant_bytes;
+        let mut last_assistant_text = String::new();
+        let mut first_model_call = true;
+
+        // ---- Loop ----
+
+        loop {
+            if cancellation.is_cancelled() {
+                return CalloutRunTerminal::Cancelled;
+            }
+
+            if let Err(err) = tracker.check_wall_time(tokio::time::Instant::now()) {
+                return map_budget_error_to_callout(err);
+            }
+
+            let step = match rig_run.next_step() {
+                Ok(s) => s,
+                Err(e) => {
+                    // Rig enforces `max_turns` here as `MaxTurnsError`; map it
+                    // to a budget failure for symmetry with other exhausted
+                    // dimensions. Any other prompt error is a protocol failure.
+                    if matches!(e, rig_core::completion::PromptError::MaxTurnsError { .. }) {
+                        tracing::debug!(
+                            target: "rollshot::agent::callout",
+                            max_turns = self.config.max_turns,
+                            "callout run exceeded model-call budget"
+                        );
+                        return CalloutRunTerminal::BudgetExhausted {
+                            dimension: BudgetDimension::ModelCalls,
+                        };
+                    }
+                    tracing::debug!(
+                        target: "rollshot::agent::callout",
+                        error = %e,
+                        "callout rig agent run returned a protocol error"
+                    );
+                    return CalloutRunTerminal::ProtocolFailure;
+                }
+            };
+
+            match step {
+                rig_core::agent::run::AgentRunStep::CallModel {
+                    prompt, history, ..
+                } => {
+                    // Attachments only on the first model call.
+                    let turn_attachments = if first_model_call {
+                        first_model_call = false;
+                        attachments.clone()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let mut history_msgs: Vec<crate::model::ModelMessage> = Vec::new();
+                    for m in &history {
+                        crate::model::push_model_messages(m, &mut history_msgs);
+                    }
+                    crate::model::push_model_messages(&prompt, &mut history_msgs);
+
+                    let request = crate::model::ModelRequest {
+                        model: input.manifest.model.clone(),
+                        prompt: String::new(),
+                        history: history_msgs,
+                        turn: rig_run.turn(),
+                        tool_definitions: tool_definitions.clone(),
+                        system_prompt: Some(AgentTaskProfile::Callout.system_prompt().to_string()),
+                        max_tokens: None,
+                        attachments: turn_attachments,
+                    };
+
+                    let turn_result = self
+                        .drive_streamed_turn(
+                            &mut rig_run,
+                            &tool_names,
+                            provider,
+                            &NullEventSink,
+                            &mut tracker,
+                            &mut total_assistant_bytes,
+                            max_assistant_bytes,
+                            cancellation,
+                            request,
+                            &mut last_assistant_text,
+                        )
+                        .await;
+
+                    match turn_result {
+                        Ok(()) => {}
+                        Err(DriverError::BudgetExhausted(dim)) => {
+                            return CalloutRunTerminal::BudgetExhausted { dimension: dim };
+                        }
+                        Err(DriverError::Cancelled) => return CalloutRunTerminal::Cancelled,
+                        Err(DriverError::ProviderFailure(msg)) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::callout",
+                                error = %msg,
+                                "callout provider stream failed"
+                            );
+                            return CalloutRunTerminal::ProviderFailure;
+                        }
+                        Err(DriverError::AgentProtocolFailure(msg)) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::callout",
+                                error = %msg,
+                                "callout model turn produced a protocol error"
+                            );
+                            return CalloutRunTerminal::ProtocolFailure;
+                        }
+                    }
+
+                    tracker.apply_turn();
+                }
+                rig_core::agent::run::AgentRunStep::CallTools { calls } => {
+                    // The only advertised tool is `submit_callout_suggestion`. Any
+                    // call to a different name, or more than one call in the same
+                    // response, is a protocol failure.
+                    if calls.len() != 1
+                        || calls[0].tool_call.function.name != SUBMIT_CALLOUT_SUGGESTION
+                    {
+                        tracing::debug!(
+                            target: "rollshot::agent::callout",
+                            call_count = calls.len(),
+                            tool_name = %calls.first().map(|c| c.tool_call.function.name.as_str()).unwrap_or(""),
+                            "callout runner rejecting tool call batch"
+                        );
+                        return CalloutRunTerminal::ProtocolFailure;
+                    }
+
+                    // Decode the submission. The first terminal tool call ends
+                    // the run; the runner does not need to feed a tool result
+                    // back to the model.
+                    let pending = &calls[0];
+                    let decoded = match decode_submission(&pending.tool_call.function.arguments) {
+                        Ok(t) => t,
+                        Err(err) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::callout",
+                                error = %err,
+                                "callout terminal payload failed validation"
+                            );
+                            return CalloutRunTerminal::ProtocolFailure;
+                        }
+                    };
+
+                    // Charge the tool budget (1 call) and execute the stub so
+                    // the rig state machine sees a successful result. The
+                    // decoded terminal is the callout's authoritative handoff;
+                    // the stub's own result is not surfaced.
+                    if let Err(err) = tracker.charge(UsageSnapshot {
+                        tool_calls: 1,
+                        ..UsageSnapshot::default()
+                    }) {
+                        return map_budget_error_to_callout(err);
+                    }
+
+                    let tool_call = ToolCall {
+                        name: pending.tool_call.function.name.clone(),
+                        arguments_json: pending.tool_call.function.arguments.clone(),
+                    };
+                    let terminal_tools: BTreeSet<String> = [SUBMIT_CALLOUT_SUGGESTION.to_string()]
+                        .into_iter()
+                        .collect();
+                    let results = registry
+                        .execute_calls(&[tool_call], cancellation, &terminal_tools)
+                        .await;
+
+                    let mut rig_results: Vec<rig_core::message::UserContent> = Vec::new();
+                    for (i, result) in results.into_iter().enumerate() {
+                        let call_id = calls[i].tool_call.id.clone();
+                        match result {
+                            Ok(ToolOutcome::Success { result_json }) => {
+                                let result_str =
+                                    serde_json::to_string(&result_json).unwrap_or_default();
+                                rig_results.push(rig_core::message::UserContent::tool_result(
+                                    call_id,
+                                    rig_core::message::ToolResultContent::from_tool_output(
+                                        result_str,
+                                    ),
+                                ));
+                            }
+                            Ok(ToolOutcome::Recoverable { error }) => {
+                                tracing::debug!(
+                                    target: "rollshot::agent::callout",
+                                    error = %error,
+                                    "callout stub tool rejected payload"
+                                );
+                                return CalloutRunTerminal::ProtocolFailure;
+                            }
+                            Err(err) => {
+                                tracing::debug!(
+                                    target: "rollshot::agent::callout",
+                                    error = %err,
+                                    "callout stub tool returned an error"
+                                );
+                                return CalloutRunTerminal::ProtocolFailure;
+                            }
+                        }
+                    }
+
+                    // Advance the rig state machine with the stub's result.
+                    if let Err(e) = rig_run.tool_results(rig_results) {
+                        tracing::debug!(
+                            target: "rollshot::agent::callout",
+                            error = %e,
+                            "rig agent run tool_results failed"
+                        );
+                        return CalloutRunTerminal::ProtocolFailure;
+                    }
+
+                    tracker.apply_turn();
+                    // The decoded terminal is the callout handoff; the run is
+                    // complete. Do NOT loop for a follow-up model turn.
+                    return decoded;
+                }
+                rig_core::agent::run::AgentRunStep::Done(_) => {
+                    // Reaching Done means the model never called the terminal
+                    // tool. Per the brief this is a protocol failure.
+                    tracing::debug!(
+                        target: "rollshot::agent::callout",
+                        "callout model completed without a terminal tool call"
+                    );
+                    return CalloutRunTerminal::ProtocolFailure;
+                }
+            }
+        }
+    }
+}
+
+fn map_budget_error_to_callout(err: BudgetError) -> crate::callout::CalloutRunTerminal {
+    match err {
+        BudgetError::Exceeded(dim) => {
+            crate::callout::CalloutRunTerminal::BudgetExhausted { dimension: dim }
+        }
+        BudgetError::Overflow => crate::callout::CalloutRunTerminal::ProtocolFailure,
     }
 }
 
