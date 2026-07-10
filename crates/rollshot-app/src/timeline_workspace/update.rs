@@ -54,9 +54,13 @@ pub enum Message {
     OpenInputMonitoringSettings,
     DismissBanner,
     AnnotateStepRequested,
+    AnnotationToolChanged(super::annotation::AnnotationTool),
+    AnnotationTextChanged(String),
     AnnotationCanvasPressed(rollshot_image_document::ImagePoint),
     AnnotationCanvasMoved(rollshot_image_document::ImagePoint),
     AnnotationCanvasReleased(rollshot_image_document::ImagePoint),
+    AnnotationUndo,
+    AnnotationRedo,
     AnnotationDone,
     AnnotationCancel,
     CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
@@ -379,54 +383,69 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             Task::none()
         }
+        Message::AnnotationToolChanged(tool) => {
+            if let Some(session) = &mut state.annotation_session {
+                session.tool = tool;
+                session.draft = None;
+            }
+            Task::none()
+        }
+        Message::AnnotationTextChanged(text) => {
+            if let Some(session) = &mut state.annotation_session {
+                session.text_note = text;
+            }
+            Task::none()
+        }
         Message::AnnotationCanvasPressed(point) => {
             if let Some(session) = &mut state.annotation_session {
-                session.draft = Some(super::annotation::AnnotationDraft::Number {
-                    tip: clamp_annotation_point(point, session.width, session.height),
-                    bubble: clamp_annotation_point(point, session.width, session.height),
-                });
+                let point = clamp_annotation_point(point, session.width, session.height);
+                session.draft = match session.tool {
+                    super::annotation::AnnotationTool::Number => {
+                        Some(super::annotation::AnnotationDraft::Number {
+                            tip: point,
+                            bubble: point,
+                        })
+                    }
+                    super::annotation::AnnotationTool::Redaction => {
+                        Some(super::annotation::AnnotationDraft::Redaction {
+                            start: point,
+                            current: point,
+                        })
+                    }
+                    super::annotation::AnnotationTool::Text => None,
+                };
             }
             Task::none()
         }
         Message::AnnotationCanvasMoved(point) => {
             if let Some(session) = &mut state.annotation_session {
-                if let Some(super::annotation::AnnotationDraft::Number { bubble, .. }) =
-                    &mut session.draft
-                {
-                    *bubble = clamp_annotation_point(point, session.width, session.height);
+                let point = clamp_annotation_point(point, session.width, session.height);
+                match &mut session.draft {
+                    Some(super::annotation::AnnotationDraft::Number { bubble, .. }) => {
+                        *bubble = point;
+                    }
+                    Some(super::annotation::AnnotationDraft::Redaction { current, .. }) => {
+                        *current = point;
+                    }
+                    None => {}
                 }
             }
             Task::none()
         }
         Message::AnnotationCanvasReleased(point) => {
-            let Some(session) = &mut state.annotation_session else {
-                return Task::none();
-            };
-            let release = clamp_annotation_point(point, session.width, session.height);
-            let source = session.source;
-            let tip = match session.draft.take() {
-                Some(super::annotation::AnnotationDraft::Number { tip, .. }) => tip,
-                None => release,
-                Some(super::annotation::AnnotationDraft::Redaction { .. }) => {
-                    return Task::none();
-                }
-            };
-            let Some(step) = state
-                .guide
-                .steps()
-                .iter()
-                .find(|step| step.source == source)
-                .cloned()
-            else {
-                state.annotation_session = None;
-                state.message = Some(
-                    "Annotation session closed because the step no longer exists.".to_string(),
-                );
-                return Task::none();
-            };
-            if let Some(doc) = state.presentation.document_for_step(&step, &state.store) {
-                doc.document.add_number_callout(tip, release);
-            }
+            commit_annotation_release(state, point);
+            Task::none()
+        }
+        Message::AnnotationUndo => {
+            with_annotation_document(state, |doc| {
+                doc.document.undo();
+            });
+            Task::none()
+        }
+        Message::AnnotationRedo => {
+            with_annotation_document(state, |doc| {
+                doc.document.redo();
+            });
             Task::none()
         }
         Message::AnnotationDone => {
@@ -870,11 +889,96 @@ fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePo
     point.clamp_to(width, height)
 }
 
+fn with_annotation_document(
+    state: &mut TimelineWorkspace,
+    f: impl FnOnce(&mut super::annotation::StepAnnotationDocument),
+) {
+    let Some(session) = state.annotation_session.as_ref() else {
+        return;
+    };
+    let Some(step) = state
+        .guide
+        .steps()
+        .iter()
+        .find(|step| step.source == session.source)
+        .cloned()
+    else {
+        return;
+    };
+    if let Some(doc) = state.presentation.document_for_step(&step, &state.store) {
+        f(doc);
+    }
+}
+
+fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
+    let Some(session) = &mut state.annotation_session else {
+        return;
+    };
+    let release = clamp_annotation_point(point, session.width, session.height);
+    let source = session.source;
+    let tool = session.tool;
+    let draft = session.draft.take();
+    let text_note = session.text_note.trim().to_string();
+    let Some(step) = state
+        .guide
+        .steps()
+        .iter()
+        .find(|step| step.source == source)
+        .cloned()
+    else {
+        state.annotation_session = None;
+        state.message =
+            Some("Annotation session closed because the step no longer exists.".to_string());
+        return;
+    };
+
+    if tool == super::annotation::AnnotationTool::Text && text_note.is_empty() {
+        state.message = Some("Enter text before placing a text note.".to_string());
+        return;
+    }
+
+    let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
+        return;
+    };
+
+    let error_message = match tool {
+        super::annotation::AnnotationTool::Number => {
+            let tip = match draft {
+                Some(super::annotation::AnnotationDraft::Number { tip, .. }) => tip,
+                _ => release,
+            };
+            doc.document.add_number_callout(tip, release);
+            None
+        }
+        super::annotation::AnnotationTool::Text => doc
+            .document
+            .add_text_note(release, text_note)
+            .err()
+            .map(|error| format!("Text note failed: {error}")),
+        super::annotation::AnnotationTool::Redaction => {
+            let rect = match draft.and_then(|draft| draft.redaction_rect()) {
+                Some(rect) => rect,
+                None => rollshot_image_document::ImageRect::from_corners(release, release),
+            };
+            doc.document
+                .add_redaction(rect)
+                .err()
+                .map(|error| format!("Redaction failed: {error}"))
+        }
+    };
+
+    if let Some(message) = error_message {
+        state.message = Some(message);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
-    use crate::timeline_workspace::{FfmpegSetupDialog, TimelineWorkspace};
+    use crate::timeline_workspace::{
+        annotation::AnnotationTool, FfmpegSetupDialog, TimelineWorkspace,
+    };
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
     use std::ffi::{OsStr, OsString};
 
@@ -1494,6 +1598,175 @@ mod tests {
             state.message.as_deref(),
             Some("Step annotations were cleared because the keyframe changed.")
         );
+    }
+
+    #[test]
+    fn annotation_text_tool_commits_text_note_on_click() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let _ = update(
+            &mut state,
+            Message::AnnotationToolChanged(AnnotationTool::Text),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationTextChanged("This label matters".to_string()),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(5.0, 6.0)),
+        );
+
+        let doc = state.presentation.doc(source).unwrap();
+        assert!(doc.document.annotations().iter().any(|annotation| {
+            matches!(
+                annotation,
+                rollshot_image_document::Annotation::TextNote { text, .. }
+                    if text == "This label matters"
+            )
+        }));
+    }
+
+    #[test]
+    fn annotation_redaction_tool_commits_dragged_redaction() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let _ = update(
+            &mut state,
+            Message::AnnotationToolChanged(AnnotationTool::Redaction),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasPressed(rollshot_image_document::ImagePoint::new(4.0, 4.0)),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasMoved(rollshot_image_document::ImagePoint::new(18.0, 20.0)),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(18.0, 20.0)),
+        );
+
+        let doc = state.presentation.doc(source).unwrap();
+        assert!(doc.document.annotations().iter().any(|annotation| {
+            matches!(
+                annotation,
+                rollshot_image_document::Annotation::OpaqueRedaction { bounds, .. }
+                    if bounds.width >= 14.0 && bounds.height >= 16.0
+            )
+        }));
+    }
+
+    #[test]
+    fn annotation_undo_and_redo_update_current_document() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        assert_eq!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .annotations()
+                .len(),
+            1
+        );
+
+        let _ = update(&mut state, Message::AnnotationUndo);
+        assert_eq!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .annotations()
+                .len(),
+            0
+        );
+
+        let _ = update(&mut state, Message::AnnotationRedo);
+        assert_eq!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .annotations()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn empty_text_note_click_sets_message_without_committing_annotation() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let _ = update(
+            &mut state,
+            Message::AnnotationToolChanged(AnnotationTool::Text),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationTextChanged("   ".to_string()),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(5.0, 6.0)),
+        );
+
+        assert_eq!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .annotations()
+                .len(),
+            0
+        );
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|message| message.contains("Enter text")));
+    }
+
+    #[test]
+    fn zero_area_redaction_sets_message_without_committing_annotation() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.selected_step().unwrap().source;
+        let _ = update(
+            &mut state,
+            Message::AnnotationToolChanged(AnnotationTool::Redaction),
+        );
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+
+        assert_eq!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .annotations()
+                .len(),
+            0
+        );
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|message| message.contains("Redaction failed")));
     }
 
     fn caption_proposal_for_first_step(

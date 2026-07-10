@@ -72,7 +72,6 @@ impl ActionGuidePresentation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum AnnotationTool {
     Number,
     Text,
@@ -85,7 +84,6 @@ pub(crate) enum AnnotationDraft {
         tip: ImagePoint,
         bubble: ImagePoint,
     },
-    #[allow(dead_code)]
     Redaction {
         start: ImagePoint,
         current: ImagePoint,
@@ -93,7 +91,6 @@ pub(crate) enum AnnotationDraft {
 }
 
 impl AnnotationDraft {
-    #[allow(dead_code)]
     pub(crate) fn redaction_rect(&self) -> Option<rollshot_image_document::ImageRect> {
         match self {
             AnnotationDraft::Redaction { start, current } => Some(
@@ -111,9 +108,7 @@ pub(crate) struct StepAnnotationSession {
     pub handle: image::Handle,
     pub width: u32,
     pub height: u32,
-    #[allow(dead_code)]
     pub tool: AnnotationTool,
-    #[allow(dead_code)]
     pub text_note: String,
     pub draft: Option<AnnotationDraft>,
 }
