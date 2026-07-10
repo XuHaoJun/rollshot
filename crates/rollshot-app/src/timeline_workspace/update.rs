@@ -1575,6 +1575,115 @@ mod tests {
     }
 
     #[test]
+    fn storyboard_render_uses_flattened_text_and_redaction_annotations() {
+        let mut state = ws(recording_from_frames());
+        let source = state.selected_step().unwrap().source;
+        let before = render_timeline_storyboard(
+            &state,
+            StoryboardOptions {
+                max_width: 240,
+                max_canvas_pixels: 1_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+        )
+        .expect("storyboard render before annotation");
+
+        let step = state.selected_step().unwrap().clone();
+        let doc = state
+            .presentation
+            .document_for_step(&step, &state.store)
+            .expect("presentation doc");
+        doc.document
+            .add_text_note(
+                rollshot_image_document::ImagePoint::new(2.0, 2.0),
+                "Note".to_string(),
+            )
+            .unwrap();
+        doc.document
+            .add_redaction(rollshot_image_document::ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 8.0,
+                height: 8.0,
+            })
+            .unwrap();
+        assert!(state.presentation.has_annotations(source));
+        assert!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .flatten()
+                .pixels()
+                .any(|pixel| pixel.0 == [0, 0, 0, 255]),
+            "redaction should flatten to opaque black before storyboard render"
+        );
+
+        let after = render_timeline_storyboard(
+            &state,
+            StoryboardOptions {
+                max_width: 240,
+                max_canvas_pixels: 1_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+        )
+        .expect("storyboard render");
+
+        assert_ne!(
+            before.image.as_raw(),
+            after.image.as_raw(),
+            "annotated storyboard render should differ from raw keyframe render"
+        );
+    }
+
+    #[test]
+    fn issue_pack_action_carries_annotated_storyboard_image() {
+        let mut state = ws(recording_from_frames());
+        state.issue_pack = Some(super::super::IssuePackDialog {
+            review_confirmed: true,
+            pending_kind: None,
+            include_gif: false,
+        });
+        let before = {
+            let action = timeline_issue_pack_action(&state);
+            action
+                .storyboard_image
+                .expect("storyboard before annotation")
+        };
+
+        let step = state.selected_step().unwrap().clone();
+        let doc = state
+            .presentation
+            .document_for_step(&step, &state.store)
+            .expect("presentation doc");
+        doc.document
+            .add_redaction(rollshot_image_document::ImageRect {
+                x: 4.0,
+                y: 4.0,
+                width: 12.0,
+                height: 12.0,
+            })
+            .unwrap();
+
+        let action = timeline_issue_pack_action(&state);
+
+        assert!(action.storyboard_image.is_some());
+        let image = action.storyboard_image.as_ref().unwrap();
+        assert_ne!(
+            before.as_raw(),
+            image.as_raw(),
+            "Issue Pack storyboard image should use flattened annotated keyframes"
+        );
+    }
+
+    #[test]
     fn replacing_keyframe_clears_step_annotations_and_shows_banner() {
         let mut state = ws(recording_from_frames());
         let source = state.selected_step().unwrap().source;
