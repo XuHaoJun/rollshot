@@ -27,12 +27,13 @@ pub struct Shortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfig {
     pub capture_region_hotkey: Shortcut,
+    pub capture_text_hotkey: Option<Shortcut>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub config: DaemonConfig,
-    pub warning: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -42,17 +43,23 @@ struct ConfigFile {
 
 #[derive(Deserialize)]
 struct RawDaemonConfig {
-    capture_region_hotkey: String,
+    capture_region_hotkey: Option<String>,
+    capture_text_hotkey: Option<String>,
 }
 
 impl DaemonConfig {
     pub fn default_for(platform: Platform) -> Self {
-        let text = match platform {
+        let region = match platform {
             Platform::Linux => "Alt+Shift+6",
             Platform::Macos => "Command+Shift+6",
         };
+        let text = match platform {
+            Platform::Linux => "Alt+Shift+7",
+            Platform::Macos => "Command+Shift+7",
+        };
         Self {
-            capture_region_hotkey: text.parse().expect("platform default is valid"),
+            capture_region_hotkey: region.parse().expect("platform default is valid"),
+            capture_text_hotkey: Some(text.parse().expect("platform default is valid")),
         }
     }
 }
@@ -181,13 +188,13 @@ pub fn load_from(path: &Path, platform: Platform) -> LoadedConfig {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return LoadedConfig {
                 config: fallback,
-                warning: None,
+                warnings: Vec::new(),
             };
         }
         Err(error) => {
             return LoadedConfig {
                 config: fallback,
-                warning: Some(format!("failed to read daemon config: {error}")),
+                warnings: vec![format!("failed to read daemon config: {error}")],
             };
         }
     };
@@ -197,7 +204,7 @@ pub fn load_from(path: &Path, platform: Platform) -> LoadedConfig {
         Err(error) => {
             return LoadedConfig {
                 config: fallback,
-                warning: Some(format!("failed to parse daemon config: {error}")),
+                warnings: vec![format!("failed to parse daemon config: {error}")],
             };
         }
     };
@@ -205,21 +212,59 @@ pub fn load_from(path: &Path, platform: Platform) -> LoadedConfig {
     let Some(raw_daemon) = raw.daemon else {
         return LoadedConfig {
             config: fallback,
-            warning: None,
+            warnings: Vec::new(),
         };
     };
 
-    match raw_daemon.capture_region_hotkey.parse() {
-        Ok(capture_region_hotkey) => LoadedConfig {
-            config: DaemonConfig {
-                capture_region_hotkey,
-            },
-            warning: None,
+    let mut warnings = Vec::new();
+
+    let region = match raw_daemon
+        .capture_region_hotkey
+        .as_deref()
+        .unwrap_or(match platform {
+            Platform::Linux => "Alt+Shift+6",
+            Platform::Macos => "Command+Shift+6",
+        })
+        .parse()
+    {
+        Ok(shortcut) => shortcut,
+        Err(error) => {
+            warnings.push(format!("invalid daemon region shortcut: {error}"));
+            fallback.capture_region_hotkey
+        }
+    };
+
+    let text = match raw_daemon.capture_text_hotkey.as_deref() {
+        Some(raw) => match raw.parse() {
+            Ok(shortcut) => Some(shortcut),
+            Err(error) => {
+                warnings.push(format!("invalid daemon text shortcut: {error}"));
+                fallback.capture_text_hotkey
+            }
         },
-        Err(error) => LoadedConfig {
-            config: fallback,
-            warning: Some(format!("invalid daemon shortcut: {error}")),
+        None => fallback.capture_text_hotkey,
+    };
+
+    let (region, text, collision_warning) = match (region, text) {
+        (region, Some(text)) if region == text => (
+            region,
+            None,
+            Some(
+                "hotkey collision: text shortcut disabled in favor of region shortcut".to_string(),
+            ),
+        ),
+        (region, text) => (region, text, None),
+    };
+    if let Some(warning) = collision_warning {
+        warnings.push(warning);
+    }
+
+    LoadedConfig {
+        config: DaemonConfig {
+            capture_region_hotkey: region,
+            capture_text_hotkey: text,
         },
+        warnings,
     }
 }
 
@@ -236,7 +281,7 @@ mod tests {
             loaded.config.capture_region_hotkey.to_string(),
             "Alt+Shift+6"
         );
-        assert!(loaded.warning.is_none());
+        assert!(loaded.warnings.is_empty());
     }
 
     #[test]
@@ -255,7 +300,7 @@ mod tests {
             loaded.config.capture_region_hotkey.to_string(),
             "Control+Alt+7"
         );
-        assert!(loaded.warning.is_none());
+        assert!(loaded.warnings.is_empty());
     }
 
     #[test]
@@ -279,7 +324,7 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
             loaded.config.capture_region_hotkey.to_string(),
             "Alt+Shift+6"
         );
-        assert!(loaded.warning.is_none());
+        assert!(loaded.warnings.is_empty());
     }
 
     #[test]
@@ -291,7 +336,7 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
         let loaded = load_from(&path, Platform::Linux);
 
         assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
-        assert!(loaded.warning.unwrap().contains("parse"));
+        assert!(loaded.warnings[0].contains("parse"));
     }
 
     #[test]
@@ -303,7 +348,7 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
         let loaded = load_from(&path, Platform::Linux);
 
         assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
-        assert!(loaded.warning.unwrap().contains("shortcut"));
+        assert!(loaded.warnings[0].contains("region shortcut"));
     }
 
     #[test]
@@ -315,7 +360,7 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
         let loaded = load_from(&path, Platform::Linux);
 
         assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
-        assert!(loaded.warning.unwrap().contains("shortcut"));
+        assert!(loaded.warnings[0].contains("region shortcut"));
     }
 
     #[test]
@@ -327,7 +372,7 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
         let loaded = load_from(&path, Platform::Linux);
 
         assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
-        assert!(loaded.warning.unwrap().contains("modifier"));
+        assert!(loaded.warnings[0].contains("region shortcut"));
     }
 
     #[test]
@@ -336,7 +381,7 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
         let loaded = load_from(dir.path(), Platform::Linux);
 
         assert_eq!(loaded.config, DaemonConfig::default_for(Platform::Linux));
-        assert!(loaded.warning.unwrap().contains("read"));
+        assert!(loaded.warnings[0].contains("read"));
     }
 
     #[test]
@@ -375,5 +420,136 @@ key_source = { Env = "ANTHROPIC_API_KEY" }
     fn rollshot_config_dir_from_base_appends_rollshot() {
         let dir = rollshot_config_dir_from_base(PathBuf::from("/tmp/xdg-config"));
         assert_eq!(dir, PathBuf::from("/tmp/xdg-config").join("rollshot"));
+    }
+
+    #[test]
+    fn linux_default_text_hotkey() {
+        let cfg = DaemonConfig::default_for(Platform::Linux);
+        assert_eq!(cfg.capture_text_hotkey.unwrap().to_string(), "Alt+Shift+7");
+    }
+
+    #[test]
+    fn macos_default_text_hotkey() {
+        let cfg = DaemonConfig::default_for(Platform::Macos);
+        assert_eq!(
+            cfg.capture_text_hotkey.unwrap().to_string(),
+            "Command+Shift+7"
+        );
+    }
+
+    #[test]
+    fn legacy_file_with_only_region_hotkey_uses_default_text_hotkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"Control+Alt+7\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(
+            loaded.config.capture_region_hotkey.to_string(),
+            "Control+Alt+7"
+        );
+        assert_eq!(
+            loaded.config.capture_text_hotkey.unwrap().to_string(),
+            "Alt+Shift+7"
+        );
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn independent_text_hotkey_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"Control+Alt+7\"\ncapture_text_hotkey = \"Control+Shift+8\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(
+            loaded.config.capture_region_hotkey.to_string(),
+            "Control+Alt+7"
+        );
+        assert_eq!(
+            loaded.config.capture_text_hotkey.unwrap().to_string(),
+            "Control+Shift+8"
+        );
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn invalid_text_hotkey_falls_back_to_default_preserving_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"Control+Alt+7\"\ncapture_text_hotkey = \"Alt+Shift\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(
+            loaded.config.capture_region_hotkey.to_string(),
+            "Control+Alt+7"
+        );
+        assert_eq!(
+            loaded.config.capture_text_hotkey.unwrap().to_string(),
+            "Alt+Shift+7"
+        );
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("text"));
+    }
+
+    #[test]
+    fn both_fields_invalid_produces_two_warnings_region_then_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"Alt+Shift\"\ncapture_text_hotkey = \"Bogus\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(
+            loaded.config.capture_region_hotkey.to_string(),
+            "Alt+Shift+6"
+        );
+        assert_eq!(
+            loaded.config.capture_text_hotkey.unwrap().to_string(),
+            "Alt+Shift+7"
+        );
+        assert_eq!(loaded.warnings.len(), 2);
+        assert!(loaded.warnings[0].contains("region shortcut"));
+        assert!(loaded.warnings[1].contains("text shortcut"));
+    }
+
+    #[test]
+    fn collision_disables_text_shortcut_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ncapture_region_hotkey = \"Alt+Shift+6\"\ncapture_text_hotkey = \"Alt+Shift+6\"\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path, Platform::Linux);
+
+        assert_eq!(
+            loaded.config.capture_region_hotkey.to_string(),
+            "Alt+Shift+6"
+        );
+        assert!(loaded.config.capture_text_hotkey.is_none());
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("collision"));
     }
 }

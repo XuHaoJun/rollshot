@@ -201,6 +201,7 @@ capture_region_hotkey = "Alt+Shift+6"
             r#"
 [daemon]
 capture_region_hotkey = "Alt+Shift+6"
+capture_text_hotkey = "Alt+Shift+7"
 "#,
         )
         .unwrap();
@@ -223,6 +224,7 @@ capture_region_hotkey = "Alt+Shift+6"
         let text = fs::read_to_string(tmp.path().join("config.toml")).unwrap();
         assert!(text.contains("[daemon]"));
         assert!(text.contains("capture_region_hotkey = \"Alt+Shift+6\""));
+        assert!(text.contains("capture_text_hotkey = \"Alt+Shift+7\""));
         assert!(text.contains("[provider]"));
         assert!(!tmp.path().join("provider.toml").exists());
     }

@@ -1,4 +1,4 @@
-use crate::daemon::core::{ActiveCapture, CaptureId, CaptureLauncher, DaemonEvent};
+use crate::daemon::core::{ActiveCapture, CaptureId, CaptureKind, CaptureLauncher, DaemonEvent};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use std::os::unix::process::CommandExt;
@@ -14,8 +14,11 @@ pub(crate) struct ProcessGroupCapture {
     pgid: Pid,
 }
 
-pub(crate) fn capture_args() -> [&'static str; 5] {
-    ["capture", "--workflow", "screenshot", "--scope", "region"]
+pub(crate) fn capture_args(kind: CaptureKind) -> &'static [&'static str] {
+    match kind {
+        CaptureKind::Region => &["capture", "--workflow", "screenshot", "--scope", "region"],
+        CaptureKind::Text => &["ocr", "--graphical-feedback"],
+    }
 }
 
 impl CurrentExeLauncher {
@@ -28,10 +31,11 @@ impl CaptureLauncher for CurrentExeLauncher {
     fn launch(
         &mut self,
         id: CaptureId,
+        kind: CaptureKind,
         events: Sender<DaemonEvent>,
     ) -> Result<Box<dyn ActiveCapture>, String> {
         let mut command = Command::new(&self.executable);
-        command.args(capture_args()).process_group(0);
+        command.args(capture_args(kind)).process_group(0);
         let child = command
             .spawn()
             .map_err(|error| format!("failed to spawn capture child: {error}"))?;
@@ -124,8 +128,16 @@ mod tests {
     #[test]
     fn capture_arguments_are_region_screenshot() {
         assert_eq!(
-            capture_args(),
-            ["capture", "--workflow", "screenshot", "--scope", "region"]
+            capture_args(CaptureKind::Region),
+            &["capture", "--workflow", "screenshot", "--scope", "region"]
+        );
+    }
+
+    #[test]
+    fn capture_text_arguments_are_ocr_graphical_feedback() {
+        assert_eq!(
+            capture_args(CaptureKind::Text),
+            &["ocr", "--graphical-feedback"]
         );
     }
 

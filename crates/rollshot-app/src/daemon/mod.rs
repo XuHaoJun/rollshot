@@ -36,7 +36,7 @@ fn run_if_primary(
 fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     let config_path = config::config_path()?;
     let loaded = config::load_from(&config_path, config::Platform::Linux);
-    if let Some(warning) = loaded.warning {
+    for warning in &loaded.warnings {
         tracing::warn!(
             target: "rollshot::daemon::config",
             %warning,
@@ -70,7 +70,7 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
 fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     let config_path = config::config_path()?;
     let loaded = config::load_from(&config_path, config::Platform::Macos);
-    if let Some(warning) = loaded.warning {
+    for warning in &loaded.warnings {
         tracing::warn!(
             target: "rollshot::daemon::config",
             %warning,
