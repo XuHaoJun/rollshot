@@ -81,13 +81,16 @@ fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String>
                 file_logging,
                 "capture session started"
             );
-            run_iced_capture(options)
+            run_iced_capture(options, post_capture::CapturePurpose::Present)
         }
         LaunchMode::Daemon => daemon::run(),
         LaunchMode::Ocr {
             options,
             graphical_feedback,
-        } => quick_ocr::run(options, graphical_feedback),
+        } => run_iced_capture(
+            options,
+            post_capture::CapturePurpose::Ocr { graphical_feedback },
+        ),
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
         #[cfg(feature = "action-guide")]
@@ -183,16 +186,28 @@ fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
     } else {
         CaptureRequest::action_guide_region()
     };
-    macos_product::run(rollshot_iced_overlay::OverlayConfig {
-        backend: "auto".to_string(),
-        fps: 5,
-        show_cursor: false,
-        request,
-        target_output_name: None,
-    })
+    macos_product::run(
+        rollshot_iced_overlay::OverlayConfig {
+            backend: "auto".to_string(),
+            fps: 5,
+            show_cursor: false,
+            request,
+            target_output_name: None,
+        },
+        post_capture::CapturePurpose::Present,
+    )
 }
 
-fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Result<(), String> {
+fn run_iced_capture(
+    options: rollshot_capture::InteractiveLaunchOptions,
+    purpose: post_capture::CapturePurpose,
+) -> Result<(), String> {
+    if matches!(purpose, post_capture::CapturePurpose::Ocr { .. }) && cfg!(not(feature = "ocr")) {
+        return Err(crate::product_ocr::ProductOcrError::Disabled
+            .message()
+            .into());
+    }
+
     let config = rollshot_iced_overlay::OverlayConfig {
         backend: options.backend,
         fps: options.fps,
@@ -203,38 +218,49 @@ fn run_iced_capture(options: rollshot_capture::InteractiveLaunchOptions) -> Resu
 
     #[cfg(target_os = "linux")]
     {
-        run_product_capture(config)
+        run_product_capture(config, purpose)
     }
 
     #[cfg(target_os = "macos")]
     {
-        run_product_capture(config)
+        run_product_capture(config, purpose)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = config;
+        let _ = (config, purpose);
         Err("unsupported platform".to_string())
     }
 }
 
 #[cfg(target_os = "linux")]
-fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String> {
-    match post_capture::capture_completion(
+fn run_product_capture(
+    config: rollshot_iced_overlay::OverlayConfig,
+    purpose: post_capture::CapturePurpose,
+) -> Result<(), String> {
+    match post_capture::select_completion(
+        purpose,
         rollshot_iced_overlay::run_overlay(config).map_err(|e| e.to_string())?,
     ) {
-        post_capture::CaptureCompletion::Present(result) => {
+        post_capture::PurposeCompletion::Cancelled => Ok(()),
+        post_capture::PurposeCompletion::Present(result) => {
             post_capture::handle_linux_capture(result)
         }
-        post_capture::CaptureCompletion::Cancelled => Ok(()),
+        post_capture::PurposeCompletion::Ocr {
+            image,
+            graphical_feedback,
+        } => quick_ocr::complete_cli(image, graphical_feedback),
     }
 }
 
 /// macOS: route capture into the single-process product daemon, which owns the
 /// whole capture → thumbnail / Result Workspace flow in one event loop.
 #[cfg(target_os = "macos")]
-fn run_product_capture(config: rollshot_iced_overlay::OverlayConfig) -> Result<(), String> {
-    macos_product::run(config)
+fn run_product_capture(
+    config: rollshot_iced_overlay::OverlayConfig,
+    purpose: post_capture::CapturePurpose,
+) -> Result<(), String> {
+    macos_product::run(config, purpose)
 }
 
 #[cfg(test)]

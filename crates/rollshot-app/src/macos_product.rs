@@ -38,7 +38,7 @@ use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
 use crate::diagnostics::TARGET_APP;
 use crate::macos_native_drag::{self, NativeDragResult};
 use crate::macos_thumbnail::{self, release_action, ThumbnailAction, ThumbnailState};
-use crate::post_capture::{select_presentation, Presentation};
+use crate::post_capture::{select_presentation, CapturePurpose, Presentation};
 use crate::result_workspace::{self, ResultDocument, ResultWorkspace};
 use crate::storage::{self, Platform};
 #[cfg(feature = "action-guide")]
@@ -98,6 +98,8 @@ pub enum Message {
     NativeDragStarted(Result<(), String>),
     /// The workspace window finished opening.
     WorkspaceWindowReady(window::Id),
+    /// Background OCR completed (text or error).
+    QuickOcrFinished(Result<String, crate::quick_ocr::QuickOcrError>),
 }
 
 /// The current phase of the product daemon.
@@ -113,6 +115,8 @@ pub enum Phase {
 /// The single daemon state.
 pub struct MacosProduct {
     phase: Phase,
+    /// The capture purpose driving this session.
+    purpose: CapturePurpose,
     /// The in-memory capture document, kept across the thumbnail→workspace
     /// transition so a thumbnail click never reloads the image from disk.
     document: Option<ResultDocument>,
@@ -129,7 +133,10 @@ impl MacosProduct {
     /// task that opens its overlay window. Returns `Ok(None)` when the user
     /// cancelled before any capture began (the caller then skips the daemon
     /// entirely), or `Err` if capture setup failed.
-    pub fn new(config: OverlayConfig) -> Result<Option<(Self, Task<Message>)>, String> {
+    pub fn new(
+        config: OverlayConfig,
+        purpose: CapturePurpose,
+    ) -> Result<Option<(Self, Task<Message>)>, String> {
         let initial_path = if config.request.workflow == Workflow::ActionGuide {
             InitialCapturePath::Overlay
         } else {
@@ -144,7 +151,8 @@ impl MacosProduct {
                     None => return Ok(None),
                 };
                 let auto_save = storage::auto_save(&result.image, Platform::Macos);
-                let mut product = MacosProduct::from_completed_image(result.image, auto_save);
+                let mut product =
+                    MacosProduct::from_completed_image(result.image, auto_save, purpose);
                 let open_task = open_presentation_window(&mut product);
                 Ok(Some((product, open_task)))
             }
@@ -171,6 +179,7 @@ impl MacosProduct {
                 Ok(Some((
                     MacosProduct {
                         phase: Phase::Capture(component),
+                        purpose,
                         document: None,
                         thumbnail_window: None,
                         workspace_window: None,
@@ -189,6 +198,7 @@ impl MacosProduct {
     fn from_completed_image(
         image: RgbaImage,
         auto_save: Result<std::path::PathBuf, String>,
+        purpose: CapturePurpose,
     ) -> Self {
         let (phase, document) = match select_presentation(Platform::Macos, auto_save) {
             Presentation::MacosSavedThumbnail(path) => {
@@ -214,6 +224,7 @@ impl MacosProduct {
         };
         MacosProduct {
             phase,
+            purpose,
             document,
             thumbnail_window: None,
             workspace_window: None,
@@ -230,7 +241,7 @@ impl MacosProduct {
         image: RgbaImage,
         auto_save: Result<std::path::PathBuf, String>,
     ) {
-        let completed = Self::from_completed_image(image, auto_save);
+        let completed = Self::from_completed_image(image, auto_save, self.purpose);
         self.phase = completed.phase;
         self.document = completed.document;
     }
@@ -467,6 +478,20 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             product.workspace_window = Some(id);
             Task::none()
         }
+        Message::QuickOcrFinished(result) => {
+            match result {
+                Ok(text) => {
+                    if let Err(e) = write_text_to_stdout(&text) {
+                        tracing::error!(target: TARGET_APP, %e, "OCR stdout write failed");
+                    }
+                    tracing::info!(target: TARGET_APP, "quick OCR completed");
+                }
+                Err(error) => {
+                    tracing::error!(target: TARGET_APP, %error, "quick OCR failed");
+                }
+            }
+            iced::exit()
+        }
     }
 }
 
@@ -515,10 +540,32 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
         component.shutdown();
     }
 
-    let auto_save = storage::auto_save(&image, Platform::Macos);
-    product.apply_capture_completion(image, auto_save);
-
-    close_tasks.push(open_presentation_window(product));
+    match product.purpose {
+        CapturePurpose::Ocr { graphical_feedback } => {
+            // OCR path: spawn a blocking worker, do not create thumbnail/workspace.
+            let task = Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || crate::product_ocr::prepare(&image))
+                        .await
+                        .map_err(|_| crate::quick_ocr::QuickOcrError::Worker)
+                        .and_then(|result| result.map_err(crate::quick_ocr::QuickOcrError::Ocr))
+                },
+                move |result| {
+                    let text_result = result.and_then(|items| {
+                        let mut clipboard = crate::quick_ocr::ArboardClipboard;
+                        crate::quick_ocr::finish_with(items, &mut clipboard)
+                    });
+                    Message::QuickOcrFinished(text_result)
+                },
+            );
+            return Task::batch(close_tasks).chain(task);
+        }
+        CapturePurpose::Present => {
+            let auto_save = storage::auto_save(&image, Platform::Macos);
+            product.apply_capture_completion(image, auto_save);
+            close_tasks.push(open_presentation_window(product));
+        }
+    }
     Task::batch(close_tasks)
 }
 
@@ -714,8 +761,18 @@ fn style(product: &MacosProduct, theme: &iced::Theme) -> iced::theme::Style {
     }
 }
 
+fn write_text_to_stdout(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(text.as_bytes())
+        .map_err(|e| e.to_string())?;
+    writeln!(stdout).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Start exactly ONE `iced::daemon`, owning the whole post-capture flow.
-pub fn run(config: OverlayConfig) -> Result<(), String> {
+pub fn run(config: OverlayConfig, purpose: CapturePurpose) -> Result<(), String> {
     use std::sync::Mutex;
 
     // The daemon `boot` closure is `Fn`, so it cannot own the non-`Clone`
@@ -723,7 +780,7 @@ pub fn run(config: OverlayConfig) -> Result<(), String> {
     // screen capture before the overlay surface exists) here and stash the built
     // product + boot task for the closure to take exactly once. `None` means the
     // user cancelled before any capture began, so no daemon is started.
-    let (product, boot_task) = match MacosProduct::new(config)? {
+    let (product, boot_task) = match MacosProduct::new(config, purpose)? {
         Some(pair) => pair,
         None => return Ok(()),
     };
