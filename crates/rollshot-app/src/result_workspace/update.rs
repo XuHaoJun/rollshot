@@ -3009,11 +3009,7 @@ mod tests {
     #[cfg(feature = "ocr")]
     #[test]
     fn command_c_maps_to_keyboard_copy() {
-        let msg = map_key_press(
-            &keyboard::Key::Character("c".into()),
-            keyboard::Modifiers::CTRL,
-            false,
-        );
+        let msg = map_key_press(&keyboard::Key::Character("c".into()), zmod(), false);
 
         assert_eq!(msg, Some(Message::KeyboardCopy));
     }
