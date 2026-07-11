@@ -244,21 +244,6 @@ impl QuickOcrFeedback for NoopFeedback {
     }
 }
 
-#[allow(dead_code)]
-pub fn run(
-    _options: rollshot_capture::InteractiveLaunchOptions,
-    _graphical_feedback: bool,
-) -> Result<(), String> {
-    #[cfg(not(feature = "ocr"))]
-    {
-        Err(ProductOcrError::Disabled.message().into())
-    }
-    #[cfg(feature = "ocr")]
-    {
-        todo!("platform capture integration is Task 3")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
