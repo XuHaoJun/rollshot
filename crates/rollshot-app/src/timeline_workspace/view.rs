@@ -726,7 +726,7 @@ fn annotation_modal<'a>(
                                 .on_press(Message::AcceptVisualAnnotation(suggestion.id))
                                 .style(button::primary),
                             button(text("Reject"))
-                                .on_press(Message::RejectVisualAnnotationSuggestion),
+                                .on_press(Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)),
                         ]
                         .spacing(6),
                     );

@@ -130,6 +130,8 @@ pub enum Message {
     DismissVisualAnnotationReview,
     /// Accept a single pending visual annotation by its suggestion id.
     AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId),
+    /// Reject a single pending visual annotation by its suggestion id.
+    RejectSingleVisualAnnotationSuggestion(rollshot_action::VisualAnnotationSuggestionId),
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -1374,6 +1376,21 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 proposal.reject_all();
             }
             state.message = Some("Visual annotation suggestions rejected.".to_string());
+            Task::none()
+        }
+        Message::RejectSingleVisualAnnotationSuggestion(id) => {
+            let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
+                state.visual_annotation_suggestion
+            else {
+                return Task::none();
+            };
+            if let Some(suggestion) = proposal.suggestions.iter_mut().find(|s| s.id == id) {
+                if suggestion.status == rollshot_action::VisualAnnotationSuggestionStatus::Pending {
+                    suggestion.status =
+                        rollshot_action::VisualAnnotationSuggestionStatus::Rejected;
+                }
+            }
+            state.message = Some("Visual annotation rejected.".to_string());
             Task::none()
         }
         Message::DismissVisualAnnotationReview => {
