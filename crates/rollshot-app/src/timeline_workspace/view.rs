@@ -164,7 +164,10 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 Some(handle) => image(handle.clone()).into(),
                 None => text("(keyframe unavailable)").into(),
             };
-            let callout_running = state.callout_suggestion.is_running();
+            let visual_running = matches!(
+                state.visual_annotation_suggestion,
+                super::VisualAnnotationSuggestionState::Running { .. }
+            );
             column![
                 container(keyframe)
                     .width(Length::Fill)
@@ -177,12 +180,14 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                 button(text("Annotate Step"))
                     .on_press(Message::AnnotateStepRequested)
                     .style(button::secondary),
-                button(text(if callout_running {
+                button(text(if visual_running {
                     "Suggesting annotations..."
                 } else {
                     "Suggest annotations"
                 }))
-                .on_press_maybe((!callout_running).then_some(Message::SuggestCalloutRequested),)
+                .on_press_maybe(
+                    (!visual_running).then_some(Message::SuggestVisualAnnotationsRequested),
+                )
                 .style(button::secondary),
                 button(text(if state.caption_suggestions_running {
                     "Suggesting Captions..."
@@ -514,14 +519,11 @@ fn annotation_modal<'a>(
     let img = image(session.handle.clone())
         .width(Length::Fixed(rendered.width))
         .height(Length::Fixed(rendered.height));
-    let callout = &state.callout_suggestion;
-    let is_running = callout.is_running();
-    let is_pending = callout.is_pending();
     let visual_running = matches!(
         state.visual_annotation_suggestion,
         super::VisualAnnotationSuggestionState::Running { .. }
     );
-    let mutation_allowed = !is_running && !is_pending && !visual_running;
+    let mutation_allowed = !visual_running;
     // Ghost projection: build all pending visual annotation ghosts.
     let suggested: Vec<rollshot_image_document::Annotation> =
         if let super::VisualAnnotationSuggestionState::PendingReview(ref proposal) =
@@ -533,13 +535,6 @@ fn annotation_modal<'a>(
                 session.width,
                 session.height,
             )
-        } else if let Some(callout_proposal) = callout.proposal() {
-            vec![super::annotation::suggested_callout_annotation(
-                &doc.document,
-                &callout_proposal.suggestion,
-                session.width,
-                session.height,
-            )]
         } else {
             Vec::new()
         };
@@ -558,64 +553,7 @@ fn annotation_modal<'a>(
     .height(Length::Fixed(rendered.height));
 
     let tool = session.tool;
-    let tool_row: Element<Message> = if is_running {
-        row![
-            text("Suggesting callout...").size(13),
-            Space::new().width(Length::Fill),
-            button(text("Cancel"))
-                .on_press(Message::CancelCalloutSuggestion)
-                .style(button::secondary),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .into()
-    } else if is_pending {
-        row![
-            text("Suggested").size(13),
-            Space::new().width(Length::Fill),
-            button(text("Accept"))
-                .on_press(Message::AcceptCalloutSuggestion)
-                .style(button::primary),
-            button(text("Reject"))
-                .on_press(Message::RejectCalloutSuggestion)
-                .style(button::secondary),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .into()
-    } else if let super::CalloutSuggestionState::NoSuggestion { reason } = callout {
-        let label = match reason {
-            Some(text) => format!("No suggestion: {text}"),
-            None => "No suggestion returned.".to_string(),
-        };
-        row![
-            text(label).size(13),
-            Space::new().width(Length::Fill),
-            button(text("Retry"))
-                .on_press_maybe(
-                    (!state.callout_suggestion.is_running())
-                        .then_some(Message::SuggestCalloutRequested),
-                )
-                .style(button::secondary),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .into()
-    } else if let super::CalloutSuggestionState::Failed { message } = callout {
-        row![
-            text(format!("Callout failed: {message}")).size(13),
-            Space::new().width(Length::Fill),
-            button(text("Retry"))
-                .on_press_maybe(
-                    (!state.callout_suggestion.is_running())
-                        .then_some(Message::SuggestCalloutRequested),
-                )
-                .style(button::secondary),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .into()
-    } else {
+    let tool_row: Element<Message> = {
         let number_btn = button(text("Number"))
             .on_press_maybe(mutation_allowed.then_some(Message::AnnotationToolChanged(
                 super::annotation::AnnotationTool::Number,
@@ -725,8 +663,9 @@ fn annotation_modal<'a>(
                             button(text("Accept"))
                                 .on_press(Message::AcceptVisualAnnotation(suggestion.id))
                                 .style(button::primary),
-                            button(text("Reject"))
-                                .on_press(Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)),
+                            button(text("Reject")).on_press(
+                                Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)
+                            ),
                         ]
                         .spacing(6),
                     );
