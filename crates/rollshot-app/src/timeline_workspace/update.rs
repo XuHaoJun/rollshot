@@ -128,6 +128,8 @@ pub enum Message {
     /// Dismiss the pending visual annotation review without accepting or rejecting.
     #[allow(dead_code)]
     DismissVisualAnnotationReview,
+    /// Accept a single pending visual annotation by its suggestion id.
+    AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId),
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -1376,6 +1378,77 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::DismissVisualAnnotationReview => {
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+            Task::none()
+        }
+        Message::AcceptVisualAnnotation(id) => {
+            let Some(step) = state.selected_step().cloned() else {
+                state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+                return Task::none();
+            };
+            let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
+                state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+                return Task::none();
+            };
+            let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
+                state.visual_annotation_suggestion
+            else {
+                return Task::none();
+            };
+            let state_id = doc.document.state_id();
+            let w = doc.document.source().width();
+            let h = doc.document.source().height();
+            match proposal.validate_item(id, Some(&step), state_id, w, h) {
+                rollshot_action::VisualAnnotationApplyOutcome::Ready => {
+                    // Extract the op for this single suggestion.
+                    let suggestion = proposal.suggestions.iter().find(|s| s.id == id).unwrap();
+                    let op = match &suggestion.payload {
+                        rollshot_action::VisualAnnotationPayload::NumberCallout { tip, bubble } => {
+                            rollshot_image_document::EditOp::AddNumberCallout {
+                                tip: *tip,
+                                bubble: *bubble,
+                            }
+                        }
+                        rollshot_action::VisualAnnotationPayload::TextNote { position, text } => {
+                            rollshot_image_document::EditOp::AddTextNote {
+                                position: *position,
+                                text: text.clone(),
+                            }
+                        }
+                        rollshot_action::VisualAnnotationPayload::OpaqueRedaction { bounds } => {
+                            rollshot_image_document::EditOp::AddRedaction { bounds: *bounds }
+                        }
+                    };
+                    match doc.document.apply_batch(vec![op]) {
+                        Ok(_) => {
+                            // Mark accepted only after successful apply.
+                            let suggestion = proposal
+                                .suggestions
+                                .iter_mut()
+                                .find(|s| s.id == id)
+                                .unwrap();
+                            suggestion.status =
+                                rollshot_action::VisualAnnotationSuggestionStatus::Accepted;
+                            // Rebase remaining pending items to the new state.
+                            let new_state_id = doc.document.state_id();
+                            proposal.rebase(new_state_id);
+                            state.message = Some("Visual annotation accepted.".to_string());
+                        }
+                        Err(e) => {
+                            state.message = Some(format!("Visual annotation apply failed: {e}"));
+                        }
+                    }
+                }
+                rollshot_action::VisualAnnotationApplyOutcome::Stale => {
+                    state.message = Some("Visual annotation suggestion is stale.".to_string());
+                }
+                rollshot_action::VisualAnnotationApplyOutcome::Missing => {
+                    state.message = Some("Visual annotation suggestion is missing.".to_string());
+                }
+                rollshot_action::VisualAnnotationApplyOutcome::NotPending => {
+                    state.message =
+                        Some("Visual annotation suggestion is no longer pending.".to_string());
+                }
+            }
             Task::none()
         }
     }
@@ -4193,6 +4266,63 @@ mod tests {
         ));
     }
 
+    /// Build a VisualAnnotationProposal with three primitives (callout, note,
+    /// redaction) for the first step, used by the individual-accept and
+    /// stale-flow tests.
+    fn visual_proposal_three_primitives(
+        state: &mut TimelineWorkspace,
+        run_id: u64,
+    ) -> VisualAnnotationProposal {
+        let step = &state.guide.steps()[0];
+        let doc = state
+            .presentation
+            .document_for_step(step, &state.store)
+            .expect("presentation document");
+        let image = doc.document.source();
+        VisualAnnotationProposal::from_agent_drafts(
+            rollshot_action::VisualAnnotationProposalId(run_id),
+            run_id,
+            step,
+            doc.document.state_id(),
+            image.width(),
+            image.height(),
+            vec![
+                rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: rollshot_action::VisualAnnotationSuggestionId(1),
+                    payload: rollshot_action::VisualAnnotationPayload::NumberCallout {
+                        tip: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                        bubble: rollshot_image_document::ImagePoint::new(20.0, 20.0),
+                    },
+                    confidence: 0.9,
+                    rationale: Some("button click target".to_string()),
+                },
+                rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: rollshot_action::VisualAnnotationSuggestionId(2),
+                    payload: rollshot_action::VisualAnnotationPayload::TextNote {
+                        position: rollshot_image_document::ImagePoint::new(8.0, 8.0),
+                        text: "Save button".to_string(),
+                    },
+                    confidence: 0.7,
+                    rationale: None,
+                },
+                rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: rollshot_action::VisualAnnotationSuggestionId(3),
+                    payload: rollshot_action::VisualAnnotationPayload::OpaqueRedaction {
+                        bounds: rollshot_image_document::ImageRect {
+                            x: 2.0,
+                            y: 2.0,
+                            width: 10.0,
+                            height: 8.0,
+                        },
+                    },
+                    confidence: 0.6,
+                    rationale: Some("sensitive info".to_string()),
+                },
+            ],
+        )
+        .expect("valid proposal")
+    }
+
     // Helper: build a VisualAnnotationProposal for the first step
     fn visual_proposal_for_first_step(
         state: &mut TimelineWorkspace,
@@ -4222,6 +4352,284 @@ mod tests {
             }],
         )
         .expect("valid proposal")
+    }
+
+    #[test]
+    fn individual_accept_visual_annotation_applies_one_and_rebases() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+        let source = state.selected_step().unwrap().source;
+        let state_before = state.presentation.doc(source).unwrap().document.state_id();
+
+        let _ = update(
+            &mut state,
+            Message::AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId(2)),
+        );
+
+        let doc = state.presentation.doc(source).unwrap();
+        assert_ne!(
+            doc.document.state_id(),
+            state_before,
+            "state_id must increment"
+        );
+        assert_eq!(doc.document.annotations().len(), 1, "one note applied");
+        assert!(
+            doc.document.annotations().iter().any(|a| matches!(
+                a,
+                rollshot_image_document::Annotation::TextNote { text, .. } if text == "Save button"
+            )),
+            "applied annotation must be the text note"
+        );
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(p) => {
+                assert_eq!(p.suggestions.len(), 3);
+                assert_eq!(
+                    p.suggestions[0].status,
+                    rollshot_action::VisualAnnotationSuggestionStatus::Pending
+                );
+                assert_eq!(
+                    p.suggestions[1].status,
+                    rollshot_action::VisualAnnotationSuggestionStatus::Accepted
+                );
+                assert_eq!(
+                    p.suggestions[2].status,
+                    rollshot_action::VisualAnnotationSuggestionStatus::Pending
+                );
+                assert_eq!(
+                    p.suggestions[0].base.document_state_id,
+                    doc.document.state_id(),
+                    "remaining items rebased"
+                );
+            }
+            other => panic!("expected PendingReview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejected_visual_annotation_cannot_reaccept() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+
+        let _ = update(
+            &mut state,
+            Message::AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId(2)),
+        );
+
+        let _ = update(
+            &mut state,
+            Message::AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId(2)),
+        );
+
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(p) => {
+                assert_eq!(
+                    p.suggestions[1].status,
+                    rollshot_action::VisualAnnotationSuggestionStatus::Accepted
+                );
+            }
+            other => panic!("expected PendingReview, got {other:?}"),
+        }
+        let source = state.selected_step().unwrap().source;
+        assert_eq!(
+            state
+                .presentation
+                .doc(source)
+                .unwrap()
+                .document
+                .annotations()
+                .len(),
+            1,
+            "must not add a second annotation"
+        );
+    }
+
+    #[test]
+    fn accept_all_visual_annotations_uses_single_state_id_increment() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        let source = state.selected_step().unwrap().source;
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+        let state_before = state.presentation.doc(source).unwrap().document.state_id();
+
+        let _ = update(&mut state, Message::AcceptAllVisualAnnotations);
+
+        let doc = state.presentation.doc(source).unwrap();
+        assert_ne!(
+            doc.document.state_id(),
+            state_before,
+            "state_id must increment"
+        );
+        assert_eq!(
+            doc.document.annotations().len(),
+            3,
+            "all three annotations applied"
+        );
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "proposal consumed"
+        );
+    }
+
+    #[test]
+    fn stale_accept_all_visual_annotations_changes_neither_count_nor_state() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+        let source = state.selected_step().unwrap().source;
+        let state_before = state.presentation.doc(source).unwrap().document.state_id();
+        let annotations_before = state
+            .presentation
+            .doc(source)
+            .unwrap()
+            .document
+            .annotations()
+            .len();
+
+        let _ = update(&mut state, Message::DeleteStep);
+
+        // After DeleteStep, the step may be renumbered. The key assertion
+        // is that the visual annotation proposal was discarded (Idle) and
+        // no annotations were applied to any document.
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "pending review must be discarded"
+        );
+        // The source's document was not mutated (if it still exists).
+        if let Some(doc) = state.presentation.doc(source) {
+            assert_eq!(
+                doc.document.state_id(),
+                state_before,
+                "document state must not change"
+            );
+            assert_eq!(
+                doc.document.annotations().len(),
+                annotations_before,
+                "annotations must not change"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_edit_after_pending_review_stales_remaining_items() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "manual edit must discard pending review"
+        );
+    }
+
+    #[test]
+    fn undo_after_pending_review_stales_remaining_items() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+
+        let _ = update(&mut state, Message::AnnotationUndo);
+
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "undo must discard pending review"
+        );
+    }
+
+    #[test]
+    fn redo_after_pending_review_stales_remaining_items() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        let _ = update(&mut state, Message::AnnotationUndo);
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+
+        let _ = update(&mut state, Message::AnnotationRedo);
+
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "redo must discard pending review"
+        );
+    }
+
+    #[test]
+    fn delete_step_after_pending_review_stales_remaining_items() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+
+        let _ = update(&mut state, Message::DeleteStep);
+
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "delete step must discard pending review"
+        );
+    }
+
+    #[test]
+    fn replace_keyframe_after_pending_review_stales_remaining_items() {
+        let mut state = ws(recording_from_frames());
+        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+        let step = state.selected_step().unwrap();
+        let replacement = *step
+            .nearby
+            .iter()
+            .find(|&&f| f != step.keyframe)
+            .expect("replacement frame id");
+
+        let _ = update(&mut state, Message::ReplaceKeyframe(replacement));
+
+        assert!(
+            matches!(
+                state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+            ),
+            "replace keyframe must discard pending review"
+        );
     }
 
     /// RAII guard that writes a `config.toml` to the given directory and

@@ -251,6 +251,16 @@ impl VisualAnnotationProposal {
             .map(|s| suggestion_to_edit_op(&s.payload))
             .collect())
     }
+
+    /// Update the `document_state_id` for all remaining pending suggestions
+    /// so they validate against the post-accept document state.
+    pub fn rebase(&mut self, new_document_state_id: u64) {
+        for suggestion in &mut self.suggestions {
+            if suggestion.status == VisualAnnotationSuggestionStatus::Pending {
+                suggestion.base.document_state_id = new_document_state_id;
+            }
+        }
+    }
 }
 
 fn validate_draft(

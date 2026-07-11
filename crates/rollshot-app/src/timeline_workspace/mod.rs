@@ -280,6 +280,14 @@ impl TimelineWorkspace {
         self.guide.steps().iter().find(|s| s.index == index)
     }
 
+    /// `true` when the visual annotation consent dialog should be shown.
+    pub(crate) fn visual_annotation_consent_pending(&self) -> bool {
+        matches!(
+            self.visual_annotation_suggestion,
+            VisualAnnotationSuggestionState::ConsentPending(_)
+        )
+    }
+
     /// Recompute the cached keyframe handle and nearby strip for the current
     /// selection. Called after any change to `selected` or to a keyframe.
     pub(crate) fn rebuild_selection_handles(&mut self) {
@@ -380,6 +388,8 @@ mod tests {
     use rollshot_action::{
         ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
         FrameStore, InputCapability, InputSourceKind, Recording, StoreConfig,
+        VisualAnnotationPayload, VisualAnnotationProposal, VisualAnnotationProposalId,
+        VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
     };
 
     fn region_32() -> CaptureRegion {
@@ -448,6 +458,61 @@ mod tests {
             candidates,
             store: FrameStore::new(StoreConfig::default()),
         }
+    }
+
+    /// Build a VisualAnnotationProposal with three primitives for view tests
+    /// that need a PendingReview state without requiring a mutable workspace.
+    pub(super) fn visual_proposal_three_primitives_for_view(
+        state: &TimelineWorkspace,
+    ) -> VisualAnnotationProposal {
+        let step = &state.guide.steps()[0];
+        let doc = state
+            .presentation
+            .doc(step.source)
+            .expect("presentation doc");
+        let image = doc.document.source();
+        VisualAnnotationProposal::from_agent_drafts(
+            VisualAnnotationProposalId(1),
+            1,
+            step,
+            doc.document.state_id(),
+            image.width(),
+            image.height(),
+            vec![
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(1),
+                    payload: VisualAnnotationPayload::NumberCallout {
+                        tip: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                        bubble: rollshot_image_document::ImagePoint::new(20.0, 20.0),
+                    },
+                    confidence: 0.9,
+                    rationale: Some("button click target".to_string()),
+                },
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(2),
+                    payload: VisualAnnotationPayload::TextNote {
+                        position: rollshot_image_document::ImagePoint::new(8.0, 8.0),
+                        text: "Save button".to_string(),
+                    },
+                    confidence: 0.7,
+                    rationale: None,
+                },
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(3),
+                    payload: VisualAnnotationPayload::OpaqueRedaction {
+                        bounds: rollshot_image_document::ImageRect {
+                            x: 2.0,
+                            y: 2.0,
+                            width: 10.0,
+                            height: 8.0,
+                        },
+                    },
+                    confidence: 0.6,
+                    rationale: Some("sensitive info".to_string()),
+                },
+            ],
+        )
+        .expect("valid proposal")
     }
 
     fn workspace(recording: Recording) -> TimelineWorkspace {
