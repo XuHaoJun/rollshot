@@ -26,6 +26,7 @@ mod macos_native_drag;
 mod macos_thumbnail;
 mod post_capture;
 pub(crate) mod product_ocr;
+mod quick_ocr;
 mod result_workspace;
 mod storage;
 
@@ -83,6 +84,10 @@ fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String>
             run_iced_capture(options)
         }
         LaunchMode::Daemon => daemon::run(),
+        LaunchMode::Ocr {
+            options,
+            graphical_feedback,
+        } => quick_ocr::run(options, graphical_feedback),
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
         #[cfg(feature = "action-guide")]
@@ -240,5 +245,15 @@ mod tests {
         // `None` resolves to default capture, which reaches the platform guard.
         let err = super::run(None, false);
         assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "ocr"))]
+    fn ocr_disabled_build_fails_before_capture() {
+        use clap::Parser;
+        let cli =
+            super::launch::LaunchCli::try_parse_from(["rollshot-app", "ocr"]).expect("parse ocr");
+        let err = super::run(cli.command, false).unwrap_err();
+        assert_eq!(err, "OCR is not available in this build");
     }
 }

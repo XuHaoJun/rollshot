@@ -16,6 +16,15 @@ pub(crate) fn copy_rgba_image(image: &image::RgbaImage) -> Result<(), String> {
         .map_err(|error| format!("clipboard write error: {error}"))
 }
 
+#[allow(dead_code)]
+pub(crate) fn set_text(text: &str) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("clipboard error: {error}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| format!("clipboard write error: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
