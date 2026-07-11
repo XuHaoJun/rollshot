@@ -1,6 +1,8 @@
 use crate::product_ocr::{OcrTextItem, OrderedOcrItems, ProductOcrError};
 use std::fmt;
 
+const TARGET_QUICK_OCR: &str = "rollshot::app::quick_ocr";
+
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum QuickOcrError {
@@ -42,12 +44,44 @@ pub fn finish_with(
     items: Vec<OcrTextItem>,
     clipboard: &mut dyn TextClipboard,
 ) -> Result<String, QuickOcrError> {
-    let text = OrderedOcrItems::new(items)
-        .into_text()
-        .map_err(QuickOcrError::Ocr)?;
-    clipboard
-        .set_text(&text)
-        .map_err(QuickOcrError::Clipboard)?;
+    let item_count = items.len();
+    tracing::info!(
+        target: TARGET_QUICK_OCR,
+        item_count,
+        stage = "assemble",
+        "ocr text assembly"
+    );
+    let text = OrderedOcrItems::new(items).into_text().map_err(|e| {
+        let error_category = match e {
+            ProductOcrError::EmptyResult => "empty_result",
+            _ => "ocr_error",
+        };
+        tracing::warn!(
+            target: TARGET_QUICK_OCR,
+            item_count,
+            stage = "assemble",
+            error_category,
+            "ocr text assembly failed"
+        );
+        QuickOcrError::Ocr(e)
+    })?;
+    tracing::info!(
+        target: TARGET_QUICK_OCR,
+        item_count,
+        text_len = text.len(),
+        stage = "clipboard_write",
+        "ocr clipboard write"
+    );
+    clipboard.set_text(&text).map_err(|e| {
+        tracing::warn!(
+            target: TARGET_QUICK_OCR,
+            item_count,
+            stage = "clipboard_write",
+            error_category = "clipboard_write",
+            "clipboard write failed"
+        );
+        QuickOcrError::Clipboard(e)
+    })?;
     Ok(text)
 }
 
@@ -64,12 +98,31 @@ pub(crate) fn complete_cli_with(
     graphical_feedback: bool,
 ) -> Result<String, QuickOcrError> {
     let text = finish_with(items, clipboard)?;
-    output
-        .write_text(&format!("{text}\n"))
-        .map_err(QuickOcrError::Clipboard)?;
+    output.write_text(&format!("{text}\n")).map_err(|e| {
+        tracing::warn!(
+            target: TARGET_QUICK_OCR,
+            stage = "stdout_write",
+            error_category = "stdout_write",
+            "stdout write failed"
+        );
+        QuickOcrError::Clipboard(e)
+    })?;
     if graphical_feedback {
-        feedback.copied().map_err(QuickOcrError::Clipboard)?;
+        feedback.copied().map_err(|e| {
+            tracing::warn!(
+                target: TARGET_QUICK_OCR,
+                stage = "feedback",
+                error_category = "feedback",
+                "feedback notification failed"
+            );
+            QuickOcrError::Clipboard(e)
+        })?;
     }
+    tracing::info!(
+        target: TARGET_QUICK_OCR,
+        stage = "complete",
+        "quick ocr completed"
+    );
     Ok(text)
 }
 
@@ -428,5 +481,95 @@ mod tests {
         let mut feedback = FakeFeedback::new();
         let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true);
         assert_eq!(feedback.copied_count, 0);
+    }
+
+    // --- privacy regression tests ---
+
+    const SENTINEL: &str = "PRIVATE_OCR_SENTINEL";
+
+    #[test]
+    fn empty_result_log_omits_sentinel() {
+        let log = crate::diagnostics::capture_test_logs(|| {
+            let mut clipboard = FakeClipboard::new();
+            let _ = finish_with(vec![], &mut clipboard);
+        });
+        assert!(
+            !log.contains(SENTINEL),
+            "logs must not contain recognized text: {log}"
+        );
+        assert!(
+            log.contains("empty_result"),
+            "logs must contain error_category: {log}"
+        );
+    }
+
+    #[test]
+    fn clipboard_failure_log_omits_sentinel() {
+        let items = vec![item(0, SENTINEL, rect(0.0, 0.0, 50.0, 12.0))];
+        let log = crate::diagnostics::capture_test_logs(|| {
+            let mut clipboard = FailClipboard;
+            let _ = finish_with(items, &mut clipboard);
+        });
+        assert!(
+            !log.contains(SENTINEL),
+            "logs must not contain recognized text: {log}"
+        );
+        assert!(
+            log.contains("clipboard_write"),
+            "logs must contain error_category: {log}"
+        );
+    }
+
+    #[test]
+    fn error_display_omits_sentinel() {
+        let items = vec![item(0, SENTINEL, rect(0.0, 0.0, 50.0, 12.0))];
+        let mut clipboard = FailClipboard;
+        let err = finish_with(items, &mut clipboard).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(SENTINEL),
+            "error display must not leak recognized text: {msg}"
+        );
+        assert!(
+            msg.contains("clipboard"),
+            "error should mention clipboard: {msg}"
+        );
+    }
+
+    #[test]
+    fn complete_cli_failure_log_omits_sentinel() {
+        let mut clipboard = FakeClipboard::new();
+        let mut output = FakeOutput::new();
+        let mut feedback = FakeFeedback::new();
+        let log = crate::diagnostics::capture_test_logs(|| {
+            let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true);
+        });
+        assert!(
+            !log.contains(SENTINEL),
+            "logs must not contain recognized text: {log}"
+        );
+        assert!(
+            log.contains("empty_result"),
+            "logs must contain error_category: {log}"
+        );
+    }
+
+    #[test]
+    fn complete_cli_success_log_omits_sentinel() {
+        let items = vec![item(0, SENTINEL, rect(0.0, 0.0, 50.0, 12.0))];
+        let mut clipboard = FakeClipboard::new();
+        let mut output = FakeOutput::new();
+        let mut feedback = FakeFeedback::new();
+        let log = crate::diagnostics::capture_test_logs(|| {
+            let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false);
+        });
+        assert!(
+            !log.contains(SENTINEL),
+            "logs must not contain recognized text: {log}"
+        );
+        assert!(
+            log.contains("stage=\"complete\""),
+            "logs must contain stage: {log}"
+        );
     }
 }
