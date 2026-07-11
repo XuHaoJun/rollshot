@@ -22,6 +22,8 @@ mod caption_agent;
 mod storyboard_copy;
 mod update;
 mod view;
+#[cfg(feature = "action-guide")]
+mod visual_annotation_agent;
 
 pub use update::{subscription, update, Message};
 pub use view::view;
