@@ -47,6 +47,7 @@ pub(crate) enum VisualAnnotationTaskResult {
 /// Consent metadata captured from the consent dialog. Contains no
 /// `RgbaImage`, `Vec<u8>`, or `ModelAttachment` — only the identifiers
 /// and provider/model names needed for provenance.
+#[derive(Debug)]
 pub(crate) struct VisualSuggestionConsent {
     pub source: rollshot_action::CandidateId,
     pub keyframe: rollshot_action::FrameId,

@@ -98,6 +98,36 @@ pub enum Message {
         run_id: u64,
         result: Result<super::callout_agent::CalloutTaskResult, String>,
     },
+    /// Begin a visual annotation suggestion run. Loads provider config and
+    /// opens the consent dialog.
+    #[allow(dead_code)]
+    SuggestVisualAnnotationsRequested,
+    /// User confirmed the visual annotation consent dialog. Reloads provider
+    /// config, compares with consent snapshot, and starts the async run.
+    #[allow(dead_code)]
+    VisualSuggestionConsentConfirmed,
+    /// User cancelled the visual annotation consent dialog.
+    #[allow(dead_code)]
+    VisualSuggestionConsentCancelled,
+    /// Background visual annotation suggestion run completed. The `run_id`
+    /// must match the current `Running` state; otherwise the result is dropped.
+    #[allow(dead_code)]
+    VisualAnnotationProposalLoaded {
+        run_id: u64,
+        result: Result<super::visual_annotation_agent::VisualAnnotationTaskResult, String>,
+    },
+    /// Cancel the in-flight visual annotation suggestion run and transition to Idle.
+    #[allow(dead_code)]
+    CancelVisualAnnotationSuggestion,
+    /// Accept all pending visual annotations in the review and apply them as edits.
+    #[allow(dead_code)]
+    AcceptAllVisualAnnotations,
+    /// Reject the pending visual annotation review and discard all suggestions.
+    #[allow(dead_code)]
+    RejectVisualAnnotationSuggestion,
+    /// Dismiss the pending visual annotation review without accepting or rejecting.
+    #[allow(dead_code)]
+    DismissVisualAnnotationReview,
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
@@ -136,6 +166,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state
                 .presentation
                 .retain_sources(state.guide.steps().iter().map(|step| step.source));
+            dismiss_stale_visual_annotation_review(state);
             Task::none()
         }
         Message::ReplaceKeyframe(frame) => {
@@ -167,6 +198,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             state.callout_suggestion = super::CalloutSuggestionState::Idle;
             state.callout_agent_run_id = 0;
+            dismiss_stale_visual_annotation_review(state);
             Task::none()
         }
         Message::DiscardRequested | Message::CloseRequested => {
@@ -574,12 +606,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             Task::none()
         }
         Message::AnnotationUndo => {
+            dismiss_stale_visual_annotation_review(state);
             with_annotation_document(state, |doc| {
                 doc.document.undo();
             });
             Task::none()
         }
         Message::AnnotationRedo => {
+            dismiss_stale_visual_annotation_review(state);
             with_annotation_document(state, |doc| {
                 doc.document.redo();
             });
@@ -593,6 +627,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             // the local run id so a fresh request gets a fresh run id.
             state.callout_suggestion = super::CalloutSuggestionState::Idle;
             state.callout_agent_run_id = 0;
+            dismiss_stale_visual_annotation_review(state);
             state.annotation_session = None;
             Task::none()
         }
@@ -612,6 +647,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             state.callout_suggestion = super::CalloutSuggestionState::Idle;
             state.callout_agent_run_id = 0;
+            dismiss_stale_visual_annotation_review(state);
             state.annotation_session = None;
             Task::none()
         }
@@ -1026,6 +1062,326 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.message = Some(format!("Managed FFmpeg download failed: {error}"));
             Task::none()
         }
+        Message::SuggestVisualAnnotationsRequested => {
+            if matches!(
+                state.visual_annotation_suggestion,
+                super::VisualAnnotationSuggestionState::Running { .. }
+                    | super::VisualAnnotationSuggestionState::ConsentPending(_)
+            ) {
+                return Task::none();
+            }
+            let Some(step) = state.selected_step().cloned() else {
+                state.message =
+                    Some("Select a step before suggesting visual annotations.".to_string());
+                return Task::none();
+            };
+            let cfg = match crate::daemon::config::rollshot_config_dir()
+                .map_err(|_| "Rollshot config directory is unavailable.".to_string())
+                .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
+            {
+                Ok(cfg) => cfg,
+                Err(error) => {
+                    state.message = Some(format!("Visual annotation suggestion failed: {error}"));
+                    return Task::none();
+                }
+            };
+            if !crate::result_workspace::workbench::has_key(&cfg) {
+                state.message = Some(
+                    "Configure an agent provider before suggesting visual annotations.".to_string(),
+                );
+                return Task::none();
+            }
+            let consent = super::visual_annotation_agent::VisualSuggestionConsent {
+                source: step.source,
+                keyframe: step.keyframe,
+                provider: format!("{}", cfg.provider),
+                model: cfg.model.clone(),
+            };
+            state.visual_annotation_suggestion =
+                super::VisualAnnotationSuggestionState::ConsentPending(consent);
+            state.message = None;
+            Task::none()
+        }
+        Message::VisualSuggestionConsentCancelled => {
+            state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+            Task::none()
+        }
+        Message::VisualSuggestionConsentConfirmed => {
+            let super::VisualAnnotationSuggestionState::ConsentPending(ref consent) =
+                state.visual_annotation_suggestion
+            else {
+                return Task::none();
+            };
+            let consent_provider = consent.provider.clone();
+            let consent_model = consent.model.clone();
+            let step_source = consent.source;
+            let keyframe = consent.keyframe;
+            let cfg = match crate::daemon::config::rollshot_config_dir()
+                .map_err(|_| "Rollshot config directory is unavailable.".to_string())
+                .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
+            {
+                Ok(cfg) => cfg,
+                Err(error) => {
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::Idle;
+                    state.message = Some(format!("Visual annotation suggestion failed: {error}"));
+                    return Task::none();
+                }
+            };
+            if !crate::result_workspace::workbench::has_key(&cfg) {
+                state.visual_annotation_suggestion =
+                    super::VisualAnnotationSuggestionState::ConsentPending(
+                        super::visual_annotation_agent::VisualSuggestionConsent {
+                            source: step_source,
+                            keyframe,
+                            provider: format!("{}", cfg.provider),
+                            model: cfg.model.clone(),
+                        },
+                    );
+                state.message = Some(
+                    "Configure an agent provider before suggesting visual annotations.".to_string(),
+                );
+                return Task::none();
+            }
+            let current_provider = format!("{}", cfg.provider);
+            let current_model = cfg.model.clone();
+            if current_provider != consent_provider || current_model != consent_model {
+                state.visual_annotation_suggestion =
+                    super::VisualAnnotationSuggestionState::ConsentPending(
+                        super::visual_annotation_agent::VisualSuggestionConsent {
+                            source: step_source,
+                            keyframe,
+                            provider: current_provider,
+                            model: current_model,
+                        },
+                    );
+                state.message =
+                    Some("Provider configuration changed. Review the consent again.".to_string());
+                return Task::none();
+            }
+            state.visual_annotation_agent_run_id =
+                state.visual_annotation_agent_run_id.saturating_add(1);
+            let run_id = state.visual_annotation_agent_run_id;
+            let Some(step) = state.selected_step().cloned() else {
+                state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+                state.message =
+                    Some("Select a step before suggesting visual annotations.".to_string());
+                return Task::none();
+            };
+            let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
+                state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+                state.message = Some(
+                    "Cannot suggest visual annotations because the keyframe is unavailable."
+                        .to_string(),
+                );
+                return Task::none();
+            };
+            let document_state_id = doc.document.state_id();
+            let image = doc.document.source().clone();
+            let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::Idle;
+                    state.message = Some(format!("Visual annotation suggestion failed: {error}"));
+                    return Task::none();
+                }
+            };
+            let cancellation = rollshot_agent::runtime::RunCancellation::new();
+            let task_cancellation = cancellation.clone();
+            state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Running {
+                run_id,
+                cancellation,
+            };
+            state.message = Some("Suggesting visual annotations...".to_string());
+            tracing::info!(
+                target: "rollshot::action::visual_annotation_agent",
+                run_id,
+                step_index = step.index,
+                keyframe = step.keyframe,
+                "visual annotation suggestion run started"
+            );
+            let input = super::visual_annotation_agent::VisualAnnotationTaskInput {
+                run_id,
+                step,
+                document_state_id,
+                image,
+            };
+            Task::perform(
+                super::visual_annotation_agent::suggest_visual_annotation_task(
+                    input,
+                    format!("{}", cfg.provider),
+                    cfg.model.clone(),
+                    adapter,
+                    task_cancellation,
+                ),
+                move |result| Message::VisualAnnotationProposalLoaded { run_id, result },
+            )
+        }
+        Message::VisualAnnotationProposalLoaded { run_id, result } => {
+            let expected_id = match &state.visual_annotation_suggestion {
+                super::VisualAnnotationSuggestionState::Running { run_id, .. } => Some(*run_id),
+                _ => None,
+            };
+            if expected_id != Some(run_id) {
+                tracing::debug!(
+                    target: "rollshot::action::visual_annotation_agent",
+                    late_run_id = run_id,
+                    expected_run_id = ?expected_id,
+                    "ignoring late visual annotation suggestion result"
+                );
+                return Task::none();
+            }
+            match result {
+                Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(
+                    proposal,
+                )) => {
+                    tracing::info!(
+                        target: "rollshot::action::visual_annotation_agent",
+                        run_id,
+                        "visual annotation suggestion ready for review"
+                    );
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::PendingReview(proposal);
+                    state.message =
+                        Some("Visual annotation suggestions ready for review.".to_string());
+                }
+                Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::NoSuggestion {
+                    reason,
+                }) => {
+                    let message = match &reason {
+                        Some(text) => format!("Visual annotation suggestion: {text}"),
+                        None => "Visual annotation suggestion: no suggestion returned.".to_string(),
+                    };
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::NoSuggestion { reason };
+                    state.message = Some(message);
+                }
+                Err(message) => {
+                    tracing::error!(
+                        target: "rollshot::action::visual_annotation_agent",
+                        run_id,
+                        error = %message,
+                        "visual annotation suggestion failed"
+                    );
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::Failed { message };
+                    state.message = Some(
+                        "Visual annotation suggestion failed. See the annotation modal for details."
+                            .to_string(),
+                    );
+                }
+            }
+            Task::none()
+        }
+        Message::CancelVisualAnnotationSuggestion => {
+            match &state.visual_annotation_suggestion {
+                super::VisualAnnotationSuggestionState::Running {
+                    run_id,
+                    cancellation,
+                } => {
+                    tracing::info!(
+                        target: "rollshot::action::visual_annotation_agent",
+                        run_id,
+                        "visual annotation suggestion cancelled by user"
+                    );
+                    cancellation.cancel();
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::Idle;
+                    state.message = Some("Visual annotation suggestion cancelled.".to_string());
+                }
+                super::VisualAnnotationSuggestionState::ConsentPending(_) => {
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::Idle;
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::AcceptAllVisualAnnotations => {
+            let step = state.selected_step().cloned();
+            let doc = step
+                .as_ref()
+                .and_then(|s| state.presentation.document_for_step(s, &state.store));
+            let (step, doc) = match (step, doc) {
+                (Some(step), Some(doc)) => (step, doc),
+                _ => {
+                    state.visual_annotation_suggestion =
+                        super::VisualAnnotationSuggestionState::Idle;
+                    return Task::none();
+                }
+            };
+            let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
+                state.visual_annotation_suggestion
+            else {
+                return Task::none();
+            };
+            let state_id = doc.document.state_id();
+            let image = doc.document.source();
+            let w = image.width();
+            let h = image.height();
+            let mut applied = 0usize;
+            let mut stale = 0usize;
+            let ids: Vec<_> = proposal.suggestions.iter().map(|s| s.id).collect();
+            let mut ops_to_apply = Vec::new();
+            for id in &ids {
+                match proposal.validate_item(*id, Some(&step), state_id, w, h) {
+                    rollshot_action::VisualAnnotationApplyOutcome::Ready => {
+                        ops_to_apply.push(*id);
+                    }
+                    rollshot_action::VisualAnnotationApplyOutcome::Stale => {
+                        stale += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if !ops_to_apply.is_empty() {
+                let edit_ops = proposal.pending_edit_ops();
+                if let Ok(ops) = edit_ops {
+                    for op in &ops {
+                        match op {
+                            rollshot_image_document::EditOp::AddNumberCallout { tip, bubble } => {
+                                doc.document.add_number_callout(*tip, *bubble);
+                            }
+                            rollshot_image_document::EditOp::AddTextNote { position, text } => {
+                                let _ = doc.document.add_text_note(*position, text.clone());
+                            }
+                            rollshot_image_document::EditOp::AddRedaction { bounds } => {
+                                let _ = doc.document.add_redaction(*bounds);
+                            }
+                            _ => {}
+                        }
+                    }
+                    applied = ops.len();
+                }
+            }
+            state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+            state.message = Some(match stale {
+                0 if applied > 0 => format!("Accepted {applied} visual annotation suggestions."),
+                0 => "No visual annotations to accept.".to_string(),
+                _ if applied > 0 => format!(
+                    "Accepted {applied} visual annotation suggestions; {stale} stale suggestions skipped."
+                ),
+                _ => format!("All {stale} visual annotation suggestions were stale."),
+            });
+            Task::none()
+        }
+        Message::RejectVisualAnnotationSuggestion => {
+            if let super::VisualAnnotationSuggestionState::PendingReview(mut proposal) =
+                std::mem::replace(
+                    &mut state.visual_annotation_suggestion,
+                    super::VisualAnnotationSuggestionState::Idle,
+                )
+            {
+                proposal.reject_all();
+            }
+            state.message = Some("Visual annotation suggestions rejected.".to_string());
+            Task::none()
+        }
+        Message::DismissVisualAnnotationReview => {
+            state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+            Task::none()
+        }
     }
 }
 
@@ -1226,6 +1582,18 @@ fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePo
     point.clamp_to(width, height)
 }
 
+/// Dismiss a pending visual annotation review when a state-changing manual
+/// action occurs. Transitions to Idle and displays a "stale" banner.
+fn dismiss_stale_visual_annotation_review(state: &mut TimelineWorkspace) {
+    if matches!(
+        state.visual_annotation_suggestion,
+        super::VisualAnnotationSuggestionState::PendingReview(_)
+    ) {
+        state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+        state.message = Some("Annotation suggestions are stale; regenerate them.".to_string());
+    }
+}
+
 fn with_annotation_document(
     state: &mut TimelineWorkspace,
     f: impl FnOnce(&mut super::annotation::StepAnnotationDocument),
@@ -1306,6 +1674,8 @@ fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
 
     if let Some(message) = error_message {
         state.message = Some(message);
+    } else {
+        dismiss_stale_visual_annotation_review(state);
     }
 }
 
@@ -1313,10 +1683,13 @@ fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
 mod tests {
     use super::*;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
+    use crate::timeline_workspace::visual_annotation_agent::VisualSuggestionConsent;
     use crate::timeline_workspace::{
         annotation::AnnotationTool, FfmpegSetupDialog, StoryboardCopyState, TimelineWorkspace,
     };
-    use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind};
+    use rollshot_action::{
+        CaptureRegion, InputCapability, InputSourceKind, VisualAnnotationProposal,
+    };
     use std::ffi::{OsStr, OsString};
 
     /// RAII guard that restores an environment variable to its original value on drop.
@@ -3321,5 +3694,537 @@ mod tests {
                 message: "new failure".to_string(),
             }
         );
+    }
+
+    // ---------- Visual annotation consent & review lifecycle ----------
+
+    #[test]
+    fn new_workspace_has_idle_visual_annotation_state() {
+        let state = ws(synthetic_recording(1));
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+        assert_eq!(state.visual_annotation_agent_run_id, 0);
+    }
+
+    #[test]
+    fn suggest_visual_annotations_without_selection_sets_message() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(synthetic_recording(0));
+
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("Select a step")));
+    }
+
+    #[test]
+    fn suggest_visual_annotations_without_key_sets_message() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("Configure an agent provider")));
+    }
+
+    #[test]
+    fn suggest_visual_annotations_transitions_to_consent_pending() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(consent) => {
+                assert_eq!(consent.keyframe, state.selected_step().unwrap().keyframe);
+                assert!(!consent.provider.is_empty());
+                assert!(!consent.model.is_empty());
+            }
+            other => panic!("expected ConsentPending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn visual_consent_cancel_keeps_workspace_idle() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        let _ = update(&mut state, Message::VisualSuggestionConsentCancelled);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn visual_consent_confirm_starts_running_task() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+
+        assert!(
+            task.units() > 0,
+            "consent confirm should return a Task::perform"
+        );
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn visual_proposal_loaded_matching_run_stores_pending_review() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        let run_id = match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running {
+                run_id, ..
+            } => *run_id,
+            other => panic!("expected Running, got {other:?}"),
+        };
+
+        let proposal = visual_proposal_for_first_step(&mut state, run_id);
+        let _ = update(
+            &mut state,
+            Message::VisualAnnotationProposalLoaded {
+                run_id,
+                result: Ok(
+                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(proposal),
+                ),
+            },
+        );
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+        ));
+    }
+
+    #[test]
+    fn visual_proposal_loaded_late_run_is_rejected() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running {
+                run_id: 2,
+                cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            };
+
+        let old_proposal = visual_proposal_for_first_step(&mut state, 1);
+        let _ = update(
+            &mut state,
+            Message::VisualAnnotationProposalLoaded {
+                run_id: 1,
+                result: Ok(
+                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(old_proposal),
+                ),
+            },
+        );
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running { run_id: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn visual_proposal_loaded_no_suggestion_stores_no_suggestion() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        let run_id = match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running {
+                run_id, ..
+            } => *run_id,
+            other => panic!("expected Running, got {other:?}"),
+        };
+
+        let _ = update(
+            &mut state,
+            Message::VisualAnnotationProposalLoaded {
+                run_id,
+                result: Ok(crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::NoSuggestion {
+                    reason: Some("no suggestion".to_string()),
+                }),
+            },
+        );
+
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::NoSuggestion { reason } => {
+                assert_eq!(reason.as_deref(), Some("no suggestion"));
+            }
+            other => panic!("expected NoSuggestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn visual_proposal_loaded_error_stores_failed() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        let run_id = match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running {
+                run_id, ..
+            } => *run_id,
+            other => panic!("expected Running, got {other:?}"),
+        };
+
+        let _ = update(
+            &mut state,
+            Message::VisualAnnotationProposalLoaded {
+                run_id,
+                result: Err("provider failed".to_string()),
+            },
+        );
+
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Failed { message } => {
+                assert_eq!(message, "provider failed");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_visual_annotation_clears_pending_review() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::RejectVisualAnnotationSuggestion);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn accept_all_visual_annotations_applies_pending_items() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::AcceptAllVisualAnnotations);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn dismiss_visual_annotation_review_clears_state() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::DismissVisualAnnotationReview);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn delete_step_dismisses_visual_annotation_review() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::DeleteStep);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+        assert_eq!(
+            state.message.as_deref(),
+            Some("Annotation suggestions are stale; regenerate them.")
+        );
+    }
+
+    #[test]
+    fn replace_keyframe_dismisses_visual_annotation_review() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+        let step = state.selected_step().unwrap();
+        let replacement = *step
+            .nearby
+            .iter()
+            .find(|&&f| f != step.keyframe)
+            .expect("replacement frame id");
+
+        let _ = update(&mut state, Message::ReplaceKeyframe(replacement));
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+        assert_eq!(
+            state.message.as_deref(),
+            Some("Annotation suggestions are stale; regenerate them.")
+        );
+    }
+
+    #[test]
+    fn annotation_undo_dismisses_visual_annotation_review() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::AnnotationUndo);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn annotation_redo_dismisses_visual_annotation_review() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+        let _ = update(&mut state, Message::AnnotationUndo);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::AnnotationRedo);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn annotation_done_dismisses_visual_annotation_review() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(&mut state, Message::AnnotationDone);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn visual_annotation_cancel_on_running_invokes_cancellation() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        let cancellation = match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running {
+                cancellation,
+                ..
+            } => cancellation.clone(),
+            other => panic!("expected Running, got {other:?}"),
+        };
+
+        let _ = update(&mut state, Message::CancelVisualAnnotationSuggestion);
+
+        assert!(cancellation.is_cancelled());
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn suggest_visual_annotations_while_running_is_noop() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        let prev_run_id = match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running {
+                run_id, ..
+            } => *run_id,
+            other => panic!("expected Running, got {other:?}"),
+        };
+
+        let task = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        assert_eq!(task.units(), 0);
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running { run_id, .. } if run_id == prev_run_id
+        ));
+    }
+
+    #[test]
+    fn visual_consent_confirm_with_changed_provider_stays_consent_pending() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        // Simulate key becoming unavailable between request and confirm.
+        drop(_anthropic);
+        let _anthropic2 = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+
+        let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+
+        assert_eq!(task.units(), 0);
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(_)
+        ));
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("Configure an agent provider")));
+    }
+
+    #[test]
+    fn document_edit_discards_visual_annotation_pending_review() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        let _ = update(
+            &mut state,
+            Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(8.0, 8.0)),
+        );
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn visual_annotation_cancel_on_consent_pending_goes_idle() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(
+                VisualSuggestionConsent {
+                    source: 1,
+                    keyframe: 1,
+                    provider: "Anthropic".to_string(),
+                    model: "test".to_string(),
+                },
+            );
+
+        let _ = update(&mut state, Message::CancelVisualAnnotationSuggestion);
+
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    // Helper: build a VisualAnnotationProposal for the first step
+    fn visual_proposal_for_first_step(
+        state: &mut TimelineWorkspace,
+        run_id: u64,
+    ) -> VisualAnnotationProposal {
+        let step = &state.guide.steps()[0];
+        let doc = state
+            .presentation
+            .document_for_step(step, &state.store)
+            .expect("presentation document");
+        let image = doc.document.source();
+        VisualAnnotationProposal::from_agent_drafts(
+            rollshot_action::VisualAnnotationProposalId(run_id),
+            run_id,
+            step,
+            doc.document.state_id(),
+            image.width(),
+            image.height(),
+            vec![rollshot_action::VisualAnnotationSuggestionDraft {
+                id: rollshot_action::VisualAnnotationSuggestionId(1),
+                payload: rollshot_action::VisualAnnotationPayload::TextNote {
+                    position: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                    text: "test note".to_string(),
+                },
+                confidence: 0.8,
+                rationale: None,
+            }],
+        )
+        .expect("valid proposal")
     }
 }

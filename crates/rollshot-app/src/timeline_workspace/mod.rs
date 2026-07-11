@@ -98,7 +98,7 @@ pub(crate) struct StripFrame {
 /// ```text
 ///   Idle ──► Running ──► Pending       (proposal ready for review)
 ///               │     ──► NoSuggestion  (model declined with a reason)
-///               │     ──► Failed        (provider/protocol/budget error)
+///               │     └─► Failed        (provider/protocol/budget error)
 ///               └────────► Idle          (user cancelled)
 ///   Pending / NoSuggestion / Failed ──► Idle  (accepted, rejected, or replaced keyframe)
 /// ```
@@ -116,6 +116,42 @@ pub(crate) enum CalloutSuggestionState {
         cancellation: rollshot_agent::runtime::RunCancellation,
     },
     Pending(rollshot_action::CalloutProposal),
+    NoSuggestion {
+        reason: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+/// State machine for the visual annotation suggestion flow with consent gating.
+///
+/// ```text
+///   Idle ──► ConsentPending ──► Running ──► PendingReview
+///               │                  │             │
+///               │ cancel           │ cancel      │ accept/reject/dismiss
+///               v                  v             v
+///              Idle              Idle           Idle
+///                                  │
+///                                  └──► NoSuggestion (model declined)
+///                                  └──► Failed       (provider/protocol error)
+/// ```
+///
+/// Manual state-changing actions (DeleteStep, ReplaceKeyframe, manual
+/// annotation, undo, redo) discard a pending review and transition to
+/// Idle with a "stale" banner. `run_id` is the monotonic local id from
+/// `visual_annotation_agent_run_id`; late results from older cancelled or
+/// timed-out runs are dropped.
+#[derive(Debug)]
+#[allow(dead_code)] // Read by Task 8's view; only the update path uses it here.
+pub(crate) enum VisualAnnotationSuggestionState {
+    Idle,
+    ConsentPending(visual_annotation_agent::VisualSuggestionConsent),
+    Running {
+        run_id: u64,
+        cancellation: rollshot_agent::runtime::RunCancellation,
+    },
+    PendingReview(rollshot_action::VisualAnnotationProposal),
     NoSuggestion {
         reason: Option<String>,
     },
@@ -186,6 +222,12 @@ pub struct TimelineWorkspace {
     /// Monotonic local run id for callout suggestion provenance.
     #[allow(dead_code)] // Read by Task 8's view; only the update path uses it in Task 7.
     pub(crate) callout_agent_run_id: u64,
+    /// Current visual annotation suggestion state. See [`VisualAnnotationSuggestionState`].
+    #[allow(dead_code)] // Read by Task 8's view; only the update path uses it here.
+    pub(crate) visual_annotation_suggestion: VisualAnnotationSuggestionState,
+    /// Monotonic local run id for visual annotation suggestion provenance.
+    #[allow(dead_code)]
+    pub(crate) visual_annotation_agent_run_id: u64,
     /// Monotonic operation id for storyboard copy provenance and late-result
     /// race protection. Incremented on each [`CopyStoryboardRequested`].
     pub(crate) storyboard_copy_operation_id: u64,
@@ -224,6 +266,8 @@ impl TimelineWorkspace {
             caption_agent_run_id: 0,
             callout_suggestion: CalloutSuggestionState::Idle,
             callout_agent_run_id: 0,
+            visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
+            visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
         };
         ws.rebuild_selection_handles();
