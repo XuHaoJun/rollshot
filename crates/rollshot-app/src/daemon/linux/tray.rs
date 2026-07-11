@@ -15,6 +15,11 @@ impl DaemonTrayItem {
         let _ = self.events.send(DaemonEvent::CaptureRegion);
     }
 
+    #[cfg(feature = "ocr")]
+    fn activate_text(&mut self) {
+        let _ = self.events.send(DaemonEvent::CaptureText);
+    }
+
     fn activate_quit(&mut self) {
         let _ = self.events.send(DaemonEvent::Quit);
     }
@@ -39,14 +44,26 @@ impl ksni::Tray for DaemonTrayItem {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::StandardItem;
-        vec![
-            StandardItem {
-                label: "Capture Region".into(),
-                icon_name: "camera-photo".into(),
-                activate: Box::new(Self::activate_capture),
-                ..Default::default()
-            }
-            .into(),
+        let mut items = vec![StandardItem {
+            label: "Capture Region".into(),
+            icon_name: "camera-photo".into(),
+            activate: Box::new(Self::activate_capture),
+            ..Default::default()
+        }
+        .into()];
+        #[cfg(feature = "ocr")]
+        {
+            items.push(
+                StandardItem {
+                    label: "Capture Text".into(),
+                    icon_name: "text-x-generic".into(),
+                    activate: Box::new(Self::activate_text),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(
             StandardItem {
                 label: "Quit Rollshot".into(),
                 icon_name: "application-exit".into(),
@@ -54,7 +71,8 @@ impl ksni::Tray for DaemonTrayItem {
                 ..Default::default()
             }
             .into(),
-        ]
+        );
+        items
     }
 }
 
@@ -110,6 +128,7 @@ mod tests {
         assert!(matches!(rx.recv().unwrap(), DaemonEvent::Quit));
     }
 
+    #[cfg(not(feature = "ocr"))]
     #[test]
     fn menu_contains_only_capture_and_quit() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -134,5 +153,30 @@ mod tests {
         assert_eq!(pixmaps[0].width, 1);
         assert_eq!(pixmaps[0].height, 1);
         assert_eq!(pixmaps[0].data, [255, 0, 0, 0]);
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn ocr_menu_contains_region_text_and_quit() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let item = DaemonTrayItem::new(tx, test_icon());
+        let menu = ksni::Tray::menu(&item);
+        let labels: Vec<&str> = menu
+            .iter()
+            .map(|item| match item {
+                ksni::MenuItem::Standard(item) => item.label.as_str(),
+                _ => panic!("daemon tray only uses standard items"),
+            })
+            .collect();
+        assert_eq!(labels, ["Capture Region", "Capture Text", "Quit Rollshot"]);
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn activate_text_sends_capture_text_event() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut item = DaemonTrayItem::new(tx, test_icon());
+        item.activate_text();
+        assert!(matches!(rx.recv().unwrap(), DaemonEvent::CaptureText));
     }
 }

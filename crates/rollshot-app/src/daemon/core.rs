@@ -12,7 +12,7 @@ pub enum CaptureKind {
     Text,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DaemonEvent {
     CaptureRegion,
     CaptureText,

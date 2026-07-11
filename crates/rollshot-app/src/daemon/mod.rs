@@ -51,11 +51,27 @@ fn run_primary(_instance: instance::InstanceGuard) -> Result<(), String> {
     let launcher = process::CurrentExeLauncher::new(executable);
     let mut core = core::DaemonCore::new(launcher, events);
 
+    let text_shortcut_display = {
+        #[cfg(feature = "ocr")]
+        {
+            loaded
+                .config
+                .capture_text_hotkey
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        }
+        #[cfg(not(feature = "ocr"))]
+        {
+            String::new()
+        }
+    };
     tracing::info!(
         target: "rollshot::daemon::core",
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,
         preferred_shortcut = %loaded.config.capture_region_hotkey,
+        text_shortcut = %text_shortcut_display,
         "Rollshot tray daemon ready; portal shortcut setup runs asynchronously"
     );
     while let Ok(event) = receiver.recv() {
