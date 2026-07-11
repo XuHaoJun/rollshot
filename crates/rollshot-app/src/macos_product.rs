@@ -485,10 +485,11 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             result,
             graphical_feedback,
         } => {
+            use crate::quick_ocr::{CliOutput, NoopFeedback, QuickOcrFeedback, StdoutOutput};
             match result {
                 Ok(text) => {
-                    let mut output = crate::quick_ocr::StdoutOutput;
-                    let mut feedback = crate::quick_ocr::NoopFeedback;
+                    let mut output = StdoutOutput;
+                    let mut feedback = NoopFeedback;
                     if let Err(e) = output.write_text(&format!("{text}\n")) {
                         tracing::error!(target: TARGET_APP, %e, "OCR stdout write failed");
                     }
@@ -841,6 +842,7 @@ mod tests {
         .expect("test component");
         MacosProduct {
             phase: Phase::Capture(component),
+            purpose: CapturePurpose::Present,
             document: None,
             thumbnail_window: None,
             workspace_window: None,
@@ -858,6 +860,7 @@ mod tests {
         );
         MacosProduct {
             phase: Phase::Thumbnail(ThumbnailState::new(handle, path.clone(), Instant::now())),
+            purpose: CapturePurpose::Present,
             document: Some(ResultDocument::saved(image, path)),
             thumbnail_window: None,
             workspace_window: None,
@@ -969,14 +972,21 @@ mod tests {
 
     #[test]
     fn fullscreen_success_bootstraps_existing_thumbnail_phase() {
-        let product =
-            MacosProduct::from_completed_image(image(), Ok(PathBuf::from("/tmp/fullscreen.png")));
+        let product = MacosProduct::from_completed_image(
+            image(),
+            Ok(PathBuf::from("/tmp/fullscreen.png")),
+            CapturePurpose::Present,
+        );
         assert!(matches!(product.phase, Phase::Thumbnail(_)));
     }
 
     #[test]
     fn fullscreen_auto_save_failure_bootstraps_existing_workspace_phase() {
-        let product = MacosProduct::from_completed_image(image(), Err("disk full".to_string()));
+        let product = MacosProduct::from_completed_image(
+            image(),
+            Err("disk full".to_string()),
+            CapturePurpose::Present,
+        );
         assert!(matches!(product.phase, Phase::Workspace(_)));
     }
 

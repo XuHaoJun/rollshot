@@ -4,7 +4,7 @@ use std::fmt;
 const TARGET_QUICK_OCR: &str = "rollshot::app::quick_ocr";
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum QuickOcrError {
     Ocr(ProductOcrError),
     Clipboard(String),

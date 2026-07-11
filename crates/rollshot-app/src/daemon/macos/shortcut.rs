@@ -34,7 +34,6 @@ fn key_to_code(key: &str) -> Result<Code, String> {
         .map_err(|_| format!("unsupported shortcut key: {key}"))
 }
 
-#[cfg(feature = "ocr")]
 pub(crate) fn hotkey_event_for_id(
     id: u32,
     registered: &[(u32, CaptureKind)],

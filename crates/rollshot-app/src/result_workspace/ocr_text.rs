@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use rollshot_image_document::{Annotation, ImagePoint, ImageRect};
 
 use crate::product_ocr::OrderedOcrItems;
+#[allow(unused_imports)]
 pub use crate::product_ocr::{OcrItemId, OcrTextItem, ProductOcrError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

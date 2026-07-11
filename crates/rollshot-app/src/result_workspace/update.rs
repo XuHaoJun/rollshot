@@ -120,6 +120,7 @@ pub enum Message {
     /// The async folder-picker returned (None = cancelled).
     IssuePackFolderChosen(Option<PathBuf>),
     /// Background Issue Pack export completed.
+    #[allow(private_interfaces)]
     IssuePackFinished(Result<crate::issue_pack::IssuePackExportResult, String>),
     /// Close the Issue Pack dialog without exporting.
     IssuePackCancel,
@@ -925,7 +926,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         #[cfg(feature = "ocr")]
         Message::OcrPrepared(Err(error)) => {
-            state.ocr_text.fail_prepare(error.clone());
+            state.ocr_text.fail_prepare(error);
             state.editor.tool = Tool::Select;
             state.message = Some(InlineMessage::Error(error.message().to_string()));
             Task::none()
