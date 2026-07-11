@@ -172,10 +172,74 @@ Rules you must follow:
   meaningful UI, return `no_suggestion` with a short reason. Do not
   guess."#;
 
+const VISUAL_ANNOTATION_SYSTEM_PROMPT: &str = r#"You are Rollshot Visual Annotation Agent.
+Your only job is to suggest visual annotations for the single most important UI
+element(s) in the screenshot the user is reviewing. Rollshot has already
+authorized the screenshot for this run as an image attachment; do not ask the
+user to upload, attach, or take another screenshot.
+
+You have exactly one terminal tool: `submit_visual_annotation_suggestions`. The
+tool accepts one of two payloads:
+
+  1. A batch of annotation suggestions:
+     {
+       "suggestions": [
+         {
+           "kind": "number_callout",
+           "id": <unique integer>,
+           "tip": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+           "bubble": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+           "confidence": <0.0..=1.0>,
+           "rationale": <string <= 500 chars, optional>
+         },
+         {
+           "kind": "text_note",
+           "id": <unique integer>,
+           "position": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+           "text": <non-empty string <= 500 chars>,
+           "confidence": <0.0..=1.0>,
+           "rationale": <string <= 500 chars, optional>
+         },
+         {
+           "kind": "opaque_redaction",
+           "id": <unique integer>,
+           "bounds": { "x": <0.0..=1.0>, "y": <0.0..=1.0>, "width": <0.0..=1.0>, "height": <0.0..=1.0> },
+           "confidence": <0.0..=1.0>,
+           "rationale": <string <= 500 chars, optional>
+         }
+       ]
+     }
+     Coordinates are normalized image-fraction values. The batch may contain
+     any combination of the three kinds. Each suggestion must have a unique id.
+
+  2. A no-suggestion report when no annotation is appropriate:
+     {
+       "result": "no_suggestion",
+       "reason": <string <= 500 chars, optional>
+     }
+
+Rules you must follow:
+- Choose at most a few high-confidence annotations. Rollshot owns bubble
+  placement and numbering for callouts.
+- Do not output any prose, reasoning, JSON, or commentary outside the
+  single `submit_visual_annotation_suggestions` tool call.
+- Coordinates and confidence must be finite numbers in 0..=1. Keep
+  `rationale` and `reason` at or under 500 characters. Do not include
+  URLs, raw bytes, or PII.
+- Do not reference, transcribe, or speculate about PII (names, emails,
+  account numbers, addresses).
+- Only call tools advertised in this run. There is exactly one:
+  `submit_visual_annotation_suggestions`. Do not invent tool handles,
+  function names, or capability identifiers.
+- If the screenshot is too small, too low-contrast, or shows no
+  meaningful UI, return `no_suggestion` with a short reason. Do not guess."#;
+
 pub(crate) enum AgentTaskProfile {
     SmartRedaction,
     #[allow(dead_code)]
     Callout,
+    #[allow(dead_code)]
+    VisualAnnotation,
 }
 
 impl AgentTaskProfile {
@@ -183,6 +247,7 @@ impl AgentTaskProfile {
         match self {
             Self::SmartRedaction => SMART_REDACTION_SYSTEM_PROMPT,
             Self::Callout => CALLOUT_SYSTEM_PROMPT,
+            Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT,
         }
     }
 
@@ -191,6 +256,7 @@ impl AgentTaskProfile {
         match self {
             Self::SmartRedaction => &["submit_for_review", "request_user_input"],
             Self::Callout => &["submit_callout_suggestion"],
+            Self::VisualAnnotation => &["submit_visual_annotation_suggestions"],
         }
     }
 }
@@ -1614,6 +1680,280 @@ impl AgentRunner {
             }
         }
     }
+
+    /// Bounded visual annotation runner. Returns a
+    /// `VisualAnnotationRunTerminal` that never carries provider payload,
+    /// prompt text, attachment bytes, or image coordinates. Reuses
+    /// `drive_streamed_turn` and the rig state machine for streamed-turn
+    /// assembly, budget charging, cancellation, and tool-result threading.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_visual_annotation_with_provider(
+        &self,
+        mut input: crate::domain::AuthorizedModelInput,
+        provider: &dyn ProviderAdapter,
+        budget: RunBudget,
+        cancellation: &RunCancellation,
+    ) -> crate::visual_annotation::VisualAnnotationRunTerminal {
+        use crate::tools::ToolRegistryLimits;
+        use crate::visual_annotation::{
+            decode_visual_annotation_terminal, submit_visual_annotation_suggestions_definition,
+            submit_visual_annotation_suggestions_tool_arc, VisualAnnotationRunTerminal,
+            SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS,
+        };
+
+        // ---- Pre-flight ----
+
+        if cancellation.is_cancelled() {
+            return VisualAnnotationRunTerminal::Cancelled;
+        }
+
+        let attachments = input.take_model_attachments();
+        let attachment_count = attachments.len() as u32;
+
+        let start = tokio::time::Instant::now();
+        let mut tracker = BudgetTracker::new(budget, start);
+
+        if let Err(err) = tracker.charge(UsageSnapshot {
+            attachments: attachment_count,
+            ..UsageSnapshot::default()
+        }) {
+            return map_budget_error_to_visual_annotation(err);
+        }
+
+        let tool_definitions = vec![submit_visual_annotation_suggestions_definition()];
+        let tool_names: BTreeSet<String> =
+            tool_definitions.iter().map(|t| t.name.clone()).collect();
+
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        if let Err(e) = registry.register(submit_visual_annotation_suggestions_tool_arc()) {
+            tracing::error!(
+                target: "rollshot::agent::visual_annotation",
+                error = %e,
+                "failed to register visual annotation stub tool"
+            );
+            return VisualAnnotationRunTerminal::ProtocolFailure;
+        }
+
+        let mut rig_run = rig_core::agent::run::AgentRun::new(rig_core::message::Message::user(
+            &input.user_message,
+        ))
+        .max_turns(self.config.max_turns);
+
+        let mut total_assistant_bytes: usize = 0;
+        let max_assistant_bytes = self.config.max_assistant_bytes;
+        let mut last_assistant_text = String::new();
+        let mut first_model_call = true;
+
+        // ---- Loop ----
+
+        loop {
+            if cancellation.is_cancelled() {
+                return VisualAnnotationRunTerminal::Cancelled;
+            }
+
+            if let Err(err) = tracker.check_wall_time(tokio::time::Instant::now()) {
+                return map_budget_error_to_visual_annotation(err);
+            }
+
+            let step = match rig_run.next_step() {
+                Ok(s) => s,
+                Err(e) => {
+                    if matches!(e, rig_core::completion::PromptError::MaxTurnsError { .. }) {
+                        tracing::debug!(
+                            target: "rollshot::agent::visual_annotation",
+                            max_turns = self.config.max_turns,
+                            "visual annotation run exceeded model-call budget"
+                        );
+                        return VisualAnnotationRunTerminal::BudgetExhausted {
+                            dimension: BudgetDimension::ModelCalls,
+                        };
+                    }
+                    tracing::debug!(
+                        target: "rollshot::agent::visual_annotation",
+                        error = %e,
+                        "visual annotation rig agent run returned a protocol error"
+                    );
+                    return VisualAnnotationRunTerminal::ProtocolFailure;
+                }
+            };
+
+            match step {
+                rig_core::agent::run::AgentRunStep::CallModel {
+                    prompt, history, ..
+                } => {
+                    let turn_attachments = if first_model_call {
+                        first_model_call = false;
+                        attachments.clone()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let mut history_msgs: Vec<crate::model::ModelMessage> = Vec::new();
+                    for m in &history {
+                        crate::model::push_model_messages(m, &mut history_msgs);
+                    }
+                    crate::model::push_model_messages(&prompt, &mut history_msgs);
+
+                    let request = crate::model::ModelRequest {
+                        model: input.manifest.model.clone(),
+                        prompt: String::new(),
+                        history: history_msgs,
+                        turn: rig_run.turn(),
+                        tool_definitions: tool_definitions.clone(),
+                        system_prompt: Some(
+                            AgentTaskProfile::VisualAnnotation
+                                .system_prompt()
+                                .to_string(),
+                        ),
+                        max_tokens: None,
+                        attachments: turn_attachments,
+                    };
+
+                    let turn_result = self
+                        .drive_streamed_turn(
+                            &mut rig_run,
+                            &tool_names,
+                            provider,
+                            &NullEventSink,
+                            &mut tracker,
+                            &mut total_assistant_bytes,
+                            max_assistant_bytes,
+                            cancellation,
+                            request,
+                            &mut last_assistant_text,
+                        )
+                        .await;
+
+                    match turn_result {
+                        Ok(()) => {}
+                        Err(DriverError::BudgetExhausted(dim)) => {
+                            return VisualAnnotationRunTerminal::BudgetExhausted { dimension: dim };
+                        }
+                        Err(DriverError::Cancelled) => {
+                            return VisualAnnotationRunTerminal::Cancelled;
+                        }
+                        Err(DriverError::ProviderFailure(msg)) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::visual_annotation",
+                                error = %msg,
+                                "visual annotation provider stream failed"
+                            );
+                            return VisualAnnotationRunTerminal::ProviderFailure;
+                        }
+                        Err(DriverError::AgentProtocolFailure(msg)) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::visual_annotation",
+                                error = %msg,
+                                "visual annotation model turn produced a protocol error"
+                            );
+                            return VisualAnnotationRunTerminal::ProtocolFailure;
+                        }
+                    }
+
+                    tracker.apply_turn();
+                }
+                rig_core::agent::run::AgentRunStep::CallTools { calls } => {
+                    if calls.len() != 1
+                        || calls[0].tool_call.function.name != SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS
+                    {
+                        tracing::debug!(
+                            target: "rollshot::agent::visual_annotation",
+                            call_count = calls.len(),
+                            tool_name = %calls.first().map(|c| c.tool_call.function.name.as_str()).unwrap_or(""),
+                            "visual annotation runner rejecting tool call batch"
+                        );
+                        return VisualAnnotationRunTerminal::ProtocolFailure;
+                    }
+
+                    let pending = &calls[0];
+                    let decoded = match decode_visual_annotation_terminal(
+                        &pending.tool_call.function.arguments,
+                    ) {
+                        Ok(t) => t,
+                        Err(err) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::visual_annotation",
+                                error = %err,
+                                "visual annotation terminal payload failed validation"
+                            );
+                            return VisualAnnotationRunTerminal::ProtocolFailure;
+                        }
+                    };
+
+                    if let Err(err) = tracker.charge(UsageSnapshot {
+                        tool_calls: 1,
+                        ..UsageSnapshot::default()
+                    }) {
+                        return map_budget_error_to_visual_annotation(err);
+                    }
+
+                    let tool_call = ToolCall {
+                        name: pending.tool_call.function.name.clone(),
+                        arguments_json: pending.tool_call.function.arguments.clone(),
+                    };
+                    let terminal_tools: BTreeSet<String> =
+                        [SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS.to_string()]
+                            .into_iter()
+                            .collect();
+                    let results = registry
+                        .execute_calls(&[tool_call], cancellation, &terminal_tools)
+                        .await;
+
+                    let mut rig_results: Vec<rig_core::message::UserContent> = Vec::new();
+                    for (i, result) in results.into_iter().enumerate() {
+                        let call_id = calls[i].tool_call.id.clone();
+                        match result {
+                            Ok(ToolOutcome::Success { result_json }) => {
+                                let result_str =
+                                    serde_json::to_string(&result_json).unwrap_or_default();
+                                rig_results.push(rig_core::message::UserContent::tool_result(
+                                    call_id,
+                                    rig_core::message::ToolResultContent::from_tool_output(
+                                        result_str,
+                                    ),
+                                ));
+                            }
+                            Ok(ToolOutcome::Recoverable { error }) => {
+                                tracing::debug!(
+                                    target: "rollshot::agent::visual_annotation",
+                                    error = %error,
+                                    "visual annotation stub tool rejected payload"
+                                );
+                                return VisualAnnotationRunTerminal::ProtocolFailure;
+                            }
+                            Err(err) => {
+                                tracing::debug!(
+                                    target: "rollshot::agent::visual_annotation",
+                                    error = %err,
+                                    "visual annotation stub tool returned an error"
+                                );
+                                return VisualAnnotationRunTerminal::ProtocolFailure;
+                            }
+                        }
+                    }
+
+                    if let Err(e) = rig_run.tool_results(rig_results) {
+                        tracing::debug!(
+                            target: "rollshot::agent::visual_annotation",
+                            error = %e,
+                            "rig agent run tool_results failed"
+                        );
+                        return VisualAnnotationRunTerminal::ProtocolFailure;
+                    }
+
+                    tracker.apply_turn();
+                    return decoded;
+                }
+                rig_core::agent::run::AgentRunStep::Done(_) => {
+                    tracing::debug!(
+                        target: "rollshot::agent::visual_annotation",
+                        "visual annotation model completed without a terminal tool call"
+                    );
+                    return VisualAnnotationRunTerminal::ProtocolFailure;
+                }
+            }
+        }
+    }
 }
 
 fn map_budget_error_to_callout(err: BudgetError) -> crate::callout::CalloutRunTerminal {
@@ -1622,6 +1962,21 @@ fn map_budget_error_to_callout(err: BudgetError) -> crate::callout::CalloutRunTe
             crate::callout::CalloutRunTerminal::BudgetExhausted { dimension: dim }
         }
         BudgetError::Overflow => crate::callout::CalloutRunTerminal::ProtocolFailure,
+    }
+}
+
+fn map_budget_error_to_visual_annotation(
+    err: BudgetError,
+) -> crate::visual_annotation::VisualAnnotationRunTerminal {
+    match err {
+        BudgetError::Exceeded(dim) => {
+            crate::visual_annotation::VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: dim,
+            }
+        }
+        BudgetError::Overflow => {
+            crate::visual_annotation::VisualAnnotationRunTerminal::ProtocolFailure
+        }
     }
 }
 
@@ -1666,6 +2021,18 @@ pub(crate) mod tests {
         assert_eq!(
             AgentTaskProfile::Callout.terminal_tools(),
             &["submit_callout_suggestion"],
+        );
+    }
+
+    #[test]
+    fn visual_annotation_profile_advertises_only_submit_visual_annotation_suggestions() {
+        assert_eq!(
+            AgentTaskProfile::VisualAnnotation.system_prompt(),
+            VISUAL_ANNOTATION_SYSTEM_PROMPT,
+        );
+        assert_eq!(
+            AgentTaskProfile::VisualAnnotation.terminal_tools(),
+            &["submit_visual_annotation_suggestions"],
         );
     }
 
