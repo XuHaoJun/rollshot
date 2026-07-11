@@ -271,9 +271,9 @@ fn prepare_ocr_task(state: &mut super::ResultWorkspace) -> Task<Message> {
     let image = state.document.image.source().clone();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || super::ocr_text::prepare_product_ocr(&image))
+            tokio::task::spawn_blocking(move || crate::product_ocr::prepare(&image))
                 .await
-                .unwrap_or(Err(super::ocr_text::ProductOcrError::Detect))
+                .unwrap_or(Err(crate::product_ocr::ProductOcrError::Detect))
         },
         Message::OcrPrepared,
     )

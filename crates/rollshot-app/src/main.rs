@@ -25,6 +25,7 @@ mod issue_pack;
 mod macos_native_drag;
 mod macos_thumbnail;
 mod post_capture;
+pub(crate) mod product_ocr;
 mod result_workspace;
 mod storage;
 
