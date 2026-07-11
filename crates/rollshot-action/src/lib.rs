@@ -22,6 +22,7 @@ mod models;
 mod recorder;
 mod storyboard;
 mod video;
+pub mod visual_annotation_proposal;
 
 pub use callout_proposal::{
     CalloutApplyOutcome, CalloutProposal, CalloutProposalError, CalloutProposalId,
@@ -52,3 +53,9 @@ pub use storyboard::{
     StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
 pub use video::{export_video, VideoOptions};
+pub use visual_annotation_proposal::{
+    VisualAnnotationApplyOutcome, VisualAnnotationBase, VisualAnnotationPayload,
+    VisualAnnotationProposal, VisualAnnotationProposalError, VisualAnnotationProposalId,
+    VisualAnnotationProvenance, VisualAnnotationSuggestion, VisualAnnotationSuggestionDraft,
+    VisualAnnotationSuggestionId, VisualAnnotationSuggestionStatus, MAX_VISUAL_SUGGESTIONS,
+};
