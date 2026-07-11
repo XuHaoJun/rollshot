@@ -1065,6 +1065,9 @@ mod tests {
     #[test]
     fn complete_capture_ocr_does_not_create_thumbnail_or_workspace() {
         let mut product = product_in_capture_phase();
+        product.purpose = CapturePurpose::Ocr {
+            graphical_feedback: false,
+        };
         let image = image();
         let capture_result = rollshot_iced_overlay::CaptureResult { image, stats: None };
         let task = complete_capture(&mut product, capture_result);

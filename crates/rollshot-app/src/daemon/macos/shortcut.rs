@@ -78,6 +78,7 @@ impl ShortcutGuard {
             .register(region_hotkey)
             .map_err(|error| format!("failed to register capture hotkey: {error}"))?;
 
+        #[allow(unused_mut)]
         let mut registered: Vec<(u32, CaptureKind)> =
             vec![(region_hotkey.id(), CaptureKind::Region)];
 
