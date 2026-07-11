@@ -1,9 +1,18 @@
 use futures_util::StreamExt;
+use rollshot_agent::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType};
+use rollshot_agent::driver::{AgentConfig, AgentRunner};
 use rollshot_agent::model::{
-    ModelError, ModelRequest, ModelStreamEvent, StopReason, ToolDefinition,
+    ModelCompletion, ModelError, ModelRequest, ModelStreamEvent, ModelUsage, StopReason,
+    ToolDefinition,
+};
+use rollshot_agent::runtime::RunCancellation;
+use rollshot_agent::visual_annotation::{
+    visual_annotation_run_budget, VisualAnnotationRunTerminal,
 };
 use rollshot_agent::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};
 use serde::Deserialize;
+use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1026,4 +1035,335 @@ async fn openai_stream_consumes_at_least_two_chunks() {
         event_count >= 2,
         "should observe at least 2 events from the stream"
     );
+}
+
+// ========== Visual annotation runner contract tests ==========
+
+mod visual_annotation {
+    use super::*;
+
+    struct ScriptedProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+        scripts: Mutex<VecDeque<Vec<ModelStreamEvent>>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(scripts: Vec<Vec<ModelStreamEvent>>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(scripts)),
+            }
+        }
+    }
+
+    impl ProviderAdapter for ScriptedProvider {
+        fn stream(
+            &self,
+            request: ModelRequest,
+            _bounds: StreamBounds,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >,
+                            ModelError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.requests.lock().unwrap().push(request);
+            let events = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(async move {
+                let s = futures_util::stream::iter(events.into_iter().map(Ok));
+                Ok(Box::pin(s)
+                    as Pin<
+                        Box<
+                            dyn futures_util::Stream<Item = Result<ModelStreamEvent, ModelError>>
+                                + Send,
+                        >,
+                    >)
+            })
+        }
+    }
+
+    fn authorized_input_with_one_png() -> AuthorizedModelInput {
+        AuthorizedModelInput::new(
+            "anthropic".into(),
+            "vision-model".into(),
+            "suggest visual annotations".into(),
+            vec![AttachmentDescriptor {
+                media_type: MediaType::Png,
+                width: 1,
+                height: 1,
+                byte_count: 4,
+            }],
+            vec![vec![0x89, 0x50, 0x4E, 0x47]],
+        )
+        .expect("valid input")
+    }
+
+    fn completion_event(stop: StopReason) -> ModelStreamEvent {
+        ModelStreamEvent::Completed(ModelCompletion {
+            usage: ModelUsage {
+                input_tokens: 5,
+                output_tokens: 3,
+                total_tokens: 8,
+            },
+            stop_reason: stop,
+        })
+    }
+
+    fn tool_call_turn(id: &str, name: &str, args: &str) -> Vec<ModelStreamEvent> {
+        vec![
+            ModelStreamEvent::ToolCallStart {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            ModelStreamEvent::ToolCallArgumentDelta {
+                id: id.to_string(),
+                delta: args.to_string(),
+            },
+            completion_event(StopReason::ToolUse),
+        ]
+    }
+
+    fn va_runner() -> AgentRunner {
+        AgentRunner::new(AgentConfig {
+            max_turns: 2,
+            ..AgentConfig::default()
+        })
+    }
+
+    // ---- One attachment ----
+
+    #[tokio::test]
+    async fn runner_sends_one_attachment() {
+        let args = serde_json::json!({
+            "suggestions": [
+                {"id":1,"kind":"number_callout","tip":{"x":0.5,"y":0.25},
+                 "bubble":{"x":0.6,"y":0.25},"confidence":0.9}
+            ]
+        })
+        .to_string();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_visual_annotation_suggestions",
+            &args,
+        )]);
+        let runner = va_runner();
+        let input = authorized_input_with_one_png();
+        let cancel = RunCancellation::new();
+
+        let _ = runner
+            .run_visual_annotation_with_provider(
+                input,
+                &provider,
+                visual_annotation_run_budget(),
+                &cancel,
+            )
+            .await;
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].attachments.len(),
+            1,
+            "runner must send exactly one attachment"
+        );
+    }
+
+    // ---- Two turns (max_turns from budget) ----
+
+    #[tokio::test]
+    async fn runner_makes_at_most_two_model_turns() {
+        let budget = visual_annotation_run_budget();
+        assert_eq!(budget.model_calls, 2, "budget model_calls must be 2");
+
+        let args = serde_json::json!({
+            "suggestions": [
+                {"id":1,"kind":"text_note","position":{"x":0.3,"y":0.4},
+                 "text":"Click Save","confidence":0.9}
+            ]
+        })
+        .to_string();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_visual_annotation_suggestions",
+            &args,
+        )]);
+        let runner = va_runner();
+        let input = authorized_input_with_one_png();
+        let cancel = RunCancellation::new();
+
+        let _ = runner
+            .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+            .await;
+
+        let requests = provider.requests.lock().unwrap();
+        assert!(
+            requests.len() <= 2,
+            "runner must make at most 2 model turns, got {}",
+            requests.len()
+        );
+    }
+
+    // ---- One tool call ----
+
+    #[tokio::test]
+    async fn runner_expects_one_tool_call() {
+        let budget = visual_annotation_run_budget();
+        assert_eq!(budget.tool_calls, 1, "budget tool_calls must be 1");
+
+        let args = serde_json::json!({
+            "suggestions": [
+                {"id":1,"kind":"opaque_redaction",
+                 "bounds":{"x":0.5,"y":0.1,"width":0.2,"height":0.1},
+                 "confidence":0.7}
+            ]
+        })
+        .to_string();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_visual_annotation_suggestions",
+            &args,
+        )]);
+        let runner = va_runner();
+        let input = authorized_input_with_one_png();
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+            .await;
+
+        match result {
+            VisualAnnotationRunTerminal::Suggested(drafts) => {
+                assert_eq!(
+                    drafts.len(),
+                    1,
+                    "expected one suggestion from one tool call"
+                );
+            }
+            other => panic!("expected Suggested, got {other:?}"),
+        }
+    }
+
+    // ---- 30-second deadline ----
+
+    #[test]
+    fn budget_has_30s_wall_clock_deadline() {
+        let budget = visual_annotation_run_budget();
+        assert_eq!(
+            budget.wall_time,
+            std::time::Duration::from_secs(30),
+            "wall_time must be 30 seconds"
+        );
+    }
+
+    // ---- 4 KiB argument/result limits ----
+
+    #[test]
+    fn budget_has_4kib_argument_and_result_limits() {
+        let budget = visual_annotation_run_budget();
+        assert_eq!(budget.argument_bytes, 4_096, "argument_bytes must be 4 KiB");
+        assert_eq!(budget.result_bytes, 4_096, "result_bytes must be 4 KiB");
+    }
+
+    // ---- Cancellation ----
+
+    #[tokio::test]
+    async fn cancellation_before_completion_returns_cancelled() {
+        let args = serde_json::json!({
+            "suggestions": [
+                {"id":1,"kind":"number_callout","tip":{"x":0.5,"y":0.5},
+                 "bubble":{"x":0.6,"y":0.5},"confidence":0.5}
+            ]
+        })
+        .to_string();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_visual_annotation_suggestions",
+            &args,
+        )]);
+        let runner = va_runner();
+        let input = authorized_input_with_one_png();
+        let cancel = RunCancellation::new();
+        cancel.cancel();
+
+        let result = runner
+            .run_visual_annotation_with_provider(
+                input,
+                &provider,
+                visual_annotation_run_budget(),
+                &cancel,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            VisualAnnotationRunTerminal::Cancelled,
+            "cancellation before completion must return Cancelled"
+        );
+    }
+
+    // ---- Debug redaction ----
+
+    #[tokio::test]
+    async fn runner_debug_output_does_not_contain_prompt_or_attachment_bytes() {
+        let secret_prompt = "secret-prompt-text-42424";
+        let args = serde_json::json!({
+            "suggestions": [
+                {"id":1,"kind":"text_note","position":{"x":0.5,"y":0.5},
+                 "text":"note","confidence":0.5}
+            ]
+        })
+        .to_string();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_visual_annotation_suggestions",
+            &args,
+        )]);
+        let runner = va_runner();
+        let input = AuthorizedModelInput::new(
+            "anthropic".into(),
+            "vision-model".into(),
+            secret_prompt.into(),
+            vec![AttachmentDescriptor {
+                media_type: MediaType::Png,
+                width: 1,
+                height: 1,
+                byte_count: 4,
+            }],
+            vec![vec![0x89, 0x50, 0x4E, 0x47]],
+        )
+        .expect("valid input");
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run_visual_annotation_with_provider(
+                input,
+                &provider,
+                visual_annotation_run_budget(),
+                &cancel,
+            )
+            .await;
+
+        let debug_str = format!("{:?}", result);
+        assert!(
+            !debug_str.contains(secret_prompt),
+            "Debug output must not contain prompt text: {}",
+            debug_str
+        );
+        assert!(
+            !debug_str.contains("89504e47"),
+            "Debug output must not contain attachment hex bytes: {}",
+            debug_str
+        );
+    }
 }
