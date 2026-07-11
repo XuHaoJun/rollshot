@@ -132,10 +132,10 @@ pub(crate) struct NumberAnnotationCanvas<'a> {
     pub document: &'a ImageDocument,
     pub draft: Option<AnnotationDraft>,
     pub scale: f32,
-    /// Optional non-mutating ghost projection of a pending callout
-    /// proposal. The canvas renders it with reduced alpha and a small
-    /// `Suggested` label so the user can review before accepting.
-    pub suggested: Option<Annotation>,
+    /// Non-mutating ghost projections of pending proposal suggestions. The
+    /// canvas renders each at reduced alpha so the user can distinguish
+    /// them from committed annotations.
+    pub suggested: Vec<Annotation>,
     /// When `false`, the canvas does not publish pointer events; manual
     /// annotation tools and canvas mutation are suspended.
     pub mutation_allowed: bool,
@@ -286,30 +286,48 @@ fn draft_annotation(document: &ImageDocument, draft: AnnotationDraft) -> Option<
     }
 }
 
-/// Project a pending callout proposal into a temporary [`Annotation`] for
-/// ghost rendering. The helper is pure projection only: it does not call
-/// `add_number_callout` and never mutates the document's `state_id`,
-/// annotations, undo, or redo stacks. The returned annotation uses the
-/// number the document would assign on accept and the deterministic
-/// bubble placed by [`rollshot_image_document::place_number_callout_bubble`].
-pub(crate) fn suggested_callout_annotation(
+/// Project all pending suggestions from a [`VisualAnnotationProposal`] into
+/// ghost [`Annotation`] values for canvas rendering. Each ghost uses a
+/// local-only id (`AnnotationId(0)`) and does not mutate the document.
+pub(crate) fn proposal_ghosts(
+    proposal: &rollshot_action::VisualAnnotationProposal,
     document: &ImageDocument,
-    suggestion: &rollshot_action::CalloutSuggestion,
-    width: u32,
-    height: u32,
-) -> Annotation {
-    let bubble = rollshot_image_document::place_number_callout_bubble(
-        suggestion.tip,
-        width,
-        height,
-        document.annotations(),
-    );
-    Annotation::NumberCallout {
-        id: AnnotationId(0),
-        number: document.next_number(),
-        tip: suggestion.tip,
-        bubble,
+    _width: u32,
+    _height: u32,
+) -> Vec<Annotation> {
+    use rollshot_action::VisualAnnotationSuggestionStatus;
+    let mut ghosts = Vec::new();
+    let mut next_number = document.next_number();
+    for suggestion in &proposal.suggestions {
+        if suggestion.status != VisualAnnotationSuggestionStatus::Pending {
+            continue;
+        }
+        match &suggestion.payload {
+            rollshot_action::VisualAnnotationPayload::NumberCallout { tip, bubble } => {
+                ghosts.push(Annotation::NumberCallout {
+                    id: AnnotationId(0),
+                    number: next_number,
+                    tip: *tip,
+                    bubble: *bubble,
+                });
+                next_number += 1;
+            }
+            rollshot_action::VisualAnnotationPayload::TextNote { position, text } => {
+                ghosts.push(Annotation::TextNote {
+                    id: AnnotationId(0),
+                    position: *position,
+                    text: text.clone(),
+                });
+            }
+            rollshot_action::VisualAnnotationPayload::OpaqueRedaction { bounds } => {
+                ghosts.push(Annotation::OpaqueRedaction {
+                    id: AnnotationId(0),
+                    bounds: *bounds,
+                });
+            }
+        }
     }
+    ghosts
 }
 
 impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
@@ -372,12 +390,14 @@ impl canvas::Program<super::Message> for NumberAnnotationCanvas<'_> {
         {
             self.draw_annotation(&mut frame, &draft);
         }
-        if let Some(suggested) = &self.suggested {
-            // Ghost projection: render the pending proposal with reduced alpha
-            // so the user can distinguish it from a committed annotation.
+        for suggested in &self.suggested {
+            // Ghost projection: render pending proposals with reduced alpha
+            // so the user can distinguish them from committed annotations.
             self.draw_annotation_with_alpha(&mut frame, suggested, 0.5);
+        }
+        if !self.suggested.is_empty() {
             // Small label above the canvas content so the user knows the
-            // ghost is a suggestion, not a committed annotation.
+            // ghosts are suggestions, not committed annotations.
             frame.fill_text(canvas::Text {
                 content: "Suggested".to_string(),
                 position: Point::new(8.0, 8.0),
@@ -572,145 +592,11 @@ mod tests {
                 current: ImagePoint::new(12.0, 10.0),
             }),
             scale: 0.5,
-            suggested: None,
+            suggested: Vec::new(),
             mutation_allowed: true,
         };
 
         assert_eq!(canvas.scale, 0.5);
-    }
-
-    fn suggestion(tip: ImagePoint, width: u32, height: u32) -> rollshot_action::CalloutSuggestion {
-        rollshot_action::CalloutSuggestion {
-            id: rollshot_action::CalloutSuggestionId(1),
-            base: rollshot_action::CalloutSuggestionBase {
-                step_source: 42,
-                keyframe: 0,
-                document_state_id: 0,
-                image_width: width,
-                image_height: height,
-            },
-            tip,
-            confidence: 0.75,
-            rationale: Some("test".to_string()),
-            provenance: rollshot_action::CalloutProposalProvenance::Agent { run_id: 1 },
-            status: rollshot_action::CalloutSuggestionStatus::Pending,
-        }
-    }
-
-    #[test]
-    fn suggested_callout_annotation_uses_next_number_from_document() {
-        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
-            64,
-            48,
-            ::image::Rgba([0, 0, 0, 255]),
-        ));
-        document.add_number_callout(ImagePoint::new(4.0, 4.0), ImagePoint::new(12.0, 12.0));
-        let expected_number = document.next_number();
-        let suggestion = suggestion(ImagePoint::new(20.0, 20.0), 64, 48);
-
-        let annotation = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
-
-        match annotation {
-            Annotation::NumberCallout { number, .. } => {
-                assert_eq!(number, expected_number);
-            }
-            other => panic!("expected NumberCallout, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn suggested_callout_annotation_preserves_tip_from_suggestion() {
-        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
-            64,
-            48,
-            ::image::Rgba([0, 0, 0, 255]),
-        ));
-        let tip = ImagePoint::new(20.0, 30.0);
-        let suggestion = suggestion(tip, 64, 48);
-
-        let annotation = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
-
-        match annotation {
-            Annotation::NumberCallout {
-                tip: returned_tip, ..
-            } => assert_eq!(returned_tip, tip),
-            other => panic!("expected NumberCallout, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn suggested_callout_annotation_uses_placement_bubble() {
-        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
-            64,
-            48,
-            ::image::Rgba([0, 0, 0, 255]),
-        ));
-        let tip = ImagePoint::new(20.0, 20.0);
-        let suggestion = suggestion(tip, 64, 48);
-        let expected_bubble = rollshot_image_document::place_number_callout_bubble(
-            tip,
-            64,
-            48,
-            document.annotations(),
-        );
-
-        let annotation = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
-
-        match annotation {
-            Annotation::NumberCallout { bubble, .. } => {
-                assert_eq!(bubble, expected_bubble);
-            }
-            other => panic!("expected NumberCallout, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn suggested_callout_annotation_does_not_mutate_document() {
-        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
-            64,
-            48,
-            ::image::Rgba([0, 0, 0, 255]),
-        ));
-        document.add_number_callout(ImagePoint::new(4.0, 4.0), ImagePoint::new(12.0, 12.0));
-        let baseline_state_id = document.state_id();
-        let baseline_annotations = document.annotations().to_vec();
-        let baseline_undo = document.can_undo();
-        let baseline_redo = document.can_redo();
-        let baseline_next_number = document.next_number();
-        let suggestion = suggestion(ImagePoint::new(20.0, 20.0), 64, 48);
-
-        let _ = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
-
-        assert_eq!(document.state_id(), baseline_state_id);
-        assert_eq!(document.annotations(), baseline_annotations);
-        assert_eq!(document.can_undo(), baseline_undo);
-        assert_eq!(document.can_redo(), baseline_redo);
-        assert_eq!(document.next_number(), baseline_next_number);
-    }
-
-    #[test]
-    fn number_annotation_canvas_carries_suggested_and_mutation_allowed() {
-        let document = ImageDocument::new(::image::RgbaImage::from_pixel(
-            64,
-            48,
-            ::image::Rgba([0, 0, 0, 255]),
-        ));
-        let suggestion = suggestion(ImagePoint::new(20.0, 20.0), 64, 48);
-        let projected = super::suggested_callout_annotation(&document, &suggestion, 64, 48);
-
-        let canvas = NumberAnnotationCanvas {
-            document: &document,
-            draft: None,
-            scale: 0.5,
-            suggested: Some(projected),
-            mutation_allowed: false,
-        };
-
-        assert!(
-            canvas.suggested.is_some(),
-            "suggested ghost should be present"
-        );
-        assert!(!canvas.mutation_allowed, "mutation should be disabled");
     }
 
     #[test]
@@ -724,8 +610,8 @@ mod tests {
         let canvas = NumberAnnotationCanvas {
             document: &document,
             draft: None,
-            scale: 1.0,
-            suggested: None,
+            scale: 0.5,
+            suggested: Vec::new(),
             mutation_allowed: false,
         };
         let bounds = Rectangle {
@@ -750,6 +636,76 @@ mod tests {
         );
     }
 
+    fn visual_proposal_with_three_suggestions(
+        step: &rollshot_action::GuideStep,
+        state_id: u64,
+        w: u32,
+        h: u32,
+    ) -> rollshot_action::VisualAnnotationProposal {
+        rollshot_action::VisualAnnotationProposal::from_agent_drafts(
+            rollshot_action::VisualAnnotationProposalId(1),
+            1,
+            step,
+            state_id,
+            w,
+            h,
+            vec![
+                rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: rollshot_action::VisualAnnotationSuggestionId(1),
+                    payload: rollshot_action::VisualAnnotationPayload::NumberCallout {
+                        tip: rollshot_image_document::ImagePoint::new(2.0, 2.0),
+                        bubble: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                    },
+                    confidence: 0.9,
+                    rationale: Some("button click target".to_string()),
+                },
+                rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: rollshot_action::VisualAnnotationSuggestionId(2),
+                    payload: rollshot_action::VisualAnnotationPayload::TextNote {
+                        position: rollshot_image_document::ImagePoint::new(3.0, 3.0),
+                        text: "Save button".to_string(),
+                    },
+                    confidence: 0.7,
+                    rationale: None,
+                },
+                rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: rollshot_action::VisualAnnotationSuggestionId(3),
+                    payload: rollshot_action::VisualAnnotationPayload::OpaqueRedaction {
+                        bounds: rollshot_image_document::ImageRect {
+                            x: 1.0,
+                            y: 1.0,
+                            width: 3.0,
+                            height: 2.0,
+                        },
+                    },
+                    confidence: 0.6,
+                    rationale: Some("sensitive info".to_string()),
+                },
+            ],
+        )
+        .expect("valid proposal")
+    }
+
+    #[test]
+    fn pending_visual_proposal_projects_all_three_ghost_primitives() {
+        let store = frame_store_with_two_frames();
+        let guide = guide();
+        let step = &guide.steps()[0];
+        let mut presentation = ActionGuidePresentation::new();
+        let doc = presentation.document_for_step(step, &store).unwrap();
+        let proposal = visual_proposal_with_three_suggestions(
+            step,
+            doc.document.state_id(),
+            doc.document.source().width(),
+            doc.document.source().height(),
+        );
+        let ghosts = super::proposal_ghosts(&proposal, &doc.document, 8, 8);
+        assert_eq!(ghosts.len(), 3);
+        assert!(matches!(ghosts[0], Annotation::NumberCallout { .. }));
+        assert!(matches!(ghosts[1], Annotation::TextNote { .. }));
+        assert!(matches!(ghosts[2], Annotation::OpaqueRedaction { .. }));
+    }
+
     #[test]
     fn number_annotation_canvas_publishes_events_when_mutation_allowed() {
         use iced::mouse;
@@ -762,7 +718,7 @@ mod tests {
             document: &document,
             draft: None,
             scale: 1.0,
-            suggested: None,
+            suggested: Vec::new(),
             mutation_allowed: true,
         };
         let bounds = Rectangle {

@@ -17,11 +17,12 @@
 //! ```
 
 mod annotation;
-mod callout_agent;
 mod caption_agent;
 mod storyboard_copy;
 mod update;
 mod view;
+#[cfg(feature = "action-guide")]
+mod visual_annotation_agent;
 
 pub use update::{subscription, update, Message};
 pub use view::view;
@@ -91,57 +92,40 @@ pub(crate) struct StripFrame {
     pub handle: iced::widget::image::Handle,
 }
 
-/// State machine for the agent callout suggestion flow.
+/// State machine for the visual annotation suggestion flow with consent gating.
 ///
 /// ```text
-///   Idle ──► Running ──► Pending       (proposal ready for review)
-///               │     ──► NoSuggestion  (model declined with a reason)
-///               │     ──► Failed        (provider/protocol/budget error)
-///               └────────► Idle          (user cancelled)
-///   Pending / NoSuggestion / Failed ──► Idle  (accepted, rejected, or replaced keyframe)
+///   Idle ──► ConsentPending ──► Running ──► PendingReview
+///               │                  │             │
+///               │ cancel           │ cancel      │ accept/reject/dismiss
+///               v                  v             v
+///              Idle              Idle           Idle
+///                                  │
+///                                  └──► NoSuggestion (model declined)
+///                                  └──► Failed       (provider/protocol error)
 /// ```
 ///
-/// `run_id` is the monotonic local id from `callout_agent_run_id`. The
-/// loaded arm in `update.rs` only accepts a result whose `run_id` matches
-/// the current `Running` state, which protects against late completions
-/// from older cancelled or timed-out runs overwriting newer ones.
+/// Manual state-changing actions (DeleteStep, ReplaceKeyframe, manual
+/// annotation, undo, redo) discard a pending review and transition to
+/// Idle with a "stale" banner. `run_id` is the monotonic local id from
+/// `visual_annotation_agent_run_id`; late results from older cancelled or
+/// timed-out runs are dropped.
 #[derive(Debug)]
-#[allow(dead_code)] // Variants are read by Task 8's view; only the update path uses them in Task 7.
-pub(crate) enum CalloutSuggestionState {
+#[allow(dead_code)] // Read by view; only the update path uses it here.
+pub(crate) enum VisualAnnotationSuggestionState {
     Idle,
+    ConsentPending(visual_annotation_agent::VisualSuggestionConsent),
     Running {
         run_id: u64,
         cancellation: rollshot_agent::runtime::RunCancellation,
     },
-    Pending(rollshot_action::CalloutProposal),
+    PendingReview(rollshot_action::VisualAnnotationProposal),
     NoSuggestion {
         reason: Option<String>,
     },
     Failed {
         message: String,
     },
-}
-
-impl CalloutSuggestionState {
-    /// `true` while a callout run is in flight. The view disables manual
-    /// annotation tools and the canvas mutator while this is true.
-    pub(crate) fn is_running(&self) -> bool {
-        matches!(self, Self::Running { .. })
-    }
-
-    /// `true` when a proposal is ready for review. The view shows the
-    /// `Accept`/`Reject` controls and the ghost canvas projection.
-    pub(crate) fn is_pending(&self) -> bool {
-        matches!(self, Self::Pending(_))
-    }
-
-    /// The pending proposal, if one is staged for review.
-    pub(crate) fn proposal(&self) -> Option<&rollshot_action::CalloutProposal> {
-        match self {
-            Self::Pending(proposal) => Some(proposal),
-            _ => None,
-        }
-    }
 }
 
 /// The Action Guide review/export workspace. Owns the editable guide and the
@@ -178,12 +162,12 @@ pub struct TimelineWorkspace {
     pub(crate) caption_suggestions_running: bool,
     /// Monotonic local run id for caption proposal provenance.
     pub(crate) caption_agent_run_id: u64,
-    /// Current callout suggestion state. See [`CalloutSuggestionState`].
-    #[allow(dead_code)] // Read by Task 8's view; only the update path uses it in Task 7.
-    pub(crate) callout_suggestion: CalloutSuggestionState,
-    /// Monotonic local run id for callout suggestion provenance.
-    #[allow(dead_code)] // Read by Task 8's view; only the update path uses it in Task 7.
-    pub(crate) callout_agent_run_id: u64,
+    /// Current visual annotation suggestion state. See [`VisualAnnotationSuggestionState`].
+    #[allow(dead_code)] // Read by Task 8's view; only the update path uses it here.
+    pub(crate) visual_annotation_suggestion: VisualAnnotationSuggestionState,
+    /// Monotonic local run id for visual annotation suggestion provenance.
+    #[allow(dead_code)]
+    pub(crate) visual_annotation_agent_run_id: u64,
     /// Monotonic operation id for storyboard copy provenance and late-result
     /// race protection. Incremented on each [`CopyStoryboardRequested`].
     pub(crate) storyboard_copy_operation_id: u64,
@@ -220,8 +204,8 @@ impl TimelineWorkspace {
             caption_proposal: None,
             caption_suggestions_running: false,
             caption_agent_run_id: 0,
-            callout_suggestion: CalloutSuggestionState::Idle,
-            callout_agent_run_id: 0,
+            visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
+            visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
         };
         ws.rebuild_selection_handles();
@@ -232,6 +216,14 @@ impl TimelineWorkspace {
     pub(crate) fn selected_step(&self) -> Option<&GuideStep> {
         let index = self.selected?;
         self.guide.steps().iter().find(|s| s.index == index)
+    }
+
+    /// `true` when the visual annotation consent dialog should be shown.
+    pub(crate) fn visual_annotation_consent_pending(&self) -> bool {
+        matches!(
+            self.visual_annotation_suggestion,
+            VisualAnnotationSuggestionState::ConsentPending(_)
+        )
     }
 
     /// Recompute the cached keyframe handle and nearby strip for the current
@@ -334,6 +326,8 @@ mod tests {
     use rollshot_action::{
         ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
         FrameStore, InputCapability, InputSourceKind, Recording, StoreConfig,
+        VisualAnnotationPayload, VisualAnnotationProposal, VisualAnnotationProposalId,
+        VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
     };
 
     fn region_32() -> CaptureRegion {
@@ -404,6 +398,61 @@ mod tests {
         }
     }
 
+    /// Build a VisualAnnotationProposal with three primitives for view tests
+    /// that need a PendingReview state without requiring a mutable workspace.
+    pub(super) fn visual_proposal_three_primitives_for_view(
+        state: &TimelineWorkspace,
+    ) -> VisualAnnotationProposal {
+        let step = &state.guide.steps()[0];
+        let doc = state
+            .presentation
+            .doc(step.source)
+            .expect("presentation doc");
+        let image = doc.document.source();
+        VisualAnnotationProposal::from_agent_drafts(
+            VisualAnnotationProposalId(1),
+            1,
+            step,
+            doc.document.state_id(),
+            image.width(),
+            image.height(),
+            vec![
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(1),
+                    payload: VisualAnnotationPayload::NumberCallout {
+                        tip: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                        bubble: rollshot_image_document::ImagePoint::new(20.0, 20.0),
+                    },
+                    confidence: 0.9,
+                    rationale: Some("button click target".to_string()),
+                },
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(2),
+                    payload: VisualAnnotationPayload::TextNote {
+                        position: rollshot_image_document::ImagePoint::new(8.0, 8.0),
+                        text: "Save button".to_string(),
+                    },
+                    confidence: 0.7,
+                    rationale: None,
+                },
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(3),
+                    payload: VisualAnnotationPayload::OpaqueRedaction {
+                        bounds: rollshot_image_document::ImageRect {
+                            x: 2.0,
+                            y: 2.0,
+                            width: 10.0,
+                            height: 8.0,
+                        },
+                    },
+                    confidence: 0.6,
+                    rationale: Some("sensitive info".to_string()),
+                },
+            ],
+        )
+        .expect("valid proposal")
+    }
+
     fn workspace(recording: Recording) -> TimelineWorkspace {
         TimelineWorkspace::new(
             recording,
@@ -432,5 +481,122 @@ mod tests {
         assert_eq!(ws.selected, None);
         assert!(ws.keyframe_handle.is_none());
         assert!(ws.strip.is_empty());
+    }
+
+    #[test]
+    fn accepted_visual_annotations_flatten_only_storyboard() {
+        let mut ws = workspace(recording_from_frames());
+        let step = ws.selected_step().cloned().expect("selected step");
+        let original = ws
+            .store
+            .retained(step.keyframe)
+            .expect("retained keyframe")
+            .image
+            .clone();
+
+        let doc = ws
+            .presentation
+            .document_for_step(&step, &ws.store)
+            .expect("presentation doc");
+        doc.document
+            .add_text_note(
+                rollshot_image_document::ImagePoint::new(2.0, 2.0),
+                "Regression note".to_string(),
+            )
+            .unwrap();
+
+        let options = storyboard_copy::render_storyboard_input(
+            &storyboard_copy::snapshot_storyboard(&ws.guide, &ws.store, &ws.presentation)
+                .expect("snapshot"),
+            rollshot_action::StoryboardOptions::default(),
+        )
+        .expect("render");
+
+        assert_ne!(
+            options.image.as_raw(),
+            original.as_raw(),
+            "annotated storyboard must differ from original"
+        );
+        assert_eq!(
+            ws.store.retained(step.keyframe).unwrap().image.as_raw(),
+            original.as_raw(),
+            "retained keyframe must be unchanged after annotation"
+        );
+    }
+
+    #[test]
+    fn export_guide_metadata_contains_no_provider_or_model_data() {
+        let ws = workspace(recording_from_frames());
+        let tmp = tempfile::tempdir().unwrap();
+        let guide = ws.guide.clone();
+        let region = ws.region;
+        let capability = ws.capability;
+        let source_kind = ws.source_kind;
+        let store = &ws.store;
+
+        let path = rollshot_action::export_guide(
+            &guide,
+            store,
+            region,
+            capability,
+            source_kind,
+            tmp.path(),
+        )
+        .expect("export_guide");
+
+        let session_json =
+            std::fs::read_to_string(path.join("session.json")).expect("session.json");
+        let lower = session_json.to_lowercase();
+        for forbidden in &[
+            "provider",
+            "model",
+            "run_id",
+            "run id",
+            "prompt",
+            "rationale",
+            "attachment",
+            "api_key",
+            "api key",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "session.json must not contain '{forbidden}': {session_json}"
+            );
+        }
+
+        let steps_md = std::fs::read_to_string(path.join("steps.md")).expect("steps.md");
+        let steps_lower = steps_md.to_lowercase();
+        for forbidden in &[
+            "provider",
+            "model",
+            "run_id",
+            "prompt",
+            "rationale",
+            "attachment",
+        ] {
+            assert!(
+                !steps_lower.contains(forbidden),
+                "steps.md must not contain '{forbidden}'"
+            );
+        }
+    }
+
+    #[test]
+    fn suggest_captions_requested_does_not_enter_consent_pending() {
+        let mut ws = workspace(recording_from_frames());
+        ws.caption_suggestions_running = false;
+
+        let _result =
+            super::update::update(&mut ws, super::update::Message::SuggestCaptionsRequested);
+
+        assert!(
+            !matches!(
+                ws.visual_annotation_suggestion,
+                VisualAnnotationSuggestionState::ConsentPending(_)
+            ),
+            "SuggestCaptionsRequested must not enter ConsentPending"
+        );
+        // Whether or not the handler succeeds (depends on provider config),
+        // it must never touch the visual annotation consent state.
     }
 }

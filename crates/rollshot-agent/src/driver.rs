@@ -126,63 +126,79 @@ Improve runs:
 5. Preserve unrelated useful detections from the current source.
 6. Explain what changed in the detector before submit_for_review."#;
 
-const CALLOUT_SYSTEM_PROMPT: &str = r#"You are Rollshot Action Guide Callout Agent.
-Your only job is to suggest at most one Number Callout tip for the single most
-important UI element in the screenshot the user is reviewing. Rollshot has
-already authorized the screenshot for this run as an image attachment; do not
-ask the user to upload, attach, or take another screenshot.
+const VISUAL_ANNOTATION_SYSTEM_PROMPT: &str = r#"You are Rollshot Visual Annotation Agent.
+Your only job is to suggest visual annotations for the single most important UI
+element(s) in the screenshot the user is reviewing. Rollshot has already
+authorized the screenshot for this run as an image attachment; do not ask the
+user to upload, attach, or take another screenshot.
 
-You have exactly one terminal tool: `submit_callout_suggestion`. The tool
-accepts one of two payloads:
+You have exactly one terminal tool: `submit_visual_annotation_suggestions`. The
+tool accepts one of two payloads:
 
-  1. A single Number Callout tip:
+  1. A batch of annotation suggestions:
      {
-       "result": "suggestion",
-       "tip": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
-       "confidence": <0.0..=1.0>,
-       "rationale": <string <= 500 chars, optional>
+       "suggestions": [
+         {
+           "kind": "number_callout",
+           "id": <unique integer>,
+           "tip": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+           "bubble": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+           "confidence": <0.0..=1.0>,
+           "rationale": <string <= 500 chars, optional>
+         },
+         {
+           "kind": "text_note",
+           "id": <unique integer>,
+           "position": { "x": <0.0..=1.0>, "y": <0.0..=1.0> },
+           "text": <non-empty string <= 500 chars>,
+           "confidence": <0.0..=1.0>,
+           "rationale": <string <= 500 chars, optional>
+         },
+         {
+           "kind": "opaque_redaction",
+           "id": <unique integer>,
+           "bounds": { "x": <0.0..=1.0>, "y": <0.0..=1.0>, "width": <0.0..=1.0>, "height": <0.0..=1.0> },
+           "confidence": <0.0..=1.0>,
+           "rationale": <string <= 500 chars, optional>
+         }
+       ]
      }
-     `x` and `y` are normalized image-fraction coordinates of the
-     important UI element, not the bubble. Rollshot owns bubble placement
-     and numbering.
+     Coordinates are normalized image-fraction values. The batch may contain
+     any combination of the three kinds. Each suggestion must have a unique id.
 
-  2. A no-suggestion report when no element is worth a callout:
+  2. A no-suggestion report when no annotation is appropriate:
      {
        "result": "no_suggestion",
        "reason": <string <= 500 chars, optional>
      }
 
 Rules you must follow:
-- Choose at most one tip. Never select the bubble position or the callout
-  number — Rollshot assigns those deterministically. Do not return
-  bubble coordinates, number, or numbering hints.
+- Choose at most a few high-confidence annotations. Rollshot owns bubble
+  placement and numbering for callouts.
 - Do not output any prose, reasoning, JSON, or commentary outside the
-  single `submit_callout_suggestion` tool call. The tool result is the
-  only thing the app reads.
-- Coordinates and confidence must be finite numbers. `confidence` must be
-  between 0 and 1 inclusive. Keep `rationale` and `reason` at or under 500
-  characters; longer values are rejected. Do not include URLs, raw bytes,
-  or PII.
+  single `submit_visual_annotation_suggestions` tool call.
+- Coordinates and confidence must be finite numbers in 0..=1. Keep
+  `rationale` and `reason` at or under 500 characters. Do not include
+  URLs, raw bytes, or PII.
 - Do not reference, transcribe, or speculate about PII (names, emails,
-  account numbers, addresses). The annotated number is enough context.
+  account numbers, addresses).
 - Only call tools advertised in this run. There is exactly one:
-  `submit_callout_suggestion`. Do not invent tool handles, function
-  names, or capability identifiers.
+  `submit_visual_annotation_suggestions`. Do not invent tool handles,
+  function names, or capability identifiers.
 - If the screenshot is too small, too low-contrast, or shows no
-  meaningful UI, return `no_suggestion` with a short reason. Do not
-  guess."#;
+  meaningful UI, return `no_suggestion` with a short reason. Do not guess."#;
 
 pub(crate) enum AgentTaskProfile {
     SmartRedaction,
     #[allow(dead_code)]
-    Callout,
+    VisualAnnotation,
 }
 
 impl AgentTaskProfile {
     pub(crate) fn system_prompt(&self) -> &'static str {
         match self {
             Self::SmartRedaction => SMART_REDACTION_SYSTEM_PROMPT,
-            Self::Callout => CALLOUT_SYSTEM_PROMPT,
+            Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT,
         }
     }
 
@@ -190,7 +206,7 @@ impl AgentTaskProfile {
     pub(crate) fn terminal_tools(&self) -> &'static [&'static str] {
         match self {
             Self::SmartRedaction => &["submit_for_review", "request_user_input"],
-            Self::Callout => &["submit_callout_suggestion"],
+            Self::VisualAnnotation => &["submit_visual_annotation_suggestions"],
         }
     }
 }
@@ -945,9 +961,9 @@ impl AgentRunner {
     }
 
     /// Stream one provider turn into the rig state machine. Shared by the
-    /// Smart Redaction driver (`run_with_provider`) and the callout runner
-    /// (`run_callout_with_provider`) so both paths reuse the same
-    /// budget charging, cancellation, and Rig tool-result threading.
+    /// Smart Redaction driver (`run_with_provider`) and the visual annotation
+    /// runner so both paths reuse the same budget charging, cancellation,
+    /// and Rig tool-result threading.
     #[allow(clippy::too_many_arguments)]
     async fn drive_streamed_turn(
         &self,
@@ -1330,33 +1346,32 @@ impl AgentRunner {
         Ok(None)
     }
 
-    /// Bounded callout runner. Returns a `CalloutRunTerminal` that never
-    /// carries provider payload, prompt text, attachment bytes, or image
-    /// coordinates. Reuses `drive_streamed_turn` and the rig state machine
-    /// for streamed-turn assembly, budget charging, cancellation, and
-    /// tool-result threading.
+    /// Bounded visual annotation runner. Returns a
+    /// `VisualAnnotationRunTerminal` that never carries provider payload,
+    /// prompt text, attachment bytes, or image coordinates. Reuses
+    /// `drive_streamed_turn` and the rig state machine for streamed-turn
+    /// assembly, budget charging, cancellation, and tool-result threading.
     #[allow(clippy::too_many_lines)]
-    pub async fn run_callout_with_provider(
+    pub async fn run_visual_annotation_with_provider(
         &self,
         mut input: crate::domain::AuthorizedModelInput,
         provider: &dyn ProviderAdapter,
         budget: RunBudget,
         cancellation: &RunCancellation,
-    ) -> crate::callout::CalloutRunTerminal {
-        use crate::callout::{
-            decode_submission, submit_callout_suggestion_definition,
-            submit_callout_suggestion_tool_arc, CalloutRunTerminal, SUBMIT_CALLOUT_SUGGESTION,
-        };
+    ) -> crate::visual_annotation::VisualAnnotationRunTerminal {
         use crate::tools::ToolRegistryLimits;
+        use crate::visual_annotation::{
+            decode_visual_annotation_terminal, submit_visual_annotation_suggestions_definition,
+            submit_visual_annotation_suggestions_tool_arc, VisualAnnotationRunTerminal,
+            SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS,
+        };
 
         // ---- Pre-flight ----
 
         if cancellation.is_cancelled() {
-            return CalloutRunTerminal::Cancelled;
+            return VisualAnnotationRunTerminal::Cancelled;
         }
 
-        // Take the authorized attachments ONCE; charge the attachments budget
-        // once. Any later turns must NOT carry the attachment.
         let attachments = input.take_model_attachments();
         let attachment_count = attachments.len() as u32;
 
@@ -1367,21 +1382,21 @@ impl AgentRunner {
             attachments: attachment_count,
             ..UsageSnapshot::default()
         }) {
-            return map_budget_error_to_callout(err);
+            return map_budget_error_to_visual_annotation(err);
         }
 
-        let tool_definitions = vec![submit_callout_suggestion_definition()];
+        let tool_definitions = vec![submit_visual_annotation_suggestions_definition()];
         let tool_names: BTreeSet<String> =
             tool_definitions.iter().map(|t| t.name.clone()).collect();
 
         let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
-        if let Err(e) = registry.register(submit_callout_suggestion_tool_arc()) {
+        if let Err(e) = registry.register(submit_visual_annotation_suggestions_tool_arc()) {
             tracing::error!(
-                target: "rollshot::agent::callout",
+                target: "rollshot::agent::visual_annotation",
                 error = %e,
-                "failed to register callout stub tool"
+                "failed to register visual annotation stub tool"
             );
-            return CalloutRunTerminal::ProtocolFailure;
+            return VisualAnnotationRunTerminal::ProtocolFailure;
         }
 
         let mut rig_run = rig_core::agent::run::AgentRun::new(rig_core::message::Message::user(
@@ -1398,35 +1413,32 @@ impl AgentRunner {
 
         loop {
             if cancellation.is_cancelled() {
-                return CalloutRunTerminal::Cancelled;
+                return VisualAnnotationRunTerminal::Cancelled;
             }
 
             if let Err(err) = tracker.check_wall_time(tokio::time::Instant::now()) {
-                return map_budget_error_to_callout(err);
+                return map_budget_error_to_visual_annotation(err);
             }
 
             let step = match rig_run.next_step() {
                 Ok(s) => s,
                 Err(e) => {
-                    // Rig enforces `max_turns` here as `MaxTurnsError`; map it
-                    // to a budget failure for symmetry with other exhausted
-                    // dimensions. Any other prompt error is a protocol failure.
                     if matches!(e, rig_core::completion::PromptError::MaxTurnsError { .. }) {
                         tracing::debug!(
-                            target: "rollshot::agent::callout",
+                            target: "rollshot::agent::visual_annotation",
                             max_turns = self.config.max_turns,
-                            "callout run exceeded model-call budget"
+                            "visual annotation run exceeded model-call budget"
                         );
-                        return CalloutRunTerminal::BudgetExhausted {
+                        return VisualAnnotationRunTerminal::BudgetExhausted {
                             dimension: BudgetDimension::ModelCalls,
                         };
                     }
                     tracing::debug!(
-                        target: "rollshot::agent::callout",
+                        target: "rollshot::agent::visual_annotation",
                         error = %e,
-                        "callout rig agent run returned a protocol error"
+                        "visual annotation rig agent run returned a protocol error"
                     );
-                    return CalloutRunTerminal::ProtocolFailure;
+                    return VisualAnnotationRunTerminal::ProtocolFailure;
                 }
             };
 
@@ -1434,7 +1446,6 @@ impl AgentRunner {
                 rig_core::agent::run::AgentRunStep::CallModel {
                     prompt, history, ..
                 } => {
-                    // Attachments only on the first model call.
                     let turn_attachments = if first_model_call {
                         first_model_call = false;
                         attachments.clone()
@@ -1454,7 +1465,11 @@ impl AgentRunner {
                         history: history_msgs,
                         turn: rig_run.turn(),
                         tool_definitions: tool_definitions.clone(),
-                        system_prompt: Some(AgentTaskProfile::Callout.system_prompt().to_string()),
+                        system_prompt: Some(
+                            AgentTaskProfile::VisualAnnotation
+                                .system_prompt()
+                                .to_string(),
+                        ),
                         max_tokens: None,
                         attachments: turn_attachments,
                     };
@@ -1477,79 +1492,74 @@ impl AgentRunner {
                     match turn_result {
                         Ok(()) => {}
                         Err(DriverError::BudgetExhausted(dim)) => {
-                            return CalloutRunTerminal::BudgetExhausted { dimension: dim };
+                            return VisualAnnotationRunTerminal::BudgetExhausted { dimension: dim };
                         }
-                        Err(DriverError::Cancelled) => return CalloutRunTerminal::Cancelled,
+                        Err(DriverError::Cancelled) => {
+                            return VisualAnnotationRunTerminal::Cancelled;
+                        }
                         Err(DriverError::ProviderFailure(msg)) => {
                             tracing::debug!(
-                                target: "rollshot::agent::callout",
+                                target: "rollshot::agent::visual_annotation",
                                 error = %msg,
-                                "callout provider stream failed"
+                                "visual annotation provider stream failed"
                             );
-                            return CalloutRunTerminal::ProviderFailure;
+                            return VisualAnnotationRunTerminal::ProviderFailure;
                         }
                         Err(DriverError::AgentProtocolFailure(msg)) => {
                             tracing::debug!(
-                                target: "rollshot::agent::callout",
+                                target: "rollshot::agent::visual_annotation",
                                 error = %msg,
-                                "callout model turn produced a protocol error"
+                                "visual annotation model turn produced a protocol error"
                             );
-                            return CalloutRunTerminal::ProtocolFailure;
+                            return VisualAnnotationRunTerminal::ProtocolFailure;
                         }
                     }
 
                     tracker.apply_turn();
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
-                    // The only advertised tool is `submit_callout_suggestion`. Any
-                    // call to a different name, or more than one call in the same
-                    // response, is a protocol failure.
                     if calls.len() != 1
-                        || calls[0].tool_call.function.name != SUBMIT_CALLOUT_SUGGESTION
+                        || calls[0].tool_call.function.name != SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS
                     {
                         tracing::debug!(
-                            target: "rollshot::agent::callout",
+                            target: "rollshot::agent::visual_annotation",
                             call_count = calls.len(),
                             tool_name = %calls.first().map(|c| c.tool_call.function.name.as_str()).unwrap_or(""),
-                            "callout runner rejecting tool call batch"
+                            "visual annotation runner rejecting tool call batch"
                         );
-                        return CalloutRunTerminal::ProtocolFailure;
+                        return VisualAnnotationRunTerminal::ProtocolFailure;
                     }
 
-                    // Decode the submission. The first terminal tool call ends
-                    // the run; the runner does not need to feed a tool result
-                    // back to the model.
                     let pending = &calls[0];
-                    let decoded = match decode_submission(&pending.tool_call.function.arguments) {
+                    let decoded = match decode_visual_annotation_terminal(
+                        &pending.tool_call.function.arguments,
+                    ) {
                         Ok(t) => t,
                         Err(err) => {
                             tracing::debug!(
-                                target: "rollshot::agent::callout",
+                                target: "rollshot::agent::visual_annotation",
                                 error = %err,
-                                "callout terminal payload failed validation"
+                                "visual annotation terminal payload failed validation"
                             );
-                            return CalloutRunTerminal::ProtocolFailure;
+                            return VisualAnnotationRunTerminal::ProtocolFailure;
                         }
                     };
 
-                    // Charge the tool budget (1 call) and execute the stub so
-                    // the rig state machine sees a successful result. The
-                    // decoded terminal is the callout's authoritative handoff;
-                    // the stub's own result is not surfaced.
                     if let Err(err) = tracker.charge(UsageSnapshot {
                         tool_calls: 1,
                         ..UsageSnapshot::default()
                     }) {
-                        return map_budget_error_to_callout(err);
+                        return map_budget_error_to_visual_annotation(err);
                     }
 
                     let tool_call = ToolCall {
                         name: pending.tool_call.function.name.clone(),
                         arguments_json: pending.tool_call.function.arguments.clone(),
                     };
-                    let terminal_tools: BTreeSet<String> = [SUBMIT_CALLOUT_SUGGESTION.to_string()]
-                        .into_iter()
-                        .collect();
+                    let terminal_tools: BTreeSet<String> =
+                        [SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS.to_string()]
+                            .into_iter()
+                            .collect();
                     let results = registry
                         .execute_calls(&[tool_call], cancellation, &terminal_tools)
                         .await;
@@ -1570,58 +1580,59 @@ impl AgentRunner {
                             }
                             Ok(ToolOutcome::Recoverable { error }) => {
                                 tracing::debug!(
-                                    target: "rollshot::agent::callout",
+                                    target: "rollshot::agent::visual_annotation",
                                     error = %error,
-                                    "callout stub tool rejected payload"
+                                    "visual annotation stub tool rejected payload"
                                 );
-                                return CalloutRunTerminal::ProtocolFailure;
+                                return VisualAnnotationRunTerminal::ProtocolFailure;
                             }
                             Err(err) => {
                                 tracing::debug!(
-                                    target: "rollshot::agent::callout",
+                                    target: "rollshot::agent::visual_annotation",
                                     error = %err,
-                                    "callout stub tool returned an error"
+                                    "visual annotation stub tool returned an error"
                                 );
-                                return CalloutRunTerminal::ProtocolFailure;
+                                return VisualAnnotationRunTerminal::ProtocolFailure;
                             }
                         }
                     }
 
-                    // Advance the rig state machine with the stub's result.
                     if let Err(e) = rig_run.tool_results(rig_results) {
                         tracing::debug!(
-                            target: "rollshot::agent::callout",
+                            target: "rollshot::agent::visual_annotation",
                             error = %e,
                             "rig agent run tool_results failed"
                         );
-                        return CalloutRunTerminal::ProtocolFailure;
+                        return VisualAnnotationRunTerminal::ProtocolFailure;
                     }
 
                     tracker.apply_turn();
-                    // The decoded terminal is the callout handoff; the run is
-                    // complete. Do NOT loop for a follow-up model turn.
                     return decoded;
                 }
                 rig_core::agent::run::AgentRunStep::Done(_) => {
-                    // Reaching Done means the model never called the terminal
-                    // tool. Per the brief this is a protocol failure.
                     tracing::debug!(
-                        target: "rollshot::agent::callout",
-                        "callout model completed without a terminal tool call"
+                        target: "rollshot::agent::visual_annotation",
+                        "visual annotation model completed without a terminal tool call"
                     );
-                    return CalloutRunTerminal::ProtocolFailure;
+                    return VisualAnnotationRunTerminal::ProtocolFailure;
                 }
             }
         }
     }
 }
 
-fn map_budget_error_to_callout(err: BudgetError) -> crate::callout::CalloutRunTerminal {
+fn map_budget_error_to_visual_annotation(
+    err: BudgetError,
+) -> crate::visual_annotation::VisualAnnotationRunTerminal {
     match err {
         BudgetError::Exceeded(dim) => {
-            crate::callout::CalloutRunTerminal::BudgetExhausted { dimension: dim }
+            crate::visual_annotation::VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: dim,
+            }
         }
-        BudgetError::Overflow => crate::callout::CalloutRunTerminal::ProtocolFailure,
+        BudgetError::Overflow => {
+            crate::visual_annotation::VisualAnnotationRunTerminal::ProtocolFailure
+        }
     }
 }
 
@@ -1658,14 +1669,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn callout_profile_advertises_only_submit_callout_suggestion() {
+    fn visual_annotation_profile_advertises_only_submit_visual_annotation_suggestions() {
         assert_eq!(
-            AgentTaskProfile::Callout.system_prompt(),
-            CALLOUT_SYSTEM_PROMPT,
+            AgentTaskProfile::VisualAnnotation.system_prompt(),
+            VISUAL_ANNOTATION_SYSTEM_PROMPT,
         );
         assert_eq!(
-            AgentTaskProfile::Callout.terminal_tools(),
-            &["submit_callout_suggestion"],
+            AgentTaskProfile::VisualAnnotation.terminal_tools(),
+            &["submit_visual_annotation_suggestions"],
         );
     }
 
