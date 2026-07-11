@@ -112,7 +112,7 @@ impl TextClipboard for ArboardClipboard {
 
 /// Production stdout adapter: writes to locked stdout.
 #[allow(dead_code)]
-struct StdoutOutput;
+pub(crate) struct StdoutOutput;
 
 impl CliOutput for StdoutOutput {
     fn write_text(&mut self, text: &str) -> Result<(), String> {
@@ -162,6 +162,20 @@ impl QuickOcrFeedback for NotifyFeedback {
         {
             let _ = message;
         }
+        Ok(())
+    }
+}
+
+/// No-op feedback adapter for platforms where notify-rust is unavailable.
+#[allow(dead_code)]
+pub(crate) struct NoopFeedback;
+
+#[allow(dead_code)]
+impl QuickOcrFeedback for NoopFeedback {
+    fn copied(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn failed(&mut self, _message: &str) -> Result<(), String> {
         Ok(())
     }
 }
