@@ -434,7 +434,15 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false, 100, 200);
+        let _ = complete_cli_with(
+            items,
+            &mut clipboard,
+            &mut output,
+            &mut feedback,
+            false,
+            100,
+            200,
+        );
         assert_eq!(feedback.copied_count, 0);
     }
 
@@ -444,7 +452,15 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, true, 100, 200);
+        let _ = complete_cli_with(
+            items,
+            &mut clipboard,
+            &mut output,
+            &mut feedback,
+            true,
+            100,
+            200,
+        );
         assert_eq!(feedback.copied_count, 1);
     }
 
@@ -453,8 +469,16 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let err = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true, 100, 200)
-            .unwrap_err();
+        let err = complete_cli_with(
+            vec![],
+            &mut clipboard,
+            &mut output,
+            &mut feedback,
+            true,
+            100,
+            200,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             QuickOcrError::Ocr(ProductOcrError::EmptyResult)
@@ -469,8 +493,16 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FailOutput;
         let mut feedback = FakeFeedback::new();
-        let err = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false, 100, 200)
-            .unwrap_err();
+        let err = complete_cli_with(
+            items,
+            &mut clipboard,
+            &mut output,
+            &mut feedback,
+            false,
+            100,
+            200,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, QuickOcrError::Clipboard(_)),
             "output failure should be Clipboard error: {err:?}"
@@ -483,7 +515,15 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true, 100, 200);
+        let _ = complete_cli_with(
+            vec![],
+            &mut clipboard,
+            &mut output,
+            &mut feedback,
+            true,
+            100,
+            200,
+        );
         assert_eq!(feedback.copied_count, 0);
     }
 
@@ -546,7 +586,15 @@ mod tests {
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
         let log = crate::diagnostics::capture_test_logs(|| {
-            let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true, 100, 200);
+            let _ = complete_cli_with(
+                vec![],
+                &mut clipboard,
+                &mut output,
+                &mut feedback,
+                true,
+                100,
+                200,
+            );
         });
         assert!(
             !log.contains(SENTINEL),
@@ -565,7 +613,15 @@ mod tests {
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
         let log = crate::diagnostics::capture_test_logs(|| {
-        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false, 100, 200);
+            let _ = complete_cli_with(
+                items,
+                &mut clipboard,
+                &mut output,
+                &mut feedback,
+                false,
+                100,
+                200,
+            );
         });
         assert!(
             !log.contains(SENTINEL),
