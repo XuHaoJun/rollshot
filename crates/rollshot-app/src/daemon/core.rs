@@ -184,6 +184,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn core() -> (
         DaemonCore<FakeLauncher>,
         Arc<Mutex<FakeState>>,

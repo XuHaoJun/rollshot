@@ -18,6 +18,7 @@ pub enum CapturePurpose {
 /// Dispatch decision after capture completion: whether there is post-capture
 /// work and, for OCR, which side-effect path to follow.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum PurposeCompletion {
     Cancelled,
     Present(rollshot_iced_overlay::CaptureResult),
@@ -28,6 +29,7 @@ pub enum PurposeCompletion {
 }
 
 /// Select the completion path based on the capture purpose and result.
+#[allow(dead_code)]
 pub fn select_completion(
     purpose: CapturePurpose,
     result: Option<rollshot_iced_overlay::CaptureResult>,

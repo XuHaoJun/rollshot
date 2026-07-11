@@ -48,6 +48,7 @@ pub(crate) fn hotkey_event_for_id(
 }
 
 #[cfg(feature = "ocr")]
+#[allow(dead_code)]
 pub(crate) fn is_valid_registration(registered: &[(u32, CaptureKind)]) -> bool {
     registered
         .iter()
