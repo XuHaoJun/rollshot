@@ -68,7 +68,6 @@ pub fn finish_with(
     tracing::info!(
         target: TARGET_QUICK_OCR,
         item_count,
-        text_len = text.len(),
         stage = "clipboard_write",
         "ocr clipboard write"
     );
@@ -96,6 +95,8 @@ pub(crate) fn complete_cli_with(
     output: &mut dyn CliOutput,
     feedback: &mut dyn QuickOcrFeedback,
     graphical_feedback: bool,
+    image_width: u32,
+    image_height: u32,
 ) -> Result<String, QuickOcrError> {
     let text = finish_with(items, clipboard)?;
     output.write_text(&format!("{text}\n")).map_err(|e| {
@@ -103,6 +104,8 @@ pub(crate) fn complete_cli_with(
             target: TARGET_QUICK_OCR,
             stage = "stdout_write",
             error_category = "stdout_write",
+            image_width,
+            image_height,
             "stdout write failed"
         );
         QuickOcrError::Clipboard(e)
@@ -113,6 +116,8 @@ pub(crate) fn complete_cli_with(
                 target: TARGET_QUICK_OCR,
                 stage = "feedback",
                 error_category = "feedback",
+                image_width,
+                image_height,
                 "feedback notification failed"
             );
             QuickOcrError::Clipboard(e)
@@ -121,6 +126,8 @@ pub(crate) fn complete_cli_with(
     tracing::info!(
         target: TARGET_QUICK_OCR,
         stage = "complete",
+        image_width,
+        image_height,
         "quick ocr completed"
     );
     Ok(text)
@@ -131,6 +138,8 @@ pub(crate) fn complete_cli_with(
 #[cfg(feature = "ocr")]
 #[allow(dead_code)]
 pub fn complete_cli(image: image::RgbaImage, graphical_feedback: bool) -> Result<(), String> {
+    let image_width = image.width();
+    let image_height = image.height();
     let items = crate::product_ocr::prepare(&image).map_err(|e| e.message().to_string())?;
     let mut clipboard = ArboardClipboard;
     let mut output = StdoutOutput;
@@ -141,6 +150,8 @@ pub fn complete_cli(image: image::RgbaImage, graphical_feedback: bool) -> Result
         &mut output,
         &mut feedback,
         graphical_feedback,
+        image_width,
+        image_height,
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -417,8 +428,16 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let result =
-            complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false).unwrap();
+        let result = complete_cli_with(
+            items,
+            &mut clipboard,
+            &mut output,
+            &mut feedback,
+            false,
+            100,
+            200,
+        )
+        .unwrap();
         assert_eq!(result, "hello");
         assert_eq!(clipboard.written, vec!["hello"]);
         assert_eq!(output.written, vec!["hello\n"]);
@@ -430,7 +449,7 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false);
+        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false, 100, 200);
         assert_eq!(feedback.copied_count, 0);
     }
 
@@ -440,7 +459,7 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, true);
+        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, true, 100, 200);
         assert_eq!(feedback.copied_count, 1);
     }
 
@@ -449,7 +468,7 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let err = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true)
+        let err = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true, 100, 200)
             .unwrap_err();
         assert!(matches!(
             err,
@@ -465,7 +484,7 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FailOutput;
         let mut feedback = FakeFeedback::new();
-        let err = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false)
+        let err = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false, 100, 200)
             .unwrap_err();
         assert!(
             matches!(err, QuickOcrError::Clipboard(_)),
@@ -479,7 +498,7 @@ mod tests {
         let mut clipboard = FakeClipboard::new();
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
-        let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true);
+        let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true, 100, 200);
         assert_eq!(feedback.copied_count, 0);
     }
 
@@ -542,7 +561,7 @@ mod tests {
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
         let log = crate::diagnostics::capture_test_logs(|| {
-            let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true);
+            let _ = complete_cli_with(vec![], &mut clipboard, &mut output, &mut feedback, true, 100, 200);
         });
         assert!(
             !log.contains(SENTINEL),
@@ -561,7 +580,7 @@ mod tests {
         let mut output = FakeOutput::new();
         let mut feedback = FakeFeedback::new();
         let log = crate::diagnostics::capture_test_logs(|| {
-            let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false);
+        let _ = complete_cli_with(items, &mut clipboard, &mut output, &mut feedback, false, 100, 200);
         });
         assert!(
             !log.contains(SENTINEL),
