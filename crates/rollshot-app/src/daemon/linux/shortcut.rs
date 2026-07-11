@@ -135,6 +135,7 @@ async fn run_portal(
     };
 
     let result = async {
+        #[allow(unused_mut)]
         let mut shortcuts = vec![ashpd::desktop::global_shortcuts::NewShortcut::new(
             SHORTCUT_ID,
             "Capture a Rollshot region",
