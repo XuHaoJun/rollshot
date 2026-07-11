@@ -177,7 +177,7 @@ impl AuthorizedModelInput {
         &self.attachments
     }
 
-    #[allow(dead_code)] // Used by the callout runner in a later task
+    #[allow(dead_code)] // Used by the visual annotation runner
     pub(crate) fn take_model_attachments(&mut self) -> Vec<crate::model::ModelAttachment> {
         self.manifest
             .descriptors
