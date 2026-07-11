@@ -1063,37 +1063,27 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             let image = doc.document.source();
             let w = image.width();
             let h = image.height();
-            let mut applied = 0usize;
             let mut stale = 0usize;
             let ids: Vec<_> = proposal.suggestions.iter().map(|s| s.id).collect();
-            let mut ops_to_apply = Vec::new();
             for id in &ids {
                 match proposal.validate_item(*id, Some(&step), state_id, w, h) {
-                    rollshot_action::VisualAnnotationApplyOutcome::Ready => {
-                        ops_to_apply.push(*id);
-                    }
+                    rollshot_action::VisualAnnotationApplyOutcome::Ready => {}
                     rollshot_action::VisualAnnotationApplyOutcome::Stale => {
                         stale += 1;
                     }
                     _ => {}
                 }
             }
-            for id in &ops_to_apply {
-                if let Some(suggestion) = proposal.suggestions.iter().find(|s| s.id == *id) {
-                    match &suggestion.payload {
-                        rollshot_action::VisualAnnotationPayload::NumberCallout { tip, bubble } => {
-                            doc.document.add_number_callout(*tip, *bubble);
-                        }
-                        rollshot_action::VisualAnnotationPayload::TextNote { position, text } => {
-                            let _ = doc.document.add_text_note(*position, text.clone());
-                        }
-                        rollshot_action::VisualAnnotationPayload::OpaqueRedaction { bounds } => {
-                            let _ = doc.document.add_redaction(*bounds);
-                        }
-                    }
-                    applied += 1;
+            let ops = proposal.pending_edit_ops().unwrap_or_default();
+            let applied = match doc.document.apply_batch(ops) {
+                Ok(outcome) => outcome.added_ids.len(),
+                Err(error) => {
+                    state.message = Some(format!(
+                        "Could not apply visual annotation suggestions: {error}"
+                    ));
+                    return Task::none();
                 }
-            }
+            };
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
             state.message = Some(match stale {
                 0 if applied > 0 => format!("Accepted {applied} visual annotation suggestions."),
@@ -3477,10 +3467,10 @@ mod tests {
         let _ = update(&mut state, Message::AcceptAllVisualAnnotations);
 
         let doc = state.presentation.doc(source).unwrap();
-        assert_ne!(
+        assert_eq!(
             doc.document.state_id(),
-            state_before,
-            "state_id must increment"
+            state_before + 1,
+            "accepting the batch must create one undoable document change"
         );
         assert_eq!(
             doc.document.annotations().len(),
