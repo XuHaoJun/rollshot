@@ -1335,24 +1335,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     _ => {}
                 }
             }
-            if !ops_to_apply.is_empty() {
-                let edit_ops = proposal.pending_edit_ops();
-                if let Ok(ops) = edit_ops {
-                    for op in &ops {
-                        match op {
-                            rollshot_image_document::EditOp::AddNumberCallout { tip, bubble } => {
-                                doc.document.add_number_callout(*tip, *bubble);
-                            }
-                            rollshot_image_document::EditOp::AddTextNote { position, text } => {
-                                let _ = doc.document.add_text_note(*position, text.clone());
-                            }
-                            rollshot_image_document::EditOp::AddRedaction { bounds } => {
-                                let _ = doc.document.add_redaction(*bounds);
-                            }
-                            _ => {}
+            for id in &ops_to_apply {
+                if let Some(suggestion) = proposal.suggestions.iter().find(|s| s.id == *id) {
+                    match &suggestion.payload {
+                        rollshot_action::VisualAnnotationPayload::NumberCallout { tip, bubble } => {
+                            doc.document.add_number_callout(*tip, *bubble);
+                        }
+                        rollshot_action::VisualAnnotationPayload::TextNote { position, text } => {
+                            let _ = doc.document.add_text_note(*position, text.clone());
+                        }
+                        rollshot_action::VisualAnnotationPayload::OpaqueRedaction { bounds } => {
+                            let _ = doc.document.add_redaction(*bounds);
                         }
                     }
-                    applied = ops.len();
+                    applied += 1;
                 }
             }
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
@@ -4226,5 +4222,143 @@ mod tests {
             }],
         )
         .expect("valid proposal")
+    }
+
+    /// RAII guard that writes a `config.toml` to the given directory and
+    /// removes it on drop, so provider-config-change tests don't leak state.
+    struct ConfigFileGuard {
+        dir: std::path::PathBuf,
+        had_file: bool,
+    }
+
+    impl ConfigFileGuard {
+        fn new(config_dir: &std::path::Path, content: &str) -> Self {
+            let _ = std::fs::create_dir_all(config_dir);
+            let path = config_dir.join("config.toml");
+            let had_file = path.exists();
+            std::fs::write(&path, content).expect("write config.toml for test");
+            Self {
+                dir: config_dir.to_path_buf(),
+                had_file,
+            }
+        }
+    }
+
+    impl Drop for ConfigFileGuard {
+        fn drop(&mut self) {
+            let path = self.dir.join("config.toml");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn visual_consent_confirm_with_changed_provider_model_stays_consent_pending() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config_dir =
+            crate::daemon::config::rollshot_config_dir().expect("config dir available in test");
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let _cfg = ConfigFileGuard::new(
+            &config_dir,
+            r#"[provider]
+provider = "Anthropic"
+model = "claude-sonnet-4-6"
+key_source = { Env = "ANTHROPIC_API_KEY" }
+"#,
+        );
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        // Verify consent captured the original provider/model.
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(consent) => {
+                assert_eq!(consent.provider, "Anthropic");
+                assert_eq!(consent.model, "claude-sonnet-4-6");
+            }
+            other => panic!("expected ConsentPending, got {other:?}"),
+        }
+
+        // Simulate provider/model change between request and confirm.
+        drop(_cfg);
+        let _cfg2 = ConfigFileGuard::new(
+            &config_dir,
+            r#"[provider]
+provider = "OpenAI"
+model = "gpt-4o"
+key_source = { Env = "OPENAI_API_KEY" }
+"#,
+        );
+        drop(_anthropic);
+        let _openai2 = EnvVarGuard::set("OPENAI_API_KEY", "test-key-openai");
+
+        let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+
+        assert_eq!(task.units(), 0);
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(_)
+        ));
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|m| m.contains("Provider configuration changed")));
+        // Verify consent snapshot was updated to the new provider/model.
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(consent) => {
+                assert_eq!(consent.provider, "OpenAI");
+                assert_eq!(consent.model, "gpt-4o");
+            }
+            other => panic!("expected ConsentPending with new provider, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn visual_consent_confirm_after_provider_change_succeeds_on_retry() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config_dir =
+            crate::daemon::config::rollshot_config_dir().expect("config dir available in test");
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+        let _cfg = ConfigFileGuard::new(
+            &config_dir,
+            r#"[provider]
+provider = "Anthropic"
+model = "claude-sonnet-4-6"
+key_source = { Env = "ANTHROPIC_API_KEY" }
+"#,
+        );
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::SuggestVisualAnnotationsRequested);
+
+        // Simulate provider/model change.
+        drop(_cfg);
+        let _cfg2 = ConfigFileGuard::new(
+            &config_dir,
+            r#"[provider]
+provider = "OpenAI"
+model = "gpt-4o"
+key_source = { Env = "OPENAI_API_KEY" }
+"#,
+        );
+        drop(_anthropic);
+        let _openai2 = EnvVarGuard::set("OPENAI_API_KEY", "test-key-openai");
+
+        // First confirm: detects the change, stays in ConsentPending.
+        let _ = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(_)
+        ));
+
+        // Second confirm: consent snapshot now matches; should start running.
+        let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
+        assert!(
+            task.units() > 0,
+            "second confirm after config change should return a Task::perform"
+        );
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Running { .. }
+        ));
     }
 }
