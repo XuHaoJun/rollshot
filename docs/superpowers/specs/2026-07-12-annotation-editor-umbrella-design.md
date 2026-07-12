@@ -21,6 +21,11 @@ not one implementation plan. Each slice defined in this document requires its
 own live sub-project specification and implementation plan before code changes
 begin.
 
+This umbrella remains a live program-control document until all slices are
+complete. Each slice transition, handoff, and completion must update the Slice
+Status Registry in this document. Once the complete program lands, this file
+becomes a historical snapshot under the normal `docs/superpowers/` rules.
+
 The design builds on the existing Result Workspace and
 `rollshot-image-document`; it does not replace their established ownership
 boundaries.
@@ -487,7 +492,72 @@ missing-field-safe canonical defaults.
 Each slice is a separate sub-project with its own live specification,
 implementation plan, review, and verification.
 
-### Slice 1 — Editor And Style Foundation
+### 17.1 Required superpowers lifecycle
+
+Every slice follows the full superpowers workflow independently:
+
+1. Invoke `superpowers:brainstorming` for that slice. Explore current code and
+   the landed output of the preceding slice, resolve slice-specific product and
+   engineering decisions, write the slice spec, obtain user approval, and
+   commit the approved spec.
+2. After the user reviews the written slice spec, invoke
+   `superpowers:writing-plans` to create its implementation plan. The plan must
+   cite both this umbrella and the approved slice spec.
+3. Execute only the approved slice plan, using
+   `superpowers:executing-plans` or
+   `superpowers:subagent-driven-development` as appropriate to the session.
+   Implementation follows `superpowers:test-driven-development` for feature
+   and bug-fix work.
+4. Before any completion claim, invoke
+   `superpowers:verification-before-completion` and run the slice's full
+   automated and runtime verification. Use
+   `superpowers:requesting-code-review` before integration when applicable.
+5. Use `superpowers:finishing-a-development-branch` for the integration or
+   handoff decision when the slice implementation is complete and verified.
+6. Update and commit the Slice Status Registry below as part of every handoff,
+   blocked transition, or completion. The registry update is required work,
+   not optional release notes.
+
+The next slice may perform read-only research or an explicitly approved spike,
+but its implementation does not begin until the preceding slice is marked
+`Complete` in this umbrella. A downstream discovery that conflicts with an
+umbrella invariant stops the slice: revise this umbrella with user approval
+before changing the slice spec or implementation to diverge from it.
+
+### 17.2 Slice status registry
+
+Allowed statuses are `Not started`, `Brainstorming`, `Spec approved`,
+`Planned`, `In progress`, `Handoff`, `Blocked`, and `Complete`.
+
+| Slice | Status | Slice spec | Implementation plan | Implementation / verification | Last update |
+|---|---|---|---|---|---|
+| 1 — Editor And Style Foundation | Not started | — | — | — | 2026-07-12 |
+| 2 — Two-Point Tools | Not started | — | — | — | 2026-07-12 |
+| 3 — Box Tools | Not started | — | — | — | 2026-07-12 |
+| 4 — Freehand Tools | Not started | — | — | — | 2026-07-12 |
+| 5 — Pixelate Effect | Not started | — | — | — | 2026-07-12 |
+| 6 — Integrated Hardening | Not started | — | — | — | 2026-07-12 |
+
+Registry update requirements:
+
+- `Brainstorming`: record the start date and current owner/session in the
+  implementation/verification column.
+- `Spec approved`: link the committed slice spec and record its commit or PR.
+- `Planned`: link the implementation plan and record its commit or PR.
+- `In progress`: record the implementation branch, commit range, or PR.
+- `Handoff`: record completed tasks, fresh verification evidence, remaining
+  tasks, known risks, and the exact next entry point. A handoff is not
+  completion and does not unlock the next slice.
+- `Blocked`: record the blocking condition, evidence, and the decision or
+  external change required to resume.
+- `Complete`: link the landed implementation, record automated and platform
+  runtime verification, record the completion date, and confirm that no
+  required work remains. Only `Complete` unlocks implementation of the next
+  slice.
+- Every registry transition is committed so a new session can recover program
+  state from the repository without relying on chat history.
+
+### 17.3 Slice 1 — Editor And Style Foundation
 
 - Annotation style value types and edit/history contracts.
 - Canonical constructors and compatibility updates.
@@ -500,21 +570,21 @@ implementation plan, review, and verification.
 This slice lands first. Later slices may not create competing property,
 default, or style systems.
 
-### Slice 2 — Two-Point Tools
+### 17.4 Slice 2 — Two-Point Tools
 
 - Line and Arrow.
 - Shared two-point geometry, bounds, hit testing, and render commands.
 - Endpoint handles, body movement, and Shift snapping.
 - Live/flatten consistency.
 
-### Slice 3 — Box Tools
+### 17.5 Slice 3 — Box Tools
 
 - Rectangle, Ellipse, and Shapes selector.
 - Stroke and optional fill.
 - Eight-direction resize and body movement.
 - Shift aspect constraint and ellipse-specific hit testing.
 
-### Slice 4 — Freehand Tools
+### 17.6 Slice 4 — Freehand Tools
 
 - Pen and Highlighter.
 - Pointer sampling and path simplification.
@@ -522,7 +592,7 @@ default, or style systems.
 - Highlighter compositing.
 - Long-stroke preview and flatten performance.
 
-### Slice 5 — Pixelate Effect
+### 17.7 Slice 5 — Pixelate Effect
 
 - Pixelate annotation and block-size property.
 - Move and resize behavior.
@@ -530,7 +600,7 @@ default, or style systems.
 - Immutable-source full-resolution flattening.
 - Product wording and type separation from Opaque Redaction.
 
-### Slice 6 — Integrated Hardening
+### 17.8 Slice 6 — Integrated Hardening
 
 - Cross-tool shortcuts and tooltip consistency.
 - More-menu active state and narrow-window behavior.
@@ -542,7 +612,7 @@ default, or style systems.
 
 Slice 6 adds no annotation tool.
 
-### Slice gate
+### 17.9 Slice gate
 
 Every slice must:
 
