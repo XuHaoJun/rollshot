@@ -28,15 +28,233 @@
 - Do not add future-tool variants, fields, toolbar placeholders, or any `rollshot-core` stitching change.
 - Every shell command in this repository is prefixed with `rtk`.
 
+## Engineering Review Record
+
+### Step 0 — Scope challenge
+
+The nine-task draft had three new files and no new crate or top-level module, so the complexity gate did not trigger. Every task contributes directly to the approved Slice 1 vertical contract. The minimum viable plan is the complete slice: omitting document styles, compatibility migration, defaults, transactions, toolbar, or verification would leave a toolbar-only or model-only partial feature that the umbrella explicitly rejects. The review therefore keeps the approved scope and removes no required behavior.
+
+The search check used the repository's pinned iced 0.14 skill references rather than the open web: `responsive`, Canvas, `stack`, `float`, tooltip, and standard inputs cover the proposed UI; custom `Widget` and custom `Overlay` remain unnecessary and are known footguns for widget-tree and overlay-contract stability.
+
+### Auto decisions
+
+#### Auto decision D1 — How should the breaking `Annotation` migration land?
+
+Context: Adding fields to Rust enum variants breaks every constructor immediately.
+
+ELI10: If style fields land before all callers are updated, the repository cannot compile between tasks. A tired engineer cannot test or safely review a red commit.
+
+Stakes if we pick wrong: Execution produces non-buildable intermediate commits and hides real regressions behind expected compiler failures.
+
+Recommendation: **D1A — Keep Task 1 additive, then make storage/render/edit/consumer migration one atomic Task 2** because explicit, green commits are more valuable than artificially small broken commits.
+
+Note: options differ in kind, not coverage — no completeness score.
+
+Pros / cons:
+
+- **D1A — Atomic workspace migration (recommended; human: ~2 days / AI: ~45 min).** ✅ Every commit builds and can be reverted; ❌ Task 2 is necessarily broader.
+- **D1B — Stagger enum changes across commits (human: ~1.5 days / AI: ~35 min).** ✅ Smaller textual commits; ❌ intermediate commits cannot compile.
+
+Net: Accept one larger semantic commit to preserve the repository's executable history.
+
+#### Auto decision D2 — How should test commands select multiple modules?
+
+Context: Cargo accepts one positional test-name filter, but the draft supplied two or three.
+
+ELI10: Those commands fail before running tests, so an executor could mistake command-line misuse for a red test. Chaining valid invocations makes each signal unambiguous.
+
+Stakes if we pick wrong: TDD checkpoints are unusable and failures are misdiagnosed.
+
+Recommendation: **D2A — Chain one valid filtered invocation per module or run the whole crate** because explicit Run/Expected pairs are non-negotiable.
+
+Completeness: D2A=10/10, D2B=2/10.
+
+Pros / cons:
+
+- **D2A — Valid chained/full-crate commands (recommended; human: ~10 min / AI: ~2 min).** ✅ Commands execute exactly as written; ❌ some checkpoints run a few extra tests.
+- **D2B — Keep invalid multi-filter commands.** ✅ No editing effort; ❌ no checkpoint can run successfully.
+
+Net: Prefer slightly broader valid tests over concise invalid commands.
+
+#### Auto decision D3 — How should shared `config.toml` writes and warnings behave?
+
+Context: Annotation defaults share a file with daemon and provider settings.
+
+ELI10: A direct write can truncate the whole settings file if the process or disk fails halfway through. Treating a recoverable default-save problem as an error also makes harmless editing failures look catastrophic.
+
+Stakes if we pick wrong: Users can lose unrelated settings or see misleading failure severity.
+
+Recommendation: **D3A — Preserve the TOML table, write/sync/rename a sibling file, and add `InlineMessage::Warning`** because the blast radius includes every Rollshot setting.
+
+Completeness: D3A=10/10, D3B=6/10.
+
+Pros / cons:
+
+- **D3A — Atomic replacement plus warning semantics (recommended; human: ~1 day / AI: ~25 min).** ✅ Existing bytes survive failed writes and severity is honest; ❌ adds a small file helper and tests.
+- **D3B — Direct write and reuse `Error`.** ✅ Minimal code; ❌ partial writes can clobber unrelated configuration and warnings look fatal.
+
+Net: Spend a small amount of boring file-I/O code to contain a high-blast-radius failure.
+
+#### Auto decision D4 — How should preview and popup state cross the view boundary?
+
+Context: The draft asked Canvas to derive previews from `ResultWorkspace`, but `AnnotationCanvas` only receives document/editor references; Copy, More, and color popups could also overlap.
+
+ELI10: Hidden access creates borrow and ownership confusion. Multiple booleans can make two menus open at once and stack invisible click-catchers over the canvas.
+
+Stakes if we pick wrong: Preview code does not fit the actual API or popups steal input unpredictably.
+
+Recommendation: **D4A — Build one preview clone in `canvas_view`, pass it explicitly, and use one `Popup` enum** because explicit data flow and single ownership are easier to reason about.
+
+Note: options differ in kind, not coverage — no completeness score.
+
+Pros / cons:
+
+- **D4A — Explicit preview input plus exclusive popup enum (recommended; human: ~0.5 day / AI: ~15 min).** ✅ Borrowing and event ownership are visible; ❌ adds one field and enum.
+- **D4B — Let Canvas infer state and keep independent booleans.** ✅ Fewer type declarations; ❌ requires unavailable state and permits overlapping interaction layers.
+
+Net: One extra explicit value removes two classes of UI-state ambiguity.
+
+#### Auto decision D5 — Which missing tests are required before execution?
+
+Context: The draft covered high-level property behavior but not picker edge math, failed atomic writes, or style edits at tall-image coordinates.
+
+ELI10: UI sliders fail at edges, file writes fail at inconvenient times, and long screenshots expose coordinate bugs ordinary screenshots hide. These are cheap deterministic tests now and expensive bugs later.
+
+Stakes if we pick wrong: Boundary input, configuration safety, or long-image output can regress silently.
+
+Recommendation: **D5A — Add deterministic negative and boundary tests in the owning tasks** because AI-assisted completeness is inexpensive and well-tested code is non-negotiable.
+
+Completeness: D5A=10/10, D5B=7/10.
+
+Pros / cons:
+
+- **D5A — Add all three test groups (recommended; human: ~1 day / AI: ~20 min).** ✅ Covers realistic failures without GUI timing; ❌ modestly lengthens test code.
+- **D5B — Rely on manual runtime checks.** ✅ Less test code; ❌ failures become platform-dependent and harder to reproduce.
+
+Net: Automate deterministic correctness and reserve manual checks for actual platform integration.
+
+#### Auto decision D6 — Should toolbar and properties be split into separate tasks?
+
+Context: Both modify `toolbar.rs`, `properties.rs`, `view.rs`, and the same popup/message routing.
+
+ELI10: Splitting work that changes the same state machine creates merge conflicts and temporary UI states that are not useful. Keeping one vertical UI task is larger but reviewable as one behavior.
+
+Stakes if we pick wrong: Parallel-looking tasks conflict heavily and neither produces a coherent editor row alone.
+
+Recommendation: **D6A — Keep one UI task with smaller internal red/green steps** because files that change together should live and land together.
+
+Note: options differ in kind, not coverage — no completeness score.
+
+Pros / cons:
+
+- **D6A — One cohesive UI task (recommended; human: ~3 days / AI: ~60 min).** ✅ One state model and one usable deliverable; ❌ requires a careful reviewer checkpoint.
+- **D6B — Split toolbar and picker tasks.** ✅ Smaller headings; ❌ both touch the same modules and create an incomplete intermediate UI.
+
+Net: Keep the cohesive task but preserve its fine-grained test checkpoints.
+
+### What already exists
+
+- `ImageDocument` already owns immutable pixels, snapshots, exact state IDs, undo/redo, number sequencing, typed `EditOp`, flattening, hit testing, and Navigator anchors; the plan extends these paths rather than replacing them.
+- `RenderShape` already feeds both iced Canvas and raster flattening; style values flow through it rather than creating a second renderer.
+- Result Workspace already owns tools, drafts, selection, keyboard routing, inline messages, Copy/Save, and dirty state; the plan adds focused state without a new app architecture.
+- `provider_config.rs` already demonstrates section-preserving TOML mutation; annotation defaults reuse the table-preservation pattern and strengthen the final write.
+- iced 0.14 already provides responsive layout, Canvas, tooltips, rows, inputs, stack, and float; the plan uses those built-ins.
+
+### Test flow diagram
+
+```text
+style values ──unit──> exact size/color mappings
+      │
+      v
+annotation + EditOp ──unit──> validation/history/IDs/sequence
+      │
+      ├──> RenderShape ──unit──> bounds/hit/colors/text layout
+      │                         │
+      │                         v
+      │                    flatten pixels
+      v
+compatibility consumers ──workspace compile + crate tests
+      │
+      v
+defaults store ──tempdir integration──> preserve/write/failure
+      │
+      v
+property state ──unit──> target/preview/apply/cancel/popup ownership
+      │
+      v
+toolbar model + Canvas ──unit/integration──> routing/coordinates/output isolation
+      │
+      v
+Linux + macOS smoke verification
+```
+
+### Test coverage table
+
+| Task / behavior | Unit | Integration | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| 1 / exact color and size values | ✓ | — | — | no |
+| 2 / constructors, typed edits, validation, history, sequence | ✓ | ✓ | — | no |
+| 2 / shared live/flatten style semantics and Redaction opacity | ✓ | ✓ | — | no |
+| 2 / automation, workbench, timeline, and OCR compatibility | ✓ | ✓ | — | no |
+| 3 / defaults load, sibling preservation, atomic failure | ✓ | ✓ | — | no |
+| 4 / property target, preview, Apply/Cancel, popup exclusivity | ✓ | ✓ | — | no |
+| 5 / creation defaults, preview isolation, dirty state | ✓ | ✓ | — | no |
+| 6 / responsive routing, picker math, tooltip metadata | ✓ | ✓ | Linux/macOS | visual polish only |
+| 7 / keyboard precedence, Copy/Save isolation, tall coordinates | ✓ | ✓ | Linux/macOS | native clipboard/dialog UX only |
+
+### Failure modes
+
+| New codepath | Production failure | Test | Error handling / user result |
+|---|---|---|---|
+| Typed document edit | Wrong annotation kind or invalid next number | Task 2 Phase B Step 1 | `EditError::{WrongKind,InvalidNextNumber}`; inline error, no mutation |
+| Style rendering | Optional Text plate or scaled Number bounds diverge | Task 2 Step 1 | Deterministic shared helpers; test failure prevents landing |
+| Defaults load | Missing, malformed, or partially invalid TOML | Task 3 Step 1 | Canonical fallback plus one visible warning |
+| Defaults save | Permission/disk/rename failure | Task 3 Steps 1–3 | Original bytes retained, in-memory value retained, one warning |
+| Color transaction | Invalid hex or cancelled/outside close | Task 4 Steps 1–4 | Apply disabled or transaction cancelled; no history |
+| Popup routing | Copy, More, and picker compete for input | Task 4 Step 1 and Task 6 Step 6 | Exclusive `Popup` enum; deterministic close/cancel |
+| Canvas preview | Preview leaks into flatten or stale selected ID | Task 5 Steps 1–5 | Explicit one-annotation preview; output uses committed document |
+| Responsive toolbar | Active tool moves to More at narrow width | Task 6 Steps 1–7 | More names and styles the active tool |
+| Keyboard routing | Backspace/shortcut steals focused input | Task 7 Steps 1–3 | Focus gate and local-first `Esc`; no silent deletion |
+| Platform integration | Native clipboard/dialog or layout differs | Task 7 Steps 5–6 | Runtime evidence; Handoff instead of false completion |
+
+No failure mode is both silent and uncovered.
+
+### Performance and resources
+
+No new capture, stitch, pixel-conversion, streaming, or unbounded-buffer path is introduced. The only preview allocation is one selected `Annotation` clone while a color transaction is open; committed annotations continue viewport culling. Responsive toolbar modeling is constant-size work, picker Canvas geometry is tiny, config I/O occurs only on completed default edits, and full-resolution flatten remains limited to explicit output/tests. No cache or shader is justified for Slice 1.
+
+### Task dependencies and execution strategy
+
+| Task | Modules touched | Depends on |
+|---|---|---|
+| 1 | `rollshot-image-document` values | — |
+| 2 | `rollshot-image-document`, Result Workspace, timeline workspace | 1 |
+| 3 | Result Workspace config/state | 1, 2 |
+| 4 | Result Workspace property/update state | 3 |
+| 5 | Result Workspace Canvas/update/view | 4 |
+| 6 | Result Workspace toolbar/properties/view/update | 5 |
+| 7 | Result Workspace integration and docs | 6 |
+
+Sequential execution, no parallelization opportunity. Tasks 2–7 share the Result Workspace or depend directly on its preceding state contracts; parallel agents would create merge conflicts and reason against stale interfaces. No task modifies the workspace root `Cargo.toml` or introduces a new artifact/distribution pipeline.
+
+### NOT in scope
+
+- Line, Arrow, Rectangle, Ellipse, Pen, Highlighter, and Pixelate — each belongs to a later gated slice.
+- Capture Overlay, Action Guide annotation UX, and agent proposal UX — the approved product boundary is Result Workspace only.
+- Editable project files or persisted annotation graphs — only next-object defaults persist.
+- Alpha controls, font family, dash styles, arrow variants, corner radius, number formats, Blur, and plugin APIs — explicitly deferred by the umbrella.
+- Custom iced `Widget`, custom `Overlay`, Shader, or picker cache — built-ins and a small Canvas are sufficient.
+- Windows runtime behavior and new distribution artifacts — Rollshot's approved Slice 1 runtime gate is Linux and macOS and this slice adds no artifact.
+- `rollshot-core` benchmarks — no stitching path changes.
+
 ---
 
-### Task 1: Add canonical color and style value types
+### Task 1: Add color and style value types without changing annotations
 
 **Files:**
 
 - Modify: `crates/rollshot-image-document/src/geometry.rs`
 - Modify: `crates/rollshot-image-document/src/style.rs`
-- Modify: `crates/rollshot-image-document/src/annotation.rs`
 - Modify: `crates/rollshot-image-document/src/lib.rs`
 
 **Interfaces:**
@@ -44,9 +262,8 @@
 - Produces: `Rgb8::new(u8, u8, u8)`, `Rgb8::opaque()`, and `Rgb8::with_alpha(u8)`.
 - Produces: `NumberSize::{Small, Medium, Large}`, `NumberSize::scale() -> f32`, and `NumberStyle { accent: Rgb8, size: NumberSize }`.
 - Produces: `TextSize::{Px14, Px18, Px24, Px32}`, `TextSize::pixels() -> f32`, and `TextStyle { font_size: TextSize, text_color: Rgb8, background: Option<Rgb8> }`.
-- Produces: `Annotation::{number_callout,text_note,opaque_redaction}` constructors and `Annotation::{number_style,text_style}` typed accessors; `OpaqueRedaction` receives no style argument.
 
-- [ ] **Step 1: Write failing value and constructor tests**
+- [ ] **Step 1: Write failing value tests**
 
 Add tests that lock exact mappings and canonical styles:
 
@@ -68,18 +285,13 @@ fn canonical_styles_preserve_current_appearance() {
     assert_eq!(TextStyle::default().background, Some(Rgb8::new(0x11, 0x11, 0x11)));
 }
 
-#[test]
-fn opaque_redaction_constructor_has_no_style_input() {
-    let annotation = Annotation::opaque_redaction(AnnotationId(9), rect());
-    assert!(matches!(annotation, Annotation::OpaqueRedaction { .. }));
-}
 ```
 
 - [ ] **Step 2: Run the focused tests and confirm they fail**
 
-Run: `rtk cargo test -p rollshot-image-document style::tests annotation::tests`
+Run: `rtk cargo test -p rollshot-image-document style::tests`
 
-Expected: compilation fails because `Rgb8`, `NumberSize`, `TextSize`, style structs, and constructors do not exist.
+Expected: compilation fails because `Rgb8`, `NumberSize`, `TextSize`, and the style structs do not exist.
 
 - [ ] **Step 3: Implement the minimal typed values and constructors**
 
@@ -123,33 +335,44 @@ pub struct NumberStyle { pub accent: Rgb8, pub size: NumberSize }
 pub struct TextStyle { pub font_size: TextSize, pub text_color: Rgb8, pub background: Option<Rgb8> }
 ```
 
-Implement explicit `Default` values for both style structs using the current style constants, add `style` fields to Number/Text variants, add typed style accessors returning `None` for inapplicable variants, and add constructors that simply build the requested typed variant.
+Implement explicit `Default` values for both style structs using the current style constants and re-export the new types from `lib.rs`. Do not change `Annotation` in this task; keeping the workspace green makes the later enum migration one explicit atomic change.
 
 - [ ] **Step 4: Run focused tests and formatting**
 
-Run: `rtk cargo test -p rollshot-image-document style::tests annotation::tests && rtk cargo fmt --check`
+Run: `rtk cargo test -p rollshot-image-document style::tests && rtk cargo fmt --check`
 
 Expected: all focused tests pass and formatting reports no diff.
 
 - [ ] **Step 5: Commit the style model**
 
 ```bash
-rtk git add crates/rollshot-image-document/src/{geometry.rs,style.rs,annotation.rs,lib.rs}
+rtk git add crates/rollshot-image-document/src/{geometry.rs,style.rs,lib.rs}
 rtk git commit -m "feat(annotation): add typed number and text styles"
 ```
 
-### Task 2: Make render, bounds, hit testing, and flatten style-aware
+### Task 2: Atomically store styles, add typed edits, render them, and migrate consumers
 
 **Files:**
 
 - Modify: `crates/rollshot-image-document/src/shapes.rs`
 - Modify: `crates/rollshot-image-document/src/hit.rs`
 - Modify: `crates/rollshot-image-document/src/flatten.rs`
+- Modify: `crates/rollshot-image-document/src/annotation.rs`
+- Modify: `crates/rollshot-image-document/src/edit_op.rs`
+- Modify: `crates/rollshot-image-document/src/document.rs`
+- Modify: `crates/rollshot-image-document/src/callout_placement.rs`
+- Modify: `crates/rollshot-image-document/src/navigator.rs`
 - Modify: `crates/rollshot-image-document/tests/text_export.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/canvas.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/update.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/ocr_text.rs`
+- Modify: `crates/rollshot-app/src/timeline_workspace/annotation.rs`
+- Modify: `crates/rollshot-app/src/timeline_workspace/update.rs`
 
 **Interfaces:**
 
 - Consumes: `NumberStyle`, `TextStyle`, `NumberSize::scale()`, `TextSize::pixels()`, and `Rgb8` from Task 1.
+- Produces: `Annotation::{number_callout,text_note,opaque_redaction}` canonical constructors, `Annotation::{number_callout_with_style,text_note_with_style}` explicit-style constructors, and typed style accessors.
 - Produces: `number_label_px(label: &str, style: NumberStyle)`, `leader_triangle(tip, bubble, style)`, and `text_plate_rect(position, text, style)`.
 - Preserves: existing `annotation_shapes`, `annotation_bounds`, `hit_test_annotation`, and `ImageDocument::flatten` public entry points.
 
@@ -185,13 +408,25 @@ Add a raster test comparing representative pixels from live `RenderShape` colors
 
 - [ ] **Step 2: Run the render tests and confirm failure**
 
-Run: `rtk cargo test -p rollshot-image-document shapes::tests hit::tests --test text_export`
+Run: `rtk cargo test -p rollshot-image-document`
 
 Expected: failures show fixed global constants still drive Number/Text shapes and bounds.
 
 - [ ] **Step 3: Thread styles through shared geometry**
 
-Replace fixed-size helpers with style-aware forms:
+Add `style: NumberStyle` and `style: TextStyle` to the committed variants. Implement canonical constructors that inject `Default` and explicit-style constructors used by `ImageDocument`:
+
+```rust
+pub fn number_callout(id: AnnotationId, number: u32, tip: ImagePoint, bubble: ImagePoint) -> Self {
+    Self::number_callout_with_style(id, number, tip, bubble, NumberStyle::default())
+}
+
+pub fn number_callout_with_style(id: AnnotationId, number: u32, tip: ImagePoint, bubble: ImagePoint, style: NumberStyle) -> Self {
+    Self::NumberCallout { id, number, tip, bubble, style }
+}
+```
+
+Provide the equivalent canonical/explicit Text constructors, a style-free Redaction constructor, and typed accessors. Then replace fixed-size helpers with style-aware forms:
 
 ```rust
 const TEXT_BACKGROUND_ALPHA: u8 = 217;
@@ -215,14 +450,11 @@ Run: `rtk cargo test -p rollshot-image-document`
 
 Expected: all crate tests pass, including exact Redaction opacity and styled Text export.
 
-- [ ] **Step 5: Commit shared rendering semantics**
+- [ ] **Step 5: Continue directly to Phase B; do not commit a broken workspace**
 
-```bash
-rtk git add crates/rollshot-image-document/src/{shapes.rs,hit.rs,flatten.rs} crates/rollshot-image-document/tests/text_export.rs
-rtk git commit -m "feat(annotation): render typed styles consistently"
-```
+Expected: the image-document crate is green, while the workspace still identifies external construction sites that Phase C must migrate before the single Task 2 commit.
 
-### Task 3: Add typed document edits and exact sequence history
+#### Phase B: Add typed document edits and exact sequence history
 
 **Files:**
 
@@ -310,14 +542,11 @@ Run: `rtk cargo test -p rollshot-image-document && rtk cargo clippy -p rollshot-
 
 Expected: all document tests and clippy pass.
 
-- [ ] **Step 5: Commit typed document edits**
+- [ ] **Step 5: Continue directly to Phase C; do not commit a broken workspace**
 
-```bash
-rtk git add crates/rollshot-image-document/src/{edit_op.rs,document.rs}
-rtk git commit -m "feat(annotation): add history-safe style edits"
-```
+Expected: document tests pass; external app consumers are migrated next before committing.
 
-### Task 4: Migrate every existing annotation consumer
+#### Phase C: Migrate every existing annotation consumer
 
 **Files:**
 
@@ -359,8 +588,8 @@ Expected: compilation failures identify every Number/Text literal missing `style
 Use constructors for transient and ghost annotations:
 
 ```rust
-Annotation::number_callout(id, number, tip, bubble, NumberStyle::default())
-Annotation::text_note(id, position, text, TextStyle::default())
+Annotation::number_callout(id, number, tip, bubble)
+Annotation::text_note(id, position, text)
 Annotation::opaque_redaction(id, bounds)
 ```
 
@@ -379,14 +608,14 @@ Run: `rtk cargo test -p rollshot-image-document && rtk cargo test -p rollshot-ap
 
 Expected: all commands pass with canonical behavior preserved.
 
-- [ ] **Step 5: Commit compatibility migration**
+- [ ] **Step 5: Commit the complete atomic workspace migration**
 
 ```bash
-rtk git add crates/rollshot-image-document crates/rollshot-app/src/result_workspace crates/rollshot-app/src/timeline_workspace
-rtk git commit -m "refactor(annotation): use canonical annotation construction"
+rtk git add crates/rollshot-image-document crates/rollshot-app/src/result_workspace/{canvas.rs,update.rs,ocr_text.rs} crates/rollshot-app/src/timeline_workspace/{annotation.rs,update.rs}
+rtk git commit -m "feat(annotation): store and edit annotation styles"
 ```
 
-### Task 5: Persist typed next-object defaults without clobbering config
+### Task 3: Persist typed next-object defaults without clobbering config
 
 **Files:**
 
@@ -399,7 +628,7 @@ rtk git commit -m "refactor(annotation): use canonical annotation construction"
 - Produces: `AnnotationDefaults { number: NumberStyle, text: TextStyle }`.
 - Produces: `LoadedAnnotationDefaults { values: AnnotationDefaults, warnings: Vec<String> }`.
 - Produces: `load_from(path: &Path) -> LoadedAnnotationDefaults` and `save_to(path: &Path, values: &AnnotationDefaults) -> Result<(), String>`.
-- Produces: `AnnotationDefaultsState { values, config_path, warning_reported }` owned by `ResultWorkspace`.
+- Produces: `AnnotationDefaultsState { values, config_path, warning_reported }` owned by `ResultWorkspace` and `InlineMessage::Warning(String)` for non-blocking persistence/load warnings.
 
 - [ ] **Step 1: Enable serde for shared style values and write persistence tests**
 
@@ -432,6 +661,17 @@ fn save_preserves_unrelated_and_unknown_sections() {
 }
 
 #[test]
+fn failed_atomic_write_leaves_existing_config_bytes_unchanged() {
+    let original = b"[daemon]\ncapture_region_hotkey = \"Alt+Shift+6\"\n";
+    write_bytes(original);
+    let result = save_to_with_writer(&path(), &AnnotationDefaults::default(), |_path, _bytes| {
+        Err("injected atomic write failure".to_string())
+    });
+    assert_eq!(result, Err("injected atomic write failure".to_string()));
+    assert_eq!(std::fs::read(path()).unwrap(), original);
+}
+
+#[test]
 fn invalid_field_falls_back_with_one_warning() {
     write_config("[annotation_defaults.text]\nfont_size = \"Px99\"\n");
     let loaded = load_from(&path());
@@ -459,24 +699,32 @@ pub struct AnnotationDefaults {
 }
 
 pub fn save_to(path: &Path, values: &AnnotationDefaults) -> Result<(), String> {
+    save_to_with_writer(path, values, write_temp_sync_rename)
+}
+
+fn save_to_with_writer(
+    path: &Path,
+    values: &AnnotationDefaults,
+    writer: impl FnOnce(&Path, &[u8]) -> Result<(), String>,
+) -> Result<(), String> {
     let mut root = read_existing_table_or_empty(path)?;
     root.insert("annotation_defaults".into(), toml::Value::try_from(values).map_err(|e| format!("serialize annotation defaults: {e}"))?);
     let text = toml::to_string_pretty(&root).map_err(|e| format!("serialize config.toml: {e}"))?;
     let parent = path.parent().ok_or_else(|| "configuration path has no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| format!("create config directory: {e}"))?;
-    std::fs::write(path, text).map_err(|e| format!("write config.toml: {e}"))
+    writer(path, text.as_bytes())
 }
 ```
 
-On malformed whole-file TOML, load canonical defaults with one warning and refuse to overwrite the malformed file. On per-field decode failure, retain valid sibling fields, default only the invalid field, and return one combined warning string.
+`write_temp_sync_rename` writes a uniquely named sibling file, calls `sync_all`, then renames it over `config.toml`; every error removes the temporary file and leaves the original bytes unchanged. On malformed whole-file TOML, load canonical defaults with one `InlineMessage::Warning` and refuse to overwrite the malformed file. On per-field decode failure, retain valid sibling fields, default only the invalid field, and return one combined warning string.
 
 - [ ] **Step 4: Wire defaults into workspace construction with test injection**
 
-Add `ResultWorkspace::with_loaded_defaults(...)` for tests and make product `new(...)` call `config::config_path()` then `annotation_defaults::load_from`. Store warnings as the existing inline warning/error text without replacing a more important initial error; retain a `warning_reported` flag for later save failures.
+Add `ResultWorkspace::with_loaded_defaults(...)` for tests and make product `new(...)` call `config::config_path()` then `annotation_defaults::load_from`. Store warnings as `InlineMessage::Warning` without replacing a more important initial error; retain a `warning_reported` flag for later save failures.
 
 - [ ] **Step 5: Run persistence and workspace-construction tests**
 
-Run: `rtk cargo test -p rollshot-app annotation_defaults::tests result_workspace::tests`
+Run: `rtk cargo test -p rollshot-app annotation_defaults::tests && rtk cargo test -p rollshot-app result_workspace::tests`
 
 Expected: all tests pass without reading or writing the developer's real config directory.
 
@@ -487,7 +735,7 @@ rtk git add crates/rollshot-app/Cargo.toml crates/rollshot-app/src/result_worksp
 rtk git commit -m "feat(annotation): persist editor style defaults"
 ```
 
-### Task 6: Add property targets and transactional editor state
+### Task 4: Add property targets and transactional editor state
 
 **Files:**
 
@@ -501,7 +749,7 @@ rtk git commit -m "feat(annotation): persist editor style defaults"
 - Produces: `PropertyTarget::{NumberTool,TextTool,Annotation(AnnotationId)}`.
 - Produces: `ColorProperty::{NumberAccent,TextColor,TextBackground}`.
 - Produces: `ColorTransaction { target, property, original: Rgb8, preview: Rgb8, hex: String }`.
-- Produces: `PropertyState { color: Option<ColorTransaction>, next_number_input: String }` inside `EditorState`.
+- Produces: `PropertyState { color: Option<ColorTransaction>, next_number_input: String, popup: Option<Popup> }` inside `EditorState`, where `Popup::{CopyMenu,MoreMenu,ColorPicker}` guarantees one transient popup at a time.
 - Produces: messages `SetNumberSize`, `SetTextSize`, `ToggleTextBackground`, `NextNumberInputChanged`, `CommitNextNumber`, `OpenColorPicker`, `PreviewColor`, `ColorHexChanged`, `ApplyColor`, and `CancelColor`.
 
 - [ ] **Step 1: Write pure target and transaction tests**
@@ -566,7 +814,7 @@ For annotation targets, call exactly one `set_number_style` or `set_text_style`.
 
 - [ ] **Step 5: Run property, history, and persistence tests**
 
-Run: `rtk cargo test -p rollshot-app result_workspace::properties::tests result_workspace::update::tests`
+Run: `rtk cargo test -p rollshot-app result_workspace::properties::tests && rtk cargo test -p rollshot-app result_workspace::update::tests`
 
 Expected: property target, Apply/Cancel, one-entry history, no-op, and persistence-warning tests pass.
 
@@ -577,7 +825,7 @@ rtk git add crates/rollshot-app/src/result_workspace/{properties.rs,canvas.rs,mo
 rtk git commit -m "feat(annotation): add transactional property editing"
 ```
 
-### Task 7: Use defaults for creation and styles for live canvas previews
+### Task 5: Use defaults for creation and styles for live canvas previews
 
 **Files:**
 
@@ -587,9 +835,9 @@ rtk git commit -m "feat(annotation): add transactional property editing"
 
 **Interfaces:**
 
-- Consumes: `AnnotationDefaultsState` from Task 5 and property previews from Task 6.
+- Consumes: `AnnotationDefaultsState` from Task 3 and property previews from Task 4.
 - Preserves: one document edit per creation/release and one per completed inline Text session.
-- Produces: app-only preview annotation selection that overlays a transaction style without entering document history or flatten output.
+- Produces: `AnnotationCanvas::property_preview: Option<Annotation>` carrying at most one app-only preview clone without entering document history or flatten output.
 
 - [ ] **Step 1: Write creation-default and preview-isolation tests**
 
@@ -636,11 +884,11 @@ On Text draft commit submit its captured creation style, not the current global 
 
 - [ ] **Step 4: Render preview styles app-only**
 
-Add `properties::preview_annotation(state, annotation) -> Option<Annotation>` that clones only the selected annotation and substitutes the transaction preview style. In `AnnotationCanvas::draw`, use the preview clone for that selected ID; continue passing the committed document to flatten/Copy/Save.
+Add `properties::preview_annotation(state) -> Option<Annotation>` that clones only the selected annotation and substitutes the transaction preview style. Build it in `canvas_view` and pass it as `AnnotationCanvas::property_preview`; in `AnnotationCanvas::draw`, use that clone only when its ID matches the committed annotation being drawn. Continue passing the committed document to flatten/Copy/Save.
 
 - [ ] **Step 5: Run gestures, canvas, flatten, and dirty-state tests**
 
-Run: `rtk cargo test -p rollshot-app result_workspace::canvas::tests result_workspace::update::tests && rtk cargo test -p rollshot-image-document`
+Run: `rtk cargo test -p rollshot-app result_workspace::canvas::tests && rtk cargo test -p rollshot-app result_workspace::update::tests && rtk cargo test -p rollshot-image-document`
 
 Expected: creation/default and preview isolation tests pass; existing gesture/history tests remain green.
 
@@ -651,7 +899,7 @@ rtk git add crates/rollshot-app/src/result_workspace/{canvas.rs,update.rs,view.r
 rtk git commit -m "feat(annotation): apply defaults to annotation creation"
 ```
 
-### Task 8: Build the two-row responsive toolbar and property controls
+### Task 6: Build the two-row responsive toolbar and property controls
 
 **Files:**
 
@@ -699,6 +947,18 @@ fn active_overflow_tool_marks_more_active_and_names_it() {
 ```
 
 Test that Select with no selection has no properties, selected Number/Text show only supported controls, Redaction shows none, and creation tools show defaults.
+
+Add deterministic picker-math tests:
+
+```rust
+#[test]
+fn saturation_value_and_hue_mapping_clamp_at_every_edge() {
+    assert_eq!(sv_from_point(Point::new(-1.0, 121.0), Size::new(220.0, 120.0)), (0.0, 0.0));
+    assert_eq!(sv_from_point(Point::new(220.0, 0.0), Size::new(220.0, 120.0)), (1.0, 1.0));
+    assert_eq!(hue_from_x(-5.0, 220.0), 0.0);
+    assert_eq!(hue_from_x(225.0, 220.0), 360.0);
+}
+```
 
 - [ ] **Step 2: Run toolbar tests and confirm missing model**
 
@@ -756,7 +1016,7 @@ Keep the existing `view.rs` construction tests and add pure routing/model assert
 
 - [ ] **Step 7: Run toolbar and view tests**
 
-Run: `rtk cargo test -p rollshot-app result_workspace::toolbar::tests result_workspace::properties::tests result_workspace::view::tests`
+Run: `rtk cargo test -p rollshot-app result_workspace::toolbar::tests && rtk cargo test -p rollshot-app result_workspace::properties::tests && rtk cargo test -p rollshot-app result_workspace::view::tests`
 
 Expected: responsive routing, contextual properties, More active state, and picker behavior tests pass.
 
@@ -767,7 +1027,7 @@ rtk git add crates/rollshot-app/src/result_workspace/{toolbar.rs,properties.rs,v
 rtk git commit -m "feat(annotation): add responsive editor toolbar"
 ```
 
-### Task 9: Lock keyboard precedence, failure behavior, and full verification
+### Task 7: Lock keyboard precedence, failure behavior, and full verification
 
 **Files:**
 
@@ -817,6 +1077,8 @@ fn failed_default_save_warns_once_and_keeps_memory_value() {
 ```
 
 Add integrated tests for Undo/Redo cancelling preview before history, invalid next number leaving state unchanged, Navigator refresh only after commit, Copy/Save excluding previews, and Opaque Redaction remaining black/255 after mixed edits.
+
+Add a tall-image test that uses a downscaled display, edits Number and Text styles near the bottom in full-resolution coordinates, then asserts live render bounds and flattened pixels remain anchored to the original image-space positions.
 
 - [ ] **Step 2: Run integrated tests and confirm failures**
 
