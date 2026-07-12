@@ -74,6 +74,7 @@ pub struct EditorState {
     pub text_draft: Option<TextDraft>,
     pub navigator_open: bool,
     pub copy_menu_open: bool,
+    pub more_menu_open: bool,
     /// Document `state_id` at the last successful Save As (dirty marker).
     pub saved_state_id: u64,
     /// Last canvas press, for double-click detection.
@@ -95,6 +96,7 @@ impl EditorState {
             text_draft: None,
             navigator_open,
             copy_menu_open: false,
+            more_menu_open: false,
             saved_state_id,
             last_press: None,
             navigator_items: Vec::new(),

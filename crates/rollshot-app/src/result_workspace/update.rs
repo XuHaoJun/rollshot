@@ -91,6 +91,8 @@ pub enum Message {
     NavigatorJump(AnnotationId),
     /// Toggle the Copy menu dropdown.
     ToggleCopyMenu,
+    /// Toggle the More overflow menu dropdown.
+    ToggleMoreMenu,
     /// Canvas pointer pressed (image-space coordinate).
     CanvasPressed(rollshot_image_document::ImagePoint),
     /// Canvas pointer moved (image-space coordinate).
@@ -231,6 +233,7 @@ impl PartialEq for Message {
             (Self::ToggleNavigator, Self::ToggleNavigator) => true,
             (Self::NavigatorJump(a), Self::NavigatorJump(b)) => a == b,
             (Self::ToggleCopyMenu, Self::ToggleCopyMenu) => true,
+            (Self::ToggleMoreMenu, Self::ToggleMoreMenu) => true,
             (Self::CanvasPressed(a), Self::CanvasPressed(b)) => a == b,
             (Self::CanvasMoved(a), Self::CanvasMoved(b)) => a == b,
             (Self::CanvasReleased(a), Self::CanvasReleased(b)) => a == b,
@@ -409,6 +412,7 @@ pub(crate) fn handle_canvas_pressed(
 ) -> Task<Message> {
     commit_text_draft(state);
     state.editor.copy_menu_open = false;
+    state.editor.more_menu_open = false;
 
     let scale = current_scale(state);
     let tolerance = HIT_TOLERANCE_SCREEN / scale;
@@ -814,6 +818,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 return Task::none();
             }
             commit_text_draft(state);
+            state.editor.more_menu_open = false;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
                 state.editor.drag = None;
@@ -871,6 +876,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.pending_unredacted_action = None;
             } else if state.editor.copy_menu_open {
                 state.editor.copy_menu_open = false;
+            } else if state.editor.more_menu_open {
+                state.editor.more_menu_open = false;
             } else if state.editor.text_draft.is_some() {
                 state.editor.text_draft = None;
             } else if state.editor.drag.is_some() {
@@ -916,6 +923,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ToggleCopyMenu => {
             commit_text_draft(state);
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
+            Task::none()
+        }
+        Message::ToggleMoreMenu => {
+            state.editor.more_menu_open = !state.editor.more_menu_open;
             Task::none()
         }
         Message::TextDraftAction(action) => {
