@@ -87,154 +87,104 @@ pub fn parse_hex_rgb(input: &str) -> Result<Rgb8, &'static str> {
     Ok(Rgb8::new(r, g, b))
 }
 
+fn number_size_row(
+    current: rollshot_image_document::NumberSize,
+) -> iced::Element<'static, Message> {
+    use iced::widget::{button, row, text};
+
+    row![
+        text("Size:"),
+        button(text("S"))
+            .on_press(Message::SetNumberSize(
+                rollshot_image_document::NumberSize::Small
+            ))
+            .style(if current == rollshot_image_document::NumberSize::Small {
+                button::primary
+            } else {
+                button::secondary
+            }),
+        button(text("M"))
+            .on_press(Message::SetNumberSize(
+                rollshot_image_document::NumberSize::Medium
+            ))
+            .style(if current == rollshot_image_document::NumberSize::Medium {
+                button::primary
+            } else {
+                button::secondary
+            }),
+        button(text("L"))
+            .on_press(Message::SetNumberSize(
+                rollshot_image_document::NumberSize::Large
+            ))
+            .style(if current == rollshot_image_document::NumberSize::Large {
+                button::primary
+            } else {
+                button::secondary
+            }),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn text_size_row() -> iced::Element<'static, Message> {
+    use iced::widget::{button, row, text};
+
+    row![
+        text("Size:"),
+        button(text("14")).on_press(Message::SetTextSize(
+            rollshot_image_document::TextSize::Px14
+        )),
+        button(text("18")).on_press(Message::SetTextSize(
+            rollshot_image_document::TextSize::Px18
+        )),
+        button(text("24")).on_press(Message::SetTextSize(
+            rollshot_image_document::TextSize::Px24
+        )),
+        button(text("32")).on_press(Message::SetTextSize(
+            rollshot_image_document::TextSize::Px32
+        )),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn text_bg_toggle(has_bg: bool) -> iced::Element<'static, Message> {
+    use iced::widget::{button, text};
+
+    button(text(if has_bg { "BG On" } else { "BG Off" }))
+        .on_press(Message::ToggleTextBackground)
+        .into()
+}
+
 /// Build the property controls row for the current tool/selection.
 ///
 /// Returns `None` when the active tool has no associated properties (Redact,
 /// OcrText, Select with no matching annotation). The caller wraps this in a
 /// conditional row to keep the widget tree stable.
 pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
-    use iced::widget::{button, row, text};
+    use iced::widget::row;
 
     let target = property_target(state)?;
     match target {
         PropertyTarget::NumberTool => {
             let defaults = &state.annotation_defaults.values.number;
-            let size_row = row![
-                text("Size:"),
-                button(text("S"))
-                    .on_press(Message::SetNumberSize(
-                        rollshot_image_document::NumberSize::Small
-                    ))
-                    .style(
-                        if defaults.size == rollshot_image_document::NumberSize::Small {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }
-                    ),
-                button(text("M"))
-                    .on_press(Message::SetNumberSize(
-                        rollshot_image_document::NumberSize::Medium
-                    ))
-                    .style(
-                        if defaults.size == rollshot_image_document::NumberSize::Medium {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }
-                    ),
-                button(text("L"))
-                    .on_press(Message::SetNumberSize(
-                        rollshot_image_document::NumberSize::Large
-                    ))
-                    .style(
-                        if defaults.size == rollshot_image_document::NumberSize::Large {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }
-                    ),
-            ]
-            .spacing(4);
-            Some(size_row.into())
+            Some(number_size_row(defaults.size))
         }
         PropertyTarget::TextTool => {
             let defaults = &state.annotation_defaults.values.text;
-            let size_row = row![
-                text("Size:"),
-                button(text("14")).on_press(Message::SetTextSize(
-                    rollshot_image_document::TextSize::Px14
-                )),
-                button(text("18")).on_press(Message::SetTextSize(
-                    rollshot_image_document::TextSize::Px18
-                )),
-                button(text("24")).on_press(Message::SetTextSize(
-                    rollshot_image_document::TextSize::Px24
-                )),
-                button(text("32")).on_press(Message::SetTextSize(
-                    rollshot_image_document::TextSize::Px32
-                )),
-            ]
-            .spacing(4);
-            let bg_toggle = button(text(if defaults.background.is_some() {
-                "BG On"
-            } else {
-                "BG Off"
-            }))
-            .on_press(Message::ToggleTextBackground);
-            Some(row![size_row, bg_toggle].spacing(8).into())
+            let size = text_size_row();
+            let bg = text_bg_toggle(defaults.background.is_some());
+            Some(row![size, bg].spacing(8).into())
         }
-        PropertyTarget::Annotation(id) => {
-            // Annotation-specific: show controls based on annotation type
-            match state.document.image.annotation(id)? {
-                Annotation::NumberCallout { style, .. } => {
-                    let size_row = row![
-                        text("Size:"),
-                        button(text("S"))
-                            .on_press(Message::SetNumberSize(
-                                rollshot_image_document::NumberSize::Small
-                            ))
-                            .style(
-                                if style.size == rollshot_image_document::NumberSize::Small {
-                                    button::primary
-                                } else {
-                                    button::secondary
-                                }
-                            ),
-                        button(text("M"))
-                            .on_press(Message::SetNumberSize(
-                                rollshot_image_document::NumberSize::Medium
-                            ))
-                            .style(
-                                if style.size == rollshot_image_document::NumberSize::Medium {
-                                    button::primary
-                                } else {
-                                    button::secondary
-                                }
-                            ),
-                        button(text("L"))
-                            .on_press(Message::SetNumberSize(
-                                rollshot_image_document::NumberSize::Large
-                            ))
-                            .style(
-                                if style.size == rollshot_image_document::NumberSize::Large {
-                                    button::primary
-                                } else {
-                                    button::secondary
-                                }
-                            ),
-                    ]
-                    .spacing(4);
-                    Some(size_row.into())
-                }
-                Annotation::TextNote { style, .. } => {
-                    let size_row = row![
-                        text("Size:"),
-                        button(text("14")).on_press(Message::SetTextSize(
-                            rollshot_image_document::TextSize::Px14
-                        )),
-                        button(text("18")).on_press(Message::SetTextSize(
-                            rollshot_image_document::TextSize::Px18
-                        )),
-                        button(text("24")).on_press(Message::SetTextSize(
-                            rollshot_image_document::TextSize::Px24
-                        )),
-                        button(text("32")).on_press(Message::SetTextSize(
-                            rollshot_image_document::TextSize::Px32
-                        )),
-                    ]
-                    .spacing(4);
-                    let bg_toggle = button(text(if style.background.is_some() {
-                        "BG On"
-                    } else {
-                        "BG Off"
-                    }))
-                    .on_press(Message::ToggleTextBackground);
-                    Some(row![size_row, bg_toggle].spacing(8).into())
-                }
-                _ => None,
+        PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
+            Annotation::NumberCallout { style, .. } => Some(number_size_row(style.size)),
+            Annotation::TextNote { style, .. } => {
+                let size = text_size_row();
+                let bg = text_bg_toggle(style.background.is_some());
+                Some(row![size, bg].spacing(8).into())
             }
-        }
+            _ => None,
+        },
     }
 }
 

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::canvas::Tool;
 use super::Message;
 use super::ResultWorkspace;
@@ -250,6 +248,7 @@ pub fn hue_from_x(x: f32, width: f32) -> f32 {
 // HSV → RGB conversion (for canvas picker rendering)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     let c = v * s;
     let h2 = h / 60.0;
@@ -266,6 +265,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     (r1 + m, g1 + m, b1 + m)
 }
 
+#[allow(dead_code)]
 fn rgb_from_hsv(h: f32, s: f32, v: f32) -> Rgb8 {
     let (r, g, b) = hsv_to_rgb(h, s, v);
     Rgb8::new((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
@@ -275,6 +275,7 @@ fn rgb_from_hsv(h: f32, s: f32, v: f32) -> Rgb8 {
 // Saturation/Value canvas program
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 struct SaturationValue {
     hue: f32,
     selected: Option<Rgb8>,
@@ -353,6 +354,7 @@ impl canvas_widget::Program<Message> for SaturationValue {
 // Hue strip canvas program
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 struct HueStrip;
 
 impl canvas_widget::Program<Message> for HueStrip {
@@ -401,6 +403,7 @@ impl canvas_widget::Program<Message> for HueStrip {
     }
 }
 
+#[allow(dead_code)]
 fn rgb_to_hsv(rgb: Rgb8) -> (f32, f32, f32) {
     let r = rgb.r as f32 / 255.0;
     let g = rgb.g as f32 / 255.0;
@@ -491,6 +494,7 @@ fn more_button<'a>(model: &ToolbarModel, overflow_open: bool) -> Element<'a, Mes
     btn.into()
 }
 
+#[allow(dead_code)]
 fn overflow_item_button(item: &ToolbarItem) -> Element<'_, Message> {
     let msg = match item.kind {
         ToolbarItemKind::Tool(tool) => Message::SelectTool(tool),
