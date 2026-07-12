@@ -531,7 +531,7 @@ Allowed statuses are `Not started`, `Brainstorming`, `Spec approved`,
 
 | Slice | Status | Slice spec | Implementation plan | Implementation / verification | Last update |
 |---|---|---|---|---|---|
-| 1 — Editor And Style Foundation | Brainstorming | — | — | Codex session on `feat/annotation-editor-style-foundation`; written spec awaiting review | 2026-07-12 |
+| 1 — Editor And Style Foundation | Spec approved | [`2026-07-12-editor-and-style-foundation-design.md`](2026-07-12-editor-and-style-foundation-design.md) (`ec909a0`) | — | Branch `feat/annotation-editor-style-foundation`; written spec approved by user | 2026-07-12 |
 | 2 — Two-Point Tools | Not started | — | — | — | 2026-07-12 |
 | 3 — Box Tools | Not started | — | — | — | 2026-07-12 |
 | 4 — Freehand Tools | Not started | — | — | — | 2026-07-12 |

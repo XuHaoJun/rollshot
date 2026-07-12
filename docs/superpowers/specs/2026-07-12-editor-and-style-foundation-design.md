@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-12
 
-**Status:** Draft — pending written-spec review
+**Status:** Approved
 
 **Slice:** 1 — Editor And Style Foundation
 
