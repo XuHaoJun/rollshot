@@ -366,15 +366,14 @@ impl ImageDocument {
         style: crate::style::NumberStyle,
     ) -> Result<(), EditError> {
         let index = self.annotation_index(id)?;
-        let before = self.snapshot();
-        match &mut self.annotations[index] {
-            Annotation::NumberCallout { style: s, .. } => {
-                if *s == style {
-                    return Ok(());
-                }
-                *s = style;
-            }
+        match &self.annotations[index] {
+            Annotation::NumberCallout { style: s, .. } if *s == style => return Ok(()),
+            Annotation::NumberCallout { .. } => {}
             _ => return Err(EditError::WrongKind),
+        }
+        let before = self.snapshot();
+        if let Annotation::NumberCallout { style: s, .. } = &mut self.annotations[index] {
+            *s = style;
         }
         self.commit(before);
         Ok(())
@@ -386,15 +385,14 @@ impl ImageDocument {
         style: crate::style::TextStyle,
     ) -> Result<(), EditError> {
         let index = self.annotation_index(id)?;
-        let before = self.snapshot();
-        match &mut self.annotations[index] {
-            Annotation::TextNote { style: s, .. } => {
-                if *s == style {
-                    return Ok(());
-                }
-                *s = style;
-            }
+        match &self.annotations[index] {
+            Annotation::TextNote { style: s, .. } if *s == style => return Ok(()),
+            Annotation::TextNote { .. } => {}
             _ => return Err(EditError::WrongKind),
+        }
+        let before = self.snapshot();
+        if let Annotation::TextNote { style: s, .. } = &mut self.annotations[index] {
+            *s = style;
         }
         self.commit(before);
         Ok(())
@@ -588,10 +586,9 @@ impl ImageDocument {
                 let index = self.annotation_index(id)?;
                 match &mut self.annotations[index] {
                     Annotation::NumberCallout { style: s, .. } => {
-                        if *s == style {
-                            return Ok(());
+                        if *s != style {
+                            *s = style;
                         }
-                        *s = style;
                     }
                     _ => return Err(EditError::WrongKind),
                 }
@@ -600,10 +597,9 @@ impl ImageDocument {
                 let index = self.annotation_index(id)?;
                 match &mut self.annotations[index] {
                     Annotation::TextNote { style: s, .. } => {
-                        if *s == style {
-                            return Ok(());
+                        if *s != style {
+                            *s = style;
                         }
-                        *s = style;
                     }
                     _ => return Err(EditError::WrongKind),
                 }
