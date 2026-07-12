@@ -15,6 +15,8 @@ use rollshot_image_document::{
 };
 use std::time::Instant;
 
+use super::properties::PropertyState;
+
 /// Screen-space hit tolerance; divide by the viewport scale for image space.
 pub const HIT_TOLERANCE_SCREEN: f32 = 8.0;
 /// Screen-space slop and window for double-click detection.
@@ -76,6 +78,8 @@ pub struct EditorState {
     /// (spec §13). Keyed by the document state_id.
     pub navigator_items: Vec<rollshot_image_document::NavigatorItem>,
     pub navigator_items_state: Option<u64>,
+    /// Transactional property editing state (color picker, next number input).
+    pub properties: PropertyState,
 }
 
 impl EditorState {
@@ -91,6 +95,7 @@ impl EditorState {
             last_press: None,
             navigator_items: Vec::new(),
             navigator_items_state: None,
+            properties: PropertyState::default(),
         }
     }
 }

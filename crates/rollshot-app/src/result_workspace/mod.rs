@@ -7,6 +7,7 @@ mod navigator;
 pub(crate) mod ocr_layer;
 #[cfg(feature = "ocr")]
 pub(crate) mod ocr_text;
+pub(crate) mod properties;
 mod secure_sharing;
 mod update;
 mod view;
