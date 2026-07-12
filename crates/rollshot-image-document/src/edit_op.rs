@@ -3,6 +3,7 @@
 
 use crate::annotation::AnnotationId;
 use crate::geometry::{ImagePoint, ImageRect};
+use crate::style::{NumberStyle, TextStyle};
 
 /// A single document mutation. Add* allocate new ids; Update*/Delete reference
 /// annotations that exist BEFORE the batch is applied.
@@ -14,10 +15,12 @@ pub enum EditOp {
     AddTextNote {
         position: ImagePoint,
         text: String,
+        style: TextStyle,
     },
     AddNumberCallout {
         tip: ImagePoint,
         bubble: ImagePoint,
+        style: NumberStyle,
     },
     UpdateRedactionBounds {
         id: AnnotationId,
@@ -35,6 +38,17 @@ pub enum EditOp {
         id: AnnotationId,
         tip: ImagePoint,
         bubble: ImagePoint,
+    },
+    UpdateNumberStyle {
+        id: AnnotationId,
+        style: NumberStyle,
+    },
+    UpdateTextStyle {
+        id: AnnotationId,
+        style: TextStyle,
+    },
+    SetNextNumber {
+        value: u32,
     },
     Delete {
         id: AnnotationId,

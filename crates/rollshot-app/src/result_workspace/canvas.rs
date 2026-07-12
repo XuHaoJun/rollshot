@@ -305,18 +305,16 @@ impl AnnotationCanvas<'_> {
 
     fn draft_annotation(&self) -> Option<Annotation> {
         match &self.editor.drag {
-            Some(DragState::CreateNumber { tip, bubble }) => Some(Annotation::NumberCallout {
-                id: AnnotationId(u64::MAX),
-                number: self.document.next_number(),
-                tip: *tip,
-                bubble: *bubble,
-            }),
+            Some(DragState::CreateNumber { tip, bubble }) => Some(Annotation::number_callout(
+                AnnotationId(u64::MAX),
+                self.document.next_number(),
+                *tip,
+                *bubble,
+            )),
             Some(DragState::CreateRedaction { anchor, current }) => {
                 let rect = ImageRect::from_corners(*anchor, *current);
-                (!rect.is_empty()).then_some(Annotation::OpaqueRedaction {
-                    id: AnnotationId(u64::MAX),
-                    bounds: rect,
-                })
+                (!rect.is_empty())
+                    .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
             }
             Some(DragState::EditAnnotation { current, .. }) => Some(current.clone()),
             _ => None,
@@ -340,8 +338,13 @@ impl AnnotationCanvas<'_> {
                 handle(frame, *bubble, accent, white);
                 handle(frame, *tip, white, accent);
             }
-            Annotation::TextNote { position, text, .. } => {
-                let plate = rollshot_image_document::text_plate_rect(*position, text);
+            Annotation::TextNote {
+                position,
+                text,
+                style,
+                ..
+            } => {
+                let plate = rollshot_image_document::text_plate_rect(*position, text, *style);
                 frame.stroke(
                     &canvas::Path::rectangle(
                         Point::new(plate.x * s, plate.y * s),
@@ -618,12 +621,12 @@ mod tests {
 
     #[test]
     fn body_drag_preserves_grab_offset_and_moves_number_as_a_unit() {
-        let original = Annotation::NumberCallout {
-            id: AnnotationId(1),
-            number: 1,
-            tip: ImagePoint::new(0.0, 0.0),
-            bubble: ImagePoint::new(10.0, 10.0),
-        };
+        let original = Annotation::number_callout(
+            AnnotationId(1),
+            1,
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(10.0, 10.0),
+        );
         let moved = dragged_annotation(
             &original,
             HitPart::Body,

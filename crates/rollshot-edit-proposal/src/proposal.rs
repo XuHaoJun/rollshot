@@ -103,10 +103,12 @@ impl ProposedEdit {
             ProposedEdit::AddTextNote { position, text } => EditOp::AddTextNote {
                 position: *position,
                 text: text.clone(),
+                style: rollshot_image_document::TextStyle::default(),
             },
             ProposedEdit::AddNumberCallout { tip, bubble } => EditOp::AddNumberCallout {
                 tip: *tip,
                 bubble: *bubble,
+                style: rollshot_image_document::NumberStyle::default(),
             },
             ProposedEdit::UpdateRedactionBounds { id, bounds } => EditOp::UpdateRedactionBounds {
                 id: *id,
@@ -229,12 +231,17 @@ mod tests {
             .to_edit_op(),
             EditOp::AddTextNote {
                 position: p,
-                text: "x".into()
+                text: "x".into(),
+                style: rollshot_image_document::TextStyle::default(),
             }
         );
         assert_eq!(
             ProposedEdit::AddNumberCallout { tip: p, bubble: p }.to_edit_op(),
-            EditOp::AddNumberCallout { tip: p, bubble: p }
+            EditOp::AddNumberCallout {
+                tip: p,
+                bubble: p,
+                style: rollshot_image_document::NumberStyle::default(),
+            }
         );
         assert_eq!(
             ProposedEdit::UpdateRedactionBounds {
