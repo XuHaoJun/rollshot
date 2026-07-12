@@ -250,9 +250,11 @@ pub(crate) fn canvas_view<'a>(
             geometry.scale,
             geometry.image_origin,
         ),
+        annotation_defaults: &state.annotation_defaults,
         pending_proposal,
         review,
         selected_candidate,
+        property_preview: super::properties::preview_annotation(state),
     })
     .width(Length::Fixed(geometry.rendered_size.width))
     .height(Length::Fixed(geometry.rendered_size.height));

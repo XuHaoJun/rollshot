@@ -16,6 +16,7 @@ use rollshot_image_document::{
 use std::time::Instant;
 
 use super::properties::PropertyState;
+use rollshot_image_document::TextStyle;
 
 /// Screen-space hit tolerance; divide by the viewport scale for image space.
 pub const HIT_TOLERANCE_SCREEN: f32 = 8.0;
@@ -61,6 +62,9 @@ pub struct TextDraft {
     pub target: Option<AnnotationId>,
     pub position: ImagePoint,
     pub content: text_editor::Content,
+    /// Style captured at draft creation time; changing defaults mid-draft
+    /// does not restyle the in-progress draft.
+    pub style: TextStyle,
 }
 
 pub struct EditorState {
@@ -205,10 +209,16 @@ pub struct AnnotationCanvas<'a> {
     pub editor: &'a EditorState,
     pub scale: f32,
     pub visible: ImageRect,
+    pub annotation_defaults: &'a super::AnnotationDefaultsState,
     // SP6 workbench candidate overlay. `None` in Normal mode.
     pub pending_proposal: Option<&'a rollshot_edit_proposal::EditProposal>,
     pub review: Option<&'a super::workbench::CandidateReview>,
     pub selected_candidate: Option<rollshot_edit_proposal::CandidateId>,
+    /// App-only preview clone for live property editing. When present and
+    /// its ID matches a committed annotation, the preview shapes replace
+    /// the committed shapes on canvas — without entering document history
+    /// or flatten output.
+    pub property_preview: Option<Annotation>,
 }
 
 fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> Option<ImagePoint> {
@@ -310,12 +320,15 @@ impl AnnotationCanvas<'_> {
 
     fn draft_annotation(&self) -> Option<Annotation> {
         match &self.editor.drag {
-            Some(DragState::CreateNumber { tip, bubble }) => Some(Annotation::number_callout(
-                AnnotationId(u64::MAX),
-                self.document.next_number(),
-                *tip,
-                *bubble,
-            )),
+            Some(DragState::CreateNumber { tip, bubble }) => {
+                Some(Annotation::number_callout_with_style(
+                    AnnotationId(u64::MAX),
+                    self.document.next_number(),
+                    *tip,
+                    *bubble,
+                    self.annotation_defaults.values.number,
+                ))
+            }
             Some(DragState::CreateRedaction { anchor, current }) => {
                 let rect = ImageRect::from_corners(*anchor, *current);
                 (!rect.is_empty())
@@ -416,6 +429,12 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
                 continue;
             }
             if annotation_bounds(annotation).intersects(&self.visible) {
+                if let Some(ref preview) = self.property_preview {
+                    if preview.id() == annotation.id() {
+                        self.draw_annotation(&mut frame, preview);
+                        continue;
+                    }
+                }
                 self.draw_annotation(&mut frame, annotation);
             }
         }

@@ -84,6 +84,72 @@ pub fn parse_hex_rgb(input: &str) -> Result<Rgb8, &'static str> {
     Ok(Rgb8::new(r, g, b))
 }
 
+/// Build an app-only preview clone of the selected annotation with the
+/// current color transaction applied. Returns `None` when no preview is
+/// active or the selection is not a styled annotation.
+///
+/// **Critical invariant:** The clone never enters the document or flatten
+/// output — it is only used by `AnnotationCanvas` for live rendering.
+pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
+    let tx = state.editor.properties.color.as_ref()?;
+    let id = match tx.target {
+        PropertyTarget::Annotation(id) => id,
+        _ => return None,
+    };
+    let annotation = state.document.image.annotation(id)?.clone();
+    match annotation {
+        Annotation::NumberCallout {
+            id,
+            number,
+            tip,
+            bubble,
+            style,
+        } => {
+            if !matches!(tx.property, ColorProperty::NumberAccent) {
+                return None;
+            }
+            let mut s = style;
+            s.accent = tx.preview;
+            Some(Annotation::NumberCallout {
+                id,
+                number,
+                tip,
+                bubble,
+                style: s,
+            })
+        }
+        Annotation::TextNote {
+            id,
+            position,
+            text,
+            style,
+        } => match tx.property {
+            ColorProperty::TextColor => {
+                let mut s = style;
+                s.text_color = tx.preview;
+                Some(Annotation::TextNote {
+                    id,
+                    position,
+                    text,
+                    style: s,
+                })
+            }
+            ColorProperty::TextBackground => {
+                let mut s = style;
+                s.background = Some(tx.preview);
+                Some(Annotation::TextNote {
+                    id,
+                    position,
+                    text,
+                    style: s,
+                })
+            }
+            _ => None,
+        },
+        Annotation::OpaqueRedaction { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

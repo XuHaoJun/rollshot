@@ -428,10 +428,15 @@ pub(crate) fn handle_canvas_pressed(
                     {
                         state.editor.drag = None;
                         state.editor.selection = Some(hit.id);
+                        let existing_style = match state.document.image.annotation(hit.id) {
+                            Some(Annotation::TextNote { style, .. }) => *style,
+                            _ => state.annotation_defaults.values.text,
+                        };
                         state.editor.text_draft = Some(TextDraft {
                             target: Some(hit.id),
                             position: *position,
                             content: iced::widget::text_editor::Content::with_text(text),
+                            style: existing_style,
                         });
                         return iced::widget::operation::focus(state.text_editor_id.clone());
                     }
@@ -474,6 +479,7 @@ pub(crate) fn handle_canvas_pressed(
                 target: None,
                 position: point,
                 content: iced::widget::text_editor::Content::new(),
+                style: state.annotation_defaults.values.text,
             });
             iced::widget::operation::focus(state.text_editor_id.clone())
         }
@@ -554,7 +560,11 @@ pub(crate) fn handle_canvas_released(
     let point = point.clamp_to(w, h);
     match state.editor.drag.take() {
         Some(DragState::CreateNumber { tip, .. }) => {
-            let id = state.document.image.add_number_callout(tip, point);
+            let id = state.document.image.add_number_callout_with_style(
+                tip,
+                point,
+                state.annotation_defaults.values.number,
+            );
             state.editor.selection = Some(id);
         }
         Some(DragState::CreateRedaction { anchor, .. }) => {
@@ -1730,7 +1740,12 @@ fn commit_text_draft(state: &mut super::ResultWorkspace) {
     let text = draft.content.text().trim_end().to_string();
     match draft.target {
         None => {
-            if let Ok(id) = state.document.image.add_text_note(draft.position, text) {
+            if let Ok(id) =
+                state
+                    .document
+                    .image
+                    .add_text_note_with_style(draft.position, text, draft.style)
+            {
                 state.editor.selection = Some(id);
             }
         }
@@ -3743,5 +3758,72 @@ mod tests {
         let before = state.document.image.state_id();
         let _ = update(&mut state, Message::ApplyColor);
         assert_eq!(state.document.image.state_id(), before);
+    }
+
+    // -- creation defaults (Task 5) ----------------------------------------
+
+    #[test]
+    fn number_creation_copies_current_tool_default() {
+        use rollshot_image_document::{NumberSize, NumberStyle};
+        let mut state = workspace_with_size(200, 200);
+        state.annotation_defaults.values.number.size = NumberSize::Large;
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(10.0, 10.0),
+        );
+        match &state.document.image.annotations()[0] {
+            Annotation::NumberCallout {
+                style: NumberStyle { size, .. },
+                ..
+            } => {
+                assert_eq!(*size, NumberSize::Large);
+            }
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_draft_captures_default_style_at_creation_time() {
+        use rollshot_image_document::TextSize;
+        let mut state = workspace_with_size(200, 100);
+        state.annotation_defaults.values.text.font_size = TextSize::Px32;
+        let _ = update(&mut state, Message::SelectTool(Tool::Text));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+        );
+        let draft = state.editor.text_draft.as_ref().expect("draft open");
+        assert_eq!(draft.style.font_size, TextSize::Px32);
+    }
+
+    #[test]
+    fn selected_color_preview_changes_canvas_shapes_not_flattened_document() {
+        use rollshot_image_document::{annotation_shapes as shapes_fn, Rgb8};
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let before = state.document.image.flatten();
+
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(0, 255, 0)));
+
+        let preview =
+            super::super::properties::preview_annotation(&state).expect("preview should exist");
+        let committed = state.document.image.annotation(id).unwrap();
+        assert_ne!(
+            shapes_fn(&preview),
+            shapes_fn(committed),
+            "preview shapes should differ from committed shapes"
+        );
+        assert_eq!(state.document.image.flatten(), before);
     }
 }
