@@ -47,6 +47,7 @@ pub struct PropertyState {
     pub next_number_input: String,
     #[allow(dead_code)]
     pub focus: Option<PropertyFocus>,
+    pub popup: Option<Popup>,
 }
 
 /// Determine the active property target based on the current tool and selection.
@@ -260,5 +261,6 @@ mod tests {
         assert!(ps.color.is_none());
         assert!(ps.next_number_input.is_empty());
         assert!(ps.focus.is_none());
+        assert!(ps.popup.is_none());
     }
 }

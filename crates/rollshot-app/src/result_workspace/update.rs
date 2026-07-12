@@ -142,6 +142,12 @@ pub enum Message {
     ApplyColor,
     /// Cancel the color transaction without mutation.
     CancelColor,
+    /// Set the number size for number callouts.
+    SetNumberSize(rollshot_image_document::NumberSize),
+    /// Set the text size for text notes.
+    SetTextSize(rollshot_image_document::TextSize),
+    /// Toggle the text background on/off for text notes.
+    ToggleTextBackground,
     #[cfg(feature = "ocr")]
     OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
     #[cfg(feature = "ocr")]
@@ -253,6 +259,9 @@ impl PartialEq for Message {
             (Self::ColorHexChanged(a), Self::ColorHexChanged(b)) => a == b,
             (Self::ApplyColor, Self::ApplyColor) => true,
             (Self::CancelColor, Self::CancelColor) => true,
+            (Self::SetNumberSize(a), Self::SetNumberSize(b)) => a == b,
+            (Self::SetTextSize(a), Self::SetTextSize(b)) => a == b,
+            (Self::ToggleTextBackground, Self::ToggleTextBackground) => true,
             #[cfg(feature = "ocr")]
             (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
             #[cfg(feature = "ocr")]
@@ -1663,7 +1672,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         {
                             let mut new_style = *style;
                             new_style.accent = tx.preview;
-                            let _ = state.document.image.set_number_style(id, new_style);
+                            if let Err(e) = state.document.image.set_number_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
                         }
                     }
                     ColorProperty::TextColor => {
@@ -1672,7 +1683,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         {
                             let mut new_style = *style;
                             new_style.text_color = tx.preview;
-                            let _ = state.document.image.set_text_style(id, new_style);
+                            if let Err(e) = state.document.image.set_text_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
                         }
                     }
                     ColorProperty::TextBackground => {
@@ -1681,7 +1694,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         {
                             let mut new_style = *style;
                             new_style.background = Some(tx.preview);
-                            let _ = state.document.image.set_text_style(id, new_style);
+                            if let Err(e) = state.document.image.set_text_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
                         }
                     }
                 },
@@ -1692,6 +1707,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.color = None;
             Task::none()
         }
+        Message::SetNumberSize(_size) => Task::none(),
+        Message::SetTextSize(_size) => Task::none(),
+        Message::ToggleTextBackground => Task::none(),
     }
 }
 
