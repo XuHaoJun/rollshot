@@ -2,7 +2,7 @@
 pub(crate) mod shortcut;
 pub(crate) mod tray;
 
-use crate::daemon::config::{DaemonConfig, Shortcut};
+use crate::daemon::config::DaemonConfig;
 use crate::daemon::core::{DaemonCore, DaemonEvent, LoopAction};
 use crate::daemon::process::CurrentExeLauncher;
 use crate::daemon::start_parts;
@@ -25,7 +25,7 @@ use winit::window::WindowId;
 /// diagram so the doc never drifts from the code.
 struct DaemonApp {
     core: DaemonCore<CurrentExeLauncher>,
-    hotkey: Shortcut,
+    config: DaemonConfig,
     proxy: EventLoopProxy<DaemonEvent>,
     shortcut: Option<shortcut::ShortcutGuard>,
     tray: Option<tray::TrayGuard>,
@@ -42,19 +42,43 @@ impl ApplicationHandler<DaemonEvent> for DaemonApp {
         event_loop.set_control_flow(ControlFlow::Wait);
 
         let proxy = self.proxy.clone();
-        let hotkey = self.hotkey.clone();
+        let region_hotkey = self.config.capture_region_hotkey.clone();
+        #[cfg(feature = "ocr")]
+        let text_hotkey = self.config.capture_text_hotkey.clone();
         match start_parts(
             || tray::TrayGuard::start(proxy.clone()),
-            || shortcut::ShortcutGuard::start(proxy.clone(), &hotkey),
+            || {
+                shortcut::ShortcutGuard::start(
+                    proxy.clone(),
+                    &region_hotkey,
+                    #[cfg(feature = "ocr")]
+                    text_hotkey.as_ref(),
+                )
+            },
         ) {
             Ok((tray, shortcut)) => {
                 self.tray = Some(tray);
                 self.shortcut = shortcut;
+                let text_shortcut_display = {
+                    #[cfg(feature = "ocr")]
+                    {
+                        self.config
+                            .capture_text_hotkey
+                            .as_ref()
+                            .map(|s| s.to_string())
+                            .unwrap_or_default()
+                    }
+                    #[cfg(not(feature = "ocr"))]
+                    {
+                        String::new()
+                    }
+                };
                 tracing::info!(
                     target: "rollshot::daemon::core",
                     version = env!("CARGO_PKG_VERSION"),
                     os = std::env::consts::OS,
-                    preferred_shortcut = %self.hotkey,
+                    preferred_shortcut = %self.config.capture_region_hotkey,
+                    text_shortcut = %text_shortcut_display,
                     shortcut_active = self.shortcut.is_some(),
                     "Rollshot tray daemon ready"
                 );
@@ -111,7 +135,7 @@ pub fn run(
 
     let mut app = DaemonApp {
         core,
-        hotkey: config.capture_region_hotkey.clone(),
+        config: config.clone(),
         proxy,
         tray: None,
         shortcut: None,

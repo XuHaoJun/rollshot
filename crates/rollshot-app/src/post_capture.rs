@@ -6,6 +6,46 @@ use crate::storage::Platform;
 #[cfg(target_os = "linux")]
 use crate::result_workspace::{run as run_workspace, ResultDocument};
 
+/// The intent behind a capture session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapturePurpose {
+    /// Normal capture: auto-save and present the result workspace / thumbnail.
+    Present,
+    /// OCR capture: recognize text and copy to clipboard.
+    Ocr { graphical_feedback: bool },
+}
+
+/// Dispatch decision after capture completion: whether there is post-capture
+/// work and, for OCR, which side-effect path to follow.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum PurposeCompletion {
+    Cancelled,
+    Present(rollshot_iced_overlay::CaptureResult),
+    Ocr {
+        image: image::RgbaImage,
+        graphical_feedback: bool,
+    },
+}
+
+/// Select the completion path based on the capture purpose and result.
+#[allow(dead_code)]
+pub fn select_completion(
+    purpose: CapturePurpose,
+    result: Option<rollshot_iced_overlay::CaptureResult>,
+) -> PurposeCompletion {
+    match result {
+        None => PurposeCompletion::Cancelled,
+        Some(cr) => match purpose {
+            CapturePurpose::Present => PurposeCompletion::Present(cr),
+            CapturePurpose::Ocr { graphical_feedback } => PurposeCompletion::Ocr {
+                image: cr.image,
+                graphical_feedback,
+            },
+        },
+    }
+}
+
 /// What the caller should present to the user after a capture completes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presentation {
@@ -108,6 +148,58 @@ mod tests {
             select_presentation(Platform::Macos, Err("disk full".to_string())),
             Presentation::MacosUnsavedWorkspace("disk full".to_string())
         );
+    }
+
+    #[test]
+    fn cancelled_ocr_has_no_post_capture_work() {
+        assert!(matches!(
+            select_completion(
+                CapturePurpose::Ocr {
+                    graphical_feedback: false
+                },
+                None
+            ),
+            PurposeCompletion::Cancelled
+        ));
+    }
+
+    #[test]
+    fn cancelled_present_has_no_post_capture_work() {
+        assert!(matches!(
+            select_completion(CapturePurpose::Present, None),
+            PurposeCompletion::Cancelled
+        ));
+    }
+
+    #[test]
+    fn present_purpose_preserves_result() {
+        let cr = capture_result();
+        match select_completion(CapturePurpose::Present, Some(cr.clone())) {
+            PurposeCompletion::Present(r) => {
+                assert_eq!(r.image.dimensions(), (1, 1));
+            }
+            other => panic!("expected Present, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ocr_purpose_extracts_image_and_feedback_flag() {
+        let cr = capture_result();
+        match select_completion(
+            CapturePurpose::Ocr {
+                graphical_feedback: true,
+            },
+            Some(cr),
+        ) {
+            PurposeCompletion::Ocr {
+                image,
+                graphical_feedback,
+            } => {
+                assert_eq!(image.dimensions(), (1, 1));
+                assert!(graphical_feedback);
+            }
+            other => panic!("expected Ocr, got {other:?}"),
+        }
     }
 
     #[test]

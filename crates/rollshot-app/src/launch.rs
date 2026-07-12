@@ -5,6 +5,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
+    Ocr {
+        options: InteractiveLaunchOptions,
+        graphical_feedback: bool,
+    },
     Daemon,
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
@@ -36,6 +40,9 @@ pub enum LaunchCommand {
     /// Capture a screenshot or scrolling capture (default when no subcommand).
     Capture(CaptureArgs),
 
+    /// Recognize text in a selected region and copy it to the clipboard.
+    Ocr(OcrArgs),
+
     /// Run Rollshot in the system tray and listen for the capture shortcut.
     Daemon,
 
@@ -52,6 +59,25 @@ pub enum LaunchCommand {
     /// Probe Action Guide input capability and exit.
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct OcrArgs {
+    /// Which capture backend to use.
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = rollshot_capture::KNOWN_BACKEND_NAMES,
+    )]
+    pub backend: String,
+
+    /// Include the cursor in captured frames.
+    #[arg(long, default_value_t = false)]
+    pub show_cursor: bool,
+
+    /// Show graphical feedback during capture (daemon children only).
+    #[arg(long, hide = true, default_value_t = false)]
+    pub graphical_feedback: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -141,6 +167,15 @@ pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode,
             }))
         }
         Some(LaunchCommand::Daemon) => Ok(LaunchMode::Daemon),
+        Some(LaunchCommand::Ocr(args)) => Ok(LaunchMode::Ocr {
+            options: InteractiveLaunchOptions {
+                backend: args.backend,
+                fps: 5,
+                show_cursor: args.show_cursor,
+                initial_request: CaptureRequest::screenshot_region(),
+            },
+            graphical_feedback: args.graphical_feedback,
+        }),
         #[cfg(feature = "action-guide")]
         Some(LaunchCommand::ActionGuide { fullscreen }) => {
             Ok(LaunchMode::ActionGuide { fullscreen })
@@ -330,5 +365,30 @@ mod tests {
     fn no_subcommand_still_selects_default_capture() {
         let mode = parse(&["rollshot-app"]).expect("parse default");
         assert!(matches!(mode, LaunchMode::Capture(_)));
+    }
+
+    #[test]
+    fn ocr_uses_screenshot_region_and_capture_flags() {
+        let mode = parse(&[
+            "rollshot-app",
+            "ocr",
+            "--backend",
+            "fixture",
+            "--show-cursor",
+        ])
+        .expect("ocr parse");
+        assert!(matches!(
+            mode,
+            LaunchMode::Ocr { options, graphical_feedback: false }
+                if options.backend == "fixture"
+                    && options.show_cursor
+                    && options.initial_request == CaptureRequest::screenshot_region()
+        ));
+    }
+
+    #[test]
+    fn ocr_rejects_workflow_and_scope_flags() {
+        assert!(parse(&["rollshot-app", "ocr", "--scope", "fullscreen"]).is_err());
+        assert!(parse(&["rollshot-app", "ocr", "--workflow", "scrolling"]).is_err());
     }
 }

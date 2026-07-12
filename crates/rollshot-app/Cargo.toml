@@ -12,13 +12,14 @@ path = "src/main.rs"
 
 [features]
 action-guide = ["dep:rollshot-action", "dep:rollshot-linux-input", "dep:rollshot-macos-input", "rollshot-iced-overlay/action-guide"]
-ocr = ["rollshot-vision/ocr"]
+ocr = ["rollshot-vision/ocr", "dep:notify-rust"]
 
 [dependencies]
 arboard = "3.4"
 async-stream = "0.3"
 chrono = "0.4"
 dirs = "6"
+notify-rust = { version = "4", optional = true }
 etcetera = { workspace = true }
 ffmpeg-sidecar = { workspace = true }
 fs4 = { workspace = true }

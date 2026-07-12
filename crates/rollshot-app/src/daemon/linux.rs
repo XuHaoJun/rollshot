@@ -17,7 +17,14 @@ impl LinuxPlatform {
         let tray_events = events.clone();
         let (tray, shortcut) = super::start_parts(
             || tray::TrayGuard::start(tray_events),
-            || shortcut::ShortcutGuard::start(events, &config.capture_region_hotkey),
+            || {
+                shortcut::ShortcutGuard::start(
+                    events,
+                    &config.capture_region_hotkey,
+                    #[cfg(feature = "ocr")]
+                    config.capture_text_hotkey.as_ref(),
+                )
+            },
         )?;
         Ok(Self {
             _shortcut: shortcut,

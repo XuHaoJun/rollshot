@@ -1,6 +1,8 @@
 use crate::daemon::core::DaemonEvent;
 
 pub(crate) const CAPTURE_ID: &str = "capture-region";
+#[cfg(feature = "ocr")]
+pub(crate) const TEXT_ID: &str = "capture-text";
 pub(crate) const QUIT_ID: &str = "quit-rollshot";
 
 /// Map a tray menu item id to the daemon semantic event it triggers. Unknown
@@ -8,6 +10,8 @@ pub(crate) const QUIT_ID: &str = "quit-rollshot";
 pub(crate) fn daemon_event_for(id: &str) -> Option<DaemonEvent> {
     match id {
         CAPTURE_ID => Some(DaemonEvent::CaptureRegion),
+        #[cfg(feature = "ocr")]
+        TEXT_ID => Some(DaemonEvent::CaptureText),
         QUIT_ID => Some(DaemonEvent::Quit),
         _ => None,
     }
@@ -43,9 +47,15 @@ impl TrayGuard {
     pub(crate) fn start(proxy: EventLoopProxy<DaemonEvent>) -> Result<Self, String> {
         let menu = Menu::new();
         let capture = MenuItem::with_id(MenuId::new(CAPTURE_ID), "Capture Region", true, None);
-        let quit = MenuItem::with_id(MenuId::new(QUIT_ID), "Quit Rollshot", true, None);
         menu.append(&capture)
             .map_err(|error| format!("failed to build tray menu: {error}"))?;
+        #[cfg(feature = "ocr")]
+        {
+            let text = MenuItem::with_id(MenuId::new(TEXT_ID), "Capture Text", true, None);
+            menu.append(&text)
+                .map_err(|error| format!("failed to build tray menu: {error}"))?;
+        }
+        let quit = MenuItem::with_id(MenuId::new(QUIT_ID), "Quit Rollshot", true, None);
         menu.append(&quit)
             .map_err(|error| format!("failed to build tray menu: {error}"))?;
 
@@ -95,6 +105,15 @@ mod tests {
         ));
         assert!(matches!(daemon_event_for(QUIT_ID), Some(DaemonEvent::Quit)));
         assert!(daemon_event_for("unknown").is_none());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn text_tray_id_maps_to_capture_text() {
+        assert!(matches!(
+            daemon_event_for(TEXT_ID),
+            Some(DaemonEvent::CaptureText)
+        ));
     }
 
     #[test]

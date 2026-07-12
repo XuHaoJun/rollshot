@@ -171,6 +171,7 @@ directives to enable diagnostics for specific subsystems:
 | `rollshot::stitch::verifier` | Match verification decisions |
 | `rollshot::stitch::canvas` | Canvas growth, append, and memory behavior |
 | `rollshot::save` | Auto-save, explicit save, and result handoff |
+| `rollshot::app::quick_ocr` | Region text capture lifecycle (assembly, clipboard, feedback) |
 
 Parent directives enable events from child targets. For example,
 `rollshot::stitch=debug` enables debug events from `rollshot::stitch`,
@@ -444,6 +445,48 @@ If the shortcut cannot be registered (e.g. another app owns it), the daemon
 logs a warning and keeps working through the menu. Starting a second daemon
 exits immediately without a second menu item. The shortcut uses Carbon hotkey
 registration and does not require Accessibility permission.
+
+### Region Text Capture (OCR)
+
+Rollshot can recognize text in a selected screen region and copy it to the
+clipboard. OCR is gated behind the `ocr` Cargo feature on `rollshot-app`.
+
+**CLI usage** (direct mode):
+
+```bash
+cargo run -p rollshot-app --features ocr -- ocr
+```
+
+This opens a region selector, runs OCR on the captured image, writes the
+recognized text to stdout (one line per text block, trailing newline), and
+copies it to the clipboard. Press Esc to cancel silently — no text is written
+to stdout or clipboard. If the selection is empty or no text is recognized,
+the clipboard is left untouched.
+
+**Daemon shortcuts:**
+
+| Platform | Region capture | Text capture |
+|----------|---------------|--------------|
+| Linux (KDE) | `Alt+Shift+6` | `Alt+Shift+7` |
+| macOS | `Command+Shift+6` | `Command+Shift+7` |
+
+The text-capture shortcut triggers region selection, runs OCR, and copies the
+result to the clipboard. On success, a desktop notification confirms the copy.
+On failure, a notification or error dialog reports the failure without
+revealing recognized text. The text-capture shortcut is disabled when the
+`ocr` feature is not enabled at build time.
+
+**Configuration:**
+
+```toml
+[daemon]
+capture_text_hotkey = "Alt+Shift+7"   # Linux
+# capture_text_hotkey = "Command+Shift+7"  # macOS
+```
+
+Both the region and text tray/shortcut entries require an OCR-enabled build.
+Without the `ocr` feature, the text shortcut is not registered and the `ocr`
+CLI subcommand returns an error.
 
 ## Manual Testing: macOS ScreenCaptureKit Capture
 

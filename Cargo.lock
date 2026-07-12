@@ -6283,6 +6283,7 @@ dependencies = [
  "imageproc 0.26.2",
  "ksni",
  "nix 0.29.0",
+ "notify-rust",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",

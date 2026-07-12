@@ -120,6 +120,7 @@ pub enum Message {
     /// The async folder-picker returned (None = cancelled).
     IssuePackFolderChosen(Option<PathBuf>),
     /// Background Issue Pack export completed.
+    #[allow(private_interfaces)]
     IssuePackFinished(Result<crate::issue_pack::IssuePackExportResult, String>),
     /// Close the Issue Pack dialog without exporting.
     IssuePackCancel,
@@ -271,9 +272,9 @@ fn prepare_ocr_task(state: &mut super::ResultWorkspace) -> Task<Message> {
     let image = state.document.image.source().clone();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || super::ocr_text::prepare_product_ocr(&image))
+            tokio::task::spawn_blocking(move || crate::product_ocr::prepare(&image))
                 .await
-                .unwrap_or(Err(super::ocr_text::ProductOcrError::Detect))
+                .unwrap_or(Err(crate::product_ocr::ProductOcrError::Detect))
         },
         Message::OcrPrepared,
     )
@@ -925,7 +926,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         #[cfg(feature = "ocr")]
         Message::OcrPrepared(Err(error)) => {
-            state.ocr_text.fail_prepare(error.clone());
+            state.ocr_text.fail_prepare(error);
             state.editor.tool = Tool::Select;
             state.message = Some(InlineMessage::Error(error.message().to_string()));
             Task::none()
@@ -3008,11 +3009,7 @@ mod tests {
     #[cfg(feature = "ocr")]
     #[test]
     fn command_c_maps_to_keyboard_copy() {
-        let msg = map_key_press(
-            &keyboard::Key::Character("c".into()),
-            keyboard::Modifiers::CTRL,
-            false,
-        );
+        let msg = map_key_press(&keyboard::Key::Character("c".into()), zmod(), false);
 
         assert_eq!(msg, Some(Message::KeyboardCopy));
     }

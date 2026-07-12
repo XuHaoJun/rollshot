@@ -4,7 +4,18 @@ use std::future::Future;
 use std::time::Duration;
 
 const SHORTCUT_ID: &str = "capture-region";
+#[cfg(feature = "ocr")]
+const TEXT_SHORTCUT_ID: &str = "capture-text";
 const PORTAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+pub fn event_for_shortcut(id: &str) -> Option<DaemonEvent> {
+    match id {
+        SHORTCUT_ID => Some(DaemonEvent::CaptureRegion),
+        #[cfg(feature = "ocr")]
+        TEXT_SHORTCUT_ID => Some(DaemonEvent::CaptureText),
+        _ => None,
+    }
+}
 
 pub struct ShortcutGuard {
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -26,9 +37,12 @@ pub(super) fn contains_capture_binding<'a>(ids: impl IntoIterator<Item = &'a str
 impl ShortcutGuard {
     pub fn start(
         events: std::sync::mpsc::Sender<DaemonEvent>,
-        shortcut: &Shortcut,
+        region_shortcut: &Shortcut,
+        #[cfg(feature = "ocr")] text_shortcut: Option<&Shortcut>,
     ) -> Result<Self, String> {
-        let preferred = preferred_trigger(shortcut);
+        let preferred_region = preferred_trigger(region_shortcut);
+        #[cfg(feature = "ocr")]
+        let preferred_text = text_shortcut.map(preferred_trigger);
         let (shutdown, receiver) = tokio::sync::watch::channel(false);
         let thread = std::thread::Builder::new()
             .name("rollshot-global-shortcut".into())
@@ -47,7 +61,13 @@ impl ShortcutGuard {
                         return;
                     }
                 };
-                if let Err(error) = runtime.block_on(run_portal(events, preferred, receiver)) {
+                if let Err(error) = runtime.block_on(run_portal(
+                    events,
+                    preferred_region,
+                    #[cfg(feature = "ocr")]
+                    preferred_text,
+                    receiver,
+                )) {
                     tracing::warn!(
                         target: "rollshot::daemon::shortcut",
                         %error,
@@ -98,7 +118,8 @@ where
 
 async fn run_portal(
     events: std::sync::mpsc::Sender<DaemonEvent>,
-    preferred: String,
+    preferred_region: String,
+    #[cfg(feature = "ocr")] preferred_text: Option<String>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     let Some(portal) = cancellable(
@@ -114,12 +135,24 @@ async fn run_portal(
     };
 
     let result = async {
-        let shortcut = ashpd::desktop::global_shortcuts::NewShortcut::new(
+        #[allow(unused_mut)]
+        let mut shortcuts = vec![ashpd::desktop::global_shortcuts::NewShortcut::new(
             SHORTCUT_ID,
             "Capture a Rollshot region",
         )
-        .preferred_trigger(Some(preferred.as_str()));
-        let shortcuts = [shortcut];
+        .preferred_trigger(Some(preferred_region.as_str()))];
+
+        #[cfg(feature = "ocr")]
+        if let Some(text_preferred) = &preferred_text {
+            shortcuts.push(
+                ashpd::desktop::global_shortcuts::NewShortcut::new(
+                    TEXT_SHORTCUT_ID,
+                    "Capture Rollshot text",
+                )
+                .preferred_trigger(Some(text_preferred.as_str())),
+            );
+        }
+
         let parent = ashpd::WindowIdentifier::default();
         let Some(request) = cancellable(
             portal.bind_shortcuts(&session, &shortcuts, &parent),
@@ -131,8 +164,22 @@ async fn run_portal(
         };
         let response = request.response().map_err(|error| error.to_string())?;
 
-        if !contains_capture_binding(response.shortcuts().iter().map(|shortcut| shortcut.id())) {
+        let bound_ids: Vec<&str> = response
+            .shortcuts()
+            .iter()
+            .map(|shortcut| shortcut.id())
+            .collect();
+
+        if !contains_capture_binding(bound_ids.iter().copied()) {
             return Err("portal did not bind capture-region".into());
+        }
+
+        #[cfg(feature = "ocr")]
+        if !bound_ids.contains(&TEXT_SHORTCUT_ID) && preferred_text.is_some() {
+            tracing::warn!(
+                target: "rollshot::daemon::shortcut",
+                "text shortcut not bound by portal; text capture via hotkey degraded"
+            );
         }
 
         let Some(mut activated) = cancellable(portal.receive_activated(), &mut shutdown).await?
@@ -151,8 +198,8 @@ async fn run_portal(
                             "global shortcut activation stream closed".into()
                         );
                     };
-                    if is_capture_shortcut(event.shortcut_id()) {
-                        let _ = events.send(DaemonEvent::CaptureRegion);
+                    if let Some(daemon_event) = event_for_shortcut(event.shortcut_id()) {
+                        let _ = events.send(daemon_event);
                     }
                 }
             }
@@ -215,5 +262,48 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn event_for_shortcut_routes_capture_region() {
+        assert_eq!(
+            event_for_shortcut("capture-region"),
+            Some(DaemonEvent::CaptureRegion)
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn event_for_shortcut_routes_capture_text() {
+        assert_eq!(
+            event_for_shortcut("capture-text"),
+            Some(DaemonEvent::CaptureText)
+        );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn event_for_shortcut_ignores_unknown_ids() {
+        assert_eq!(event_for_shortcut("unknown"), None);
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn region_only_binding_keeps_guard_active() {
+        let bound: Vec<&str> = vec!["capture-region"];
+        assert!(contains_capture_binding(bound.iter().copied()));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn empty_binding_detected_as_missing_region() {
+        assert!(!contains_capture_binding(std::iter::empty::<&str>()));
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn text_only_binding_detected_as_missing_region() {
+        let bound: Vec<&str> = vec!["capture-text"];
+        assert!(!contains_capture_binding(bound.iter().copied()));
     }
 }
