@@ -9,6 +9,7 @@ pub(crate) mod ocr_layer;
 pub(crate) mod ocr_text;
 pub(crate) mod properties;
 mod secure_sharing;
+pub(crate) mod toolbar;
 mod update;
 mod view;
 pub mod viewport;

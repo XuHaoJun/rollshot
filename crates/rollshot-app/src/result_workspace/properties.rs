@@ -1,6 +1,9 @@
+use iced::Element;
+
 use rollshot_image_document::{Annotation, AnnotationId, Rgb8};
 
 use super::canvas::Tool;
+use super::Message;
 use super::ResultWorkspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,157 @@ pub fn parse_hex_rgb(input: &str) -> Result<Rgb8, &'static str> {
     let g = u8::from_str_radix(&s[2..4], 16).map_err(|_| "invalid hex digit")?;
     let b = u8::from_str_radix(&s[4..6], 16).map_err(|_| "invalid hex digit")?;
     Ok(Rgb8::new(r, g, b))
+}
+
+/// Build the property controls row for the current tool/selection.
+///
+/// Returns `None` when the active tool has no associated properties (Redact,
+/// OcrText, Select with no matching annotation). The caller wraps this in a
+/// conditional row to keep the widget tree stable.
+pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
+    use iced::widget::{button, row, text};
+
+    let target = property_target(state)?;
+    match target {
+        PropertyTarget::NumberTool => {
+            let defaults = &state.annotation_defaults.values.number;
+            let size_row = row![
+                text("Size:"),
+                button(text("S"))
+                    .on_press(Message::SetNumberSize(
+                        rollshot_image_document::NumberSize::Small
+                    ))
+                    .style(
+                        if defaults.size == rollshot_image_document::NumberSize::Small {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }
+                    ),
+                button(text("M"))
+                    .on_press(Message::SetNumberSize(
+                        rollshot_image_document::NumberSize::Medium
+                    ))
+                    .style(
+                        if defaults.size == rollshot_image_document::NumberSize::Medium {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }
+                    ),
+                button(text("L"))
+                    .on_press(Message::SetNumberSize(
+                        rollshot_image_document::NumberSize::Large
+                    ))
+                    .style(
+                        if defaults.size == rollshot_image_document::NumberSize::Large {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }
+                    ),
+            ]
+            .spacing(4);
+            Some(size_row.into())
+        }
+        PropertyTarget::TextTool => {
+            let defaults = &state.annotation_defaults.values.text;
+            let size_row = row![
+                text("Size:"),
+                button(text("14")).on_press(Message::SetTextSize(
+                    rollshot_image_document::TextSize::Px14
+                )),
+                button(text("18")).on_press(Message::SetTextSize(
+                    rollshot_image_document::TextSize::Px18
+                )),
+                button(text("24")).on_press(Message::SetTextSize(
+                    rollshot_image_document::TextSize::Px24
+                )),
+                button(text("32")).on_press(Message::SetTextSize(
+                    rollshot_image_document::TextSize::Px32
+                )),
+            ]
+            .spacing(4);
+            let bg_toggle = button(text(if defaults.background.is_some() {
+                "BG On"
+            } else {
+                "BG Off"
+            }))
+            .on_press(Message::ToggleTextBackground);
+            Some(row![size_row, bg_toggle].spacing(8).into())
+        }
+        PropertyTarget::Annotation(id) => {
+            // Annotation-specific: show controls based on annotation type
+            match state.document.image.annotation(id)? {
+                Annotation::NumberCallout { style, .. } => {
+                    let size_row = row![
+                        text("Size:"),
+                        button(text("S"))
+                            .on_press(Message::SetNumberSize(
+                                rollshot_image_document::NumberSize::Small
+                            ))
+                            .style(
+                                if style.size == rollshot_image_document::NumberSize::Small {
+                                    button::primary
+                                } else {
+                                    button::secondary
+                                }
+                            ),
+                        button(text("M"))
+                            .on_press(Message::SetNumberSize(
+                                rollshot_image_document::NumberSize::Medium
+                            ))
+                            .style(
+                                if style.size == rollshot_image_document::NumberSize::Medium {
+                                    button::primary
+                                } else {
+                                    button::secondary
+                                }
+                            ),
+                        button(text("L"))
+                            .on_press(Message::SetNumberSize(
+                                rollshot_image_document::NumberSize::Large
+                            ))
+                            .style(
+                                if style.size == rollshot_image_document::NumberSize::Large {
+                                    button::primary
+                                } else {
+                                    button::secondary
+                                }
+                            ),
+                    ]
+                    .spacing(4);
+                    Some(size_row.into())
+                }
+                Annotation::TextNote { style, .. } => {
+                    let size_row = row![
+                        text("Size:"),
+                        button(text("14")).on_press(Message::SetTextSize(
+                            rollshot_image_document::TextSize::Px14
+                        )),
+                        button(text("18")).on_press(Message::SetTextSize(
+                            rollshot_image_document::TextSize::Px18
+                        )),
+                        button(text("24")).on_press(Message::SetTextSize(
+                            rollshot_image_document::TextSize::Px24
+                        )),
+                        button(text("32")).on_press(Message::SetTextSize(
+                            rollshot_image_document::TextSize::Px32
+                        )),
+                    ]
+                    .spacing(4);
+                    let bg_toggle = button(text(if style.background.is_some() {
+                        "BG On"
+                    } else {
+                        "BG Off"
+                    }))
+                    .on_press(Message::ToggleTextBackground);
+                    Some(row![size_row, bg_toggle].spacing(8).into())
+                }
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Build an app-only preview clone of the selected annotation with the
@@ -328,5 +482,73 @@ mod tests {
         assert!(ps.next_number_input.is_empty());
         assert!(ps.focus.is_none());
         assert!(ps.popup.is_none());
+    }
+
+    // -- property view tests (Task 6) ----------------------------------------
+
+    #[test]
+    fn select_with_no_selection_has_no_properties() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = None;
+        assert_eq!(property_target(&state), None);
+    }
+
+    #[test]
+    fn number_tool_shows_number_target() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Number;
+        assert_eq!(property_target(&state), Some(PropertyTarget::NumberTool));
+    }
+
+    #[test]
+    fn text_tool_shows_text_target() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Text;
+        assert_eq!(property_target(&state), Some(PropertyTarget::TextTool));
+    }
+
+    #[test]
+    fn redact_tool_shows_no_properties() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Redact;
+        assert_eq!(property_target(&state), None);
+    }
+
+    #[test]
+    fn selected_number_annotation_shows_annotation_target() {
+        let mut state = workspace();
+        let id = add_number(&mut state);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let target = property_target(&state);
+        assert!(matches!(target, Some(PropertyTarget::Annotation(id2)) if id2 == id));
+    }
+
+    #[test]
+    fn selected_text_annotation_shows_annotation_target() {
+        let mut state = workspace();
+        let id = add_text(&mut state);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let target = property_target(&state);
+        assert!(matches!(target, Some(PropertyTarget::Annotation(id2)) if id2 == id));
+    }
+
+    #[test]
+    fn number_size_label_matches_variants() {
+        assert_eq!(rollshot_image_document::NumberSize::ALL.len(), 3);
+        assert_eq!(rollshot_image_document::NumberSize::Small.scale(), 0.75);
+        assert_eq!(rollshot_image_document::NumberSize::Medium.scale(), 1.0);
+        assert_eq!(rollshot_image_document::NumberSize::Large.scale(), 1.3);
+    }
+
+    #[test]
+    fn text_size_label_matches_variants() {
+        assert_eq!(rollshot_image_document::TextSize::ALL.len(), 4);
+        assert!((rollshot_image_document::TextSize::Px14.pixels() - 14.0).abs() < f32::EPSILON);
+        assert!((rollshot_image_document::TextSize::Px18.pixels() - 18.0).abs() < f32::EPSILON);
+        assert!((rollshot_image_document::TextSize::Px24.pixels() - 24.0).abs() < f32::EPSILON);
+        assert!((rollshot_image_document::TextSize::Px32.pixels() - 32.0).abs() < f32::EPSILON);
     }
 }
