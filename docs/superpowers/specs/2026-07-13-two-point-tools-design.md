@@ -48,9 +48,10 @@ umbrella is revised with user approval.
 
 ## 4. Approved Product Decisions
 
-- `Arrow` remains directly visible in the second toolbar row.
-- `Line` is available from More at every supported width.
-- More shows active styling and the current tool name while Line is active.
+- `Line` and `Arrow` are directly visible at Wide and Compact widths.
+- Narrow keeps `Arrow` visible and moves `Line` into More.
+- More shows active styling and the current tool name while Narrow Line is
+  active.
 - Arrow uses a single filled-triangle head at the drag-release endpoint.
 - Arrow uses shortcut `A`; Line uses shortcut `L`.
 - Line and Arrow remain active after successful creation.
@@ -287,13 +288,16 @@ two-point annotation through the existing selection path.
 
 ### 9.1 Toolbar routing
 
-Arrow joins the directly visible tools at every supported density. Line is a
-tool entry in More at every supported density. This preserves the umbrella's
-approved visible-tool priority without adding a new split selector.
+Arrow joins the directly visible tools at every supported density. Line is
+directly visible at Wide and Compact densities and moves into More at Narrow.
+This follows the mature screenshot-editor convention of adjacent Line and
+Arrow tools when space permits while preserving the umbrella's approved
+narrow-width priority without adding a new split selector.
 
-When Line is active, More uses active styling and displays `Line`. Closing More
-does not change the active tool. Both entries retain tooltips and shortcut
-hints. Output actions remain pinned and never enter overflow.
+When Narrow Line is active, More uses active styling and displays `Line`.
+Closing More does not change the active tool. Line's tooltip is `Line (L) —
+Shift: Snap to 45°`; Arrow's tooltip is `Arrow (A) — Shift: Snap to 45°`.
+Output actions remain pinned and never enter overflow.
 
 ### 9.2 Persisted defaults
 
@@ -385,8 +389,8 @@ required. Config migration is missing-field-safe through canonical defaults.
 - Start edit, end edit, body translation, release commit, and cancellation.
 - Zoom-independent handle rendering and image-space hit tolerance.
 - Tool persistence after creation and no implicit selection.
-- Arrow direct visibility, Line More routing, active More state, and all
-  supported density classes.
+- Wide/Compact adjacent Line and Arrow visibility, Narrow Line More routing,
+  active More state, and all supported density classes.
 - `A`/`L` shortcuts and focused inline-editor/property-input precedence.
 - Independent Line/Arrow defaults, missing/invalid config fallback, unrelated
   config preservation, and non-blocking persistence failure.
@@ -419,8 +423,8 @@ stitching benchmark workflow.
 
 Both platform Result Workspace paths verify:
 
-- Arrow direct access, Line access through More, active-state visibility,
-  tooltips, and `A`/`L` shortcuts.
+- Wide/Compact adjacent Line and Arrow access, Narrow Line access through More,
+  active-state visibility, Shift hints, and `A`/`L` shortcuts.
 - Line and Arrow creation, sub-threshold cancellation, persistent active tool,
   and press-to-release Arrow direction.
 - Shift snapping during creation and endpoint editing.
