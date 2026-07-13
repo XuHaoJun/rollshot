@@ -380,6 +380,64 @@ fn active_two_point(state: &super::ResultWorkspace) -> Option<(TwoPointKind, Str
     }
 }
 
+fn prepare_shape_transaction(
+    kind: rollshot_image_document::ShapeKind,
+    id: Option<AnnotationId>,
+    original_stroke: StrokeStyle,
+    original_fill: Option<Rgb8>,
+    remembered: Rgb8,
+) -> super::properties::ShapeStyleTransaction {
+    super::properties::ShapeStyleTransaction {
+        id: id.unwrap_or(rollshot_image_document::AnnotationId(u64::MAX)),
+        kind,
+        original_stroke,
+        original_fill,
+        preview_stroke: original_stroke,
+        preview_fill: original_fill,
+        remembered_fill_color: remembered,
+    }
+}
+
+macro_rules! resolve_shape_transaction {
+    ($state:expr, $target:expr) => {{
+        let (kind, id, original_stroke, original_fill, remembered) = match $target {
+            super::properties::PropertyTarget::ShapeTool(kind) => {
+                let sd = $state.annotation_defaults.values.shape(kind);
+                (
+                    kind,
+                    None,
+                    sd.stroke,
+                    if sd.fill_enabled {
+                        Some(sd.fill_color)
+                    } else {
+                        None
+                    },
+                    sd.fill_color,
+                )
+            }
+            super::properties::PropertyTarget::Annotation(id) => {
+                match $state.document.image.annotation(id) {
+                    Some(Annotation::Shape {
+                        kind, stroke, fill, ..
+                    }) => {
+                        let remembered = $state.annotation_defaults.values.shape(*kind).fill_color;
+                        (*kind, Some(id), *stroke, *fill, remembered)
+                    }
+                    _ => return Task::none(),
+                }
+            }
+            _ => return Task::none(),
+        };
+        let new_tx =
+            prepare_shape_transaction(kind, id, original_stroke, original_fill, remembered);
+        let tx = $state.editor.properties.shape_style.get_or_insert(new_tx);
+        if id.is_some() && tx.id != id.unwrap() {
+            *tx = prepare_shape_transaction(kind, id, original_stroke, original_fill, remembered);
+        }
+        tx
+    }};
+}
+
 fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f32, f32) {
     match (annotation, part) {
         (Annotation::TwoPoint { start, .. }, HitPart::Body) => {
@@ -553,10 +611,10 @@ pub(crate) fn handle_canvas_pressed(
             Task::none()
         }
         Tool::Rectangle | Tool::Ellipse => {
-            let kind = match state.editor.tool {
-                Tool::Rectangle => rollshot_image_document::ShapeKind::Rectangle,
-                Tool::Ellipse => rollshot_image_document::ShapeKind::Ellipse,
-                _ => unreachable!(),
+            let kind = if state.editor.tool == Tool::Rectangle {
+                rollshot_image_document::ShapeKind::Rectangle
+            } else {
+                rollshot_image_document::ShapeKind::Ellipse
             };
             let shape_defaults = state.annotation_defaults.values.shape(kind);
             state.editor.drag = Some(DragState::CreateShape {
@@ -2024,124 +2082,18 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::PreviewShapeStrokeWidth(width) => {
-            use super::properties::ShapeStyleTransaction;
             let Some(target) = super::properties::property_target(state) else {
                 return Task::none();
             };
-            let (kind, id, original_stroke, original_fill, remembered) = match target {
-                super::properties::PropertyTarget::ShapeTool(kind) => {
-                    let sd = state.annotation_defaults.values.shape(kind);
-                    (
-                        kind,
-                        None,
-                        sd.stroke,
-                        if sd.fill_enabled {
-                            Some(sd.fill_color)
-                        } else {
-                            None
-                        },
-                        sd.fill_color,
-                    )
-                }
-                super::properties::PropertyTarget::Annotation(id) => {
-                    match state.document.image.annotation(id) {
-                        Some(Annotation::Shape {
-                            kind, stroke, fill, ..
-                        }) => {
-                            let remembered =
-                                state.annotation_defaults.values.shape(*kind).fill_color;
-                            (*kind, Some(id), *stroke, *fill, remembered)
-                        }
-                        _ => return Task::none(),
-                    }
-                }
-                _ => return Task::none(),
-            };
-            let tx = state
-                .editor
-                .properties
-                .shape_style
-                .get_or_insert(ShapeStyleTransaction {
-                    id: id.unwrap_or(rollshot_image_document::AnnotationId(u64::MAX)),
-                    kind,
-                    original_stroke,
-                    original_fill,
-                    preview_stroke: original_stroke,
-                    preview_fill: original_fill,
-                    remembered_fill_color: remembered,
-                });
-            if id.is_some() && tx.id != id.unwrap() {
-                *tx = ShapeStyleTransaction {
-                    id: id.unwrap(),
-                    kind,
-                    original_stroke,
-                    original_fill,
-                    preview_stroke: original_stroke,
-                    preview_fill: original_fill,
-                    remembered_fill_color: remembered,
-                };
-            }
+            let tx = resolve_shape_transaction!(state, target);
             tx.preview_stroke.width = width;
             Task::none()
         }
         Message::ToggleShapeFill => {
-            use super::properties::ShapeStyleTransaction;
             let Some(target) = super::properties::property_target(state) else {
                 return Task::none();
             };
-            let (kind, id, original_stroke, original_fill, remembered) = match target {
-                super::properties::PropertyTarget::ShapeTool(kind) => {
-                    let sd = state.annotation_defaults.values.shape(kind);
-                    (
-                        kind,
-                        None,
-                        sd.stroke,
-                        if sd.fill_enabled {
-                            Some(sd.fill_color)
-                        } else {
-                            None
-                        },
-                        sd.fill_color,
-                    )
-                }
-                super::properties::PropertyTarget::Annotation(id) => {
-                    match state.document.image.annotation(id) {
-                        Some(Annotation::Shape {
-                            kind, stroke, fill, ..
-                        }) => {
-                            let remembered =
-                                state.annotation_defaults.values.shape(*kind).fill_color;
-                            (*kind, Some(id), *stroke, *fill, remembered)
-                        }
-                        _ => return Task::none(),
-                    }
-                }
-                _ => return Task::none(),
-            };
-            let tx = state
-                .editor
-                .properties
-                .shape_style
-                .get_or_insert(ShapeStyleTransaction {
-                    id: id.unwrap_or(rollshot_image_document::AnnotationId(u64::MAX)),
-                    kind,
-                    original_stroke,
-                    original_fill,
-                    preview_stroke: original_stroke,
-                    preview_fill: original_fill,
-                    remembered_fill_color: remembered,
-                });
-            if id.is_some() && tx.id != id.unwrap() {
-                *tx = ShapeStyleTransaction {
-                    id: id.unwrap(),
-                    kind,
-                    original_stroke,
-                    original_fill,
-                    preview_stroke: original_stroke,
-                    preview_fill: original_fill,
-                    remembered_fill_color: remembered,
-                };
-            }
+            let tx = resolve_shape_transaction!(state, target);
             tx.preview_fill = if let Some(color) = tx.preview_fill {
                 tx.remembered_fill_color = color;
                 None
@@ -2149,16 +2101,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 Some(tx.remembered_fill_color)
             };
             // Tool-default: persist immediately
-            if id.is_none() {
-                if let super::properties::PropertyTarget::ShapeTool(kind) = target {
-                    let sd = state.annotation_defaults.values.shape_mut(kind);
-                    sd.fill_enabled = tx.preview_fill.is_some();
-                    if let Some(color) = tx.preview_fill {
-                        sd.fill_color = color;
-                    }
-                    state.editor.properties.shape_style = None;
-                    persist_annotation_defaults(state);
+            if let super::properties::PropertyTarget::ShapeTool(kind) = target {
+                let sd = state.annotation_defaults.values.shape_mut(kind);
+                sd.fill_enabled = tx.preview_fill.is_some();
+                if let Some(color) = tx.preview_fill {
+                    sd.fill_color = color;
                 }
+                state.editor.properties.shape_style = None;
+                persist_annotation_defaults(state);
             }
             Task::none()
         }
@@ -5450,5 +5400,54 @@ mod tests {
         let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
         let _ = update(&mut state, Message::Undo);
         assert!(state.editor.properties.shape_style.is_none());
+    }
+
+    #[test]
+    fn apply_shape_style_with_stale_id_leaves_state_unchanged() {
+        use super::super::properties::ShapeStyleTransaction;
+
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let defaults_before = state.annotation_defaults.values.clone();
+        let history_before = state.document.image.state_id();
+        let doc_before = state.document.image.flatten();
+
+        // Inject a transaction referencing a nonexistent annotation.
+        let stale_id = AnnotationId(9999);
+        state.editor.properties.shape_style = Some(ShapeStyleTransaction {
+            id: stale_id,
+            kind: rollshot_image_document::ShapeKind::Rectangle,
+            original_stroke: StrokeStyle {
+                color: Rgb8::new(0, 0, 0),
+                width: 1.0,
+                opacity: 1.0,
+            },
+            original_fill: None,
+            preview_stroke: StrokeStyle {
+                color: Rgb8::new(255, 0, 0),
+                width: 99.0,
+                opacity: 1.0,
+            },
+            preview_fill: Some(Rgb8::new(0, 255, 0)),
+            remembered_fill_color: Rgb8::new(0, 0, 0),
+        });
+
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+
+        // Transaction should remain (set_shape_style errored, take() was called
+        // but the error is recorded as inline message).
+        assert!(state.editor.properties.shape_style.is_none());
+        assert!(matches!(
+            state.message,
+            Some(InlineMessage::Error(ref e)) if e.contains("annotation does not exist")
+        ));
+        // Document, history, and defaults must be unchanged.
+        assert_eq!(state.document.image.state_id(), history_before);
+        assert_eq!(state.annotation_defaults.values, defaults_before);
+        let doc_after = state.document.image.flatten();
+        assert_eq!(doc_before.dimensions(), doc_after.dimensions());
+        // Compare a sample pixel to confirm no mutation.
+        let px_before = doc_before.get_pixel(5, 5);
+        let px_after = doc_after.get_pixel(5, 5);
+        assert_eq!(px_before, px_after);
     }
 }
