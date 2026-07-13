@@ -1,12 +1,14 @@
-use rollshot_image_document::{NumberSize, NumberStyle, Rgb8, TextSize, TextStyle};
+use rollshot_image_document::{NumberSize, NumberStyle, Rgb8, StrokeStyle, TextSize, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AnnotationDefaults {
     pub number: NumberStyle,
     pub text: TextStyle,
+    pub line: StrokeStyle,
+    pub arrow: StrokeStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -61,9 +63,16 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
     let mut warnings = Vec::new();
     let number = load_number_style(&section, &mut warnings);
     let text = load_text_style(&section, &mut warnings);
+    let line = load_stroke_style(&section, "line", &mut warnings);
+    let arrow = load_stroke_style(&section, "arrow", &mut warnings);
 
     LoadedAnnotationDefaults {
-        values: AnnotationDefaults { number, text },
+        values: AnnotationDefaults {
+            number,
+            text,
+            line,
+            arrow,
+        },
         warnings,
     }
 }
@@ -148,6 +157,62 @@ fn load_text_style(parent: &toml::Table, warnings: &mut Vec<String>) -> TextStyl
     }
 }
 
+fn load_stroke_style(parent: &toml::Table, key: &str, warnings: &mut Vec<String>) -> StrokeStyle {
+    let table = match parent.get(key) {
+        Some(toml::Value::Table(t)) => t,
+        None => return StrokeStyle::default(),
+        _ => {
+            warnings.push(format!(
+                "annotation_defaults.{key} is not a table — using defaults"
+            ));
+            return StrokeStyle::default();
+        }
+    };
+
+    let defaults = StrokeStyle::default();
+    let mut invalid = false;
+    let color = match table.get("color") {
+        Some(value) => match deserialize_rgb8(value) {
+            Some(color) => color,
+            None => {
+                invalid = true;
+                defaults.color
+            }
+        },
+        None => defaults.color,
+    };
+    let width = match table.get("width") {
+        Some(value) => match value.as_float().map(|width| width as f32) {
+            Some(width) if width.is_finite() && width > 0.0 => width,
+            _ => {
+                invalid = true;
+                defaults.width
+            }
+        },
+        None => defaults.width,
+    };
+    let opacity = match table.get("opacity") {
+        Some(value) if value.as_float() == Some(1.0) => 1.0,
+        Some(_) => {
+            invalid = true;
+            1.0
+        }
+        None => 1.0,
+    };
+
+    if invalid {
+        warnings.push(format!(
+            "annotation_defaults.{key} contains invalid stroke values — using defaults"
+        ));
+    }
+
+    StrokeStyle {
+        color,
+        width,
+        opacity,
+    }
+}
+
 fn deserialize_rgb8(v: &toml::Value) -> Option<Rgb8> {
     // Try table form: { r: 0, g: 0, b: 0 }
     if let toml::Value::Table(t) = v {
@@ -190,8 +255,11 @@ pub(crate) fn save_to_with_writer(
     writer: impl FnOnce(&Path, &[u8]) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut root = read_existing_table_or_empty(path)?;
-    let mut section =
-        toml::Value::try_from(values).map_err(|e| format!("serialize annotation defaults: {e}"))?;
+    let mut persisted = values.clone();
+    persisted.line.opacity = 1.0;
+    persisted.arrow.opacity = 1.0;
+    let mut section = toml::Value::try_from(&persisted)
+        .map_err(|e| format!("serialize annotation defaults: {e}"))?;
     if let Some(text) = section
         .as_table_mut()
         .and_then(|section| section.get_mut("text"))
@@ -302,6 +370,44 @@ mod tests {
     }
 
     #[test]
+    fn missing_two_point_sections_use_independent_canonical_defaults() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults.number]\nsize = \"Medium\"\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.line, StrokeStyle::default());
+        assert_eq!(loaded.values.arrow, StrokeStyle::default());
+    }
+
+    #[test]
+    fn invalid_line_width_does_not_reset_arrow_defaults() {
+        let ctx = TestContext::new();
+        ctx.write_config(
+            "[annotation_defaults.line]\nwidth = -2.0\nopacity = 0.5\n\
+             [annotation_defaults.arrow]\nwidth = 9.0\nopacity = 1.0\n\
+             [annotation_defaults.arrow.color]\nr = 1\ng = 2\nb = 3\n",
+        );
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.line, StrokeStyle::default());
+        assert_eq!(loaded.values.arrow.width, 9.0);
+        assert_eq!(loaded.values.arrow.color, Rgb8::new(1, 2, 3));
+        assert_eq!(loaded.warnings.len(), 1);
+    }
+
+    #[test]
+    fn save_preserves_unrelated_config_and_round_trips_two_point_defaults() {
+        let ctx = TestContext::new();
+        ctx.write_config("[daemon]\ncapture_region_hotkey = \"Alt+Shift+6\"\n");
+        let mut values = AnnotationDefaults::default();
+        values.line.width = 7.0;
+        values.arrow.color = Rgb8::new(10, 20, 30);
+        save_to(&ctx.path(), &values).unwrap();
+        let text = std::fs::read_to_string(ctx.path()).unwrap();
+        assert!(text.contains("capture_region_hotkey"));
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values, values);
+    }
+
+    #[test]
     fn save_preserves_unrelated_and_unknown_sections() {
         let ctx = TestContext::new();
         ctx.write_config(
@@ -358,6 +464,7 @@ mod tests {
                 text_color: Rgb8::new(0x00, 0x00, 0x00),
                 background: None,
             },
+            ..AnnotationDefaults::default()
         };
         save_to(&ctx.path(), &defaults).unwrap();
         let loaded = load_from(&ctx.path());

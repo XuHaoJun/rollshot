@@ -29,6 +29,8 @@ pub enum Tool {
     Select,
     Number,
     Text,
+    Line,
+    Arrow,
     Redact,
     #[cfg(feature = "ocr")]
     OcrText,

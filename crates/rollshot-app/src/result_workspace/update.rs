@@ -13,7 +13,7 @@ use super::canvas::{
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
 use rollshot_image_document::{
     hit_test_annotation, Annotation, AnnotationId, Hit, HitPart, ImageDocument, ImagePoint,
-    ImageRect, Rgb8,
+    ImageRect, Rgb8, TwoPointKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,13 @@ pub enum Message {
     ApplyColor,
     /// Cancel the color transaction without mutation.
     CancelColor,
+    /// Live-preview a stroke width during slider interaction (no doc mutation).
+    PreviewStrokeWidth(f32),
+    /// Commit the stroke-width transaction to the document or active-tool default.
+    ApplyStrokeWidth,
+    /// Cancel the stroke-width transaction without mutation.
+    #[allow(dead_code)]
+    CancelStrokeWidth,
     /// Set the number size for number callouts.
     SetNumberSize(rollshot_image_document::NumberSize),
     /// Set the text size for text notes.
@@ -262,6 +269,9 @@ impl PartialEq for Message {
             (Self::ColorHexChanged(a), Self::ColorHexChanged(b)) => a == b,
             (Self::ApplyColor, Self::ApplyColor) => true,
             (Self::CancelColor, Self::CancelColor) => true,
+            (Self::PreviewStrokeWidth(a), Self::PreviewStrokeWidth(b)) => a == b,
+            (Self::ApplyStrokeWidth, Self::ApplyStrokeWidth) => true,
+            (Self::CancelStrokeWidth, Self::CancelStrokeWidth) => true,
             (Self::SetNumberSize(a), Self::SetNumberSize(b)) => a == b,
             (Self::SetTextSize(a), Self::SetTextSize(b)) => a == b,
             (Self::ToggleTextBackground, Self::ToggleTextBackground) => true,
@@ -366,7 +376,7 @@ pub(crate) fn direct_manipulation_hit(
                     part,
                 })
         }
-        Tool::Number | Tool::Text => None,
+        Tool::Number | Tool::Text | Tool::Line | Tool::Arrow => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -488,6 +498,7 @@ pub(crate) fn handle_canvas_pressed(
             });
             iced::widget::operation::focus(state.text_editor_id.clone())
         }
+        Tool::Line | Tool::Arrow => Task::none(),
         Tool::Redact => {
             if let Some(hit) =
                 direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance)
@@ -831,6 +842,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             commit_text_draft(state);
             state.editor.more_menu_open = false;
             state.editor.properties.popup = None;
+            state.editor.properties.color = None;
+            state.editor.properties.width = None;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
                 state.editor.drag = None;
@@ -853,8 +866,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if state.editor.tool == Tool::OcrText {
                 return Task::none();
             }
-            if state.editor.properties.color.is_some() {
+            if state.editor.properties.color.is_some() || state.editor.properties.width.is_some() {
                 state.editor.properties.color = None;
+                state.editor.properties.width = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -871,8 +885,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if state.editor.tool == Tool::OcrText {
                 return Task::none();
             }
-            if state.editor.properties.color.is_some() {
+            if state.editor.properties.color.is_some() || state.editor.properties.width.is_some() {
                 state.editor.properties.color = None;
+                state.editor.properties.width = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -903,8 +918,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.editor.tool = Tool::Select;
                 return Task::none();
             }
-            if state.editor.properties.color.is_some() {
+            if state.editor.properties.color.is_some() || state.editor.properties.width.is_some() {
                 state.editor.properties.color = None;
+                state.editor.properties.width = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1655,6 +1671,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     .text
                     .background
                     .unwrap_or(rollshot_image_document::Rgb8::new(255, 255, 255)),
+                (PropertyTarget::TwoPointTool(TwoPointKind::Line), ColorProperty::StrokeColor) => {
+                    state.annotation_defaults.values.line.color
+                }
+                (PropertyTarget::TwoPointTool(TwoPointKind::Arrow), ColorProperty::StrokeColor) => {
+                    state.annotation_defaults.values.arrow.color
+                }
                 (PropertyTarget::Annotation(id), ColorProperty::NumberAccent) => {
                     match state.document.image.annotation(*id) {
                         Some(Annotation::NumberCallout { style, .. }) => style.accent,
@@ -1675,6 +1697,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         _ => return Task::none(),
                     }
                 }
+                (PropertyTarget::Annotation(id), ColorProperty::StrokeColor) => {
+                    match state.document.image.annotation(*id) {
+                        Some(Annotation::TwoPoint { style, .. }) => style.color,
+                        _ => return Task::none(),
+                    }
+                }
                 _ => return Task::none(),
             };
             let hex = format!("#{:02X}{:02X}{:02X}", original.r, original.g, original.b);
@@ -1685,6 +1713,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 preview: original,
                 hex,
             });
+            state.editor.properties.width = None;
             state.editor.copy_menu_open = false;
             state.editor.more_menu_open = false;
             state.editor.properties.popup = Some(super::properties::Popup::ColorPicker);
@@ -1741,17 +1770,19 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         }
                         _ => {}
                     }
-                    if let Some(path) = state.annotation_defaults.config_path.clone() {
-                        if let Err(e) = super::annotation_defaults::save_to(
-                            &path,
-                            &state.annotation_defaults.values,
-                        ) {
-                            if !state.annotation_defaults.warning_reported {
-                                state.annotation_defaults.warning_reported = true;
-                                state.message =
-                                    Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                    persist_annotation_defaults(state);
+                }
+                PropertyTarget::TwoPointTool(kind) => {
+                    if tx.property == ColorProperty::StrokeColor {
+                        match kind {
+                            TwoPointKind::Line => {
+                                state.annotation_defaults.values.line.color = tx.preview
+                            }
+                            TwoPointKind::Arrow => {
+                                state.annotation_defaults.values.arrow.color = tx.preview
                             }
                         }
+                        persist_annotation_defaults(state);
                     }
                 }
                 PropertyTarget::Annotation(id) => match tx.property {
@@ -1788,6 +1819,17 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             }
                         }
                     }
+                    ColorProperty::StrokeColor => {
+                        if let Some(Annotation::TwoPoint { style, .. }) =
+                            state.document.image.annotation(id)
+                        {
+                            let mut new_style = *style;
+                            new_style.color = tx.preview;
+                            if let Err(e) = state.document.image.set_stroke_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
+                        }
+                    }
                 },
             }
             Task::none()
@@ -1795,6 +1837,78 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::CancelColor => {
             state.editor.properties.color = None;
             state.editor.properties.popup = None;
+            Task::none()
+        }
+        Message::PreviewStrokeWidth(width) => {
+            use super::properties::{PropertyTarget, StrokeWidthTransaction};
+            let Some(target) = super::properties::property_target(state) else {
+                return Task::none();
+            };
+            let original = match target {
+                PropertyTarget::TwoPointTool(TwoPointKind::Line) => {
+                    state.annotation_defaults.values.line.width
+                }
+                PropertyTarget::TwoPointTool(TwoPointKind::Arrow) => {
+                    state.annotation_defaults.values.arrow.width
+                }
+                PropertyTarget::Annotation(id) => match state.document.image.annotation(id) {
+                    Some(Annotation::TwoPoint { style, .. }) => style.width,
+                    _ => return Task::none(),
+                },
+                PropertyTarget::NumberTool | PropertyTarget::TextTool => return Task::none(),
+            };
+            let transaction = state
+                .editor
+                .properties
+                .width
+                .get_or_insert(StrokeWidthTransaction {
+                    target,
+                    original,
+                    preview: original,
+                });
+            if transaction.target != target {
+                *transaction = StrokeWidthTransaction {
+                    target,
+                    original,
+                    preview: original,
+                };
+            }
+            transaction.preview = width;
+            state.editor.properties.color = None;
+            state.editor.properties.popup = None;
+            Task::none()
+        }
+        Message::ApplyStrokeWidth => {
+            use super::properties::PropertyTarget;
+            let Some(transaction) = state.editor.properties.width.take() else {
+                return Task::none();
+            };
+            match transaction.target {
+                PropertyTarget::TwoPointTool(TwoPointKind::Line) => {
+                    state.annotation_defaults.values.line.width = transaction.preview;
+                    persist_annotation_defaults(state);
+                }
+                PropertyTarget::TwoPointTool(TwoPointKind::Arrow) => {
+                    state.annotation_defaults.values.arrow.width = transaction.preview;
+                    persist_annotation_defaults(state);
+                }
+                PropertyTarget::Annotation(id) => {
+                    if let Some(Annotation::TwoPoint { style, .. }) =
+                        state.document.image.annotation(id)
+                    {
+                        let mut new_style = *style;
+                        new_style.width = transaction.preview;
+                        if let Err(error) = state.document.image.set_stroke_style(id, new_style) {
+                            state.message = Some(InlineMessage::Error(error.to_string()));
+                        }
+                    }
+                }
+                PropertyTarget::NumberTool | PropertyTarget::TextTool => {}
+            }
+            Task::none()
+        }
+        Message::CancelStrokeWidth => {
+            state.editor.properties.width = None;
             Task::none()
         }
         Message::SetNumberSize(size) => {
@@ -2175,6 +2289,7 @@ pub(crate) fn subscription(state: &super::ResultWorkspace) -> Subscription<Messa
 
 #[cfg(test)]
 mod tests {
+    use super::super::properties::preview_annotation;
     use super::*;
     use iced::Size as IcedSize;
     use image::Rgba;
@@ -2191,6 +2306,102 @@ mod tests {
             super::super::document::ResultDocument::unsaved(image()),
             None,
         )
+    }
+
+    fn workspace_with_arrow() -> super::super::ResultWorkspace {
+        let mut state = workspace();
+        state
+            .document
+            .image
+            .add_two_point(
+                rollshot_image_document::TwoPointKind::Arrow,
+                ImagePoint::new(0.0, 0.0),
+                ImagePoint::new(1.0, 1.0),
+            )
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn width_preview_does_not_mutate_document_and_release_commits_once() {
+        let mut state = workspace_with_arrow();
+        let id = state.document.image.annotations()[0].id();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let before = state.document.image.state_id();
+
+        let _ = update(&mut state, Message::PreviewStrokeWidth(9.0));
+        assert_eq!(state.document.image.state_id(), before);
+        assert_eq!(
+            preview_annotation(&state)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .width,
+            9.0
+        );
+
+        let _ = update(&mut state, Message::ApplyStrokeWidth);
+        assert_ne!(state.document.image.state_id(), before);
+        assert_eq!(
+            state
+                .document
+                .image
+                .annotation(id)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .width,
+            9.0
+        );
+        assert!(state.document.image.undo());
+        assert_eq!(
+            state
+                .document
+                .image
+                .annotation(id)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .width,
+            4.0
+        );
+    }
+
+    #[test]
+    fn selected_arrow_style_does_not_change_arrow_or_line_defaults() {
+        let mut state = workspace_with_arrow();
+        let defaults = state.annotation_defaults.values.clone();
+        let id = state.document.image.annotations()[0].id();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::PreviewStrokeWidth(12.0));
+        let _ = update(&mut state, Message::ApplyStrokeWidth);
+        assert_eq!(state.annotation_defaults.values, defaults);
+    }
+
+    #[test]
+    fn width_only_preview_cancel_and_target_change_never_mutate_document() {
+        let mut state = workspace_with_arrow();
+        let id = state.document.image.annotations()[0].id();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let before = state.document.image.state_id();
+        let _ = update(&mut state, Message::PreviewStrokeWidth(11.0));
+        assert_eq!(
+            preview_annotation(&state)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .width,
+            11.0
+        );
+        let _ = update(&mut state, Message::CancelStrokeWidth);
+        assert!(preview_annotation(&state).is_none());
+        let _ = update(&mut state, Message::PreviewStrokeWidth(12.0));
+        let _ = update(&mut state, Message::SelectTool(Tool::Arrow));
+        assert!(preview_annotation(&state).is_none());
+        assert_eq!(state.document.image.state_id(), before);
     }
 
     fn unsaved_workspace() -> super::super::ResultWorkspace {
@@ -4080,13 +4291,13 @@ mod tests {
             .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
         state.editor.tool = Tool::Select;
         state.editor.selection = Some(id);
-        // 2. Open a color transaction on the selection.
+        // 2. Switch to Number tool (commits text draft if any — none here).
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        // 3. Open a color transaction on the active tool.
         let _ = update(
             &mut state,
             Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
         );
-        // 3. Switch to Number tool (commits text draft if any — none here).
-        let _ = update(&mut state, Message::SelectTool(Tool::Number));
         // 4. Start a creation drag.
         state.editor.drag = Some(super::super::canvas::DragState::CreateNumber {
             tip: ImagePoint::new(50.0, 50.0),
