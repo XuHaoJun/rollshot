@@ -4,7 +4,7 @@
 
 use crate::annotation::Annotation;
 use crate::geometry::{ImagePoint, ImageRect, Rgba8};
-use crate::style;
+use crate::style::{self, NumberStyle, TextStyle};
 use crate::text::measure_block;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,10 +43,17 @@ pub enum RenderShape {
     },
 }
 
+const TEXT_BACKGROUND_ALPHA: u8 = 217;
+
+fn number_radius(style: NumberStyle) -> f32 {
+    style::NUMBER_BUBBLE_RADIUS * style.size.scale()
+}
+
 /// Font size for a number label, shrunk until it fits the bubble.
-pub fn number_label_px(label: &str) -> f32 {
-    let max_width = style::NUMBER_BUBBLE_RADIUS * style::NUMBER_LABEL_MAX_WIDTH_FACTOR;
-    let mut px = style::NUMBER_FONT_PX;
+pub fn number_label_px(label: &str, style: NumberStyle) -> f32 {
+    let radius = number_radius(style);
+    let max_width = radius * style::NUMBER_LABEL_MAX_WIDTH_FACTOR;
+    let mut px = style::NUMBER_FONT_PX * style.size.scale();
     while px > style::NUMBER_FONT_MIN_PX {
         let (w, _) = measure_block(label, px, true);
         if w <= max_width {
@@ -59,8 +66,12 @@ pub fn number_label_px(label: &str) -> f32 {
 
 /// Leader triangle from bubble edge to tip, or `None` when the separation is
 /// too small to read (the callout renders as a plain stamp).
-pub(crate) fn leader_triangle(tip: ImagePoint, bubble: ImagePoint) -> Option<[ImagePoint; 3]> {
-    let radius = style::NUMBER_BUBBLE_RADIUS;
+pub(crate) fn leader_triangle(
+    tip: ImagePoint,
+    bubble: ImagePoint,
+    style: NumberStyle,
+) -> Option<[ImagePoint; 3]> {
+    let radius = number_radius(style);
     let length = bubble.distance(tip);
     if length <= radius * style::LEADER_MIN_SEPARATION_FACTOR {
         return None;
@@ -71,7 +82,7 @@ pub(crate) fn leader_triangle(tip: ImagePoint, bubble: ImagePoint) -> Option<[Im
         bubble.x + dir.0 * radius * style::LEADER_BASE_FACTOR,
         bubble.y + dir.1 * radius * style::LEADER_BASE_FACTOR,
     );
-    let hw = style::LEADER_HALF_WIDTH;
+    let hw = style::LEADER_HALF_WIDTH * style.size.scale();
     Some([
         tip,
         ImagePoint::new(base.x + normal.0 * hw, base.y + normal.1 * hw),
@@ -80,8 +91,9 @@ pub(crate) fn leader_triangle(tip: ImagePoint, bubble: ImagePoint) -> Option<[Im
 }
 
 /// Backing plate for a text note positioned at `position` (its top-left).
-pub fn text_plate_rect(position: ImagePoint, text: &str) -> ImageRect {
-    let (w, h) = measure_block(text, style::TEXT_NOTE_FONT_PX, false);
+pub fn text_plate_rect(position: ImagePoint, text: &str, style: TextStyle) -> ImageRect {
+    let px = style.font_size.pixels();
+    let (w, h) = measure_block(text, px, false);
     let pad = style::TEXT_NOTE_PLATE_PADDING;
     ImageRect {
         x: position.x,
@@ -100,24 +112,27 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
             number,
             tip,
             bubble,
+            style,
             ..
         } => {
+            let radius = number_radius(*style);
+            let outline_width = style::NUMBER_BUBBLE_OUTLINE_WIDTH * style.size.scale();
             let mut shapes = Vec::with_capacity(3);
-            if let Some(points) = leader_triangle(*tip, *bubble) {
+            if let Some(points) = leader_triangle(*tip, *bubble, *style) {
                 shapes.push(RenderShape::Triangle {
                     points,
-                    color: style::ACCENT,
+                    color: style.accent.opaque(),
                 });
             }
             shapes.push(RenderShape::Circle {
                 center: *bubble,
-                radius: style::NUMBER_BUBBLE_RADIUS,
-                fill: style::ACCENT,
-                outline_width: style::NUMBER_BUBBLE_OUTLINE_WIDTH,
+                radius,
+                fill: style.accent.opaque(),
+                outline_width,
                 outline: style::WHITE,
             });
             let label = number.to_string();
-            let px = number_label_px(&label);
+            let px = number_label_px(&label, *style);
             shapes.push(RenderShape::Label {
                 anchor: *bubble,
                 anchor_kind: TextAnchor::Center,
@@ -128,22 +143,31 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
             });
             shapes
         }
-        Annotation::TextNote { position, text, .. } => {
+        Annotation::TextNote {
+            position,
+            text,
+            style,
+            ..
+        } => {
             let pad = style::TEXT_NOTE_PLATE_PADDING;
-            vec![
-                RenderShape::Rect {
-                    rect: text_plate_rect(*position, text),
-                    color: style::TEXT_NOTE_PLATE,
-                },
-                RenderShape::Label {
-                    anchor: ImagePoint::new(position.x + pad, position.y + pad),
-                    anchor_kind: TextAnchor::TopLeft,
-                    content: text.clone(),
-                    px: style::TEXT_NOTE_FONT_PX,
-                    bold: false,
-                    color: style::TEXT_NOTE_TEXT_COLOR,
-                },
-            ]
+            let mut shapes = Vec::with_capacity(2);
+            if let Some(bg) = style.background {
+                shapes.push(RenderShape::Rect {
+                    rect: text_plate_rect(*position, text, *style),
+                    color: bg.with_alpha(TEXT_BACKGROUND_ALPHA),
+                });
+            }
+            let label_x = position.x + pad;
+            let label_y = position.y + pad;
+            shapes.push(RenderShape::Label {
+                anchor: ImagePoint::new(label_x, label_y),
+                anchor_kind: TextAnchor::TopLeft,
+                content: text.clone(),
+                px: style.font_size.pixels(),
+                bold: false,
+                color: style.text_color.opaque(),
+            });
+            shapes
         }
         Annotation::OpaqueRedaction { bounds, .. } => vec![RenderShape::Rect {
             rect: *bounds,
@@ -156,8 +180,12 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
 /// viewport culling and Navigator jump targets.
 pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
     match annotation {
-        Annotation::NumberCallout { tip, bubble, .. } => {
-            let r = style::NUMBER_BUBBLE_RADIUS + style::NUMBER_BUBBLE_OUTLINE_WIDTH;
+        Annotation::NumberCallout {
+            tip, bubble, style, ..
+        } => {
+            let radius = number_radius(*style);
+            let outline_width = style::NUMBER_BUBBLE_OUTLINE_WIDTH * style.size.scale();
+            let r = radius + outline_width;
             let bubble_box = ImageRect {
                 x: bubble.x - r,
                 y: bubble.y - r,
@@ -176,7 +204,12 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
                 height: y1 - y0,
             }
         }
-        Annotation::TextNote { position, text, .. } => text_plate_rect(*position, text),
+        Annotation::TextNote {
+            position,
+            text,
+            style,
+            ..
+        } => text_plate_rect(*position, text, *style),
         Annotation::OpaqueRedaction { bounds, .. } => *bounds,
     }
 }
@@ -185,8 +218,8 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
 mod tests {
     use super::*;
     use crate::annotation::{Annotation, AnnotationId};
-    use crate::geometry::{ImagePoint, ImageRect};
-    use crate::style;
+    use crate::geometry::{ImagePoint, ImageRect, Rgb8};
+    use crate::style::{self, NumberSize, NumberStyle, TextSize, TextStyle};
 
     fn number(tip: ImagePoint, bubble: ImagePoint) -> Annotation {
         Annotation::NumberCallout {
@@ -194,6 +227,26 @@ mod tests {
             number: 3,
             tip,
             bubble,
+            style: NumberStyle::default(),
+        }
+    }
+
+    fn number_with_style(style: NumberStyle) -> Annotation {
+        Annotation::NumberCallout {
+            id: AnnotationId(1),
+            number: 3,
+            tip: ImagePoint::new(10.0, 10.0),
+            bubble: ImagePoint::new(100.0, 100.0),
+            style,
+        }
+    }
+
+    fn text_with_style(style: TextStyle) -> Annotation {
+        Annotation::TextNote {
+            id: AnnotationId(2),
+            position: ImagePoint::new(20.0, 30.0),
+            text: "hello".to_string(),
+            style,
         }
     }
 
@@ -230,8 +283,9 @@ mod tests {
     #[test]
     fn text_plate_wraps_measured_text_with_padding() {
         let pos = ImagePoint::new(20.0, 30.0);
-        let plate = text_plate_rect(pos, "hello");
-        let (w, h) = crate::text::measure_block("hello", style::TEXT_NOTE_FONT_PX, false);
+        let style = TextStyle::default();
+        let plate = text_plate_rect(pos, "hello", style);
+        let (w, h) = crate::text::measure_block("hello", style.font_size.pixels(), false);
         assert_eq!(plate.x, pos.x);
         assert_eq!(plate.y, pos.y);
         assert!((plate.width - (w + style::TEXT_NOTE_PLATE_PADDING * 2.0)).abs() < 0.01);
@@ -244,6 +298,7 @@ mod tests {
             id: AnnotationId(2),
             position: ImagePoint::new(20.0, 30.0),
             text: "hello".to_string(),
+            style: TextStyle::default(),
         };
         let shapes = annotation_shapes(&note);
         assert!(matches!(shapes[0], RenderShape::Rect { .. }));
@@ -273,10 +328,8 @@ mod tests {
         let n = number(ImagePoint::new(10.0, 10.0), ImagePoint::new(100.0, 100.0));
         let b = annotation_bounds(&n);
         assert!(b.contains(ImagePoint::new(10.0, 10.0)));
-        assert!(b.contains(ImagePoint::new(
-            100.0 + style::NUMBER_BUBBLE_RADIUS - 1.0,
-            100.0
-        )));
+        let radius = number_radius(NumberStyle::default());
+        assert!(b.contains(ImagePoint::new(100.0 + radius - 1.0, 100.0)));
 
         let r = Annotation::OpaqueRedaction {
             id: AnnotationId(3),
@@ -300,13 +353,64 @@ mod tests {
 
     #[test]
     fn long_number_labels_shrink_to_fit() {
-        let small = number_label_px("3");
-        let large = number_label_px("888");
+        let style = NumberStyle::default();
+        let small = number_label_px("3", style);
+        let large = number_label_px("888", style);
         assert_eq!(small, style::NUMBER_FONT_PX);
         assert!(
             large < small,
             "3-digit labels shrink to stay inside the bubble"
         );
         assert!(large >= style::NUMBER_FONT_MIN_PX);
+    }
+
+    #[test]
+    fn number_size_scales_render_shapes_and_bounds() {
+        let small = number_with_style(NumberStyle {
+            size: NumberSize::Small,
+            ..Default::default()
+        });
+        let large = number_with_style(NumberStyle {
+            size: NumberSize::Large,
+            ..Default::default()
+        });
+        assert!(
+            annotation_bounds(&large).width > annotation_bounds(&small).width,
+            "large number callout must have wider bounds than small"
+        );
+        assert!(annotation_shapes(&large).iter().any(
+            |s| matches!(s, RenderShape::Circle { fill, .. } if *fill == NumberStyle::default().accent.opaque())
+        ));
+    }
+
+    #[test]
+    fn text_style_controls_font_color_and_optional_fixed_alpha_plate() {
+        let style = TextStyle {
+            font_size: TextSize::Px32,
+            text_color: Rgb8::new(1, 2, 3),
+            background: Some(Rgb8::new(4, 5, 6)),
+        };
+        let shapes = annotation_shapes(&text_with_style(style));
+        assert!(
+            matches!(shapes[0], RenderShape::Rect { color, .. } if color == Rgba8::new(4, 5, 6, 217)),
+            "plate color must use style background with 85% alpha"
+        );
+        assert!(
+            matches!(shapes[1], RenderShape::Label { px, color, .. } if (px - 32.0).abs() < f32::EPSILON && color == Rgba8::new(1, 2, 3, 255)),
+            "label must use style font_size and text_color"
+        );
+    }
+
+    #[test]
+    fn text_without_background_emits_only_the_label() {
+        let style = TextStyle {
+            background: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            annotation_shapes(&text_with_style(style)).len(),
+            1,
+            "no background → only the label shape"
+        );
     }
 }

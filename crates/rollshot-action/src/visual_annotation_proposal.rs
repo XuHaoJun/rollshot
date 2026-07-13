@@ -337,10 +337,12 @@ fn suggestion_to_edit_op(payload: &VisualAnnotationPayload) -> EditOp {
         VisualAnnotationPayload::NumberCallout { tip, bubble } => EditOp::AddNumberCallout {
             tip: *tip,
             bubble: *bubble,
+            style: rollshot_image_document::NumberStyle::default(),
         },
         VisualAnnotationPayload::TextNote { position, text } => EditOp::AddTextNote {
             position: *position,
             text: text.clone(),
+            style: rollshot_image_document::TextStyle::default(),
         },
         VisualAnnotationPayload::OpaqueRedaction { bounds } => {
             EditOp::AddRedaction { bounds: *bounds }
@@ -1060,6 +1062,7 @@ mod tests {
             EditOp::AddNumberCallout {
                 tip: ImagePoint::new(16.0, 20.0),
                 bubble: ImagePoint::new(80.0, 30.0),
+                style: rollshot_image_document::NumberStyle::default(),
             }
         );
     }
@@ -1084,6 +1087,7 @@ mod tests {
             EditOp::AddTextNote {
                 position: ImagePoint::new(24.0, 40.0),
                 text: "Click Save".to_string(),
+                style: rollshot_image_document::TextStyle::default(),
             }
         );
     }

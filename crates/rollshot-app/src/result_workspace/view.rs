@@ -1,111 +1,15 @@
 use super::viewport::{geometry_for, ZoomDirection, ZoomMode};
 use iced::widget::{
     button, checkbox, column, container, image as image_widget, mouse_area, opaque, row,
-    scrollable, stack, text, text_editor, tooltip, Space,
+    scrollable, stack, text, text_editor, Space,
 };
 use iced::{keyboard, mouse, Alignment, Color, Element, Length, Size, Vector};
 
-use super::canvas::Tool;
+use super::toolbar;
 use super::{Message, ResultWorkspace};
 
 const SCROLLBAR_WIDTH: f32 = 14.0;
 const SCROLLBAR_SPACING: f32 = 2.0;
-
-const ICON_SELECT: &str = "\u{2196}";
-const ICON_NUMBER: &str = "\u{2460}";
-const ICON_TEXT: &str = "T";
-const ICON_REDACT: &str = "\u{2588}";
-const ICON_UNDO: &str = "\u{21B6}";
-const ICON_REDO: &str = "\u{21B7}";
-const ICON_NAVIGATOR: &str = "\u{2261}";
-
-fn shortcut_label(name: &str, key: &str) -> String {
-    format!("{name} ({key})")
-}
-
-fn icon_button<'a>(
-    glyph: &'a str,
-    tip: String,
-    message: Message,
-    active: bool,
-) -> Element<'a, Message> {
-    let btn = button(text(glyph).size(16))
-        .padding([4, 10])
-        .on_press(message)
-        .style(if active {
-            button::primary
-        } else {
-            button::secondary
-        });
-    tooltip(btn, text(tip), tooltip::Position::Bottom).into()
-}
-
-fn tool_button<'a>(
-    glyph: &'a str,
-    name: &str,
-    key: &str,
-    tool: Tool,
-    state: &ResultWorkspace,
-) -> Element<'a, Message> {
-    icon_button(
-        glyph,
-        shortcut_label(name, key),
-        Message::SelectTool(tool),
-        state.editor.tool == tool,
-    )
-}
-
-fn toolbar(state: &ResultWorkspace) -> Element<'_, Message> {
-    let undo_btn = button(text(ICON_UNDO).size(16))
-        .padding([4, 10])
-        .on_press_maybe(state.document.image.can_undo().then_some(Message::Undo));
-    let redo_btn = button(text(ICON_REDO).size(16))
-        .padding([4, 10])
-        .on_press_maybe(state.document.image.can_redo().then_some(Message::Redo));
-
-    let copy_label = super::secure_sharing::copy_label(&state.document);
-    let save_label = super::secure_sharing::save_label(&state.document);
-
-    let mut tools = row![
-        button(text("Close")).on_press(Message::RequestClose),
-        text(state.document.display_name()).width(Length::Fill),
-        tool_button(ICON_SELECT, "Select", "V", Tool::Select, state),
-        tool_button(ICON_NUMBER, "Number", "N", Tool::Number, state),
-        tool_button(ICON_TEXT, "Text", "T", Tool::Text, state),
-        tool_button(ICON_REDACT, "Redact", "R", Tool::Redact, state),
-    ];
-
-    #[cfg(feature = "ocr")]
-    {
-        tools = tools.push(tool_button("OCR", "OCR Text", "O", Tool::OcrText, state));
-    }
-
-    tools = tools
-        .push(button(text("Smart Redaction")).on_press(Message::SmartRedaction))
-        .push(tooltip(
-            undo_btn,
-            text(shortcut_label("Undo", "Ctrl+Z")),
-            tooltip::Position::Bottom,
-        ))
-        .push(tooltip(
-            redo_btn,
-            text(shortcut_label("Redo", "Ctrl+Shift+Z")),
-            tooltip::Position::Bottom,
-        ))
-        .push(icon_button(
-            ICON_NAVIGATOR,
-            "Navigator".to_string(),
-            Message::ToggleNavigator,
-            state.editor.navigator_open,
-        ))
-        .push(button(text(copy_label)).on_press(Message::Copy))
-        .push(button(text("\u{25BE}")).on_press(Message::ToggleCopyMenu))
-        .push(button(text(save_label)).on_press(Message::SaveAs))
-        .push(reveal_button(state))
-        .push(button(text("Export Bug Report...")).on_press(Message::ExportBugReport));
-
-    tools.spacing(8).align_y(Alignment::Center).into()
-}
 
 // ---------------------------------------------------------------------------
 // View
@@ -131,7 +35,7 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
                 canvas_area
             };
             column![
-                toolbar(state),
+                toolbar::view(state),
                 disclosure,
                 message_area,
                 workspace_row,
@@ -142,7 +46,7 @@ pub(crate) fn view(state: &ResultWorkspace) -> Element<'_, Message> {
             .into()
         }
         super::workbench::WorkspaceMode::Workbench(_) => column![
-            toolbar(state),
+            toolbar::view(state),
             super::workbench::view::workbench_view(state)
         ]
         .spacing(8)
@@ -194,16 +98,6 @@ fn copy_menu<'a>(base: Element<'a, Message>, state: &'a ResultWorkspace) -> Elem
     iced::widget::stack![base, scrim].into()
 }
 
-fn reveal_button(state: &ResultWorkspace) -> Element<'_, Message> {
-    let action = super::secure_sharing::reveal_action(&state.document);
-    let btn = button(text(action.label()));
-    if !matches!(action, super::secure_sharing::RevealAction::Disabled) {
-        btn.on_press(Message::Reveal).into()
-    } else {
-        btn.into()
-    }
-}
-
 fn message_row(state: &ResultWorkspace) -> Element<'_, Message> {
     match &state.message {
         Some(msg) => {
@@ -250,9 +144,11 @@ pub(crate) fn canvas_view<'a>(
             geometry.scale,
             geometry.image_origin,
         ),
+        annotation_defaults: &state.annotation_defaults,
         pending_proposal,
         review,
         selected_candidate,
+        property_preview: super::properties::preview_annotation(state),
     })
     .width(Length::Fixed(geometry.rendered_size.width))
     .height(Length::Fixed(geometry.rendered_size.height));
@@ -261,7 +157,7 @@ pub(crate) fn canvas_view<'a>(
 
     #[cfg(feature = "ocr")]
     let layered = {
-        if state.editor.tool == Tool::OcrText {
+        if state.editor.tool == super::canvas::Tool::OcrText {
             let visible = super::canvas::visible_image_rect(
                 state.viewport.scroll_offset,
                 state.viewport_bounds,
@@ -381,7 +277,7 @@ fn status_bar(state: &ResultWorkspace, image_size: Size) -> Element<'_, Message>
     ];
 
     #[cfg(feature = "ocr")]
-    let status = if state.editor.tool == Tool::OcrText {
+    let status = if state.editor.tool == super::canvas::Tool::OcrText {
         status.push(button(text("Copy all OCR text")).on_press(Message::CopyAllOcrText))
     } else {
         status

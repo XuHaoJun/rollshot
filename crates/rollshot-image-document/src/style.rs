@@ -3,7 +3,83 @@
 //! controls; these constants are the single source of annotation appearance
 //! for BOTH the live overlay and flattened output.
 
-use crate::geometry::Rgba8;
+use crate::geometry::{Rgb8, Rgba8};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum NumberSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl NumberSize {
+    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+    pub const fn scale(self) -> f32 {
+        match self {
+            Self::Small => 0.75,
+            Self::Medium => 1.0,
+            Self::Large => 1.3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TextSize {
+    Px14,
+    #[default]
+    Px18,
+    Px24,
+    Px32,
+}
+
+impl TextSize {
+    pub const ALL: [Self; 4] = [Self::Px14, Self::Px18, Self::Px24, Self::Px32];
+    pub const fn pixels(self) -> f32 {
+        match self {
+            Self::Px14 => 14.0,
+            Self::Px18 => 18.0,
+            Self::Px24 => 24.0,
+            Self::Px32 => 32.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct NumberStyle {
+    pub accent: Rgb8,
+    pub size: NumberSize,
+}
+
+impl Default for NumberStyle {
+    fn default() -> Self {
+        Self {
+            accent: Rgb8::new(0xE5, 0x48, 0x4D),
+            size: NumberSize::Medium,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextStyle {
+    pub font_size: TextSize,
+    pub text_color: Rgb8,
+    pub background: Option<Rgb8>,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            font_size: TextSize::Px18,
+            text_color: Rgb8::new(0xFF, 0xFF, 0xFF),
+            background: Some(Rgb8::new(0x11, 0x11, 0x11)),
+        }
+    }
+}
 
 /// Callout accent (number bubble fill, leader triangle): #E5484D.
 pub const ACCENT: Rgba8 = Rgba8::new(0xE5, 0x48, 0x4D, 0xFF);
@@ -47,3 +123,31 @@ pub const FONT_BOLD_BYTES: &[u8] = include_bytes!("../assets/fonts/DejaVuSans-Bo
 /// Family name consumers use to select the vendored font (e.g. iced
 /// `Font::with_name`).
 pub const FONT_FAMILY_NAME: &str = "DejaVu Sans";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reviewed_size_mappings_are_exact() {
+        assert_eq!(NumberSize::Small.scale(), 0.75);
+        assert_eq!(NumberSize::Medium.scale(), 1.0);
+        assert_eq!(NumberSize::Large.scale(), 1.3);
+        assert_eq!(
+            TextSize::ALL.map(TextSize::pixels),
+            [14.0, 18.0, 24.0, 32.0]
+        );
+    }
+
+    #[test]
+    fn canonical_styles_preserve_current_appearance() {
+        assert_eq!(NumberStyle::default().accent, Rgb8::new(0xE5, 0x48, 0x4D));
+        assert_eq!(NumberStyle::default().size, NumberSize::Medium);
+        assert_eq!(TextStyle::default().font_size, TextSize::Px18);
+        assert_eq!(TextStyle::default().text_color, Rgb8::new(0xFF, 0xFF, 0xFF));
+        assert_eq!(
+            TextStyle::default().background,
+            Some(Rgb8::new(0x11, 0x11, 0x11))
+        );
+    }
+}

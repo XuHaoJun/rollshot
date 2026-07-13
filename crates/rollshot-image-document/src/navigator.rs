@@ -58,6 +58,7 @@ mod tests {
     use super::*;
     use crate::annotation::{Annotation, AnnotationId};
     use crate::geometry::{ImagePoint, ImageRect};
+    use crate::style::{NumberStyle, TextStyle};
 
     #[test]
     fn items_sort_by_y_then_x_then_id() {
@@ -67,11 +68,13 @@ mod tests {
                 number: 1,
                 tip: ImagePoint::new(0.0, 500.0),
                 bubble: ImagePoint::new(10.0, 500.0),
+                style: NumberStyle::default(),
             },
             Annotation::TextNote {
                 id: AnnotationId(2),
                 position: ImagePoint::new(40.0, 100.0),
                 text: "note".to_string(),
+                style: TextStyle::default(),
             },
             // Same y as the text note, smaller x — sorts first of the two.
             Annotation::OpaqueRedaction {
@@ -99,11 +102,13 @@ mod tests {
                 id: AnnotationId(9),
                 position: at,
                 text: "b".into(),
+                style: TextStyle::default(),
             },
             Annotation::TextNote {
                 id: AnnotationId(4),
                 position: at,
                 text: "a".into(),
+                style: TextStyle::default(),
             },
         ];
         let order: Vec<AnnotationId> = navigator_items(&anns).iter().map(|i| i.id).collect();
@@ -118,11 +123,13 @@ mod tests {
                 number: 7,
                 tip: ImagePoint::new(0.0, 0.0),
                 bubble: ImagePoint::new(0.0, 0.0),
+                style: NumberStyle::default(),
             },
             Annotation::TextNote {
                 id: AnnotationId(2),
                 position: ImagePoint::new(0.0, 10.0),
                 text: "first line is quite long and gets truncated\nsecond".to_string(),
+                style: TextStyle::default(),
             },
             Annotation::OpaqueRedaction {
                 id: AnnotationId(3),

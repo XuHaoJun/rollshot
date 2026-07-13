@@ -1,4 +1,5 @@
 pub mod actions;
+pub(crate) mod annotation_defaults;
 pub(crate) mod canvas;
 mod document;
 mod navigator;
@@ -6,7 +7,9 @@ mod navigator;
 pub(crate) mod ocr_layer;
 #[cfg(feature = "ocr")]
 pub(crate) mod ocr_text;
+pub(crate) mod properties;
 mod secure_sharing;
+pub(crate) mod toolbar;
 mod update;
 mod view;
 pub mod viewport;
@@ -28,6 +31,18 @@ pub(crate) const SUCCESS_MESSAGE_DURATION: Duration = Duration::from_secs(4);
 /// Pixel step for a single wheel "line" of scrolling.
 pub(crate) const WHEEL_LINE_PX: f32 = 60.0;
 
+use annotation_defaults::AnnotationDefaults;
+
+// ---------------------------------------------------------------------------
+// Annotation defaults state
+// ---------------------------------------------------------------------------
+
+pub(crate) struct AnnotationDefaultsState {
+    pub values: AnnotationDefaults,
+    pub config_path: Option<PathBuf>,
+    pub warning_reported: bool,
+}
+
 use iced::{Point, Size, Vector};
 
 // ---------------------------------------------------------------------------
@@ -38,6 +53,7 @@ use iced::{Point, Size, Vector};
 pub enum InlineMessage {
     Success { text: String, expires_at: Instant },
     Error(String),
+    Warning(String),
 }
 
 impl InlineMessage {
@@ -45,6 +61,7 @@ impl InlineMessage {
         match self {
             InlineMessage::Success { text, .. } => text,
             InlineMessage::Error(text) => text,
+            InlineMessage::Warning(text) => text,
         }
     }
 
@@ -62,7 +79,7 @@ impl InlineMessage {
     pub(crate) fn expiry(&self) -> Option<Instant> {
         match self {
             InlineMessage::Success { expires_at, .. } => Some(*expires_at),
-            InlineMessage::Error(_) => None,
+            InlineMessage::Error(_) | InlineMessage::Warning(_) => None,
         }
     }
 }
@@ -127,11 +144,40 @@ pub struct ResultWorkspace {
     /// Identity of the inline text editor widget, for focus operations.
     #[allow(dead_code)]
     pub text_editor_id: iced::widget::Id,
+    /// Loaded annotation style defaults from the shared config.toml.
+    pub(crate) annotation_defaults: AnnotationDefaultsState,
 }
 
 impl ResultWorkspace {
     pub fn new(document: ResultDocument, initial_error: Option<String>) -> Self {
-        Self::with_max_texture_dim(document, initial_error, DEFAULT_MAX_TEXTURE_DIM)
+        let (annotation_defaults, warning) =
+            match crate::daemon::config::config_path().ok().map(|p| {
+                let loaded = annotation_defaults::load_from(&p);
+                (loaded, p)
+            }) {
+                Some((loaded, path)) => (
+                    AnnotationDefaultsState {
+                        values: loaded.values,
+                        config_path: Some(path),
+                        warning_reported: !loaded.warnings.is_empty(),
+                    },
+                    loaded.warnings.into_iter().next(),
+                ),
+                None => (
+                    AnnotationDefaultsState {
+                        values: AnnotationDefaults::default(),
+                        config_path: None,
+                        warning_reported: false,
+                    },
+                    None,
+                ),
+            };
+        let mut ws = Self::with_max_texture_dim(document, initial_error, DEFAULT_MAX_TEXTURE_DIM);
+        ws.annotation_defaults = annotation_defaults;
+        if let Some(warn) = warning {
+            ws.message = Some(InlineMessage::Warning(warn));
+        }
+        ws
     }
 
     /// Construct with an explicit texture ceiling (used by tests; production
@@ -171,6 +217,11 @@ impl ResultWorkspace {
             #[cfg(feature = "ocr")]
             ocr_text: ocr_text::OcrTextState::idle(),
             text_editor_id: iced::widget::Id::unique(),
+            annotation_defaults: AnnotationDefaultsState {
+                values: AnnotationDefaults::default(),
+                config_path: None,
+                warning_reported: false,
+            },
             document,
             message,
             image_handle,

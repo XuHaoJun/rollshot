@@ -34,7 +34,7 @@ rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
 rollshot-capture = { path = "../rollshot-capture" }
 rollshot-edit-proposal = { path = "../rollshot-edit-proposal" }
 rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
-rollshot-image-document = { path = "../rollshot-image-document" }
+rollshot-image-document = { path = "../rollshot-image-document", features = ["serde"] }
 rollshot-preset = { path = "../rollshot-preset" }
 rollshot-vision = { path = "../rollshot-vision" }
 serde = { workspace = true }

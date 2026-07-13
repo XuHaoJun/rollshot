@@ -13,7 +13,7 @@ use super::canvas::{
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
 use rollshot_image_document::{
     hit_test_annotation, Annotation, AnnotationId, Hit, HitPart, ImageDocument, ImagePoint,
-    ImageRect,
+    ImageRect, Rgb8,
 };
 
 // ---------------------------------------------------------------------------
@@ -91,6 +91,8 @@ pub enum Message {
     NavigatorJump(AnnotationId),
     /// Toggle the Copy menu dropdown.
     ToggleCopyMenu,
+    /// Toggle the More overflow menu dropdown.
+    ToggleMoreMenu,
     /// Canvas pointer pressed (image-space coordinate).
     CanvasPressed(rollshot_image_document::ImagePoint),
     /// Canvas pointer moved (image-space coordinate).
@@ -127,6 +129,27 @@ pub enum Message {
     /// Messages forwarded from the workbench sub-state.
     #[allow(dead_code)] // SP6 scaffolding: constructed by later tasks
     Workbench(super::workbench::WorkbenchMessage),
+    // -- property editing (Task 4) -------------------------------------------
+    /// Set the next number value for the number tool default.
+    NextNumberInputChanged(String),
+    /// Commit the next number input to the document.
+    CommitNextNumber,
+    /// Open the color picker for a specific property.
+    OpenColorPicker(super::properties::ColorProperty),
+    /// Live-preview a color during color picker interaction (no doc mutation).
+    PreviewColor(rollshot_image_document::Rgb8),
+    /// Update the hex input field in the color picker.
+    ColorHexChanged(String),
+    /// Commit the color transaction to the document (annotation or default).
+    ApplyColor,
+    /// Cancel the color transaction without mutation.
+    CancelColor,
+    /// Set the number size for number callouts.
+    SetNumberSize(rollshot_image_document::NumberSize),
+    /// Set the text size for text notes.
+    SetTextSize(rollshot_image_document::TextSize),
+    /// Toggle the text background on/off for text notes.
+    ToggleTextBackground,
     #[cfg(feature = "ocr")]
     OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
     #[cfg(feature = "ocr")]
@@ -210,6 +233,7 @@ impl PartialEq for Message {
             (Self::ToggleNavigator, Self::ToggleNavigator) => true,
             (Self::NavigatorJump(a), Self::NavigatorJump(b)) => a == b,
             (Self::ToggleCopyMenu, Self::ToggleCopyMenu) => true,
+            (Self::ToggleMoreMenu, Self::ToggleMoreMenu) => true,
             (Self::CanvasPressed(a), Self::CanvasPressed(b)) => a == b,
             (Self::CanvasMoved(a), Self::CanvasMoved(b)) => a == b,
             (Self::CanvasReleased(a), Self::CanvasReleased(b)) => a == b,
@@ -231,6 +255,16 @@ impl PartialEq for Message {
             (Self::Workbench(a), Self::Workbench(b)) => {
                 std::mem::discriminant(a) == std::mem::discriminant(b)
             }
+            (Self::NextNumberInputChanged(a), Self::NextNumberInputChanged(b)) => a == b,
+            (Self::CommitNextNumber, Self::CommitNextNumber) => true,
+            (Self::OpenColorPicker(a), Self::OpenColorPicker(b)) => a == b,
+            (Self::PreviewColor(a), Self::PreviewColor(b)) => a == b,
+            (Self::ColorHexChanged(a), Self::ColorHexChanged(b)) => a == b,
+            (Self::ApplyColor, Self::ApplyColor) => true,
+            (Self::CancelColor, Self::CancelColor) => true,
+            (Self::SetNumberSize(a), Self::SetNumberSize(b)) => a == b,
+            (Self::SetTextSize(a), Self::SetTextSize(b)) => a == b,
+            (Self::ToggleTextBackground, Self::ToggleTextBackground) => true,
             #[cfg(feature = "ocr")]
             (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
             #[cfg(feature = "ocr")]
@@ -378,6 +412,8 @@ pub(crate) fn handle_canvas_pressed(
 ) -> Task<Message> {
     commit_text_draft(state);
     state.editor.copy_menu_open = false;
+    state.editor.more_menu_open = false;
+    state.editor.properties.popup = None;
 
     let scale = current_scale(state);
     let tolerance = HIT_TOLERANCE_SCREEN / scale;
@@ -397,10 +433,15 @@ pub(crate) fn handle_canvas_pressed(
                     {
                         state.editor.drag = None;
                         state.editor.selection = Some(hit.id);
+                        let existing_style = match state.document.image.annotation(hit.id) {
+                            Some(Annotation::TextNote { style, .. }) => *style,
+                            _ => state.annotation_defaults.values.text,
+                        };
                         state.editor.text_draft = Some(TextDraft {
                             target: Some(hit.id),
                             position: *position,
                             content: iced::widget::text_editor::Content::with_text(text),
+                            style: existing_style,
                         });
                         return iced::widget::operation::focus(state.text_editor_id.clone());
                     }
@@ -443,6 +484,7 @@ pub(crate) fn handle_canvas_pressed(
                 target: None,
                 position: point,
                 content: iced::widget::text_editor::Content::new(),
+                style: state.annotation_defaults.values.text,
             });
             iced::widget::operation::focus(state.text_editor_id.clone())
         }
@@ -523,7 +565,11 @@ pub(crate) fn handle_canvas_released(
     let point = point.clamp_to(w, h);
     match state.editor.drag.take() {
         Some(DragState::CreateNumber { tip, .. }) => {
-            let id = state.document.image.add_number_callout(tip, point);
+            let id = state.document.image.add_number_callout_with_style(
+                tip,
+                point,
+                state.annotation_defaults.values.number,
+            );
             state.editor.selection = Some(id);
         }
         Some(DragState::CreateRedaction { anchor, .. }) => {
@@ -638,6 +684,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::CopyOriginal => {
             state.editor.copy_menu_open = false;
+            state.editor.properties.popup = None;
             commit_text_draft(state);
             if super::secure_sharing::has_secure_redactions(&state.document) {
                 state.pending_unredacted_action =
@@ -717,6 +764,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::Reveal => {
             commit_text_draft(state);
+            state.editor.more_menu_open = false;
+            state.editor.properties.popup = None;
             match super::secure_sharing::reveal_action(&state.document) {
                 super::secure_sharing::RevealAction::Disabled => Task::none(),
                 super::secure_sharing::RevealAction::Immediate { path, .. } => {
@@ -768,11 +817,16 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ModalScrimPressed => Task::none(),
         Message::WheelScrolled(delta) => handle_wheel(state, delta),
         Message::SelectTool(tool) => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             #[cfg(feature = "ocr")]
             if state.editor.tool == Tool::OcrText && tool != Tool::OcrText {
                 return Task::none();
             }
             commit_text_draft(state);
+            state.editor.more_menu_open = false;
+            state.editor.properties.popup = None;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
                 state.editor.drag = None;
@@ -788,8 +842,16 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Undo => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             #[cfg(feature = "ocr")]
             if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
+            if state.editor.properties.color.is_some() {
+                state.editor.properties.color = None;
+                state.editor.properties.popup = None;
                 return Task::none();
             }
             commit_text_draft(state);
@@ -798,8 +860,16 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Redo => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             #[cfg(feature = "ocr")]
             if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
+            if state.editor.properties.color.is_some() {
+                state.editor.properties.color = None;
+                state.editor.properties.popup = None;
                 return Task::none();
             }
             commit_text_draft(state);
@@ -808,6 +878,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::DeleteSelected => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             if state.editor.text_draft.is_some() {
                 return Task::none();
             }
@@ -826,16 +899,27 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.editor.tool = Tool::Select;
                 return Task::none();
             }
+            if state.editor.properties.color.is_some() {
+                state.editor.properties.color = None;
+                state.editor.properties.popup = None;
+                return Task::none();
+            }
             if state.pending_unredacted_action.is_some() {
                 state.pending_unredacted_action = None;
             } else if state.editor.copy_menu_open {
                 state.editor.copy_menu_open = false;
+                state.editor.properties.popup = None;
+            } else if state.editor.more_menu_open {
+                state.editor.more_menu_open = false;
+                state.editor.properties.popup = None;
             } else if state.editor.text_draft.is_some() {
                 state.editor.text_draft = None;
             } else if state.editor.drag.is_some() {
                 state.editor.drag = None;
             } else if state.editor.selection.is_some() {
                 state.editor.selection = None;
+            } else if state.editor.tool != Tool::Select {
+                state.editor.tool = Tool::Select;
             } else {
                 return update(state, Message::RequestClose);
             }
@@ -843,6 +927,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::ToggleNavigator => {
             commit_text_draft(state);
+            state.editor.more_menu_open = false;
+            state.editor.properties.popup = None;
             state.editor.navigator_open = !state.editor.navigator_open;
             Task::none()
         }
@@ -875,6 +961,22 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ToggleCopyMenu => {
             commit_text_draft(state);
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
+            state.editor.more_menu_open = false;
+            state.editor.properties.color = None;
+            state.editor.properties.popup = state
+                .editor
+                .copy_menu_open
+                .then_some(super::properties::Popup::CopyMenu);
+            Task::none()
+        }
+        Message::ToggleMoreMenu => {
+            state.editor.more_menu_open = !state.editor.more_menu_open;
+            state.editor.copy_menu_open = false;
+            state.editor.properties.color = None;
+            state.editor.properties.popup = state
+                .editor
+                .more_menu_open
+                .then_some(super::properties::Popup::MoreMenu);
             Task::none()
         }
         Message::TextDraftAction(action) => {
@@ -1006,6 +1108,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::SmartRedaction => {
+            state.editor.more_menu_open = false;
+            state.editor.properties.popup = None;
             let mut wb = super::workbench::WorkbenchState::default();
             if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
                 if let Ok(cfg) = super::workbench::load_provider_config(&config_dir) {
@@ -1016,6 +1120,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::ExportBugReport => {
+            state.editor.more_menu_open = false;
+            state.editor.properties.popup = None;
             if block_pending_candidates(state) {
                 return Task::none();
             }
@@ -1502,6 +1608,279 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 | super::workbench::WorkbenchMessage::DisclosureRequested(_) => Task::none(),
             }
         }
+        Message::NextNumberInputChanged(value) => {
+            state.editor.properties.next_number_input = value;
+            Task::none()
+        }
+        Message::CommitNextNumber => {
+            let input = state.editor.properties.next_number_input.trim().to_string();
+            match input.parse::<u32>() {
+                Ok(n) => {
+                    if let Err(e) = state.document.image.set_next_number(n) {
+                        state.message = Some(InlineMessage::Error(e.to_string()));
+                    } else {
+                        state.editor.properties.next_number_input.clear();
+                    }
+                }
+                Err(_) => {
+                    if !input.is_empty() {
+                        state.message = Some(InlineMessage::Error(
+                            "Enter a valid positive integer".into(),
+                        ));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::OpenColorPicker(prop) => {
+            use super::properties::{ColorProperty, ColorTransaction, PropertyTarget};
+            let target = match super::properties::property_target(state) {
+                Some(t) => t,
+                None => return Task::none(),
+            };
+            let original = match (&target, &prop) {
+                (PropertyTarget::NumberTool, ColorProperty::NumberAccent) => {
+                    state.annotation_defaults.values.number.accent
+                }
+                (PropertyTarget::TextTool, ColorProperty::TextColor) => {
+                    state.annotation_defaults.values.text.text_color
+                }
+                (PropertyTarget::TextTool, ColorProperty::TextBackground) => state
+                    .annotation_defaults
+                    .values
+                    .text
+                    .background
+                    .unwrap_or(rollshot_image_document::Rgb8::new(255, 255, 255)),
+                (PropertyTarget::Annotation(id), ColorProperty::NumberAccent) => {
+                    match state.document.image.annotation(*id) {
+                        Some(Annotation::NumberCallout { style, .. }) => style.accent,
+                        _ => return Task::none(),
+                    }
+                }
+                (PropertyTarget::Annotation(id), ColorProperty::TextColor) => {
+                    match state.document.image.annotation(*id) {
+                        Some(Annotation::TextNote { style, .. }) => style.text_color,
+                        _ => return Task::none(),
+                    }
+                }
+                (PropertyTarget::Annotation(id), ColorProperty::TextBackground) => {
+                    match state.document.image.annotation(*id) {
+                        Some(Annotation::TextNote { style, .. }) => {
+                            style.background.unwrap_or(Rgb8::new(255, 255, 255))
+                        }
+                        _ => return Task::none(),
+                    }
+                }
+                _ => return Task::none(),
+            };
+            let hex = format!("#{:02X}{:02X}{:02X}", original.r, original.g, original.b);
+            state.editor.properties.color = Some(ColorTransaction {
+                target,
+                property: prop,
+                original,
+                preview: original,
+                hex,
+            });
+            state.editor.copy_menu_open = false;
+            state.editor.more_menu_open = false;
+            state.editor.properties.popup = Some(super::properties::Popup::ColorPicker);
+            Task::none()
+        }
+        Message::PreviewColor(rgb) => {
+            if let Some(tx) = &mut state.editor.properties.color {
+                tx.preview = rgb;
+                tx.hex = format!("#{:02X}{:02X}{:02X}", rgb.r, rgb.g, rgb.b);
+            }
+            Task::none()
+        }
+        Message::ColorHexChanged(input) => {
+            if let Some(tx) = &mut state.editor.properties.color {
+                if let Ok(rgb) = super::properties::parse_hex_rgb(&input) {
+                    tx.preview = rgb;
+                }
+                tx.hex = input;
+            }
+            Task::none()
+        }
+        Message::ApplyColor => {
+            let tx = match state.editor.properties.color.take() {
+                Some(tx) => tx,
+                None => return Task::none(),
+            };
+            state.editor.properties.popup = None;
+            use super::properties::{ColorProperty, PropertyTarget};
+            match tx.target {
+                PropertyTarget::NumberTool => {
+                    if let ColorProperty::NumberAccent = tx.property {
+                        state.annotation_defaults.values.number.accent = tx.preview;
+                    }
+                    if let Some(path) = state.annotation_defaults.config_path.clone() {
+                        if let Err(e) = super::annotation_defaults::save_to(
+                            &path,
+                            &state.annotation_defaults.values,
+                        ) {
+                            if !state.annotation_defaults.warning_reported {
+                                state.annotation_defaults.warning_reported = true;
+                                state.message =
+                                    Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                            }
+                        }
+                    }
+                }
+                PropertyTarget::TextTool => {
+                    match tx.property {
+                        ColorProperty::TextColor => {
+                            state.annotation_defaults.values.text.text_color = tx.preview;
+                        }
+                        ColorProperty::TextBackground => {
+                            state.annotation_defaults.values.text.background = Some(tx.preview);
+                        }
+                        _ => {}
+                    }
+                    if let Some(path) = state.annotation_defaults.config_path.clone() {
+                        if let Err(e) = super::annotation_defaults::save_to(
+                            &path,
+                            &state.annotation_defaults.values,
+                        ) {
+                            if !state.annotation_defaults.warning_reported {
+                                state.annotation_defaults.warning_reported = true;
+                                state.message =
+                                    Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                            }
+                        }
+                    }
+                }
+                PropertyTarget::Annotation(id) => match tx.property {
+                    ColorProperty::NumberAccent => {
+                        if let Some(Annotation::NumberCallout { style, .. }) =
+                            state.document.image.annotation(id)
+                        {
+                            let mut new_style = *style;
+                            new_style.accent = tx.preview;
+                            if let Err(e) = state.document.image.set_number_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
+                        }
+                    }
+                    ColorProperty::TextColor => {
+                        if let Some(Annotation::TextNote { style, .. }) =
+                            state.document.image.annotation(id)
+                        {
+                            let mut new_style = *style;
+                            new_style.text_color = tx.preview;
+                            if let Err(e) = state.document.image.set_text_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
+                        }
+                    }
+                    ColorProperty::TextBackground => {
+                        if let Some(Annotation::TextNote { style, .. }) =
+                            state.document.image.annotation(id)
+                        {
+                            let mut new_style = *style;
+                            new_style.background = Some(tx.preview);
+                            if let Err(e) = state.document.image.set_text_style(id, new_style) {
+                                state.message = Some(InlineMessage::Error(e.to_string()));
+                            }
+                        }
+                    }
+                },
+            }
+            Task::none()
+        }
+        Message::CancelColor => {
+            state.editor.properties.color = None;
+            state.editor.properties.popup = None;
+            Task::none()
+        }
+        Message::SetNumberSize(size) => {
+            match super::properties::property_target(state) {
+                Some(super::properties::PropertyTarget::NumberTool) => {
+                    state.annotation_defaults.values.number.size = size;
+                    persist_annotation_defaults(state);
+                }
+                Some(super::properties::PropertyTarget::Annotation(id)) => {
+                    if let Some(Annotation::NumberCallout { style, .. }) =
+                        state.document.image.annotation(id)
+                    {
+                        let mut next = *style;
+                        next.size = size;
+                        if let Err(error) = state.document.image.set_number_style(id, next) {
+                            state.message = Some(InlineMessage::Error(error.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::SetTextSize(size) => {
+            match super::properties::property_target(state) {
+                Some(super::properties::PropertyTarget::TextTool) => {
+                    state.annotation_defaults.values.text.font_size = size;
+                    persist_annotation_defaults(state);
+                }
+                Some(super::properties::PropertyTarget::Annotation(id)) => {
+                    if let Some(Annotation::TextNote { style, .. }) =
+                        state.document.image.annotation(id)
+                    {
+                        let mut next = *style;
+                        next.font_size = size;
+                        if let Err(error) = state.document.image.set_text_style(id, next) {
+                            state.message = Some(InlineMessage::Error(error.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::ToggleTextBackground => {
+            match super::properties::property_target(state) {
+                Some(super::properties::PropertyTarget::TextTool) => {
+                    let background = &mut state.annotation_defaults.values.text.background;
+                    *background = if background.is_some() {
+                        None
+                    } else {
+                        rollshot_image_document::TextStyle::default().background
+                    };
+                    persist_annotation_defaults(state);
+                }
+                Some(super::properties::PropertyTarget::Annotation(id)) => {
+                    if let Some(Annotation::TextNote { style, .. }) =
+                        state.document.image.annotation(id)
+                    {
+                        let mut next = *style;
+                        next.background = if next.background.is_some() {
+                            None
+                        } else {
+                            rollshot_image_document::TextStyle::default().background
+                        };
+                        if let Err(error) = state.document.image.set_text_style(id, next) {
+                            state.message = Some(InlineMessage::Error(error.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+    }
+}
+
+fn persist_annotation_defaults(state: &mut super::ResultWorkspace) {
+    let Some(path) = state.annotation_defaults.config_path.clone() else {
+        return;
+    };
+    if let Err(error) =
+        super::annotation_defaults::save_to(&path, &state.annotation_defaults.values)
+    {
+        if !state.annotation_defaults.warning_reported {
+            state.annotation_defaults.warning_reported = true;
+            state.message = Some(InlineMessage::Warning(format!(
+                "Could not save annotation defaults: {error}"
+            )));
+        }
     }
 }
 
@@ -1522,7 +1901,12 @@ fn commit_text_draft(state: &mut super::ResultWorkspace) {
     let text = draft.content.text().trim_end().to_string();
     match draft.target {
         None => {
-            if let Ok(id) = state.document.image.add_text_note(draft.position, text) {
+            if let Ok(id) =
+                state
+                    .document
+                    .image
+                    .add_text_note_with_style(draft.position, text, draft.style)
+            {
                 state.editor.selection = Some(id);
             }
         }
@@ -2281,9 +2665,10 @@ mod tests {
 
     fn workspace_with_size(w: u32, h: u32) -> super::super::ResultWorkspace {
         let img = RgbaImage::from_pixel(w, h, Rgba([100, 150, 200, 255]));
-        let mut ws = super::super::ResultWorkspace::new(
+        let mut ws = super::super::ResultWorkspace::with_max_texture_dim(
             super::super::document::ResultDocument::unsaved(img),
             None,
+            super::super::DEFAULT_MAX_TEXTURE_DIM,
         );
         ws.viewport.zoom = ZoomMode::ActualSize;
         ws.apply_viewport_bounds(Size::new(w as f32, h as f32));
@@ -3337,5 +3722,624 @@ mod tests {
             .join("images/final-redacted.png");
         let decoded = image::open(final_image).unwrap().to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 0, 255]);
+    }
+
+    // -- property editing tests (Task 4) ------------------------------------
+
+    fn workspace_with_selected_number() -> super::super::ResultWorkspace {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        state
+    }
+
+    fn workspace_with_selected_text() -> super::super::ResultWorkspace {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_text_note(ImagePoint::new(10.0, 10.0), "note".into())
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        state
+    }
+
+    #[test]
+    fn open_color_picker_snapshots_original_color() {
+        let mut state = workspace_with_selected_number();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let tx = state.editor.properties.color.as_ref().unwrap();
+        assert_eq!(tx.original, tx.preview);
+        assert_eq!(
+            tx.original,
+            rollshot_image_document::NumberStyle::default().accent
+        );
+        assert_eq!(
+            tx.hex,
+            format!(
+                "#{:02X}{:02X}{:02X}",
+                tx.original.r, tx.original.g, tx.original.b
+            )
+        );
+    }
+
+    #[test]
+    fn preview_color_updates_preview_without_mutation() {
+        let mut state = workspace_with_selected_number();
+        let before = state.document.image.state_id();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(1, 2, 3)));
+        let tx = state.editor.properties.color.as_ref().unwrap();
+        assert_eq!(tx.preview, Rgb8::new(1, 2, 3));
+        assert_eq!(
+            state.document.image.state_id(),
+            before,
+            "no document mutation"
+        );
+    }
+
+    #[test]
+    fn cancel_color_restores_preview_without_history_or_default_save() {
+        let mut state = workspace_with_selected_number();
+        let before = state.document.image.state_id();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(1, 2, 3)));
+        let _ = update(&mut state, Message::CancelColor);
+        assert_eq!(state.document.image.state_id(), before);
+        assert!(state.editor.properties.color.is_none());
+    }
+
+    #[test]
+    fn apply_color_to_annotation_mutates_document() {
+        let mut state = workspace_with_selected_number();
+        let before = state.document.image.state_id();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
+        let _ = update(&mut state, Message::ApplyColor);
+        assert_ne!(state.document.image.state_id(), before, "document mutated");
+        assert!(state.editor.properties.color.is_none());
+        let id = state.editor.selection.unwrap();
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::NumberCallout { style, .. } => {
+                assert_eq!(style.accent, Rgb8::new(10, 20, 30));
+            }
+            _ => panic!("expected NumberCallout"),
+        }
+    }
+
+    #[test]
+    fn apply_color_to_text_annotation_mutates_document() {
+        let mut state = workspace_with_selected_text();
+        let before = state.document.image.state_id();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::TextColor),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(40, 50, 60)));
+        let _ = update(&mut state, Message::ApplyColor);
+        assert_ne!(state.document.image.state_id(), before);
+        let id = state.editor.selection.unwrap();
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::TextNote { style, .. } => {
+                assert_eq!(style.text_color, Rgb8::new(40, 50, 60));
+            }
+            _ => panic!("expected TextNote"),
+        }
+    }
+
+    #[test]
+    fn color_hex_changed_updates_hex_and_preview() {
+        let mut state = workspace_with_selected_number();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::ColorHexChanged("#AABBCC".into()));
+        let tx = state.editor.properties.color.as_ref().unwrap();
+        assert_eq!(tx.hex, "#AABBCC");
+        assert_eq!(tx.preview, Rgb8::new(0xAA, 0xBB, 0xCC));
+    }
+
+    #[test]
+    fn color_hex_changed_with_invalid_does_not_update_preview() {
+        let mut state = workspace_with_selected_number();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let original = state.editor.properties.color.as_ref().unwrap().preview;
+        let _ = update(&mut state, Message::ColorHexChanged("ZZZZZZ".into()));
+        let tx = state.editor.properties.color.as_ref().unwrap();
+        assert_eq!(
+            tx.preview, original,
+            "invalid hex preserves previous preview"
+        );
+    }
+
+    #[test]
+    fn commit_next_number_parses_and_sets() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Number;
+        state.editor.properties.next_number_input = "42".into();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert_eq!(state.document.image.next_number(), 42);
+        assert!(state.editor.properties.next_number_input.is_empty());
+    }
+
+    #[test]
+    fn commit_next_number_rejects_zero() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Number;
+        state.editor.properties.next_number_input = "0".into();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert!(state.message.is_some());
+        assert!(state.message.as_ref().unwrap().is_error());
+    }
+
+    #[test]
+    fn commit_next_number_rejects_non_numeric() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Number;
+        state.editor.properties.next_number_input = "abc".into();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert!(state.message.is_some());
+        assert!(state.message.as_ref().unwrap().is_error());
+    }
+
+    #[test]
+    fn open_color_picker_on_redact_tool_is_noop() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Redact;
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        assert!(state.editor.properties.color.is_none());
+    }
+
+    #[test]
+    fn apply_color_on_no_transaction_is_noop() {
+        let mut state = workspace_with_size(200, 200);
+        let before = state.document.image.state_id();
+        let _ = update(&mut state, Message::ApplyColor);
+        assert_eq!(state.document.image.state_id(), before);
+    }
+
+    #[test]
+    fn discrete_size_edits_update_tool_defaults_and_selected_annotations() {
+        let mut defaults = workspace_with_size(200, 200);
+        defaults.editor.tool = Tool::Number;
+        let _ = update(
+            &mut defaults,
+            Message::SetNumberSize(rollshot_image_document::NumberSize::Large),
+        );
+        assert_eq!(
+            defaults.annotation_defaults.values.number.size,
+            rollshot_image_document::NumberSize::Large
+        );
+
+        let mut selected = workspace_with_selected_text();
+        let before = selected.document.image.state_id();
+        let _ = update(
+            &mut selected,
+            Message::SetTextSize(rollshot_image_document::TextSize::Px32),
+        );
+        assert_ne!(selected.document.image.state_id(), before);
+        let id = selected.editor.selection.unwrap();
+        assert!(matches!(
+            selected.document.image.annotation(id),
+            Some(Annotation::TextNote { style, .. })
+                if style.font_size == rollshot_image_document::TextSize::Px32
+        ));
+    }
+
+    #[test]
+    fn background_toggle_updates_defaults_and_selected_annotations() {
+        let mut defaults = workspace_with_size(200, 200);
+        defaults.editor.tool = Tool::Text;
+        let _ = update(&mut defaults, Message::ToggleTextBackground);
+        assert_eq!(defaults.annotation_defaults.values.text.background, None);
+
+        let mut selected = workspace_with_selected_text();
+        let _ = update(&mut selected, Message::ToggleTextBackground);
+        let id = selected.editor.selection.unwrap();
+        assert!(matches!(
+            selected.document.image.annotation(id),
+            Some(Annotation::TextNote { style, .. }) if style.background.is_none()
+        ));
+    }
+
+    #[test]
+    fn opening_a_popup_closes_the_previous_popup() {
+        use super::super::properties::{ColorProperty, Popup};
+
+        let mut state = workspace_with_selected_number();
+        let _ = update(&mut state, Message::ToggleCopyMenu);
+        assert_eq!(state.editor.properties.popup, Some(Popup::CopyMenu));
+
+        let _ = update(&mut state, Message::ToggleMoreMenu);
+        assert!(!state.editor.copy_menu_open);
+        assert_eq!(state.editor.properties.popup, Some(Popup::MoreMenu));
+
+        let _ = update(&mut state, Message::ToggleNavigator);
+        assert!(!state.editor.more_menu_open);
+        assert_eq!(state.editor.properties.popup, None);
+
+        let _ = update(&mut state, Message::ToggleMoreMenu);
+
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::NumberAccent),
+        );
+        assert!(!state.editor.more_menu_open);
+        assert_eq!(state.editor.properties.popup, Some(Popup::ColorPicker));
+
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.properties.color.is_none());
+        assert_eq!(state.editor.properties.popup, None);
+    }
+
+    // -- creation defaults (Task 5) ----------------------------------------
+
+    #[test]
+    fn number_creation_copies_current_tool_default() {
+        use rollshot_image_document::{NumberSize, NumberStyle};
+        let mut state = workspace_with_size(200, 200);
+        state.annotation_defaults.values.number.size = NumberSize::Large;
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(10.0, 10.0),
+        );
+        match &state.document.image.annotations()[0] {
+            Annotation::NumberCallout {
+                style: NumberStyle { size, .. },
+                ..
+            } => {
+                assert_eq!(*size, NumberSize::Large);
+            }
+            other => panic!("expected NumberCallout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_draft_captures_default_style_at_creation_time() {
+        use rollshot_image_document::TextSize;
+        let mut state = workspace_with_size(200, 100);
+        state.annotation_defaults.values.text.font_size = TextSize::Px32;
+        let _ = update(&mut state, Message::SelectTool(Tool::Text));
+        let _ = update(
+            &mut state,
+            Message::CanvasPressed(ImagePoint::new(10.0, 10.0)),
+        );
+        let draft = state.editor.text_draft.as_ref().expect("draft open");
+        assert_eq!(draft.style.font_size, TextSize::Px32);
+    }
+
+    #[test]
+    fn selected_color_preview_changes_canvas_shapes_not_flattened_document() {
+        use rollshot_image_document::{annotation_shapes as shapes_fn, Rgb8};
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let before = state.document.image.flatten();
+
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(0, 255, 0)));
+
+        let preview =
+            super::super::properties::preview_annotation(&state).expect("preview should exist");
+        let committed = state.document.image.annotation(id).unwrap();
+        assert_ne!(
+            shapes_fn(&preview),
+            shapes_fn(committed),
+            "preview shapes should differ from committed shapes"
+        );
+        assert_eq!(state.document.image.flatten(), before);
+    }
+
+    // -- keyboard precedence and failure behavior (Task 7) --------------------
+
+    /// Build a workspace with all local states layered: color tx, drag,
+    /// selection, and a creation tool (Number) active.
+    fn workspace_with_all_local_states() -> super::super::ResultWorkspace {
+        let mut state = workspace_with_size(200, 200);
+        // 1. Add an annotation and select it.
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        // 2. Open a color transaction on the selection.
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        // 3. Switch to Number tool (commits text draft if any — none here).
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        // 4. Start a creation drag.
+        state.editor.drag = Some(super::super::canvas::DragState::CreateNumber {
+            tip: ImagePoint::new(50.0, 50.0),
+            bubble: ImagePoint::new(60.0, 60.0),
+        });
+        state
+    }
+
+    fn press_escape(state: &mut super::super::ResultWorkspace) {
+        let _ = update(state, Message::EscapePressed);
+    }
+
+    /// Escape resolves: color tx → drag → selection → creation tool → Select → close.
+    #[test]
+    fn escape_resolves_property_then_draft_then_selection_then_tool_then_close() {
+        let mut state = workspace_with_all_local_states();
+
+        // 1st Esc: cancel the color transaction (highest priority).
+        assert!(
+            state.editor.properties.color.is_some(),
+            "precondition: color tx open"
+        );
+        press_escape(&mut state);
+        assert!(state.editor.properties.color.is_none());
+        assert!(
+            state.editor.drag.is_some(),
+            "drag survives color tx cancellation"
+        );
+
+        // 2nd Esc: cancel the in-progress drag.
+        press_escape(&mut state);
+        assert!(state.editor.drag.is_none());
+        assert!(
+            state.editor.selection.is_some(),
+            "selection survives drag cancellation"
+        );
+
+        // 3rd Esc: clear the selection.
+        press_escape(&mut state);
+        assert!(state.editor.selection.is_none());
+        assert_eq!(
+            state.editor.tool,
+            Tool::Number,
+            "tool unchanged after selection clear"
+        );
+
+        // 4th Esc: creation tool → Select.
+        press_escape(&mut state);
+        assert_eq!(state.editor.tool, Tool::Select);
+
+        // 5th Esc: Select tool → trigger close (unsaved workspace).
+        press_escape(&mut state);
+        assert!(
+            state.pending_discard.is_some(),
+            "final Esc triggers close on unsaved workspace"
+        );
+    }
+
+    /// When PropertyFocus is active, Backspace and tool-switching keys must
+    /// NOT fire. Escape still works (it is always routed).
+    #[test]
+    fn focused_property_input_owns_delete_and_shortcut_keys() {
+        let mut state = workspace_with_selected_text();
+        state.editor.properties.focus = Some(super::super::properties::PropertyFocus::HexInput);
+
+        // DeleteSelected should be suppressed when PropertyFocus is active.
+        let before = state.document.image.state_id();
+        let _ = update(&mut state, Message::DeleteSelected);
+        assert_eq!(state.document.image.state_id(), before, "no deletion");
+        assert!(state.editor.selection.is_some(), "selection preserved");
+
+        // Tool-switching should be suppressed.
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        assert_eq!(state.editor.tool, Tool::Select, "tool not changed");
+
+        // Undo should be suppressed.
+        let _ = update(&mut state, Message::Undo);
+        assert_eq!(state.document.image.state_id(), before, "no undo");
+
+        // Escape must always work regardless of PropertyFocus.
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(
+            state.editor.selection.is_none() || state.pending_discard.is_some(),
+            "Escape not suppressed by PropertyFocus"
+        );
+    }
+
+    /// When a defaults save fails, the warning appears once and subsequent
+    /// failures keep the memory value without re-warning.
+    #[test]
+    fn failed_default_save_warns_once_and_keeps_memory_value() {
+        use rollshot_image_document::NumberSize;
+        let mut state = workspace_with_size(200, 200);
+        // Point to a path under /sys which is read-only and cannot be created.
+        state.annotation_defaults.config_path = Some(std::path::PathBuf::from(
+            "/sys/rollshot_test_dir/config.toml",
+        ));
+        state.annotation_defaults.warning_reported = false;
+        state.editor.tool = Tool::Number;
+
+        // First apply: should warn.
+        state.annotation_defaults.values.number.size = NumberSize::Large;
+        // Trigger defaults persistence via color apply (NumberTool target).
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(255, 0, 0)));
+        let _ = update(&mut state, Message::ApplyColor);
+
+        let first_msg = state.message.as_ref().map(|m| m.text().to_owned());
+        assert!(first_msg.is_some(), "first save failure produces a warning");
+
+        // Second apply: message text should be the same (deduped).
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(0, 255, 0)));
+        let _ = update(&mut state, Message::ApplyColor);
+
+        let second_msg = state.message.as_ref().map(|m| m.text().to_owned());
+        assert_eq!(
+            first_msg, second_msg,
+            "same warning text on repeated failure"
+        );
+
+        // The in-memory value should be updated regardless of persistence failure.
+        assert_eq!(
+            state.annotation_defaults.values.number.accent,
+            Rgb8::new(0, 255, 0),
+            "memory value updated despite save failure"
+        );
+    }
+
+    /// Undo/Redo cancels a property preview before touching document history.
+    #[test]
+    fn undo_cancels_property_preview_before_history() {
+        use rollshot_image_document::Rgb8;
+        let mut state = workspace_with_selected_number();
+        let before = state.document.image.state_id();
+
+        // Open color preview.
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
+        assert!(state.editor.properties.color.is_some());
+
+        // Undo should cancel the preview (no-op since no doc mutation happened).
+        let _ = update(&mut state, Message::Undo);
+        assert!(
+            state.editor.properties.color.is_none(),
+            "undo cancels property preview"
+        );
+        assert_eq!(state.document.image.state_id(), before);
+    }
+
+    /// Invalid next number input leaves state unchanged (no error on empty,
+    /// error on non-numeric).
+    #[test]
+    fn invalid_next_number_leaves_state_unchanged() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Number;
+        let before = state.document.image.next_number();
+
+        // Empty input: no error, no change.
+        state.editor.properties.next_number_input.clear();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert_eq!(state.document.image.next_number(), before);
+        assert!(state.message.is_none(), "empty input is silent");
+
+        // Non-numeric: error, no change.
+        state.editor.properties.next_number_input = "abc".into();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert_eq!(state.document.image.next_number(), before);
+        assert!(state.message.as_ref().unwrap().is_error());
+    }
+
+    /// Copy/Save payloads exclude live property previews.
+    #[test]
+    fn copy_and_save_exclude_preview() {
+        use rollshot_image_document::Rgb8;
+        let mut state = workspace_with_selected_number();
+
+        // Open a color preview that differs from the committed annotation.
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(0, 0, 0)));
+
+        // Copy payload must flatten committed annotations, NOT the preview.
+        let copy = copy_payload(&state);
+        let flattened = state.document.image.flatten();
+        assert_eq!(copy, flattened, "copy payload is flattened document");
+
+        // Save payload must also be the committed document.
+        let save = save_payload(&state);
+        assert_eq!(save, flattened, "save payload is flattened document");
+    }
+
+    /// Opaque Redaction remains fully opaque (alpha=255) after mixed edits.
+    #[test]
+    fn opaque_redaction_remains_black_after_mixed_edits() {
+        let mut state = workspace_with_size(200, 200);
+        // Add a number callout.
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
+        // Add a redaction.
+        let rid = state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            })
+            .unwrap();
+        // Move the redaction.
+        let _ = state.document.image.set_redaction_bounds(
+            rid,
+            ImageRect {
+                x: 5.0,
+                y: 5.0,
+                width: 25.0,
+                height: 25.0,
+            },
+        );
+        // Undo the move.
+        let _ = state.document.image.undo();
+        // Redo the move.
+        let _ = state.document.image.redo();
+
+        // The redaction bounds should still be valid.
+        match state.document.image.annotation(rid).unwrap() {
+            Annotation::OpaqueRedaction { bounds, .. } => {
+                assert_eq!(
+                    *bounds,
+                    ImageRect {
+                        x: 5.0,
+                        y: 5.0,
+                        width: 25.0,
+                        height: 25.0
+                    }
+                );
+            }
+            _ => panic!("expected OpaqueRedaction"),
+        }
+
+        // Flatten and check pixel inside the redaction: must be fully opaque black.
+        let flat = state.document.image.flatten();
+        let px = flat.get_pixel(10, 10);
+        assert_eq!(px.0[3], 255, "redaction pixel must be fully opaque");
     }
 }

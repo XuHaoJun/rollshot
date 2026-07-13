@@ -121,6 +121,27 @@ impl Rgba8 {
     }
 }
 
+/// An 8-bit sRGB color without alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Rgb8 {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb8 {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+    pub const fn opaque(self) -> Rgba8 {
+        Rgba8::new(self.r, self.g, self.b, 0xFF)
+    }
+    pub const fn with_alpha(self, alpha: u8) -> Rgba8 {
+        Rgba8::new(self.r, self.g, self.b, alpha)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

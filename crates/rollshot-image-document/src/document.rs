@@ -42,6 +42,8 @@ pub enum EditError {
     WrongKind,
     #[error("coordinates must be finite")]
     NonFiniteCoordinate,
+    #[error("next number must be at least 1")]
+    InvalidNextNumber,
 }
 
 /// One restorable history state (mark-shot pattern: graph + counters).
@@ -174,6 +176,15 @@ impl ImageDocument {
     }
 
     pub fn add_number_callout(&mut self, tip: ImagePoint, bubble: ImagePoint) -> AnnotationId {
+        self.add_number_callout_with_style(tip, bubble, crate::style::NumberStyle::default())
+    }
+
+    pub fn add_number_callout_with_style(
+        &mut self,
+        tip: ImagePoint,
+        bubble: ImagePoint,
+        style: crate::style::NumberStyle,
+    ) -> AnnotationId {
         let before = self.snapshot();
         let (w, h) = self.source.dimensions();
         let id = self.allocate_id();
@@ -184,6 +195,7 @@ impl ImageDocument {
             number,
             tip: tip.clamp_to(w, h),
             bubble: bubble.clamp_to(w, h),
+            style,
         });
         self.commit(before);
         id
@@ -193,6 +205,15 @@ impl ImageDocument {
         &mut self,
         position: ImagePoint,
         text: String,
+    ) -> Result<AnnotationId, EditError> {
+        self.add_text_note_with_style(position, text, crate::style::TextStyle::default())
+    }
+
+    pub fn add_text_note_with_style(
+        &mut self,
+        position: ImagePoint,
+        text: String,
+        style: crate::style::TextStyle,
     ) -> Result<AnnotationId, EditError> {
         if text.trim().is_empty() {
             return Err(EditError::EmptyText);
@@ -204,6 +225,7 @@ impl ImageDocument {
             id,
             position: position.clamp_to(w, h),
             text,
+            style,
         });
         self.commit(before);
         Ok(id)
@@ -338,6 +360,57 @@ impl ImageDocument {
         Ok(())
     }
 
+    pub fn set_number_style(
+        &mut self,
+        id: AnnotationId,
+        style: crate::style::NumberStyle,
+    ) -> Result<(), EditError> {
+        let index = self.annotation_index(id)?;
+        match &self.annotations[index] {
+            Annotation::NumberCallout { style: s, .. } if *s == style => return Ok(()),
+            Annotation::NumberCallout { .. } => {}
+            _ => return Err(EditError::WrongKind),
+        }
+        let before = self.snapshot();
+        if let Annotation::NumberCallout { style: s, .. } = &mut self.annotations[index] {
+            *s = style;
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    pub fn set_text_style(
+        &mut self,
+        id: AnnotationId,
+        style: crate::style::TextStyle,
+    ) -> Result<(), EditError> {
+        let index = self.annotation_index(id)?;
+        match &self.annotations[index] {
+            Annotation::TextNote { style: s, .. } if *s == style => return Ok(()),
+            Annotation::TextNote { .. } => {}
+            _ => return Err(EditError::WrongKind),
+        }
+        let before = self.snapshot();
+        if let Annotation::TextNote { style: s, .. } = &mut self.annotations[index] {
+            *s = style;
+        }
+        self.commit(before);
+        Ok(())
+    }
+
+    pub fn set_next_number(&mut self, value: u32) -> Result<(), EditError> {
+        if value == 0 {
+            return Err(EditError::InvalidNextNumber);
+        }
+        if self.next_number == value {
+            return Ok(());
+        }
+        let before = self.snapshot();
+        self.next_number = value;
+        self.commit(before);
+        Ok(())
+    }
+
     /// Apply many operations as ONE history entry (spec §6.5). Atomic: if any
     /// op is invalid the whole batch is rolled back — no mutation, no commit,
     /// no `state_id` change. Update*/Delete reference annotations existing
@@ -369,10 +442,13 @@ impl ImageDocument {
                 | EditOp::UpdateTextPosition { id, .. }
                 | EditOp::UpdateText { id, .. }
                 | EditOp::UpdateNumberPoints { id, .. }
+                | EditOp::UpdateNumberStyle { id, .. }
+                | EditOp::UpdateTextStyle { id, .. }
                 | EditOp::Delete { id } => Some(*id),
                 EditOp::AddRedaction { .. }
                 | EditOp::AddTextNote { .. }
-                | EditOp::AddNumberCallout { .. } => None,
+                | EditOp::AddNumberCallout { .. }
+                | EditOp::SetNextNumber { .. } => None,
             };
             if referenced_id.is_some_and(|id| self.annotation(id).is_none()) {
                 return Err(EditError::UnknownAnnotation);
@@ -422,7 +498,11 @@ impl ImageDocument {
                 });
                 added_ids.push(id);
             }
-            EditOp::AddTextNote { position, text } => {
+            EditOp::AddTextNote {
+                position,
+                text,
+                style,
+            } => {
                 ensure_point_finite(&position)?;
                 if text.trim().is_empty() {
                     return Err(EditError::EmptyText);
@@ -432,10 +512,11 @@ impl ImageDocument {
                     id,
                     position: position.clamp_to(w, h),
                     text,
+                    style,
                 });
                 added_ids.push(id);
             }
-            EditOp::AddNumberCallout { tip, bubble } => {
+            EditOp::AddNumberCallout { tip, bubble, style } => {
                 ensure_point_finite(&tip)?;
                 ensure_point_finite(&bubble)?;
                 let id = self.allocate_id();
@@ -446,6 +527,7 @@ impl ImageDocument {
                     number,
                     tip: tip.clamp_to(w, h),
                     bubble: bubble.clamp_to(w, h),
+                    style,
                 });
                 added_ids.push(id);
             }
@@ -500,6 +582,37 @@ impl ImageDocument {
                     *deleted_callout = true;
                 }
             }
+            EditOp::UpdateNumberStyle { id, style } => {
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::NumberCallout { style: s, .. } => {
+                        if *s != style {
+                            *s = style;
+                        }
+                    }
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::UpdateTextStyle { id, style } => {
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::TextNote { style: s, .. } => {
+                        if *s != style {
+                            *s = style;
+                        }
+                    }
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::SetNextNumber { value } => {
+                if value == 0 {
+                    return Err(EditError::InvalidNextNumber);
+                }
+                if self.next_number == value {
+                    return Ok(());
+                }
+                self.next_number = value;
+            }
         }
         Ok(())
     }
@@ -530,7 +643,8 @@ impl ImageDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{ImagePoint, ImageRect};
+    use crate::geometry::{ImagePoint, ImageRect, Rgb8};
+    use crate::style::{NumberSize, NumberStyle, TextStyle};
     use image::{Rgba, RgbaImage};
 
     pub(crate) fn doc() -> ImageDocument {
@@ -1001,10 +1115,12 @@ mod tests {
                 EditOp::AddNumberCallout {
                     tip: ImagePoint::new(1.0, 1.0),
                     bubble: ImagePoint::new(2.0, 2.0),
+                    style: NumberStyle::default(),
                 },
                 EditOp::AddNumberCallout {
                     tip: ImagePoint::new(3.0, 3.0),
                     bubble: ImagePoint::new(4.0, 4.0),
+                    style: NumberStyle::default(),
                 },
                 EditOp::AddRedaction {
                     bounds: rect(5.0, 5.0, 5.0, 5.0),
@@ -1061,6 +1177,7 @@ mod tests {
                 EditOp::AddTextNote {
                     position: ImagePoint::new(1.0, 1.0),
                     text: "original".into(),
+                    style: TextStyle::default(),
                 },
                 EditOp::UpdateText {
                     id: AnnotationId(1),
@@ -1099,10 +1216,12 @@ mod tests {
                 EditOp::AddTextNote {
                     position: ImagePoint::new(2.0, 2.0),
                     text: "a".into(),
+                    style: TextStyle::default(),
                 },
                 EditOp::AddNumberCallout {
                     tip: ImagePoint::new(3.0, 3.0),
                     bubble: ImagePoint::new(4.0, 4.0),
+                    style: NumberStyle::default(),
                 },
             ])
             .expect("valid mixed adds");
@@ -1125,6 +1244,7 @@ mod tests {
                 EditOp::AddTextNote {
                     position: ImagePoint::new(1.0, 1.0),
                     text: "   ".into(),
+                    style: TextStyle::default(),
                 },
             ])
             .unwrap_err();
@@ -1159,6 +1279,7 @@ mod tests {
             .apply_batch(vec![EditOp::AddNumberCallout {
                 tip: ImagePoint::new(f32::INFINITY, 1.0),
                 bubble: ImagePoint::new(2.0, 2.0),
+                style: NumberStyle::default(),
             }])
             .unwrap_err();
         assert_eq!(err, EditError::NonFiniteCoordinate);
@@ -1173,10 +1294,12 @@ mod tests {
                 EditOp::AddTextNote {
                     position: ImagePoint::new(5.0, 5.0),
                     text: "old".into(),
+                    style: TextStyle::default(),
                 },
                 EditOp::AddNumberCallout {
                     tip: ImagePoint::new(1.0, 1.0),
                     bubble: ImagePoint::new(2.0, 2.0),
+                    style: NumberStyle::default(),
                 },
             ])
             .expect("seed");
@@ -1212,5 +1335,159 @@ mod tests {
             }
             _ => panic!("wrong kind"),
         }
+    }
+
+    // --- Phase B: style edits and next-number ---
+
+    #[test]
+    fn style_edit_retains_id_and_is_one_undo_entry() {
+        let mut d = test_doc();
+        let id = d.add_number_callout(point(5.0), point(5.0));
+        let before = d.state_id();
+        let style = NumberStyle {
+            accent: Rgb8::new(1, 2, 3),
+            size: NumberSize::Large,
+        };
+        d.set_number_style(id, style).unwrap();
+        assert_eq!(d.annotation(id).unwrap().number_style(), Some(style));
+        assert_ne!(d.state_id(), before);
+        assert!(d.undo());
+        assert_eq!(
+            d.annotation(id).unwrap().number_style(),
+            Some(NumberStyle::default())
+        );
+    }
+
+    #[test]
+    fn next_number_is_document_local_validated_and_restored_exactly() {
+        let mut d = test_doc();
+        assert_eq!(d.set_next_number(0), Err(EditError::InvalidNextNumber));
+        assert_eq!(d.next_number(), 1);
+        d.set_next_number(7).unwrap();
+        let id = d.add_number_callout(point(1.0), point(1.0));
+        assert!(matches!(
+            d.annotation(id),
+            Some(Annotation::NumberCallout { number: 7, .. })
+        ));
+        assert!(d.undo());
+        assert_eq!(d.next_number(), 7);
+        assert!(d.undo());
+        assert_eq!(d.next_number(), 1);
+    }
+
+    #[test]
+    fn wrong_kind_style_edit_is_atomic() {
+        let mut d = test_doc();
+        let id = d.add_redaction(rect(0.0, 0.0, 5.0, 5.0)).unwrap();
+        let state = d.state_id();
+        assert_eq!(
+            d.set_text_style(id, TextStyle::default()),
+            Err(EditError::WrongKind)
+        );
+        assert_eq!(d.state_id(), state);
+        assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn set_next_number_zero_rejected_no_undo_entry() {
+        let mut d = test_doc();
+        let s = d.state_id();
+        assert_eq!(d.set_next_number(0), Err(EditError::InvalidNextNumber));
+        assert_eq!(d.state_id(), s);
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn set_next_number_unchanged_is_noop() {
+        let mut d = test_doc();
+        let s = d.state_id();
+        d.set_next_number(1).unwrap();
+        assert_eq!(d.state_id(), s, "unchanged next_number must not commit");
+    }
+
+    #[test]
+    fn text_style_edit_retains_id_and_is_undoable() {
+        let mut d = test_doc();
+        let id = d.add_text_note(point(5.0), "note".to_string()).unwrap();
+        let before = d.state_id();
+        let style = TextStyle {
+            font_size: crate::style::TextSize::Px32,
+            text_color: Rgb8::new(10, 20, 30),
+            background: None,
+        };
+        d.set_text_style(id, style).unwrap();
+        assert_eq!(d.annotation(id).unwrap().text_style(), Some(style));
+        assert_ne!(d.state_id(), before);
+        assert!(d.undo());
+        assert_eq!(
+            d.annotation(id).unwrap().text_style(),
+            Some(TextStyle::default())
+        );
+    }
+
+    #[test]
+    fn add_number_callout_with_style_stores_custom_style() {
+        let mut d = test_doc();
+        let style = NumberStyle {
+            accent: Rgb8::new(100, 200, 50),
+            size: NumberSize::Small,
+        };
+        let id = d.add_number_callout_with_style(point(1.0), point(2.0), style);
+        assert_eq!(d.annotation(id).unwrap().number_style(), Some(style));
+    }
+
+    #[test]
+    fn add_text_note_with_style_stores_custom_style() {
+        let mut d = test_doc();
+        let style = TextStyle {
+            font_size: crate::style::TextSize::Px14,
+            text_color: Rgb8::new(5, 5, 5),
+            background: None,
+        };
+        let id = d
+            .add_text_note_with_style(point(1.0), "hi".to_string(), style)
+            .unwrap();
+        assert_eq!(d.annotation(id).unwrap().text_style(), Some(style));
+    }
+
+    #[test]
+    fn apply_batch_with_styles_and_sequence() {
+        let mut d = test_doc();
+        let ns = NumberStyle {
+            accent: Rgb8::new(1, 1, 1),
+            size: NumberSize::Large,
+        };
+        let ts = TextStyle {
+            font_size: crate::style::TextSize::Px24,
+            text_color: Rgb8::new(2, 2, 2),
+            background: None,
+        };
+        let out = d
+            .apply_batch(vec![
+                EditOp::AddNumberCallout {
+                    tip: point(1.0),
+                    bubble: point(2.0),
+                    style: ns,
+                },
+                EditOp::AddTextNote {
+                    position: point(3.0),
+                    text: "x".into(),
+                    style: ts,
+                },
+                EditOp::SetNextNumber { value: 5 },
+            ])
+            .expect("batch");
+        let callout_id = out.added_ids[0];
+        let text_id = out.added_ids[1];
+        assert_eq!(d.annotation(callout_id).unwrap().number_style(), Some(ns));
+        assert_eq!(d.annotation(text_id).unwrap().text_style(), Some(ts));
+        assert_eq!(d.next_number(), 5);
+        assert!(d.undo());
+        assert_eq!(d.next_number(), 1);
+        assert!(d.annotation(callout_id).is_none());
+    }
+
+    fn point(x: f32) -> ImagePoint {
+        ImagePoint::new(x, x)
     }
 }

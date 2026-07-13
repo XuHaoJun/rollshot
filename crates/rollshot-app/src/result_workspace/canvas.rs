@@ -15,6 +15,9 @@ use rollshot_image_document::{
 };
 use std::time::Instant;
 
+use super::properties::PropertyState;
+use rollshot_image_document::TextStyle;
+
 /// Screen-space hit tolerance; divide by the viewport scale for image space.
 pub const HIT_TOLERANCE_SCREEN: f32 = 8.0;
 /// Screen-space slop and window for double-click detection.
@@ -59,6 +62,9 @@ pub struct TextDraft {
     pub target: Option<AnnotationId>,
     pub position: ImagePoint,
     pub content: text_editor::Content,
+    /// Style captured at draft creation time; changing defaults mid-draft
+    /// does not restyle the in-progress draft.
+    pub style: TextStyle,
 }
 
 pub struct EditorState {
@@ -68,6 +74,7 @@ pub struct EditorState {
     pub text_draft: Option<TextDraft>,
     pub navigator_open: bool,
     pub copy_menu_open: bool,
+    pub more_menu_open: bool,
     /// Document `state_id` at the last successful Save As (dirty marker).
     pub saved_state_id: u64,
     /// Last canvas press, for double-click detection.
@@ -76,6 +83,8 @@ pub struct EditorState {
     /// (spec §13). Keyed by the document state_id.
     pub navigator_items: Vec<rollshot_image_document::NavigatorItem>,
     pub navigator_items_state: Option<u64>,
+    /// Transactional property editing state (color picker, next number input).
+    pub properties: PropertyState,
 }
 
 impl EditorState {
@@ -87,10 +96,12 @@ impl EditorState {
             text_draft: None,
             navigator_open,
             copy_menu_open: false,
+            more_menu_open: false,
             saved_state_id,
             last_press: None,
             navigator_items: Vec::new(),
             navigator_items_state: None,
+            properties: PropertyState::default(),
         }
     }
 }
@@ -200,10 +211,16 @@ pub struct AnnotationCanvas<'a> {
     pub editor: &'a EditorState,
     pub scale: f32,
     pub visible: ImageRect,
+    pub annotation_defaults: &'a super::AnnotationDefaultsState,
     // SP6 workbench candidate overlay. `None` in Normal mode.
     pub pending_proposal: Option<&'a rollshot_edit_proposal::EditProposal>,
     pub review: Option<&'a super::workbench::CandidateReview>,
     pub selected_candidate: Option<rollshot_edit_proposal::CandidateId>,
+    /// App-only preview clone for live property editing. When present and
+    /// its ID matches a committed annotation, the preview shapes replace
+    /// the committed shapes on canvas — without entering document history
+    /// or flatten output.
+    pub property_preview: Option<Annotation>,
 }
 
 fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> Option<ImagePoint> {
@@ -305,18 +322,19 @@ impl AnnotationCanvas<'_> {
 
     fn draft_annotation(&self) -> Option<Annotation> {
         match &self.editor.drag {
-            Some(DragState::CreateNumber { tip, bubble }) => Some(Annotation::NumberCallout {
-                id: AnnotationId(u64::MAX),
-                number: self.document.next_number(),
-                tip: *tip,
-                bubble: *bubble,
-            }),
+            Some(DragState::CreateNumber { tip, bubble }) => {
+                Some(Annotation::number_callout_with_style(
+                    AnnotationId(u64::MAX),
+                    self.document.next_number(),
+                    *tip,
+                    *bubble,
+                    self.annotation_defaults.values.number,
+                ))
+            }
             Some(DragState::CreateRedaction { anchor, current }) => {
                 let rect = ImageRect::from_corners(*anchor, *current);
-                (!rect.is_empty()).then_some(Annotation::OpaqueRedaction {
-                    id: AnnotationId(u64::MAX),
-                    bounds: rect,
-                })
+                (!rect.is_empty())
+                    .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
             }
             Some(DragState::EditAnnotation { current, .. }) => Some(current.clone()),
             _ => None,
@@ -340,8 +358,13 @@ impl AnnotationCanvas<'_> {
                 handle(frame, *bubble, accent, white);
                 handle(frame, *tip, white, accent);
             }
-            Annotation::TextNote { position, text, .. } => {
-                let plate = rollshot_image_document::text_plate_rect(*position, text);
+            Annotation::TextNote {
+                position,
+                text,
+                style,
+                ..
+            } => {
+                let plate = rollshot_image_document::text_plate_rect(*position, text, *style);
                 frame.stroke(
                     &canvas::Path::rectangle(
                         Point::new(plate.x * s, plate.y * s),
@@ -408,6 +431,12 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
                 continue;
             }
             if annotation_bounds(annotation).intersects(&self.visible) {
+                if let Some(ref preview) = self.property_preview {
+                    if preview.id() == annotation.id() {
+                        self.draw_annotation(&mut frame, preview);
+                        continue;
+                    }
+                }
                 self.draw_annotation(&mut frame, annotation);
             }
         }
@@ -618,12 +647,12 @@ mod tests {
 
     #[test]
     fn body_drag_preserves_grab_offset_and_moves_number_as_a_unit() {
-        let original = Annotation::NumberCallout {
-            id: AnnotationId(1),
-            number: 1,
-            tip: ImagePoint::new(0.0, 0.0),
-            bubble: ImagePoint::new(10.0, 10.0),
-        };
+        let original = Annotation::number_callout(
+            AnnotationId(1),
+            1,
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(10.0, 10.0),
+        );
         let moved = dragged_annotation(
             &original,
             HitPart::Body,

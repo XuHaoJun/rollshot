@@ -109,7 +109,7 @@ fn clamp_center_to_image(center: ImagePoint, extent: f32, width: u32, height: u3
 mod tests {
     use super::*;
     use crate::annotation::{Annotation, AnnotationId};
-    use crate::style;
+    use crate::style::{self, NumberStyle};
 
     fn offset() -> f32 {
         style::NUMBER_BUBBLE_RADIUS * 2.5
@@ -125,6 +125,7 @@ mod tests {
             number: 1,
             tip,
             bubble,
+            style: NumberStyle::default(),
         }
     }
 

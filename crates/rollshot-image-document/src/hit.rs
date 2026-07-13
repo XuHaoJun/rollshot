@@ -56,8 +56,11 @@ pub fn hit_test_annotation(
     tolerance: f32,
 ) -> Option<HitPart> {
     match annotation {
-        Annotation::NumberCallout { tip, bubble, .. } => {
-            if point.distance(*bubble) <= style::NUMBER_BUBBLE_RADIUS + tolerance {
+        Annotation::NumberCallout {
+            tip, bubble, style, ..
+        } => {
+            let radius = style::NUMBER_BUBBLE_RADIUS * style.size.scale();
+            if point.distance(*bubble) <= radius + tolerance {
                 Some(HitPart::NumberBubble)
             } else if point.distance(*tip) <= tolerance * 1.6 {
                 Some(HitPart::NumberTip)
@@ -65,7 +68,12 @@ pub fn hit_test_annotation(
                 None
             }
         }
-        Annotation::TextNote { position, text, .. } => text_plate_rect(*position, text)
+        Annotation::TextNote {
+            position,
+            text,
+            style,
+            ..
+        } => text_plate_rect(*position, text, *style)
             .expanded(tolerance)
             .contains(point)
             .then_some(HitPart::Body),
@@ -107,6 +115,7 @@ mod tests {
             number: 1,
             tip: ImagePoint::new(20.0, 20.0),
             bubble: ImagePoint::new(120.0, 120.0),
+            style: style::NumberStyle::default(),
         }
     }
 
@@ -123,10 +132,10 @@ mod tests {
     #[test]
     fn bubble_edge_within_tolerance_hits() {
         let anns = vec![callout()];
-        let just_outside_edge =
-            ImagePoint::new(120.0 + style::NUMBER_BUBBLE_RADIUS + TOL - 1.0, 120.0);
+        let radius = style::NUMBER_BUBBLE_RADIUS * style::NumberStyle::default().size.scale();
+        let just_outside_edge = ImagePoint::new(120.0 + radius + TOL - 1.0, 120.0);
         assert!(hit_test(&anns, just_outside_edge, TOL).is_some());
-        let beyond = ImagePoint::new(120.0 + style::NUMBER_BUBBLE_RADIUS + TOL + 2.0, 120.0);
+        let beyond = ImagePoint::new(120.0 + radius + TOL + 2.0, 120.0);
         assert!(hit_test(&anns, beyond, TOL).is_none());
     }
 
@@ -136,6 +145,7 @@ mod tests {
             id: AnnotationId(2),
             position: ImagePoint::new(10.0, 10.0),
             text: "hello".to_string(),
+            style: style::TextStyle::default(),
         }];
         let hit = hit_test(&anns, ImagePoint::new(14.0, 14.0), TOL).unwrap();
         assert_eq!(hit.part, HitPart::Body);

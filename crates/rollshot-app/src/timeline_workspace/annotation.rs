@@ -274,6 +274,7 @@ fn draft_annotation(document: &ImageDocument, draft: AnnotationDraft) -> Option<
             number: document.annotations().len() as u32 + 1,
             tip,
             bubble,
+            style: Default::default(),
         }),
         AnnotationDraft::Redaction { .. } => {
             draft
@@ -309,6 +310,7 @@ pub(crate) fn proposal_ghosts(
                     number: next_number,
                     tip: *tip,
                     bubble: *bubble,
+                    style: Default::default(),
                 });
                 next_number += 1;
             }
@@ -317,6 +319,7 @@ pub(crate) fn proposal_ghosts(
                     id: AnnotationId(0),
                     position: *position,
                     text: text.clone(),
+                    style: Default::default(),
                 });
             }
             rollshot_action::VisualAnnotationPayload::OpaqueRedaction { bounds } => {

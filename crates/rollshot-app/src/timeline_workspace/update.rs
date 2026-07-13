@@ -1151,12 +1151,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                             rollshot_image_document::EditOp::AddNumberCallout {
                                 tip: *tip,
                                 bubble: *bubble,
+                                style: Default::default(),
                             }
                         }
                         rollshot_action::VisualAnnotationPayload::TextNote { position, text } => {
                             rollshot_image_document::EditOp::AddTextNote {
                                 position: *position,
                                 text: text.clone(),
+                                style: Default::default(),
                             }
                         }
                         rollshot_action::VisualAnnotationPayload::OpaqueRedaction { bounds } => {
