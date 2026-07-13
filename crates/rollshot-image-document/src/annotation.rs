@@ -16,6 +16,14 @@ pub enum TwoPointKind {
     Arrow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum ShapeKind {
+    Rectangle,
+    Ellipse,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Annotation {
     TwoPoint {
@@ -296,6 +304,11 @@ mod tests {
             ts,
         );
         assert_eq!(t.text_style(), Some(ts));
+    }
+
+    #[test]
+    fn shape_kinds_are_distinct() {
+        assert_ne!(ShapeKind::Rectangle, ShapeKind::Ellipse);
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub mod style;
 mod text;
 mod two_point;
 
-pub use annotation::{Annotation, AnnotationId, TwoPointKind};
+pub use annotation::{Annotation, AnnotationId, ShapeKind, TwoPointKind};
 pub use callout_placement::place_number_callout_bubble;
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use edit_op::{BatchOutcome, EditOp};
