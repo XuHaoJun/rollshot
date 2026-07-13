@@ -137,6 +137,7 @@ pub fn dragged_annotation(
     grab_offset: (f32, f32),
     shift: bool,
     image_size: (u32, u32),
+    scale: f32,
 ) -> Annotation {
     let mut next = original.clone();
     let (width, height) = image_size;
@@ -176,11 +177,18 @@ pub fn dragged_annotation(
             *bounds = resized_rect(*bounds, handle, point);
         }
         (Annotation::Shape { bounds, .. }, HitPart::Body) => {
-            bounds.x = point.x - grab_offset.0;
-            bounds.y = point.y - grab_offset.1;
+            *bounds = super::box_tool::moved_bounds(
+                *bounds,
+                point,
+                ImagePoint::new(grab_offset.0, grab_offset.1),
+                width,
+                height,
+            );
         }
         (Annotation::Shape { bounds, .. }, HitPart::Resize(handle)) => {
-            *bounds = resized_rect(*bounds, handle, point);
+            *bounds = super::box_tool::resized_bounds(
+                *bounds, handle, point, shift, scale, width, height,
+            );
         }
         _ => {}
     }
@@ -466,6 +474,29 @@ impl AnnotationCanvas<'_> {
                 let rect = ImageRect::from_corners(*anchor, *current);
                 (!rect.is_empty())
                     .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
+            }
+            Some(DragState::CreateShape {
+                kind,
+                anchor,
+                current,
+                style,
+                fill,
+            }) => {
+                let (w, h) = self.document.source().dimensions();
+                let bounds = super::box_tool::creation_bounds(
+                    *anchor,
+                    *current,
+                    self.modifiers.shift(),
+                    w,
+                    h,
+                );
+                (!bounds.is_empty()).then_some(Annotation::shape_with_style(
+                    AnnotationId(u64::MAX),
+                    *kind,
+                    bounds,
+                    *style,
+                    *fill,
+                ))
             }
             Some(DragState::EditAnnotation { current, .. }) => Some(current.clone()),
             _ => None,
@@ -805,6 +836,7 @@ mod tests {
             (5.0, 5.0),
             false,
             (200, 200),
+            1.0,
         );
         match moved {
             Annotation::NumberCallout { tip, bubble, .. } => {
@@ -830,6 +862,7 @@ mod tests {
             (10.0, 20.0),
             false,
             (200, 200),
+            1.0,
         );
         let moved_with_shift = dragged_annotation(
             &original,
@@ -838,6 +871,7 @@ mod tests {
             (10.0, 20.0),
             true,
             (200, 200),
+            1.0,
         );
         assert_eq!(moved_with_shift, moved, "body movement ignores Shift");
         let (before_start, before_end) = match original {
@@ -870,6 +904,7 @@ mod tests {
             (0.0, 0.0),
             false,
             (200, 200),
+            1.0,
         );
         let snapped_start = dragged_annotation(
             &original,
@@ -878,6 +913,7 @@ mod tests {
             (0.0, 0.0),
             true,
             (200, 200),
+            1.0,
         );
         let raw_end = ImagePoint::new(120.0, 70.0);
         let moved_end = dragged_annotation(
@@ -887,6 +923,7 @@ mod tests {
             (0.0, 0.0),
             false,
             (200, 200),
+            1.0,
         );
 
         assert!(matches!(

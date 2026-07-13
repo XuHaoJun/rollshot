@@ -452,6 +452,9 @@ fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f3
         (Annotation::NumberCallout { bubble, .. }, HitPart::Body) => {
             (point.x - bubble.x, point.y - bubble.y)
         }
+        (Annotation::Shape { bounds, .. }, HitPart::Body) => {
+            (point.x - bounds.x, point.y - bounds.y)
+        }
         _ => (0.0, 0.0),
     }
 }
@@ -667,6 +670,7 @@ pub(crate) fn handle_canvas_moved(
     let (w, h) = state.document.image.source().dimensions();
     let point = point.clamp_to(w, h);
     let shift = state.modifiers.shift();
+    let scale = current_scale(state);
     match &mut state.editor.drag {
         Some(DragState::CreateNumber { bubble, .. }) => {
             *bubble = point;
@@ -692,7 +696,8 @@ pub(crate) fn handle_canvas_moved(
             current,
         }) => {
             *raw_point = point;
-            *current = dragged_annotation(original, *part, point, *grab_offset, shift, (w, h));
+            *current =
+                dragged_annotation(original, *part, point, *grab_offset, shift, (w, h), scale);
             Task::none()
         }
         Some(DragState::Pan { last_pointer }) => {
@@ -759,8 +764,8 @@ pub(crate) fn handle_canvas_released(
             fill,
             ..
         }) => {
-            let bounds = ImageRect::from_corners(anchor, point);
-            if bounds.width > 0.0 && bounds.height > 0.0 {
+            let bounds = super::box_tool::creation_bounds(anchor, point, shift, w, h);
+            if super::box_tool::meets_creation_threshold(bounds, scale) {
                 if let Err(e) = state
                     .document
                     .image
@@ -777,8 +782,15 @@ pub(crate) fn handle_canvas_released(
             ..
         }) => {
             let raw_point = point;
-            let current =
-                dragged_annotation(&original, part, raw_point, grab_offset, shift, (w, h));
+            let current = dragged_annotation(
+                &original,
+                part,
+                raw_point,
+                grab_offset,
+                shift,
+                (w, h),
+                scale,
+            );
             if current != original {
                 let result = match &current {
                     Annotation::TwoPoint { start, end, .. } => state
@@ -1012,6 +1024,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ModifiersChanged(modifiers) => {
             state.modifiers = modifiers;
             let image_size = state.document.image.source().dimensions();
+            let scale = current_scale(state);
             if let Some(DragState::EditAnnotation {
                 part,
                 original,
@@ -1027,6 +1040,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     *grab_offset,
                     modifiers.shift(),
                     image_size,
+                    scale,
                 );
             }
             Task::none()
