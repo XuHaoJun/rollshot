@@ -126,26 +126,43 @@ fn number_size_row(
     .into()
 }
 
-fn text_size_row() -> iced::Element<'static, Message> {
-    use iced::widget::{button, row, text};
+fn text_size_row(current: rollshot_image_document::TextSize) -> iced::Element<'static, Message> {
+    use iced::widget::{row, text};
 
     row![
         text("Size:"),
-        button(text("14")).on_press(Message::SetTextSize(
-            rollshot_image_document::TextSize::Px14
-        )),
-        button(text("18")).on_press(Message::SetTextSize(
-            rollshot_image_document::TextSize::Px18
-        )),
-        button(text("24")).on_press(Message::SetTextSize(
-            rollshot_image_document::TextSize::Px24
-        )),
-        button(text("32")).on_press(Message::SetTextSize(
-            rollshot_image_document::TextSize::Px32
-        )),
+        text_size_button("14", rollshot_image_document::TextSize::Px14, current),
+        text_size_button("18", rollshot_image_document::TextSize::Px18, current),
+        text_size_button("24", rollshot_image_document::TextSize::Px24, current),
+        text_size_button("32", rollshot_image_document::TextSize::Px32, current),
     ]
     .spacing(4)
     .into()
+}
+
+fn text_size_button(
+    label: &'static str,
+    size: rollshot_image_document::TextSize,
+    current: rollshot_image_document::TextSize,
+) -> iced::Element<'static, Message> {
+    use iced::widget::{button, text};
+
+    button(text(label))
+        .on_press(Message::SetTextSize(size))
+        .style(if size == current {
+            button::primary
+        } else {
+            button::secondary
+        })
+        .into()
+}
+
+fn color_button(label: &'static str, property: ColorProperty) -> Element<'static, Message> {
+    use iced::widget::{button, text};
+
+    button(text(label))
+        .on_press(Message::OpenColorPicker(property))
+        .into()
 }
 
 fn text_bg_toggle(has_bg: bool) -> iced::Element<'static, Message> {
@@ -168,20 +185,57 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
     match target {
         PropertyTarget::NumberTool => {
             let defaults = &state.annotation_defaults.values.number;
-            Some(number_size_row(defaults.size))
+            Some(
+                row![
+                    color_button("Color", ColorProperty::NumberAccent),
+                    number_size_row(defaults.size),
+                    iced::widget::text_input("Next", &state.editor.properties.next_number_input)
+                        .on_input(Message::NextNumberInputChanged)
+                        .on_submit(Message::CommitNextNumber)
+                        .width(70),
+                ]
+                .spacing(8)
+                .into(),
+            )
         }
         PropertyTarget::TextTool => {
             let defaults = &state.annotation_defaults.values.text;
-            let size = text_size_row();
+            let size = text_size_row(defaults.font_size);
             let bg = text_bg_toggle(defaults.background.is_some());
-            Some(row![size, bg].spacing(8).into())
+            let mut controls = row![
+                color_button("Text color", ColorProperty::TextColor),
+                size,
+                bg
+            ]
+            .spacing(8);
+            if defaults.background.is_some() {
+                controls = controls.push(color_button("BG color", ColorProperty::TextBackground));
+            }
+            Some(controls.into())
         }
         PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
-            Annotation::NumberCallout { style, .. } => Some(number_size_row(style.size)),
+            Annotation::NumberCallout { style, .. } => Some(
+                row![
+                    color_button("Color", ColorProperty::NumberAccent),
+                    number_size_row(style.size)
+                ]
+                .spacing(8)
+                .into(),
+            ),
             Annotation::TextNote { style, .. } => {
-                let size = text_size_row();
+                let size = text_size_row(style.font_size);
                 let bg = text_bg_toggle(style.background.is_some());
-                Some(row![size, bg].spacing(8).into())
+                let mut controls = row![
+                    color_button("Text color", ColorProperty::TextColor),
+                    size,
+                    bg
+                ]
+                .spacing(8);
+                if style.background.is_some() {
+                    controls =
+                        controls.push(color_button("BG color", ColorProperty::TextBackground));
+                }
+                Some(controls.into())
             }
             _ => None,
         },

@@ -151,9 +151,9 @@ pub struct ResultWorkspace {
 impl ResultWorkspace {
     pub fn new(document: ResultDocument, initial_error: Option<String>) -> Self {
         let (annotation_defaults, warning) =
-            match crate::daemon::config::config_path().ok().and_then(|p| {
+            match crate::daemon::config::config_path().ok().map(|p| {
                 let loaded = annotation_defaults::load_from(&p);
-                Some((loaded, p))
+                (loaded, p)
             }) {
                 Some((loaded, path)) => (
                     AnnotationDefaultsState {

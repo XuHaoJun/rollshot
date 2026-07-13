@@ -2,7 +2,7 @@ use super::canvas::Tool;
 use super::Message;
 use super::ResultWorkspace;
 use iced::widget::canvas as canvas_widget;
-use iced::widget::{button, column, responsive, row, text, tooltip};
+use iced::widget::{button, column, container, responsive, row, text, text_input, tooltip};
 use iced::{mouse, Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use rollshot_image_document::Rgb8;
 
@@ -50,6 +50,7 @@ pub enum ToolbarItemKind {
     SmartRedaction,
     Reveal,
     ExportBugReport,
+    #[cfg(feature = "ocr")]
     Ocr,
     Close,
 }
@@ -62,19 +63,9 @@ pub struct ToolbarItem {
 }
 
 impl ToolbarItem {
-    pub const COPY: Self = Self {
-        kind: ToolbarItemKind::Copy,
-        label: "Copy",
-        shortcut: "",
-    };
     pub const COPY_SPLIT: Self = Self {
         kind: ToolbarItemKind::CopySplit,
         label: "\u{25BE}",
-        shortcut: "",
-    };
-    pub const SAVE: Self = Self {
-        kind: ToolbarItemKind::Save,
-        label: "Save As",
         shortcut: "",
     };
     pub const UNDO: Self = Self {
@@ -150,6 +141,7 @@ fn tool_item(tool: Tool) -> ToolbarItem {
 // ---------------------------------------------------------------------------
 
 pub struct ToolbarModel {
+    #[allow(dead_code)]
     pub first_row: Vec<ToolbarItem>,
     pub visible_tools: Vec<Tool>,
     pub more: Vec<ToolbarItem>,
@@ -172,6 +164,13 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
         ToolbarItem::REVEAL,
         ToolbarItem::EXPORT_BUG_REPORT,
     ];
+
+    #[cfg(feature = "ocr")]
+    overflow.push(ToolbarItem {
+        kind: ToolbarItemKind::Ocr,
+        label: "OCR Text",
+        shortcut: "O",
+    });
 
     if density == ToolbarDensity::Narrow {
         overflow.insert(0, tool_item(Tool::Redact));
@@ -495,19 +494,31 @@ fn more_button<'a>(model: &ToolbarModel, overflow_open: bool) -> Element<'a, Mes
 }
 
 #[allow(dead_code)]
-fn overflow_item_button(item: &ToolbarItem) -> Element<'_, Message> {
+fn overflow_item_button(item: ToolbarItem, state: &ResultWorkspace) -> Element<'static, Message> {
+    if item.kind == ToolbarItemKind::Reveal {
+        let button = button(text(item.label).size(14)).padding([4, 12]);
+        return if matches!(
+            super::secure_sharing::reveal_action(&state.document),
+            super::secure_sharing::RevealAction::Disabled
+        ) {
+            button.into()
+        } else {
+            button.on_press(Message::Reveal).into()
+        };
+    }
     let msg = match item.kind {
         ToolbarItemKind::Tool(tool) => Message::SelectTool(tool),
         ToolbarItemKind::SmartRedaction => Message::SmartRedaction,
         ToolbarItemKind::Navigator => Message::ToggleNavigator,
-        ToolbarItemKind::Reveal => Message::Reveal,
         ToolbarItemKind::ExportBugReport => Message::ExportBugReport,
+        #[cfg(feature = "ocr")]
+        ToolbarItemKind::Ocr => Message::SelectTool(Tool::OcrText),
         _ => return text("").into(),
     };
-    button(text(item.label).size(14))
+    let button = button(text(item.label).size(14))
         .padding([4, 12])
-        .on_press(msg)
-        .into()
+        .on_press(msg);
+    button.into()
 }
 
 /// First row: Close, title, undo/redo, Copy, Save.
@@ -558,10 +569,76 @@ pub fn second_row(state: &ResultWorkspace, model: ToolbarModel) -> Element<'_, M
             .into()
     });
 
-    row![tools_row, properties_row]
+    let controls: Element<'_, Message> = row![tools_row, properties_row]
         .spacing(8)
         .align_y(Alignment::Center)
-        .into()
+        .into();
+
+    if state.editor.more_menu_open {
+        let mut menu = row![].spacing(4);
+        for item in model.more {
+            menu = menu.push(overflow_item_button(item, state));
+        }
+        column![controls, container(menu).padding(4)]
+            .spacing(4)
+            .into()
+    } else if state.editor.properties.color.is_some() {
+        column![controls, color_picker(state)].spacing(4).into()
+    } else {
+        controls
+    }
+}
+
+fn color_picker(state: &ResultWorkspace) -> Element<'_, Message> {
+    let Some(transaction) = state.editor.properties.color.as_ref() else {
+        return text("").into();
+    };
+    let (hue, _, _) = rgb_to_hsv(transaction.preview);
+    let palette = [
+        Rgb8::new(0xE5, 0x48, 0x4D),
+        Rgb8::new(0xFF, 0xA5, 0x00),
+        Rgb8::new(0xFF, 0xD6, 0x00),
+        Rgb8::new(0x2E, 0xC4, 0x71),
+        Rgb8::new(0x2D, 0x9C, 0xDB),
+        Rgb8::new(0x9B, 0x51, 0xE0),
+        Rgb8::new(0x11, 0x11, 0x11),
+        Rgb8::new(0xFF, 0xFF, 0xFF),
+    ];
+    let palette = palette.into_iter().fold(row![].spacing(4), |row, color| {
+        row.push(
+            button(text("●").style(move |_| text::Style {
+                color: Some(Color::from_rgb8(color.r, color.g, color.b)),
+            }))
+            .on_press(Message::PreviewColor(color)),
+        )
+    });
+    let saturation_value = iced::widget::canvas(SaturationValue {
+        hue,
+        selected: Some(transaction.preview),
+    })
+    .width(220)
+    .height(120);
+    let hue = iced::widget::canvas(HueStrip).width(220).height(18);
+    let valid_hex = super::properties::parse_hex_rgb(&transaction.hex).is_ok();
+
+    container(
+        column![
+            palette,
+            saturation_value,
+            hue,
+            row![
+                text_input("#RRGGBB", &transaction.hex)
+                    .on_input(Message::ColorHexChanged)
+                    .width(110),
+                button(text("Apply")).on_press_maybe(valid_hex.then_some(Message::ApplyColor)),
+                button(text("Cancel")).on_press(Message::CancelColor),
+            ]
+            .spacing(6),
+        ]
+        .spacing(6),
+    )
+    .padding(8)
+    .into()
 }
 
 /// Top-level toolbar view: first row + responsive second row.
@@ -571,8 +648,7 @@ pub fn view(state: &ResultWorkspace) -> Element<'_, Message> {
         let model = toolbar_model(state, size.width);
         second_row(state, model)
     })
-    .width(Length::Fill)
-    .height(Length::Fixed(40.0));
+    .width(Length::Fill);
 
     column![first, second].into()
 }

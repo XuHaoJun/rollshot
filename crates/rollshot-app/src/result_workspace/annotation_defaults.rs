@@ -80,15 +80,17 @@ fn load_number_style(parent: &toml::Table, warnings: &mut Vec<String>) -> Number
 
     let accent = table
         .get("accent")
-        .and_then(|v| deserialize_rgb8(v))
+        .and_then(deserialize_rgb8)
         .unwrap_or_else(|| {
-            warnings.push("annotation_defaults.number.accent invalid — using default".into());
+            if table.contains_key("accent") {
+                warnings.push("annotation_defaults.number.accent invalid — using default".into());
+            }
             NumberStyle::default().accent
         });
 
     let size = table
         .get("size")
-        .and_then(|v| deserialize_number_size(v))
+        .and_then(deserialize_number_size)
         .unwrap_or_else(|| {
             if table.contains_key("size") {
                 warnings.push("annotation_defaults.number.size invalid — using default".into());
@@ -111,7 +113,7 @@ fn load_text_style(parent: &toml::Table, warnings: &mut Vec<String>) -> TextStyl
 
     let font_size = table
         .get("font_size")
-        .and_then(|v| deserialize_text_size(v))
+        .and_then(deserialize_text_size)
         .unwrap_or_else(|| {
             if table.contains_key("font_size") {
                 warnings.push("annotation_defaults.text.font_size invalid — using default".into());
@@ -121,13 +123,23 @@ fn load_text_style(parent: &toml::Table, warnings: &mut Vec<String>) -> TextStyl
 
     let text_color = table
         .get("text_color")
-        .and_then(|v| deserialize_rgb8(v))
+        .and_then(deserialize_rgb8)
         .unwrap_or_else(|| TextStyle::default().text_color);
 
-    let background = table.get("background").and_then(|v| match v {
-        toml::Value::Table(_) | toml::Value::String(_) => deserialize_rgb8(v),
-        _ => None,
-    });
+    let background = match table.get("background") {
+        Some(value) => deserialize_rgb8(value).or_else(|| {
+            warnings.push("annotation_defaults.text.background invalid — using default".into());
+            TextStyle::default().background
+        }),
+        None if table
+            .get("background_enabled")
+            .and_then(toml::Value::as_bool)
+            == Some(false) =>
+        {
+            None
+        }
+        None => TextStyle::default().background,
+    };
 
     TextStyle {
         font_size,
@@ -139,9 +151,9 @@ fn load_text_style(parent: &toml::Table, warnings: &mut Vec<String>) -> TextStyl
 fn deserialize_rgb8(v: &toml::Value) -> Option<Rgb8> {
     // Try table form: { r: 0, g: 0, b: 0 }
     if let toml::Value::Table(t) = v {
-        let r = t.get("r").and_then(|v| v.as_integer())? as u8;
-        let g = t.get("g").and_then(|v| v.as_integer())? as u8;
-        let b = t.get("b").and_then(|v| v.as_integer())? as u8;
+        let r = u8::try_from(t.get("r").and_then(|v| v.as_integer())?).ok()?;
+        let g = u8::try_from(t.get("g").and_then(|v| v.as_integer())?).ok()?;
+        let b = u8::try_from(t.get("b").and_then(|v| v.as_integer())?).ok()?;
         return Some(Rgb8::new(r, g, b));
     }
     None
@@ -178,8 +190,18 @@ pub(crate) fn save_to_with_writer(
     writer: impl FnOnce(&Path, &[u8]) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut root = read_existing_table_or_empty(path)?;
-    let section =
+    let mut section =
         toml::Value::try_from(values).map_err(|e| format!("serialize annotation defaults: {e}"))?;
+    if let Some(text) = section
+        .as_table_mut()
+        .and_then(|section| section.get_mut("text"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        text.insert(
+            "background_enabled".into(),
+            toml::Value::Boolean(values.text.background.is_some()),
+        );
+    }
     root.insert("annotation_defaults".into(), section);
     let text = toml::to_string_pretty(&root).map_err(|e| format!("serialize config.toml: {e}"))?;
     let parent = path
@@ -276,6 +298,7 @@ mod tests {
         assert_eq!(loaded.values.number.size, NumberSize::Large);
         assert_eq!(loaded.values.number.accent, NumberStyle::default().accent);
         assert_eq!(loaded.values.text, TextStyle::default());
+        assert!(loaded.warnings.is_empty());
     }
 
     #[test]
@@ -315,7 +338,10 @@ mod tests {
             loaded.values.text.text_color,
             TextStyle::default().text_color
         );
-        assert_eq!(loaded.values.text.background, None);
+        assert_eq!(
+            loaded.values.text.background,
+            TextStyle::default().background
+        );
         assert!(!loaded.warnings.is_empty());
     }
 
