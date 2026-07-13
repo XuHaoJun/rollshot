@@ -532,7 +532,7 @@ Allowed statuses are `Not started`, `Brainstorming`, `Spec approved`,
 | Slice | Status | Slice spec | Implementation plan | Implementation / verification | Last update |
 |---|---|---|---|---|---|
 | 1 — Editor And Style Foundation | Complete | [`2026-07-12-editor-and-style-foundation-design.md`](2026-07-12-editor-and-style-foundation-design.md) (`ec909a0`) | [`2026-07-12-editor-and-style-foundation.md`](../plans/2026-07-12-editor-and-style-foundation.md) (`b722d2d`) | Landed in PR #90 (`745d424`); automated verification and Linux/macOS runtime verification complete; no required work remains | 2026-07-13 |
-| 2 — Two-Point Tools | Spec approved | [`2026-07-13-two-point-tools-design.md`](2026-07-13-two-point-tools-design.md) (`12d4a70`) | — | Approved slice design committed on `feat/annotation-two-point-tools`; implementation not started | 2026-07-13 |
+| 2 — Two-Point Tools | Spec approved | [`2026-07-13-two-point-tools-design.md`](2026-07-13-two-point-tools-design.md) (`af4690c`) | — | Approved slice design committed on `feat/annotation-two-point-tools`; implementation not started | 2026-07-13 |
 | 3 — Box Tools | Not started | — | — | — | 2026-07-12 |
 | 4 — Freehand Tools | Not started | — | — | — | 2026-07-12 |
 | 5 — Pixelate Effect | Not started | — | — | — | 2026-07-12 |
