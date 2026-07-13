@@ -10,10 +10,11 @@ use super::canvas::{
     dragged_annotation, DragState, EditorState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
     DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
 };
+use super::two_point::{constrained_endpoint, gesture_meets_threshold};
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
 use rollshot_image_document::{
     hit_test_annotation, Annotation, AnnotationId, Hit, HitPart, ImageDocument, ImagePoint,
-    ImageRect, Rgb8, TwoPointKind,
+    ImageRect, Rgb8, StrokeStyle, TwoPointKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -343,8 +344,25 @@ fn current_scale(state: &super::ResultWorkspace) -> f32 {
     .scale
 }
 
+fn active_two_point(state: &super::ResultWorkspace) -> Option<(TwoPointKind, StrokeStyle)> {
+    match state.editor.tool {
+        Tool::Line => Some((
+            TwoPointKind::Line,
+            state.annotation_defaults.values.line,
+        )),
+        Tool::Arrow => Some((
+            TwoPointKind::Arrow,
+            state.annotation_defaults.values.arrow,
+        )),
+        _ => None,
+    }
+}
+
 fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f32, f32) {
     match (annotation, part) {
+        (Annotation::TwoPoint { start, .. }, HitPart::Body) => {
+            (point.x - start.x, point.y - start.y)
+        }
         (Annotation::TextNote { position, .. }, HitPart::Body) => {
             (point.x - position.x, point.y - position.y)
         }
@@ -469,6 +487,7 @@ pub(crate) fn handle_canvas_pressed(
                     state.editor.drag = Some(DragState::EditAnnotation {
                         part: hit.part,
                         grab_offset: grab_offset(&original, hit.part, point),
+                        raw_point: point,
                         current: original.clone(),
                         original,
                     });
@@ -498,7 +517,17 @@ pub(crate) fn handle_canvas_pressed(
             });
             iced::widget::operation::focus(state.text_editor_id.clone())
         }
-        Tool::Line | Tool::Arrow => Task::none(),
+        Tool::Line | Tool::Arrow => {
+            let (kind, style) = active_two_point(state)
+                .expect("line and arrow tools always provide two-point defaults");
+            state.editor.drag = Some(DragState::CreateTwoPoint {
+                kind,
+                start: point,
+                raw_current: point,
+                style,
+            });
+            Task::none()
+        }
         Tool::Redact => {
             if let Some(hit) =
                 direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance)
@@ -512,6 +541,7 @@ pub(crate) fn handle_canvas_pressed(
                 state.editor.drag = Some(DragState::EditAnnotation {
                     part: hit.part,
                     grab_offset: grab_offset(&original, hit.part, point),
+                    raw_point: point,
                     current: original.clone(),
                     original,
                 });
@@ -534,9 +564,14 @@ pub(crate) fn handle_canvas_moved(
 ) -> Task<Message> {
     let (w, h) = state.document.image.source().dimensions();
     let point = point.clamp_to(w, h);
+    let shift = state.modifiers.shift();
     match &mut state.editor.drag {
         Some(DragState::CreateNumber { bubble, .. }) => {
             *bubble = point;
+            Task::none()
+        }
+        Some(DragState::CreateTwoPoint { raw_current, .. }) => {
+            *raw_current = point;
             Task::none()
         }
         Some(DragState::CreateRedaction { current, .. }) => {
@@ -547,9 +582,11 @@ pub(crate) fn handle_canvas_moved(
             part,
             original,
             grab_offset,
+            raw_point,
             current,
         }) => {
-            *current = dragged_annotation(original, *part, point, *grab_offset);
+            *raw_point = point;
+            *current = dragged_annotation(original, *part, point, *grab_offset, shift);
             Task::none()
         }
         Some(DragState::Pan { last_pointer }) => {
@@ -574,6 +611,8 @@ pub(crate) fn handle_canvas_released(
 ) -> Task<Message> {
     let (w, h) = state.document.image.source().dimensions();
     let point = point.clamp_to(w, h);
+    let shift = state.modifiers.shift();
+    let scale = current_scale(state);
     match state.editor.drag.take() {
         Some(DragState::CreateNumber { tip, .. }) => {
             let id = state.document.image.add_number_callout_with_style(
@@ -582,6 +621,24 @@ pub(crate) fn handle_canvas_released(
                 state.annotation_defaults.values.number,
             );
             state.editor.selection = Some(id);
+        }
+        Some(DragState::CreateTwoPoint {
+            kind,
+            start,
+            style,
+            ..
+        }) => {
+            let raw_current = point;
+            let end = constrained_endpoint(start, raw_current, shift);
+            if gesture_meets_threshold(start, end, scale) {
+                if let Err(error) = state
+                    .document
+                    .image
+                    .add_two_point_with_style(kind, start, end, style)
+                {
+                    state.message = Some(InlineMessage::Error(error.to_string()));
+                }
+            }
         }
         Some(DragState::CreateRedaction { anchor, .. }) => {
             if let Ok(id) = state
@@ -593,8 +650,13 @@ pub(crate) fn handle_canvas_released(
             }
         }
         Some(DragState::EditAnnotation {
-            original, current, ..
+            part,
+            original,
+            grab_offset,
+            ..
         }) => {
+            let raw_point = point;
+            let current = dragged_annotation(&original, part, raw_point, grab_offset, shift);
             if current != original {
                 let result = match &current {
                     Annotation::TwoPoint { start, end, .. } => state
@@ -823,6 +885,22 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::ModifiersChanged(modifiers) => {
             state.modifiers = modifiers;
+            if let Some(DragState::EditAnnotation {
+                part,
+                original,
+                grab_offset,
+                raw_point,
+                current,
+            }) = &mut state.editor.drag
+            {
+                *current = dragged_annotation(
+                    original,
+                    *part,
+                    *raw_point,
+                    *grab_offset,
+                    modifiers.shift(),
+                );
+            }
             Task::none()
         }
         Message::PointerMoved(position) => {
@@ -2290,6 +2368,7 @@ pub(crate) fn subscription(state: &super::ResultWorkspace) -> Subscription<Messa
 #[cfg(test)]
 mod tests {
     use super::super::properties::preview_annotation;
+    use super::super::two_point::constrained_endpoint;
     use super::*;
     use iced::Size as IcedSize;
     use image::Rgba;
@@ -2888,6 +2967,155 @@ mod tests {
         ws.viewport.zoom = ZoomMode::ActualSize;
         ws.apply_viewport_bounds(Size::new(w as f32, h as f32));
         ws
+    }
+
+    fn endpoints(annotation: &Annotation) -> (ImagePoint, ImagePoint) {
+        match annotation {
+            Annotation::TwoPoint { start, end, .. } => (*start, *end),
+            _ => panic!("expected TwoPoint annotation"),
+        }
+    }
+
+    fn workspace_with_selected_arrow() -> super::super::ResultWorkspace {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_two_point(
+                TwoPointKind::Arrow,
+                ImagePoint::new(10.0, 20.0),
+                ImagePoint::new(80.0, 40.0),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        state
+    }
+
+    fn current_drag_annotation(
+        state: &super::super::ResultWorkspace,
+    ) -> Option<Annotation> {
+        match &state.editor.drag {
+            Some(DragState::CreateTwoPoint {
+                kind,
+                start,
+                raw_current,
+                style,
+            }) => Some(Annotation::two_point_with_style(
+                AnnotationId(u64::MAX),
+                *kind,
+                *start,
+                constrained_endpoint(*start, *raw_current, state.modifiers.shift()),
+                *style,
+            )),
+            Some(DragState::EditAnnotation { current, .. }) => Some(current.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn arrow_creation_previews_and_commits_same_snapped_endpoint_without_selection() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Arrow;
+        let _ = update(
+            &mut state,
+            Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        );
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(90.0, 36.0));
+        let preview = current_drag_annotation(&state).unwrap();
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(90.0, 36.0));
+        let committed = &state.document.image.annotations()[0];
+        assert_eq!(endpoints(committed), endpoints(&preview));
+        assert_eq!(committed.stroke_style(), preview.stroke_style());
+        assert_eq!(state.editor.tool, Tool::Arrow);
+        assert_eq!(state.editor.selection, None);
+    }
+
+    #[test]
+    fn two_point_creation_captures_style_at_press_and_adds_one_history_entry() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Line;
+        let pressed_style = state.annotation_defaults.values.line;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        state.annotation_defaults.values.line.width = pressed_style.width + 5.0;
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(70.0, 10.0));
+
+        assert_eq!(
+            state.document.image.annotations()[0].stroke_style(),
+            Some(pressed_style)
+        );
+        assert!(state.document.image.undo());
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn sub_threshold_two_point_gesture_creates_no_history() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Line;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(11.0, 10.0));
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn shift_toggle_recomputes_endpoint_preview_before_pointer_moves_again() {
+        let mut state = workspace_with_selected_arrow();
+        let id = state.editor.selection.unwrap();
+        let (_, end) = endpoints(state.document.image.annotation(id).unwrap());
+        let _ = handle_canvas_pressed(&mut state, end, Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(90.0, 36.0));
+        let unsnapped = current_drag_annotation(&state).unwrap();
+        let _ = update(
+            &mut state,
+            Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        );
+        let snapped = current_drag_annotation(&state).unwrap();
+        assert_ne!(snapped, unsnapped);
+    }
+
+    #[test]
+    fn endpoint_drag_fixes_the_opposite_endpoint_and_commits_one_edit() {
+        let mut state = workspace_with_selected_arrow();
+        let id = state.editor.selection.unwrap();
+        let original = state.document.image.annotation(id).unwrap().clone();
+        let (start, end) = endpoints(&original);
+        let _ = handle_canvas_pressed(&mut state, end, Instant::now());
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(120.0, 70.0));
+        assert_eq!(
+            endpoints(state.document.image.annotation(id).unwrap()),
+            (start, ImagePoint::new(120.0, 70.0))
+        );
+        assert!(state.document.image.undo());
+        assert_eq!(state.document.image.annotation(id), Some(&original));
+    }
+
+    #[test]
+    fn release_point_is_used_even_without_a_final_move_event() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Line;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(30.0, 10.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(70.0, 10.0));
+        assert_eq!(
+            endpoints(&state.document.image.annotations()[0]),
+            (ImagePoint::new(10.0, 10.0), ImagePoint::new(70.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn escape_cancels_two_point_creation_without_history() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Arrow;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(80.0, 40.0));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+        assert_eq!(state.editor.tool, Tool::Arrow);
     }
 
     fn press_move_release(

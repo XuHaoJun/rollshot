@@ -137,6 +137,7 @@ pub(crate) fn canvas_view<'a>(
     let overlay = iced::widget::canvas(super::canvas::AnnotationCanvas {
         document: &state.document.image,
         editor: &state.editor,
+        modifiers: state.modifiers,
         scale: geometry.scale,
         visible: super::canvas::visible_image_rect(
             state.viewport.scroll_offset,

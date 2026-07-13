@@ -10,7 +10,7 @@
 use iced::widget::text_editor;
 use iced::Point;
 use rollshot_image_document::{
-    Annotation, AnnotationId, HitPart, ImagePoint, ImageRect,
+    Annotation, AnnotationId, HitPart, ImagePoint, ImageRect, StrokeStyle, TwoPointKind,
     ResizeHandle::{self, *},
 };
 use std::time::Instant;
@@ -44,6 +44,12 @@ pub enum DragState {
     Pan { last_pointer: Point },
     /// Number tool: tip anchored at the press point, bubble follows the drag.
     CreateNumber { tip: ImagePoint, bubble: ImagePoint },
+    CreateTwoPoint {
+        kind: TwoPointKind,
+        start: ImagePoint,
+        raw_current: ImagePoint,
+        style: StrokeStyle,
+    },
     CreateRedaction {
         anchor: ImagePoint,
         current: ImagePoint,
@@ -54,6 +60,9 @@ pub enum DragState {
         original: Annotation,
         /// press point − annotation reference point, so the body doesn't jump.
         grab_offset: (f32, f32),
+        /// Latest unclamped gesture input after image-bounds clamping. Kept so
+        /// modifier changes can recompute the preview without pointer motion.
+        raw_point: ImagePoint,
         current: Annotation,
     },
 }
@@ -116,9 +125,22 @@ pub fn dragged_annotation(
     part: HitPart,
     point: ImagePoint,
     grab_offset: (f32, f32),
+    shift: bool,
 ) -> Annotation {
     let mut next = original.clone();
     match (&mut next, part) {
+        (Annotation::TwoPoint { start, end, .. }, HitPart::StartEndpoint) => {
+            *start = super::two_point::constrained_endpoint(*end, point, shift);
+        }
+        (Annotation::TwoPoint { start, end, .. }, HitPart::EndEndpoint) => {
+            *end = super::two_point::constrained_endpoint(*start, point, shift);
+        }
+        (Annotation::TwoPoint { start, end, .. }, HitPart::Body) => {
+            let dx = point.x - grab_offset.0 - start.x;
+            let dy = point.y - grab_offset.1 - start.y;
+            *start = ImagePoint::new(start.x + dx, start.y + dy);
+            *end = ImagePoint::new(end.x + dx, end.y + dy);
+        }
         (Annotation::NumberCallout { tip, .. }, HitPart::NumberTip) => *tip = point,
         (Annotation::NumberCallout { bubble, .. }, HitPart::NumberBubble) => *bubble = point,
         (Annotation::NumberCallout { tip, bubble, .. }, HitPart::Body) => {
@@ -211,6 +233,7 @@ pub fn visible_image_rect(
 pub struct AnnotationCanvas<'a> {
     pub document: &'a rollshot_image_document::ImageDocument,
     pub editor: &'a EditorState,
+    pub modifiers: iced::keyboard::Modifiers,
     pub scale: f32,
     pub visible: ImageRect,
     pub annotation_defaults: &'a super::AnnotationDefaultsState,
@@ -350,6 +373,22 @@ impl AnnotationCanvas<'_> {
                     self.annotation_defaults.values.number,
                 ))
             }
+            Some(DragState::CreateTwoPoint {
+                kind,
+                start,
+                raw_current,
+                style,
+            }) => Some(Annotation::two_point_with_style(
+                AnnotationId(u64::MAX),
+                *kind,
+                *start,
+                super::two_point::constrained_endpoint(
+                    *start,
+                    *raw_current,
+                    self.modifiers.shift(),
+                ),
+                *style,
+            )),
             Some(DragState::CreateRedaction { anchor, current }) => {
                 let rect = ImageRect::from_corners(*anchor, *current);
                 (!rect.is_empty())
@@ -373,7 +412,15 @@ impl AnnotationCanvas<'_> {
             );
         };
         match annotation {
-            Annotation::TwoPoint { .. } => {}
+            Annotation::TwoPoint {
+                kind, start, end, ..
+            } => {
+                handle(frame, *start, white, accent);
+                match kind {
+                    TwoPointKind::Line => handle(frame, *end, white, accent),
+                    TwoPointKind::Arrow => handle(frame, *end, accent, white),
+                }
+            }
             Annotation::NumberCallout { tip, bubble, .. } => {
                 handle(frame, *bubble, accent, white);
                 handle(frame, *tip, white, accent);
@@ -678,6 +725,7 @@ mod tests {
             HitPart::Body,
             ImagePoint::new(25.0, 25.0),
             (5.0, 5.0),
+            false,
         );
         match moved {
             Annotation::NumberCallout { tip, bubble, .. } => {
@@ -686,6 +734,103 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn body_drag_translates_both_endpoints_and_preserves_vector() {
+        let original = Annotation::two_point(
+            AnnotationId(1),
+            rollshot_image_document::TwoPointKind::Arrow,
+            ImagePoint::new(10.0, 20.0),
+            ImagePoint::new(80.0, 40.0),
+        );
+        let moved = dragged_annotation(
+            &original,
+            HitPart::Body,
+            ImagePoint::new(60.0, 70.0),
+            (10.0, 20.0),
+            false,
+        );
+        let moved_with_shift = dragged_annotation(
+            &original,
+            HitPart::Body,
+            ImagePoint::new(60.0, 70.0),
+            (10.0, 20.0),
+            true,
+        );
+        assert_eq!(moved_with_shift, moved, "body movement ignores Shift");
+        let (before_start, before_end) = match original {
+            Annotation::TwoPoint { start, end, .. } => (start, end),
+            _ => unreachable!(),
+        };
+        let (after_start, after_end) = match moved {
+            Annotation::TwoPoint { start, end, .. } => (start, end),
+            _ => panic!("expected TwoPoint annotation"),
+        };
+        assert_eq!(after_start, ImagePoint::new(50.0, 50.0));
+        assert_eq!(after_end, ImagePoint::new(120.0, 70.0));
+        assert_eq!(
+            after_end.x - after_start.x,
+            before_end.x - before_start.x
+        );
+        assert_eq!(
+            after_end.y - after_start.y,
+            before_end.y - before_start.y
+        );
+    }
+
+    #[test]
+    fn endpoint_drags_fix_the_opposite_endpoint_and_apply_shift() {
+        let original = Annotation::two_point(
+            AnnotationId(1),
+            rollshot_image_document::TwoPointKind::Line,
+            ImagePoint::new(10.0, 20.0),
+            ImagePoint::new(80.0, 40.0),
+        );
+        let raw_start = ImagePoint::new(20.0, 70.0);
+        let moved_start = dragged_annotation(
+            &original,
+            HitPart::StartEndpoint,
+            raw_start,
+            (0.0, 0.0),
+            false,
+        );
+        let snapped_start = dragged_annotation(
+            &original,
+            HitPart::StartEndpoint,
+            raw_start,
+            (0.0, 0.0),
+            true,
+        );
+        let raw_end = ImagePoint::new(120.0, 70.0);
+        let moved_end = dragged_annotation(
+            &original,
+            HitPart::EndEndpoint,
+            raw_end,
+            (0.0, 0.0),
+            false,
+        );
+
+        assert!(matches!(
+            moved_start,
+            Annotation::TwoPoint { start, end, .. }
+                if start == raw_start && end == ImagePoint::new(80.0, 40.0)
+        ));
+        assert!(matches!(
+            snapped_start,
+            Annotation::TwoPoint { start, end, .. }
+                if start == crate::result_workspace::two_point::constrained_endpoint(
+                    end,
+                    raw_start,
+                    true,
+                )
+                    && end == ImagePoint::new(80.0, 40.0)
+        ));
+        assert!(matches!(
+            moved_end,
+            Annotation::TwoPoint { start, end, .. }
+                if start == ImagePoint::new(10.0, 20.0) && end == raw_end
+        ));
     }
 
     use image::{Rgba, RgbaImage};
