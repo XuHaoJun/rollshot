@@ -127,18 +127,24 @@ pub fn dragged_annotation(
     point: ImagePoint,
     grab_offset: (f32, f32),
     shift: bool,
+    image_size: (u32, u32),
 ) -> Annotation {
     let mut next = original.clone();
+    let (width, height) = image_size;
     match (&mut next, part) {
         (Annotation::TwoPoint { start, end, .. }, HitPart::StartEndpoint) => {
-            *start = super::two_point::constrained_endpoint(*end, point, shift);
+            *start =
+                super::two_point::bounded_constrained_endpoint(*end, point, shift, width, height);
         }
         (Annotation::TwoPoint { start, end, .. }, HitPart::EndEndpoint) => {
-            *end = super::two_point::constrained_endpoint(*start, point, shift);
+            *end =
+                super::two_point::bounded_constrained_endpoint(*start, point, shift, width, height);
         }
         (Annotation::TwoPoint { start, end, .. }, HitPart::Body) => {
-            let dx = point.x - grab_offset.0 - start.x;
-            let dy = point.y - grab_offset.1 - start.y;
+            let dx = (point.x - grab_offset.0 - start.x)
+                .clamp(-start.x.min(end.x), width as f32 - start.x.max(end.x));
+            let dy = (point.y - grab_offset.1 - start.y)
+                .clamp(-start.y.min(end.y), height as f32 - start.y.max(end.y));
             *start = ImagePoint::new(start.x + dx, start.y + dy);
             *end = ImagePoint::new(end.x + dx, end.y + dy);
         }
@@ -364,6 +370,7 @@ impl AnnotationCanvas<'_> {
     }
 
     fn draft_annotation(&self) -> Option<Annotation> {
+        let (width, height) = self.document.source().dimensions();
         match &self.editor.drag {
             Some(DragState::CreateNumber { tip, bubble }) => {
                 Some(Annotation::number_callout_with_style(
@@ -383,10 +390,12 @@ impl AnnotationCanvas<'_> {
                 AnnotationId(u64::MAX),
                 *kind,
                 *start,
-                super::two_point::constrained_endpoint(
+                super::two_point::bounded_constrained_endpoint(
                     *start,
                     *raw_current,
                     self.modifiers.shift(),
+                    width,
+                    height,
                 ),
                 *style,
             )),
@@ -727,6 +736,7 @@ mod tests {
             ImagePoint::new(25.0, 25.0),
             (5.0, 5.0),
             false,
+            (200, 200),
         );
         match moved {
             Annotation::NumberCallout { tip, bubble, .. } => {
@@ -751,6 +761,7 @@ mod tests {
             ImagePoint::new(60.0, 70.0),
             (10.0, 20.0),
             false,
+            (200, 200),
         );
         let moved_with_shift = dragged_annotation(
             &original,
@@ -758,6 +769,7 @@ mod tests {
             ImagePoint::new(60.0, 70.0),
             (10.0, 20.0),
             true,
+            (200, 200),
         );
         assert_eq!(moved_with_shift, moved, "body movement ignores Shift");
         let (before_start, before_end) = match original {
@@ -789,6 +801,7 @@ mod tests {
             raw_start,
             (0.0, 0.0),
             false,
+            (200, 200),
         );
         let snapped_start = dragged_annotation(
             &original,
@@ -796,10 +809,17 @@ mod tests {
             raw_start,
             (0.0, 0.0),
             true,
+            (200, 200),
         );
         let raw_end = ImagePoint::new(120.0, 70.0);
-        let moved_end =
-            dragged_annotation(&original, HitPart::EndEndpoint, raw_end, (0.0, 0.0), false);
+        let moved_end = dragged_annotation(
+            &original,
+            HitPart::EndEndpoint,
+            raw_end,
+            (0.0, 0.0),
+            false,
+            (200, 200),
+        );
 
         assert!(matches!(
             moved_start,

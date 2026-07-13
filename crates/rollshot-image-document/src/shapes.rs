@@ -130,7 +130,7 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
                 width: style.width,
                 color,
             }];
-            if *kind == TwoPointKind::Arrow {
+            if *kind == TwoPointKind::Arrow && start.distance(*end) > 0.0 {
                 shapes.push(RenderShape::Triangle {
                     points: arrowhead_points(*start, *end, style.width),
                     color,
@@ -282,6 +282,23 @@ mod tests {
         let shapes = annotation_shapes(&annotation);
         assert!(matches!(shapes[0], RenderShape::Line { .. }));
         assert!(matches!(shapes[1], RenderShape::Triangle { .. }));
+    }
+
+    #[test]
+    fn coincident_arrow_draft_lowers_without_an_arrowhead() {
+        let point = ImagePoint::new(25.0, 30.0);
+        let annotation =
+            Annotation::two_point(AnnotationId(u64::MAX), TwoPointKind::Arrow, point, point);
+
+        assert_eq!(
+            annotation_shapes(&annotation),
+            vec![RenderShape::Line {
+                start: point,
+                end: point,
+                width: 4.0,
+                color: Rgb8::new(0xE5, 0x48, 0x4D).opaque(),
+            }]
+        );
     }
 
     #[test]

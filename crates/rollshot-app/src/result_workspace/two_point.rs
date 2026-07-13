@@ -25,6 +25,37 @@ pub fn constrained_endpoint(fixed: ImagePoint, moving: ImagePoint, shift: bool) 
     }
 }
 
+pub fn bounded_constrained_endpoint(
+    fixed: ImagePoint,
+    moving: ImagePoint,
+    shift: bool,
+    width: u32,
+    height: u32,
+) -> ImagePoint {
+    let moving = moving.clamp_to(width, height);
+    let constrained = constrained_endpoint(fixed, moving, shift);
+    let delta_x = constrained.x - fixed.x;
+    let delta_y = constrained.y - fixed.y;
+    let mut factor = 1.0_f32;
+
+    if delta_x > 0.0 {
+        factor = factor.min((width as f32 - fixed.x) / delta_x);
+    } else if delta_x < 0.0 {
+        factor = factor.min(-fixed.x / delta_x);
+    }
+    if delta_y > 0.0 {
+        factor = factor.min((height as f32 - fixed.y) / delta_y);
+    } else if delta_y < 0.0 {
+        factor = factor.min(-fixed.y / delta_y);
+    }
+
+    ImagePoint::new(
+        fixed.x + delta_x * factor.clamp(0.0, 1.0),
+        fixed.y + delta_y * factor.clamp(0.0, 1.0),
+    )
+    .clamp_to(width, height)
+}
+
 pub fn gesture_meets_threshold(start: ImagePoint, end: ImagePoint, scale: f32) -> bool {
     start.distance(end) * scale >= MIN_GESTURE_SCREEN
 }
@@ -63,6 +94,16 @@ mod tests {
             constrained_endpoint(fixed, moving, true),
             snap_endpoint(fixed, moving)
         );
+    }
+
+    #[test]
+    fn bounded_shift_constraint_stays_on_snapped_ray() {
+        let fixed = ImagePoint::new(90.0, 50.0);
+        let endpoint =
+            bounded_constrained_endpoint(fixed, ImagePoint::new(100.0, 70.0), true, 100, 100);
+
+        assert_eq!(endpoint, ImagePoint::new(100.0, 60.0));
+        assert_eq!(endpoint.x - fixed.x, endpoint.y - fixed.y);
     }
 
     #[test]

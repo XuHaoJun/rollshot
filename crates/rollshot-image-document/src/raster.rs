@@ -87,12 +87,17 @@ pub(crate) fn stroke_line(
     width: f32,
     color: Rgba8,
 ) {
+    if img.width() == 0 || img.height() == 0 {
+        return;
+    }
     let radius = width / 2.0;
     let bounds = ImageRect::from_corners(start, end).expanded(radius + 1.0);
-    let x0 = bounds.x.floor() as i32;
-    let y0 = bounds.y.floor() as i32;
-    let x1 = (bounds.x + bounds.width).ceil() as i32;
-    let y1 = (bounds.y + bounds.height).ceil() as i32;
+    let max_x = i32::try_from(img.width() - 1).unwrap_or(i32::MAX);
+    let max_y = i32::try_from(img.height() - 1).unwrap_or(i32::MAX);
+    let x0 = (bounds.x.floor() as i32).max(0);
+    let y0 = (bounds.y.floor() as i32).max(0);
+    let x1 = ((bounds.x + bounds.width).ceil() as i32).min(max_x);
+    let y1 = ((bounds.y + bounds.height).ceil() as i32).min(max_y);
     for y in y0..=y1 {
         for x in x0..=x1 {
             let sample = ImagePoint::new(x as f32 + 0.5, y as f32 + 0.5);
@@ -128,5 +133,27 @@ pub(crate) fn fill_triangle(img: &mut RgbaImage, t: &[ImagePoint; 3], color: Rgb
                 blend_px(img, x, y, color, hits as f32 / 16.0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn huge_finite_line_width_scans_only_image_pixels() {
+        let mut image = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 0]));
+        let color = Rgba8::new(10, 20, 30, 255);
+
+        stroke_line(
+            &mut image,
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(1.0, 1.0),
+            f32::MAX,
+            color,
+        );
+
+        assert!(image.pixels().all(|pixel| pixel.0 == [10, 20, 30, 255]));
     }
 }
