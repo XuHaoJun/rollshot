@@ -166,6 +166,13 @@ pub fn dragged_annotation(
         (Annotation::OpaqueRedaction { bounds, .. }, HitPart::Resize(handle)) => {
             *bounds = resized_rect(*bounds, handle, point);
         }
+        (Annotation::Shape { bounds, .. }, HitPart::Body) => {
+            bounds.x = point.x - grab_offset.0;
+            bounds.y = point.y - grab_offset.1;
+        }
+        (Annotation::Shape { bounds, .. }, HitPart::Resize(handle)) => {
+            *bounds = resized_rect(*bounds, handle, point);
+        }
         _ => {}
     }
     next
@@ -196,7 +203,7 @@ fn resized_rect(original: ImageRect, handle: ResizeHandle, p: ImagePoint) -> Ima
 use iced::widget::canvas;
 use iced::{mouse, Color, Rectangle, Renderer, Size, Theme, Vector};
 use rollshot_image_document::{
-    annotation_bounds, annotation_shapes, redaction_handles, style, RenderShape, TextAnchor,
+    annotation_bounds, annotation_shapes, resize_handles, style, RenderShape, TextAnchor,
 };
 
 use super::update::{direct_manipulation_hit, Message};
@@ -360,6 +367,53 @@ impl AnnotationCanvas<'_> {
                     ..canvas::Text::default()
                 });
             }
+            RenderShape::Box {
+                kind,
+                bounds,
+                stroke,
+                stroke_width,
+                fill,
+            } => {
+                use rollshot_image_document::ShapeKind;
+                let rect = iced::Rectangle {
+                    x: bounds.x * s,
+                    y: bounds.y * s,
+                    width: bounds.width * s,
+                    height: bounds.height * s,
+                };
+                let cx = rect.x + rect.width / 2.0;
+                let cy = rect.y + rect.height / 2.0;
+                let rx = rect.width / 2.0;
+                let ry = rect.height / 2.0;
+
+                let make_path = |kind: &ShapeKind| -> canvas::Path {
+                    match kind {
+                        ShapeKind::Rectangle => canvas::Path::rectangle(
+                            Point::new(rect.x, rect.y),
+                            Size::new(rect.width, rect.height),
+                        ),
+                        ShapeKind::Ellipse => canvas::Path::new(|b| {
+                            b.ellipse(canvas::path::arc::Elliptical {
+                                center: Point::new(cx, cy),
+                                radii: iced::Vector::new(rx, ry),
+                                rotation: iced::Radians(0.0),
+                                start_angle: iced::Radians(0.0),
+                                end_angle: iced::Radians(std::f32::consts::TAU),
+                            });
+                        }),
+                    }
+                };
+
+                if let Some(fill_color) = fill {
+                    frame.fill(&make_path(kind), token_color(*fill_color));
+                }
+                frame.stroke(
+                    &make_path(kind),
+                    canvas::Stroke::default()
+                        .with_color(token_color(*stroke))
+                        .with_width(stroke_width * s),
+                );
+            }
         }
     }
 
@@ -451,7 +505,12 @@ impl AnnotationCanvas<'_> {
                 );
             }
             Annotation::OpaqueRedaction { bounds, .. } => {
-                for (_, p) in redaction_handles(*bounds) {
+                for (_, p) in resize_handles(*bounds) {
+                    handle(frame, p, white, accent);
+                }
+            }
+            Annotation::Shape { bounds, .. } => {
+                for (_, p) in resize_handles(*bounds) {
                     handle(frame, p, white, accent);
                 }
             }

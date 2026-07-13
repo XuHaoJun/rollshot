@@ -78,7 +78,8 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
                     Some(
                         Annotation::TwoPoint { .. }
                         | Annotation::NumberCallout { .. }
-                        | Annotation::TextNote { .. },
+                        | Annotation::TextNote { .. }
+                        | Annotation::Shape { .. },
                     ) => Some(PropertyTarget::Annotation(id)),
                     _ => None,
                 })
@@ -398,6 +399,7 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             _ => None,
         },
         Annotation::OpaqueRedaction { .. } => None,
+        Annotation::Shape { .. } => None,
     }
 }
 

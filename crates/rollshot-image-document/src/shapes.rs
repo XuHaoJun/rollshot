@@ -2,7 +2,7 @@
 //! for BOTH flattened output (raster.rs/flatten.rs) and any live overlay
 //! renderer.
 
-use crate::annotation::{Annotation, TwoPointKind};
+use crate::annotation::{Annotation, ShapeKind, TwoPointKind};
 use crate::geometry::{ImagePoint, ImageRect, Rgba8};
 use crate::style::{self, NumberStyle, TextStyle};
 use crate::text::measure_block;
@@ -47,6 +47,13 @@ pub enum RenderShape {
         px: f32,
         bold: bool,
         color: Rgba8,
+    },
+    Box {
+        kind: ShapeKind,
+        bounds: ImageRect,
+        stroke: Rgba8,
+        stroke_width: f32,
+        fill: Option<Rgba8>,
     },
 }
 
@@ -203,6 +210,24 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
             rect: *bounds,
             color: style::REDACTION_FILL,
         }],
+        Annotation::Shape {
+            kind,
+            bounds,
+            stroke,
+            fill,
+            ..
+        } => {
+            let alpha = (stroke.opacity * 255.0).round() as u8;
+            let stroke_color = stroke.color.with_alpha(alpha);
+            let fill_color = fill.map(|c| c.opaque());
+            vec![RenderShape::Box {
+                kind: *kind,
+                bounds: *bounds,
+                stroke: stroke_color,
+                stroke_width: stroke.width,
+                fill: fill_color,
+            }]
+        }
     }
 }
 
@@ -248,6 +273,9 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
             ..
         } => text_plate_rect(*position, text, *style),
         Annotation::OpaqueRedaction { bounds, .. } => *bounds,
+        Annotation::Shape { bounds, stroke, .. } => {
+            crate::box_shape::shape_visual_bounds(*bounds, stroke.width)
+        }
     }
 }
 
@@ -256,7 +284,7 @@ mod tests {
     use super::*;
     use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect, Rgb8};
-    use crate::style::{self, NumberSize, NumberStyle, TextSize, TextStyle};
+    use crate::style::{self, NumberSize, NumberStyle, StrokeStyle, TextSize, TextStyle};
 
     fn line() -> Annotation {
         Annotation::two_point(
@@ -511,6 +539,103 @@ mod tests {
             annotation_shapes(&text_with_style(style)).len(),
             1,
             "no background → only the label shape"
+        );
+    }
+
+    // --- Shape tests ---
+
+    #[test]
+    fn shape_lowers_to_box_with_correct_kind_and_bounds() {
+        let ann = Annotation::shape(
+            AnnotationId(10),
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 10.0,
+                y: 20.0,
+                width: 30.0,
+                height: 40.0,
+            },
+        );
+        let shapes = annotation_shapes(&ann);
+        assert_eq!(shapes.len(), 1);
+        match &shapes[0] {
+            RenderShape::Box {
+                kind,
+                bounds,
+                stroke,
+                stroke_width,
+                fill,
+            } => {
+                assert_eq!(*kind, crate::annotation::ShapeKind::Rectangle);
+                assert_eq!(
+                    *bounds,
+                    ImageRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 30.0,
+                        height: 40.0
+                    }
+                );
+                assert_eq!(*stroke, Rgb8::new(0xE5, 0x48, 0x4D).with_alpha(255));
+                assert_eq!(*stroke_width, 4.0);
+                assert_eq!(*fill, None);
+            }
+            _ => panic!("expected Box"),
+        }
+    }
+
+    #[test]
+    fn shape_with_fill_lowers_to_box_with_fill() {
+        let ann = Annotation::shape_with_style(
+            AnnotationId(11),
+            crate::annotation::ShapeKind::Ellipse,
+            ImageRect {
+                x: 5.0,
+                y: 5.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            StrokeStyle {
+                color: Rgb8::new(10, 20, 30),
+                width: 2.0,
+                opacity: 0.5,
+            },
+            Some(Rgb8::new(100, 200, 50)),
+        );
+        let shapes = annotation_shapes(&ann);
+        match &shapes[0] {
+            RenderShape::Box {
+                kind, stroke, fill, ..
+            } => {
+                assert_eq!(*kind, crate::annotation::ShapeKind::Ellipse);
+                assert_eq!(*stroke, Rgb8::new(10, 20, 30).with_alpha(128));
+                assert_eq!(*fill, Some(Rgb8::new(100, 200, 50).opaque()));
+            }
+            _ => panic!("expected Box"),
+        }
+    }
+
+    #[test]
+    fn shape_bounds_expands_by_half_stroke_width() {
+        let ann = Annotation::shape(
+            AnnotationId(12),
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 10.0,
+                y: 20.0,
+                width: 30.0,
+                height: 40.0,
+            },
+        );
+        let b = annotation_bounds(&ann);
+        assert_eq!(
+            b,
+            ImageRect {
+                x: 8.0,
+                y: 18.0,
+                width: 34.0,
+                height: 44.0,
+            }
         );
     }
 }

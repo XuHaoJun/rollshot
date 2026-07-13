@@ -4,6 +4,7 @@
 //! or capture code — see README.md for the responsibility boundary.
 
 mod annotation;
+pub mod box_shape;
 pub mod callout_placement;
 mod document;
 mod edit_op;
@@ -22,7 +23,7 @@ pub use callout_placement::place_number_callout_bubble;
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use edit_op::{BatchOutcome, EditOp};
 pub use geometry::{ImagePoint, ImageRect, Rgb8, Rgba8};
-pub use hit::{hit_test_annotation, redaction_handles, Hit, HitPart, ResizeHandle};
+pub use hit::{hit_test_annotation, resize_handles, Hit, HitPart, ResizeHandle};
 pub use navigator::NavigatorItem;
 pub use shapes::{annotation_bounds, annotation_shapes, text_plate_rect, RenderShape, TextAnchor};
 pub use style::{NumberSize, NumberStyle, StrokeStyle, TextSize, TextStyle};

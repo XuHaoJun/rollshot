@@ -682,6 +682,10 @@ pub(crate) fn handle_canvas_released(
                         .document
                         .image
                         .set_redaction_bounds(original.id(), *bounds),
+                    Annotation::Shape { bounds, .. } => state
+                        .document
+                        .image
+                        .set_shape_bounds(original.id(), *bounds),
                 };
                 if let Err(e) = result {
                     state.message = Some(InlineMessage::Error(e.to_string()));

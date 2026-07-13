@@ -1,7 +1,7 @@
 //! The annotation graph. Geometry is stored in full-resolution image
 //! coordinates (spec §6); IDs are stable across undo/redo.
 
-use crate::geometry::{ImagePoint, ImageRect};
+use crate::geometry::{ImagePoint, ImageRect, Rgb8};
 use crate::style::{NumberStyle, StrokeStyle, TextStyle};
 
 /// Stable annotation identity, restored together with document history.
@@ -52,6 +52,13 @@ pub enum Annotation {
     OpaqueRedaction {
         id: AnnotationId,
         bounds: ImageRect,
+    },
+    Shape {
+        id: AnnotationId,
+        kind: ShapeKind,
+        bounds: ImageRect,
+        stroke: StrokeStyle,
+        fill: Option<Rgb8>,
     },
 }
 
@@ -128,12 +135,33 @@ impl Annotation {
         Self::OpaqueRedaction { id, bounds }
     }
 
+    pub fn shape(id: AnnotationId, kind: ShapeKind, bounds: ImageRect) -> Self {
+        Self::shape_with_style(id, kind, bounds, StrokeStyle::default(), None)
+    }
+
+    pub fn shape_with_style(
+        id: AnnotationId,
+        kind: ShapeKind,
+        bounds: ImageRect,
+        stroke: StrokeStyle,
+        fill: Option<Rgb8>,
+    ) -> Self {
+        Self::Shape {
+            id,
+            kind,
+            bounds,
+            stroke,
+            fill,
+        }
+    }
+
     pub fn id(&self) -> AnnotationId {
         match self {
             Annotation::TwoPoint { id, .. }
             | Annotation::NumberCallout { id, .. }
             | Annotation::TextNote { id, .. }
-            | Annotation::OpaqueRedaction { id, .. } => *id,
+            | Annotation::OpaqueRedaction { id, .. }
+            | Annotation::Shape { id, .. } => *id,
         }
     }
 
@@ -146,12 +174,14 @@ impl Annotation {
             Annotation::NumberCallout { bubble, .. } => *bubble,
             Annotation::TextNote { position, .. } => *position,
             Annotation::OpaqueRedaction { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
+            Annotation::Shape { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
         }
     }
 
     pub fn stroke_style(&self) -> Option<StrokeStyle> {
         match self {
             Annotation::TwoPoint { style, .. } => Some(*style),
+            Annotation::Shape { stroke, .. } => Some(*stroke),
             _ => None,
         }
     }

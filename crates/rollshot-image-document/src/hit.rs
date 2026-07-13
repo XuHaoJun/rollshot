@@ -2,6 +2,7 @@
 //! converts a fixed screen-space tolerance through its zoom scale).
 
 use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
+use crate::box_shape::shape_contains_point;
 use crate::geometry::{ImagePoint, ImageRect};
 use crate::shapes::text_plate_rect;
 use crate::style;
@@ -35,9 +36,9 @@ pub struct Hit {
     pub part: HitPart,
 }
 
-/// The 8 resize-handle anchor points of a redaction (also used by the editor
-/// to draw handles, so hit positions and visuals agree).
-pub fn redaction_handles(bounds: ImageRect) -> [(ResizeHandle, ImagePoint); 8] {
+/// The 8 resize-handle anchor points of a box-shaped annotation (also used by
+/// the editor to draw handles, so hit positions and visuals agree).
+pub fn resize_handles(bounds: ImageRect) -> [(ResizeHandle, ImagePoint); 8] {
     let (x0, y0) = (bounds.x, bounds.y);
     let (x1, y1) = (bounds.x + bounds.width, bounds.y + bounds.height);
     let (cx, cy) = (x0 + bounds.width / 2.0, y0 + bounds.height / 2.0);
@@ -101,7 +102,7 @@ pub fn hit_test_annotation(
             .contains(point)
             .then_some(HitPart::Body),
         Annotation::OpaqueRedaction { bounds, .. } => {
-            for (handle, anchor) in redaction_handles(*bounds) {
+            for (handle, anchor) in resize_handles(*bounds) {
                 if point.distance(anchor) <= tolerance * 1.5 {
                     return Some(HitPart::Resize(handle));
                 }
@@ -109,6 +110,20 @@ pub fn hit_test_annotation(
             bounds
                 .expanded(tolerance)
                 .contains(point)
+                .then_some(HitPart::Body)
+        }
+        Annotation::Shape {
+            kind,
+            bounds,
+            stroke,
+            ..
+        } => {
+            for (handle, anchor) in resize_handles(*bounds) {
+                if point.distance(anchor) <= tolerance * 1.5 {
+                    return Some(HitPart::Resize(handle));
+                }
+            }
+            shape_contains_point(*kind, *bounds, point, stroke.width / 2.0 + tolerance)
                 .then_some(HitPart::Body)
         }
     }
@@ -262,5 +277,103 @@ mod tests {
         ];
         let hit = hit_test(&anns, ImagePoint::new(60.0, 60.0), TOL).unwrap();
         assert_eq!(hit.id, AnnotationId(2), "later annotations draw on top");
+    }
+
+    #[test]
+    fn shape_rectangle_interior_hits_body() {
+        let ann = Annotation::shape(
+            AnnotationId(10),
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0,
+            },
+        );
+        assert_eq!(
+            hit_test_annotation(&ann, ImagePoint::new(50.0, 50.0), TOL),
+            Some(HitPart::Body)
+        );
+    }
+
+    #[test]
+    fn shape_ellipse_interior_hits_body() {
+        let ann = Annotation::shape(
+            AnnotationId(11),
+            crate::annotation::ShapeKind::Ellipse,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0,
+            },
+        );
+        let center = ImagePoint::new(50.0, 50.0);
+        assert_eq!(hit_test_annotation(&ann, center, TOL), Some(HitPart::Body));
+    }
+
+    #[test]
+    fn shape_ellipse_corner_miss_without_tolerance() {
+        let ann = Annotation::shape(
+            AnnotationId(12),
+            crate::annotation::ShapeKind::Ellipse,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0,
+            },
+        );
+        // Point well outside the ellipse (and not on a resize handle)
+        assert_eq!(
+            hit_test_annotation(&ann, ImagePoint::new(3.0, 3.0), 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn shape_resize_handles_beat_body() {
+        let ann = Annotation::shape(
+            AnnotationId(13),
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            },
+        );
+        // Top-left corner should hit resize handle, not body
+        let hit = hit_test_annotation(&ann, ImagePoint::new(50.0, 50.0), TOL).unwrap();
+        assert_eq!(hit, HitPart::Resize(ResizeHandle::TopLeft));
+    }
+
+    #[test]
+    fn shape_topmost_wins_on_overlap() {
+        let anns = vec![
+            Annotation::shape(
+                AnnotationId(1),
+                crate::annotation::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
+            ),
+            Annotation::shape(
+                AnnotationId(2),
+                crate::annotation::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 25.0,
+                    y: 25.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
+            ),
+        ];
+        let hit = hit_test(&anns, ImagePoint::new(60.0, 60.0), TOL).unwrap();
+        assert_eq!(hit.id, AnnotationId(2));
     }
 }
