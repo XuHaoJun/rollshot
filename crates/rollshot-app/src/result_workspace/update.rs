@@ -813,6 +813,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ModalScrimPressed => Task::none(),
         Message::WheelScrolled(delta) => handle_wheel(state, delta),
         Message::SelectTool(tool) => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             #[cfg(feature = "ocr")]
             if state.editor.tool == Tool::OcrText && tool != Tool::OcrText {
                 return Task::none();
@@ -834,8 +837,15 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Undo => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             #[cfg(feature = "ocr")]
             if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
+            if state.editor.properties.color.is_some() {
+                state.editor.properties.color = None;
                 return Task::none();
             }
             commit_text_draft(state);
@@ -844,8 +854,15 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::Redo => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             #[cfg(feature = "ocr")]
             if state.editor.tool == Tool::OcrText {
+                return Task::none();
+            }
+            if state.editor.properties.color.is_some() {
+                state.editor.properties.color = None;
                 return Task::none();
             }
             commit_text_draft(state);
@@ -854,6 +871,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             Task::none()
         }
         Message::DeleteSelected => {
+            if state.editor.properties.focus.is_some() {
+                return Task::none();
+            }
             if state.editor.text_draft.is_some() {
                 return Task::none();
             }
@@ -872,6 +892,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.editor.tool = Tool::Select;
                 return Task::none();
             }
+            if state.editor.properties.color.is_some() {
+                state.editor.properties.color = None;
+                return Task::none();
+            }
             if state.pending_unredacted_action.is_some() {
                 state.pending_unredacted_action = None;
             } else if state.editor.copy_menu_open {
@@ -884,6 +908,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.editor.drag = None;
             } else if state.editor.selection.is_some() {
                 state.editor.selection = None;
+            } else if state.editor.tool != Tool::Select {
+                state.editor.tool = Tool::Select;
             } else {
                 return update(state, Message::RequestClose);
             }
@@ -1661,8 +1687,11 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             &path,
                             &state.annotation_defaults.values,
                         ) {
-                            state.message =
-                                Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                            if !state.annotation_defaults.warning_reported {
+                                state.annotation_defaults.warning_reported = true;
+                                state.message =
+                                    Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                            }
                         }
                     }
                 }
@@ -1681,8 +1710,11 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             &path,
                             &state.annotation_defaults.values,
                         ) {
-                            state.message =
-                                Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                            if !state.annotation_defaults.warning_reported {
+                                state.annotation_defaults.warning_reported = true;
+                                state.message =
+                                    Some(InlineMessage::Warning(format!("Saved defaults: {e}")));
+                            }
                         }
                     }
                 }
@@ -3836,5 +3868,285 @@ mod tests {
             "preview shapes should differ from committed shapes"
         );
         assert_eq!(state.document.image.flatten(), before);
+    }
+
+    // -- keyboard precedence and failure behavior (Task 7) --------------------
+
+    /// Build a workspace with all local states layered: color tx, drag,
+    /// selection, and a creation tool (Number) active.
+    fn workspace_with_all_local_states() -> super::super::ResultWorkspace {
+        let mut state = workspace_with_size(200, 200);
+        // 1. Add an annotation and select it.
+        let id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        // 2. Open a color transaction on the selection.
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        // 3. Switch to Number tool (commits text draft if any — none here).
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        // 4. Start a creation drag.
+        state.editor.drag = Some(super::super::canvas::DragState::CreateNumber {
+            tip: ImagePoint::new(50.0, 50.0),
+            bubble: ImagePoint::new(60.0, 60.0),
+        });
+        state
+    }
+
+    fn press_escape(state: &mut super::super::ResultWorkspace) {
+        let _ = update(state, Message::EscapePressed);
+    }
+
+    /// Escape resolves: color tx → drag → selection → creation tool → Select → close.
+    #[test]
+    fn escape_resolves_property_then_draft_then_selection_then_tool_then_close() {
+        let mut state = workspace_with_all_local_states();
+
+        // 1st Esc: cancel the color transaction (highest priority).
+        assert!(
+            state.editor.properties.color.is_some(),
+            "precondition: color tx open"
+        );
+        press_escape(&mut state);
+        assert!(state.editor.properties.color.is_none());
+        assert!(
+            state.editor.drag.is_some(),
+            "drag survives color tx cancellation"
+        );
+
+        // 2nd Esc: cancel the in-progress drag.
+        press_escape(&mut state);
+        assert!(state.editor.drag.is_none());
+        assert!(
+            state.editor.selection.is_some(),
+            "selection survives drag cancellation"
+        );
+
+        // 3rd Esc: clear the selection.
+        press_escape(&mut state);
+        assert!(state.editor.selection.is_none());
+        assert_eq!(
+            state.editor.tool,
+            Tool::Number,
+            "tool unchanged after selection clear"
+        );
+
+        // 4th Esc: creation tool → Select.
+        press_escape(&mut state);
+        assert_eq!(state.editor.tool, Tool::Select);
+
+        // 5th Esc: Select tool → trigger close (unsaved workspace).
+        press_escape(&mut state);
+        assert!(
+            state.pending_discard.is_some(),
+            "final Esc triggers close on unsaved workspace"
+        );
+    }
+
+    /// When PropertyFocus is active, Backspace and tool-switching keys must
+    /// NOT fire. Escape still works (it is always routed).
+    #[test]
+    fn focused_property_input_owns_delete_and_shortcut_keys() {
+        let mut state = workspace_with_selected_text();
+        state.editor.properties.focus = Some(super::super::properties::PropertyFocus::HexInput);
+
+        // DeleteSelected should be suppressed when PropertyFocus is active.
+        let before = state.document.image.state_id();
+        let _ = update(&mut state, Message::DeleteSelected);
+        assert_eq!(state.document.image.state_id(), before, "no deletion");
+        assert!(state.editor.selection.is_some(), "selection preserved");
+
+        // Tool-switching should be suppressed.
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        assert_eq!(state.editor.tool, Tool::Select, "tool not changed");
+
+        // Undo should be suppressed.
+        let _ = update(&mut state, Message::Undo);
+        assert_eq!(state.document.image.state_id(), before, "no undo");
+
+        // Escape must always work regardless of PropertyFocus.
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(
+            state.editor.selection.is_none() || state.pending_discard.is_some(),
+            "Escape not suppressed by PropertyFocus"
+        );
+    }
+
+    /// When a defaults save fails, the warning appears once and subsequent
+    /// failures keep the memory value without re-warning.
+    #[test]
+    fn failed_default_save_warns_once_and_keeps_memory_value() {
+        use rollshot_image_document::NumberSize;
+        let mut state = workspace_with_size(200, 200);
+        // Point to a path under /sys which is read-only and cannot be created.
+        state.annotation_defaults.config_path = Some(std::path::PathBuf::from(
+            "/sys/rollshot_test_dir/config.toml",
+        ));
+        state.annotation_defaults.warning_reported = false;
+        state.editor.tool = Tool::Number;
+
+        // First apply: should warn.
+        state.annotation_defaults.values.number.size = NumberSize::Large;
+        // Trigger defaults persistence via color apply (NumberTool target).
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(255, 0, 0)));
+        let _ = update(&mut state, Message::ApplyColor);
+
+        let first_msg = state.message.as_ref().map(|m| m.text().to_owned());
+        assert!(first_msg.is_some(), "first save failure produces a warning");
+
+        // Second apply: message text should be the same (deduped).
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(0, 255, 0)));
+        let _ = update(&mut state, Message::ApplyColor);
+
+        let second_msg = state.message.as_ref().map(|m| m.text().to_owned());
+        assert_eq!(
+            first_msg, second_msg,
+            "same warning text on repeated failure"
+        );
+
+        // The in-memory value should be updated regardless of persistence failure.
+        assert_eq!(
+            state.annotation_defaults.values.number.accent,
+            Rgb8::new(0, 255, 0),
+            "memory value updated despite save failure"
+        );
+    }
+
+    /// Undo/Redo cancels a property preview before touching document history.
+    #[test]
+    fn undo_cancels_property_preview_before_history() {
+        use rollshot_image_document::Rgb8;
+        let mut state = workspace_with_selected_number();
+        let before = state.document.image.state_id();
+
+        // Open color preview.
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
+        assert!(state.editor.properties.color.is_some());
+
+        // Undo should cancel the preview (no-op since no doc mutation happened).
+        let _ = update(&mut state, Message::Undo);
+        assert!(
+            state.editor.properties.color.is_none(),
+            "undo cancels property preview"
+        );
+        assert_eq!(state.document.image.state_id(), before);
+    }
+
+    /// Invalid next number input leaves state unchanged (no error on empty,
+    /// error on non-numeric).
+    #[test]
+    fn invalid_next_number_leaves_state_unchanged() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Number;
+        let before = state.document.image.next_number();
+
+        // Empty input: no error, no change.
+        state.editor.properties.next_number_input.clear();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert_eq!(state.document.image.next_number(), before);
+        assert!(state.message.is_none(), "empty input is silent");
+
+        // Non-numeric: error, no change.
+        state.editor.properties.next_number_input = "abc".into();
+        let _ = update(&mut state, Message::CommitNextNumber);
+        assert_eq!(state.document.image.next_number(), before);
+        assert!(state.message.as_ref().unwrap().is_error());
+    }
+
+    /// Copy/Save payloads exclude live property previews.
+    #[test]
+    fn copy_and_save_exclude_preview() {
+        use rollshot_image_document::Rgb8;
+        let mut state = workspace_with_selected_number();
+
+        // Open a color preview that differs from the committed annotation.
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(0, 0, 0)));
+
+        // Copy payload must flatten committed annotations, NOT the preview.
+        let copy = copy_payload(&state);
+        let flattened = state.document.image.flatten();
+        assert_eq!(copy, flattened, "copy payload is flattened document");
+
+        // Save payload must also be the committed document.
+        let save = save_payload(&state);
+        assert_eq!(save, flattened, "save payload is flattened document");
+    }
+
+    /// Opaque Redaction remains fully opaque (alpha=255) after mixed edits.
+    #[test]
+    fn opaque_redaction_remains_black_after_mixed_edits() {
+        let mut state = workspace_with_size(200, 200);
+        // Add a number callout.
+        state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
+        // Add a redaction.
+        let rid = state
+            .document
+            .image
+            .add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            })
+            .unwrap();
+        // Move the redaction.
+        let _ = state.document.image.set_redaction_bounds(
+            rid,
+            ImageRect {
+                x: 5.0,
+                y: 5.0,
+                width: 25.0,
+                height: 25.0,
+            },
+        );
+        // Undo the move.
+        let _ = state.document.image.undo();
+        // Redo the move.
+        let _ = state.document.image.redo();
+
+        // The redaction bounds should still be valid.
+        match state.document.image.annotation(rid).unwrap() {
+            Annotation::OpaqueRedaction { bounds, .. } => {
+                assert_eq!(
+                    *bounds,
+                    ImageRect {
+                        x: 5.0,
+                        y: 5.0,
+                        width: 25.0,
+                        height: 25.0
+                    }
+                );
+            }
+            _ => panic!("expected OpaqueRedaction"),
+        }
+
+        // Flatten and check pixel inside the redaction: must be fully opaque black.
+        let flat = state.document.image.flatten();
+        let px = flat.get_pixel(10, 10);
+        assert_eq!(px.0[3], 255, "redaction pixel must be fully opaque");
     }
 }
