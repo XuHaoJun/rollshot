@@ -122,6 +122,16 @@ fn tool_item(tool: Tool) -> ToolbarItem {
             label: "Text",
             shortcut: "T",
         },
+        Tool::Line => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Line),
+            label: "Line",
+            shortcut: "L",
+        },
+        Tool::Arrow => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Arrow),
+            label: "Arrow",
+            shortcut: "A",
+        },
         Tool::Redact => ToolbarItem {
             kind: ToolbarItemKind::Tool(Tool::Redact),
             label: "Redact",
@@ -152,10 +162,15 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
     let density = density_for_width(width);
 
     let primary_tools = match density {
-        ToolbarDensity::Wide | ToolbarDensity::Compact => {
-            vec![Tool::Select, Tool::Number, Tool::Text, Tool::Redact]
-        }
-        ToolbarDensity::Narrow => vec![Tool::Select, Tool::Number, Tool::Text],
+        ToolbarDensity::Wide | ToolbarDensity::Compact => vec![
+            Tool::Select,
+            Tool::Number,
+            Tool::Text,
+            Tool::Line,
+            Tool::Arrow,
+            Tool::Redact,
+        ],
+        ToolbarDensity::Narrow => vec![Tool::Select, Tool::Number, Tool::Text, Tool::Arrow],
     };
 
     let mut overflow = vec![
@@ -174,6 +189,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
 
     if density == ToolbarDensity::Narrow {
         overflow.insert(0, tool_item(Tool::Redact));
+        overflow.insert(0, tool_item(Tool::Line));
     }
 
     let more_active_tool = if overflow
@@ -432,6 +448,17 @@ fn rgb_to_hsv(rgb: Rgb8) -> (f32, f32, f32) {
 // View construction
 // ---------------------------------------------------------------------------
 
+fn tool_tooltip(tool: Tool) -> String {
+    match tool {
+        Tool::Line => "Line (L) — Shift: Snap to 45°".into(),
+        Tool::Arrow => "Arrow (A) — Shift: Snap to 45°".into(),
+        _ => {
+            let item = tool_item(tool);
+            shortcut_label(item.label, item.shortcut)
+        }
+    }
+}
+
 fn tool_button<'a>(tool: Tool, state: &ResultWorkspace) -> Element<'a, Message> {
     let item = tool_item(tool);
     let btn = button(text(item.label).size(14))
@@ -442,12 +469,7 @@ fn tool_button<'a>(tool: Tool, state: &ResultWorkspace) -> Element<'a, Message> 
         } else {
             button::secondary
         });
-    tooltip(
-        btn,
-        text(format!("{} ({})", item.label, item.shortcut)),
-        tooltip::Position::Bottom,
-    )
-    .into()
+    tooltip(btn, text(tool_tooltip(tool)), tooltip::Position::Bottom).into()
 }
 
 fn undo_button(state: &ResultWorkspace) -> Element<'_, Message> {
@@ -747,12 +769,51 @@ mod tests {
     }
 
     #[test]
-    fn wide_shows_all_four_primary_tools() {
+    fn wide_shows_all_primary_tools() {
         let model = toolbar_model(&state(), 1100.0);
         assert_eq!(
             model.visible_tools,
-            vec![Tool::Select, Tool::Number, Tool::Text, Tool::Redact]
+            vec![
+                Tool::Select,
+                Tool::Number,
+                Tool::Text,
+                Tool::Line,
+                Tool::Arrow,
+                Tool::Redact,
+            ]
         );
+    }
+
+    #[test]
+    fn wide_and_compact_show_adjacent_line_and_arrow() {
+        for width in [1000.0, 800.0] {
+            let model = toolbar_model(&state(), width);
+            let pair = model
+                .visible_tools
+                .windows(2)
+                .any(|tools| tools == [Tool::Line, Tool::Arrow]);
+            assert!(pair, "Line and Arrow must be adjacent at width {width}");
+        }
+    }
+
+    #[test]
+    fn narrow_keeps_arrow_visible_and_routes_active_line_through_more() {
+        let mut state = state();
+        state.editor.tool = Tool::Line;
+        let model = toolbar_model(&state, 600.0);
+        assert!(model.visible_tools.contains(&Tool::Arrow));
+        assert!(!model.visible_tools.contains(&Tool::Line));
+        assert!(model
+            .more
+            .iter()
+            .any(|item| item.kind == ToolbarItemKind::Tool(Tool::Line)));
+        assert_eq!(model.more_active_tool, Some((Tool::Line, "Line")));
+    }
+
+    #[test]
+    fn two_point_tooltips_include_shortcut_and_shift_hint() {
+        assert_eq!(tool_tooltip(Tool::Line), "Line (L) — Shift: Snap to 45°");
+        assert_eq!(tool_tooltip(Tool::Arrow), "Arrow (A) — Shift: Snap to 45°");
     }
 
     #[test]

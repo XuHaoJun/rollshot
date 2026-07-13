@@ -2321,6 +2321,8 @@ pub(crate) fn map_key_press(
             "v" => Some(Message::SelectTool(Tool::Select)),
             "n" => Some(Message::SelectTool(Tool::Number)),
             "t" => Some(Message::SelectTool(Tool::Text)),
+            "l" => Some(Message::SelectTool(Tool::Line)),
+            "a" => Some(Message::SelectTool(Tool::Arrow)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
@@ -3716,6 +3718,32 @@ mod tests {
         assert_eq!(
             map_key_press(&Key::Named(Named::Escape), none, true),
             Some(Message::EscapePressed)
+        );
+    }
+
+    #[test]
+    fn map_key_press_routes_line_and_arrow_when_input_is_not_captured() {
+        let modifiers = keyboard::Modifiers::empty();
+        assert_eq!(
+            map_key_press(&keyboard::Key::Character("l".into()), modifiers, false),
+            Some(Message::SelectTool(Tool::Line))
+        );
+        assert_eq!(
+            map_key_press(&keyboard::Key::Character("a".into()), modifiers, false),
+            Some(Message::SelectTool(Tool::Arrow))
+        );
+    }
+
+    #[test]
+    fn map_key_press_captured_input_blocks_two_point_shortcuts() {
+        let modifiers = keyboard::Modifiers::empty();
+        assert_eq!(
+            map_key_press(&keyboard::Key::Character("l".into()), modifiers, true),
+            None
+        );
+        assert_eq!(
+            map_key_press(&keyboard::Key::Character("a".into()), modifiers, true),
+            None
         );
     }
 
