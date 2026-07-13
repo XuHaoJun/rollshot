@@ -221,7 +221,8 @@ mod tests {
     #[test]
     fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
         let mut doc = ImageDocument::new(base(1000, 20_000));
-        for i in 0..20u32 {
+        // 14 rows × 7 types = 98, plus 1 Rectangle + 1 Ellipse = exactly 100.
+        for i in 0..14u32 {
             let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
             doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}"))
@@ -245,14 +246,96 @@ mod tests {
                 ImagePoint::new(900.0, y + 180.0),
             )
             .unwrap();
+            doc.add_shape(
+                crate::annotation::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 700.0,
+                    y: y + 200.0,
+                    width: 60.0,
+                    height: 80.0,
+                },
+            )
+            .unwrap();
+            doc.add_shape(
+                crate::annotation::ShapeKind::Ellipse,
+                ImageRect {
+                    x: 850.0,
+                    y: y + 200.0,
+                    width: 60.0,
+                    height: 80.0,
+                },
+            )
+            .unwrap();
         }
+        // Extra Rectangle + Ellipse to reach exactly 100.
+        let ey = 100.0 + 14.0 * 950.0;
+        doc.add_shape(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 100.0,
+                y: ey,
+                width: 60.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        let ey2 = 100.0 + 15.0 * 950.0;
+        doc.add_shape(
+            crate::annotation::ShapeKind::Ellipse,
+            ImageRect {
+                x: 300.0,
+                y: ey2,
+                width: 60.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
         assert_eq!(flattened.dimensions(), doc.source().dimensions());
+        assert_eq!(
+            flattened.dimensions(),
+            doc.source().dimensions(),
+            "output dimensions match source"
+        );
+
+        // Representative Number (row 0) still paints.
         assert_ne!(
             flattened.get_pixel(160, 240),
             doc.source().get_pixel(160, 240)
         );
-        assert_eq!(doc.navigator_items().len(), 100);
+
+        // Representative Rectangle (row 0): no fill, stroke paints the edge.
+        // Row 0 y=100, shape at y+200=300. Bounds: (700, 300)–(760, 380).
+        // Interior (730, 340) must be source.
+        assert_eq!(
+            flattened.get_pixel(730, 340),
+            doc.source().get_pixel(730, 340),
+            "Rectangle interior without fill must be source"
+        );
+        // Left edge (700, 340) must be painted by stroke.
+        assert_ne!(
+            flattened.get_pixel(700, 340),
+            doc.source().get_pixel(700, 340),
+            "Rectangle edge must be painted by stroke"
+        );
+
+        // Representative Ellipse (row 0): no fill, stroke paints the boundary.
+        // Row 0 y=100, shape at y+200=300. Bounds: (850, 300)–(910, 380).
+        // Center (880, 340) must be source.
+        assert_eq!(
+            flattened.get_pixel(880, 340),
+            doc.source().get_pixel(880, 340),
+            "Ellipse center without fill must be source"
+        );
+        // Top of ellipse (880, 300) must be painted by stroke.
+        assert_ne!(
+            flattened.get_pixel(880, 300),
+            doc.source().get_pixel(880, 300),
+            "Ellipse boundary must be painted by stroke"
+        );
+
         assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());
     }
 

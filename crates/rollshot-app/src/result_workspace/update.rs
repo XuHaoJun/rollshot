@@ -5675,4 +5675,192 @@ mod tests {
         );
         assert!(!state.editor.shapes_menu_open);
     }
+
+    // -- shape output and lifecycle (Task 6) ----------------------------------
+
+    #[test]
+    fn shape_output_committed_rectangle_and_ellipse_appear_in_copy_and_save() {
+        let mut state = workspace_with_size(200, 200);
+        state
+            .document
+            .image
+            .add_shape(
+                rollshot_image_document::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+            )
+            .unwrap();
+        state
+            .document
+            .image
+            .add_shape(
+                rollshot_image_document::ShapeKind::Ellipse,
+                ImageRect {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+            )
+            .unwrap();
+
+        let source = state.document.image.source();
+        let copy = copy_payload(&state);
+        let save = save_payload(&state);
+        let flattened = state.document.image.flatten();
+
+        assert_eq!(copy, flattened, "copy payload equals flatten");
+        assert_eq!(save, flattened, "save payload equals flatten");
+
+        // Rectangle stroke at left edge (10, 35).
+        assert_ne!(
+            copy.get_pixel(10, 35),
+            source.get_pixel(10, 35),
+            "committed Rectangle stroke must appear in output"
+        );
+        // Rectangle interior without fill must remain source.
+        assert_eq!(
+            copy.get_pixel(35, 35),
+            source.get_pixel(35, 35),
+            "Rectangle interior without fill must be source"
+        );
+        // Ellipse stroke at top center (125, 100).
+        assert_ne!(
+            copy.get_pixel(125, 100),
+            source.get_pixel(125, 100),
+            "committed Ellipse stroke must appear in output"
+        );
+        // Ellipse center without fill must remain source.
+        assert_eq!(
+            copy.get_pixel(125, 125),
+            source.get_pixel(125, 125),
+            "Ellipse center without fill must be source"
+        );
+    }
+
+    #[test]
+    fn shape_output_excludes_draft_outline_and_handles() {
+        let mut state = workspace_with_size(200, 200);
+        // Commit a Rectangle to give us something to select.
+        let rect_id = state
+            .document
+            .image
+            .add_shape(
+                rollshot_image_document::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(rect_id);
+
+        // Start an in-progress shape creation (draft, not committed).
+        state.editor.tool = Tool::Rectangle;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(150.0, 150.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(180.0, 180.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreateShape { .. })
+        ));
+
+        let source = state.document.image.source();
+        let output = copy_payload(&state);
+        let flattened = state.document.image.flatten();
+        assert_eq!(output, flattened, "copy equals flatten");
+
+        // Draft center (165, 165) must NOT appear in output.
+        assert_eq!(
+            output.get_pixel(165, 165),
+            source.get_pixel(165, 165),
+            "uncommitted shape draft must stay out of output"
+        );
+        // Selection handles are app-only canvas visuals and must NOT appear
+        // in flattened output. Pick a pixel near the committed Rectangle
+        // (10,10)-(60,60) that is inside the handle circle radius but outside
+        // the committed stroke's outer boundary (8,8)-(62,62).
+        assert_eq!(
+            output.get_pixel(5, 5),
+            source.get_pixel(5, 5),
+            "selection handle area must stay out of output"
+        );
+    }
+
+    #[test]
+    fn failed_shape_operations_do_not_change_state() {
+        let mut state = workspace_with_size(200, 200);
+        let before_id = state.document.image.state_id();
+        let before_selection = state.editor.selection;
+        let before_defaults = state.annotation_defaults.values.clone();
+
+        // 1. Apply shape style to a stale (nonexistent) annotation.
+        state.editor.properties.shape_style =
+            Some(super::super::properties::ShapeStyleTransaction {
+                id: AnnotationId(9999),
+                kind: rollshot_image_document::ShapeKind::Rectangle,
+                original_stroke: StrokeStyle::default(),
+                original_fill: None,
+                preview_stroke: StrokeStyle {
+                    color: Rgb8::new(255, 0, 0),
+                    width: 99.0,
+                    opacity: 1.0,
+                },
+                preview_fill: None,
+                remembered_fill_color: Rgb8::new(0, 0, 0),
+            });
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+        assert_eq!(
+            state.document.image.state_id(),
+            before_id,
+            "stale ID: state_id unchanged"
+        );
+        assert!(!state.annotations_dirty(), "stale ID: not dirty");
+        assert_eq!(
+            state.editor.selection, before_selection,
+            "stale ID: selection unchanged"
+        );
+        assert_eq!(
+            state.annotation_defaults.values, before_defaults,
+            "stale ID: defaults unchanged"
+        );
+        assert!(state.editor.properties.shape_style.is_none());
+
+        // 2. Cancel a shape style preview without applying.
+        let mut state2 = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        state2.editor.saved_state_id = state2.document.image.state_id();
+        let before2 = state2.document.image.state_id();
+        let _ = update(&mut state2, Message::PreviewShapeStrokeWidth(12.0));
+        let _ = update(&mut state2, Message::CancelShapeStyle);
+        assert_eq!(
+            state2.document.image.state_id(),
+            before2,
+            "cancel: state_id unchanged"
+        );
+        assert!(!state2.annotations_dirty(), "cancel: not dirty");
+    }
+
+    #[test]
+    fn successful_shape_edit_updates_state_id_and_dirty() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        // Mark the workspace as clean (saved at current state).
+        state.editor.saved_state_id = state.document.image.state_id();
+        let before = state.document.image.state_id();
+        assert!(!state.annotations_dirty());
+
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(8.0));
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+        assert_ne!(
+            state.document.image.state_id(),
+            before,
+            "apply: state_id updated"
+        );
+        assert!(state.annotations_dirty(), "apply: dirty");
+    }
 }
