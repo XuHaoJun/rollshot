@@ -204,10 +204,10 @@ mod tests {
 
     /// Spec §13/§16: long image at the history-limit annotation scale.
     #[test]
-    fn hundred_annotations_on_long_image_flatten_hit_test_and_order() {
-        let mut doc = ImageDocument::new(base(1000, 20000));
-        for i in 0..34u32 {
-            let y = 100.0 + i as f32 * 580.0;
+    fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
+        let mut doc = ImageDocument::new(base(1000, 20_000));
+        for i in 0..20u32 {
+            let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
             doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}"))
                 .unwrap();
@@ -218,12 +218,26 @@ mod tests {
                 height: 40.0,
             })
             .unwrap();
+            doc.add_two_point(
+                TwoPointKind::Line,
+                ImagePoint::new(20.0, y + 100.0),
+                ImagePoint::new(300.0, y + 180.0),
+            )
+            .unwrap();
+            doc.add_two_point(
+                TwoPointKind::Arrow,
+                ImagePoint::new(500.0, y + 100.0),
+                ImagePoint::new(900.0, y + 180.0),
+            )
+            .unwrap();
         }
-        assert_eq!(doc.annotations().len(), 102);
-        let items = doc.navigator_items();
-        assert_eq!(items.len(), 102);
-        assert!(doc.hit_test(ImagePoint::new(160.0, 100.0), 8.0).is_some());
-        let out = doc.flatten();
-        assert_eq!(out.dimensions(), (1000, 20000));
+        let flattened = doc.flatten();
+        assert_eq!(flattened.dimensions(), doc.source().dimensions());
+        assert_ne!(
+            flattened.get_pixel(160, 240),
+            doc.source().get_pixel(160, 240)
+        );
+        assert_eq!(doc.navigator_items().len(), 100);
+        assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());
     }
 }

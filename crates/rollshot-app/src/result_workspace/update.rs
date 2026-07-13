@@ -346,14 +346,8 @@ fn current_scale(state: &super::ResultWorkspace) -> f32 {
 
 fn active_two_point(state: &super::ResultWorkspace) -> Option<(TwoPointKind, StrokeStyle)> {
     match state.editor.tool {
-        Tool::Line => Some((
-            TwoPointKind::Line,
-            state.annotation_defaults.values.line,
-        )),
-        Tool::Arrow => Some((
-            TwoPointKind::Arrow,
-            state.annotation_defaults.values.arrow,
-        )),
+        Tool::Line => Some((TwoPointKind::Line, state.annotation_defaults.values.line)),
+        Tool::Arrow => Some((TwoPointKind::Arrow, state.annotation_defaults.values.arrow)),
         _ => None,
     }
 }
@@ -623,10 +617,7 @@ pub(crate) fn handle_canvas_released(
             state.editor.selection = Some(id);
         }
         Some(DragState::CreateTwoPoint {
-            kind,
-            start,
-            style,
-            ..
+            kind, start, style, ..
         }) => {
             let raw_current = point;
             let end = constrained_endpoint(start, raw_current, shift);
@@ -2564,6 +2555,65 @@ mod tests {
     }
 
     #[test]
+    fn two_point_output_excludes_draft_and_handles() {
+        let mut state = workspace_with_size(200, 200);
+        state
+            .document
+            .image
+            .add_two_point(
+                TwoPointKind::Line,
+                ImagePoint::new(20.0, 40.0),
+                ImagePoint::new(120.0, 40.0),
+            )
+            .unwrap();
+        let arrow_id = state
+            .document
+            .image
+            .add_two_point(
+                TwoPointKind::Arrow,
+                ImagePoint::new(20.0, 100.0),
+                ImagePoint::new(140.0, 100.0),
+            )
+            .unwrap();
+        state.editor.selection = Some(arrow_id);
+        let _ = update(&mut state, Message::SelectTool(Tool::Line));
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(20.0, 160.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(120.0, 160.0));
+
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreateTwoPoint { .. })
+        ));
+        assert_eq!(state.editor.selection, Some(arrow_id));
+
+        let output = copy_payload(&state);
+        assert_eq!(output, state.document.image.flatten());
+        assert_ne!(
+            output.get_pixel(60, 40),
+            state.document.image.source().get_pixel(60, 40),
+            "committed line must reach output"
+        );
+        assert_ne!(
+            output.get_pixel(80, 100),
+            state.document.image.source().get_pixel(80, 100),
+            "committed arrow must reach output"
+        );
+        assert_eq!(
+            output.get_pixel(80, 160),
+            state.document.image.source().get_pixel(80, 160),
+            "uncommitted draft must stay out of output"
+        );
+        assert_eq!(
+            output.get_pixel(20, 95),
+            state.document.image.source().get_pixel(20, 95),
+            "selection handle must stay out of output"
+        );
+
+        let original = copy_original_payload(&state);
+        assert_eq!(original.as_raw(), state.document.image.source().as_raw());
+    }
+
+    #[test]
     fn save_payload_is_source_without_annotations_and_flatten_with() {
         let mut state = unsaved_workspace();
         assert_eq!(
@@ -2994,9 +3044,7 @@ mod tests {
         state
     }
 
-    fn current_drag_annotation(
-        state: &super::super::ResultWorkspace,
-    ) -> Option<Annotation> {
+    fn current_drag_annotation(state: &super::super::ResultWorkspace) -> Option<Annotation> {
         match &state.editor.drag {
             Some(DragState::CreateTwoPoint {
                 kind,
