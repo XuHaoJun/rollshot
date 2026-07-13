@@ -9,6 +9,13 @@ use crate::style::{NumberStyle, TextStyle};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnotationId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TwoPointKind {
+    Line,
+    Arrow,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Annotation {
     NumberCallout {
@@ -176,6 +183,14 @@ mod tests {
 
         let t = Annotation::text_note(AnnotationId(2), ImagePoint::new(7.0, 8.0), "hi".to_string());
         assert_eq!(t.text_style(), Some(TextStyle::default()));
+    }
+
+    #[test]
+    fn two_point_kinds_are_distinct_and_copyable() {
+        let line = TwoPointKind::Line;
+        let arrow = TwoPointKind::Arrow;
+        assert_ne!(line, arrow);
+        assert_eq!(line, TwoPointKind::Line);
     }
 
     #[test]

@@ -16,7 +16,7 @@ mod shapes;
 pub mod style;
 mod text;
 
-pub use annotation::{Annotation, AnnotationId};
+pub use annotation::{Annotation, AnnotationId, TwoPointKind};
 pub use callout_placement::place_number_callout_bubble;
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use edit_op::{BatchOutcome, EditOp};
@@ -24,5 +24,5 @@ pub use geometry::{ImagePoint, ImageRect, Rgb8, Rgba8};
 pub use hit::{hit_test_annotation, redaction_handles, Hit, HitPart, ResizeHandle};
 pub use navigator::NavigatorItem;
 pub use shapes::{annotation_bounds, annotation_shapes, text_plate_rect, RenderShape, TextAnchor};
-pub use style::{NumberSize, NumberStyle, TextSize, TextStyle};
+pub use style::{NumberSize, NumberStyle, StrokeStyle, TextSize, TextStyle};
 pub use text::{draw_text_block, measure_block};
