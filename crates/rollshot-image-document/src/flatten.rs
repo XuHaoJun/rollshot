@@ -6,7 +6,7 @@ use image::RgbaImage;
 
 use crate::annotation::Annotation;
 use crate::geometry::ImagePoint;
-use crate::raster::{fill_circle, fill_rect, fill_triangle, stroke_circle};
+use crate::raster::{fill_circle, fill_rect, fill_triangle, stroke_circle, stroke_line};
 use crate::shapes::{annotation_shapes, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
 
@@ -22,6 +22,12 @@ pub(crate) fn flatten_onto(source: &RgbaImage, annotations: &[Annotation]) -> Rg
 
 fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
     match shape {
+        RenderShape::Line {
+            start,
+            end,
+            width,
+            color,
+        } => stroke_line(img, *start, *end, *width, *color),
         RenderShape::Rect { rect, color } => fill_rect(img, *rect, *color),
         RenderShape::Circle {
             center,
@@ -59,11 +65,55 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
 #[cfg(test)]
 mod tests {
     use crate::geometry::{ImagePoint, ImageRect};
-    use crate::ImageDocument;
+    use crate::{ImageDocument, Rgb8, StrokeStyle, TwoPointKind};
     use image::{Rgba, RgbaImage};
 
     fn base(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_pixel(w, h, Rgba([10, 20, 30, 255]))
+    }
+
+    #[test]
+    fn flatten_paints_shaft_and_arrowhead_without_mutating_source() {
+        let mut doc = ImageDocument::new(base(140, 100));
+        doc.add_two_point(
+            TwoPointKind::Arrow,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(110.0, 50.0),
+        )
+        .unwrap();
+        let out = doc.flatten();
+        assert_ne!(out.get_pixel(50, 50), doc.source().get_pixel(50, 50));
+        assert_ne!(out.get_pixel(100, 50), doc.source().get_pixel(100, 50));
+        assert_eq!(doc.source().get_pixel(50, 50).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn line_opacity_blends_once_at_full_coverage() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_two_point_with_style(
+            TwoPointKind::Line,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(90.0, 50.0),
+            StrokeStyle {
+                color: Rgb8::new(110, 120, 130),
+                width: 4.0,
+                opacity: 0.5,
+            },
+        )
+        .unwrap();
+        assert_eq!(doc.flatten().get_pixel(50, 50).0, [60, 70, 80, 255]);
+    }
+
+    #[test]
+    fn line_raster_clips_cleanly_at_image_edges() {
+        let mut doc = ImageDocument::new(base(30, 20));
+        doc.add_two_point(
+            TwoPointKind::Line,
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(20.0, 0.0),
+        )
+        .unwrap();
+        assert_ne!(doc.flatten().get_pixel(0, 0).0, [10, 20, 30, 255]);
     }
 
     #[test]
@@ -154,10 +204,10 @@ mod tests {
 
     /// Spec §13/§16: long image at the history-limit annotation scale.
     #[test]
-    fn hundred_annotations_on_long_image_flatten_hit_test_and_order() {
-        let mut doc = ImageDocument::new(base(1000, 20000));
-        for i in 0..34u32 {
-            let y = 100.0 + i as f32 * 580.0;
+    fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
+        let mut doc = ImageDocument::new(base(1000, 20_000));
+        for i in 0..20u32 {
+            let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
             doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}"))
                 .unwrap();
@@ -168,12 +218,26 @@ mod tests {
                 height: 40.0,
             })
             .unwrap();
+            doc.add_two_point(
+                TwoPointKind::Line,
+                ImagePoint::new(20.0, y + 100.0),
+                ImagePoint::new(300.0, y + 180.0),
+            )
+            .unwrap();
+            doc.add_two_point(
+                TwoPointKind::Arrow,
+                ImagePoint::new(500.0, y + 100.0),
+                ImagePoint::new(900.0, y + 180.0),
+            )
+            .unwrap();
         }
-        assert_eq!(doc.annotations().len(), 102);
-        let items = doc.navigator_items();
-        assert_eq!(items.len(), 102);
-        assert!(doc.hit_test(ImagePoint::new(160.0, 100.0), 8.0).is_some());
-        let out = doc.flatten();
-        assert_eq!(out.dimensions(), (1000, 20000));
+        let flattened = doc.flatten();
+        assert_eq!(flattened.dimensions(), doc.source().dimensions());
+        assert_ne!(
+            flattened.get_pixel(160, 240),
+            doc.source().get_pixel(160, 240)
+        );
+        assert_eq!(doc.navigator_items().len(), 100);
+        assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());
     }
 }

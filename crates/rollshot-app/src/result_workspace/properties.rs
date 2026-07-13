@@ -1,6 +1,6 @@
 use iced::Element;
 
-use rollshot_image_document::{Annotation, AnnotationId, Rgb8};
+use rollshot_image_document::{Annotation, AnnotationId, Rgb8, TwoPointKind};
 
 use super::canvas::Tool;
 use super::Message;
@@ -10,6 +10,7 @@ use super::ResultWorkspace;
 pub enum PropertyTarget {
     NumberTool,
     TextTool,
+    TwoPointTool(TwoPointKind),
     Annotation(AnnotationId),
 }
 
@@ -19,6 +20,7 @@ pub enum ColorProperty {
     NumberAccent,
     TextColor,
     TextBackground,
+    StrokeColor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,13 @@ pub struct ColorTransaction {
     pub original: Rgb8,
     pub preview: Rgb8,
     pub hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeWidthTransaction {
+    pub target: PropertyTarget,
+    pub original: f32,
+    pub preview: f32,
 }
 
 #[allow(dead_code)]
@@ -47,6 +56,7 @@ pub enum PropertyFocus {
 #[derive(Debug, Default)]
 pub struct PropertyState {
     pub color: Option<ColorTransaction>,
+    pub width: Option<StrokeWidthTransaction>,
     pub next_number_input: String,
     #[allow(dead_code)]
     pub focus: Option<PropertyFocus>,
@@ -58,14 +68,18 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
     match state.editor.tool {
         Tool::Number => Some(PropertyTarget::NumberTool),
         Tool::Text => Some(PropertyTarget::TextTool),
+        Tool::Line => Some(PropertyTarget::TwoPointTool(TwoPointKind::Line)),
+        Tool::Arrow => Some(PropertyTarget::TwoPointTool(TwoPointKind::Arrow)),
         Tool::Select => {
             state
                 .editor
                 .selection
                 .and_then(|id| match state.document.image.annotation(id) {
-                    Some(Annotation::NumberCallout { .. } | Annotation::TextNote { .. }) => {
-                        Some(PropertyTarget::Annotation(id))
-                    }
+                    Some(
+                        Annotation::TwoPoint { .. }
+                        | Annotation::NumberCallout { .. }
+                        | Annotation::TextNote { .. },
+                    ) => Some(PropertyTarget::Annotation(id)),
                     _ => None,
                 })
         }
@@ -173,6 +187,51 @@ fn text_bg_toggle(has_bg: bool) -> iced::Element<'static, Message> {
         .into()
 }
 
+fn stroke_width(state: &ResultWorkspace, target: PropertyTarget) -> Option<f32> {
+    match target {
+        PropertyTarget::TwoPointTool(TwoPointKind::Line) => {
+            Some(state.annotation_defaults.values.line.width)
+        }
+        PropertyTarget::TwoPointTool(TwoPointKind::Arrow) => {
+            Some(state.annotation_defaults.values.arrow.width)
+        }
+        PropertyTarget::Annotation(id) => state
+            .document
+            .image
+            .annotation(id)?
+            .stroke_style()
+            .map(|s| s.width),
+        PropertyTarget::NumberTool | PropertyTarget::TextTool => None,
+    }
+}
+
+fn stroke_controls(
+    state: &ResultWorkspace,
+    target: PropertyTarget,
+) -> Option<Element<'static, Message>> {
+    use iced::widget::{row, slider};
+
+    let width = state
+        .editor
+        .properties
+        .width
+        .as_ref()
+        .filter(|transaction| transaction.target == target)
+        .map(|transaction| transaction.preview)
+        .or_else(|| stroke_width(state, target))?;
+    Some(
+        row![
+            color_button("Color", ColorProperty::StrokeColor),
+            slider(1.0_f32..=16.0_f32, width, Message::PreviewStrokeWidth)
+                .step(1.0_f32)
+                .on_release(Message::ApplyStrokeWidth)
+                .width(96),
+        ]
+        .spacing(8)
+        .into(),
+    )
+}
+
 /// Build the property controls row for the current tool/selection.
 ///
 /// Returns `None` when the active tool has no associated properties (Redact,
@@ -213,7 +272,9 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
             }
             Some(controls.into())
         }
+        PropertyTarget::TwoPointTool(_) => stroke_controls(state, target),
         PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
+            Annotation::TwoPoint { .. } => stroke_controls(state, target),
             Annotation::NumberCallout { style, .. } => Some(
                 row![
                     color_button("Color", ColorProperty::NumberAccent),
@@ -243,19 +304,45 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
 }
 
 /// Build an app-only preview clone of the selected annotation with the
-/// current color transaction applied. Returns `None` when no preview is
+/// current property transactions applied. Returns `None` when no preview is
 /// active or the selection is not a styled annotation.
 ///
 /// **Critical invariant:** The clone never enters the document or flatten
 /// output — it is only used by `AnnotationCanvas` for live rendering.
 pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
-    let tx = state.editor.properties.color.as_ref()?;
-    let id = match tx.target {
-        PropertyTarget::Annotation(id) => id,
-        _ => return None,
-    };
+    let id = state.editor.selection?;
     let annotation = state.document.image.annotation(id)?.clone();
     match annotation {
+        Annotation::TwoPoint {
+            id,
+            kind,
+            start,
+            end,
+            mut style,
+        } => {
+            let mut changed = false;
+            if let Some(tx) = state.editor.properties.color.as_ref() {
+                if tx.target == PropertyTarget::Annotation(id)
+                    && tx.property == ColorProperty::StrokeColor
+                {
+                    style.color = tx.preview;
+                    changed = true;
+                }
+            }
+            if let Some(tx) = state.editor.properties.width.as_ref() {
+                if tx.target == PropertyTarget::Annotation(id) {
+                    style.width = tx.preview;
+                    changed = true;
+                }
+            }
+            changed.then_some(Annotation::TwoPoint {
+                id,
+                kind,
+                start,
+                end,
+                style,
+            })
+        }
         Annotation::NumberCallout {
             id,
             number,
@@ -263,7 +350,10 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             bubble,
             style,
         } => {
-            if !matches!(tx.property, ColorProperty::NumberAccent) {
+            let tx = state.editor.properties.color.as_ref()?;
+            if tx.target != PropertyTarget::Annotation(id)
+                || !matches!(tx.property, ColorProperty::NumberAccent)
+            {
                 return None;
             }
             let mut s = style;
@@ -281,27 +371,30 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             position,
             text,
             style,
-        } => match tx.property {
-            ColorProperty::TextColor => {
-                let mut s = style;
-                s.text_color = tx.preview;
-                Some(Annotation::TextNote {
-                    id,
-                    position,
-                    text,
-                    style: s,
-                })
-            }
-            ColorProperty::TextBackground => {
-                let mut s = style;
-                s.background = Some(tx.preview);
-                Some(Annotation::TextNote {
-                    id,
-                    position,
-                    text,
-                    style: s,
-                })
-            }
+        } => match state.editor.properties.color.as_ref()? {
+            tx if tx.target == PropertyTarget::Annotation(id) => match tx.property {
+                ColorProperty::TextColor => {
+                    let mut s = style;
+                    s.text_color = tx.preview;
+                    Some(Annotation::TextNote {
+                        id,
+                        position,
+                        text,
+                        style: s,
+                    })
+                }
+                ColorProperty::TextBackground => {
+                    let mut s = style;
+                    s.background = Some(tx.preview);
+                    Some(Annotation::TextNote {
+                        id,
+                        position,
+                        text,
+                        style: s,
+                    })
+                }
+                _ => None,
+            },
             _ => None,
         },
         Annotation::OpaqueRedaction { .. } => None,
@@ -370,6 +463,25 @@ mod tests {
         let mut state = workspace();
         state.editor.tool = Tool::Number;
         assert_eq!(property_target(&state), Some(PropertyTarget::NumberTool));
+    }
+
+    #[test]
+    fn creation_tools_target_independent_two_point_defaults() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Line;
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::TwoPointTool(
+                rollshot_image_document::TwoPointKind::Line
+            ))
+        );
+        state.editor.tool = Tool::Arrow;
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::TwoPointTool(
+                rollshot_image_document::TwoPointKind::Arrow
+            ))
+        );
     }
 
     #[test]
@@ -483,6 +595,7 @@ mod tests {
     fn property_state_default_is_empty() {
         let ps = PropertyState::default();
         assert!(ps.color.is_none());
+        assert!(ps.width.is_none());
         assert!(ps.next_number_input.is_empty());
         assert!(ps.focus.is_none());
         assert!(ps.popup.is_none());

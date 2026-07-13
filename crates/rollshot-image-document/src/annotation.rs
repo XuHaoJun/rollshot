@@ -2,15 +2,29 @@
 //! coordinates (spec §6); IDs are stable across undo/redo.
 
 use crate::geometry::{ImagePoint, ImageRect};
-use crate::style::{NumberStyle, TextStyle};
+use crate::style::{NumberStyle, StrokeStyle, TextStyle};
 
-/// Stable annotation identity, never reused within a document.
+/// Stable annotation identity, restored together with document history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnotationId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TwoPointKind {
+    Line,
+    Arrow,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Annotation {
+    TwoPoint {
+        id: AnnotationId,
+        kind: TwoPointKind,
+        start: ImagePoint,
+        end: ImagePoint,
+        style: StrokeStyle,
+    },
     NumberCallout {
         id: AnnotationId,
         number: u32,
@@ -34,6 +48,31 @@ pub enum Annotation {
 }
 
 impl Annotation {
+    pub fn two_point(
+        id: AnnotationId,
+        kind: TwoPointKind,
+        start: ImagePoint,
+        end: ImagePoint,
+    ) -> Self {
+        Self::two_point_with_style(id, kind, start, end, StrokeStyle::default())
+    }
+
+    pub fn two_point_with_style(
+        id: AnnotationId,
+        kind: TwoPointKind,
+        start: ImagePoint,
+        end: ImagePoint,
+        style: StrokeStyle,
+    ) -> Self {
+        Self::TwoPoint {
+            id,
+            kind,
+            start,
+            end,
+            style,
+        }
+    }
+
     pub fn number_callout(
         id: AnnotationId,
         number: u32,
@@ -83,7 +122,8 @@ impl Annotation {
 
     pub fn id(&self) -> AnnotationId {
         match self {
-            Annotation::NumberCallout { id, .. }
+            Annotation::TwoPoint { id, .. }
+            | Annotation::NumberCallout { id, .. }
             | Annotation::TextNote { id, .. }
             | Annotation::OpaqueRedaction { id, .. } => *id,
         }
@@ -92,9 +132,19 @@ impl Annotation {
     /// Reading-order anchor used for Navigator ordering (spec §8.2).
     pub fn anchor(&self) -> ImagePoint {
         match self {
+            Annotation::TwoPoint { start, end, .. } => {
+                ImagePoint::new(start.x.min(end.x), start.y.min(end.y))
+            }
             Annotation::NumberCallout { bubble, .. } => *bubble,
             Annotation::TextNote { position, .. } => *position,
             Annotation::OpaqueRedaction { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
+        }
+    }
+
+    pub fn stroke_style(&self) -> Option<StrokeStyle> {
+        match self {
+            Annotation::TwoPoint { style, .. } => Some(*style),
+            _ => None,
         }
     }
 
@@ -117,7 +167,40 @@ impl Annotation {
 mod tests {
     use super::*;
     use crate::geometry::{ImagePoint, ImageRect};
-    use crate::style::{NumberStyle, TextStyle};
+    use crate::style::{NumberStyle, StrokeStyle, TextStyle};
+
+    #[test]
+    fn canonical_two_point_constructor_preserves_kind_and_points() {
+        let annotation = Annotation::two_point(
+            AnnotationId(7),
+            TwoPointKind::Arrow,
+            ImagePoint::new(10.0, 20.0),
+            ImagePoint::new(80.0, 40.0),
+        );
+        assert!(matches!(
+            annotation,
+            Annotation::TwoPoint {
+                id: AnnotationId(7),
+                kind: TwoPointKind::Arrow,
+                start,
+                end,
+                style,
+            } if start == ImagePoint::new(10.0, 20.0)
+                && end == ImagePoint::new(80.0, 40.0)
+                && style == StrokeStyle::default()
+        ));
+    }
+
+    #[test]
+    fn two_point_anchor_is_endpoint_extent_top_left() {
+        let annotation = Annotation::two_point(
+            AnnotationId(8),
+            TwoPointKind::Line,
+            ImagePoint::new(80.0, 20.0),
+            ImagePoint::new(10.0, 40.0),
+        );
+        assert_eq!(annotation.anchor(), ImagePoint::new(10.0, 20.0));
+    }
 
     #[test]
     fn anchor_is_bubble_for_number_position_for_text_topleft_for_redaction() {
@@ -176,6 +259,14 @@ mod tests {
 
         let t = Annotation::text_note(AnnotationId(2), ImagePoint::new(7.0, 8.0), "hi".to_string());
         assert_eq!(t.text_style(), Some(TextStyle::default()));
+    }
+
+    #[test]
+    fn two_point_kinds_are_distinct_and_copyable() {
+        let line = TwoPointKind::Line;
+        let arrow = TwoPointKind::Arrow;
+        assert_ne!(line, arrow);
+        assert_eq!(line, TwoPointKind::Line);
     }
 
     #[test]

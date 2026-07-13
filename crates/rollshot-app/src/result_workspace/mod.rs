@@ -10,6 +10,7 @@ pub(crate) mod ocr_text;
 pub(crate) mod properties;
 mod secure_sharing;
 pub(crate) mod toolbar;
+pub(crate) mod two_point;
 mod update;
 mod view;
 pub mod viewport;

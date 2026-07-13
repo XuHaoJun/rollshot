@@ -158,6 +158,23 @@ impl NumberAnnotationCanvas<'_> {
     ) {
         for shape in annotation_shapes(annotation) {
             match shape {
+                RenderShape::Line {
+                    start,
+                    end,
+                    width,
+                    color,
+                } => {
+                    let path = canvas::Path::line(
+                        Point::new(start.x * self.scale, start.y * self.scale),
+                        Point::new(end.x * self.scale, end.y * self.scale),
+                    );
+                    frame.stroke(
+                        &path,
+                        canvas::Stroke::default()
+                            .with_color(rgba_alpha(color, alpha))
+                            .with_width(width * self.scale),
+                    );
+                }
                 RenderShape::Circle {
                     center,
                     radius,

@@ -5,11 +5,12 @@ use std::collections::VecDeque;
 
 use image::RgbaImage;
 
-use crate::annotation::{Annotation, AnnotationId};
+use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
 use crate::edit_op::{BatchOutcome, EditOp};
 use crate::geometry::{ImagePoint, ImageRect};
 use crate::hit::Hit;
 use crate::navigator::NavigatorItem;
+use crate::style::StrokeStyle;
 
 /// Maximum undo entries (spec §10).
 pub const HISTORY_LIMIT: usize = 100;
@@ -30,8 +31,40 @@ fn ensure_rect_finite(r: &ImageRect) -> Result<(), EditError> {
     }
 }
 
+fn validate_stroke_style(style: StrokeStyle) -> Result<(), EditError> {
+    if !style.width.is_finite() || style.width <= 0.0 {
+        return Err(EditError::InvalidStrokeWidth);
+    }
+    if !style.opacity.is_finite() || !(0.0..=1.0).contains(&style.opacity) {
+        return Err(EditError::InvalidOpacity);
+    }
+    Ok(())
+}
+
+fn clamp_two_point(
+    start: ImagePoint,
+    end: ImagePoint,
+    width: u32,
+    height: u32,
+) -> Result<(ImagePoint, ImagePoint), EditError> {
+    ensure_point_finite(&start)?;
+    ensure_point_finite(&end)?;
+    let start = start.clamp_to(width, height);
+    let end = end.clamp_to(width, height);
+    if start == end {
+        return Err(EditError::CoincidentPoints);
+    }
+    Ok((start, end))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EditError {
+    #[error("two-point annotations require distinct endpoints")]
+    CoincidentPoints,
+    #[error("stroke width must be finite and greater than zero")]
+    InvalidStrokeWidth,
+    #[error("stroke opacity must be finite and between zero and one")]
+    InvalidOpacity,
     #[error("text notes must contain non-whitespace text")]
     EmptyText,
     #[error("redactions must cover at least one pixel")]
@@ -51,6 +84,7 @@ pub enum EditError {
 struct Snapshot {
     annotations: Vec<Annotation>,
     next_number: u32,
+    next_id: u64,
     state_id: u64,
 }
 
@@ -127,6 +161,7 @@ impl ImageDocument {
         Snapshot {
             annotations: self.annotations.clone(),
             next_number: self.next_number,
+            next_id: self.next_id,
             state_id: self.state_id,
         }
     }
@@ -146,6 +181,7 @@ impl ImageDocument {
     fn restore(&mut self, snapshot: Snapshot) {
         self.annotations = snapshot.annotations;
         self.next_number = snapshot.next_number;
+        self.next_id = snapshot.next_id;
         self.state_id = snapshot.state_id;
     }
 
@@ -173,6 +209,50 @@ impl ImageDocument {
         let id = AnnotationId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    pub fn add_two_point(
+        &mut self,
+        kind: TwoPointKind,
+        start: ImagePoint,
+        end: ImagePoint,
+    ) -> Result<AnnotationId, EditError> {
+        self.add_two_point_with_style(kind, start, end, StrokeStyle::default())
+    }
+
+    pub fn add_two_point_with_style(
+        &mut self,
+        kind: TwoPointKind,
+        start: ImagePoint,
+        end: ImagePoint,
+        style: StrokeStyle,
+    ) -> Result<AnnotationId, EditError> {
+        let outcome = self.apply_batch(vec![EditOp::AddTwoPoint {
+            kind,
+            start,
+            end,
+            style,
+        }])?;
+        Ok(outcome.added_ids[0])
+    }
+
+    pub fn set_two_point_points(
+        &mut self,
+        id: AnnotationId,
+        start: ImagePoint,
+        end: ImagePoint,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdateTwoPointPoints { id, start, end }])?;
+        Ok(())
+    }
+
+    pub fn set_stroke_style(
+        &mut self,
+        id: AnnotationId,
+        style: StrokeStyle,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdateStrokeStyle { id, style }])?;
+        Ok(())
     }
 
     pub fn add_number_callout(&mut self, tip: ImagePoint, bubble: ImagePoint) -> AnnotationId {
@@ -444,8 +524,11 @@ impl ImageDocument {
                 | EditOp::UpdateNumberPoints { id, .. }
                 | EditOp::UpdateNumberStyle { id, .. }
                 | EditOp::UpdateTextStyle { id, .. }
+                | EditOp::UpdateTwoPointPoints { id, .. }
+                | EditOp::UpdateStrokeStyle { id, .. }
                 | EditOp::Delete { id } => Some(*id),
-                EditOp::AddRedaction { .. }
+                EditOp::AddTwoPoint { .. }
+                | EditOp::AddRedaction { .. }
                 | EditOp::AddTextNote { .. }
                 | EditOp::AddNumberCallout { .. }
                 | EditOp::SetNextNumber { .. } => None,
@@ -472,6 +555,12 @@ impl ImageDocument {
         if deleted_callout {
             self.renumber_compactly();
         }
+        if self.annotations == before.annotations
+            && self.next_number == before.next_number
+            && self.next_id == before.next_id
+        {
+            return Ok(BatchOutcome { added_ids });
+        }
         self.commit(before);
         Ok(BatchOutcome { added_ids })
     }
@@ -485,6 +574,20 @@ impl ImageDocument {
         deleted_callout: &mut bool,
     ) -> Result<(), EditError> {
         match op {
+            EditOp::AddTwoPoint {
+                kind,
+                start,
+                end,
+                style,
+            } => {
+                validate_stroke_style(style)?;
+                let (start, end) = clamp_two_point(start, end, w, h)?;
+                let id = self.allocate_id();
+                self.annotations.push(Annotation::two_point_with_style(
+                    id, kind, start, end, style,
+                ));
+                added_ids.push(id);
+            }
             EditOp::AddRedaction { bounds } => {
                 ensure_rect_finite(&bounds)?;
                 let clamped = bounds.clamp_to(w, h);
@@ -575,6 +678,32 @@ impl ImageDocument {
                     _ => return Err(EditError::WrongKind),
                 }
             }
+            EditOp::UpdateTwoPointPoints { id, start, end } => {
+                let (start, end) = clamp_two_point(start, end, w, h)?;
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::TwoPoint {
+                        start: current_start,
+                        end: current_end,
+                        ..
+                    } => {
+                        *current_start = start;
+                        *current_end = end;
+                    }
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::UpdateStrokeStyle { id, style } => {
+                validate_stroke_style(style)?;
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::TwoPoint {
+                        style: current_style,
+                        ..
+                    } => *current_style = style,
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
             EditOp::Delete { id } => {
                 let index = self.annotation_index(id)?;
                 let removed = self.annotations.remove(index);
@@ -643,12 +772,154 @@ impl ImageDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annotation::TwoPointKind;
     use crate::geometry::{ImagePoint, ImageRect, Rgb8};
-    use crate::style::{NumberSize, NumberStyle, TextStyle};
+    use crate::style::{NumberSize, NumberStyle, StrokeStyle, TextStyle};
     use image::{Rgba, RgbaImage};
 
     pub(crate) fn doc() -> ImageDocument {
         ImageDocument::new(RgbaImage::from_pixel(100, 200, Rgba([10, 20, 30, 255])))
+    }
+
+    fn image() -> RgbaImage {
+        RgbaImage::from_pixel(100, 200, Rgba([10, 20, 30, 255]))
+    }
+
+    #[test]
+    fn two_point_add_update_style_delete_undo_redo_is_one_entry_per_edit() {
+        let mut doc = ImageDocument::new(image());
+        let id = doc
+            .add_two_point(
+                TwoPointKind::Arrow,
+                ImagePoint::new(10.0, 10.0),
+                ImagePoint::new(80.0, 40.0),
+            )
+            .unwrap();
+        doc.set_two_point_points(id, ImagePoint::new(20.0, 20.0), ImagePoint::new(90.0, 60.0))
+            .unwrap();
+        let style = StrokeStyle {
+            color: Rgb8::new(1, 2, 3),
+            width: 8.0,
+            opacity: 1.0,
+        };
+        doc.set_stroke_style(id, style).unwrap();
+        doc.delete_annotation(id).unwrap();
+        assert!(doc.undo());
+        assert_eq!(
+            doc.annotation(id).and_then(Annotation::stroke_style),
+            Some(style)
+        );
+        assert!(doc.redo());
+        assert!(doc.annotation(id).is_none());
+    }
+
+    #[test]
+    fn rejected_two_point_edits_are_atomic() {
+        let mut doc = ImageDocument::new(image());
+        let before_state = doc.state_id();
+        assert_eq!(
+            doc.add_two_point(
+                TwoPointKind::Line,
+                ImagePoint::new(5.0, 5.0),
+                ImagePoint::new(5.0, 5.0),
+            ),
+            Err(EditError::CoincidentPoints)
+        );
+        assert_eq!(doc.state_id(), before_state);
+        assert!(doc.annotations().is_empty());
+    }
+
+    #[test]
+    fn invalid_stroke_values_are_rejected_without_mutation() {
+        let mut doc = ImageDocument::new(image());
+        for style in [
+            StrokeStyle {
+                width: 0.0,
+                ..StrokeStyle::default()
+            },
+            StrokeStyle {
+                width: f32::NAN,
+                ..StrokeStyle::default()
+            },
+            StrokeStyle {
+                opacity: -0.1,
+                ..StrokeStyle::default()
+            },
+            StrokeStyle {
+                opacity: 1.1,
+                ..StrokeStyle::default()
+            },
+        ] {
+            assert!(doc
+                .add_two_point_with_style(
+                    TwoPointKind::Line,
+                    ImagePoint::new(1.0, 1.0),
+                    ImagePoint::new(20.0, 20.0),
+                    style,
+                )
+                .is_err());
+        }
+        assert!(doc.annotations().is_empty());
+    }
+
+    #[test]
+    fn failed_batch_restores_next_id_and_noop_updates_create_no_history() {
+        let mut doc = ImageDocument::new(image());
+        let result = doc.apply_batch(vec![
+            EditOp::AddTwoPoint {
+                kind: TwoPointKind::Line,
+                start: ImagePoint::new(1.0, 1.0),
+                end: ImagePoint::new(20.0, 20.0),
+                style: StrokeStyle::default(),
+            },
+            EditOp::AddTwoPoint {
+                kind: TwoPointKind::Arrow,
+                start: ImagePoint::new(5.0, 5.0),
+                end: ImagePoint::new(5.0, 5.0),
+                style: StrokeStyle::default(),
+            },
+        ]);
+        assert_eq!(result, Err(EditError::CoincidentPoints));
+        let id = doc
+            .add_two_point(
+                TwoPointKind::Line,
+                ImagePoint::new(1.0, 1.0),
+                ImagePoint::new(20.0, 20.0),
+            )
+            .unwrap();
+        assert_eq!(id, AnnotationId(1));
+        while doc.undo() {}
+        let id = doc
+            .add_two_point(
+                TwoPointKind::Line,
+                ImagePoint::new(1.0, 1.0),
+                ImagePoint::new(20.0, 20.0),
+            )
+            .unwrap();
+        let before = doc.state_id();
+        doc.set_stroke_style(id, StrokeStyle::default()).unwrap();
+        assert_eq!(doc.state_id(), before);
+    }
+
+    #[test]
+    fn identical_two_point_and_raw_style_updates_create_no_history() {
+        let mut doc = ImageDocument::new(image());
+        let start = ImagePoint::new(1.0, 1.0);
+        let end = ImagePoint::new(20.0, 20.0);
+        let id = doc.add_two_point(TwoPointKind::Line, start, end).unwrap();
+        let before = doc.state_id();
+
+        doc.set_two_point_points(id, start, end).unwrap();
+        doc.apply_batch(vec![EditOp::UpdateStrokeStyle {
+            id,
+            style: StrokeStyle::default(),
+        }])
+        .unwrap();
+
+        assert_eq!(doc.state_id(), before);
+        assert!(doc.undo());
+        assert!(doc.annotation(id).is_none());
+        assert!(!doc.can_undo());
     }
 
     #[test]
@@ -806,12 +1077,12 @@ mod tests {
     }
 
     #[test]
-    fn ids_stay_stable_across_undo_redo_and_are_never_reused() {
+    fn ids_and_next_id_restore_across_undo_redo() {
         let mut d = doc();
         let first = d.add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0));
         assert!(d.undo());
         let second = d.add_number_callout(ImagePoint::new(2.0, 2.0), ImagePoint::new(2.0, 2.0));
-        assert_ne!(first, second, "ids are never reused after undo");
+        assert_eq!(first, second, "undo restores the complete allocation state");
         assert!(d.undo());
         assert!(d.redo());
         assert_eq!(d.annotations()[0].id(), second, "redo restores the same id");

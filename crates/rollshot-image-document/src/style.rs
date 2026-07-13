@@ -81,6 +81,24 @@ impl Default for TextStyle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StrokeStyle {
+    pub color: Rgb8,
+    pub width: f32,
+    pub opacity: f32,
+}
+
+impl Default for StrokeStyle {
+    fn default() -> Self {
+        Self {
+            color: Rgb8::new(0xE5, 0x48, 0x4D),
+            width: 4.0,
+            opacity: 1.0,
+        }
+    }
+}
+
 /// Callout accent (number bubble fill, leader triangle): #E5484D.
 pub const ACCENT: Rgba8 = Rgba8::new(0xE5, 0x48, 0x4D, 0xFF);
 pub const WHITE: Rgba8 = Rgba8::new(0xFF, 0xFF, 0xFF, 0xFF);
@@ -148,6 +166,18 @@ mod tests {
         assert_eq!(
             TextStyle::default().background,
             Some(Rgb8::new(0x11, 0x11, 0x11))
+        );
+    }
+
+    #[test]
+    fn canonical_stroke_style_is_reviewed_opaque_accent() {
+        assert_eq!(
+            StrokeStyle::default(),
+            StrokeStyle {
+                color: Rgb8::new(0xE5, 0x48, 0x4D),
+                width: 4.0,
+                opacity: 1.0,
+            }
         );
     }
 }

@@ -1,14 +1,20 @@
 //! Typed, agent-free document edit operations and their batch outcome.
 //! Applied atomically by `ImageDocument::apply_batch` (spec §6.5).
 
-use crate::annotation::AnnotationId;
+use crate::annotation::{AnnotationId, TwoPointKind};
 use crate::geometry::{ImagePoint, ImageRect};
-use crate::style::{NumberStyle, TextStyle};
+use crate::style::{NumberStyle, StrokeStyle, TextStyle};
 
 /// A single document mutation. Add* allocate new ids; Update*/Delete reference
 /// annotations that exist BEFORE the batch is applied.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditOp {
+    AddTwoPoint {
+        kind: TwoPointKind,
+        start: ImagePoint,
+        end: ImagePoint,
+        style: StrokeStyle,
+    },
     AddRedaction {
         bounds: ImageRect,
     },
@@ -38,6 +44,15 @@ pub enum EditOp {
         id: AnnotationId,
         tip: ImagePoint,
         bubble: ImagePoint,
+    },
+    UpdateTwoPointPoints {
+        id: AnnotationId,
+        start: ImagePoint,
+        end: ImagePoint,
+    },
+    UpdateStrokeStyle {
+        id: AnnotationId,
+        style: StrokeStyle,
     },
     UpdateNumberStyle {
         id: AnnotationId,
