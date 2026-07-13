@@ -10,8 +10,9 @@
 use iced::widget::text_editor;
 use iced::Point;
 use rollshot_image_document::{
-    Annotation, AnnotationId, HitPart, ImagePoint, ImageRect, StrokeStyle, TwoPointKind,
+    Annotation, AnnotationId, HitPart, ImagePoint, ImageRect,
     ResizeHandle::{self, *},
+    StrokeStyle, TwoPointKind,
 };
 use std::time::Instant;
 
@@ -769,14 +770,8 @@ mod tests {
         };
         assert_eq!(after_start, ImagePoint::new(50.0, 50.0));
         assert_eq!(after_end, ImagePoint::new(120.0, 70.0));
-        assert_eq!(
-            after_end.x - after_start.x,
-            before_end.x - before_start.x
-        );
-        assert_eq!(
-            after_end.y - after_start.y,
-            before_end.y - before_start.y
-        );
+        assert_eq!(after_end.x - after_start.x, before_end.x - before_start.x);
+        assert_eq!(after_end.y - after_start.y, before_end.y - before_start.y);
     }
 
     #[test]
@@ -803,13 +798,8 @@ mod tests {
             true,
         );
         let raw_end = ImagePoint::new(120.0, 70.0);
-        let moved_end = dragged_annotation(
-            &original,
-            HitPart::EndEndpoint,
-            raw_end,
-            (0.0, 0.0),
-            false,
-        );
+        let moved_end =
+            dragged_annotation(&original, HitPart::EndEndpoint, raw_end, (0.0, 0.0), false);
 
         assert!(matches!(
             moved_start,

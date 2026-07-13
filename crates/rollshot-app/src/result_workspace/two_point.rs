@@ -17,11 +17,7 @@ pub fn snap_endpoint(fixed: ImagePoint, moving: ImagePoint) -> ImagePoint {
     )
 }
 
-pub fn constrained_endpoint(
-    fixed: ImagePoint,
-    moving: ImagePoint,
-    shift: bool,
-) -> ImagePoint {
+pub fn constrained_endpoint(fixed: ImagePoint, moving: ImagePoint, shift: bool) -> ImagePoint {
     if shift {
         snap_endpoint(fixed, moving)
     } else {
