@@ -3,7 +3,7 @@
 use image::RgbaImage;
 
 use crate::geometry::{ImagePoint, ImageRect, Rgba8};
-use crate::two_point::{point_in_triangle, segment_distance};
+use crate::two_point::point_in_triangle;
 
 /// Source-over blend of `color` at `coverage` (0..=1) into pixel (x, y).
 /// Out-of-bounds coordinates are ignored.
@@ -98,11 +98,27 @@ pub(crate) fn stroke_line(
     let y0 = (bounds.y.floor() as i32).max(0);
     let x1 = ((bounds.x + bounds.width).ceil() as i32).min(max_x);
     let y1 = ((bounds.y + bounds.height).ceil() as i32).min(max_y);
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length == 0.0 {
+        return;
+    }
+    let (ux, uy) = (dx / length, dy / length);
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let sample = ImagePoint::new(x as f32 + 0.5, y as f32 + 0.5);
-            let coverage = (radius + 0.5 - segment_distance(sample, start, end)).clamp(0.0, 1.0);
-            blend_px(img, x, y, color, coverage);
+            let rel_x = x as f32 + 0.5 - start.x;
+            let rel_y = y as f32 + 0.5 - start.y;
+            // Butt caps: the stroke ends flush at both endpoints, matching the
+            // live iced canvas (`Stroke::default()` uses `LineCap::Butt`) and
+            // the reviewed geometry where the arrow tip is exactly `end`. A
+            // clamped-projection distance would instead round-cap the stroke,
+            // painting a semicircle past each endpoint (a nub beyond the tip).
+            let along = rel_x * ux + rel_y * uy;
+            let perp = (rel_x * uy - rel_y * ux).abs();
+            let perp_coverage = (radius + 0.5 - perp).clamp(0.0, 1.0);
+            let cap_coverage = (along.min(length - along) + 0.5).clamp(0.0, 1.0);
+            blend_px(img, x, y, color, perp_coverage * cap_coverage);
         }
     }
 }
@@ -146,14 +162,42 @@ mod tests {
         let mut image = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 0]));
         let color = Rgba8::new(10, 20, 30, 255);
 
+        // A full-span segment with an enormous width: the scan region must be
+        // clamped to the image, and every pixel is covered along the segment.
         stroke_line(
             &mut image,
-            ImagePoint::new(0.0, 0.0),
-            ImagePoint::new(1.0, 1.0),
+            ImagePoint::new(0.0, 1.0),
+            ImagePoint::new(2.0, 1.0),
             f32::MAX,
             color,
         );
 
         assert!(image.pixels().all(|pixel| pixel.0 == [10, 20, 30, 255]));
+    }
+
+    #[test]
+    fn line_uses_butt_caps_and_does_not_paint_past_endpoints() {
+        // Horizontal segment (10,10)->(30,10), width 8 (radius 4). A pixel 3px
+        // beyond `end` sits within the round-cap radius but outside the butt
+        // cap, so butt-cap rasterization must leave it untouched.
+        let mut image = RgbaImage::from_pixel(40, 20, Rgba([0, 0, 0, 255]));
+        let color = Rgba8::new(200, 50, 50, 255);
+        stroke_line(
+            &mut image,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(30.0, 10.0),
+            8.0,
+            color,
+        );
+        assert_ne!(
+            image.get_pixel(20, 10).0,
+            [0, 0, 0, 255],
+            "mid-segment pixel must be painted"
+        );
+        assert_eq!(
+            image.get_pixel(33, 10).0,
+            [0, 0, 0, 255],
+            "pixel beyond the endpoint must stay unpainted with butt caps"
+        );
     }
 }
