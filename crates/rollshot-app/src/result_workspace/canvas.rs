@@ -48,12 +48,12 @@ impl From<rollshot_image_document::ShapeKind> for Tool {
     }
 }
 
-impl From<Tool> for rollshot_image_document::ShapeKind {
-    fn from(tool: Tool) -> Self {
-        match tool {
-            Tool::Rectangle => rollshot_image_document::ShapeKind::Rectangle,
-            Tool::Ellipse => rollshot_image_document::ShapeKind::Ellipse,
-            _ => panic!("non-shape tool cannot convert to ShapeKind"),
+impl Tool {
+    pub fn as_shape_kind(self) -> Option<rollshot_image_document::ShapeKind> {
+        match self {
+            Tool::Rectangle => Some(rollshot_image_document::ShapeKind::Rectangle),
+            Tool::Ellipse => Some(rollshot_image_document::ShapeKind::Ellipse),
+            _ => None,
         }
     }
 }

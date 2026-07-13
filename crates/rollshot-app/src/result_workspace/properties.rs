@@ -17,7 +17,6 @@ pub enum PropertyTarget {
     Annotation(AnnotationId),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorProperty {
     NumberAccent,
@@ -54,7 +53,6 @@ pub struct ShapeStyleTransaction {
     pub remembered_fill_color: Rgb8,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
     CopyMenu,
@@ -74,7 +72,6 @@ pub struct PropertyState {
     pub width: Option<StrokeWidthTransaction>,
     pub shape_style: Option<ShapeStyleTransaction>,
     pub next_number_input: String,
-    #[allow(dead_code)]
     pub focus: Option<PropertyFocus>,
     pub popup: Option<Popup>,
 }
@@ -254,6 +251,48 @@ fn stroke_controls(
     )
 }
 
+fn shape_stroke_controls(
+    state: &ResultWorkspace,
+    target: PropertyTarget,
+) -> Option<Element<'static, Message>> {
+    use iced::widget::{row, slider};
+
+    let width = state
+        .editor
+        .properties
+        .shape_style
+        .as_ref()
+        .map(|tx| tx.preview_stroke.width)
+        .or_else(|| stroke_width(state, target))?;
+    Some(
+        row![
+            color_button("Stroke", ColorProperty::StrokeColor),
+            slider(1.0_f32..=16.0_f32, width, Message::PreviewShapeStrokeWidth)
+                .step(1.0_f32)
+                .on_release(Message::ApplyShapeStyle)
+                .width(96),
+        ]
+        .spacing(8)
+        .into(),
+    )
+}
+
+fn fill_controls(fill_enabled: bool) -> Element<'static, Message> {
+    use iced::widget::{button, row, text};
+
+    let fill_btn = button(text(if fill_enabled { "Fill On" } else { "Fill Off" }))
+        .on_press(Message::ToggleShapeFill);
+
+    let color_btn = button(text("Fill color"))
+        .on_press_maybe(if fill_enabled {
+            Some(Message::OpenColorPicker(ColorProperty::ShapeFill))
+        } else {
+            None
+        });
+
+    row![fill_btn, color_btn].spacing(8).into()
+}
+
 /// Build the property controls row for the current tool/selection.
 ///
 /// Returns `None` when the active tool has no associated properties (Redact,
@@ -295,7 +334,12 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
             Some(controls.into())
         }
         PropertyTarget::TwoPointTool(_) => stroke_controls(state, target),
-        PropertyTarget::ShapeTool(_) => stroke_controls(state, target),
+        PropertyTarget::ShapeTool(kind) => {
+            let defaults = state.annotation_defaults.values.shape(kind);
+            let stroke = shape_stroke_controls(state, target)?;
+            let fill = fill_controls(defaults.fill_enabled);
+            Some(row![stroke, fill].spacing(8).into())
+        }
         PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
             Annotation::TwoPoint { .. } => stroke_controls(state, target),
             Annotation::NumberCallout { style, .. } => Some(
@@ -320,6 +364,18 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                         controls.push(color_button("BG color", ColorProperty::TextBackground));
                 }
                 Some(controls.into())
+            }
+            Annotation::Shape { fill, .. } => {
+                let stroke = shape_stroke_controls(state, target)?;
+                let fill_enabled = state
+                    .editor
+                    .properties
+                    .shape_style
+                    .as_ref()
+                    .map(|tx| tx.preview_fill.is_some())
+                    .unwrap_or(fill.is_some());
+                let fill = fill_controls(fill_enabled);
+                Some(row![stroke, fill].spacing(8).into())
             }
             _ => None,
         },
