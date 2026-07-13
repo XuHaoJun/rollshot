@@ -187,12 +187,9 @@ pub(crate) fn fill_box_shape(
     for y in y0..y1 {
         for x in x0..x1 {
             let mut hits = 0u32;
-            for sy in 0..4 {
-                for sx in 0..4 {
-                    let sample = ImagePoint::new(
-                        x as f32 + BOX_SAMPLE_OFFSETS[sx],
-                        y as f32 + BOX_SAMPLE_OFFSETS[sy],
-                    );
+            for &oy in &BOX_SAMPLE_OFFSETS {
+                for &ox in &BOX_SAMPLE_OFFSETS {
+                    let sample = ImagePoint::new(x as f32 + ox, y as f32 + oy);
                     if point_in_shape(kind, bounds, sample) {
                         hits += 1;
                     }
@@ -274,12 +271,9 @@ pub(crate) fn stroke_box_shape(
             }
 
             let mut hits = 0u32;
-            for sy in 0..4 {
-                for sx in 0..4 {
-                    let sample = ImagePoint::new(
-                        x as f32 + BOX_SAMPLE_OFFSETS[sx],
-                        y as f32 + BOX_SAMPLE_OFFSETS[sy],
-                    );
+            for &oy in &BOX_SAMPLE_OFFSETS {
+                for &ox in &BOX_SAMPLE_OFFSETS {
+                    let sample = ImagePoint::new(x as f32 + ox, y as f32 + oy);
                     let in_outer = point_in_shape(kind, bounds.expanded(half), sample);
                     let in_inner = if half > 0.0 {
                         point_in_shape(kind, bounds.expanded(-half), sample)

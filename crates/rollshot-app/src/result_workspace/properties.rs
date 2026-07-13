@@ -425,8 +425,8 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             id,
             kind,
             bounds,
-            stroke,
-            fill,
+            stroke: _,
+            fill: _,
         } => {
             let tx = state.editor.properties.shape_style.as_ref()?;
             if tx.id != id {

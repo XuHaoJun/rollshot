@@ -159,12 +159,16 @@ pub enum Message {
     /// Toggle the text background on/off for text notes.
     ToggleTextBackground,
     /// Live-preview a shape stroke width during slider interaction.
+    #[allow(dead_code)]
     PreviewShapeStrokeWidth(f32),
     /// Toggle fill on/off for the active shape tool or selected shape.
+    #[allow(dead_code)]
     ToggleShapeFill,
     /// Commit the shape style transaction to the document.
+    #[allow(dead_code)]
     ApplyShapeStyle,
     /// Cancel the shape style transaction without mutation.
+    #[allow(dead_code)]
     CancelShapeStyle,
     /// Toggle the shapes selector menu.
     ToggleShapesMenu,

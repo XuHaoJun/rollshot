@@ -1056,7 +1056,6 @@ mod tests {
 
     #[test]
     fn both_shape_choices_in_selector_with_active_indication() {
-        use super::super::canvas::EditorState;
         use super::super::document::ResultDocument;
         use image::{Rgba, RgbaImage};
 

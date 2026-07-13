@@ -321,4 +321,57 @@ mod tests {
             assert!(!text.to_ascii_lowercase().contains("secure"), "{text}");
         }
     }
+
+    #[test]
+    fn opaque_redaction_is_only_secure_sharing_classification() {
+        let mut document = saved();
+
+        document
+            .image
+            .add_shape(
+                rollshot_image_document::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 3.0,
+                    height: 3.0,
+                },
+            )
+            .unwrap();
+        assert!(
+            !has_secure_redactions(&document),
+            "ordinary Shape must not trigger secure-sharing classification"
+        );
+
+        document
+            .image
+            .add_shape_with_style(
+                rollshot_image_document::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 3.0,
+                    height: 3.0,
+                },
+                rollshot_image_document::StrokeStyle::default(),
+                Some(rollshot_image_document::Rgb8::new(0, 0, 0)),
+            )
+            .unwrap();
+        assert!(
+            !has_secure_redactions(&document),
+            "black-filled Shape must not trigger secure-sharing classification"
+        );
+
+        let rid = add_redaction(&mut document);
+        assert!(
+            has_secure_redactions(&document),
+            "OpaqueRedaction must trigger secure-sharing classification"
+        );
+
+        document.image.delete_annotation(rid).unwrap();
+        assert!(
+            !has_secure_redactions(&document),
+            "removing OpaqueRedaction must clear secure-sharing classification"
+        );
+    }
 }

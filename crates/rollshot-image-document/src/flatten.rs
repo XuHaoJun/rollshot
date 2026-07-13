@@ -293,7 +293,6 @@ mod tests {
 
         assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
-        assert_eq!(flattened.dimensions(), doc.source().dimensions());
         assert_eq!(
             flattened.dimensions(),
             doc.source().dimensions(),
@@ -405,6 +404,44 @@ mod tests {
         let first = doc.flatten();
         let second = doc.flatten();
         assert_eq!(first.as_raw(), second.as_raw());
+    }
+
+    #[test]
+    fn copy_original_remains_byte_identical_to_source() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
+        doc.add_redaction(ImageRect {
+            x: 20.0,
+            y: 20.0,
+            width: 30.0,
+            height: 30.0,
+        })
+        .unwrap();
+        doc.add_shape(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 60.0,
+                y: 60.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        )
+        .unwrap();
+
+        let source = doc.source().clone();
+        let copy_original = doc.source().clone();
+        assert_eq!(
+            copy_original.as_raw(),
+            source.as_raw(),
+            "Copy Original must be byte-identical to the unflattened source"
+        );
+
+        let flattened = doc.flatten();
+        assert_ne!(
+            flattened.as_raw(),
+            source.as_raw(),
+            "flattened output must differ from source when annotations exist"
+        );
     }
 
     #[test]

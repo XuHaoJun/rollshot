@@ -799,4 +799,53 @@ mod tests {
             "mutation-allowed canvas should publish pointer events"
         );
     }
+
+    #[test]
+    fn timeline_annotation_tool_has_no_rectangle_or_ellipse_variant() {
+        let all_variants = [
+            AnnotationTool::Number,
+            AnnotationTool::Text,
+            AnnotationTool::Redaction,
+        ];
+        assert_eq!(all_variants.len(), 3, "Timeline has exactly 3 annotation tools");
+
+        for variant in &all_variants {
+            match variant {
+                AnnotationTool::Number
+                | AnnotationTool::Text
+                | AnnotationTool::Redaction => {}
+            }
+        }
+
+        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            64,
+            ::image::Rgba([10, 20, 30, 255]),
+        ));
+        document.add_number_callout(ImagePoint::new(8.0, 8.0), ImagePoint::new(24.0, 24.0));
+        document
+            .add_text_note(ImagePoint::new(4.0, 40.0), "label".to_string())
+            .unwrap();
+        document
+            .add_redaction(rollshot_image_document::ImageRect {
+                x: 32.0,
+                y: 8.0,
+                width: 16.0,
+                height: 12.0,
+            })
+            .unwrap();
+
+        assert_eq!(document.annotations().len(), 3);
+        for annotation in document.annotations() {
+            assert!(
+                matches!(
+                    annotation,
+                    rollshot_image_document::Annotation::NumberCallout { .. }
+                        | rollshot_image_document::Annotation::TextNote { .. }
+                        | rollshot_image_document::Annotation::OpaqueRedaction { .. }
+                ),
+                "Timeline document must only contain Number/Text/Redaction annotations"
+            );
+        }
+    }
 }

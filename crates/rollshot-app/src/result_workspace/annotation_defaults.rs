@@ -681,8 +681,10 @@ mod tests {
     #[test]
     fn valid_last_shape_round_trips_and_malformed_falls_back() {
         let ctx = TestContext::new();
-        let mut values = AnnotationDefaults::default();
-        values.last_shape = ShapeKind::Ellipse;
+        let values = AnnotationDefaults {
+            last_shape: ShapeKind::Ellipse,
+            ..AnnotationDefaults::default()
+        };
         save_to(&ctx.path(), &values).unwrap();
         let loaded = load_from(&ctx.path());
         assert_eq!(loaded.values.last_shape, ShapeKind::Ellipse);
