@@ -166,6 +166,12 @@ pub enum Message {
     ApplyShapeStyle,
     /// Cancel the shape style transaction without mutation.
     CancelShapeStyle,
+    /// Toggle the shapes selector menu.
+    ToggleShapesMenu,
+    /// Select a specific shape kind from the selector.
+    SelectShape(rollshot_image_document::ShapeKind),
+    /// Activate the remembered shape tool (primary button / `S` shortcut).
+    SelectRememberedShape,
     #[cfg(feature = "ocr")]
     OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
     #[cfg(feature = "ocr")]
@@ -288,6 +294,9 @@ impl PartialEq for Message {
             (Self::ToggleShapeFill, Self::ToggleShapeFill) => true,
             (Self::ApplyShapeStyle, Self::ApplyShapeStyle) => true,
             (Self::CancelShapeStyle, Self::CancelShapeStyle) => true,
+            (Self::ToggleShapesMenu, Self::ToggleShapesMenu) => true,
+            (Self::SelectShape(a), Self::SelectShape(b)) => a == b,
+            (Self::SelectRememberedShape, Self::SelectRememberedShape) => true,
             #[cfg(feature = "ocr")]
             (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
             #[cfg(feature = "ocr")]
@@ -369,6 +378,7 @@ fn set_selection(state: &mut super::ResultWorkspace, selection: Option<Annotatio
     if state.editor.selection != selection {
         clear_property_transactions(state);
         state.editor.selection = selection;
+        state.editor.shapes_menu_open = false;
     }
 }
 
@@ -526,6 +536,7 @@ pub(crate) fn handle_canvas_pressed(
     commit_text_draft(state);
     state.editor.copy_menu_open = false;
     state.editor.more_menu_open = false;
+    state.editor.shapes_menu_open = false;
     state.editor.properties.popup = None;
 
     let scale = current_scale(state);
@@ -1061,6 +1072,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             commit_text_draft(state);
             state.editor.more_menu_open = false;
+            state.editor.shapes_menu_open = false;
             state.editor.properties.popup = None;
             state.editor.properties.color = None;
             state.editor.properties.width = None;
@@ -1167,6 +1179,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             } else if state.editor.more_menu_open {
                 state.editor.more_menu_open = false;
                 state.editor.properties.popup = None;
+            } else if state.editor.shapes_menu_open {
+                state.editor.shapes_menu_open = false;
             } else if state.editor.text_draft.is_some() {
                 state.editor.text_draft = None;
             } else if state.editor.drag.is_some() {
@@ -1183,6 +1197,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ToggleNavigator => {
             commit_text_draft(state);
             state.editor.more_menu_open = false;
+            state.editor.shapes_menu_open = false;
             state.editor.properties.popup = None;
             state.editor.navigator_open = !state.editor.navigator_open;
             Task::none()
@@ -1217,6 +1232,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             commit_text_draft(state);
             state.editor.copy_menu_open = !state.editor.copy_menu_open;
             state.editor.more_menu_open = false;
+            state.editor.shapes_menu_open = false;
             state.editor.properties.color = None;
             state.editor.properties.popup = state
                 .editor
@@ -1227,6 +1243,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         Message::ToggleMoreMenu => {
             state.editor.more_menu_open = !state.editor.more_menu_open;
             state.editor.copy_menu_open = false;
+            state.editor.shapes_menu_open = false;
             state.editor.properties.color = None;
             state.editor.properties.popup = state
                 .editor
@@ -1965,6 +1982,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.width = None;
             state.editor.copy_menu_open = false;
             state.editor.more_menu_open = false;
+            state.editor.shapes_menu_open = false;
             state.editor.properties.popup = Some(super::properties::Popup::ColorPicker);
             Task::none()
         }
@@ -2145,6 +2163,33 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::CancelShapeStyle => {
             state.editor.properties.shape_style = None;
+            Task::none()
+        }
+        Message::ToggleShapesMenu => {
+            state.editor.shapes_menu_open = !state.editor.shapes_menu_open;
+            state.editor.more_menu_open = false;
+            state.editor.copy_menu_open = false;
+            state.editor.properties.popup = None;
+            Task::none()
+        }
+        Message::SelectShape(kind) => {
+            let tool = match kind {
+                rollshot_image_document::ShapeKind::Rectangle => Tool::Rectangle,
+                rollshot_image_document::ShapeKind::Ellipse => Tool::Ellipse,
+            };
+            state.editor.tool = tool;
+            state.annotation_defaults.values.last_shape = kind;
+            state.editor.shapes_menu_open = false;
+            persist_annotation_defaults(state);
+            Task::none()
+        }
+        Message::SelectRememberedShape => {
+            let kind = state.annotation_defaults.values.last_shape;
+            let tool = match kind {
+                rollshot_image_document::ShapeKind::Rectangle => Tool::Rectangle,
+                rollshot_image_document::ShapeKind::Ellipse => Tool::Ellipse,
+            };
+            state.editor.tool = tool;
             Task::none()
         }
         Message::CancelColor => {
@@ -2565,6 +2610,7 @@ pub(crate) fn map_key_press(
             "u" => Some(Message::SelectTool(Tool::Rectangle)),
             "o" if !cfg!(feature = "ocr") => Some(Message::SelectTool(Tool::Ellipse)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
+            "s" => Some(Message::SelectRememberedShape),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
             _ => None,
@@ -5463,5 +5509,170 @@ mod tests {
         let px_before = doc_before.get_pixel(5, 5);
         let px_after = doc_after.get_pixel(5, 5);
         assert_eq!(px_before, px_after);
+    }
+
+    // -- shapes selector shortcuts (Task 5) -----------------------------------
+
+    #[test]
+    fn select_shape_activates_tool_and_persists_last_shape() {
+        let mut state = workspace();
+        let _ = update(
+            &mut state,
+            Message::SelectShape(rollshot_image_document::ShapeKind::Ellipse),
+        );
+        assert_eq!(state.editor.tool, Tool::Ellipse);
+        assert_eq!(
+            state.annotation_defaults.values.last_shape,
+            rollshot_image_document::ShapeKind::Ellipse
+        );
+    }
+
+    #[test]
+    fn select_shape_closes_shapes_menu() {
+        let mut state = workspace();
+        state.editor.shapes_menu_open = true;
+        let _ = update(
+            &mut state,
+            Message::SelectShape(rollshot_image_document::ShapeKind::Rectangle),
+        );
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn select_shape_does_not_alter_other_kind_defaults() {
+        let mut state = workspace();
+        let rect_before = state.annotation_defaults.values.rectangle;
+        let _ = update(
+            &mut state,
+            Message::SelectShape(rollshot_image_document::ShapeKind::Ellipse),
+        );
+        assert_eq!(state.annotation_defaults.values.rectangle, rect_before);
+    }
+
+    #[test]
+    fn select_remembered_shape_activates_without_cycling() {
+        let mut state = workspace();
+        // Default remembered = Rectangle
+        let _ = update(&mut state, Message::SelectRememberedShape);
+        assert_eq!(state.editor.tool, Tool::Rectangle);
+        // Change remembered to Ellipse
+        state.annotation_defaults.values.last_shape = rollshot_image_document::ShapeKind::Ellipse;
+        let _ = update(&mut state, Message::SelectRememberedShape);
+        assert_eq!(state.editor.tool, Tool::Ellipse);
+    }
+
+    #[test]
+    fn toggle_shapes_menu_toggles_open_close() {
+        let mut state = workspace();
+        assert!(!state.editor.shapes_menu_open);
+        let _ = update(&mut state, Message::ToggleShapesMenu);
+        assert!(state.editor.shapes_menu_open);
+        let _ = update(&mut state, Message::ToggleShapesMenu);
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn toggle_shapes_menu_closes_other_menus() {
+        let mut state = workspace();
+        state.editor.more_menu_open = true;
+        state.editor.copy_menu_open = true;
+        let _ = update(&mut state, Message::ToggleShapesMenu);
+        assert!(!state.editor.more_menu_open);
+        assert!(!state.editor.copy_menu_open);
+    }
+
+    #[test]
+    fn toggle_shapes_menu_changes_no_tool_or_dirty_state() {
+        let mut state = workspace();
+        let tool_before = state.editor.tool;
+        let dirty_before = state.annotations_dirty();
+        let _ = update(&mut state, Message::ToggleShapesMenu);
+        assert_eq!(state.editor.tool, tool_before);
+        assert_eq!(state.annotations_dirty(), dirty_before);
+        let _ = update(&mut state, Message::ToggleShapesMenu);
+        assert_eq!(state.editor.tool, tool_before);
+        assert_eq!(state.annotations_dirty(), dirty_before);
+    }
+
+    #[test]
+    fn s_shortcut_maps_to_select_remembered_shape() {
+        use keyboard::Key;
+        let none = keyboard::Modifiers::default();
+        assert_eq!(
+            map_key_press(&Key::Character("s".into()), none, false),
+            Some(Message::SelectRememberedShape)
+        );
+    }
+
+    #[test]
+    fn command_s_does_not_activate_tool() {
+        use keyboard::Key;
+        assert_eq!(
+            map_key_press(&Key::Character("s".into()), zmod(), false),
+            None
+        );
+    }
+
+    #[test]
+    fn captured_s_suppresses_shortcut() {
+        use keyboard::Key;
+        let none = keyboard::Modifiers::default();
+        assert_eq!(map_key_press(&Key::Character("s".into()), none, true), None);
+    }
+
+    #[test]
+    fn select_tool_closes_shapes_menu() {
+        let mut state = workspace();
+        state.editor.shapes_menu_open = true;
+        let _ = update(&mut state, Message::SelectTool(Tool::Text));
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn more_menu_open_closes_shapes_menu() {
+        let mut state = workspace();
+        state.editor.shapes_menu_open = true;
+        let _ = update(&mut state, Message::ToggleMoreMenu);
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn copy_menu_open_closes_shapes_menu() {
+        let mut state = workspace();
+        state.editor.shapes_menu_open = true;
+        let _ = update(&mut state, Message::ToggleCopyMenu);
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn escape_closes_shapes_menu() {
+        let mut state = workspace();
+        state.editor.shapes_menu_open = true;
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn selection_change_closes_shapes_menu() {
+        let mut state = workspace();
+        let id = state.document.image.add_number_callout(
+            rollshot_image_document::ImagePoint::new(10.0, 10.0),
+            rollshot_image_document::ImagePoint::new(10.0, 10.0),
+        );
+        state.editor.shapes_menu_open = true;
+        set_selection(&mut state, Some(id));
+        assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn color_picker_open_closes_shapes_menu() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Number;
+        state.editor.shapes_menu_open = true;
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(super::super::properties::ColorProperty::NumberAccent),
+        );
+        assert!(!state.editor.shapes_menu_open);
     }
 }

@@ -105,6 +105,13 @@ impl ToolbarItem {
     };
 }
 
+fn other_shape_tool(remembered: rollshot_image_document::ShapeKind) -> Tool {
+    match remembered {
+        rollshot_image_document::ShapeKind::Rectangle => Tool::Ellipse,
+        rollshot_image_document::ShapeKind::Ellipse => Tool::Rectangle,
+    }
+}
+
 fn tool_item(tool: Tool) -> ToolbarItem {
     match tool {
         Tool::Select => ToolbarItem {
@@ -170,6 +177,7 @@ pub struct ToolbarModel {
 
 pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
     let density = density_for_width(width);
+    let remembered = state.annotation_defaults.values.last_shape;
 
     let primary_tools = match density {
         ToolbarDensity::Wide | ToolbarDensity::Compact => vec![
@@ -182,7 +190,13 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
             Tool::Ellipse,
             Tool::Redact,
         ],
-        ToolbarDensity::Narrow => vec![Tool::Select, Tool::Number, Tool::Text, Tool::Arrow],
+        ToolbarDensity::Narrow => vec![
+            Tool::Select,
+            Tool::Number,
+            Tool::Text,
+            Tool::Arrow,
+            remembered.into(),
+        ],
     };
 
     let mut overflow = vec![
@@ -202,6 +216,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
     if density == ToolbarDensity::Narrow {
         overflow.insert(0, tool_item(Tool::Redact));
         overflow.insert(0, tool_item(Tool::Line));
+        overflow.insert(0, tool_item(other_shape_tool(remembered)));
     }
 
     let more_active_tool = if overflow
@@ -464,8 +479,8 @@ fn tool_tooltip(tool: Tool) -> String {
     match tool {
         Tool::Line => "Line (L) — Shift: Snap to 45°".into(),
         Tool::Arrow => "Arrow (A) — Shift: Snap to 45°".into(),
-        Tool::Rectangle => "Rectangle (U)".into(),
-        Tool::Ellipse => "Ellipse (O)".into(),
+        Tool::Rectangle => "Rectangle (S) — Shift: Square".into(),
+        Tool::Ellipse => "Ellipse (S) — Shift: Circle".into(),
         _ => {
             let item = tool_item(tool);
             shortcut_label(item.label, item.shortcut)
@@ -484,6 +499,60 @@ fn tool_button<'a>(tool: Tool, state: &ResultWorkspace) -> Element<'a, Message> 
             button::secondary
         });
     tooltip(btn, text(tool_tooltip(tool)), tooltip::Position::Bottom).into()
+}
+
+fn shape_tool_button<'a>(tool: Tool, state: &ResultWorkspace) -> Element<'a, Message> {
+    let remembered = state.annotation_defaults.values.last_shape;
+    let active = state.editor.tool == tool;
+    let primary = button(text(tool_item(tool).label).size(14))
+        .padding([4, 8])
+        .on_press(Message::SelectRememberedShape)
+        .style(if active {
+            button::primary
+        } else {
+            button::secondary
+        });
+    let primary_with_tip = tooltip(
+        primary,
+        text(tool_tooltip(remembered.into())),
+        tooltip::Position::Bottom,
+    );
+    let chevron = button(text("\u{25BE}").size(12))
+        .padding([4, 4])
+        .on_press(Message::ToggleShapesMenu)
+        .style(if state.editor.shapes_menu_open {
+            button::primary
+        } else {
+            button::secondary
+        });
+    row![primary_with_tip, chevron].spacing(1).into()
+}
+
+fn shapes_selector<'a>(state: &ResultWorkspace) -> Option<Element<'a, Message>> {
+    if !state.editor.shapes_menu_open {
+        return None;
+    }
+    let remembered = state.annotation_defaults.values.last_shape;
+    let kinds = [
+        rollshot_image_document::ShapeKind::Rectangle,
+        rollshot_image_document::ShapeKind::Ellipse,
+    ];
+    let mut menu = row![].spacing(4);
+    for kind in kinds {
+        let tool: Tool = kind.into();
+        let item = tool_item(tool);
+        let is_active = kind == remembered;
+        let btn = button(text(item.label).size(14))
+            .padding([4, 12])
+            .on_press(Message::SelectShape(kind))
+            .style(if is_active {
+                button::primary
+            } else {
+                button::secondary
+            });
+        menu = menu.push(btn);
+    }
+    Some(container(menu).padding(4).into())
 }
 
 fn undo_button(state: &ResultWorkspace) -> Element<'_, Message> {
@@ -585,7 +654,11 @@ pub fn second_row(state: &ResultWorkspace, model: ToolbarModel) -> Element<'_, M
     let mut tools_row = row![].spacing(4).align_y(Alignment::Center);
 
     for tool in &model.visible_tools {
-        tools_row = tools_row.push(tool_button(*tool, state));
+        if matches!(tool, Tool::Rectangle | Tool::Ellipse) {
+            tools_row = tools_row.push(shape_tool_button(*tool, state));
+        } else {
+            tools_row = tools_row.push(tool_button(*tool, state));
+        }
     }
 
     #[cfg(feature = "ocr")]
@@ -618,6 +691,12 @@ pub fn second_row(state: &ResultWorkspace, model: ToolbarModel) -> Element<'_, M
         column![controls, container(menu).padding(4)]
             .spacing(4)
             .into()
+    } else if state.editor.shapes_menu_open {
+        if let Some(selector) = shapes_selector(state) {
+            column![controls, selector].spacing(4).into()
+        } else {
+            controls
+        }
     } else if state.editor.properties.color.is_some() {
         column![controls, color_picker(state)].spacing(4).into()
     } else {
@@ -893,5 +972,113 @@ mod tests {
     #[test]
     fn hue_from_x_full() {
         assert_eq!(hue_from_x(220.0, 220.0), 360.0);
+    }
+
+    // -- shapes selector tests (Task 5) --------------------------------------
+
+    #[test]
+    fn rectangle_is_initial_remembered_shape_in_visible_tools() {
+        let s = state();
+        assert_eq!(
+            s.annotation_defaults.values.last_shape,
+            rollshot_image_document::ShapeKind::Rectangle
+        );
+        for width in [1100.0, 800.0] {
+            let model = toolbar_model(&s, width);
+            assert!(
+                model.visible_tools.contains(&Tool::Rectangle),
+                "Rectangle must be visible at width {width}"
+            );
+            assert!(
+                model.visible_tools.contains(&Tool::Ellipse),
+                "Ellipse must be visible at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_visible_tools_include_remembered_shape() {
+        let s = state();
+        let model = toolbar_model(&s, 640.0);
+        assert!(
+            model.visible_tools.contains(&Tool::Rectangle),
+            "Remembered Rectangle must be visible on narrow"
+        );
+        assert!(
+            !model.visible_tools.contains(&Tool::Ellipse),
+            "Non-remembered Ellipse must be in overflow on narrow"
+        );
+    }
+
+    #[test]
+    fn narrow_routes_non_remembered_shape_to_overflow() {
+        let mut s = state();
+        s.annotation_defaults.values.last_shape = rollshot_image_document::ShapeKind::Ellipse;
+        let model = toolbar_model(&s, 640.0);
+        assert!(
+            model.visible_tools.contains(&Tool::Ellipse),
+            "Remembered Ellipse must be visible on narrow"
+        );
+        assert!(
+            !model.visible_tools.contains(&Tool::Rectangle),
+            "Non-remembered Rectangle must be in overflow on narrow"
+        );
+        assert!(
+            model
+                .more
+                .iter()
+                .any(|item| item.kind == ToolbarItemKind::Tool(Tool::Rectangle)),
+            "Rectangle must be in overflow on narrow when Ellipse is remembered"
+        );
+    }
+
+    #[test]
+    fn narrow_line_and_redact_always_in_overflow() {
+        let model = toolbar_model(&state(), 640.0);
+        assert!(model
+            .more
+            .iter()
+            .any(|item| item.kind == ToolbarItemKind::Tool(Tool::Line)));
+        assert!(model
+            .more
+            .iter()
+            .any(|item| item.kind == ToolbarItemKind::Tool(Tool::Redact)));
+    }
+
+    #[test]
+    fn shape_tooltips_include_s_shortcut_and_shift_hint() {
+        assert_eq!(
+            tool_tooltip(Tool::Rectangle),
+            "Rectangle (S) — Shift: Square"
+        );
+        assert_eq!(tool_tooltip(Tool::Ellipse), "Ellipse (S) — Shift: Circle");
+    }
+
+    #[test]
+    fn both_shape_choices_in_selector_with_active_indication() {
+        use super::super::canvas::EditorState;
+        use super::super::document::ResultDocument;
+        use image::{Rgba, RgbaImage};
+
+        let img = RgbaImage::from_pixel(200, 200, Rgba([100, 150, 200, 255]));
+        let mut s = super::super::ResultWorkspace::new(ResultDocument::unsaved(img), None);
+        s.editor.shapes_menu_open = true;
+        // Default remembered = Rectangle
+        assert!(
+            shapes_selector(&s).is_some(),
+            "Selector must render when open"
+        );
+        // Changing remembered to Ellipse
+        s.annotation_defaults.values.last_shape = rollshot_image_document::ShapeKind::Ellipse;
+        assert!(shapes_selector(&s).is_some());
+    }
+
+    #[test]
+    fn shapes_selector_none_when_closed() {
+        let s = state();
+        assert!(
+            shapes_selector(&s).is_none(),
+            "Selector must not render when menu is closed"
+        );
     }
 }

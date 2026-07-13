@@ -39,6 +39,25 @@ pub enum Tool {
     OcrText,
 }
 
+impl From<rollshot_image_document::ShapeKind> for Tool {
+    fn from(kind: rollshot_image_document::ShapeKind) -> Self {
+        match kind {
+            rollshot_image_document::ShapeKind::Rectangle => Tool::Rectangle,
+            rollshot_image_document::ShapeKind::Ellipse => Tool::Ellipse,
+        }
+    }
+}
+
+impl From<Tool> for rollshot_image_document::ShapeKind {
+    fn from(tool: Tool) -> Self {
+        match tool {
+            Tool::Rectangle => rollshot_image_document::ShapeKind::Rectangle,
+            Tool::Ellipse => rollshot_image_document::ShapeKind::Ellipse,
+            _ => panic!("non-shape tool cannot convert to ShapeKind"),
+        }
+    }
+}
+
 /// An in-progress pointer gesture. Exactly ONE document edit is submitted on
 /// release (spec §5.2); previews are rendered from this state only.
 #[derive(Debug, Clone)]
@@ -96,6 +115,7 @@ pub struct EditorState {
     pub navigator_open: bool,
     pub copy_menu_open: bool,
     pub more_menu_open: bool,
+    pub shapes_menu_open: bool,
     /// Document `state_id` at the last successful Save As (dirty marker).
     pub saved_state_id: u64,
     /// Last canvas press, for double-click detection.
@@ -118,6 +138,7 @@ impl EditorState {
             navigator_open,
             copy_menu_open: false,
             more_menu_open: false,
+            shapes_menu_open: false,
             saved_state_id,
             last_press: None,
             navigator_items: Vec::new(),
