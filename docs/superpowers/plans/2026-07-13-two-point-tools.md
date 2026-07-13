@@ -57,17 +57,18 @@
 - `crates/rollshot-app/src/result_workspace/annotation_defaults.rs` — independent Line/Arrow persistence and fallback.
 - `crates/rollshot-app/src/result_workspace/properties.rs` — TwoPoint targets, stroke color/width transactions, controls, and app-only preview.
 - `crates/rollshot-app/src/result_workspace/canvas.rs` — tools, drafts, render command, endpoint handles, and modifier-aware edit preview.
+- `crates/rollshot-app/src/result_workspace/view.rs` — pass current workspace modifiers into the Canvas program explicitly.
 - `crates/rollshot-app/src/result_workspace/update.rs` — gesture lifecycle, typed commits, defaults/property updates, Esc, and shortcuts.
 - `crates/rollshot-app/src/result_workspace/toolbar.rs` — density routing, More active state, and exact tooltips.
 - `crates/rollshot-app/src/result_workspace/mod.rs` — register the focused app geometry module.
 - `crates/rollshot-app/src/timeline_workspace/annotation.rs` — exhaustively draw the shared line command without adding creation UX.
-- `crates/rollshot-app/src/timeline_workspace/update.rs`, `crates/rollshot-app/src/result_workspace/secure_sharing.rs`, and other exhaustive `Annotation` consumers — compatibility arms only where the compiler or focused tests require them.
+- `crates/rollshot-app/src/timeline_workspace/update.rs`, `crates/rollshot-app/src/result_workspace/secure_sharing.rs`, and `crates/rollshot-app/src/result_workspace/ocr_text.rs` — audited compatibility consumers; change only if an explicit test demonstrates a required behavior change.
 - `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md` — lifecycle evidence at Handoff or Complete.
 
 ## Task Dependencies
 
-1. Task 1 establishes the committed model and typed edit API.
-2. Task 2 completes framework-neutral geometry, hit testing, live commands, and flattening.
+1. Task 1 records the lifecycle transition and establishes additive shared value types.
+2. Task 2 atomically adds the committed model, typed edit API, framework-neutral geometry, hit testing, live commands, and flattening.
 3. Task 3 extends Slice 1 defaults and transactional properties.
 4. Task 4 wires modifier-aware creation and editing gestures.
 5. Task 5 exposes the tools through responsive toolbar and keyboard routing.
@@ -75,11 +76,224 @@
 
 Each task ends in a green commit. Do not land an enum variant in one commit while leaving exhaustive workspace consumers uncompilable.
 
+## Engineering Review Record (auto mode, 2026-07-13)
+
+### Step 0 — Scope Challenge
+
+- **Goal alignment:** all six tasks are required for the approved Line/Arrow vertical slice. Task 6 is acceptance and lifecycle evidence, not a product expansion.
+- **Minimum viable plan:** Tasks 1–6 are the minimum complete slice because omitting persistence/properties, gestures, discoverability, or full-resolution/platform verification would leave an approved user-facing requirement incomplete. No task is deferred.
+- **Complexity check:** 2 net-new files, 2 focused modules, and 6 tasks. None of the thresholds (>12 net-new files, >2 top-level modules/crates, >10 tasks) trigger.
+- **Search check:** no new concurrency or infrastructure is introduced. The plan reuses iced 0.14's built-in `Slider::on_release`, built-in `Canvas`, and existing snapshot/history and atomic config-writing flows, verified against the repository's pinned iced 0.14 reference and current code. No web search is needed for an unpinned or novel pattern.
+- **Completeness check:** complete negative-path, rollback, preview-isolation, platform, and long-image coverage is retained; no AI-time shortcut is accepted.
+- **Distribution check:** no new binary, crate, container, or installable artifact is introduced; existing Rollshot application distribution remains unchanged.
+
+### What already exists
+
+- `ImageDocument` already owns snapshots, undo/redo, batch preflight, clamping, stable IDs, and dirty `state_id`; Task 2 extends these paths instead of creating a second history system.
+- `RenderShape::Triangle`, `blend_px`, Canvas shape dispatch, and `flatten()` already provide the shared live/output pipeline; Task 2 adds only a finite line primitive and TwoPoint lowering.
+- Result Workspace already owns transient color transactions, persisted per-tool defaults, selection replacement previews, modifier tracking, and Canvas event routing; Tasks 3–4 extend those mechanisms.
+- Toolbar density/More routing and captured-input shortcut precedence already exist; Task 5 inserts Line/Arrow into the existing model.
+- The existing 100-annotation long-image test and Linux/macOS Result Workspace paths already provide scale and platform acceptance harnesses; Task 6 extends them.
+
+### NOT in scope
+
+- Generic paths, freehand, shapes, blur, crop, and later annotation slices — not required for the approved two-point slice.
+- Arrowhead variants, opacity controls, dashed strokes, and per-end decorations — explicitly excluded by the approved spec.
+- Timeline creation/editing UX — Timeline only consumes the shared render command in this slice.
+- Automation proposal operations, OCR semantics, Action Guide creation, and secure-sharing classification changes — TwoPoint remains an ordinary visible annotation.
+- New Shader/custom Widget/custom Overlay work — iced built-ins and the current Canvas are sufficient.
+- `rollshot-core` stitching changes or benchmarks — annotation rendering does not touch stitching hot paths.
+- Packaging or CI distribution changes — this slice creates no new artifact.
+
+### Reviewed data and test flow
+
+```text
+persisted tool default ──press──> raw image-space draft ──Shift/zoom──> Canvas preview
+                                  │                         │
+                                  │ release point           └── never enters ImageDocument
+                                  v
+                         validated EditOp batch
+                                  │
+                     ┌────────────┴────────────┐
+                     v                         v
+             commit one Snapshot       reject + restore full Snapshot
+                     │                  (annotations/counters/next_id)
+                     v
+          Annotation::TwoPoint ──annotation_shapes──> Line + optional Triangle
+                     │                         ├── Result Workspace Canvas
+                     │                         ├── Timeline Canvas
+                     │                         └── full-resolution flatten
+                     └── hit test / Navigator / undo-redo
+
+TDD layers:
+value types → document transactions → pure geometry → render/hit/flatten
+            → defaults/properties → gestures/modifiers → toolbar/shortcuts
+            → integrated output + Linux/macOS acceptance
+```
+
+### Auto decisions
+
+#### Auto decision D1 — Should failed batches restore allocated annotation IDs?
+Context: `ImageDocument::Snapshot` currently omits `next_id`, so a batch can fail after allocation and still consume an ID.
+ELI10: A failed edit should behave as if it never happened. If its hidden ID counter moves forward, later successful annotations expose evidence of an edit the user never got.
+Stakes if we pick wrong: rejected automation or UI batches silently create gaps and violate atomic rollback.
+Recommendation: **1A** because a full snapshot is the explicit, boring atomicity boundary.
+Completeness: A=10/10, B=5/10.
+Pros / cons:
+A) **1A — Add `next_id` to snapshot/restore plus regression test (recommended)** (human: ~1 hour / AI: ~10 min; low risk; negligible maintenance) ✅ restores true atomicity and undo/redo identity; ❌ slightly broadens an existing private snapshot.
+B) **1B — Accept monotonic ID gaps** (human: 0 / AI: 0; medium semantic risk; hidden maintenance debt) ✅ no code change; ❌ contradicts the batch contract and masks partial mutation.
+Net: pay a tiny private-state cost to make rollback truthful.
+
+#### Auto decision D2 — Where should Canvas read current Shift state?
+Context: the plan referenced nonexistent `editor.modifiers`; modifiers actually live on `ResultWorkspace`.
+ELI10: The preview needs the same Shift key state as the release handler. Passing it explicitly prevents the picture from disagreeing with what gets committed.
+Stakes if we pick wrong: the plan does not compile or the snapped preview differs from the saved annotation.
+Recommendation: **2A** because explicit data flow is smaller than relocating shared editor state.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) **2A — Add `modifiers` to `AnnotationCanvas` and pass it from `view.rs` (recommended)** (human: ~1 hour / AI: ~10 min; low risk; low maintenance) ✅ mirrors current ownership and is directly testable; ❌ adds one Canvas input.
+B) **2B — Move modifiers into `EditorState`** (human: ~0.5 day / AI: ~30 min; medium regression risk; medium maintenance) ✅ Canvas could keep reading only editor state; ❌ needlessly changes wheel/keyboard ownership across the workspace.
+Net: pass one value instead of redesigning state ownership.
+
+#### Auto decision D3 — How should no-op TwoPoint updates avoid history entries?
+Context: `apply_batch` commits every non-empty successful batch even when update values are unchanged.
+ELI10: Moving an endpoint to where it already is should not make Undo look like it did something. One mutation check at the batch boundary also keeps direct and batch APIs consistent.
+Stakes if we pick wrong: no-op property or gesture releases pollute history and dirty state.
+Recommendation: **3A** because one transactional path is DRY and complete.
+Completeness: A=10/10, B=8/10.
+Pros / cons:
+A) **3A — Detect snapshot changes before batch commit; delegate new public methods through one-op batches (recommended)** (human: ~0.5 day / AI: ~25 min; low-to-medium risk; low maintenance) ✅ fixes direct and batch semantics together; ❌ requires regression tests for existing batch behavior.
+B) **3B — Precheck only the new direct methods** (human: ~2 hours / AI: ~15 min; low immediate risk; medium maintenance) ✅ minimizes the touched batch code; ❌ leaves equivalent `EditOp` no-ops with different history semantics.
+Net: make the existing transaction boundary authoritative rather than duplicating policy.
+
+#### Auto decision D4 — When should the umbrella lifecycle enter `In progress`?
+Context: the registry is `Planned`, but execution steps did not record the required start transition.
+ELI10: The umbrella is the handoff ledger. Updating it before code tells the next person whether work has actually started and where to resume.
+Stakes if we pick wrong: branch state and lifecycle evidence drift, making interruption recovery ambiguous.
+Recommendation: **4A** because lifecycle truth should precede implementation.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) **4A — Add a committed Task 1 Step 0 transition to `In progress` (recommended)** (human: ~10 min / AI: ~5 min; very low risk; low maintenance) ✅ preserves an auditable transition; ❌ adds one docs-only commit.
+B) **4B — Wait until Task 1's feature commit** (human: 0 / AI: 0; low code risk; medium process risk) ✅ fewer commits; ❌ the registry remains stale during active work.
+Net: one small commit buys reliable resumability.
+
+#### Auto decision D5 — Should task file lists and commits name every compatibility consumer exactly?
+Context: Task 2 staged files not declared in its file list, while Task 6 used conditional modification wording.
+ELI10: An executor should know before starting which files a task owns. Wildcards and “if needed” make review boundaries and accidental edits harder to spot.
+Stakes if we pick wrong: commits can include unrelated changes or miss an exhaustive match needed for a green workspace.
+Recommendation: **5A** because explicit file ownership is safer for both humans and agents.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) **5A — Declare known exhaustive files, narrow `git add`, and mark other consumers verify-only (recommended)** (human: ~1 hour / AI: ~15 min; low risk; low maintenance) ✅ aligns steps, file lists, and commits; ❌ compiler discoveries still require updating the live plan before touching a new file.
+B) **5B — Keep broad directory staging and conditional files** (human: 0 / AI: 0; medium staging risk; medium maintenance) ✅ tolerates surprises without plan edits; ❌ weakens surgical-change and review guarantees.
+Net: prefer an amendable precise plan over speculative staging.
+
+#### Auto decision D6 — How should color-only and width-only previews compose?
+Context: current `preview_annotation` returns early without a color transaction, and `Annotation::with_stroke_style` was left as an ambiguous helper choice.
+ELI10: Width dragging must show a preview even when the color picker is closed. An exact local reconstruction keeps that preview out of the document and avoids inventing a mutating model API.
+Stakes if we pick wrong: the width slider appears unresponsive or preview code bypasses document history.
+Recommendation: **6A** because explicit local reconstruction is the smallest safe contract.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) **6A — Rewrite `preview_annotation` to accept either transaction and reconstruct `TwoPoint` explicitly (recommended)** (human: ~2 hours / AI: ~20 min; low risk; low maintenance) ✅ width-only/color-only previews work without public mutation helpers; ❌ the variant fields are written once in app code.
+B) **6B — Add public `Annotation::with_stroke_style`** (human: ~2 hours / AI: ~15 min; medium boundary risk; medium maintenance) ✅ shortens app matching; ❌ expands the framework-neutral API for one UI-only use.
+Net: keep preview mutation local and document mutation transactional.
+
+#### Auto decision D7 — Which point is authoritative when pointer release arrives without a final move event?
+Context: the release pseudocode used stored `raw_current`, which may lag the actual release coordinate.
+ELI10: Operating systems do not promise a move event immediately before release. The release event itself is the final user intent and must drive both threshold and commit.
+Stakes if we pick wrong: quick drags end at the previous cursor position or are wrongly cancelled.
+Recommendation: **7A** because the terminal event is the canonical input.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) **7A — Clamp/store the release point, then constrain and commit from it; add a no-final-move test (recommended)** (human: ~2 hours / AI: ~20 min; low risk; low maintenance) ✅ eliminates stale-coordinate behavior and preserves preview/commit equality; ❌ release handling gains one explicit update.
+B) **7B — Keep the last move point** (human: 0 / AI: 0; medium UX risk; hidden maintenance) ✅ simpler pseudocode; ❌ depends on an event-order guarantee iced/OS input does not provide.
+Net: trust the event that ends the gesture.
+
+#### Auto decision D8 — Are Task 6 integration tests RED tests or acceptance tests?
+Context: Tasks 1–5 already implement the behavior, so Task 6 cannot honestly predict that newly added integration tests fail.
+ELI10: A RED step is useful only before behavior exists. At the end of a vertical slice, these tests should pass and expose an integration defect if they do not.
+Stakes if we pick wrong: executors may treat a real regression as an expected failure.
+Recommendation: **8A** because exact Run/Expected pairs matter more than ritual wording.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) **8A — Label them acceptance tests with Expected: PASS (recommended)** (human: ~15 min / AI: ~5 min; very low risk; low maintenance) ✅ makes failures actionable; ❌ they are not a fresh RED cycle.
+B) **8B — Move the tests into earlier implementation tasks** (human: ~0.5 day / AI: ~30 min; medium plan churn; low maintenance) ✅ preserves strict RED timing; ❌ splits cross-layer acceptance setup across unrelated tasks.
+Net: keep end-to-end acceptance together and tell the truth about expected results.
+
+#### Auto decision D9 — Which negative paths need explicit automated coverage before runtime checks?
+Context: rollback IDs, no-op history, width-only preview cancellation, target changes, and release-without-move were not all asserted.
+ELI10: These are the cases users hit when they cancel, click quickly, or retry after invalid input. They are cheap deterministic tests and expensive manual regressions.
+Stakes if we pick wrong: silent dirty-state/history errors reach both platforms despite happy-path tests passing.
+Recommendation: **9A** because completeness is inexpensive here and manual-only coverage is fragile.
+Completeness: A=10/10, B=7/10.
+Pros / cons:
+A) **9A — Add all five focused negative/regression cases in Tasks 2–4 (recommended)** (human: ~0.5 day / AI: ~35 min; low risk; low maintenance) ✅ locks each failure at its owning layer; ❌ adds several focused tests.
+B) **9B — Rely on final runtime checklist for cancellation and event ordering** (human: ~1 hour / AI: ~10 min; medium regression risk; high recurring manual cost) ✅ fewer tests now; ❌ failures are slower and less deterministic to diagnose.
+Net: automate deterministic edge cases and reserve manual checks for rendering feel and native integration.
+
+#### Auto decision D10 — Should the long-image acceptance allocate a wider second fixture?
+Context: the repository already tests a 1000×20,000 image; the proposed replacement widened it to 1200 pixels and duplicated scale work.
+ELI10: Full-resolution RGBA images are large, and flattening holds another full image. Reusing the current dimensions tests the same behavior without adding roughly 40 MB of peak pixel storage.
+Stakes if we pick wrong: local/CI tests become slower or memory-sensitive without increasing coverage.
+Recommendation: **10A** because performance tests should control resource cost while preserving the scale invariant.
+Completeness: A=10/10, B=10/10.
+Pros / cons:
+A) **10A — Extend the existing 1000×20,000 test to 100 mixed annotations (recommended)** (human: ~1 hour / AI: ~15 min; low risk; low maintenance) ✅ preserves long-image and mixed-tool coverage at existing peak dimensions; ❌ rewrites the current fixture mix.
+B) **10B — Add/keep a 1200×20,000 fixture** (human: ~30 min / AI: ~10 min; low correctness risk; higher resource maintenance) ✅ leaves the old test untouched; ❌ duplicates coverage and raises peak memory/time.
+Net: same correctness signal, lower CI resource exposure.
+
+### Test coverage
+
+| Task / behavior | Unit | Integration | E2E / smoke | Manual only |
+|---|---:|---:|---:|---:|
+| Task 1 / value defaults and distinct kinds | ✓ | — | — | no |
+| Task 2 / constructor, validation, atomic rollback including `next_id`, no-op history | ✓ | ✓ | — | no |
+| Task 2 / arrow geometry, bounds, endpoint/shaft/head hit priority | ✓ | ✓ | — | no |
+| Task 2 / shared lowering, Canvas consumers, alpha/edge raster, immutable flatten | ✓ | ✓ | — | no |
+| Task 2 / Navigator labels and ordering | ✓ | ✓ | — | no |
+| Task 3 / independent config round-trip, fallback, warning, write failure | ✓ | ✓ | — | no |
+| Task 3 / color/width preview, Apply/Cancel/target switch, one-entry undo | ✓ | ✓ | — | no |
+| Task 4 / 45° snap, zoom threshold, live modifier toggle, release-without-move | ✓ | ✓ | — | no |
+| Task 4 / endpoint/body edits, Esc/delete/undo/redo | ✓ | ✓ | — | no |
+| Task 5 / responsive routing, More active state, exact hints, shortcut precedence | ✓ | ✓ | — | no |
+| Task 6 / committed-only Copy/Save, Copy Original, 100-annotation long image | ✓ | ✓ | ✓ | no |
+| Task 6 / Linux and macOS native dialogs, clipboard, visual legibility | — | — | ✓ | yes |
+
+### Failure modes
+
+| Codepath | Realistic failure | Automated coverage / handling | User-visible result |
+|---|---|---|---|
+| Document add/update batch | non-finite/coincident point or invalid style after an earlier allocation | Task 2 Steps 1–3; typed `EditError`, full snapshot restore including `next_id` | inline error for UI commits; no mutation/history |
+| Document no-op update | identical endpoint/style creates dirty state | Task 2 Steps 1–3; snapshot-change guard returns success without commit | no message; correctly no visible change/history |
+| Geometry/raster | short or edge-clipped arrow produces non-finite/out-of-bounds sampling | Task 2 Steps 4–10; validated non-coincident points, bounded raster loop | valid clipped annotation, no panic |
+| Defaults load/save | malformed field, non-opaque value, or atomic write failure | Task 3 Steps 1–7; per-field fallback and existing `Result` writer | one warning; in-memory value retained on save failure |
+| Property preview | width-only transaction, Cancel/Esc, or target switch leaks into document | Task 3 Steps 4–7; app-only clone and transaction clearing | preview reverts; no dirty/history entry |
+| Gesture input | modifier changes mid-drag or release arrives without final move | Task 4 Steps 4–8; explicit Canvas modifiers and canonical release point | preview and committed endpoint agree |
+| Gesture validation | sub-threshold or clamped-coincident gesture | Task 4 Steps 4–8 plus Task 2 `EditError`; cancel or inline error | no annotation for short gesture; error for invalid commit |
+| Toolbar/keyboard | narrow active tool disappears or focused input consumes L/A | Task 5 Steps 1–6; More active model and captured-input early return | active Line remains visible in More; typing unaffected |
+| Output/privacy | draft/handles enter output or TwoPoint becomes a redaction mask | Task 6 Steps 1–4; flatten reads committed graph, explicit redaction-only audit | output contains only committed visible strokes |
+| Platform handoff | Linux/macOS clipboard or Save As behavior differs/unavailable | Task 6 Steps 5–7; failed/unavailable check forces `Handoff` | lifecycle records exact remaining risk; never false Complete |
+
+**Critical silent gaps:** none after applying D1–D10.
+
+### Performance and resources
+
+- Rasterization visits only the line's expanded bounding box; there is no full-image scan per stroke beyond the existing final flatten traversal.
+- Live Canvas continues existing visible-rectangle culling and emits one line plus at most one triangle per TwoPoint annotation.
+- The long-image acceptance test reuses the existing 1000×20,000 RGBA dimensions and replaces its annotation mix; it does not add a second oversized fixture.
+- No capture/stitching loop, pixel-format conversion, I/O queue, or system resource lifecycle changes; stitching benchmarks are not applicable.
+
+### Parallelization strategy
+
+Sequential execution, no parallelization opportunity. Tasks 1–2 establish shared public enums and exhaustive matches; Tasks 3–5 all modify `crates/rollshot-app/src/result_workspace/`; Task 6 consumes every earlier task and records lifecycle evidence. Parallel worktrees would create avoidable conflicts and are forbidden by repository instructions unless explicitly requested.
+
 ---
 
 ### Task 1: Add the shared two-point value types without changing annotations
 
 **Files:**
+- Modify: `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md`
 - Modify: `crates/rollshot-image-document/src/style.rs`
 - Modify: `crates/rollshot-image-document/src/annotation.rs`
 - Modify: `crates/rollshot-image-document/src/lib.rs`
@@ -90,6 +304,17 @@ Each task ends in a green commit. Do not land an enum variant in one commit whil
 - Produces: `StrokeStyle { color: Rgb8, width: f32, opacity: f32 }` and `StrokeStyle::default()`.
 - Does not change `Annotation`, `EditOp`, document behavior, or any exhaustive
   match; the commit remains additive and workspace-green.
+
+- [ ] **Step 0: Record Slice 2 as In progress before implementation**
+
+Update the Slice 2 umbrella row from `Planned` to `In progress`, preserving the registered spec/plan links and hashes. Record this branch and Task 1 as the current entry point.
+
+```bash
+rtk git add docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md
+rtk git commit -m "docs(annotation): start two-point tool slice"
+```
+
+Expected: the lifecycle transition is committed on `feat/annotation-two-point-tools` before product code changes.
 
 - [ ] **Step 1: Write failing value-type tests**
 
@@ -195,6 +420,8 @@ rtk git commit -m "feat(annotation): add two-point value types"
 - Modify: `crates/rollshot-image-document/src/flatten.rs`
 - Modify: `crates/rollshot-image-document/src/navigator.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/canvas.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/properties.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/update.rs`
 - Modify: `crates/rollshot-app/src/timeline_workspace/annotation.rs`
 - Test: inline tests in the owning modules
 
@@ -303,6 +530,37 @@ fn invalid_stroke_values_are_rejected_without_mutation() {
     }
     assert!(doc.annotations().is_empty());
 }
+
+#[test]
+fn failed_batch_restores_next_id_and_noop_updates_create_no_history() {
+    let mut doc = ImageDocument::new(image());
+    let result = doc.apply_batch(vec![
+        EditOp::AddTwoPoint {
+            kind: TwoPointKind::Line,
+            start: ImagePoint::new(1.0, 1.0),
+            end: ImagePoint::new(20.0, 20.0),
+            style: StrokeStyle::default(),
+        },
+        EditOp::AddTwoPoint {
+            kind: TwoPointKind::Arrow,
+            start: ImagePoint::new(5.0, 5.0),
+            end: ImagePoint::new(5.0, 5.0),
+            style: StrokeStyle::default(),
+        },
+    ]);
+    assert_eq!(result, Err(EditError::CoincidentPoints));
+    let id = doc
+        .add_two_point(TwoPointKind::Line, ImagePoint::new(1.0, 1.0), ImagePoint::new(20.0, 20.0))
+        .unwrap();
+    assert_eq!(id, AnnotationId(1));
+    while doc.undo() {}
+    let id = doc
+        .add_two_point(TwoPointKind::Line, ImagePoint::new(1.0, 1.0), ImagePoint::new(20.0, 20.0))
+        .unwrap();
+    let before = doc.state_id();
+    doc.set_stroke_style(id, StrokeStyle::default()).unwrap();
+    assert_eq!(doc.state_id(), before);
+}
 ```
 
 - [ ] **Step 2: Run the model tests and confirm the missing-API failure**
@@ -374,7 +632,9 @@ fn clamp_two_point(
 }
 ```
 
-Direct methods and `apply_batch` use the same helpers. Update referenced-ID preflight and `apply_one` exhaustively. Compare existing points/styles before commit so no-op updates create no history entry.
+Add `next_id` to the private `Snapshot`, `snapshot()`, and `restore()` so failed batches and undo/redo restore the complete identity state. Direct TwoPoint methods delegate through one-op `apply_batch` calls and extract the returned ID for adds. Update referenced-ID preflight and `apply_one` exhaustively.
+
+After all operations succeed, compare `annotations`, `next_number`, and `next_id` with the pre-batch snapshot. If none changed, return `Ok(BatchOutcome { added_ids })` without `commit`; otherwise commit exactly once. This makes identical point/style updates no-ops for both public methods and raw batches without duplicating policy.
 
 - [ ] **Step 4: Write failing pure-geometry tests**
 
@@ -631,7 +891,7 @@ Expected: all commands pass, including exact arrowhead, finite-segment miss, opa
 - [ ] **Step 11: Commit the atomic model and render lifecycle**
 
 ```bash
-rtk git add crates/rollshot-image-document/src crates/rollshot-app/src/result_workspace/canvas.rs crates/rollshot-app/src/result_workspace/properties.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/secure_sharing.rs crates/rollshot-app/src/result_workspace/ocr_text.rs crates/rollshot-app/src/timeline_workspace/annotation.rs crates/rollshot-app/src/timeline_workspace/update.rs
+rtk git add crates/rollshot-image-document/src/annotation.rs crates/rollshot-image-document/src/edit_op.rs crates/rollshot-image-document/src/document.rs crates/rollshot-image-document/src/lib.rs crates/rollshot-image-document/src/two_point.rs crates/rollshot-image-document/src/shapes.rs crates/rollshot-image-document/src/hit.rs crates/rollshot-image-document/src/raster.rs crates/rollshot-image-document/src/flatten.rs crates/rollshot-image-document/src/navigator.rs crates/rollshot-app/src/result_workspace/canvas.rs crates/rollshot-app/src/result_workspace/properties.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/timeline_workspace/annotation.rs
 rtk git commit -m "feat(annotation): add two-point document lifecycle"
 ```
 
@@ -781,6 +1041,23 @@ fn selected_arrow_style_does_not_change_arrow_or_line_defaults() {
     update(&mut state, Message::ApplyStrokeWidth);
     assert_eq!(state.annotation_defaults.values, defaults);
 }
+
+#[test]
+fn width_only_preview_cancel_and_target_change_never_mutate_document() {
+    let mut state = workspace_with_arrow();
+    let id = state.document.image.annotations()[0].id();
+    state.editor.tool = Tool::Select;
+    state.editor.selection = Some(id);
+    let before = state.document.image.state_id();
+    update(&mut state, Message::PreviewStrokeWidth(11.0));
+    assert_eq!(preview_annotation(&state).unwrap().stroke_style().unwrap().width, 11.0);
+    update(&mut state, Message::CancelStrokeWidth);
+    assert!(preview_annotation(&state).is_none());
+    update(&mut state, Message::PreviewStrokeWidth(12.0));
+    update(&mut state, Message::SelectTool(Tool::Arrow));
+    assert!(preview_annotation(&state).is_none());
+    assert_eq!(state.document.image.state_id(), before);
+}
 ```
 
 - [ ] **Step 5: Implement TwoPoint targets and mutually exclusive property transactions**
@@ -824,27 +1101,30 @@ Use `Message::CancelStrokeWidth` when Esc or a target change invalidates the tra
 
 - [ ] **Step 6: Extend app-only preview cloning for both stroke properties**
 
-For a selected `Annotation::TwoPoint`, clone the annotation and apply the active transaction only to the clone:
+Rewrite `preview_annotation` so it does not require a color transaction up front. Resolve the selected annotation ID, then independently look up matching color and width transactions. For a selected `Annotation::TwoPoint`, apply either or both active transactions only to a reconstructed clone:
 
 ```rust
-Annotation::TwoPoint { mut style, .. } => {
-    if let Some(tx) = &state.editor.properties.color {
+Annotation::TwoPoint { id, kind, start, end, mut style } => {
+    let mut changed = false;
+    if let Some(tx) = state.editor.properties.color.as_ref() {
         if tx.target == PropertyTarget::Annotation(id)
             && tx.property == ColorProperty::StrokeColor
         {
             style.color = tx.preview;
+            changed = true;
         }
     }
-    if let Some(tx) = &state.editor.properties.width {
+    if let Some(tx) = state.editor.properties.width.as_ref() {
         if tx.target == PropertyTarget::Annotation(id) {
             style.width = tx.preview;
+            changed = true;
         }
     }
-    Some(annotation.with_stroke_style(style))
+    changed.then_some(Annotation::TwoPoint { id, kind, start, end, style })
 }
 ```
 
-Implement `Annotation::with_stroke_style` as an app-local reconstruction helper or explicit match; do not add a mutating document bypass. `AnnotationCanvas.property_preview` remains the only consumer, so Copy/Save cannot observe it.
+Keep the existing Number/Text reconstruction arms. Do not add `Annotation::with_stroke_style` or any mutating document bypass. `AnnotationCanvas.property_preview` remains the only consumer, so Copy/Save cannot observe it.
 
 - [ ] **Step 7: Run property/default tests and workspace tests**
 
@@ -872,6 +1152,7 @@ rtk git commit -m "feat(annotation): add two-point defaults and properties"
 - Create: `crates/rollshot-app/src/result_workspace/two_point.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/mod.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/canvas.rs`
+- Modify: `crates/rollshot-app/src/result_workspace/view.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/update.rs`
 - Test: inline tests in `two_point.rs`, `canvas.rs`, and `update.rs`
 
@@ -1073,6 +1354,19 @@ fn body_drag_translates_both_endpoints_and_preserves_vector() {
     assert_eq!(after_end.x - after_start.x, before_end.x - before_start.x);
     assert_eq!(after_end.y - after_start.y, before_end.y - before_start.y);
 }
+
+#[test]
+fn release_point_is_used_even_without_a_final_move_event() {
+    let mut state = workspace();
+    state.editor.tool = Tool::Line;
+    handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+    handle_canvas_moved(&mut state, ImagePoint::new(30.0, 10.0));
+    handle_canvas_released(&mut state, ImagePoint::new(70.0, 10.0));
+    assert_eq!(
+        endpoints(&state.document.image.annotations()[0]),
+        (ImagePoint::new(10.0, 10.0), ImagePoint::new(70.0, 10.0))
+    );
+}
 ```
 
 - [ ] **Step 5: Add tools and transient draft representation**
@@ -1099,7 +1393,7 @@ CreateTwoPoint {
 },
 ```
 
-Add `raw_point: ImagePoint` to `EditAnnotation`. The current preview remains derived state. `draft_annotation()` applies `constrained_endpoint(start, raw_current, editor.modifiers.shift())`; it does not read current defaults after press because style was captured at draft creation.
+Add `raw_point: ImagePoint` to `EditAnnotation`. Add `modifiers: iced::keyboard::Modifiers` to `AnnotationCanvas` and pass `state.modifiers` explicitly from `view.rs`. The current preview remains derived state. `draft_annotation()` applies `constrained_endpoint(start, raw_current, self.modifiers.shift())`; it does not read current defaults after press because style was captured at draft creation.
 
 - [ ] **Step 6: Wire pressed, moved, modifier-changed, and released paths**
 
@@ -1115,9 +1409,11 @@ fn active_two_point(state: &ResultWorkspace) -> Option<(TwoPointKind, StrokeStyl
 }
 ```
 
-On press, create `CreateTwoPoint`. On move, update `raw_current`. On `ModifiersChanged`, recompute any `EditAnnotation.current` from `original`, `part`, stored `raw_point`, `grab_offset`, and the new Shift state. On release:
+On press, create `CreateTwoPoint`. On move, update `raw_current`. On `ModifiersChanged`, recompute any `EditAnnotation.current` from `original`, `part`, stored `raw_point`, `grab_offset`, and the new Shift state. On release, treat the clamped release event point as authoritative, store it as the final raw point, and then constrain it:
 
 ```rust
+let (image_width, image_height) = state.document.image.source().dimensions();
+let raw_current = released_point.clamp_to(image_width, image_height);
 let end = constrained_endpoint(start, raw_current, state.modifiers.shift());
 if gesture_meets_threshold(start, end, current_scale(state)) {
     if let Err(error) = state.document.image.add_two_point_with_style(kind, start, end, style) {
@@ -1146,7 +1442,7 @@ Expected: all eight directions, mid-drag Shift toggles, threshold at multiple zo
 - [ ] **Step 9: Commit the gesture lifecycle**
 
 ```bash
-rtk git add crates/rollshot-app/src/result_workspace/mod.rs crates/rollshot-app/src/result_workspace/two_point.rs crates/rollshot-app/src/result_workspace/canvas.rs crates/rollshot-app/src/result_workspace/update.rs
+rtk git add crates/rollshot-app/src/result_workspace/mod.rs crates/rollshot-app/src/result_workspace/two_point.rs crates/rollshot-app/src/result_workspace/canvas.rs crates/rollshot-app/src/result_workspace/view.rs crates/rollshot-app/src/result_workspace/update.rs
 rtk git commit -m "feat(annotation): add two-point editing gestures"
 ```
 
@@ -1309,8 +1605,8 @@ rtk git commit -m "feat(annotation): expose line and arrow tools"
 **Files:**
 - Modify: `crates/rollshot-image-document/src/flatten.rs`
 - Modify: `crates/rollshot-app/src/result_workspace/update.rs`
-- Modify only if focused compiler/tests require: `crates/rollshot-app/src/result_workspace/secure_sharing.rs`
-- Modify only if focused compiler/tests require: `crates/rollshot-app/src/result_workspace/ocr_text.rs`
+- Verify without modification: `crates/rollshot-app/src/result_workspace/secure_sharing.rs`
+- Verify without modification: `crates/rollshot-app/src/result_workspace/ocr_text.rs`
 - Modify: `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md`
 - Test: existing inline suites plus new integration tests in `flatten.rs` and `update.rs`
 
@@ -1319,57 +1615,55 @@ rtk git commit -m "feat(annotation): expose line and arrow tools"
 - Produces: mixed long-image regression evidence and platform runtime evidence.
 - Produces: umbrella status `Complete` only after all required automated and Linux/macOS runtime checks pass; otherwise `Handoff` with exact remaining entry point.
 
-- [ ] **Step 1: Write failing mixed-output and long-image tests**
+- [ ] **Step 1: Add mixed-output and long-image acceptance tests**
 
 Extend the existing long-image scale test instead of creating a second synthetic benchmark:
 
 ```rust
 #[test]
 fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
-    let mut doc = ImageDocument::new(base(1200, 20_000));
-    for i in 0..100u32 {
-        let y = 40.0 + i as f32 * 190.0;
-        if i % 2 == 0 {
-            doc.add_two_point(
-                TwoPointKind::Line,
-                ImagePoint::new(20.0, y),
-                ImagePoint::new(300.0, y + 80.0),
-            )
-            .unwrap();
-        } else {
-            doc.add_two_point(
-                TwoPointKind::Arrow,
-                ImagePoint::new(500.0, y),
-                ImagePoint::new(900.0, y + 80.0),
-            )
-            .unwrap();
-        }
+    let mut doc = ImageDocument::new(base(1000, 20_000));
+    for i in 0..20u32 {
+        let y = 100.0 + i as f32 * 950.0;
+        doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
+        doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}")).unwrap();
+        doc.add_redaction(ImageRect { x: 500.0, y, width: 80.0, height: 40.0 }).unwrap();
+        doc.add_two_point(
+            TwoPointKind::Line,
+            ImagePoint::new(20.0, y + 100.0),
+            ImagePoint::new(300.0, y + 180.0),
+        ).unwrap();
+        doc.add_two_point(
+            TwoPointKind::Arrow,
+            ImagePoint::new(500.0, y + 100.0),
+            ImagePoint::new(900.0, y + 180.0),
+        ).unwrap();
     }
     let flattened = doc.flatten();
     assert_eq!(flattened.dimensions(), doc.source().dimensions());
-    assert_ne!(flattened.get_pixel(160, 80), doc.source().get_pixel(160, 80));
+    assert_ne!(flattened.get_pixel(160, 240), doc.source().get_pixel(160, 240));
     assert_eq!(doc.navigator_items().len(), 100);
-    assert!(doc.hit_test(ImagePoint::new(160.0, 80.0), 8.0).is_some());
+    assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());
 }
 ```
 
 Add a Result Workspace output test that starts an uncommitted draft and selection, then proves `copy_payload` contains only committed Line/Arrow pixels and `copy_original_payload` remains source-identical.
 
-- [ ] **Step 2: Run the integration tests and confirm any remaining gaps**
+- [ ] **Step 2: Run the acceptance tests**
 
 ```bash
 rtk cargo test -p rollshot-image-document hundred_mixed_annotations_on_long_image_include_line_and_arrow
 rtk cargo test -p rollshot-app two_point_output_excludes_draft_and_handles
 ```
 
-Expected before final integration: the first command may fail until the existing scale fixture is updated; the second fails until its fixture and assertions are added.
+Expected: both commands pass. Any failure is an integration defect to fix in Step 3, not an expected RED state, because Tasks 1–5 already implement the behavior under acceptance.
 
 - [ ] **Step 3: Complete compatibility arms and integration assertions**
 
 Use explicit handling:
 
-- Secure-sharing redaction checks continue to classify only `OpaqueRedaction` as secure redaction; TwoPoint is an ordinary visible annotation.
-- OCR redaction masks continue to extract only `OpaqueRedaction` bounds; TwoPoint does not enter privacy masks.
+- Verify that secure-sharing redaction checks continue to classify only `OpaqueRedaction` as secure redaction; TwoPoint is an ordinary visible annotation. Do not edit the module unless its focused test first demonstrates a behavior gap and the live plan is updated to declare that file.
+- Verify that OCR redaction masks continue to extract only `OpaqueRedaction` bounds; TwoPoint does not enter privacy masks. Do not edit the module unless its focused test first demonstrates a behavior gap and the live plan is updated to declare that file.
 - Timeline accepts the line render command from Task 2 but exposes no creation action.
 - Copy/Save use `ImageDocument::flatten()` unchanged; tests prove drafts, property previews, and handles never reach it.
 - Copy Original uses the immutable source unchanged.
@@ -1426,7 +1720,7 @@ Preserve the already-registered slice-spec and implementation-plan links and com
 - [ ] **Step 8: Commit integration evidence**
 
 ```bash
-rtk git add crates/rollshot-image-document/src/flatten.rs crates/rollshot-app/src/result_workspace docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md
+rtk git add crates/rollshot-image-document/src/flatten.rs crates/rollshot-app/src/result_workspace/update.rs docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md
 rtk git commit -m "test(annotation): verify two-point tool lifecycle"
 ```
 
