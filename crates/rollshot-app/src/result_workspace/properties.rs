@@ -256,6 +256,7 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
     };
     let annotation = state.document.image.annotation(id)?.clone();
     match annotation {
+        Annotation::TwoPoint { .. } => None,
         Annotation::NumberCallout {
             id,
             number,

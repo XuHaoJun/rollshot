@@ -3,6 +3,7 @@
 use image::RgbaImage;
 
 use crate::geometry::{ImagePoint, ImageRect, Rgba8};
+use crate::two_point::{point_in_triangle, segment_distance};
 
 /// Source-over blend of `color` at `coverage` (0..=1) into pixel (x, y).
 /// Out-of-bounds coordinates are ignored.
@@ -79,17 +80,26 @@ pub(crate) fn stroke_circle(
     }
 }
 
-fn edge(a: ImagePoint, b: ImagePoint, p: ImagePoint) -> f32 {
-    (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
-}
-
-fn point_in_triangle(p: ImagePoint, t: &[ImagePoint; 3]) -> bool {
-    let d1 = edge(t[0], t[1], p);
-    let d2 = edge(t[1], t[2], p);
-    let d3 = edge(t[2], t[0], p);
-    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-    !(has_neg && has_pos)
+pub(crate) fn stroke_line(
+    img: &mut RgbaImage,
+    start: ImagePoint,
+    end: ImagePoint,
+    width: f32,
+    color: Rgba8,
+) {
+    let radius = width / 2.0;
+    let bounds = ImageRect::from_corners(start, end).expanded(radius + 1.0);
+    let x0 = bounds.x.floor() as i32;
+    let y0 = bounds.y.floor() as i32;
+    let x1 = (bounds.x + bounds.width).ceil() as i32;
+    let y1 = (bounds.y + bounds.height).ceil() as i32;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let sample = ImagePoint::new(x as f32 + 0.5, y as f32 + 0.5);
+            let coverage = (radius + 0.5 - segment_distance(sample, start, end)).clamp(0.0, 1.0);
+            blend_px(img, x, y, color, coverage);
+        }
+    }
 }
 
 /// Anti-aliased filled triangle via 4×4 supersampled coverage.
@@ -109,7 +119,7 @@ pub(crate) fn fill_triangle(img: &mut RgbaImage, t: &[ImagePoint; 3], color: Rgb
                         x as f32 + (sx as f32 + 0.5) / 4.0,
                         y as f32 + (sy as f32 + 0.5) / 4.0,
                     );
-                    if point_in_triangle(sample, t) {
+                    if point_in_triangle(sample, *t) {
                         hits += 1;
                     }
                 }

@@ -245,6 +245,23 @@ impl AnnotationCanvas<'_> {
     fn draw_shape(&self, frame: &mut canvas::Frame, shape: &RenderShape) {
         let s = self.scale;
         match shape {
+            RenderShape::Line {
+                start,
+                end,
+                width,
+                color,
+            } => {
+                let path = canvas::Path::line(
+                    Point::new(start.x * s, start.y * s),
+                    Point::new(end.x * s, end.y * s),
+                );
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default()
+                        .with_color(token_color(*color))
+                        .with_width(width * s),
+                );
+            }
             RenderShape::Rect { rect, color } => frame.fill_rectangle(
                 Point::new(rect.x * s, rect.y * s),
                 Size::new(rect.width * s, rect.height * s),
@@ -354,6 +371,7 @@ impl AnnotationCanvas<'_> {
             );
         };
         match annotation {
+            Annotation::TwoPoint { .. } => {}
             Annotation::NumberCallout { tip, bubble, .. } => {
                 handle(frame, *bubble, accent, white);
                 handle(frame, *tip, white, accent);

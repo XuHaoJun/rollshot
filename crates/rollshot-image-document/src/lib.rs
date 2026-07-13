@@ -15,6 +15,7 @@ mod raster;
 mod shapes;
 pub mod style;
 mod text;
+mod two_point;
 
 pub use annotation::{Annotation, AnnotationId, TwoPointKind};
 pub use callout_placement::place_number_callout_bubble;
@@ -26,3 +27,4 @@ pub use navigator::NavigatorItem;
 pub use shapes::{annotation_bounds, annotation_shapes, text_plate_rect, RenderShape, TextAnchor};
 pub use style::{NumberSize, NumberStyle, StrokeStyle, TextSize, TextStyle};
 pub use text::{draw_text_block, measure_block};
+pub use two_point::{arrowhead_points, point_in_triangle, segment_distance, two_point_bounds};

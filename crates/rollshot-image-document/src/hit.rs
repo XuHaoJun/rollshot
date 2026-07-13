@@ -1,10 +1,11 @@
 //! Image-space hit-testing. Tolerances are passed in by the editor (which
 //! converts a fixed screen-space tolerance through its zoom scale).
 
-use crate::annotation::{Annotation, AnnotationId};
+use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
 use crate::geometry::{ImagePoint, ImageRect};
 use crate::shapes::text_plate_rect;
 use crate::style;
+use crate::two_point::{arrowhead_points, point_in_triangle, segment_distance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeHandle {
@@ -21,6 +22,8 @@ pub enum ResizeHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitPart {
     Body,
+    StartEndpoint,
+    EndEndpoint,
     NumberBubble,
     NumberTip,
     Resize(ResizeHandle),
@@ -56,6 +59,26 @@ pub fn hit_test_annotation(
     tolerance: f32,
 ) -> Option<HitPart> {
     match annotation {
+        Annotation::TwoPoint {
+            kind,
+            start,
+            end,
+            style,
+            ..
+        } => {
+            if point.distance(*start) <= tolerance {
+                Some(HitPart::StartEndpoint)
+            } else if point.distance(*end) <= tolerance {
+                Some(HitPart::EndEndpoint)
+            } else if segment_distance(point, *start, *end) <= style.width / 2.0 + tolerance
+                || (*kind == TwoPointKind::Arrow
+                    && point_in_triangle(point, arrowhead_points(*start, *end, style.width)))
+            {
+                Some(HitPart::Body)
+            } else {
+                None
+            }
+        }
         Annotation::NumberCallout {
             tip, bubble, style, ..
         } => {
@@ -103,7 +126,7 @@ pub fn hit_test(annotations: &[Annotation], point: ImagePoint, tolerance: f32) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotation::{Annotation, AnnotationId};
+    use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect};
     use crate::style;
 
@@ -117,6 +140,50 @@ mod tests {
             bubble: ImagePoint::new(120.0, 120.0),
             style: style::NumberStyle::default(),
         }
+    }
+
+    fn arrow() -> Annotation {
+        Annotation::two_point(
+            AnnotationId(2),
+            TwoPointKind::Arrow,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(100.0, 50.0),
+        )
+    }
+
+    #[test]
+    fn arrow_hit_tests_endpoints_shaft_and_triangle_in_priority_order() {
+        let annotation = arrow();
+        assert_eq!(
+            hit_test_annotation(&annotation, ImagePoint::new(10.0, 50.0), 8.0),
+            Some(HitPart::StartEndpoint)
+        );
+        assert_eq!(
+            hit_test_annotation(&annotation, ImagePoint::new(100.0, 50.0), 8.0),
+            Some(HitPart::EndEndpoint)
+        );
+        assert_eq!(
+            hit_test_annotation(&annotation, ImagePoint::new(50.0, 53.0), 8.0),
+            Some(HitPart::Body)
+        );
+        assert_eq!(
+            hit_test_annotation(&annotation, ImagePoint::new(80.0, 58.0), 2.0),
+            Some(HitPart::Body)
+        );
+    }
+
+    #[test]
+    fn line_hit_does_not_extend_beyond_finite_segment() {
+        let annotation = Annotation::two_point(
+            AnnotationId(3),
+            TwoPointKind::Line,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(100.0, 50.0),
+        );
+        assert_eq!(
+            hit_test_annotation(&annotation, ImagePoint::new(115.0, 50.0), 2.0),
+            None
+        );
     }
 
     #[test]

@@ -2,10 +2,11 @@
 //! for BOTH flattened output (raster.rs/flatten.rs) and any live overlay
 //! renderer.
 
-use crate::annotation::Annotation;
+use crate::annotation::{Annotation, TwoPointKind};
 use crate::geometry::{ImagePoint, ImageRect, Rgba8};
 use crate::style::{self, NumberStyle, TextStyle};
 use crate::text::measure_block;
+use crate::two_point::{arrowhead_points, two_point_bounds};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAnchor {
@@ -18,6 +19,12 @@ pub enum TextAnchor {
 /// A framework-neutral drawing primitive in image coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderShape {
+    Line {
+        start: ImagePoint,
+        end: ImagePoint,
+        width: f32,
+        color: Rgba8,
+    },
     Rect {
         rect: ImageRect,
         color: Rgba8,
@@ -108,6 +115,29 @@ pub fn text_plate_rect(position: ImagePoint, text: &str, style: TextStyle) -> Im
 /// (spec §6) — those are editor concerns and never enter this model.
 pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
     match annotation {
+        Annotation::TwoPoint {
+            kind,
+            start,
+            end,
+            style,
+            ..
+        } => {
+            let alpha = (style.opacity * 255.0).round() as u8;
+            let color = style.color.with_alpha(alpha);
+            let mut shapes = vec![RenderShape::Line {
+                start: *start,
+                end: *end,
+                width: style.width,
+                color,
+            }];
+            if *kind == TwoPointKind::Arrow {
+                shapes.push(RenderShape::Triangle {
+                    points: arrowhead_points(*start, *end, style.width),
+                    color,
+                });
+            }
+            shapes
+        }
         Annotation::NumberCallout {
             number,
             tip,
@@ -180,6 +210,13 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
 /// viewport culling and Navigator jump targets.
 pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
     match annotation {
+        Annotation::TwoPoint {
+            kind,
+            start,
+            end,
+            style,
+            ..
+        } => two_point_bounds(*kind, *start, *end, style.width),
         Annotation::NumberCallout {
             tip, bubble, style, ..
         } => {
@@ -217,9 +254,55 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotation::{Annotation, AnnotationId};
+    use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect, Rgb8};
     use crate::style::{self, NumberSize, NumberStyle, TextSize, TextStyle};
+
+    fn line() -> Annotation {
+        Annotation::two_point(
+            AnnotationId(1),
+            TwoPointKind::Line,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(100.0, 50.0),
+        )
+    }
+
+    fn arrow() -> Annotation {
+        Annotation::two_point(
+            AnnotationId(2),
+            TwoPointKind::Arrow,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(100.0, 50.0),
+        )
+    }
+
+    #[test]
+    fn arrow_lowers_to_shaft_then_existing_triangle() {
+        let annotation = arrow();
+        let shapes = annotation_shapes(&annotation);
+        assert!(matches!(shapes[0], RenderShape::Line { .. }));
+        assert!(matches!(shapes[1], RenderShape::Triangle { .. }));
+    }
+
+    #[test]
+    fn line_lowers_to_one_shaft_with_reviewed_style() {
+        let shapes = annotation_shapes(&line());
+        assert_eq!(shapes.len(), 1);
+        assert!(matches!(
+            shapes[0],
+            RenderShape::Line {
+                start: ImagePoint { x: 10.0, y: 50.0 },
+                end: ImagePoint { x: 100.0, y: 50.0 },
+                width: 4.0,
+                color: Rgba8 {
+                    r: 0xE5,
+                    g: 0x48,
+                    b: 0x4D,
+                    a: 0xFF
+                },
+            }
+        ));
+    }
 
     fn number(tip: ImagePoint, bubble: ImagePoint) -> Annotation {
         Annotation::NumberCallout {

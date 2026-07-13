@@ -1,7 +1,7 @@
 //! Deterministic Navigator ordering (spec §8.2): image-space top-to-bottom,
 //! ties by horizontal position, then stable annotation ID.
 
-use crate::annotation::{Annotation, AnnotationId};
+use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
 use crate::geometry::ImagePoint;
 use crate::shapes::annotation_bounds;
 
@@ -17,6 +17,14 @@ pub struct NavigatorItem {
 
 fn label(annotation: &Annotation) -> String {
     match annotation {
+        Annotation::TwoPoint {
+            kind: TwoPointKind::Line,
+            ..
+        } => "Line".to_string(),
+        Annotation::TwoPoint {
+            kind: TwoPointKind::Arrow,
+            ..
+        } => "Arrow".to_string(),
         Annotation::NumberCallout { number, .. } => number.to_string(),
         Annotation::TextNote { text, .. } => {
             let first_line = text.lines().next().unwrap_or("").trim();
@@ -56,9 +64,42 @@ pub fn navigator_items(annotations: &[Annotation]) -> Vec<NavigatorItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotation::{Annotation, AnnotationId};
+    use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect};
     use crate::style::{NumberStyle, TextStyle};
+
+    fn line() -> Annotation {
+        Annotation::two_point(
+            AnnotationId(1),
+            TwoPointKind::Line,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(100.0, 50.0),
+        )
+    }
+
+    fn arrow() -> Annotation {
+        Annotation::two_point(
+            AnnotationId(2),
+            TwoPointKind::Arrow,
+            ImagePoint::new(10.0, 50.0),
+            ImagePoint::new(100.0, 50.0),
+        )
+    }
+
+    #[test]
+    fn navigator_labels_two_point_kinds_and_uses_visual_center() {
+        let items = navigator_items(&[line(), arrow()]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Line", "Arrow"]
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.center.x.is_finite() && item.center.y.is_finite()));
+    }
 
     #[test]
     fn items_sort_by_y_then_x_then_id() {

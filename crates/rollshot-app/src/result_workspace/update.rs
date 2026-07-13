@@ -586,6 +586,10 @@ pub(crate) fn handle_canvas_released(
         }) => {
             if current != original {
                 let result = match &current {
+                    Annotation::TwoPoint { start, end, .. } => state
+                        .document
+                        .image
+                        .set_two_point_points(original.id(), *start, *end),
                     Annotation::NumberCallout { tip, bubble, .. } => state
                         .document
                         .image
