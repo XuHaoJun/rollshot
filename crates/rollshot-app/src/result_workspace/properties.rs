@@ -283,12 +283,11 @@ fn fill_controls(fill_enabled: bool) -> Element<'static, Message> {
     let fill_btn = button(text(if fill_enabled { "Fill On" } else { "Fill Off" }))
         .on_press(Message::ToggleShapeFill);
 
-    let color_btn = button(text("Fill color"))
-        .on_press_maybe(if fill_enabled {
-            Some(Message::OpenColorPicker(ColorProperty::ShapeFill))
-        } else {
-            None
-        });
+    let color_btn = button(text("Fill color")).on_press_maybe(if fill_enabled {
+        Some(Message::OpenColorPicker(ColorProperty::ShapeFill))
+    } else {
+        None
+    });
 
     row![fill_btn, color_btn].spacing(8).into()
 }

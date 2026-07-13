@@ -807,13 +807,15 @@ mod tests {
             AnnotationTool::Text,
             AnnotationTool::Redaction,
         ];
-        assert_eq!(all_variants.len(), 3, "Timeline has exactly 3 annotation tools");
+        assert_eq!(
+            all_variants.len(),
+            3,
+            "Timeline has exactly 3 annotation tools"
+        );
 
         for variant in &all_variants {
             match variant {
-                AnnotationTool::Number
-                | AnnotationTool::Text
-                | AnnotationTool::Redaction => {}
+                AnnotationTool::Number | AnnotationTool::Text | AnnotationTool::Redaction => {}
             }
         }
 
