@@ -158,6 +158,14 @@ pub enum Message {
     SetTextSize(rollshot_image_document::TextSize),
     /// Toggle the text background on/off for text notes.
     ToggleTextBackground,
+    /// Live-preview a shape stroke width during slider interaction.
+    PreviewShapeStrokeWidth(f32),
+    /// Toggle fill on/off for the active shape tool or selected shape.
+    ToggleShapeFill,
+    /// Commit the shape style transaction to the document.
+    ApplyShapeStyle,
+    /// Cancel the shape style transaction without mutation.
+    CancelShapeStyle,
     #[cfg(feature = "ocr")]
     OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
     #[cfg(feature = "ocr")]
@@ -276,6 +284,10 @@ impl PartialEq for Message {
             (Self::SetNumberSize(a), Self::SetNumberSize(b)) => a == b,
             (Self::SetTextSize(a), Self::SetTextSize(b)) => a == b,
             (Self::ToggleTextBackground, Self::ToggleTextBackground) => true,
+            (Self::PreviewShapeStrokeWidth(a), Self::PreviewShapeStrokeWidth(b)) => a == b,
+            (Self::ToggleShapeFill, Self::ToggleShapeFill) => true,
+            (Self::ApplyShapeStyle, Self::ApplyShapeStyle) => true,
+            (Self::CancelShapeStyle, Self::CancelShapeStyle) => true,
             #[cfg(feature = "ocr")]
             (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
             #[cfg(feature = "ocr")]
@@ -347,6 +359,7 @@ fn current_scale(state: &super::ResultWorkspace) -> f32 {
 fn clear_property_transactions(state: &mut super::ResultWorkspace) {
     state.editor.properties.color = None;
     state.editor.properties.width = None;
+    state.editor.properties.shape_style = None;
     if state.editor.properties.popup == Some(super::properties::Popup::ColorPicker) {
         state.editor.properties.popup = None;
     }
@@ -403,7 +416,9 @@ pub(crate) fn direct_manipulation_hit(
                     part,
                 })
         }
-        Tool::Number | Tool::Text | Tool::Line | Tool::Arrow => None,
+        Tool::Number | Tool::Text | Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse => {
+            None
+        }
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -537,6 +552,26 @@ pub(crate) fn handle_canvas_pressed(
             });
             Task::none()
         }
+        Tool::Rectangle | Tool::Ellipse => {
+            let kind = match state.editor.tool {
+                Tool::Rectangle => rollshot_image_document::ShapeKind::Rectangle,
+                Tool::Ellipse => rollshot_image_document::ShapeKind::Ellipse,
+                _ => unreachable!(),
+            };
+            let shape_defaults = state.annotation_defaults.values.shape(kind);
+            state.editor.drag = Some(DragState::CreateShape {
+                kind,
+                anchor: point,
+                current: point,
+                style: shape_defaults.stroke,
+                fill: if shape_defaults.fill_enabled {
+                    Some(shape_defaults.fill_color)
+                } else {
+                    None
+                },
+            });
+            Task::none()
+        }
         Tool::Redact => {
             if let Some(hit) =
                 direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance)
@@ -584,6 +619,10 @@ pub(crate) fn handle_canvas_moved(
             Task::none()
         }
         Some(DragState::CreateRedaction { current, .. }) => {
+            *current = point;
+            Task::none()
+        }
+        Some(DragState::CreateShape { current, .. }) => {
             *current = point;
             Task::none()
         }
@@ -653,6 +692,24 @@ pub(crate) fn handle_canvas_released(
                 .add_redaction(ImageRect::from_corners(anchor, point))
             {
                 set_selection(state, Some(id));
+            }
+        }
+        Some(DragState::CreateShape {
+            kind,
+            anchor,
+            style,
+            fill,
+            ..
+        }) => {
+            let bounds = ImageRect::from_corners(anchor, point);
+            if bounds.width > 0.0 && bounds.height > 0.0 {
+                if let Err(e) = state
+                    .document
+                    .image
+                    .add_shape_with_style(kind, bounds, style, fill)
+                {
+                    state.message = Some(InlineMessage::Error(e.to_string()));
+                }
             }
         }
         Some(DragState::EditAnnotation {
@@ -935,6 +992,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.popup = None;
             state.editor.properties.color = None;
             state.editor.properties.width = None;
+            state.editor.properties.shape_style = None;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
                 state.editor.drag = None;
@@ -957,9 +1015,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if state.editor.tool == Tool::OcrText {
                 return Task::none();
             }
-            if state.editor.properties.color.is_some() || state.editor.properties.width.is_some() {
+            if state.editor.properties.color.is_some()
+                || state.editor.properties.width.is_some()
+                || state.editor.properties.shape_style.is_some()
+            {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -976,9 +1038,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if state.editor.tool == Tool::OcrText {
                 return Task::none();
             }
-            if state.editor.properties.color.is_some() || state.editor.properties.width.is_some() {
+            if state.editor.properties.color.is_some()
+                || state.editor.properties.width.is_some()
+                || state.editor.properties.shape_style.is_some()
+            {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1011,9 +1077,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 state.editor.tool = Tool::Select;
                 return Task::none();
             }
-            if state.editor.properties.color.is_some() || state.editor.properties.width.is_some() {
+            if state.editor.properties.color.is_some()
+                || state.editor.properties.width.is_some()
+                || state.editor.properties.shape_style.is_some()
+            {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1796,6 +1866,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         _ => return Task::none(),
                     }
                 }
+                (PropertyTarget::ShapeTool(kind), ColorProperty::StrokeColor) => {
+                    state.annotation_defaults.values.shape(*kind).stroke.color
+                }
+                (PropertyTarget::ShapeTool(kind), ColorProperty::ShapeFill) => {
+                    state.annotation_defaults.values.shape(*kind).fill_color
+                }
+                (PropertyTarget::Annotation(id), ColorProperty::ShapeFill) => {
+                    match state.document.image.annotation(*id) {
+                        Some(Annotation::Shape { fill, .. }) => {
+                            fill.unwrap_or(Rgb8::new(0xE5, 0x48, 0x4D))
+                        }
+                        _ => return Task::none(),
+                    }
+                }
                 _ => return Task::none(),
             };
             let hex = format!("#{:02X}{:02X}{:02X}", original.r, original.g, original.b);
@@ -1878,6 +1962,17 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         persist_annotation_defaults(state);
                     }
                 }
+                PropertyTarget::ShapeTool(kind) => {
+                    if tx.property == ColorProperty::StrokeColor {
+                        state
+                            .annotation_defaults
+                            .values
+                            .shape_mut(kind)
+                            .stroke
+                            .color = tx.preview;
+                        persist_annotation_defaults(state);
+                    }
+                }
                 PropertyTarget::Annotation(id) => match tx.property {
                     ColorProperty::NumberAccent => {
                         if let Some(Annotation::NumberCallout { style, .. }) =
@@ -1923,8 +2018,169 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             }
                         }
                     }
+                    ColorProperty::ShapeFill => {}
                 },
             }
+            Task::none()
+        }
+        Message::PreviewShapeStrokeWidth(width) => {
+            use super::properties::ShapeStyleTransaction;
+            let Some(target) = super::properties::property_target(state) else {
+                return Task::none();
+            };
+            let (kind, id, original_stroke, original_fill, remembered) = match target {
+                super::properties::PropertyTarget::ShapeTool(kind) => {
+                    let sd = state.annotation_defaults.values.shape(kind);
+                    (
+                        kind,
+                        None,
+                        sd.stroke,
+                        if sd.fill_enabled {
+                            Some(sd.fill_color)
+                        } else {
+                            None
+                        },
+                        sd.fill_color,
+                    )
+                }
+                super::properties::PropertyTarget::Annotation(id) => {
+                    match state.document.image.annotation(id) {
+                        Some(Annotation::Shape {
+                            kind, stroke, fill, ..
+                        }) => {
+                            let remembered =
+                                state.annotation_defaults.values.shape(*kind).fill_color;
+                            (*kind, Some(id), *stroke, *fill, remembered)
+                        }
+                        _ => return Task::none(),
+                    }
+                }
+                _ => return Task::none(),
+            };
+            let tx = state
+                .editor
+                .properties
+                .shape_style
+                .get_or_insert(ShapeStyleTransaction {
+                    id: id.unwrap_or(rollshot_image_document::AnnotationId(u64::MAX)),
+                    kind,
+                    original_stroke,
+                    original_fill,
+                    preview_stroke: original_stroke,
+                    preview_fill: original_fill,
+                    remembered_fill_color: remembered,
+                });
+            if id.is_some() && tx.id != id.unwrap() {
+                *tx = ShapeStyleTransaction {
+                    id: id.unwrap(),
+                    kind,
+                    original_stroke,
+                    original_fill,
+                    preview_stroke: original_stroke,
+                    preview_fill: original_fill,
+                    remembered_fill_color: remembered,
+                };
+            }
+            tx.preview_stroke.width = width;
+            Task::none()
+        }
+        Message::ToggleShapeFill => {
+            use super::properties::ShapeStyleTransaction;
+            let Some(target) = super::properties::property_target(state) else {
+                return Task::none();
+            };
+            let (kind, id, original_stroke, original_fill, remembered) = match target {
+                super::properties::PropertyTarget::ShapeTool(kind) => {
+                    let sd = state.annotation_defaults.values.shape(kind);
+                    (
+                        kind,
+                        None,
+                        sd.stroke,
+                        if sd.fill_enabled {
+                            Some(sd.fill_color)
+                        } else {
+                            None
+                        },
+                        sd.fill_color,
+                    )
+                }
+                super::properties::PropertyTarget::Annotation(id) => {
+                    match state.document.image.annotation(id) {
+                        Some(Annotation::Shape {
+                            kind, stroke, fill, ..
+                        }) => {
+                            let remembered =
+                                state.annotation_defaults.values.shape(*kind).fill_color;
+                            (*kind, Some(id), *stroke, *fill, remembered)
+                        }
+                        _ => return Task::none(),
+                    }
+                }
+                _ => return Task::none(),
+            };
+            let tx = state
+                .editor
+                .properties
+                .shape_style
+                .get_or_insert(ShapeStyleTransaction {
+                    id: id.unwrap_or(rollshot_image_document::AnnotationId(u64::MAX)),
+                    kind,
+                    original_stroke,
+                    original_fill,
+                    preview_stroke: original_stroke,
+                    preview_fill: original_fill,
+                    remembered_fill_color: remembered,
+                });
+            if id.is_some() && tx.id != id.unwrap() {
+                *tx = ShapeStyleTransaction {
+                    id: id.unwrap(),
+                    kind,
+                    original_stroke,
+                    original_fill,
+                    preview_stroke: original_stroke,
+                    preview_fill: original_fill,
+                    remembered_fill_color: remembered,
+                };
+            }
+            tx.preview_fill = if let Some(color) = tx.preview_fill {
+                tx.remembered_fill_color = color;
+                None
+            } else {
+                Some(tx.remembered_fill_color)
+            };
+            // Tool-default: persist immediately
+            if id.is_none() {
+                if let super::properties::PropertyTarget::ShapeTool(kind) = target {
+                    let sd = state.annotation_defaults.values.shape_mut(kind);
+                    sd.fill_enabled = tx.preview_fill.is_some();
+                    if let Some(color) = tx.preview_fill {
+                        sd.fill_color = color;
+                    }
+                    state.editor.properties.shape_style = None;
+                    persist_annotation_defaults(state);
+                }
+            }
+            Task::none()
+        }
+        Message::ApplyShapeStyle => {
+            let Some(tx) = state.editor.properties.shape_style.take() else {
+                return Task::none();
+            };
+            // For selected annotations: commit to document
+            if tx.id.0 != u64::MAX {
+                if let Err(e) =
+                    state
+                        .document
+                        .image
+                        .set_shape_style(tx.id, tx.preview_stroke, tx.preview_fill)
+                {
+                    state.message = Some(InlineMessage::Error(e.to_string()));
+                }
+            }
+            Task::none()
+        }
+        Message::CancelShapeStyle => {
+            state.editor.properties.shape_style = None;
             Task::none()
         }
         Message::CancelColor => {
@@ -1948,7 +2204,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Some(Annotation::TwoPoint { style, .. }) => style.width,
                     _ => return Task::none(),
                 },
-                PropertyTarget::NumberTool | PropertyTarget::TextTool => return Task::none(),
+                PropertyTarget::NumberTool
+                | PropertyTarget::TextTool
+                | PropertyTarget::ShapeTool(_) => return Task::none(),
             };
             let transaction = state
                 .editor
@@ -1996,7 +2254,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         }
                     }
                 }
-                PropertyTarget::NumberTool | PropertyTarget::TextTool => {}
+                PropertyTarget::NumberTool
+                | PropertyTarget::TextTool
+                | PropertyTarget::ShapeTool(_) => {}
             }
             Task::none()
         }
@@ -2338,6 +2598,8 @@ pub(crate) fn map_key_press(
             "t" => Some(Message::SelectTool(Tool::Text)),
             "l" => Some(Message::SelectTool(Tool::Line)),
             "a" => Some(Message::SelectTool(Tool::Arrow)),
+            "u" => Some(Message::SelectTool(Tool::Rectangle)),
+            "o" if !cfg!(feature = "ocr") => Some(Message::SelectTool(Tool::Ellipse)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
@@ -5039,5 +5301,154 @@ mod tests {
         let flat = state.document.image.flatten();
         let px = flat.get_pixel(10, 10);
         assert_eq!(px.0[3], 255, "redaction pixel must be fully opaque");
+    }
+
+    // -- shape style tests (Task 3) ------------------------------------------
+
+    fn workspace_with_shape(
+        kind: rollshot_image_document::ShapeKind,
+    ) -> super::super::ResultWorkspace {
+        let mut state = workspace_with_size(200, 200);
+        state
+            .document
+            .image
+            .add_shape(
+                kind,
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(state.document.image.annotations()[0].id());
+        state
+    }
+
+    #[test]
+    fn shape_preview_only_changes_preview_not_document() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _id = state.editor.selection.unwrap();
+        let before = state.document.image.state_id();
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(8.0));
+        assert_eq!(state.document.image.state_id(), before);
+        let preview = preview_annotation(&state).unwrap();
+        assert_eq!(preview.stroke_style().unwrap().width, 8.0);
+    }
+
+    #[test]
+    fn shape_apply_commits_and_one_undo_restores() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let id = state.editor.selection.unwrap();
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(8.0));
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+        assert_eq!(
+            state
+                .document
+                .image
+                .annotation(id)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .width,
+            8.0
+        );
+        assert!(state.document.image.undo());
+        assert_eq!(
+            state
+                .document
+                .image
+                .annotation(id)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .width,
+            4.0
+        );
+    }
+
+    #[test]
+    fn shape_cancel_discards_preview_without_history() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let before = state.document.image.state_id();
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+        let _ = update(&mut state, Message::CancelShapeStyle);
+        assert!(state.editor.properties.shape_style.is_none());
+        assert_eq!(state.document.image.state_id(), before);
+    }
+
+    #[test]
+    fn toggle_shape_fill_seeds_from_remembered_color() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _id = state.editor.selection.unwrap();
+        let _ = update(&mut state, Message::ToggleShapeFill);
+        let tx = state.editor.properties.shape_style.as_ref().unwrap();
+        assert!(tx.preview_fill.is_some());
+        assert_eq!(tx.preview_fill.unwrap(), Rgb8::new(0xE5, 0x48, 0x4D));
+    }
+
+    #[test]
+    fn toggle_shape_fill_disable_reenable_retains_preview_color() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(&mut state, Message::ToggleShapeFill);
+        // Change the preview fill color
+        if let Some(tx) = &mut state.editor.properties.shape_style {
+            tx.preview_fill = Some(Rgb8::new(0, 255, 0));
+        }
+        let _ = update(&mut state, Message::ToggleShapeFill);
+        assert!(state
+            .editor
+            .properties
+            .shape_style
+            .as_ref()
+            .unwrap()
+            .preview_fill
+            .is_none());
+        let _ = update(&mut state, Message::ToggleShapeFill);
+        assert_eq!(
+            state
+                .editor
+                .properties
+                .shape_style
+                .as_ref()
+                .unwrap()
+                .preview_fill,
+            Some(Rgb8::new(0, 255, 0))
+        );
+    }
+
+    #[test]
+    fn selected_shape_style_does_not_change_defaults() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let defaults = state.annotation_defaults.values.clone();
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+        assert_eq!(state.annotation_defaults.values, defaults);
+    }
+
+    #[test]
+    fn shape_tool_switch_discards_preview() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+        let _ = update(&mut state, Message::SelectTool(Tool::Arrow));
+        assert!(state.editor.properties.shape_style.is_none());
+    }
+
+    #[test]
+    fn shape_escape_discards_preview() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.properties.shape_style.is_none());
+    }
+
+    #[test]
+    fn shape_undo_discards_preview() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+        let _ = update(&mut state, Message::Undo);
+        assert!(state.editor.properties.shape_style.is_none());
     }
 }

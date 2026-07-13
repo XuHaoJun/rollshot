@@ -137,6 +137,16 @@ fn tool_item(tool: Tool) -> ToolbarItem {
             label: "Redact",
             shortcut: "R",
         },
+        Tool::Rectangle => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Rectangle),
+            label: "Rectangle",
+            shortcut: "U",
+        },
+        Tool::Ellipse => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Ellipse),
+            label: "Ellipse",
+            shortcut: "O",
+        },
         #[cfg(feature = "ocr")]
         Tool::OcrText => ToolbarItem {
             kind: ToolbarItemKind::Ocr,
@@ -168,6 +178,8 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
             Tool::Text,
             Tool::Line,
             Tool::Arrow,
+            Tool::Rectangle,
+            Tool::Ellipse,
             Tool::Redact,
         ],
         ToolbarDensity::Narrow => vec![Tool::Select, Tool::Number, Tool::Text, Tool::Arrow],
@@ -452,6 +464,8 @@ fn tool_tooltip(tool: Tool) -> String {
     match tool {
         Tool::Line => "Line (L) — Shift: Snap to 45°".into(),
         Tool::Arrow => "Arrow (A) — Shift: Snap to 45°".into(),
+        Tool::Rectangle => "Rectangle (U)".into(),
+        Tool::Ellipse => "Ellipse (O)".into(),
         _ => {
             let item = tool_item(tool);
             shortcut_label(item.label, item.shortcut)
@@ -779,6 +793,8 @@ mod tests {
                 Tool::Text,
                 Tool::Line,
                 Tool::Arrow,
+                Tool::Rectangle,
+                Tool::Ellipse,
                 Tool::Redact,
             ]
         );

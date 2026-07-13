@@ -32,6 +32,8 @@ pub enum Tool {
     Text,
     Line,
     Arrow,
+    Rectangle,
+    Ellipse,
     Redact,
     #[cfg(feature = "ocr")]
     OcrText,
@@ -54,6 +56,13 @@ pub enum DragState {
     CreateRedaction {
         anchor: ImagePoint,
         current: ImagePoint,
+    },
+    CreateShape {
+        kind: rollshot_image_document::ShapeKind,
+        anchor: ImagePoint,
+        current: ImagePoint,
+        style: StrokeStyle,
+        fill: Option<rollshot_image_document::Rgb8>,
     },
     /// Select-tool drag of an existing annotation or one of its handles.
     EditAnnotation {
