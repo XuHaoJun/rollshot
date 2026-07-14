@@ -10,6 +10,62 @@
 
 **Authority:** Spec [`docs/superpowers/specs/2026-07-14-freehand-tools-design.md`](../specs/2026-07-14-freehand-tools-design.md) under umbrella [`2026-07-12-annotation-editor-umbrella-design.md`](../specs/2026-07-12-annotation-editor-umbrella-design.md). On conflict, the spec wins over this plan.
 
+## File Structure
+
+- Create: `crates/rollshot-image-document/src/freehand.rs` — framework-neutral polyline geometry.
+- Create: `crates/rollshot-app/src/result_workspace/freehand_tool.rs` — app-only sampling, simplification, threshold, and translation helpers.
+- Modify: `crates/rollshot-image-document/src/{annotation,document,edit_op,flatten,hit,lib,navigator,raster,shapes,style}.rs` — committed model, validated edits, geometry, rendering, output, and tests.
+- Modify: `crates/rollshot-app/src/result_workspace/{annotation_defaults,canvas,mod,properties,toolbar,update}.rs` — active tools, drafts, live drawing, defaults, properties, shortcuts, and diagnostics.
+- Modify: `crates/rollshot-app/src/timeline_workspace/annotation.rs` — display-only `RenderShape::Polyline` compatibility.
+- Modify: `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md` — implementation handoff evidence only; historical freehand spec/plan content is not rewritten after handoff.
+
+No new crate, top-level module, dependency, binary, or distribution artifact is introduced.
+
+## Execution Contract
+
+- TDD means RED is observed before implementation. A step that creates a new module may use temporary `todo!("implemented in the next step")` bodies so its tests compile and fail at runtime; replace those bodies only after recording RED.
+- Every implementation step runs the narrowest affected crate check immediately. Every task then runs its targeted tests and ends with explicit-path staging plus an atomic commit.
+- Never use `git add -A`. If the compiler reveals an undeclared exhaustive consumer, update that task's `**Files:**` declaration before editing it, then stage that path explicitly.
+- Baseline exception: `rtk cargo test -p rollshot-app result_workspace::tests -- --nocapture` currently exits 101 with exactly these three stale-`config.toml` failures: `save_as_cancel_leaves_no_change`, `unsaved_workspace_with_initial_error_has_error_message`, and `saved_workspace_starts_with_saved_path_message`. No other failing test is allowed. Final verification compares against this exact allowlist; wording such as “passes plus known failures” is not accepted as a PASS signal.
+- Commands that use `cargo test` without a failure allowlist must exit 0. Commands expected to observe the baseline three must say `Expected: FAIL (exit 101), exactly <names>`.
+
+## Architecture And Test Flow
+
+```text
+pointer press/move/release
+  -> app-only filtered draft (no document/history mutation)
+  -> minimum gesture + RDP at release
+  -> one validated ImageDocument edit
+  -> Annotation::Freehand (simplified image-space points)
+       |-> hit/bounds/Navigator/history/style
+       |-> borrowed iced Canvas path (live; no Vec clone per redraw)
+       `-> RenderShape::Polyline -> scanline max-coverage raster -> Copy/Save
+
+Tests:
+  helper unit RED/GREEN
+    -> document API/history/negative paths
+    -> app gesture/property integration
+    -> direct raster + committed flatten lifecycle
+    -> Timeline display compatibility + workspace regression sweep
+    -> Linux/macOS runtime checklist (handoff; not executable headlessly)
+```
+
+## What Already Exists
+
+- `two_point::segment_distance`, `ImagePoint`, and `ImageRect` already provide the geometry primitives; this plan reuses them instead of adding a geometry dependency.
+- `StrokeStyle`, `validate_stroke_style`, `UpdateStrokeStyle`, history, dirty-state, Navigator, Copy, Save, and flatten ordering already solve the generic committed-edit lifecycle; Freehand extends those paths.
+- `annotation_shapes`, `RenderShape`, the source-over raster helpers, and both iced canvases already form the shared render-command pipeline; `Polyline` is one new primitive, not a parallel renderer.
+- Result Workspace draft/edit handling, viewport culling, transactional properties, toolbar density/More routing, keyboard precedence, and defaults persistence already exist and are extended in place.
+- The 100-annotation long-image test already supplies the scale fixture; its mix is changed without increasing the history-limit count.
+
+## NOT in scope
+
+- Pen/Highlighter creation outside Result Workspace — explicitly forbidden by spec §3/§11; Timeline receives display compatibility only.
+- Multiply blending, pressure/velocity width, smoothing curves, eraser, resize handles, per-point editing, Shift constraints, multi-select, and reorder — deferred product work from spec §3.
+- A Shader/custom Widget/custom Overlay or new raster dependency — Canvas plus the existing software rasterizer are sufficient.
+- Stitching-core benchmarks and capture-backend changes — no stitching or capture path is touched.
+- Executing the Linux and macOS native runtime checklists in a headless agent environment — Task 10 records them as remaining handoff work, so the implementation is not described as full Slice 4 completion until both pass.
+
 ## Global Constraints
 
 - Prefix every shell command with `rtk` (e.g. `rtk cargo test -p rollshot-image-document`).
@@ -32,15 +88,28 @@
 **Files:**
 - Create: `crates/rollshot-image-document/src/freehand.rs`
 - Modify: `crates/rollshot-image-document/src/lib.rs` (add `mod freehand;` alongside the existing `mod two_point;` / `mod box_shape;` lines — match the existing module list style; do not re-export publicly)
+- Modify (preflight only): `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md` (Slice 4 `Planned` → `In progress` before product edits)
 
 **Interfaces:**
 - Produces: `pub(crate) fn polyline_distance(point: ImagePoint, points: &[ImagePoint]) -> f32` — minimum distance from `point` to the polyline (per-segment clamped projection; zero-length segments fall back to point distance).
 - Produces: `pub(crate) fn freehand_bounds(points: &[ImagePoint], width: f32) -> ImageRect` — AABB of the points expanded by `width / 2.0`.
 - Consumes: `crate::two_point::segment_distance`, `crate::geometry::{ImagePoint, ImageRect}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 0: Mark Slice 4 In progress before product edits**
 
-Create `crates/rollshot-image-document/src/freehand.rs`:
+Update only the Slice 4 registry row with branch `feat/annotation-freehand-tools`, the implementation start date/session, and “automated/runtime verification pending.”
+
+Run: `rtk git diff --check`
+Expected: PASS; only the umbrella registry is changed.
+
+```bash
+rtk git add docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md
+rtk git commit -m "docs(annotation): mark Slice 4 implementation in progress" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+- [ ] **Step 1: Write the failing tests around temporary stubs**
+
+Create `crates/rollshot-image-document/src/freehand.rs` from the target code below, but for RED replace both non-test function bodies with `todo!("implemented in Step 2")`. Register `mod freehand;` in `lib.rs` before running the tests.
 
 ```rust
 //! Freehand polyline geometry: bounds and distance used by hit testing and
@@ -53,25 +122,17 @@ use crate::two_point::segment_distance;
 /// duplicate points contribute a point-distance (no zero-length segment math).
 /// A single-point slice degenerates to point distance.
 pub(crate) fn polyline_distance(point: ImagePoint, points: &[ImagePoint]) -> f32 {
-    debug_assert!(!points.is_empty());
-    let mut best = f32::MAX;
-    for pair in points.windows(2) {
-        let d = if pair[0] == pair[1] {
-            point.distance(pair[0])
-        } else {
-            segment_distance(point, pair[0], pair[1])
-        };
-        best = best.min(d);
-    }
-    if points.len() == 1 {
-        best = point.distance(points[0]);
-    }
-    best
+    todo!("implemented in Step 2")
 }
 
 /// Conservative visual bounds: AABB of the points expanded by half the
 /// stroke width (round caps extend half a width past the endpoints).
 pub(crate) fn freehand_bounds(points: &[ImagePoint], width: f32) -> ImageRect {
+    todo!("implemented in Step 2")
+}
+
+// Step 2 replaces the stub above with:
+fn freehand_bounds_target(points: &[ImagePoint], width: f32) -> ImageRect {
     debug_assert!(!points.is_empty());
     let mut x0 = f32::MAX;
     let mut y0 = f32::MAX;
@@ -136,6 +197,12 @@ mod tests {
     }
 
     #[test]
+    fn single_point_degenerates_to_point_distance() {
+        let point = ImagePoint::new(3.0, 4.0);
+        assert_eq!(polyline_distance(ImagePoint::new(0.0, 0.0), &[point]), 5.0);
+    }
+
+    #[test]
     fn bounds_expand_by_half_width() {
         let b = freehand_bounds(&l_path(), 4.0);
         assert_eq!(
@@ -151,20 +218,45 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Register the module and run the tests to verify they fail, then pass**
+Run: `rtk cargo test -p rollshot-image-document freehand`
+Expected: FAIL because both helpers reach the temporary `todo!()` bodies.
 
-Add `mod freehand;` to `crates/rollshot-image-document/src/lib.rs` next to `mod two_point;`.
+- [ ] **Step 2: Implement both helpers and make the tests green**
+
+Replace `polyline_distance` with the minimum-over-segments implementation shown in its original target contract (duplicate points use point distance; a one-point slice degenerates to point distance). Replace `freehand_bounds` with the body shown as `freehand_bounds_target`, then remove the target-only helper. Keep `debug_assert!(!points.is_empty())` in both production helpers.
+
+```rust
+pub(crate) fn polyline_distance(point: ImagePoint, points: &[ImagePoint]) -> f32 {
+    debug_assert!(!points.is_empty());
+    if points.len() == 1 {
+        return point.distance(points[0]);
+    }
+    points
+        .windows(2)
+        .map(|pair| {
+            if pair[0] == pair[1] {
+                point.distance(pair[0])
+            } else {
+                segment_distance(point, pair[0], pair[1])
+            }
+        })
+        .fold(f32::MAX, f32::min)
+}
+```
 
 Run: `rtk cargo test -p rollshot-image-document freehand`
-Expected: the 5 new tests PASS (the module is written with its tests; if any fail, fix the helper, not the test).
+Expected: the 6 new tests PASS (if any fail, fix the helper, not the test).
 
 Note: `two_point::segment_distance` is `pub(crate)`-reachable — check its visibility in `crates/rollshot-image-document/src/two_point.rs:28`; it is `pub fn` in a private module, so `crate::two_point::segment_distance` resolves.
 
 - [ ] **Step 3: Commit**
 
+Run: stage the explicit paths below, then `rtk git diff --cached --check`.
+Expected: PASS; only Task 1 geometry files are staged (the registry preflight was committed in Step 0).
+
 ```bash
 rtk git add crates/rollshot-image-document/src/freehand.rs crates/rollshot-image-document/src/lib.rs
-rtk git commit -m "feat(annotation): add freehand polyline geometry helpers"
+rtk git commit -m "feat(annotation): add freehand polyline geometry helpers" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -176,6 +268,7 @@ rtk git commit -m "feat(annotation): add freehand polyline geometry helpers"
 - Modify: `crates/rollshot-image-document/src/raster.rs` (add `stroke_polyline`)
 - Modify: `crates/rollshot-image-document/src/flatten.rs` (new `draw_shape` arm, ~line 26)
 - Modify: `crates/rollshot-app/src/result_workspace/canvas.rs` (new `draw_shape` arm, ~line 322 — the `RenderShape` match is exhaustive and will not compile without it)
+- Modify: `crates/rollshot-app/src/timeline_workspace/annotation.rs` (display-only `RenderShape::Polyline` arm; this match is also exhaustive)
 
 **Interfaces:**
 - Produces: `RenderShape::Polyline { points: Vec<ImagePoint>, width: f32, color: Rgba8 }` — round caps and round joins; `color.a` is the whole-stroke uniform alpha.
@@ -245,9 +338,9 @@ fn polyline_has_round_caps() {
 Run: `rtk cargo test -p rollshot-image-document polyline`
 Expected: FAIL — `stroke_polyline` not found.
 
-- [ ] **Step 2: Implement `stroke_polyline` in `raster.rs`**
+- [ ] **Step 2: Implement a bounded-memory scanline max-coverage stroke in `raster.rs`**
 
-Add after `stroke_line` (~line 125). The whole-stroke uniform alpha comes from computing per-pixel MIN distance to the whole polyline (which gives MAX coverage), then blending exactly once. Clamped-projection distance produces round caps and joins for free:
+Add after `stroke_line` (~line 125). Do not use the original `pixels-in-whole-bounds × all-segments` loop: it becomes quadratic-looking work on long diagonal strokes. Use a reusable one-row `Vec<f32>` coverage buffer clipped to the stroke bounds. For each row, clear the buffer, visit only segments whose radius-expanded Y range intersects that row, visit only each segment's radius-expanded X range, update `coverage[x] = coverage[x].max(segment_coverage)`, then blend the row exactly once. Handle duplicate consecutive points with point distance, as `polyline_distance` does. This preserves round caps/joins and uniform alpha with `O(clipped width)` extra memory and work proportional to the union of segment-local raster regions rather than whole-bounds pixels times every segment.
 
 ```rust
 /// Anti-aliased polyline stroke with round caps and joins. The whole stroke
@@ -271,20 +364,44 @@ pub(crate) fn stroke_polyline(
     let y0 = (bounds.y.floor() as i32).max(0);
     let x1 = ((bounds.x + bounds.width).ceil() as i32).min(max_x);
     let y1 = ((bounds.y + bounds.height).ceil() as i32).min(max_y);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let row_len = (x1 - x0 + 1) as usize;
+    let mut coverage = vec![0.0_f32; row_len];
     for y in y0..=y1 {
-        for x in x0..=x1 {
-            let p = ImagePoint::new(x as f32 + 0.5, y as f32 + 0.5);
-            let d = crate::freehand::polyline_distance(p, points);
-            let coverage = (radius + 0.5 - d).clamp(0.0, 1.0);
-            if coverage > 0.0 {
-                blend_px(img, x, y, color, coverage);
+        coverage.fill(0.0);
+        let py = y as f32 + 0.5;
+        for pair in points.windows(2) {
+            let segment_bounds = ImageRect::from_corners(pair[0], pair[1]).expanded(radius + 1.0);
+            if py < segment_bounds.y || py > segment_bounds.y + segment_bounds.height {
+                continue;
+            }
+            let sx0 = (segment_bounds.x.floor() as i32).clamp(x0, x1);
+            let sx1 = ((segment_bounds.x + segment_bounds.width).ceil() as i32).clamp(x0, x1);
+            for x in sx0..=sx1 {
+                let p = ImagePoint::new(x as f32 + 0.5, py);
+                let distance = if pair[0] == pair[1] {
+                    p.distance(pair[0])
+                } else {
+                    crate::two_point::segment_distance(p, pair[0], pair[1])
+                };
+                let sample = (radius + 0.5 - distance).clamp(0.0, 1.0);
+                let index = (x - x0) as usize;
+                coverage[index] = coverage[index].max(sample);
+            }
+        }
+        for (offset, sample) in coverage.iter().copied().enumerate() {
+            if sample > 0.0 {
+                blend_px(img, x0 + offset as i32, y, color, sample);
             }
         }
     }
 }
 ```
 
-Performance note: this is O(pixels-in-bounds × segments) and runs only at explicit flatten. If the 100-annotation long-image test (Task 10) becomes slow (> a few seconds), add a per-row segment prefilter (skip segments whose own AABB expanded by `radius + 1.0` misses the pixel) — do not change the compositing semantics.
+Run: `rtk cargo test -p rollshot-image-document polyline`
+Expected: PASS; no self-overlap darkening and no separate-stroke regression.
 
 - [ ] **Step 3: Add the `RenderShape::Polyline` variant and the flatten arm**
 
@@ -308,9 +425,14 @@ In `crates/rollshot-image-document/src/flatten.rs`, add to `draw_shape` after th
         } => stroke_polyline(img, points, *width, *color),
 ```
 
-- [ ] **Step 4: Add the iced canvas arm (invoke `iced-rs` skill first)**
+Run: `rtk cargo check -p rollshot-image-document`
+Expected: PASS; the document crate's exhaustive `RenderShape` consumer is updated in the same step.
 
-In `crates/rollshot-app/src/result_workspace/canvas.rs`, `AnnotationCanvas::draw_shape` (~line 322), add after the `Line` arm:
+- [ ] **Step 4: Add borrowed iced Canvas drawing in both exhaustive consumers (invoke `iced-rs` skill first)**
+
+In `crates/rollshot-app/src/result_workspace/canvas.rs`, add a `draw_polyline(frame, points: &[ImagePoint], width, color, draw_kind: &'static str)` helper using iced 0.14's `with_line_cap(LineCap::Round)` and `with_line_join(LineJoin::Round)` builders. Use it with `"render_shape"` for the new `RenderShape::Polyline` arm. Do not reference `Annotation::Freehand` yet—Task 3 creates that variant and then adds the borrowed committed-annotation fast path; Task 7 uses the helper with `"draft"`.
+
+The target stroke is:
 
 ```rust
             RenderShape::Polyline {
@@ -327,11 +449,9 @@ In `crates/rollshot-app/src/result_workspace/canvas.rs`, `AnnotationCanvas::draw
                     });
                     frame.stroke(
                         &path,
-                        canvas::Stroke {
-                            line_cap: canvas::LineCap::Round,
-                            line_join: canvas::LineJoin::Round,
-                            ..canvas::Stroke::default()
-                        }
+                        canvas::Stroke::default()
+                        .with_line_cap(canvas::LineCap::Round)
+                        .with_line_join(canvas::LineJoin::Round)
                         .with_color(token_color(*color))
                         .with_width(width * s),
                     );
@@ -339,22 +459,31 @@ In `crates/rollshot-app/src/result_workspace/canvas.rs`, `AnnotationCanvas::draw
             }
 ```
 
-Verify the iced 0.14 `canvas::Stroke` field/builder names against the `iced-rs` skill reference before compiling; adjust to the actual 0.14 API if `line_cap`/`line_join` differ.
+In `crates/rollshot-app/src/timeline_workspace/annotation.rs`, add the same display-only `RenderShape::Polyline` arm to its exhaustive render match. Feed `color` through the existing `rgba_alpha(color, alpha)` helper so Highlighter alpha and Timeline overlay alpha compose consistently. Do not add Timeline creation or edit operations.
+
+Wrap the Result Workspace freehand draw helper with a high-volume-safe `tracing::trace!` event using target `rollshot::annotation` and structured `points`, `elapsed_us`, and `draw_kind` fields. Do not log coordinates or colors.
 
 Known, accepted deviation (spec §8.3): lyon stroke tessellation may double-blend translucent fragments at self-overlaps in the LIVE preview only. Flatten is authoritative. If runtime verification later finds this unacceptable, escalate via `rollshot-run-spike` — do not silently change the flatten semantics.
+
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS; both exhaustive `RenderShape` consumers compile.
 
 - [ ] **Step 5: Run tests and workspace build**
 
 Run: `rtk cargo test -p rollshot-image-document polyline`
 Expected: 3 new tests PASS.
-Run: `rtk cargo test`
-Expected: full suite passes (plus the 3 known pre-existing failures).
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS, including Result Workspace and Timeline Canvas consumers.
 
 - [ ] **Step 6: Commit**
 
+Run: stage the explicit paths below, then `rtk git diff --cached --check`.
+Expected: PASS; only Task 2 render/output consumers are staged.
+
 ```bash
 rtk git add crates/rollshot-image-document/src/shapes.rs crates/rollshot-image-document/src/raster.rs crates/rollshot-image-document/src/flatten.rs crates/rollshot-app/src/result_workspace/canvas.rs
-rtk git commit -m "feat(annotation): add Polyline render command with uniform-alpha raster stroke"
+rtk git add crates/rollshot-app/src/timeline_workspace/annotation.rs
+rtk git commit -m "feat(annotation): add Polyline rendering with uniform-alpha output" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -371,9 +500,10 @@ This is the largest task because adding an enum variant forces every exhaustive 
 - Modify: `crates/rollshot-image-document/src/shapes.rs` (`annotation_shapes` + `annotation_bounds` arms)
 - Modify: `crates/rollshot-image-document/src/hit.rs` (hit arm)
 - Modify: `crates/rollshot-image-document/src/navigator.rs` (labels)
+- Modify: `crates/rollshot-image-document/src/flatten.rs` (committed Freehand output lifecycle tests after the model exists)
 - Modify: `crates/rollshot-image-document/src/lib.rs` (re-export `FreehandKind` next to `TwoPointKind`/`ShapeKind`)
 - Modify (compile-required app arms): `crates/rollshot-app/src/result_workspace/canvas.rs` (`draw_selection_handles`), `crates/rollshot-app/src/result_workspace/properties.rs` (`preview_annotation`), `crates/rollshot-app/src/result_workspace/update.rs` (`handle_canvas_released` `EditAnnotation` commit match)
-- Check-and-fix: run `rtk cargo build --workspace` and add minimal arms to ANY other exhaustive `Annotation` match the compiler reports (automation lowering, workbench, Timeline, Action Guide consumers). Non-Result-Workspace consumers get display/passthrough behavior only — never freehand creation.
+- Audit only: run `rtk cargo build --workspace` after the declared arms. If another exhaustive `Annotation` consumer appears, stop, add its exact path to this `**Files:**` list, then add the smallest display/passthrough or explicit-unsupported arm; never hide scope behind “fix anything”.
 
 **Interfaces:**
 - Produces (doc crate public API):
@@ -588,6 +718,13 @@ fn freehand_labels_are_pen_and_highlighter() {
 }
 ```
 
+In the same RED step also add concise tests for the spec cases the original draft omitted:
+
+- `annotation.rs`: Pen/Highlighter canonical constructors, explicit style equality, `id`, and minimum-x/minimum-y anchor;
+- `document.rs`: delete → undo → redo, redo clearing after a new edit, rejected update rollback, and unchanged point/style updates creating no history;
+- `navigator.rs`: reading order and stable-ID tie breaking for equal anchors;
+- `hit.rs`: beyond-tolerance miss, width-sensitive hit, and topmost selection for crossing Freehand annotations.
+
 Run: `rtk cargo test -p rollshot-image-document freehand`
 Expected: FAIL — `FreehandKind`, `Annotation::Freehand`, wrappers not defined.
 
@@ -675,6 +812,9 @@ impl StrokeStyle {
 ```
 
 `lib.rs` — re-export `FreehandKind` where `ShapeKind`/`TwoPointKind` are re-exported.
+
+Run: `rtk cargo check -p rollshot-image-document`
+Expected: FAIL only on the declared exhaustive `Annotation` consumers in `shapes.rs`, `hit.rs`, and `navigator.rs`; the new model itself compiles.
 
 - [ ] **Step 3: Edit ops and validation**
 
@@ -777,7 +917,13 @@ fn clamp_freehand_points(
     }
 ```
 
+Run: `rtk cargo check -p rollshot-image-document`
+Expected: FAIL only on the declared exhaustive consumers implemented in Step 4; edit operations and validation compile.
+
 - [ ] **Step 4: Consumer arms in the document crate**
+
+Before editing consumers, run: `rtk cargo check -p rollshot-image-document`
+Expected: FAIL only on the declared exhaustive consumers implemented in this step; edit operations and validation from Step 3 compile.
 
 `shapes.rs` `annotation_shapes` (after the `Shape` arm):
 
@@ -818,6 +964,14 @@ fn clamp_freehand_points(
         },
 ```
 
+Run: `rtk cargo test -p rollshot-image-document`
+Expected: PASS.
+
+Add the two committed-document output lifecycle tests from the “Task 3 Step 4 Reference” section below to `flatten.rs`: self-crossing Highlighter uniform alpha/source immutability and exact opaque Pen output.
+
+Run: `rtk cargo test -p rollshot-image-document flatten`
+Expected: PASS; Task 2's direct raster semantics and Task 3's committed document model agree.
+
 - [ ] **Step 5: Compile-required app arms**
 
 `canvas.rs` `draw_selection_handles` (after the `Shape` arm) — a freehand stroke has no handles; show a bounding-box outline like TextNote:
@@ -838,7 +992,9 @@ fn clamp_freehand_points(
 
 (If `annotation_bounds` is already imported at `canvas.rs:244`, use the plain name and drop the `let _`; bind fields with `..` instead.)
 
-`properties.rs` `preview_annotation` (after the `Shape` arm) — placeholder until Task 9:
+In `draw_annotation`, special-case `Annotation::Freehand { points, style, .. }` before `annotation_shapes` and call the Task 2 `draw_polyline` helper with the borrowed slice, lowered alpha, and `"committed"`. Property-preview Freehand annotations use the same path. This is the point where the no-clone live fast path becomes compile-valid.
+
+`properties.rs` `preview_annotation` (after the `Shape` arm) — placeholder until Task 8:
 
 ```rust
         Annotation::Freehand { .. } => None,
@@ -853,21 +1009,32 @@ fn clamp_freehand_points(
                         .set_freehand_points(original.id(), points.clone()),
 ```
 
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS.
+
 - [ ] **Step 6: Sweep remaining exhaustive matches**
 
 Run: `rtk cargo build --workspace`
-For every `non-exhaustive patterns` error the compiler reports (automation proposal lowering, workbench review, Timeline, Action Guide render consumers), add the minimal arm consistent with that consumer's role — display passthrough or explicit "unsupported" — and note each file touched in the commit body. Do NOT add freehand creation to non-Result-Workspace consumers (spec §11).
+Expected: PASS with only the declared files. For any unexpected `non-exhaustive patterns` error, update this task's file declaration before editing; non-Result-Workspace consumers get display passthrough or explicit “unsupported,” never freehand creation (spec §11).
 
 - [ ] **Step 7: Run the full suite**
 
 Run: `rtk cargo test`
-Expected: all Task 3 tests pass; no regressions beyond the 3 known pre-existing failures.
+Expected: FAIL (exit 101) with exactly the three baseline Result Workspace failures named in the Execution Contract; every Task 3 and other workspace test passes.
 
 - [ ] **Step 8: Commit**
 
+Run: stage the explicit paths below, then `rtk git diff --cached --check`.
+Expected: PASS; only Task 3 declared model/consumer files are staged.
+
 ```bash
-rtk git add -A
-rtk git commit -m "feat(annotation): add Freehand document model with edit ops and consumer arms"
+rtk git add crates/rollshot-image-document/src/annotation.rs crates/rollshot-image-document/src/style.rs
+rtk git add crates/rollshot-image-document/src/edit_op.rs crates/rollshot-image-document/src/document.rs
+rtk git add crates/rollshot-image-document/src/shapes.rs crates/rollshot-image-document/src/hit.rs
+rtk git add crates/rollshot-image-document/src/navigator.rs crates/rollshot-image-document/src/flatten.rs crates/rollshot-image-document/src/lib.rs
+rtk git add crates/rollshot-app/src/result_workspace/canvas.rs
+rtk git add crates/rollshot-app/src/result_workspace/properties.rs crates/rollshot-app/src/result_workspace/update.rs
+rtk git commit -m "feat(annotation): add Freehand document model with edit ops and consumer arms" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -888,9 +1055,9 @@ rtk git commit -m "feat(annotation): add Freehand document model with edit ops a
   - `pub fn translated_points(points: &[ImagePoint], point: ImagePoint, grab_offset: (f32, f32), width: u32, height: u32) -> Vec<ImagePoint>` (rigid translation, bbox clamped to source, no deformation)
 - Consumes: `rollshot_image_document::ImagePoint`, `super::two_point::MIN_GESTURE_SCREEN`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write failing tests around temporary helper stubs**
 
-Create the module with tests:
+Create the module from the target code below, but for RED replace every non-test helper body with `todo!("implemented in Step 2")`. Register `mod freehand_tool;` in `mod.rs`, then run the tests before restoring the target bodies.
 
 ```rust
 //! Freehand gesture helpers: pointer sampling filter, commit-time RDP
@@ -1104,21 +1271,35 @@ mod tests {
         assert_eq!(out[1].x - out[0].x, 10.0);
         assert_eq!(out[1].y - out[0].y, 20.0);
     }
+
+    #[test]
+    fn large_collinear_input_is_bounded_without_recursion() {
+        let points: Vec<_> = (0..20_000)
+            .map(|x| ImagePoint::new(x as f32, 10.0))
+            .collect();
+        assert_eq!(simplify_rdp(&points, 1.0).len(), 2);
+    }
 }
 ```
 
-- [ ] **Step 2: Register the module and run the tests**
+Run: `rtk cargo test -p rollshot-app freehand_tool`
+Expected: FAIL because the helper stubs reach `todo!()`.
 
-Add `mod freehand_tool;` to `crates/rollshot-app/src/result_workspace/mod.rs` next to `mod box_tool;`.
+- [ ] **Step 2: Replace the stubs with the shown iterative implementations**
+
+Keep the iterative stack-based RDP implementation (no recursive call-stack risk). The distance filter bounds practical input growth; the 20,000-point collinear case guards the large-input path without a wall-clock assertion.
 
 Run: `rtk cargo test -p rollshot-app freehand_tool`
-Expected: all 8 tests PASS.
+Expected: all 9 tests PASS.
 
 - [ ] **Step 3: Commit**
 
+Run: stage the two helper-module paths below, then `rtk git diff --cached --check`.
+Expected: PASS; only Task 4 files are staged.
+
 ```bash
 rtk git add crates/rollshot-app/src/result_workspace/freehand_tool.rs crates/rollshot-app/src/result_workspace/mod.rs
-rtk git commit -m "feat(annotation): add freehand sampling, RDP, and movement helpers"
+rtk git commit -m "feat(annotation): add freehand sampling, RDP, and movement helpers" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1129,7 +1310,7 @@ rtk git commit -m "feat(annotation): add freehand sampling, RDP, and movement he
 - Modify: `crates/rollshot-app/src/result_workspace/canvas.rs` (`Tool` enum ~line 29)
 - Modify: `crates/rollshot-app/src/result_workspace/toolbar.rs` (`tool_item` ~line 108, `toolbar_model` ~line 171, `tool_tooltip` ~line 469)
 - Modify: `crates/rollshot-app/src/result_workspace/update.rs` (`map_key_press` ~line 2686, `direct_manipulation_hit` ~line 491)
-- Modify: `crates/rollshot-app/src/result_workspace/properties.rs` (`property_target` ~line 81 — temporary `None` arms, upgraded in Task 9)
+- Modify: `crates/rollshot-app/src/result_workspace/properties.rs` (`property_target` ~line 81 — temporary `None` arms, upgraded in Task 8)
 
 **Interfaces:**
 - Produces: `Tool::Pen`, `Tool::Highlighter`; keyboard `p`/`h` → `Message::SelectTool(...)`; toolbar items labeled `Pen` (shortcut `P`) and `Highlighter` (shortcut `H`).
@@ -1185,6 +1366,8 @@ fn p_and_h_select_freehand_tools() {
     assert_eq!(map_key_press(&p, keyboard::Modifiers::default(), true), None);
 }
 ```
+
+Add assertions in the same RED step that tooltips are exactly `Pen (P)` / `Highlighter (H)`, the active Highlighter remains represented when routed through More at narrow width, uppercase keys work through the existing normalization path, and command-modified `P`/`H` retain existing native/command precedence.
 
 Run: `rtk cargo test -p rollshot-app toolbar`
 Expected: FAIL — `Tool::Pen` not defined.
@@ -1249,20 +1432,23 @@ Expected: FAIL — `Tool::Pen` not defined.
         | Tool::Highlighter => None,
 ```
 
-`properties.rs` `property_target` — temporary arms (Task 9 replaces them):
+`properties.rs` `property_target` — temporary arms (Task 8 replaces them):
 
 ```rust
         Tool::Pen | Tool::Highlighter => None,
 ```
 
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS.
+
 - [ ] **Step 3: Build, run tests, commit**
 
 Run: `rtk cargo test -p rollshot-app`
-Expected: new tests PASS; existing toolbar tests still pass (some assert exact tool lists — update those assertions to include Pen/Highlighter where the spec's order requires it, and treat any OTHER behavior change as a bug in this task).
+Expected: new toolbar, More-active, tooltip, captured-input, case, and modifier-precedence tests PASS; existing toolbar tests still pass (update exact tool lists only where the spec changes their contents).
 
 ```bash
 rtk git add crates/rollshot-app/src/result_workspace/canvas.rs crates/rollshot-app/src/result_workspace/toolbar.rs crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/properties.rs
-rtk git commit -m "feat(annotation): add Pen and Highlighter tools with toolbar routing and shortcuts"
+rtk git commit -m "feat(annotation): add Pen and Highlighter tools with toolbar routing and shortcuts" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1320,6 +1506,8 @@ fn missing_freehand_sections_resolve_to_canonical_defaults() {
     assert_eq!(loaded.values.highlighter, StrokeStyle::highlighter_default());
 }
 ```
+
+Also extend the existing persistence matrix so every non-Highlighter stroke key (`line`, `arrow`, `pen`, `rectangle.stroke`, `ellipse.stroke`) is proven force-opaque, and prove an invalid Highlighter opacity falls back independently without discarding a valid Highlighter color or width.
 
 (If the existing tests use a different temp-file helper than `tempfile`, reuse that helper instead.)
 
@@ -1384,6 +1572,9 @@ and thread both into the returned `AnnotationDefaults`.
     }
 ```
 
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS.
+
 - [ ] **Step 3: Run tests and commit**
 
 Run: `rtk cargo test -p rollshot-app annotation_defaults`
@@ -1391,7 +1582,7 @@ Expected: PASS (including the pre-existing round-trip tests — the widened sign
 
 ```bash
 rtk git add crates/rollshot-app/src/result_workspace/annotation_defaults.rs
-rtk git commit -m "feat(annotation): persist pen and highlighter defaults with translucent highlighter opacity"
+rtk git commit -m "feat(annotation): persist pen and highlighter defaults with translucent highlighter opacity" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1399,7 +1590,7 @@ rtk git commit -m "feat(annotation): persist pen and highlighter defaults with t
 ### Task 7: Freehand creation gesture (draft, filter, simplify, commit) and body movement
 
 **Files:**
-- Modify: `crates/rollshot-app/src/result_workspace/canvas.rs` (`DragState::CreateFreehand`, `draft_annotation` arm, `dragged_annotation` freehand-Body arm)
+- Modify: `crates/rollshot-app/src/result_workspace/canvas.rs` (`DragState::CreateFreehand`, borrowed draft draw path, `dragged_annotation` freehand-Body arm)
 - Modify: `crates/rollshot-app/src/result_workspace/update.rs` (`handle_canvas_pressed`, `handle_canvas_moved`, `handle_canvas_released`, `grab_offset`, `active_freehand` helper)
 
 **Interfaces:**
@@ -1502,6 +1693,14 @@ fn highlighter_stroke_uses_highlighter_defaults() {
 }
 ```
 
+Add four more interaction tests in this RED step:
+
+- `Esc` clears an active Freehand draft and creates no annotation/history;
+- out-of-bounds pointer moves and release are clamped to source bounds;
+- Select body movement commits exactly one history entry on release and undo restores every original point;
+- releasing within the two-screen-pixel filter does not append a redundant endpoint, while a farther release preserves the exact endpoint before RDP.
+- successful creation marks `annotations_dirty()`, refreshes Navigator with the new stable ID/label, and leaves the Pen/Highlighter tool active without selecting the new stroke.
+
 Run: `rtk cargo test -p rollshot-app freehand`
 Expected: FAIL — `CreateFreehand` not defined.
 
@@ -1520,21 +1719,27 @@ Expected: FAIL — `CreateFreehand` not defined.
     },
 ```
 
-`canvas.rs` `draft_annotation` — add before the `EditAnnotation` arm:
+`canvas.rs` live draft drawing — do not add a `draft_annotation` arm that clones `points`. In `draw`, before the generic `draft_annotation()` fallback, borrow `CreateFreehand.points` and call the Task 2 `draw_polyline` helper directly, lowering `style.opacity` into the `Rgba8` alpha exactly as `annotation_shapes` does:
 
 ```rust
-            Some(DragState::CreateFreehand {
+            if let Some(DragState::CreateFreehand {
                 kind,
                 points,
                 style,
-            }) => (points.len() >= 2).then(|| {
-                Annotation::freehand_with_style(
-                    AnnotationId(u64::MAX),
-                    *kind,
-                    points.clone(),
-                    *style,
-                )
-            }),
+            }) = &self.editor.drag
+            {
+                let _ = kind;
+                let alpha = (style.opacity * 255.0).round() as u8;
+                self.draw_polyline(
+                    &mut frame,
+                    points,
+                    style.width,
+                    style.color.with_alpha(alpha),
+                    "draft",
+                );
+            } else if let Some(draft) = self.draft_annotation() {
+                self.draw_annotation(&mut frame, &draft);
+            }
 ```
 
 `canvas.rs` `dragged_annotation` — add before the wildcard arm:
@@ -1550,6 +1755,9 @@ Expected: FAIL — `CreateFreehand` not defined.
             );
         }
 ```
+
+Run: `rtk cargo check -p rollshot-app`
+Expected: FAIL only because pointer handlers do not yet construct or commit `CreateFreehand`.
 
 - [ ] **Step 3: Implement the pointer handlers**
 
@@ -1612,7 +1820,9 @@ fn active_freehand(
             mut points,
             style,
         }) => {
-            if points.last() != Some(&point) {
+            if points.last().is_some_and(|last| {
+                super::freehand_tool::should_accept_point(*last, point, scale)
+            }) {
                 points.push(point);
             }
             let input_points = points.len();
@@ -1648,6 +1858,9 @@ fn active_freehand(
 
 Esc cancellation needs no new code: verify `Message::EscapePressed` handling already clears `state.editor.drag` for any active drag (read the existing handler; if it special-cases drag kinds, extend it — otherwise leave untouched).
 
+Run: `rtk cargo test -p rollshot-app freehand`
+Expected: PASS for creation, sample filtering, clamping, cancellation, movement, and one-entry history.
+
 - [ ] **Step 4: Add flatten-cost tracing**
 
 In `update.rs` `copy_payload` and `save_payload` (~line 505), wrap the flatten call:
@@ -1668,26 +1881,29 @@ pub(crate) fn copy_payload(state: &super::ResultWorkspace) -> RgbaImage {
 
 (Same pattern in `save_payload` around its `flatten()` branch, message `"flatten for save"`.)
 
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS with privacy-safe structured tracing only.
+
 - [ ] **Step 5: Run tests and commit**
 
 Run: `rtk cargo test -p rollshot-app`
-Expected: the 4 new tests PASS; no gesture regressions.
+Expected: all new Freehand draft, filter, release, Esc, clamp, movement, defaults, and history tests PASS; no gesture regressions.
 
 ```bash
 rtk git add crates/rollshot-app/src/result_workspace/canvas.rs crates/rollshot-app/src/result_workspace/update.rs
-rtk git commit -m "feat(annotation): freehand creation gesture with sampling filter and RDP commit"
+rtk git commit -m "feat(annotation): freehand creation gesture with sampling filter and RDP commit" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 8: Uniform-alpha output-lifecycle tests (document crate)
+### Task 3 Step 4 Reference: Uniform-alpha output-lifecycle test bodies
 
-Verify the spec's §12.4 output rules end-to-end through `ImageDocument::flatten` (Task 2 tested the rasterizer directly; this task tests through the committed document).
+This is reference material for Task 3 Step 4, not a standalone task or commit. It verifies spec §12.4 end-to-end through `ImageDocument::flatten` after Task 2's direct raster tests and Task 3's model exist.
 
 **Files:**
 - Modify: `crates/rollshot-image-document/src/flatten.rs` (tests only)
 
-- [ ] **Step 1: Write the tests (they should pass immediately — they verify integration, not new code)**
+- [ ] **Reference: Add these tests during Task 3 Step 4 (they should pass immediately)**
 
 ```rust
 #[test]
@@ -1738,19 +1954,14 @@ fn committed_pen_flattens_opaque() {
 }
 ```
 
-- [ ] **Step 2: Run and commit**
+- [ ] **Reference: Run with Task 3 and do not make a second commit**
 
 Run: `rtk cargo test -p rollshot-image-document flatten`
 Expected: PASS.
 
-```bash
-rtk git add crates/rollshot-image-document/src/flatten.rs
-rtk git commit -m "test(annotation): freehand uniform-alpha output lifecycle"
-```
-
 ---
 
-### Task 9: Contextual properties — stroke controls plus the Highlighter opacity slider
+### Task 8: Contextual properties — stroke controls plus the Highlighter opacity slider
 
 **Files:**
 - Modify: `crates/rollshot-app/src/result_workspace/properties.rs` (`PropertyTarget::FreehandTool`, `property_target`, `stroke_width`, controls, `preview_annotation`)
@@ -1760,7 +1971,7 @@ rtk git commit -m "test(annotation): freehand uniform-alpha output lifecycle"
 - Produces:
   - `PropertyTarget::FreehandTool(FreehandKind)`
   - `pub struct OpacityTransaction { pub target: PropertyTarget, pub original: f32, pub preview: f32 }` and `PropertyState.opacity: Option<OpacityTransaction>`
-  - `Message::PreviewStrokeOpacity(f32)`, `Message::ApplyStrokeOpacity` (mirror `PreviewStrokeWidth`/`ApplyStrokeWidth` including the `Message` enum and its PartialEq arm at `update.rs:251`)
+  - `Message::PreviewStrokeOpacity(f32)`, `Message::ApplyStrokeOpacity`, and `Message::CancelStrokeOpacity` (mirror the complete stroke-width transaction family, including manual `PartialEq`)
 - Consumes: `preview_annotation` consumption in `canvas.rs` (already wired), defaults from Task 6.
 
 - [ ] **Step 1: Write failing tests**
@@ -1880,6 +2091,15 @@ fn opacity_never_targets_pen() {
 }
 ```
 
+Add tests for the complete transaction/capability contract:
+
+- a pure `opacity_value(state, target) -> Option<f32>` (or equivalently named) helper returns `Some` only for Highlighter tool/selection targets, so UI visibility is testable without inspecting `Element` internals;
+- Cancel discards preview without changing defaults/document/history;
+- selection/tool switching clears the transaction;
+- starting opacity preview clears any width/color transaction, and starting width/color preview clears opacity;
+- `NaN`/infinite preview values are rejected with the existing inline error and leave defaults/document/history unchanged;
+- out-of-range finite values clamp to `0.1..=1.0`, and Apply failure leaves the committed style unchanged.
+
 Run: `rtk cargo test -p rollshot-app properties`
 Expected: FAIL.
 
@@ -1898,6 +2118,7 @@ pub struct OpacityTransaction {
 ```
 
 - Add `pub opacity: Option<OpacityTransaction>,` to `PropertyState`.
+- Add the pure `opacity_value` capability helper and make both `view` and `PreviewStrokeOpacity` consume it; do not duplicate Highlighter-only matching in multiple UI paths.
 - `property_target`: replace the Task 5 placeholder with
 
 ```rust
@@ -2030,9 +2251,12 @@ and in the `PropertyTarget::Annotation(id)` match add before the final `_ => Non
         }
 ```
 
+Run: `rtk cargo check -p rollshot-app`
+Expected: FAIL only on the new `PropertyTarget`/opacity message arms implemented in Step 3; the properties module itself compiles.
+
 - [ ] **Step 3: Implement `update.rs` message plumbing**
 
-- Add `PreviewStrokeOpacity(f32)` and `ApplyStrokeOpacity` to the `Message` enum and its manual `PartialEq` (mirror `PreviewStrokeWidth` at `update.rs:251`).
+- Add `PreviewStrokeOpacity(f32)`, `ApplyStrokeOpacity`, and `CancelStrokeOpacity` to the `Message` enum and its manual `PartialEq` (mirror the full stroke-width transaction family).
 - `clear_property_transactions` (~line 369): add `state.editor.properties.opacity = None;`.
 - The Undo property-clear guard (~line 1103): include `|| state.editor.properties.opacity.is_some()` and clear it.
 - `PreviewStrokeOpacity` handler (mirror `PreviewStrokeWidth`, ~line 2282). Opacity targets ONLY the Highlighter tool default or a selected Highlighter annotation:
@@ -2040,6 +2264,10 @@ and in the `PropertyTarget::Annotation(id)` match add before the final `_ => Non
 ```rust
         Message::PreviewStrokeOpacity(opacity) => {
             use super::properties::{OpacityTransaction, PropertyTarget};
+            if !opacity.is_finite() {
+                state.message = Some(InlineMessage::Error("opacity must be finite".into()));
+                return Task::none();
+            }
             let Some(target) = super::properties::property_target(state) else {
                 return Task::none();
             };
@@ -2075,6 +2303,7 @@ and in the `PropertyTarget::Annotation(id)` match add before the final `_ => Non
             }
             transaction.preview = opacity.clamp(0.1, 1.0);
             state.editor.properties.color = None;
+            state.editor.properties.width = None;
             state.editor.properties.popup = None;
             Task::none()
         }
@@ -2107,6 +2336,10 @@ and in the `PropertyTarget::Annotation(id)` match add before the final `_ => Non
             }
             Task::none()
         }
+        Message::CancelStrokeOpacity => {
+            state.editor.properties.opacity = None;
+            Task::none()
+        }
 ```
 
 - Extend the existing stroke color/width paths to freehand:
@@ -2114,75 +2347,249 @@ and in the `PropertyTarget::Annotation(id)` match add before the final `_ => Non
   - `ApplyColor`: add a `PropertyTarget::FreehandTool(kind)` arm writing `state.annotation_defaults.values.pen.color` / `.highlighter.color` + `persist_annotation_defaults(state)`; extend the `Annotation(id)` `StrokeColor` arm to also match `Annotation::Freehand` (calls `set_stroke_style` exactly like TwoPoint).
   - `PreviewStrokeWidth` original lookup: add `PropertyTarget::FreehandTool(kind)` → defaults width, and extend the `Annotation(id)` arm to match `Annotation::Freehand { style, .. } => style.width`.
   - `ApplyStrokeWidth`: add `PropertyTarget::FreehandTool(kind)` → write the matching defaults width + persist; the `Annotation(id)` arm extends to `Annotation::Freehand` via `set_stroke_style` (preserve the annotation's existing opacity — build `new_style` from the committed style, only changing `width`).
+  - Mutual exclusion: `OpenColorPicker` and `PreviewStrokeWidth` clear `properties.opacity`; opacity preview clears color and width, so at most one stroke-property transaction is live.
+
+Run: `rtk cargo check -p rollshot-app`
+Expected: PASS.
 
 - [ ] **Step 4: Run tests and commit**
 
 Run: `rtk cargo test -p rollshot-app`
-Expected: all 6 new tests PASS; existing property tests unaffected.
+Expected: all new capability, preview, Apply, Cancel, target-switch, mutual-exclusion, invalid-rollback, and one-step-undo tests PASS; existing property tests are unaffected.
 
 ```bash
 rtk git add crates/rollshot-app/src/result_workspace/properties.rs crates/rollshot-app/src/result_workspace/update.rs
-rtk git commit -m "feat(annotation): freehand properties with Highlighter-only opacity control"
+rtk git commit -m "feat(annotation): freehand properties with Highlighter-only opacity control" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 10: Long-image scale test, compatibility sweep, and full verification
+### Task 9: Long-image scale test, compatibility sweep, and full verification
 
 **Files:**
 - Modify: `crates/rollshot-image-document/src/flatten.rs` (extend the existing 100-annotation stress test at ~line 222 with representative Pen and Highlighter strokes, keeping its history-limit intent — replace some existing entries or extend the mix; do not exceed 100 total if the test asserts the limit)
-- Modify: none else expected; fix anything the sweep finds.
+- Modify: no other product file. A sweep failure stops the task and requires an explicit plan/file-list update; it is not permission to “fix anything”.
 
 - [ ] **Step 1: Extend the 100-annotation test**
 
 Read the existing stress test first. Add Pen and Highlighter strokes to its annotation mix (e.g. every 9th annotation a Pen polyline, every 10th a Highlighter with `highlighter_default()` style, each with 5–20 points spread down the tall image). Preserve the test's original assertions (determinism/duration/history-limit).
 
-Run: `rtk cargo test -p rollshot-image-document -- --nocapture` and note the stress-test duration. If flatten now takes disproportionately long, apply the segment-prefilter optimization noted in Task 2 Step 2 and re-run.
+Run: `rtk cargo test -p rollshot-image-document hundred_mixed_annotations_on_long_image -- --nocapture`
+Expected: PASS. Record the duration in the Task 10 handoff; the mandatory scanline max-coverage implementation from Task 2 is already in place, so performance is measured rather than conditionally redesigned here.
 
 - [ ] **Step 2: Compatibility sweep**
 
-- Run: `rtk cargo test` (whole workspace) — automation, workbench, Timeline, Action Guide, and eval suites must pass unchanged (minus the 3 known pre-existing failures).
+- Run: `rtk cargo test` — Expected: FAIL (exit 101) with exactly the three baseline Result Workspace failures named in the Execution Contract; automation, workbench, Timeline, Action Guide, eval, and all new Freehand tests pass.
 - Run: `rtk cargo fmt --all --check`
-- Run: `rtk cargo clippy --workspace --all-targets -- -D warnings` — pre-existing `needless_range_loop` warnings in `raster.rs` are known; do not introduce new warnings (the new `stroke_polyline` loops should use the same style as the file's existing loops; if clippy flags them, follow clippy).
+- Expected: PASS.
+- Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
+- Expected: PASS. The reviewed baseline has no `rollshot-image-document` clippy warning; do not carry the stale `needless_range_loop` exception forward.
 - Run: `rtk git diff --check`
+- Expected: PASS.
 
 - [ ] **Step 3: Spec self-check**
 
-Walk spec §12 (Automated Verification) and confirm each bullet maps to a test added in Tasks 1–10 or a pre-existing suite. Add any missing test inline in the matching module. Pay specific attention to:
-- opacity control never appears for Pen/other targets (Task 9 test),
+Walk the coverage table and failure-mode table in this reviewed plan and confirm each spec §12 bullet maps to a named test added in Tasks 1–9 or a named pre-existing suite. Do not add an undeclared test “inline”; stop and update the owning task/file declaration if a mapping is absent. Pay specific attention to:
+- opacity control never appears for Pen/other targets (Task 8 test),
 - highlighter opacity config round-trip + forced-1.0 for others (Task 6 tests),
 - empty-bbox-corner hit misses (Task 3 hit test),
-- self-overlap uniformity and cross-stroke darkening (Tasks 2 and 8),
+- self-overlap uniformity and cross-stroke darkening (Task 2 direct + committed lifecycle tests),
 - Esc/draft cancellation and one-entry-per-gesture history (Task 7 tests).
+- generic output/rollback coverage remains mapped to the pre-existing `copy_flattens_annotations_and_does_not_clear_dirty`, `copy_original_payload_is_the_source`, `save_payload_is_source_without_annotations_and_flatten_with`, `save_completion_marks_the_written_state_not_newer_edits`, and `safe_save_rejects_source_before_write_and_preserves_state` tests;
+- culling/zoom/security compatibility remains mapped to `visible_image_rect_maps_scroll_and_scale`, `culling_skips_annotations_outside_the_visible_rect`, `copy_original_remains_byte_identical_to_source`, and the `secure_sharing` policy suite, with Task 3 Freehand bounds/lowering supplying the new variant input.
+
+Run: `rtk git diff --check`
+Expected: PASS; the coverage audit itself introduces no undeclared product change.
 
 - [ ] **Step 4: Commit**
 
+Run: stage `flatten.rs`, then `rtk git diff --cached --check`.
+Expected: PASS; no sweep-discovered product file is staged.
+
 ```bash
-rtk git add -A
-rtk git commit -m "test(annotation): freehand long-image scale coverage and verification sweep"
+rtk git add crates/rollshot-image-document/src/flatten.rs
+rtk git commit -m "test(annotation): freehand long-image scale coverage and verification sweep" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 11: Registry update and handoff
+### Task 10: Registry update and handoff
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md`
 
 - [ ] **Step 1: Update the umbrella registry**
 
-In `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md`, set Slice 4 to `In progress` at implementation start (branch `feat/annotation-freehand-tools`, commit range), and to `Handoff` when implementation + automated verification complete, recording: completed tasks, fresh verification evidence (test counts, fmt/clippy state), remaining work (Linux + macOS native Result Workspace runtime checklists per spec §13), known risks (lyon self-overlap live deviation — observed or not), and the exact next entry point.
+In `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md`, change Slice 4 from `In progress` (set in Task 1 Step 0) to `Handoff` when implementation + automated verification complete, recording: completed tasks, fresh verification evidence (test counts, exact three-test baseline exception, fmt/clippy state, long-image duration), remaining work (Linux + macOS native Result Workspace runtime checklists per spec §13), known risks (lyon self-overlap live deviation — observed or not), and the exact next entry point. Do not mark Slice 4 `Complete` without user acceptance of the runtime evidence/risk.
+
+Run: `rtk git diff --check`
+Expected: PASS; only the umbrella registry handoff row is changed.
 
 - [ ] **Step 2: Verification-before-completion**
 
 Invoke `superpowers:verification-before-completion` before any completion claim; then `superpowers:finishing-a-development-branch` for the integration decision (PR to `main`, mirroring PR #90/#91/#92).
 
+Run: the fresh Task 9 verification commands under `superpowers:verification-before-completion`, then stage the registry path and run `rtk git diff --cached --check`.
+Expected: exact baseline allowlist only for tests; fmt, clippy, and both diff checks PASS; registry evidence matches those fresh results.
+
 ```bash
 rtk git add docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md
-rtk git commit -m "docs(annotation): record Slice 4 implementation status"
+rtk git commit -m "docs(annotation): record Slice 4 implementation status" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
 ## Plan Self-Review Notes
 
-- **Spec coverage:** §6 model → Task 3; §7 sampling/simplify/gesture → Tasks 4, 7; §8 rendering/compositing → Task 2 (+8); §9 toolbar/defaults/properties → Tasks 5, 6, 9; §10 output → Task 8; §11 compatibility → Task 3 Step 6 + Task 10; §12 automated verification → Tasks 1–10; §13 runtime checklists → Task 11 handoff (headless environment cannot execute them).
+- **Spec coverage:** §6 model → Task 3; §7 sampling/simplify/gesture → Tasks 4, 7; §8 rendering/compositing/output → Task 2; §9 toolbar/defaults/properties → Tasks 5, 6, 8; §11 compatibility → Task 3 Step 6 + Task 9; §12 automated verification → Tasks 1–9; §13 runtime checklists → Task 10 handoff (headless environment cannot execute them).
 - **Type consistency:** `FreehandKind` (doc crate, re-exported), `Annotation::Freehand { id, kind, points, style }`, `RenderShape::Polyline { points, width, color }`, `add_freehand_with_style` / `set_freehand_points`, `DragState::CreateFreehand { kind, points, style }`, `PropertyTarget::FreehandTool(FreehandKind)`, `OpacityTransaction { target, original, preview }` — used identically across tasks.
 - **Known intentional deviations:** freehand minimum-gesture uses the LARGER bbox dimension (a straight stroke must commit), unlike the box tool's two-axis rule; freehand strokes render with round caps while `Line` keeps butt caps (different primitives, both spec'd).
+
+## Engineering Review Lock (auto mode, 2026-07-14)
+
+### Step 0 scope result
+
+All product tasks align with the complete create-through-output goal. The complexity gate triggered only because the draft had 11 task headings. The standalone output-lifecycle test task duplicated the render/model integration boundary, so it is now part of Task 3 Step 4 where both prerequisites exist; no approved product requirement was dropped. The reviewed plan has 10 tasks, 2 created files, 18 modified files, no new crate/module/dependency/artifact, and the runtime-only work is explicit under `NOT in scope` for headless execution.
+
+Search check: iced 0.14 already provides round cap/join builders on `canvas::Stroke`; lyon explicitly documents translucent self-overlap as a stroke-tessellation footgun; and classic RDP has quadratic worst-case behavior. The plan therefore keeps iced Canvas, documents the accepted live deviation, uses iterative RDP with a large-input test, and removes the rasterizer's avoidable whole-bounds × segments loop. Sources: [iced 0.14 Stroke](https://docs.rs/iced/0.14.0/iced/widget/canvas/struct.Stroke.html), [lyon StrokeTessellator](https://docs.rs/lyon_tessellation/latest/lyon_tessellation/struct.StrokeTessellator.html), [Hershberger–Snoeyink RDP analysis](https://www.cs.ubc.ca/tr/1992/tr-92-07).
+
+### Auto decisions
+
+#### Auto decision D1 — Consolidate the redundant output-test task
+Context: The original plan had 11 tasks solely because direct raster and committed flatten tests were split.
+ELI10: Both sets prove one rendering contract and touch the same file. Keeping two tasks adds a commit and dependency without creating an independently shippable result.
+Stakes if we pick wrong: The executor either crosses the complexity threshold or loses required output coverage.
+Recommendation: D1A because it reduces plan machinery without reducing scope.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) Merge lifecycle tests into Task 3's model/render integration step (recommended) — human: ~15 min / AI: ~3 min; low risk/maintenance. ✅ The earliest task with both prerequisites owns the contract. ❌ Task 3 is slightly longer.
+B) Keep a standalone test task — human: ~30 min / AI: ~5 min; low risk/medium maintenance. ✅ Smaller-looking steps. ❌ Redundant commit and dependency.
+Net: One cohesive rendering task is the smaller, clearer plan.
+
+#### Auto decision D2 — Declare the Timeline `Polyline` consumer
+Context: `timeline_workspace/annotation.rs` exhaustively matches `RenderShape`, but the original Task 2 named only Result Workspace Canvas.
+ELI10: Adding an enum variant breaks every exhaustive switch immediately. Relying on “the compiler will tell us” hides a known file and makes staging unpredictable.
+Stakes if we pick wrong: Task 2 cannot compile the workspace and Timeline display compatibility is omitted.
+Recommendation: D2A because explicit dependency impact beats compiler-discovered scope.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) Declare and test Timeline display compatibility (recommended) — human: ~30 min / AI: ~10 min; low risk/low maintenance. ✅ Workspace compiles atomically. ❌ One more declared file.
+B) Discover it during build — human: ~20 min / AI: ~5 min; medium risk/medium maintenance. ✅ Shorter initial file list. ❌ Violates surgical planning and can be missed.
+Net: The known exhaustive consumer belongs in Task 2 from the start.
+
+#### Auto decision D3 — Use scanline max-coverage rasterization
+Context: The draft loop computed distance to every segment for every pixel in the whole stroke bounds.
+ELI10: A long diagonal stroke can cover millions of bounding-box pixels; multiplying that by every segment makes Save/Copy stall. A one-row maximum-coverage buffer preserves “blend once” while examining segment-local regions.
+Stakes if we pick wrong: Long screenshots can freeze or make output disproportionately slow.
+Recommendation: D3A because it is bounded-memory and removes the known hot-loop multiplier.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) Scanline max-coverage buffer (recommended) — human: ~1 day / AI: ~45 min; medium implementation risk/low maintenance. ✅ Uniform alpha with `O(width)` memory. ❌ More raster code than brute force.
+B) Whole-bounds × segments with optional later optimization — human: ~2 hr / AI: ~15 min; high performance risk/low initial maintenance. ✅ Simplest implementation. ❌ Pushes a known scale failure into Task 9.
+Net: Pay modest local complexity now to make the output path predictable.
+
+#### Auto decision D4 — Draw live Freehand paths from borrowed points
+Context: `draw_annotation -> annotation_shapes` would clone every Freehand point vector on every Canvas redraw, and drafts would clone again.
+ELI10: Pointer movement redraws frequently, so copying a growing stroke every frame creates avoidable allocation and latency. The Canvas can build its path directly from `&[ImagePoint]`.
+Stakes if we pick wrong: Drawing feel degrades precisely on long strokes and zoomed long images.
+Recommendation: D4A because it removes hot-path allocation with a small special case.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) Borrowed Canvas helper with shared stroke styling (recommended) — human: ~3 hr / AI: ~20 min; low risk/low maintenance. ✅ No point-vector clone per redraw. ❌ Canvas has a Freehand-specific branch.
+B) Reuse owned `RenderShape` lowering everywhere — human: ~30 min / AI: ~5 min; medium performance risk/low code count. ✅ One generic call path. ❌ Allocates and copies in the live hot path.
+Net: A tiny explicit branch is better than hidden per-frame allocation.
+
+#### Auto decision D5 — Restore observable RED → GREEN sequencing
+Context: Tasks 1 and 4 originally created complete implementations and tests together, then expected PASS.
+ELI10: A passing first run cannot prove the new tests detect missing behavior. Temporary `todo!()` bodies let the executor observe real failure before restoring the reviewed implementation.
+Stakes if we pick wrong: Tests may be vacuous or never demonstrate that they guard the feature.
+Recommendation: D5A because well-tested code requires an observed RED signal.
+Completeness: A=10/10, B=5/10.
+Pros / cons:
+A) Test-first with temporary stubs (recommended) — human: ~30 min / AI: ~5 min; low risk/low maintenance. ✅ Verifiable RED and GREEN. ❌ One temporary edit per helper module.
+B) Write tests and implementation together — human: ~15 min / AI: ~2 min; medium test-quality risk/low maintenance. ✅ Faster typing. ❌ No evidence the tests fail before implementation.
+Net: The few extra minutes buy trustworthy TDD evidence.
+
+#### Auto decision D6 — Make files and staging exact
+Context: Task 3 said “fix anything” and Tasks 3/9 used `git add -A` despite a shared workspace.
+ELI10: Broad discovery and broad staging can sweep unrelated user changes into a feature commit. Exact declarations make every changed line traceable to the plan.
+Stakes if we pick wrong: Unrelated changes can be modified or committed accidentally.
+Recommendation: D6A because surgical changes and explicitness outrank convenience.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) Exact declarations and explicit-path staging (recommended) — human: ~45 min / AI: ~10 min; low risk/low maintenance. ✅ Safe in a dirty worktree. ❌ Compiler surprises require a plan-list update.
+B) Compiler discovery plus `git add -A` — human: ~15 min / AI: ~3 min; high repository risk/high review burden. ✅ Less typing. ❌ Scope and staging become nondeterministic.
+Net: Repository safety is worth explicit path lists.
+
+#### Auto decision D7 — Replace the vague spec self-check with named coverage
+Context: The draft omitted Esc, clamping, movement history, Navigator ties, hit negative cases, opacity Cancel/switch/rollback, modifier precedence, and UI capability tests.
+ELI10: Saying “add anything missing later” is not a test plan. Named tests put each failure beside the behavior that introduces it.
+Stakes if we pick wrong: Core edge cases can ship silently broken despite a large test count.
+Recommendation: D7A because completeness is cheap during AI-assisted execution and expensive after release.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) Add named tests to owning RED steps (recommended) — human: ~2 days / AI: ~90 min; low residual risk/medium maintenance. ✅ Spec §12 is auditable. ❌ More tests to maintain.
+B) Keep a final “self-check” catch-all — human: ~4 hr / AI: ~20 min; medium-high residual risk/low initial maintenance. ✅ Short plan. ❌ Missing cases are easy to wave through.
+Net: Explicit edge coverage is the right trade for an editor lifecycle feature.
+
+#### Auto decision D8 — Treat baseline failures as an exact allowlist
+Context: Current verification exits 101 with exactly three stale-config tests, while the draft said “passes plus failures.”
+ELI10: A command cannot both pass and fail. Naming the only tolerated failures lets automation reject a fourth failure instead of hiding it in prose.
+Stakes if we pick wrong: A new regression can be misclassified as pre-existing.
+Recommendation: D8A because verification signals must be machine- and human-unambiguous.
+Completeness: A=9/10, B=4/10.
+Pros / cons:
+A) Exact three-test allowlist with exit code (recommended) — human: ~30 min / AI: ~5 min; low risk/low maintenance. ✅ New failures are obvious. ❌ The full suite remains nonzero until baseline debt is repaired.
+B) “Passes plus known failures” prose — human: ~5 min / AI: ~1 min; high regression risk/medium review burden. ✅ Concise. ❌ Contradictory expected result.
+Net: An exact nonzero baseline is honest and enforceable.
+
+#### Auto decision D9 — Instrument live rendering as well as output flattening
+Context: The spec requires long-stroke render time to be observable, but the draft timed only Copy/Save flatten calls.
+ELI10: Output timing cannot diagnose a laggy pen preview. A privacy-safe trace around the borrowed Canvas path measures the user-visible hot path without logging coordinates.
+Stakes if we pick wrong: Runtime verification can observe lag but cannot locate or quantify it.
+Recommendation: D9A because diagnostics should cover the path users actually feel.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) `trace` live draw plus existing `debug` Copy/Save timing (recommended) — human: ~1 hr / AI: ~10 min; low risk/low maintenance. ✅ Both live and output costs are observable. ❌ Adds a high-volume trace site.
+B) Copy/Save timing only — human: ~20 min / AI: ~5 min; medium diagnostic gap/low maintenance. ✅ Fewer events. ❌ Cannot explain live drawing latency.
+Net: Structured `trace` is the right level for a per-redraw diagnostic.
+
+### Test coverage table
+
+| Task / behavior | Unit | Integ | E2E / smoke | Manual only |
+|---|:---:|:---:|:---:|:---:|
+| 1 / polyline distance, duplicate points, visual bounds | ✓ | — | — | no |
+| 2 / max-coverage raster, round caps/joins, clipping | ✓ | ✓ | — | no |
+| 3 / committed Pen/Highlighter flatten and source immutability | ✓ | ✓ | — | no |
+| 2 / Result + Timeline Canvas compile/display compatibility | ✓ | ✓ | workspace check | live self-overlap quality |
+| 3 / constructors, validation, edit rollback, history, undo/redo | ✓ | ✓ | — | no |
+| 3 / bounds, anchor, hit negatives/topmost, Navigator order/ties | ✓ | ✓ | — | no |
+| 4 / sampling, RDP tolerance/large input, threshold, translation | ✓ | — | — | no |
+| 5 / toolbar density/More/tooltip and keyboard precedence | ✓ | ✓ | — | native shortcut feel |
+| 6 / defaults, independent fallback, opacity persistence/forcing | ✓ | ✓ | — | restart round-trip |
+| 7 / draft/filter/release/Esc/clamp/create/move/history | ✓ | ✓ | — | drawing feel at zoom |
+| 8 / opacity capability, preview/Apply/Cancel/switch/rollback/undo | ✓ | ✓ | — | slider ergonomics |
+| 9 / 100 mixed annotations on long image and workspace compatibility | ✓ | ✓ | workspace sweep | performance feel |
+| 10 / registry evidence and branch handoff | — | — | verification skills | Linux + macOS checklist |
+
+### Failure modes
+
+| New codepath | Realistic production failure | Test coverage | Error handling | User-visible result |
+|---|---|---|---|---|
+| Geometry helpers | duplicate/degenerate points produce NaN distance | Task 1 Step 1; Task 3 Step 1 | `InvalidFreehandPath` / `NonFiniteCoordinate` | clear inline error on app edit |
+| Document add/update/style | invalid input partially mutates history | Task 3 Step 1 rollback/history tests | validated `Result<_, EditError>` before commit | clear inline error; no mutation |
+| Sampling/RDP | huge input recurses or stalls badly | Task 4 large iterative case; Task 9 duration | iterative stack + distance filter + tracing | no silent data loss; performance evidence |
+| Draft creation | Esc or short gesture commits accidentally | Task 7 Esc/sub-threshold tests | drag cleared; no document op | draft disappears, no dirty/history |
+| Movement | clamp deforms path or creates multiple entries | Tasks 4/7 translation/history tests | validated point-list replacement | inline error on rejection |
+| Live Canvas | per-frame point clones cause lag | Task 2 borrowed-path checks; Task 9 duration/manual | borrowed slice + culling + `trace` | bounded known lyon self-overlap deviation |
+| Flatten raster | self-overlap darkens or long path explodes work | Task 2 direct + Task 3 lifecycle; Task 9 scale | scanline max coverage; clipped row buffer | authoritative Copy/Save remains uniform |
+| Defaults persistence | malformed opacity poisons other fields or write fails | Task 6 matrix + pre-existing warning tests | independent fallback; existing one-time warning | in-memory value retained or canonical fallback with warning |
+| Opacity transaction | NaN, wrong target, Cancel, or switch mutates document | Task 8 invalid/target/Cancel tests | finite guard, capability helper, validated style edit | inline error or silent no-op for unsupported target, never mutation |
+| Timeline display | new render enum crashes/does not compile | Task 2 exhaustive arm + workspace check | display-only arm | annotation displays; no creation controls |
+| Workspace compatibility | a fourth regression hides among known failures | Task 9 exact allowlist | exact exit code/test-name comparison | execution stops; not reported as complete |
+
+Critical gaps after review: none. Runtime-only visual quality and native handoffs remain explicit in `NOT in scope` and Task 10 rather than being mislabeled as automated coverage.
+
+### Execution order and parallelization
+
+Sequential execution, no parallelization opportunity. Tasks 1–3 establish enum/render contracts across both crates; Tasks 4–8 repeatedly touch the same `crates/rollshot-app/src/result_workspace/` module; Tasks 9–10 consume all earlier evidence. Repository instructions also prohibit worktrees unless explicitly requested. Use `superpowers:executing-plans`, not parallel subagent lanes.
