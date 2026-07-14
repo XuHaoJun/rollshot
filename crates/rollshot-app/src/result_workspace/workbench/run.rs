@@ -1899,7 +1899,7 @@ mod reducer_tests {
 
     fn ws_with_workbench() -> ResultWorkspace {
         let img = image::RgbaImage::new(200, 200);
-        let mut ws = ResultWorkspace::new(ResultDocument::unsaved(img), None);
+        let mut ws = ResultWorkspace::with_config_path(ResultDocument::unsaved(img), None, None);
         ws.mode = WorkspaceMode::Workbench(WorkbenchState::default());
         ws
     }

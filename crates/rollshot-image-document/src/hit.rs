@@ -126,6 +126,10 @@ pub fn hit_test_annotation(
             shape_contains_point(*kind, *bounds, point, stroke.width / 2.0 + tolerance)
                 .then_some(HitPart::Body)
         }
+        Annotation::Freehand { points, style, .. } => {
+            (crate::freehand::polyline_distance(point, points) <= style.width / 2.0 + tolerance)
+                .then_some(HitPart::Body)
+        }
     }
 }
 
@@ -144,6 +148,7 @@ mod tests {
     use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect};
     use crate::style;
+    use crate::style::StrokeStyle;
 
     const TOL: f32 = 8.0;
 
@@ -374,6 +379,91 @@ mod tests {
             ),
         ];
         let hit = hit_test(&anns, ImagePoint::new(60.0, 60.0), TOL).unwrap();
+        assert_eq!(hit.id, AnnotationId(2));
+    }
+
+    #[test]
+    fn freehand_hits_near_path_not_in_empty_bbox_corner() {
+        let a = Annotation::freehand_with_style(
+            AnnotationId(1),
+            crate::annotation::FreehandKind::Pen,
+            vec![
+                ImagePoint::new(0.0, 0.0),
+                ImagePoint::new(100.0, 0.0),
+                ImagePoint::new(100.0, 100.0),
+            ],
+            StrokeStyle::default(),
+        );
+        assert_eq!(
+            hit_test_annotation(&a, ImagePoint::new(50.0, 0.0), 2.0),
+            Some(HitPart::Body)
+        );
+        assert_eq!(
+            hit_test_annotation(&a, ImagePoint::new(50.0, 3.5), 2.0),
+            Some(HitPart::Body)
+        );
+        assert_eq!(
+            hit_test_annotation(&a, ImagePoint::new(20.0, 80.0), 2.0),
+            None
+        );
+    }
+
+    #[test]
+    fn freehand_beyond_tolerance_miss() {
+        let a = Annotation::freehand_with_style(
+            AnnotationId(1),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(100.0, 0.0)],
+            StrokeStyle::default(), // width 4
+        );
+        assert_eq!(
+            hit_test_annotation(&a, ImagePoint::new(50.0, 5.0), 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn freehand_width_sensitive_hit() {
+        let narrow = Annotation::freehand_with_style(
+            AnnotationId(1),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(100.0, 0.0)],
+            StrokeStyle {
+                width: 2.0,
+                ..StrokeStyle::default()
+            },
+        );
+        let wide = Annotation::freehand_with_style(
+            AnnotationId(2),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(100.0, 0.0)],
+            StrokeStyle {
+                width: 20.0,
+                ..StrokeStyle::default()
+            },
+        );
+        let pt = ImagePoint::new(50.0, 4.0);
+        assert_eq!(hit_test_annotation(&narrow, pt, 1.0), None);
+        assert_eq!(hit_test_annotation(&wide, pt, 1.0), Some(HitPart::Body));
+    }
+
+    #[test]
+    fn freehand_topmost_wins_on_crossing() {
+        let anns = vec![
+            Annotation::freehand_with_style(
+                AnnotationId(1),
+                crate::annotation::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 50.0), ImagePoint::new(100.0, 50.0)],
+                StrokeStyle::default(),
+            ),
+            Annotation::freehand_with_style(
+                AnnotationId(2),
+                crate::annotation::FreehandKind::Pen,
+                vec![ImagePoint::new(50.0, 0.0), ImagePoint::new(50.0, 100.0)],
+                StrokeStyle::default(),
+            ),
+        ];
+        let hit = hit_test(&anns, ImagePoint::new(50.0, 50.0), 2.0).unwrap();
         assert_eq!(hit.id, AnnotationId(2));
     }
 }

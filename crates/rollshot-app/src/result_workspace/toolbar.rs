@@ -147,6 +147,16 @@ fn tool_item(tool: Tool) -> ToolbarItem {
             label: "Ellipse",
             shortcut: "O",
         },
+        Tool::Pen => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Pen),
+            label: "Pen",
+            shortcut: "P",
+        },
+        Tool::Highlighter => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Highlighter),
+            label: "Highlighter",
+            shortcut: "H",
+        },
         #[cfg(feature = "ocr")]
         Tool::OcrText => ToolbarItem {
             kind: ToolbarItemKind::Ocr,
@@ -180,6 +190,8 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
             Tool::Line,
             Tool::Arrow,
             remembered.into(),
+            Tool::Pen,
+            Tool::Highlighter,
             Tool::Redact,
         ],
         ToolbarDensity::Narrow => vec![
@@ -188,6 +200,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
             Tool::Text,
             Tool::Arrow,
             remembered.into(),
+            Tool::Pen,
         ],
     };
 
@@ -207,6 +220,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
 
     if density == ToolbarDensity::Narrow {
         overflow.insert(0, tool_item(Tool::Redact));
+        overflow.insert(0, tool_item(Tool::Highlighter));
         overflow.insert(0, tool_item(Tool::Line));
     }
 
@@ -774,10 +788,7 @@ mod tests {
     }
 
     fn state() -> ResultWorkspace {
-        let mut state = ResultWorkspace::new(ResultDocument::unsaved(image()), None);
-        state.annotation_defaults.values = super::super::AnnotationDefaults::default();
-        state.annotation_defaults.config_path = None;
-        state
+        ResultWorkspace::with_config_path(ResultDocument::unsaved(image()), None, None)
     }
 
     #[test]
@@ -867,6 +878,8 @@ mod tests {
                 Tool::Line,
                 Tool::Arrow,
                 Tool::Rectangle,
+                Tool::Pen,
+                Tool::Highlighter,
                 Tool::Redact,
             ]
         );
@@ -1049,7 +1062,11 @@ mod tests {
         use image::{Rgba, RgbaImage};
 
         let img = RgbaImage::from_pixel(200, 200, Rgba([100, 150, 200, 255]));
-        let mut s = super::super::ResultWorkspace::new(ResultDocument::unsaved(img), None);
+        let mut s = super::super::ResultWorkspace::with_config_path(
+            ResultDocument::unsaved(img),
+            None,
+            None,
+        );
         s.editor.shapes_menu_open = true;
         // Default remembered = Rectangle
         assert!(
@@ -1068,5 +1085,86 @@ mod tests {
             shapes_selector(&s).is_none(),
             "Selector must not render when menu is closed"
         );
+    }
+
+    // -- Pen & Highlighter routing (Task 5) ---------------------------------
+
+    #[test]
+    fn pen_and_highlighter_route_by_density() {
+        let s = state();
+        // Wide: both visible.
+        let wide = toolbar_model(&s, 1200.0);
+        assert!(wide.visible_tools.contains(&Tool::Pen));
+        assert!(wide.visible_tools.contains(&Tool::Highlighter));
+        // Narrow: Pen visible, Highlighter in More (with Line and Redact).
+        let narrow = toolbar_model(&s, 600.0);
+        assert!(narrow.visible_tools.contains(&Tool::Pen));
+        assert!(!narrow.visible_tools.contains(&Tool::Highlighter));
+        assert!(narrow
+            .more
+            .iter()
+            .any(|i| matches!(i.kind, ToolbarItemKind::Tool(Tool::Highlighter))));
+    }
+
+    #[test]
+    fn pen_and_highlighter_items_have_shortcuts() {
+        assert_eq!(tool_item(Tool::Pen).shortcut, "P");
+        assert_eq!(tool_item(Tool::Highlighter).shortcut, "H");
+    }
+
+    #[test]
+    fn pen_and_highlighter_tooltips() {
+        assert_eq!(tool_tooltip(Tool::Pen), "Pen (P)");
+        assert_eq!(tool_tooltip(Tool::Highlighter), "Highlighter (H)");
+    }
+
+    #[test]
+    fn active_highlighter_in_more_at_narrow() {
+        let mut s = state();
+        s.editor.tool = Tool::Highlighter;
+        let model = toolbar_model(&s, 600.0);
+        assert!(!model.visible_tools.contains(&Tool::Highlighter));
+        assert_eq!(
+            model.more_active_tool,
+            Some((Tool::Highlighter, "Highlighter"))
+        );
+    }
+
+    #[test]
+    fn umbrella_second_row_order_at_wide() {
+        let model = toolbar_model(&state(), 1200.0);
+        assert_eq!(
+            model.visible_tools,
+            vec![
+                Tool::Select,
+                Tool::Number,
+                Tool::Text,
+                Tool::Line,
+                Tool::Arrow,
+                Tool::Rectangle,
+                Tool::Pen,
+                Tool::Highlighter,
+                Tool::Redact,
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_pen_visible_highlighter_in_more() {
+        let model = toolbar_model(&state(), 600.0);
+        assert!(model.visible_tools.contains(&Tool::Pen));
+        assert!(!model.visible_tools.contains(&Tool::Highlighter));
+        // More has Line, Highlighter, Redact (in that order at front)
+        let more_tools: Vec<_> = model
+            .more
+            .iter()
+            .filter_map(|i| match i.kind {
+                ToolbarItemKind::Tool(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(more_tools.contains(&Tool::Line));
+        assert!(more_tools.contains(&Tool::Highlighter));
+        assert!(more_tools.contains(&Tool::Redact));
     }
 }

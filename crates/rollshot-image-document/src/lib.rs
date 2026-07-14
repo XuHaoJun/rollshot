@@ -9,6 +9,7 @@ pub mod callout_placement;
 mod document;
 mod edit_op;
 mod flatten;
+mod freehand;
 mod geometry;
 mod hit;
 mod navigator;
@@ -18,7 +19,7 @@ pub mod style;
 mod text;
 mod two_point;
 
-pub use annotation::{Annotation, AnnotationId, ShapeKind, TwoPointKind};
+pub use annotation::{Annotation, AnnotationId, FreehandKind, ShapeKind, TwoPointKind};
 pub use callout_placement::place_number_callout_bubble;
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use edit_op::{BatchOutcome, EditOp};

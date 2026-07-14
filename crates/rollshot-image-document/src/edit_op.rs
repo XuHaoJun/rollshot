@@ -1,7 +1,7 @@
 //! Typed, agent-free document edit operations and their batch outcome.
 //! Applied atomically by `ImageDocument::apply_batch` (spec §6.5).
 
-use crate::annotation::{AnnotationId, ShapeKind, TwoPointKind};
+use crate::annotation::{AnnotationId, FreehandKind, ShapeKind, TwoPointKind};
 use crate::geometry::{ImagePoint, ImageRect, Rgb8};
 use crate::style::{NumberStyle, StrokeStyle, TextStyle};
 
@@ -82,6 +82,15 @@ pub enum EditOp {
         id: AnnotationId,
         stroke: StrokeStyle,
         fill: Option<Rgb8>,
+    },
+    AddFreehand {
+        kind: FreehandKind,
+        points: Vec<ImagePoint>,
+        style: StrokeStyle,
+    },
+    UpdateFreehandPoints {
+        id: AnnotationId,
+        points: Vec<ImagePoint>,
     },
 }
 

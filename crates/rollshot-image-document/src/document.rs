@@ -57,6 +57,27 @@ fn clamp_two_point(
     Ok((start, end))
 }
 
+fn clamp_freehand_points(
+    points: Vec<ImagePoint>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<ImagePoint>, EditError> {
+    if points.len() < 2 {
+        return Err(EditError::InvalidFreehandPath);
+    }
+    for p in &points {
+        ensure_point_finite(p)?;
+    }
+    let clamped: Vec<ImagePoint> = points
+        .into_iter()
+        .map(|p| p.clamp_to(width, height))
+        .collect();
+    if clamped.iter().all(|p| *p == clamped[0]) {
+        return Err(EditError::InvalidFreehandPath);
+    }
+    Ok(clamped)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EditError {
     #[error("two-point annotations require distinct endpoints")]
@@ -79,6 +100,8 @@ pub enum EditError {
     InvalidNextNumber,
     #[error("shape bounds must be finite, positive, and cover at least one pixel")]
     InvalidShapeBounds,
+    #[error("freehand strokes require at least two distinct finite points")]
+    InvalidFreehandPath,
 }
 
 /// One restorable history state (mark-shot pattern: graph + counters).
@@ -536,6 +559,29 @@ impl ImageDocument {
         Ok(())
     }
 
+    pub fn add_freehand_with_style(
+        &mut self,
+        kind: crate::annotation::FreehandKind,
+        points: Vec<ImagePoint>,
+        style: StrokeStyle,
+    ) -> Result<AnnotationId, EditError> {
+        let outcome = self.apply_batch(vec![EditOp::AddFreehand {
+            kind,
+            points,
+            style,
+        }])?;
+        Ok(outcome.added_ids[0])
+    }
+
+    pub fn set_freehand_points(
+        &mut self,
+        id: AnnotationId,
+        points: Vec<ImagePoint>,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdateFreehandPoints { id, points }])?;
+        Ok(())
+    }
+
     /// Apply many operations as ONE history entry (spec §6.5). Atomic: if any
     /// op is invalid the whole batch is rolled back — no mutation, no commit,
     /// no `state_id` change. Update*/Delete reference annotations existing
@@ -573,12 +619,14 @@ impl ImageDocument {
                 | EditOp::UpdateStrokeStyle { id, .. }
                 | EditOp::UpdateShapeBounds { id, .. }
                 | EditOp::UpdateShapeStyle { id, .. }
+                | EditOp::UpdateFreehandPoints { id, .. }
                 | EditOp::Delete { id } => Some(*id),
                 EditOp::AddTwoPoint { .. }
                 | EditOp::AddRedaction { .. }
                 | EditOp::AddTextNote { .. }
                 | EditOp::AddNumberCallout { .. }
                 | EditOp::AddShape { .. }
+                | EditOp::AddFreehand { .. }
                 | EditOp::SetNextNumber { .. } => None,
             };
             if referenced_id.is_some_and(|id| self.annotation(id).is_none()) {
@@ -748,6 +796,10 @@ impl ImageDocument {
                     Annotation::TwoPoint {
                         style: current_style,
                         ..
+                    }
+                    | Annotation::Freehand {
+                        style: current_style,
+                        ..
                     } => *current_style = style,
                     _ => return Err(EditError::WrongKind),
                 }
@@ -834,6 +886,26 @@ impl ImageDocument {
                         *s = stroke;
                         *f = fill;
                     }
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::AddFreehand {
+                kind,
+                points,
+                style,
+            } => {
+                validate_stroke_style(style)?;
+                let points = clamp_freehand_points(points, w, h)?;
+                let id = self.allocate_id();
+                self.annotations
+                    .push(Annotation::freehand_with_style(id, kind, points, style));
+                added_ids.push(id);
+            }
+            EditOp::UpdateFreehandPoints { id, points } => {
+                let points = clamp_freehand_points(points, w, h)?;
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::Freehand { points: p, .. } => *p = points,
                     _ => return Err(EditError::WrongKind),
                 }
             }
@@ -2109,5 +2181,192 @@ mod tests {
             .add_shape(ShapeKind::Ellipse, rect(20.0, 20.0, 10.0, 10.0))
             .unwrap();
         assert!(!d.can_redo());
+    }
+
+    // --- Freehand tests ---
+
+    #[test]
+    fn freehand_add_validates_and_commits_one_entry() {
+        let mut doc = ImageDocument::new(RgbaImage::new(100, 100));
+        let pts = vec![
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(50.0, 20.0),
+            ImagePoint::new(60.0, 70.0),
+        ];
+        let id = doc
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                pts.clone(),
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            doc.annotation(id),
+            Some(Annotation::Freehand { kind: crate::FreehandKind::Pen, points, .. })
+                if *points == pts
+        ));
+        assert!(doc.undo());
+        assert!(doc.annotation(id).is_none());
+    }
+
+    #[test]
+    fn freehand_rejects_degenerate_paths() {
+        let mut doc = ImageDocument::new(RgbaImage::new(100, 100));
+        let style = StrokeStyle::default();
+        assert_eq!(
+            doc.add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(1.0, 1.0)],
+                style
+            ),
+            Err(EditError::InvalidFreehandPath)
+        );
+        assert_eq!(
+            doc.add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(1.0, 1.0), ImagePoint::new(1.0, 1.0)],
+                style
+            ),
+            Err(EditError::InvalidFreehandPath)
+        );
+        assert_eq!(
+            doc.add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(f32::NAN, 1.0), ImagePoint::new(2.0, 2.0)],
+                style
+            ),
+            Err(EditError::NonFiniteCoordinate)
+        );
+        assert!(!doc.can_undo());
+    }
+
+    #[test]
+    fn freehand_points_update_preserves_id_kind_style() {
+        let mut doc = ImageDocument::new(RgbaImage::new(100, 100));
+        let style = StrokeStyle::highlighter_default();
+        let id = doc
+            .add_freehand_with_style(
+                crate::FreehandKind::Highlighter,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)],
+                style,
+            )
+            .unwrap();
+        let moved = vec![ImagePoint::new(5.0, 5.0), ImagePoint::new(15.0, 5.0)];
+        doc.set_freehand_points(id, moved.clone()).unwrap();
+        assert!(matches!(
+            doc.annotation(id),
+            Some(Annotation::Freehand { kind: crate::FreehandKind::Highlighter, points, style: s, .. })
+                if *points == moved && *s == style
+        ));
+        let before = doc.state_id();
+        doc.set_freehand_points(id, moved).unwrap();
+        assert_eq!(doc.state_id(), before);
+    }
+
+    #[test]
+    fn freehand_stroke_style_update_applies() {
+        let mut doc = ImageDocument::new(RgbaImage::new(100, 100));
+        let id = doc
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        let new_style = StrokeStyle {
+            width: 8.0,
+            ..StrokeStyle::default()
+        };
+        doc.set_stroke_style(id, new_style).unwrap();
+        assert_eq!(doc.annotation(id).unwrap().stroke_style(), Some(new_style));
+    }
+
+    #[test]
+    fn freehand_delete_undo_redo_lifecycle() {
+        let mut d = test_doc();
+        let id = d
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        d.delete_annotation(id).unwrap();
+        assert!(d.annotation(id).is_none());
+        assert!(d.undo());
+        assert!(d.annotation(id).is_some());
+        assert!(d.redo());
+        assert!(d.annotation(id).is_none());
+    }
+
+    #[test]
+    fn freehand_redo_clears_on_new_edit() {
+        let mut d = test_doc();
+        let _ = d
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        assert!(d.undo());
+        assert!(d.can_redo());
+        let _ = d
+            .add_freehand_with_style(
+                crate::FreehandKind::Highlighter,
+                vec![ImagePoint::new(5.0, 5.0), ImagePoint::new(15.0, 5.0)],
+                StrokeStyle::highlighter_default(),
+            )
+            .unwrap();
+        assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn freehand_rejected_update_rollback() {
+        let mut d = test_doc();
+        let id = d
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        let s = d.state_id();
+        assert_eq!(
+            d.set_freehand_points(id, vec![ImagePoint::new(1.0, 1.0)]),
+            Err(EditError::InvalidFreehandPath)
+        );
+        assert_eq!(d.state_id(), s);
+    }
+
+    #[test]
+    fn freehand_unchanged_points_no_history() {
+        let mut d = test_doc();
+        let pts = vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)];
+        let id = d
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                pts.clone(),
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        let s = d.state_id();
+        d.set_freehand_points(id, pts).unwrap();
+        assert_eq!(d.state_id(), s);
+    }
+
+    #[test]
+    fn freehand_unchanged_style_no_history() {
+        let mut d = test_doc();
+        let id = d
+            .add_freehand_with_style(
+                crate::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        let s = d.state_id();
+        d.set_stroke_style(id, StrokeStyle::default()).unwrap();
+        assert_eq!(d.state_id(), s);
     }
 }

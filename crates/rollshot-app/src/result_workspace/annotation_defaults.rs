@@ -31,6 +31,8 @@ pub struct AnnotationDefaults {
     pub rectangle: ShapeDefaults,
     pub ellipse: ShapeDefaults,
     pub last_shape: ShapeKind,
+    pub pen: StrokeStyle,
+    pub highlighter: StrokeStyle,
 }
 
 impl Default for AnnotationDefaults {
@@ -43,6 +45,8 @@ impl Default for AnnotationDefaults {
             rectangle: ShapeDefaults::default(),
             ellipse: ShapeDefaults::default(),
             last_shape: ShapeKind::Rectangle,
+            pen: StrokeStyle::default(),
+            highlighter: StrokeStyle::highlighter_default(),
         }
     }
 }
@@ -115,11 +119,37 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
     let mut warnings = Vec::new();
     let number = load_number_style(&section, &mut warnings);
     let text = load_text_style(&section, &mut warnings);
-    let line = load_stroke_style(&section, "line", &mut warnings);
-    let arrow = load_stroke_style(&section, "arrow", &mut warnings);
+    let line = load_stroke_style(
+        &section,
+        "line",
+        StrokeStyle::default(),
+        false,
+        &mut warnings,
+    );
+    let arrow = load_stroke_style(
+        &section,
+        "arrow",
+        StrokeStyle::default(),
+        false,
+        &mut warnings,
+    );
     let rectangle = load_shape_defaults(&section, "rectangle", &mut warnings);
     let ellipse = load_shape_defaults(&section, "ellipse", &mut warnings);
     let last_shape = load_last_shape(&section, &mut warnings);
+    let pen = load_stroke_style(
+        &section,
+        "pen",
+        StrokeStyle::default(),
+        false,
+        &mut warnings,
+    );
+    let highlighter = load_stroke_style(
+        &section,
+        "highlighter",
+        StrokeStyle::highlighter_default(),
+        true,
+        &mut warnings,
+    );
 
     LoadedAnnotationDefaults {
         values: AnnotationDefaults {
@@ -130,6 +160,8 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
             rectangle,
             ellipse,
             last_shape,
+            pen,
+            highlighter,
         },
         warnings,
     }
@@ -215,19 +247,24 @@ fn load_text_style(parent: &toml::Table, warnings: &mut Vec<String>) -> TextStyl
     }
 }
 
-fn load_stroke_style(parent: &toml::Table, key: &str, warnings: &mut Vec<String>) -> StrokeStyle {
+fn load_stroke_style(
+    parent: &toml::Table,
+    key: &str,
+    defaults: StrokeStyle,
+    allow_translucent: bool,
+    warnings: &mut Vec<String>,
+) -> StrokeStyle {
     let table = match parent.get(key) {
         Some(toml::Value::Table(t)) => t,
-        None => return StrokeStyle::default(),
+        None => return defaults,
         _ => {
             warnings.push(format!(
                 "annotation_defaults.{key} is not a table — using defaults"
             ));
-            return StrokeStyle::default();
+            return defaults;
         }
     };
 
-    let defaults = StrokeStyle::default();
     let mut invalid = false;
     let color = match table.get("color") {
         Some(value) => match deserialize_rgb8(value) {
@@ -250,12 +287,15 @@ fn load_stroke_style(parent: &toml::Table, key: &str, warnings: &mut Vec<String>
         None => defaults.width,
     };
     let opacity = match table.get("opacity") {
-        Some(value) if value.as_float() == Some(1.0) => 1.0,
-        Some(_) => {
-            invalid = true;
-            1.0
-        }
-        None => 1.0,
+        None => defaults.opacity,
+        Some(value) => match value.as_float().map(|o| o as f32) {
+            Some(o) if allow_translucent && o.is_finite() && o > 0.0 && o <= 1.0 => o,
+            Some(1.0) => 1.0,
+            _ => {
+                invalid = true;
+                defaults.opacity
+            }
+        },
     };
 
     if invalid {
@@ -287,7 +327,7 @@ fn load_shape_defaults(
         }
     };
 
-    let stroke = load_stroke_style(table, "stroke", warnings);
+    let stroke = load_stroke_style(table, "stroke", StrokeStyle::default(), false, warnings);
 
     let fill_enabled = table
         .get("fill_enabled")
@@ -372,8 +412,15 @@ pub(crate) fn save_to_with_writer(
     let mut persisted = values.clone();
     persisted.line.opacity = 1.0;
     persisted.arrow.opacity = 1.0;
+    persisted.pen.opacity = 1.0;
     persisted.rectangle.stroke.opacity = 1.0;
     persisted.ellipse.stroke.opacity = 1.0;
+    if !(persisted.highlighter.opacity.is_finite()
+        && persisted.highlighter.opacity > 0.0
+        && persisted.highlighter.opacity <= 1.0)
+    {
+        persisted.highlighter.opacity = StrokeStyle::highlighter_default().opacity;
+    }
     let mut section = toml::Value::try_from(&persisted)
         .map_err(|e| format!("serialize annotation defaults: {e}"))?;
     if let Some(text) = section
@@ -711,5 +758,70 @@ mod tests {
         assert_eq!(loaded.values.ellipse.stroke.opacity, 1.0);
         assert_eq!(loaded.values.number.size, NumberSize::Large);
         assert_eq!(loaded.values.line.width, 7.0);
+    }
+
+    // -- pen & highlighter (Task 6) -------------------------------------------
+
+    #[test]
+    fn highlighter_opacity_round_trips_but_pen_is_forced_opaque() {
+        let ctx = TestContext::new();
+        let mut values = AnnotationDefaults::default();
+        values.highlighter.opacity = 0.25;
+        values.pen.opacity = 0.5; // must NOT survive persistence
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.highlighter.opacity, 0.25);
+        assert_eq!(loaded.values.pen.opacity, 1.0);
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn invalid_highlighter_opacity_falls_back_with_warning() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults.highlighter]\nopacity = 1.7\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.highlighter.opacity, 0.4);
+        assert_eq!(loaded.warnings.len(), 1);
+    }
+
+    #[test]
+    fn missing_freehand_sections_resolve_to_canonical_defaults() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults]\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pen, StrokeStyle::default());
+        assert_eq!(
+            loaded.values.highlighter,
+            StrokeStyle::highlighter_default()
+        );
+    }
+
+    #[test]
+    fn save_forces_pen_opacity_and_preserves_highlighter() {
+        let ctx = TestContext::new();
+        let mut values = AnnotationDefaults::default();
+        values.pen.opacity = 0.9;
+        values.highlighter.opacity = 0.6;
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pen.opacity, 1.0);
+        assert_eq!(loaded.values.highlighter.opacity, 0.6);
+    }
+
+    #[test]
+    fn invalid_highlighter_opacity_does_not_discard_valid_color_or_width() {
+        let ctx = TestContext::new();
+        ctx.write_config(
+            "[annotation_defaults.highlighter]\nopacity = -0.5\n\
+             [annotation_defaults.highlighter.color]\nr = 10\ng = 20\nb = 30\n",
+        );
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.highlighter.color, Rgb8::new(10, 20, 30));
+        assert_eq!(
+            loaded.values.highlighter.width,
+            StrokeStyle::highlighter_default().width
+        );
+        assert_eq!(loaded.values.highlighter.opacity, 0.4);
+        assert!(!loaded.warnings.is_empty());
     }
 }

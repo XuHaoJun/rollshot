@@ -8,7 +8,7 @@ use crate::annotation::Annotation;
 use crate::geometry::ImagePoint;
 use crate::raster::{
     fill_box_shape, fill_circle, fill_rect, fill_triangle, stroke_box_shape, stroke_circle,
-    stroke_line,
+    stroke_line, stroke_polyline,
 };
 use crate::shapes::{annotation_shapes, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
@@ -31,6 +31,11 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
             width,
             color,
         } => stroke_line(img, *start, *end, *width, *color),
+        RenderShape::Polyline {
+            points,
+            width,
+            color,
+        } => stroke_polyline(img, points, *width, *color),
         RenderShape::Rect { rect, color } => fill_rect(img, *rect, *color),
         RenderShape::Circle {
             center,
@@ -79,6 +84,7 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
 
 #[cfg(test)]
 mod tests {
+    use crate::annotation::FreehandKind;
     use crate::geometry::{ImagePoint, ImageRect};
     use crate::{ImageDocument, Rgb8, StrokeStyle, TwoPointKind};
     use image::{Rgba, RgbaImage};
@@ -221,7 +227,7 @@ mod tests {
     #[test]
     fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
         let mut doc = ImageDocument::new(base(1000, 20_000));
-        // 14 rows × 7 types = 98, plus 1 Rectangle + 1 Ellipse = exactly 100.
+        // 14 rows × 7 types = 98, plus Pen (row 3) + Highlighter (row 10) = 100.
         for i in 0..14u32 {
             let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
@@ -266,30 +272,34 @@ mod tests {
                 },
             )
             .unwrap();
+            if i == 3 {
+                let pts: Vec<_> = (0..5)
+                    .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
+                    .collect();
+                doc.add_freehand_with_style(
+                    FreehandKind::Pen,
+                    pts,
+                    StrokeStyle {
+                        color: Rgb8::new(0, 0, 0),
+                        width: 2.0,
+                        opacity: 1.0,
+                    },
+                )
+                .unwrap();
+            }
+            if i == 10 {
+                let pts: Vec<_> = (0..5)
+                    .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
+                    .collect();
+                doc.add_freehand_with_style(
+                    FreehandKind::Highlighter,
+                    pts,
+                    StrokeStyle::highlighter_default(),
+                )
+                .unwrap();
+            }
         }
-        // Extra Rectangle + Ellipse to reach exactly 100.
-        let ey = 100.0 + 14.0 * 950.0;
-        doc.add_shape(
-            crate::annotation::ShapeKind::Rectangle,
-            ImageRect {
-                x: 100.0,
-                y: ey,
-                width: 60.0,
-                height: 80.0,
-            },
-        )
-        .unwrap();
-        let ey2 = 100.0 + 15.0 * 950.0;
-        doc.add_shape(
-            crate::annotation::ShapeKind::Ellipse,
-            ImageRect {
-                x: 300.0,
-                y: ey2,
-                width: 60.0,
-                height: 80.0,
-            },
-        )
-        .unwrap();
+        // 14 rows × 7 types = 98, + Pen (row 3) + Highlighter (row 10) = 100.
 
         assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
@@ -407,6 +417,53 @@ mod tests {
     }
 
     #[test]
+    fn polyline_self_crossing_blends_alpha_exactly_once() {
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let points = vec![
+            ImagePoint::new(5.0, 5.0),
+            ImagePoint::new(35.0, 35.0),
+            ImagePoint::new(5.0, 35.0),
+            ImagePoint::new(35.0, 5.0),
+        ];
+        let color = crate::geometry::Rgba8::new(0, 0, 0, 128);
+        crate::raster::stroke_polyline(&mut img, &points, 4.0, color);
+        let crossing = img.get_pixel(20, 20).0[0];
+        assert!((126..=129).contains(&crossing), "got {crossing}");
+        let single = img.get_pixel(10, 10).0[0];
+        assert_eq!(crossing, single);
+    }
+
+    #[test]
+    fn two_separate_polylines_darken_where_they_cross() {
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let color = crate::geometry::Rgba8::new(0, 0, 0, 128);
+        let a = vec![ImagePoint::new(5.0, 20.0), ImagePoint::new(35.0, 20.0)];
+        let b = vec![ImagePoint::new(20.0, 5.0), ImagePoint::new(20.0, 35.0)];
+        crate::raster::stroke_polyline(&mut img, &a, 4.0, color);
+        crate::raster::stroke_polyline(&mut img, &b, 4.0, color);
+        let crossing = img.get_pixel(20, 20).0[0];
+        let single = img.get_pixel(10, 20).0[0];
+        assert!(
+            crossing < single,
+            "two strokes must darken: {crossing} vs {single}"
+        );
+    }
+
+    #[test]
+    fn polyline_has_round_caps() {
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let points = vec![ImagePoint::new(10.0, 20.0), ImagePoint::new(30.0, 20.0)];
+        crate::raster::stroke_polyline(
+            &mut img,
+            &points,
+            8.0,
+            crate::geometry::Rgba8::new(0, 0, 0, 255),
+        );
+        assert!(img.get_pixel(33, 20).0[0] < 128);
+        assert_eq!(img.get_pixel(36, 20).0[0], 255);
+    }
+
+    #[test]
     fn copy_original_remains_byte_identical_to_source() {
         let mut doc = ImageDocument::new(base(100, 100));
         doc.add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
@@ -469,5 +526,48 @@ mod tests {
         let out = doc.flatten();
         // Redaction should be opaque black over the shape
         assert_eq!(out.get_pixel(30, 30).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn committed_highlighter_flattens_with_uniform_alpha() {
+        let mut doc = crate::ImageDocument::new(RgbaImage::from_pixel(
+            60,
+            60,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        doc.add_freehand_with_style(
+            crate::FreehandKind::Highlighter,
+            vec![
+                ImagePoint::new(10.0, 10.0),
+                ImagePoint::new(50.0, 50.0),
+                ImagePoint::new(10.0, 50.0),
+                ImagePoint::new(50.0, 10.0),
+            ],
+            crate::StrokeStyle::highlighter_default(),
+        )
+        .unwrap();
+        let out = doc.flatten();
+        let crossing = out.get_pixel(30, 30).0;
+        let single = out.get_pixel(15, 15).0;
+        assert_eq!(crossing, single, "self-overlap must not darken");
+        assert!(crossing[2] < 255);
+        assert_eq!(doc.source().get_pixel(30, 30).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn committed_pen_flattens_opaque() {
+        let mut doc = crate::ImageDocument::new(RgbaImage::from_pixel(
+            40,
+            40,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        doc.add_freehand_with_style(
+            crate::FreehandKind::Pen,
+            vec![ImagePoint::new(5.0, 20.0), ImagePoint::new(35.0, 20.0)],
+            crate::StrokeStyle::default(),
+        )
+        .unwrap();
+        let out = doc.flatten();
+        assert_eq!(out.get_pixel(20, 20).0, [0xE5, 0x48, 0x4D, 255]);
     }
 }

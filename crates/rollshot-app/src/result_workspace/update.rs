@@ -152,6 +152,13 @@ pub enum Message {
     /// Cancel the stroke-width transaction without mutation.
     #[allow(dead_code)]
     CancelStrokeWidth,
+    /// Live-preview a stroke opacity during slider interaction (no doc mutation).
+    PreviewStrokeOpacity(f32),
+    /// Commit the opacity transaction to the document or active-tool default.
+    ApplyStrokeOpacity,
+    /// Cancel the opacity transaction without mutation.
+    #[allow(dead_code)]
+    CancelStrokeOpacity,
     /// Set the number size for number callouts.
     SetNumberSize(rollshot_image_document::NumberSize),
     /// Set the text size for text notes.
@@ -288,6 +295,11 @@ impl PartialEq for Message {
             (Self::PreviewStrokeWidth(a), Self::PreviewStrokeWidth(b)) => a == b,
             (Self::ApplyStrokeWidth, Self::ApplyStrokeWidth) => true,
             (Self::CancelStrokeWidth, Self::CancelStrokeWidth) => true,
+            (Self::PreviewStrokeOpacity(a), Self::PreviewStrokeOpacity(b)) => {
+                a.to_bits() == b.to_bits()
+            }
+            (Self::ApplyStrokeOpacity, Self::ApplyStrokeOpacity) => true,
+            (Self::CancelStrokeOpacity, Self::CancelStrokeOpacity) => true,
             (Self::SetNumberSize(a), Self::SetNumberSize(b)) => a == b,
             (Self::SetTextSize(a), Self::SetTextSize(b)) => a == b,
             (Self::ToggleTextBackground, Self::ToggleTextBackground) => true,
@@ -369,6 +381,7 @@ fn current_scale(state: &super::ResultWorkspace) -> f32 {
 fn clear_property_transactions(state: &mut super::ResultWorkspace) {
     state.editor.properties.color = None;
     state.editor.properties.width = None;
+    state.editor.properties.opacity = None;
     state.editor.properties.shape_style = None;
     if state.editor.properties.popup == Some(super::properties::Popup::ColorPicker) {
         state.editor.properties.popup = None;
@@ -387,6 +400,22 @@ fn active_two_point(state: &super::ResultWorkspace) -> Option<(TwoPointKind, Str
     match state.editor.tool {
         Tool::Line => Some((TwoPointKind::Line, state.annotation_defaults.values.line)),
         Tool::Arrow => Some((TwoPointKind::Arrow, state.annotation_defaults.values.arrow)),
+        _ => None,
+    }
+}
+
+fn active_freehand(
+    state: &super::ResultWorkspace,
+) -> Option<(rollshot_image_document::FreehandKind, StrokeStyle)> {
+    match state.editor.tool {
+        Tool::Pen => Some((
+            rollshot_image_document::FreehandKind::Pen,
+            state.annotation_defaults.values.pen,
+        )),
+        Tool::Highlighter => Some((
+            rollshot_image_document::FreehandKind::Highlighter,
+            state.annotation_defaults.values.highlighter,
+        )),
         _ => None,
     }
 }
@@ -466,6 +495,9 @@ fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f3
         (Annotation::Shape { bounds, .. }, HitPart::Body) => {
             (point.x - bounds.x, point.y - bounds.y)
         }
+        (Annotation::Freehand { points, .. }, HitPart::Body) => {
+            (point.x - points[0].x, point.y - points[0].y)
+        }
         _ => (0.0, 0.0),
     }
 }
@@ -488,9 +520,14 @@ pub(crate) fn direct_manipulation_hit(
                     part,
                 })
         }
-        Tool::Number | Tool::Text | Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse => {
-            None
-        }
+        Tool::Number
+        | Tool::Text
+        | Tool::Line
+        | Tool::Arrow
+        | Tool::Rectangle
+        | Tool::Ellipse
+        | Tool::Pen
+        | Tool::Highlighter => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -503,7 +540,15 @@ pub(crate) fn direct_manipulation_hit(
 /// The image Copy places on the clipboard: always the flattened document
 /// (pixel-identical to the source when no annotations exist — spec §12.1).
 pub(crate) fn copy_payload(state: &super::ResultWorkspace) -> RgbaImage {
-    state.document.image.flatten()
+    let started = std::time::Instant::now();
+    let out = state.document.image.flatten();
+    tracing::debug!(
+        target: "rollshot::annotation",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        annotations = state.document.image.annotations().len(),
+        "flatten for copy"
+    );
+    out
 }
 
 pub(crate) fn copy_original_payload(state: &super::ResultWorkspace) -> RgbaImage {
@@ -516,7 +561,15 @@ pub(crate) fn save_payload(state: &super::ResultWorkspace) -> RgbaImage {
     if state.document.image.annotations().is_empty() {
         state.document.image.source().clone()
     } else {
-        state.document.image.flatten()
+        let started = std::time::Instant::now();
+        let out = state.document.image.flatten();
+        tracing::debug!(
+            target: "rollshot::annotation",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            annotations = state.document.image.annotations().len(),
+            "flatten for save"
+        );
+        out
     }
 }
 
@@ -672,6 +725,17 @@ pub(crate) fn handle_canvas_pressed(
         }
         #[cfg(feature = "ocr")]
         Tool::OcrText => Task::none(),
+        Tool::Pen | Tool::Highlighter => {
+            let (kind, style) = active_freehand(state)
+                .expect("pen and highlighter tools always provide freehand defaults");
+            let (w, h) = state.document.image.source().dimensions();
+            state.editor.drag = Some(DragState::CreateFreehand {
+                kind,
+                points: vec![point.clamp_to(w, h)],
+                style,
+            });
+            Task::none()
+        }
     }
 }
 
@@ -698,6 +762,14 @@ pub(crate) fn handle_canvas_moved(
         }
         Some(DragState::CreateShape { current, .. }) => {
             *current = point;
+            Task::none()
+        }
+        Some(DragState::CreateFreehand { points, .. }) => {
+            if let Some(last) = points.last().copied() {
+                if super::freehand_tool::should_accept_point(last, point, scale) {
+                    points.push(point);
+                }
+            }
             Task::none()
         }
         Some(DragState::EditAnnotation {
@@ -787,6 +859,37 @@ pub(crate) fn handle_canvas_released(
                 }
             }
         }
+        Some(DragState::CreateFreehand {
+            kind,
+            mut points,
+            style,
+        }) => {
+            if points
+                .last()
+                .is_some_and(|last| super::freehand_tool::should_accept_point(*last, point, scale))
+            {
+                points.push(point);
+            }
+            let input_points = points.len();
+            let epsilon = super::freehand_tool::RDP_EPSILON_SCREEN / scale;
+            let simplified = super::freehand_tool::simplify_rdp(&points, epsilon);
+            tracing::debug!(
+                target: "rollshot::annotation",
+                input_points,
+                output_points = simplified.len(),
+                kind = ?kind,
+                "freehand simplification"
+            );
+            if super::freehand_tool::path_meets_threshold(&simplified, scale) {
+                if let Err(error) = state
+                    .document
+                    .image
+                    .add_freehand_with_style(kind, simplified, style)
+                {
+                    state.message = Some(InlineMessage::Error(error.to_string()));
+                }
+            }
+        }
         Some(DragState::EditAnnotation {
             part,
             original,
@@ -825,6 +928,10 @@ pub(crate) fn handle_canvas_released(
                         .document
                         .image
                         .set_shape_bounds(original.id(), *bounds),
+                    Annotation::Freehand { points, .. } => state
+                        .document
+                        .image
+                        .set_freehand_points(original.id(), points.clone()),
                 };
                 if let Err(e) = result {
                     state.message = Some(InlineMessage::Error(e.to_string()));
@@ -1077,6 +1184,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.popup = None;
             state.editor.properties.color = None;
             state.editor.properties.width = None;
+            state.editor.properties.opacity = None;
             state.editor.properties.shape_style = None;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
@@ -1102,10 +1210,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             if state.editor.properties.color.is_some()
                 || state.editor.properties.width.is_some()
+                || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
@@ -1125,10 +1235,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             if state.editor.properties.color.is_some()
                 || state.editor.properties.width.is_some()
+                || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
@@ -1164,10 +1276,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             if state.editor.properties.color.is_some()
                 || state.editor.properties.width.is_some()
+                || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
@@ -1974,6 +2088,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             .as_ref()
                             .map(|tx| tx.preview_stroke.color)
                             .unwrap_or(StrokeStyle::default().color),
+                        Some(Annotation::Freehand { style, .. }) => style.color,
                         _ => return Task::none(),
                     }
                 }
@@ -1983,6 +2098,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 (PropertyTarget::ShapeTool(kind), ColorProperty::ShapeFill) => {
                     state.annotation_defaults.values.shape(*kind).fill_color
                 }
+                (PropertyTarget::FreehandTool(kind), ColorProperty::StrokeColor) => match kind {
+                    rollshot_image_document::FreehandKind::Pen => {
+                        state.annotation_defaults.values.pen.color
+                    }
+                    rollshot_image_document::FreehandKind::Highlighter => {
+                        state.annotation_defaults.values.highlighter.color
+                    }
+                },
                 (PropertyTarget::Annotation(id), ColorProperty::ShapeFill) => {
                     match state.document.image.annotation(*id) {
                         Some(Annotation::Shape { .. }) => state
@@ -2006,6 +2129,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 hex,
             });
             state.editor.properties.width = None;
+            state.editor.properties.opacity = None;
             state.editor.copy_menu_open = false;
             state.editor.more_menu_open = false;
             state.editor.shapes_menu_open = false;
@@ -2116,6 +2240,19 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         persist_annotation_defaults(state);
                     }
                 }
+                PropertyTarget::FreehandTool(kind) => {
+                    if tx.property == ColorProperty::StrokeColor {
+                        match kind {
+                            rollshot_image_document::FreehandKind::Pen => {
+                                state.annotation_defaults.values.pen.color = tx.preview;
+                            }
+                            rollshot_image_document::FreehandKind::Highlighter => {
+                                state.annotation_defaults.values.highlighter.color = tx.preview;
+                            }
+                        }
+                        persist_annotation_defaults(state);
+                    }
+                }
                 PropertyTarget::Annotation(id) => match tx.property {
                     ColorProperty::NumberAccent => {
                         if let Some(Annotation::NumberCallout { style, .. }) =
@@ -2151,8 +2288,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         }
                     }
                     ColorProperty::StrokeColor => {
-                        if let Some(Annotation::TwoPoint { style, .. }) =
-                            state.document.image.annotation(id)
+                        if let Some(
+                            Annotation::TwoPoint { style, .. } | Annotation::Freehand { style, .. },
+                        ) = state.document.image.annotation(id)
                         {
                             let mut new_style = *style;
                             new_style.color = tx.preview;
@@ -2291,8 +2429,17 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 PropertyTarget::TwoPointTool(TwoPointKind::Arrow) => {
                     state.annotation_defaults.values.arrow.width
                 }
+                PropertyTarget::FreehandTool(kind) => match kind {
+                    rollshot_image_document::FreehandKind::Pen => {
+                        state.annotation_defaults.values.pen.width
+                    }
+                    rollshot_image_document::FreehandKind::Highlighter => {
+                        state.annotation_defaults.values.highlighter.width
+                    }
+                },
                 PropertyTarget::Annotation(id) => match state.document.image.annotation(id) {
                     Some(Annotation::TwoPoint { style, .. }) => style.width,
+                    Some(Annotation::Freehand { style, .. }) => style.width,
                     _ => return Task::none(),
                 },
                 PropertyTarget::NumberTool
@@ -2317,6 +2464,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             transaction.preview = width;
             state.editor.properties.color = None;
+            state.editor.properties.opacity = None;
             state.editor.properties.popup = None;
             Task::none()
         }
@@ -2334,9 +2482,22 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     state.annotation_defaults.values.arrow.width = transaction.preview;
                     persist_annotation_defaults(state);
                 }
+                PropertyTarget::FreehandTool(kind) => {
+                    match kind {
+                        rollshot_image_document::FreehandKind::Pen => {
+                            state.annotation_defaults.values.pen.width = transaction.preview;
+                        }
+                        rollshot_image_document::FreehandKind::Highlighter => {
+                            state.annotation_defaults.values.highlighter.width =
+                                transaction.preview;
+                        }
+                    }
+                    persist_annotation_defaults(state);
+                }
                 PropertyTarget::Annotation(id) => {
-                    if let Some(Annotation::TwoPoint { style, .. }) =
-                        state.document.image.annotation(id)
+                    if let Some(
+                        Annotation::TwoPoint { style, .. } | Annotation::Freehand { style, .. },
+                    ) = state.document.image.annotation(id)
                     {
                         let mut new_style = *style;
                         new_style.width = transaction.preview;
@@ -2353,6 +2514,82 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
         }
         Message::CancelStrokeWidth => {
             state.editor.properties.width = None;
+            Task::none()
+        }
+        Message::PreviewStrokeOpacity(opacity) => {
+            use super::properties::{OpacityTransaction, PropertyTarget};
+            if !opacity.is_finite() {
+                state.message = Some(InlineMessage::Error("opacity must be finite".into()));
+                return Task::none();
+            }
+            let Some(target) = super::properties::property_target(state) else {
+                return Task::none();
+            };
+            let original = match target {
+                PropertyTarget::FreehandTool(
+                    rollshot_image_document::FreehandKind::Highlighter,
+                ) => state.annotation_defaults.values.highlighter.opacity,
+                PropertyTarget::Annotation(id) => match state.document.image.annotation(id) {
+                    Some(Annotation::Freehand {
+                        kind: rollshot_image_document::FreehandKind::Highlighter,
+                        style,
+                        ..
+                    }) => style.opacity,
+                    _ => return Task::none(),
+                },
+                _ => return Task::none(),
+            };
+            let transaction = state
+                .editor
+                .properties
+                .opacity
+                .get_or_insert(OpacityTransaction {
+                    target,
+                    original,
+                    preview: original,
+                });
+            if transaction.target != target {
+                *transaction = OpacityTransaction {
+                    target,
+                    original,
+                    preview: original,
+                };
+            }
+            transaction.preview = opacity.clamp(0.1, 1.0);
+            state.editor.properties.color = None;
+            state.editor.properties.width = None;
+            state.editor.properties.popup = None;
+            Task::none()
+        }
+        Message::ApplyStrokeOpacity => {
+            use super::properties::PropertyTarget;
+            let Some(transaction) = state.editor.properties.opacity.take() else {
+                return Task::none();
+            };
+            match transaction.target {
+                PropertyTarget::FreehandTool(
+                    rollshot_image_document::FreehandKind::Highlighter,
+                ) => {
+                    state.annotation_defaults.values.highlighter.opacity = transaction.preview;
+                    persist_annotation_defaults(state);
+                }
+                PropertyTarget::Annotation(id) => {
+                    if let Some(Annotation::Freehand { style, .. }) =
+                        state.document.image.annotation(id)
+                    {
+                        let mut new_style = *style;
+                        new_style.opacity = transaction.preview;
+                        if let Err(error) = state.document.image.set_stroke_style(id, new_style) {
+                            state.message = Some(InlineMessage::Error(error.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::CancelStrokeOpacity => {
+            state.editor.properties.opacity = None;
             Task::none()
         }
         Message::SetNumberSize(size) => {
@@ -2692,6 +2929,8 @@ pub(crate) fn map_key_press(
             "u" => Some(Message::SelectTool(Tool::Rectangle)),
             "o" if !cfg!(feature = "ocr") => Some(Message::SelectTool(Tool::Ellipse)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
+            "p" => Some(Message::SelectTool(Tool::Pen)),
+            "h" => Some(Message::SelectTool(Tool::Highlighter)),
             "s" => Some(Message::SelectRememberedShape),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
@@ -2752,13 +2991,11 @@ mod tests {
     }
 
     fn workspace() -> super::super::ResultWorkspace {
-        let mut state = super::super::ResultWorkspace::new(
+        super::super::ResultWorkspace::with_config_path(
             super::super::document::ResultDocument::unsaved(image()),
             None,
-        );
-        state.annotation_defaults.values = super::super::AnnotationDefaults::default();
-        state.annotation_defaults.config_path = None;
-        state
+            None,
+        )
     }
 
     fn workspace_with_arrow() -> super::super::ResultWorkspace {
@@ -2918,18 +3155,20 @@ mod tests {
     }
 
     fn unsaved_workspace() -> super::super::ResultWorkspace {
-        super::super::ResultWorkspace::new(
+        super::super::ResultWorkspace::with_config_path(
             super::super::document::ResultDocument::unsaved(image()),
+            None,
             None,
         )
     }
 
     fn saved_workspace() -> super::super::ResultWorkspace {
-        super::super::ResultWorkspace::new(
+        super::super::ResultWorkspace::with_config_path(
             super::super::document::ResultDocument::saved(
                 image(),
                 std::path::PathBuf::from("/tmp/result.png"),
             ),
+            None,
             None,
         )
     }
@@ -4336,6 +4575,44 @@ mod tests {
         use keyboard::Key;
         assert_eq!(
             map_key_press(&Key::Character("n".into()), zmod(), false),
+            None
+        );
+    }
+
+    // -- Pen & Highlighter shortcuts (Task 5) ------------------------------
+
+    #[test]
+    fn p_and_h_select_freehand_tools() {
+        let p = keyboard::Key::Character("p".into());
+        let h = keyboard::Key::Character("h".into());
+        assert_eq!(
+            map_key_press(&p, keyboard::Modifiers::default(), false),
+            Some(Message::SelectTool(Tool::Pen))
+        );
+        assert_eq!(
+            map_key_press(&h, keyboard::Modifiers::default(), false),
+            Some(Message::SelectTool(Tool::Highlighter))
+        );
+        // Captured input ignores tool shortcuts.
+        assert_eq!(
+            map_key_press(&p, keyboard::Modifiers::default(), true),
+            None
+        );
+        assert_eq!(
+            map_key_press(&h, keyboard::Modifiers::default(), true),
+            None
+        );
+    }
+
+    #[test]
+    fn command_modified_p_and_h_yield_to_command_handlers() {
+        // Command+P / Command+H should NOT trigger tool selection (they go to native handlers).
+        assert_eq!(
+            map_key_press(&keyboard::Key::Character("p".into()), zmod(), false),
+            None
+        );
+        assert_eq!(
+            map_key_press(&keyboard::Key::Character("h".into()), zmod(), false),
             None
         );
     }
@@ -6112,5 +6389,408 @@ mod tests {
             "apply: state_id updated"
         );
         assert!(state.annotations_dirty(), "apply: dirty");
+    }
+
+    // -- freehand creation gesture (Task 7) ---------------------------------
+
+    #[test]
+    fn freehand_gesture_filters_samples_and_commits_simplified_stroke() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        for i in 1..=30 {
+            let _ = handle_canvas_moved(&mut state, ImagePoint::new(10.0 + i as f32, 10.0));
+        }
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(40.0, 10.0));
+        let annotations = state.document.image.annotations();
+        assert_eq!(annotations.len(), 1);
+        match &annotations[0] {
+            Annotation::Freehand { kind, points, .. } => {
+                assert_eq!(*kind, rollshot_image_document::FreehandKind::Pen);
+                assert_eq!(
+                    points.len(),
+                    2,
+                    "collinear stroke must simplify to endpoints"
+                );
+                assert_eq!(points[0], ImagePoint::new(10.0, 10.0));
+                assert_eq!(points[1], ImagePoint::new(40.0, 10.0));
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+        assert!(state.document.image.can_undo());
+        state.document.image.undo();
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn freehand_click_and_subthreshold_gestures_cancel() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Highlighter;
+        let t0 = Instant::now();
+        // Plain click.
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(10.0, 10.0));
+        // 2-px wiggle (below the 4-screen-px threshold at scale 1).
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(12.0, 10.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(12.0, 10.0));
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn highlighter_stroke_uses_highlighter_defaults() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Highlighter;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(40.0, 20.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(40.0, 20.0));
+        match &state.document.image.annotations()[0] {
+            Annotation::Freehand { style, .. } => {
+                assert_eq!(*style, StrokeStyle::highlighter_default());
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_clears_active_freehand_draft() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(80.0, 40.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreateFreehand { .. })
+        ));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+        assert_eq!(state.editor.tool, Tool::Pen);
+    }
+
+    #[test]
+    fn out_of_bounds_pointer_moves_and_release_are_clamped() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(50.0, 50.0), t0);
+        // Move past right edge.
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(150.0, 50.0));
+        // Move past bottom edge.
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(50.0, 150.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(150.0, 150.0));
+        assert!(
+            !state.document.image.annotations().is_empty(),
+            "out-of-bounds gesture must still produce an annotation"
+        );
+        match &state.document.image.annotations()[0] {
+            Annotation::Freehand { points, .. } => {
+                for p in points {
+                    assert!(p.x <= 100.0 && p.y <= 100.0, "point {p:?} out of bounds");
+                }
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_body_movement_commits_one_history_entry_and_undo_restores_all_points() {
+        let mut state = workspace_with_size(200, 200);
+        let original_points = vec![
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(20.0, 30.0),
+            ImagePoint::new(40.0, 20.0),
+        ];
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Pen,
+                original_points.clone(),
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let before = state.document.image.state_id();
+
+        // Grab the body and drag.
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(20.0, 20.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(20.0, 20.0));
+
+        assert_ne!(state.document.image.state_id(), before);
+        // Exactly one history entry for the movement (plus one for creation).
+        assert!(state.document.image.can_undo());
+        state.document.image.undo(); // undo movement
+                                     // Points restored.
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Freehand { points, .. } => {
+                assert_eq!(*points, original_points);
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+        assert!(state.document.image.can_undo());
+        state.document.image.undo(); // undo creation
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn release_within_filter_does_not_append_redundant_endpoint() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        // Move to 30,10 — 20px gesture, well above the 4px threshold.
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(30.0, 10.0));
+        // Release at 31,10 — within 2 screen px filter of last accepted point
+        // (distance = 1.0 < 2.0), so it should NOT be appended.
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(31.0, 10.0));
+        assert!(
+            !state.document.image.annotations().is_empty(),
+            "20px gesture must produce an annotation"
+        );
+        match &state.document.image.annotations()[0] {
+            Annotation::Freehand { points, .. } => {
+                // RDP simplifies the collinear stroke to endpoints.
+                assert_eq!(
+                    points.len(),
+                    2,
+                    "collinear stroke should simplify to 2 points"
+                );
+                assert_eq!(points[0], ImagePoint::new(10.0, 10.0));
+                // Second point must be (30, 10), NOT the filtered (31, 10).
+                assert_eq!(
+                    points[1],
+                    ImagePoint::new(30.0, 10.0),
+                    "release point within 2px filter should not be appended"
+                );
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn successful_creation_marks_dirty_and_refreshes_navigator_and_keeps_tool() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.saved_state_id = state.document.image.state_id();
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(60.0, 10.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(60.0, 10.0));
+
+        assert!(state.annotations_dirty());
+        let items = state.document.image.navigator_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            state.editor.tool,
+            Tool::Pen,
+            "tool stays active after creation"
+        );
+        assert_eq!(state.editor.selection, None, "new stroke is not selected");
+    }
+
+    // -- opacity transaction tests (Task 8) ----------------------------------
+
+    #[test]
+    fn apply_opacity_to_highlighter_defaults_persists() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.7));
+        let _ = update(&mut state, Message::ApplyStrokeOpacity);
+        assert_eq!(state.annotation_defaults.values.highlighter.opacity, 0.7);
+    }
+
+    #[test]
+    fn apply_opacity_to_selected_highlighter_is_one_undo_step() {
+        let mut state = workspace();
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Highlighter,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::highlighter_default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.9));
+        let _ = update(&mut state, Message::ApplyStrokeOpacity);
+        assert_eq!(
+            state
+                .document
+                .image
+                .annotation(id)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .opacity,
+            0.9
+        );
+        state.document.image.undo();
+        assert_eq!(
+            state
+                .document
+                .image
+                .annotation(id)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .opacity,
+            0.4
+        );
+    }
+
+    #[test]
+    fn opacity_never_targets_pen() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pen;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.5));
+        assert!(state.editor.properties.opacity.is_none());
+        let _ = update(&mut state, Message::ApplyStrokeOpacity);
+        assert_eq!(state.annotation_defaults.values.pen.opacity, 1.0);
+    }
+
+    #[test]
+    fn opacity_cancel_discards_preview_without_changing_defaults_or_document() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let before_defaults = state.annotation_defaults.values.clone();
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.6));
+        assert!(state.editor.properties.opacity.is_some());
+        let _ = update(&mut state, Message::CancelStrokeOpacity);
+        assert!(state.editor.properties.opacity.is_none());
+        assert_eq!(state.annotation_defaults.values, before_defaults);
+    }
+
+    #[test]
+    fn esc_clears_opacity_transaction_preserving_tool_and_selection() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.6));
+        assert!(state.editor.properties.opacity.is_some());
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.properties.opacity.is_none());
+        assert_eq!(
+            state.editor.tool,
+            Tool::Highlighter,
+            "Esc cancelling opacity must not switch the tool"
+        );
+    }
+
+    #[test]
+    fn tool_switch_clears_opacity_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.6));
+        assert!(state.editor.properties.opacity.is_some());
+        let _ = update(&mut state, Message::SelectTool(Tool::Pen));
+        assert!(state.editor.properties.opacity.is_none());
+    }
+
+    #[test]
+    fn starting_opacity_preview_clears_width_and_color() {
+        use super::super::properties::{
+            ColorProperty, ColorTransaction, PropertyTarget, StrokeWidthTransaction,
+        };
+
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        state.editor.properties.width = Some(StrokeWidthTransaction {
+            target: PropertyTarget::FreehandTool(
+                rollshot_image_document::FreehandKind::Highlighter,
+            ),
+            original: 12.0,
+            preview: 16.0,
+        });
+        state.editor.properties.color = Some(ColorTransaction {
+            target: PropertyTarget::FreehandTool(
+                rollshot_image_document::FreehandKind::Highlighter,
+            ),
+            property: ColorProperty::StrokeColor,
+            original: Rgb8::new(0, 0, 0),
+            preview: Rgb8::new(255, 0, 0),
+            hex: "#FF0000".into(),
+        });
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.5));
+        assert!(state.editor.properties.width.is_none());
+        assert!(state.editor.properties.color.is_none());
+        assert!(state.editor.properties.opacity.is_some());
+    }
+
+    #[test]
+    fn starting_width_preview_clears_opacity() {
+        use super::super::properties::{OpacityTransaction, PropertyTarget};
+
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        state.editor.properties.opacity = Some(OpacityTransaction {
+            target: PropertyTarget::FreehandTool(
+                rollshot_image_document::FreehandKind::Highlighter,
+            ),
+            original: 0.4,
+            preview: 0.8,
+        });
+        let _ = update(&mut state, Message::PreviewStrokeWidth(16.0));
+        assert!(state.editor.properties.opacity.is_none());
+        assert!(state.editor.properties.width.is_some());
+    }
+
+    #[test]
+    fn nan_opacity_is_rejected() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(f32::NAN));
+        assert!(state.editor.properties.opacity.is_none());
+    }
+
+    #[test]
+    fn infinite_opacity_is_rejected() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(f32::INFINITY));
+        assert!(state.editor.properties.opacity.is_none());
+    }
+
+    #[test]
+    fn out_of_range_opacity_clamps_to_valid_range() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.01));
+        assert_eq!(
+            state.editor.properties.opacity.as_ref().unwrap().preview,
+            0.1
+        );
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(5.0));
+        assert_eq!(
+            state.editor.properties.opacity.as_ref().unwrap().preview,
+            1.0
+        );
+    }
+
+    #[test]
+    fn apply_opacity_to_selected_pen_freehand_does_nothing() {
+        let mut state = workspace();
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        // PreviewStrokeOpacity targets Highlighter only; Pen selection → no-op
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.5));
+        assert!(state.editor.properties.opacity.is_none());
     }
 }
