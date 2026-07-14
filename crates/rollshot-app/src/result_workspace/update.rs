@@ -1276,10 +1276,12 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             }
             if state.editor.properties.color.is_some()
                 || state.editor.properties.width.is_some()
+                || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
+                state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
                 state.editor.properties.popup = None;
                 return Task::none();
@@ -6666,6 +6668,21 @@ mod tests {
         let _ = update(&mut state, Message::CancelStrokeOpacity);
         assert!(state.editor.properties.opacity.is_none());
         assert_eq!(state.annotation_defaults.values, before_defaults);
+    }
+
+    #[test]
+    fn esc_clears_opacity_transaction_preserving_tool_and_selection() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Highlighter;
+        let _ = update(&mut state, Message::PreviewStrokeOpacity(0.6));
+        assert!(state.editor.properties.opacity.is_some());
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.properties.opacity.is_none());
+        assert_eq!(
+            state.editor.tool,
+            Tool::Highlighter,
+            "Esc cancelling opacity must not switch the tool"
+        );
     }
 
     #[test]

@@ -487,6 +487,25 @@ impl AnnotationCanvas<'_> {
     }
 
     fn draw_annotation(&self, frame: &mut canvas::Frame, annotation: &Annotation) {
+        // Freehand fast path: borrow points directly instead of cloning via
+        // annotation_shapes (plan decision D4 — avoid per-redraw allocation
+        // on long strokes).
+        if let Annotation::Freehand { points, style, .. } = annotation {
+            if points.len() >= 2 {
+                let alpha = (style.opacity * 255.0).round() as u8;
+                let color = style.color.with_alpha(alpha);
+                let t0 = Instant::now();
+                self.draw_polyline(frame, points, style.width, token_color(color));
+                tracing::trace!(
+                    target: "rollshot::annotation",
+                    points = points.len(),
+                    elapsed_us = t0.elapsed().as_micros() as u64,
+                    draw_kind = "committed",
+                    "polyline stroke"
+                );
+            }
+            return;
+        }
         for shape in annotation_shapes(annotation) {
             self.draw_shape(frame, &shape);
         }
