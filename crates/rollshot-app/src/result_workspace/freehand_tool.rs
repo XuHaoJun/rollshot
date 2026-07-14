@@ -120,9 +120,7 @@ mod tests {
 
     #[test]
     fn rdp_collapses_collinear_points() {
-        let pts: Vec<ImagePoint> = (0..=10)
-            .map(|i| ImagePoint::new(i as f32, 0.0))
-            .collect();
+        let pts: Vec<ImagePoint> = (0..=10).map(|i| ImagePoint::new(i as f32, 0.0)).collect();
         assert_eq!(
             simplify_rdp(&pts, 1.0),
             vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 0.0)]
@@ -172,8 +170,7 @@ mod tests {
                     let dx = w[1].x - w[0].x;
                     let dy = w[1].y - w[0].y;
                     let len_sq = dx * dx + dy * dy;
-                    let t = (((p.x - w[0].x) * dx + (p.y - w[0].y) * dy) / len_sq)
-                        .clamp(0.0, 1.0);
+                    let t = (((p.x - w[0].x) * dx + (p.y - w[0].y) * dy) / len_sq).clamp(0.0, 1.0);
                     p.distance(ImagePoint::new(w[0].x + t * dx, w[0].y + t * dy))
                 })
                 .fold(f32::MAX, f32::min);

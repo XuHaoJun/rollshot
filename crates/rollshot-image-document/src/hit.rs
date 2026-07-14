@@ -402,7 +402,10 @@ mod tests {
             hit_test_annotation(&a, ImagePoint::new(50.0, 3.5), 2.0),
             Some(HitPart::Body)
         );
-        assert_eq!(hit_test_annotation(&a, ImagePoint::new(20.0, 80.0), 2.0), None);
+        assert_eq!(
+            hit_test_annotation(&a, ImagePoint::new(20.0, 80.0), 2.0),
+            None
+        );
     }
 
     #[test]
@@ -425,13 +428,19 @@ mod tests {
             AnnotationId(1),
             crate::annotation::FreehandKind::Pen,
             vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(100.0, 0.0)],
-            StrokeStyle { width: 2.0, ..StrokeStyle::default() },
+            StrokeStyle {
+                width: 2.0,
+                ..StrokeStyle::default()
+            },
         );
         let wide = Annotation::freehand_with_style(
             AnnotationId(2),
             crate::annotation::FreehandKind::Pen,
             vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(100.0, 0.0)],
-            StrokeStyle { width: 20.0, ..StrokeStyle::default() },
+            StrokeStyle {
+                width: 20.0,
+                ..StrokeStyle::default()
+            },
         );
         let pt = ImagePoint::new(50.0, 4.0);
         assert_eq!(hit_test_annotation(&narrow, pt, 1.0), None);

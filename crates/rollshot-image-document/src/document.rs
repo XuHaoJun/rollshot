@@ -68,7 +68,10 @@ fn clamp_freehand_points(
     for p in &points {
         ensure_point_finite(p)?;
     }
-    let clamped: Vec<ImagePoint> = points.into_iter().map(|p| p.clamp_to(width, height)).collect();
+    let clamped: Vec<ImagePoint> = points
+        .into_iter()
+        .map(|p| p.clamp_to(width, height))
+        .collect();
     if clamped.iter().all(|p| *p == clamped[0]) {
         return Err(EditError::InvalidFreehandPath);
     }

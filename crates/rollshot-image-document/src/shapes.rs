@@ -658,7 +658,11 @@ mod tests {
     #[test]
     fn freehand_lowers_to_polyline_with_opacity_alpha() {
         let pts = vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 5.0)];
-        let a = Annotation::freehand(AnnotationId(1), crate::FreehandKind::Highlighter, pts.clone());
+        let a = Annotation::freehand(
+            AnnotationId(1),
+            crate::FreehandKind::Highlighter,
+            pts.clone(),
+        );
         let shapes = annotation_shapes(&a);
         assert_eq!(shapes.len(), 1);
         assert!(matches!(
