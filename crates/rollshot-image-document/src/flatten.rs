@@ -84,6 +84,7 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
 
 #[cfg(test)]
 mod tests {
+    use crate::annotation::FreehandKind;
     use crate::geometry::{ImagePoint, ImageRect};
     use crate::{ImageDocument, Rgb8, StrokeStyle, TwoPointKind};
     use image::{Rgba, RgbaImage};
@@ -226,7 +227,7 @@ mod tests {
     #[test]
     fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
         let mut doc = ImageDocument::new(base(1000, 20_000));
-        // 14 rows × 7 types = 98, plus 1 Rectangle + 1 Ellipse = exactly 100.
+        // 14 rows × 7 types = 98, plus Pen (row 3) + Highlighter (row 10) = 100.
         for i in 0..14u32 {
             let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
@@ -271,30 +272,34 @@ mod tests {
                 },
             )
             .unwrap();
+            if i == 3 {
+                let pts: Vec<_> = (0..5)
+                    .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
+                    .collect();
+                doc.add_freehand_with_style(
+                    FreehandKind::Pen,
+                    pts,
+                    StrokeStyle {
+                        color: Rgb8::new(0, 0, 0),
+                        width: 2.0,
+                        opacity: 1.0,
+                    },
+                )
+                .unwrap();
+            }
+            if i == 10 {
+                let pts: Vec<_> = (0..5)
+                    .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
+                    .collect();
+                doc.add_freehand_with_style(
+                    FreehandKind::Highlighter,
+                    pts,
+                    StrokeStyle::highlighter_default(),
+                )
+                .unwrap();
+            }
         }
-        // Extra Rectangle + Ellipse to reach exactly 100.
-        let ey = 100.0 + 14.0 * 950.0;
-        doc.add_shape(
-            crate::annotation::ShapeKind::Rectangle,
-            ImageRect {
-                x: 100.0,
-                y: ey,
-                width: 60.0,
-                height: 80.0,
-            },
-        )
-        .unwrap();
-        let ey2 = 100.0 + 15.0 * 950.0;
-        doc.add_shape(
-            crate::annotation::ShapeKind::Ellipse,
-            ImageRect {
-                x: 300.0,
-                y: ey2,
-                width: 60.0,
-                height: 80.0,
-            },
-        )
-        .unwrap();
+        // 14 rows × 7 types = 98, + Pen (row 3) + Highlighter (row 10) = 100.
 
         assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
