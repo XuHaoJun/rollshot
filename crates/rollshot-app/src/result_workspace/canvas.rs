@@ -605,6 +605,17 @@ impl AnnotationCanvas<'_> {
                     handle(frame, p, white, accent);
                 }
             }
+            Annotation::Freehand { points, style, .. } => {
+                let b = annotation_bounds(annotation);
+                let _ = (points, style);
+                frame.stroke(
+                    &canvas::Path::rectangle(
+                        Point::new(b.x * s, b.y * s),
+                        Size::new(b.width * s, b.height * s),
+                    ),
+                    canvas::Stroke::default().with_color(accent).with_width(2.0),
+                );
+            }
         }
     }
 }

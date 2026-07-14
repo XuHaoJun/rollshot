@@ -522,4 +522,47 @@ mod tests {
         // Redaction should be opaque black over the shape
         assert_eq!(out.get_pixel(30, 30).0, [0, 0, 0, 255]);
     }
+
+    #[test]
+    fn committed_highlighter_flattens_with_uniform_alpha() {
+        let mut doc = crate::ImageDocument::new(RgbaImage::from_pixel(
+            60,
+            60,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        doc.add_freehand_with_style(
+            crate::FreehandKind::Highlighter,
+            vec![
+                ImagePoint::new(10.0, 10.0),
+                ImagePoint::new(50.0, 50.0),
+                ImagePoint::new(10.0, 50.0),
+                ImagePoint::new(50.0, 10.0),
+            ],
+            crate::StrokeStyle::highlighter_default(),
+        )
+        .unwrap();
+        let out = doc.flatten();
+        let crossing = out.get_pixel(30, 30).0;
+        let single = out.get_pixel(15, 15).0;
+        assert_eq!(crossing, single, "self-overlap must not darken");
+        assert!(crossing[2] < 255);
+        assert_eq!(doc.source().get_pixel(30, 30).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn committed_pen_flattens_opaque() {
+        let mut doc = crate::ImageDocument::new(RgbaImage::from_pixel(
+            40,
+            40,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        doc.add_freehand_with_style(
+            crate::FreehandKind::Pen,
+            vec![ImagePoint::new(5.0, 20.0), ImagePoint::new(35.0, 20.0)],
+            crate::StrokeStyle::default(),
+        )
+        .unwrap();
+        let out = doc.flatten();
+        assert_eq!(out.get_pixel(20, 20).0, [0xE5, 0x48, 0x4D, 255]);
+    }
 }

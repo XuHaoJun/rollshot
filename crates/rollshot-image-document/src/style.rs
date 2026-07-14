@@ -99,6 +99,18 @@ impl Default for StrokeStyle {
     }
 }
 
+impl StrokeStyle {
+    /// Reviewed Highlighter defaults (Slice 4 spec §4): highlighter yellow,
+    /// triple pen width, uniform 40% alpha.
+    pub fn highlighter_default() -> Self {
+        Self {
+            color: Rgb8::new(0xFF, 0xD4, 0x00),
+            width: 12.0,
+            opacity: 0.4,
+        }
+    }
+}
+
 /// Callout accent (number bubble fill, leader triangle): #E5484D.
 pub const ACCENT: Rgba8 = Rgba8::new(0xE5, 0x48, 0x4D, 0xFF);
 pub const WHITE: Rgba8 = Rgba8::new(0xFF, 0xFF, 0xFF, 0xFF);

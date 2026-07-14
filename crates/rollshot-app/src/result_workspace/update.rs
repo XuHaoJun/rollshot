@@ -825,6 +825,10 @@ pub(crate) fn handle_canvas_released(
                         .document
                         .image
                         .set_shape_bounds(original.id(), *bounds),
+                    Annotation::Freehand { points, .. } => state
+                        .document
+                        .image
+                        .set_freehand_points(original.id(), points.clone()),
                 };
                 if let Err(e) = result {
                     state.message = Some(InlineMessage::Error(e.to_string()));

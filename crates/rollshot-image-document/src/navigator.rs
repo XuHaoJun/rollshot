@@ -39,6 +39,10 @@ fn label(annotation: &Annotation) -> String {
             crate::annotation::ShapeKind::Rectangle => "Rectangle".to_string(),
             crate::annotation::ShapeKind::Ellipse => "Ellipse".to_string(),
         },
+        Annotation::Freehand { kind, .. } => match kind {
+            crate::annotation::FreehandKind::Pen => "Pen".to_string(),
+            crate::annotation::FreehandKind::Highlighter => "Highlighter".to_string(),
+        },
     }
 }
 
@@ -235,5 +239,39 @@ mod tests {
             },
         );
         assert_eq!(ann.anchor(), ImagePoint::new(15.0, 25.0));
+    }
+
+    #[test]
+    fn freehand_labels_are_pen_and_highlighter() {
+        let pen = Annotation::freehand(
+            AnnotationId(1),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(5.0, 5.0)],
+        );
+        let hl = Annotation::freehand(
+            AnnotationId(2),
+            crate::annotation::FreehandKind::Highlighter,
+            vec![ImagePoint::new(0.0, 10.0), ImagePoint::new(5.0, 15.0)],
+        );
+        let items = navigator_items(&[pen, hl]);
+        assert_eq!(items[0].label, "Pen");
+        assert_eq!(items[1].label, "Highlighter");
+    }
+
+    #[test]
+    fn freehand_reading_order_and_stable_id_tie_breaking() {
+        let a = Annotation::freehand(
+            AnnotationId(5),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 50.0), ImagePoint::new(10.0, 50.0)],
+        );
+        let b = Annotation::freehand(
+            AnnotationId(2),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 10.0), ImagePoint::new(10.0, 10.0)],
+        );
+        let items = navigator_items(&[a, b]);
+        assert_eq!(items[0].id, AnnotationId(2), "lower y sorts first");
+        assert_eq!(items[1].id, AnnotationId(5));
     }
 }

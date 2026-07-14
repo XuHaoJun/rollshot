@@ -233,6 +233,14 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
                 fill: fill_color,
             }]
         }
+        Annotation::Freehand { points, style, .. } => {
+            let alpha = (style.opacity * 255.0).round() as u8;
+            vec![RenderShape::Polyline {
+                points: points.clone(),
+                width: style.width,
+                color: style.color.with_alpha(alpha),
+            }]
+        }
     }
 }
 
@@ -280,6 +288,9 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
         Annotation::OpaqueRedaction { bounds, .. } => *bounds,
         Annotation::Shape { bounds, stroke, .. } => {
             crate::box_shape::shape_visual_bounds(*bounds, stroke.width)
+        }
+        Annotation::Freehand { points, style, .. } => {
+            crate::freehand::freehand_bounds(points, style.width)
         }
     }
 }
@@ -640,6 +651,44 @@ mod tests {
                 y: 18.0,
                 width: 34.0,
                 height: 44.0,
+            }
+        );
+    }
+
+    #[test]
+    fn freehand_lowers_to_polyline_with_opacity_alpha() {
+        let pts = vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 5.0)];
+        let a = Annotation::freehand(AnnotationId(1), crate::FreehandKind::Highlighter, pts.clone());
+        let shapes = annotation_shapes(&a);
+        assert_eq!(shapes.len(), 1);
+        assert!(matches!(
+            &shapes[0],
+            RenderShape::Polyline { points, width, color }
+                if *points == pts
+                    && *width == 12.0
+                    && color.a == (0.4_f32 * 255.0).round() as u8
+        ));
+    }
+
+    #[test]
+    fn freehand_bounds_cover_points_plus_half_width() {
+        let pts = vec![ImagePoint::new(10.0, 10.0), ImagePoint::new(30.0, 20.0)];
+        let a = Annotation::freehand_with_style(
+            AnnotationId(1),
+            crate::FreehandKind::Pen,
+            pts,
+            StrokeStyle {
+                width: 6.0,
+                ..StrokeStyle::default()
+            },
+        );
+        assert_eq!(
+            annotation_bounds(&a),
+            ImageRect {
+                x: 7.0,
+                y: 7.0,
+                width: 26.0,
+                height: 16.0
             }
         );
     }

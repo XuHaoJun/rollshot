@@ -24,6 +24,14 @@ pub enum ShapeKind {
     Ellipse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum FreehandKind {
+    Pen,
+    Highlighter,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Annotation {
     TwoPoint {
@@ -59,6 +67,14 @@ pub enum Annotation {
         bounds: ImageRect,
         stroke: StrokeStyle,
         fill: Option<Rgb8>,
+    },
+    Freehand {
+        id: AnnotationId,
+        kind: FreehandKind,
+        /// Simplified polyline in full-resolution image coordinates,
+        /// stroke start → end.
+        points: Vec<ImagePoint>,
+        style: StrokeStyle,
     },
 }
 
@@ -155,13 +171,36 @@ impl Annotation {
         }
     }
 
+    pub fn freehand(id: AnnotationId, kind: FreehandKind, points: Vec<ImagePoint>) -> Self {
+        let style = match kind {
+            FreehandKind::Pen => StrokeStyle::default(),
+            FreehandKind::Highlighter => StrokeStyle::highlighter_default(),
+        };
+        Self::freehand_with_style(id, kind, points, style)
+    }
+
+    pub fn freehand_with_style(
+        id: AnnotationId,
+        kind: FreehandKind,
+        points: Vec<ImagePoint>,
+        style: StrokeStyle,
+    ) -> Self {
+        Self::Freehand {
+            id,
+            kind,
+            points,
+            style,
+        }
+    }
+
     pub fn id(&self) -> AnnotationId {
         match self {
             Annotation::TwoPoint { id, .. }
             | Annotation::NumberCallout { id, .. }
             | Annotation::TextNote { id, .. }
             | Annotation::OpaqueRedaction { id, .. }
-            | Annotation::Shape { id, .. } => *id,
+            | Annotation::Shape { id, .. }
+            | Annotation::Freehand { id, .. } => *id,
         }
     }
 
@@ -175,6 +214,10 @@ impl Annotation {
             Annotation::TextNote { position, .. } => *position,
             Annotation::OpaqueRedaction { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
             Annotation::Shape { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
+            Annotation::Freehand { points, .. } => ImagePoint::new(
+                points.iter().map(|p| p.x).fold(f32::MAX, f32::min),
+                points.iter().map(|p| p.y).fold(f32::MAX, f32::min),
+            ),
         }
     }
 
@@ -182,6 +225,7 @@ impl Annotation {
         match self {
             Annotation::TwoPoint { style, .. } => Some(*style),
             Annotation::Shape { stroke, .. } => Some(*stroke),
+            Annotation::Freehand { style, .. } => Some(*style),
             _ => None,
         }
     }
@@ -354,5 +398,65 @@ mod tests {
         );
         assert_eq!(r.number_style(), None);
         assert_eq!(r.text_style(), None);
+    }
+
+    #[test]
+    fn freehand_pen_canonical_constructor_uses_default_style() {
+        let a = Annotation::freehand(
+            AnnotationId(1),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 5.0)],
+        );
+        assert_eq!(a.stroke_style(), Some(StrokeStyle::default()));
+        assert_eq!(a.id(), AnnotationId(1));
+    }
+
+    #[test]
+    fn freehand_highlighter_canonical_constructor_uses_highlighter_default() {
+        let a = Annotation::freehand(
+            AnnotationId(2),
+            crate::annotation::FreehandKind::Highlighter,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 5.0)],
+        );
+        assert_eq!(a.stroke_style(), Some(StrokeStyle::highlighter_default()));
+    }
+
+    #[test]
+    fn freehand_with_style_stores_explicit_style() {
+        let style = StrokeStyle {
+            width: 8.0,
+            ..StrokeStyle::default()
+        };
+        let a = Annotation::freehand_with_style(
+            AnnotationId(3),
+            crate::annotation::FreehandKind::Pen,
+            vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 5.0)],
+            style,
+        );
+        assert_eq!(a.stroke_style(), Some(style));
+    }
+
+    #[test]
+    fn freehand_anchor_is_minimum_x_minimum_y() {
+        let a = Annotation::freehand(
+            AnnotationId(4),
+            crate::annotation::FreehandKind::Pen,
+            vec![
+                ImagePoint::new(30.0, 20.0),
+                ImagePoint::new(10.0, 40.0),
+                ImagePoint::new(50.0, 10.0),
+            ],
+        );
+        assert_eq!(a.anchor(), ImagePoint::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn freehand_kind_is_copy_eq() {
+        let pen = crate::annotation::FreehandKind::Pen;
+        let hl = crate::annotation::FreehandKind::Highlighter;
+        assert_ne!(pen, hl);
+        assert_eq!(pen, crate::annotation::FreehandKind::Pen);
+        let copy = hl;
+        assert_eq!(hl, copy);
     }
 }
