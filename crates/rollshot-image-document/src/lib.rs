@@ -9,6 +9,7 @@ pub mod callout_placement;
 mod document;
 mod edit_op;
 mod flatten;
+mod freehand;
 mod geometry;
 mod hit;
 mod navigator;
