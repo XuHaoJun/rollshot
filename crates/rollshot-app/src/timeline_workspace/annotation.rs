@@ -275,12 +275,12 @@ impl NumberAnnotationCanvas<'_> {
                         }),
                     };
                     if let Some(fill_color) = fill {
-                        frame.fill(&make_path(), rgba_alpha(*fill_color, alpha));
+                        frame.fill(&make_path(), rgba_alpha(fill_color, alpha));
                     }
                     frame.stroke(
                         &make_path(),
                         canvas::Stroke::default()
-                            .with_color(rgba_alpha(*stroke, alpha))
+                            .with_color(rgba_alpha(stroke, alpha))
                             .with_width(stroke_width * s),
                     );
                 }
