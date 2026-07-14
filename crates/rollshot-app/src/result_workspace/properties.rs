@@ -1,7 +1,7 @@
 use iced::Element;
 
 use rollshot_image_document::{
-    Annotation, AnnotationId, Rgb8, ShapeKind, StrokeStyle, TwoPointKind,
+    Annotation, AnnotationId, FreehandKind, Rgb8, ShapeKind, StrokeStyle, TwoPointKind,
 };
 
 use super::canvas::Tool;
@@ -14,6 +14,7 @@ pub enum PropertyTarget {
     TextTool,
     TwoPointTool(TwoPointKind),
     ShapeTool(ShapeKind),
+    FreehandTool(FreehandKind),
     Annotation(AnnotationId),
 }
 
@@ -37,6 +38,13 @@ pub struct ColorTransaction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrokeWidthTransaction {
+    pub target: PropertyTarget,
+    pub original: f32,
+    pub preview: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpacityTransaction {
     pub target: PropertyTarget,
     pub original: f32,
     pub preview: f32,
@@ -70,6 +78,7 @@ pub enum PropertyFocus {
 pub struct PropertyState {
     pub color: Option<ColorTransaction>,
     pub width: Option<StrokeWidthTransaction>,
+    pub opacity: Option<OpacityTransaction>,
     pub shape_style: Option<ShapeStyleTransaction>,
     pub next_number_input: String,
     pub focus: Option<PropertyFocus>,
@@ -100,7 +109,8 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
                     _ => None,
                 })
         }
-        Tool::Pen | Tool::Highlighter => None,
+        Tool::Pen => Some(PropertyTarget::FreehandTool(FreehandKind::Pen)),
+        Tool::Highlighter => Some(PropertyTarget::FreehandTool(FreehandKind::Highlighter)),
         Tool::Redact => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
@@ -216,6 +226,10 @@ fn stroke_width(state: &ResultWorkspace, target: PropertyTarget) -> Option<f32> 
         PropertyTarget::ShapeTool(kind) => {
             Some(state.annotation_defaults.values.shape(kind).stroke.width)
         }
+        PropertyTarget::FreehandTool(kind) => Some(match kind {
+            FreehandKind::Pen => state.annotation_defaults.values.pen.width,
+            FreehandKind::Highlighter => state.annotation_defaults.values.highlighter.width,
+        }),
         PropertyTarget::Annotation(id) => state
             .document
             .image
@@ -295,6 +309,73 @@ fn fill_controls(fill_enabled: bool) -> Element<'static, Message> {
     row![fill_btn, color_btn].spacing(8).into()
 }
 
+/// Pure helper: returns the opacity value for a given target if it is a
+/// Highlighter tool-default or selected-Highlighter-annotation target.
+/// Returns `None` for Pen, TwoPoint, Shape, Number, Text, etc.
+pub fn opacity_value(state: &ResultWorkspace, target: PropertyTarget) -> Option<f32> {
+    match target {
+        PropertyTarget::FreehandTool(FreehandKind::Highlighter) => {
+            let committed = state.annotation_defaults.values.highlighter.opacity;
+            Some(
+                state
+                    .editor
+                    .properties
+                    .opacity
+                    .as_ref()
+                    .filter(|tx| tx.target == target)
+                    .map(|tx| tx.preview)
+                    .unwrap_or(committed),
+            )
+        }
+        PropertyTarget::Annotation(id) => {
+            let ann = state.document.image.annotation(id)?;
+            match ann {
+                Annotation::Freehand {
+                    kind: FreehandKind::Highlighter,
+                    style,
+                    ..
+                } => Some(
+                    state
+                        .editor
+                        .properties
+                        .opacity
+                        .as_ref()
+                        .filter(|tx| tx.target == target)
+                        .map(|tx| tx.preview)
+                        .unwrap_or(style.opacity),
+                ),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn opacity_control(
+    state: &ResultWorkspace,
+    target: PropertyTarget,
+    committed: f32,
+) -> Element<'static, Message> {
+    use iced::widget::{row, slider, text};
+    let value = state
+        .editor
+        .properties
+        .opacity
+        .as_ref()
+        .filter(|tx| tx.target == target)
+        .map(|tx| tx.preview)
+        .unwrap_or(committed);
+    row![
+        text(format!("{:.0}%", value * 100.0)).size(12),
+        slider(0.1_f32..=1.0_f32, value, Message::PreviewStrokeOpacity)
+            .step(0.05_f32)
+            .on_release(Message::ApplyStrokeOpacity)
+            .width(96),
+    ]
+    .spacing(4)
+    .into()
+}
+
 /// Build the property controls row for the current tool/selection.
 ///
 /// Returns `None` when the active tool has no associated properties (Redact,
@@ -341,6 +422,20 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
             let stroke = shape_stroke_controls(state, target)?;
             let fill = fill_controls(defaults.fill_enabled);
             Some(row![stroke, fill].spacing(8).into())
+        }
+        PropertyTarget::FreehandTool(kind) => {
+            let stroke = stroke_controls(state, target)?;
+            match kind {
+                FreehandKind::Pen => Some(stroke),
+                FreehandKind::Highlighter => {
+                    let committed = state.annotation_defaults.values.highlighter.opacity;
+                    Some(
+                        iced::widget::row![stroke, opacity_control(state, target, committed)]
+                            .spacing(8)
+                            .into(),
+                    )
+                }
+            }
         }
         PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
             Annotation::TwoPoint { .. } => stroke_controls(state, target),
@@ -389,6 +484,17 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                     .spacing(8)
                     .into(),
                 )
+            }
+            Annotation::Freehand { kind, style, .. } => {
+                let stroke = stroke_controls(state, target)?;
+                match kind {
+                    FreehandKind::Pen => Some(stroke),
+                    FreehandKind::Highlighter => Some(
+                        iced::widget::row![stroke, opacity_control(state, target, style.opacity)]
+                            .spacing(8)
+                            .into(),
+                    ),
+                }
             }
             _ => None,
         },
@@ -490,7 +596,40 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             _ => None,
         },
         Annotation::OpaqueRedaction { .. } => None,
-        Annotation::Freehand { .. } => None,
+        Annotation::Freehand {
+            id,
+            kind,
+            points,
+            mut style,
+        } => {
+            let mut changed = false;
+            if let Some(tx) = state.editor.properties.color.as_ref() {
+                if tx.target == PropertyTarget::Annotation(id)
+                    && tx.property == ColorProperty::StrokeColor
+                {
+                    style.color = tx.preview;
+                    changed = true;
+                }
+            }
+            if let Some(tx) = state.editor.properties.width.as_ref() {
+                if tx.target == PropertyTarget::Annotation(id) {
+                    style.width = tx.preview;
+                    changed = true;
+                }
+            }
+            if let Some(tx) = state.editor.properties.opacity.as_ref() {
+                if tx.target == PropertyTarget::Annotation(id) {
+                    style.opacity = tx.preview;
+                    changed = true;
+                }
+            }
+            changed.then_some(Annotation::Freehand {
+                id,
+                kind,
+                points,
+                style,
+            })
+        }
         Annotation::Shape {
             id,
             kind,
@@ -864,6 +1003,169 @@ mod tests {
                 assert_eq!(fill, Some(Rgb8::new(0, 255, 0)));
             }
             _ => panic!("expected Shape"),
+        }
+    }
+
+    // -- freehand property target + opacity tests (Task 8) --------------------
+
+    #[test]
+    fn pen_and_highlighter_have_freehand_targets() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pen;
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::FreehandTool(
+                rollshot_image_document::FreehandKind::Pen
+            ))
+        );
+        state.editor.tool = Tool::Highlighter;
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::FreehandTool(
+                rollshot_image_document::FreehandKind::Highlighter
+            ))
+        );
+    }
+
+    #[test]
+    fn selected_freehand_targets_annotation() {
+        let mut state = workspace();
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::Annotation(id))
+        );
+    }
+
+    #[test]
+    fn freehand_preview_applies_width_color_and_opacity_transactions() {
+        let mut state = workspace();
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Highlighter,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::highlighter_default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        state.editor.properties.opacity = Some(OpacityTransaction {
+            target: PropertyTarget::Annotation(id),
+            original: 0.4,
+            preview: 0.8,
+        });
+        match preview_annotation(&state) {
+            Some(Annotation::Freehand { style, .. }) => assert_eq!(style.opacity, 0.8),
+            other => panic!("expected freehand preview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opacity_value_returns_some_only_for_highlighter_targets() {
+        let mut state = workspace();
+
+        // Highlighter tool → Some
+        state.editor.tool = Tool::Highlighter;
+        assert_eq!(
+            opacity_value(
+                &state,
+                PropertyTarget::FreehandTool(rollshot_image_document::FreehandKind::Highlighter,)
+            ),
+            Some(rollshot_image_document::StrokeStyle::highlighter_default().opacity)
+        );
+
+        // Pen tool → None
+        assert_eq!(
+            opacity_value(
+                &state,
+                PropertyTarget::FreehandTool(rollshot_image_document::FreehandKind::Pen,)
+            ),
+            None
+        );
+
+        // Selected Highlighter annotation → Some
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Highlighter,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::highlighter_default(),
+            )
+            .unwrap();
+        assert_eq!(
+            opacity_value(&state, PropertyTarget::Annotation(id)),
+            Some(0.4)
+        );
+
+        // Selected Pen annotation → None
+        let pen_id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            opacity_value(&state, PropertyTarget::Annotation(pen_id)),
+            None
+        );
+
+        // TwoPoint annotation → None
+        let line_id = state
+            .document
+            .image
+            .add_two_point(
+                rollshot_image_document::TwoPointKind::Line,
+                ImagePoint::new(0.0, 0.0),
+                ImagePoint::new(10.0, 10.0),
+            )
+            .unwrap();
+        assert_eq!(
+            opacity_value(&state, PropertyTarget::Annotation(line_id)),
+            None
+        );
+    }
+
+    #[test]
+    fn pen_preview_annotation_applies_color_and_width_but_not_opacity() {
+        let mut state = workspace();
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Pen,
+                vec![ImagePoint::new(0.0, 0.0), ImagePoint::new(10.0, 10.0)],
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        state.editor.properties.width = Some(StrokeWidthTransaction {
+            target: PropertyTarget::Annotation(id),
+            original: 4.0,
+            preview: 8.0,
+        });
+        match preview_annotation(&state) {
+            Some(Annotation::Freehand { style, .. }) => {
+                assert_eq!(style.width, 8.0);
+                assert_eq!(style.opacity, 1.0); // unchanged
+            }
+            other => panic!("expected freehand preview, got {other:?}"),
         }
     }
 
