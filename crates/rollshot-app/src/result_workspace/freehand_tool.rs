@@ -17,16 +17,19 @@ pub fn should_accept_point(last: ImagePoint, candidate: ImagePoint, scale: f32) 
     last.distance(candidate) * scale >= MIN_SAMPLE_DISTANCE_SCREEN
 }
 
-/// Perpendicular distance from `p` to the infinite line through `a`..`b`
-/// (or point distance when a == b).
-fn line_distance(p: ImagePoint, a: ImagePoint, b: ImagePoint) -> f32 {
+/// Distance from `p` to the SEGMENT `a`..`b` (clamped projection, matching
+/// the document hit-test metric; point distance when a == b). Segment — not
+/// infinite-line — distance is required so a stroke that retraces along its
+/// own line keeps points beyond the endpoint chord.
+fn segment_distance(p: ImagePoint, a: ImagePoint, b: ImagePoint) -> f32 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len == 0.0 {
+    let len_sq = dx * dx + dy * dy;
+    if len_sq == 0.0 {
         return p.distance(a);
     }
-    ((p.x - a.x) * dy - (p.y - a.y) * dx).abs() / len
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq).clamp(0.0, 1.0);
+    p.distance(ImagePoint::new(a.x + t * dx, a.y + t * dy))
 }
 
 /// Iterative Ramer–Douglas–Peucker. Keeps first and last points; the output
@@ -43,7 +46,7 @@ pub fn simplify_rdp(points: &[ImagePoint], epsilon: f32) -> Vec<ImagePoint> {
         let mut max_d = 0.0f32;
         let mut index = first;
         for i in (first + 1)..last {
-            let d = line_distance(points[i], points[first], points[last]);
+            let d = segment_distance(points[i], points[first], points[last]);
             if d > max_d {
                 max_d = d;
                 index = i;
@@ -176,6 +179,39 @@ mod tests {
                 .fold(f32::MAX, f32::min);
             assert!(d <= 1.0 + 1e-3, "point deviates by {d}");
         }
+    }
+
+    #[test]
+    fn rdp_keeps_retrace_overshoot_beyond_endpoint_chord() {
+        // Draw right to x=100, then retrace back to x=50: (100, 0) lies on
+        // the infinite line through the (0,0)-(50,0) endpoints but 50 px past
+        // the segment. It must survive simplification — dropping it would
+        // halve the committed stroke.
+        let pts = vec![
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(100.0, 0.0),
+            ImagePoint::new(50.0, 0.0),
+        ];
+        let out = simplify_rdp(&pts, 1.0);
+        assert!(
+            out.contains(&ImagePoint::new(100.0, 0.0)),
+            "retrace overshoot must be kept, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn rdp_keeps_near_full_retrace_to_start() {
+        // Draw right to x=100 and release almost back at the start: without
+        // segment distance the whole stroke collapses to a 2-px chord and is
+        // then cancelled by the minimum-gesture rule.
+        let pts = vec![
+            ImagePoint::new(0.0, 0.0),
+            ImagePoint::new(100.0, 0.0),
+            ImagePoint::new(2.0, 0.0),
+        ];
+        let out = simplify_rdp(&pts, 1.0);
+        assert!(path_meets_threshold(&out, 1.0));
+        assert!(out.contains(&ImagePoint::new(100.0, 0.0)));
     }
 
     #[test]
