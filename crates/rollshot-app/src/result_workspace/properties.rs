@@ -351,20 +351,9 @@ pub fn opacity_value(state: &ResultWorkspace, target: PropertyTarget) -> Option<
     }
 }
 
-fn opacity_control(
-    state: &ResultWorkspace,
-    target: PropertyTarget,
-    committed: f32,
-) -> Element<'static, Message> {
+fn opacity_control(state: &ResultWorkspace, target: PropertyTarget) -> Element<'static, Message> {
     use iced::widget::{row, slider, text};
-    let value = state
-        .editor
-        .properties
-        .opacity
-        .as_ref()
-        .filter(|tx| tx.target == target)
-        .map(|tx| tx.preview)
-        .unwrap_or(committed);
+    let value = opacity_value(state, target).unwrap_or(1.0);
     row![
         text(format!("{:.0}%", value * 100.0)).size(12),
         slider(0.1_f32..=1.0_f32, value, Message::PreviewStrokeOpacity)
@@ -427,14 +416,11 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
             let stroke = stroke_controls(state, target)?;
             match kind {
                 FreehandKind::Pen => Some(stroke),
-                FreehandKind::Highlighter => {
-                    let committed = state.annotation_defaults.values.highlighter.opacity;
-                    Some(
-                        iced::widget::row![stroke, opacity_control(state, target, committed)]
-                            .spacing(8)
-                            .into(),
-                    )
-                }
+                FreehandKind::Highlighter => Some(
+                    iced::widget::row![stroke, opacity_control(state, target)]
+                        .spacing(8)
+                        .into(),
+                ),
             }
         }
         PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
@@ -485,12 +471,12 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                     .into(),
                 )
             }
-            Annotation::Freehand { kind, style, .. } => {
+            Annotation::Freehand { kind, .. } => {
                 let stroke = stroke_controls(state, target)?;
                 match kind {
                     FreehandKind::Pen => Some(stroke),
                     FreehandKind::Highlighter => Some(
-                        iced::widget::row![stroke, opacity_control(state, target, style.opacity)]
+                        iced::widget::row![stroke, opacity_control(state, target)]
                             .spacing(8)
                             .into(),
                     ),
