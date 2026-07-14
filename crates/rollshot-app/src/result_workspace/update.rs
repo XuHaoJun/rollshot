@@ -6341,15 +6341,17 @@ mod tests {
         // Move past bottom edge.
         let _ = handle_canvas_moved(&mut state, ImagePoint::new(50.0, 150.0));
         let _ = handle_canvas_released(&mut state, ImagePoint::new(150.0, 150.0));
-        if !state.document.image.annotations().is_empty() {
-            match &state.document.image.annotations()[0] {
-                Annotation::Freehand { points, .. } => {
-                    for p in points {
-                        assert!(p.x <= 100.0 && p.y <= 100.0, "point {p:?} out of bounds");
-                    }
+        assert!(
+            !state.document.image.annotations().is_empty(),
+            "out-of-bounds gesture must still produce an annotation"
+        );
+        match &state.document.image.annotations()[0] {
+            Annotation::Freehand { points, .. } => {
+                for p in points {
+                    assert!(p.x <= 100.0 && p.y <= 100.0, "point {p:?} out of bounds");
                 }
-                other => panic!("expected freehand, got {other:?}"),
             }
+            other => panic!("expected freehand, got {other:?}"),
         }
     }
 
@@ -6401,24 +6403,28 @@ mod tests {
         state.editor.tool = Tool::Pen;
         let t0 = Instant::now();
         let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
-        // Release at a point within 2 screen px of the last accepted point.
-        let _ = handle_canvas_released(&mut state, ImagePoint::new(11.0, 10.0));
-        if !state.document.image.annotations().is_empty() {
-            match &state.document.image.annotations()[0] {
-                Annotation::Freehand { points, .. } => {
-                    // The redundant endpoint (11, 10) should not be appended
-                    // since it's within the 2-px filter distance at scale 1.
-                    for p in points {
-                        let dx = (p.x - 10.0).abs();
-                        let dy = (p.y - 10.0).abs();
-                        assert!(
-                            dx >= 2.0 || dy >= 2.0 || *p == ImagePoint::new(10.0, 10.0),
-                            "redundant point {p:?} should not be appended"
-                        );
-                    }
-                }
-                other => panic!("expected freehand, got {other:?}"),
+        // Move to 30,10 — 20px gesture, well above the 4px threshold.
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(30.0, 10.0));
+        // Release at 31,10 — within 2 screen px filter of last accepted point
+        // (distance = 1.0 < 2.0), so it should NOT be appended.
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(31.0, 10.0));
+        assert!(
+            !state.document.image.annotations().is_empty(),
+            "20px gesture must produce an annotation"
+        );
+        match &state.document.image.annotations()[0] {
+            Annotation::Freehand { points, .. } => {
+                // RDP simplifies the collinear stroke to endpoints.
+                assert_eq!(points.len(), 2, "collinear stroke should simplify to 2 points");
+                assert_eq!(points[0], ImagePoint::new(10.0, 10.0));
+                // Second point must be (30, 10), NOT the filtered (31, 10).
+                assert_eq!(
+                    points[1],
+                    ImagePoint::new(30.0, 10.0),
+                    "release point within 2px filter should not be appended"
+                );
             }
+            other => panic!("expected freehand, got {other:?}"),
         }
     }
 
