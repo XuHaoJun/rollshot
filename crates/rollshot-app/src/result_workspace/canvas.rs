@@ -651,9 +651,8 @@ impl AnnotationCanvas<'_> {
                     handle(frame, p, white, accent);
                 }
             }
-            Annotation::Freehand { points, style, .. } => {
+            Annotation::Freehand { .. } => {
                 let b = annotation_bounds(annotation);
-                let _ = (points, style);
                 frame.stroke(
                     &canvas::Path::rectangle(
                         Point::new(b.x * s, b.y * s),
