@@ -153,28 +153,42 @@ pub struct ResultWorkspace {
 
 impl ResultWorkspace {
     pub fn new(document: ResultDocument, initial_error: Option<String>) -> Self {
-        let (annotation_defaults, warning) =
-            match crate::daemon::config::config_path().ok().map(|p| {
-                let loaded = annotation_defaults::load_from(&p);
-                (loaded, p)
-            }) {
-                Some((loaded, path)) => (
-                    AnnotationDefaultsState {
-                        values: loaded.values,
-                        config_path: Some(path),
-                        warning_reported: !loaded.warnings.is_empty(),
-                    },
-                    loaded.warnings.into_iter().next(),
-                ),
-                None => (
-                    AnnotationDefaultsState {
-                        values: AnnotationDefaults::default(),
-                        config_path: None,
-                        warning_reported: false,
-                    },
-                    None,
-                ),
-            };
+        Self::with_config_path(
+            document,
+            initial_error,
+            crate::daemon::config::config_path().ok(),
+        )
+    }
+
+    /// Construct with an explicit annotation-defaults config path. `None`
+    /// skips loading and uses canonical defaults. Tests use this to stay
+    /// isolated from the user's real config.toml; production uses [`Self::new`].
+    pub(crate) fn with_config_path(
+        document: ResultDocument,
+        initial_error: Option<String>,
+        config_path: Option<PathBuf>,
+    ) -> Self {
+        let (annotation_defaults, warning) = match config_path.map(|p| {
+            let loaded = annotation_defaults::load_from(&p);
+            (loaded, p)
+        }) {
+            Some((loaded, path)) => (
+                AnnotationDefaultsState {
+                    values: loaded.values,
+                    config_path: Some(path),
+                    warning_reported: !loaded.warnings.is_empty(),
+                },
+                loaded.warnings.into_iter().next(),
+            ),
+            None => (
+                AnnotationDefaultsState {
+                    values: AnnotationDefaults::default(),
+                    config_path: None,
+                    warning_reported: false,
+                },
+                None,
+            ),
+        };
         let mut ws = Self::with_max_texture_dim(document, initial_error, DEFAULT_MAX_TEXTURE_DIM);
         ws.annotation_defaults = annotation_defaults;
         if let Some(warn) = warning {
@@ -387,18 +401,58 @@ mod tests {
     }
 
     fn workspace() -> ResultWorkspace {
-        ResultWorkspace::new(ResultDocument::unsaved(image()), None)
+        ResultWorkspace::with_config_path(ResultDocument::unsaved(image()), None, None)
     }
 
     fn unsaved_workspace() -> ResultWorkspace {
-        ResultWorkspace::new(ResultDocument::unsaved(image()), None)
+        ResultWorkspace::with_config_path(ResultDocument::unsaved(image()), None, None)
     }
 
     fn saved_workspace() -> ResultWorkspace {
-        ResultWorkspace::new(
+        ResultWorkspace::with_config_path(
             ResultDocument::saved(image(), PathBuf::from("/tmp/result.png")),
             None,
+            None,
         )
+    }
+
+    // -- config isolation (with_config_path) ---------------------------------
+
+    #[test]
+    fn no_config_path_uses_canonical_defaults_without_message() {
+        let state = workspace();
+        assert!(state.message.is_none());
+        assert_eq!(
+            state.annotation_defaults.values,
+            annotation_defaults::AnnotationDefaults::default()
+        );
+        assert!(state.annotation_defaults.config_path.is_none());
+    }
+
+    #[test]
+    fn malformed_config_surfaces_warning_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not valid toml [[[").unwrap();
+        let state = ResultWorkspace::with_config_path(
+            ResultDocument::unsaved(image()),
+            None,
+            Some(path.clone()),
+        );
+        assert!(matches!(&state.message, Some(InlineMessage::Warning(_))));
+        assert!(state.annotation_defaults.warning_reported);
+        assert_eq!(state.annotation_defaults.config_path, Some(path));
+    }
+
+    #[test]
+    fn valid_config_values_load_through_with_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[annotation_defaults.line]\nwidth = 7.0\n").unwrap();
+        let state =
+            ResultWorkspace::with_config_path(ResultDocument::unsaved(image()), None, Some(path));
+        assert!(state.message.is_none());
+        assert_eq!(state.annotation_defaults.values.line.width, 7.0);
     }
 
     // -- existing model tests (Task 3/4) -------------------------------------
@@ -422,7 +476,11 @@ mod tests {
     #[test]
     fn saved_workspace_starts_with_saved_path_message() {
         let path = PathBuf::from("/tmp/result.png");
-        let state = ResultWorkspace::new(ResultDocument::saved(image(), path.clone()), None);
+        let state = ResultWorkspace::with_config_path(
+            ResultDocument::saved(image(), path.clone()),
+            None,
+            None,
+        );
         assert_eq!(
             state.message_text(),
             Some(format!("Saved to {}", path.display()))
@@ -432,7 +490,11 @@ mod tests {
     #[test]
     fn unsaved_workspace_with_initial_error_has_error_message() {
         let err = "disk full".to_string();
-        let state = ResultWorkspace::new(ResultDocument::unsaved(image()), Some(err.clone()));
+        let state = ResultWorkspace::with_config_path(
+            ResultDocument::unsaved(image()),
+            Some(err.clone()),
+            None,
+        );
         assert!(matches!(&state.message, Some(InlineMessage::Error(e)) if e == &err));
     }
 

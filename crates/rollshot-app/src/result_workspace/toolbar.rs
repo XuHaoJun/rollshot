@@ -788,10 +788,7 @@ mod tests {
     }
 
     fn state() -> ResultWorkspace {
-        let mut state = ResultWorkspace::new(ResultDocument::unsaved(image()), None);
-        state.annotation_defaults.values = super::super::AnnotationDefaults::default();
-        state.annotation_defaults.config_path = None;
-        state
+        ResultWorkspace::with_config_path(ResultDocument::unsaved(image()), None, None)
     }
 
     #[test]
@@ -1065,7 +1062,11 @@ mod tests {
         use image::{Rgba, RgbaImage};
 
         let img = RgbaImage::from_pixel(200, 200, Rgba([100, 150, 200, 255]));
-        let mut s = super::super::ResultWorkspace::new(ResultDocument::unsaved(img), None);
+        let mut s = super::super::ResultWorkspace::with_config_path(
+            ResultDocument::unsaved(img),
+            None,
+            None,
+        );
         s.editor.shapes_menu_open = true;
         // Default remembered = Rectangle
         assert!(

@@ -2991,13 +2991,11 @@ mod tests {
     }
 
     fn workspace() -> super::super::ResultWorkspace {
-        let mut state = super::super::ResultWorkspace::new(
+        super::super::ResultWorkspace::with_config_path(
             super::super::document::ResultDocument::unsaved(image()),
             None,
-        );
-        state.annotation_defaults.values = super::super::AnnotationDefaults::default();
-        state.annotation_defaults.config_path = None;
-        state
+            None,
+        )
     }
 
     fn workspace_with_arrow() -> super::super::ResultWorkspace {
@@ -3157,18 +3155,20 @@ mod tests {
     }
 
     fn unsaved_workspace() -> super::super::ResultWorkspace {
-        super::super::ResultWorkspace::new(
+        super::super::ResultWorkspace::with_config_path(
             super::super::document::ResultDocument::unsaved(image()),
+            None,
             None,
         )
     }
 
     fn saved_workspace() -> super::super::ResultWorkspace {
-        super::super::ResultWorkspace::new(
+        super::super::ResultWorkspace::with_config_path(
             super::super::document::ResultDocument::saved(
                 image(),
                 std::path::PathBuf::from("/tmp/result.png"),
             ),
+            None,
             None,
         )
     }

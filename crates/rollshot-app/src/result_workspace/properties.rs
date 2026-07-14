@@ -650,7 +650,7 @@ mod tests {
     }
 
     fn workspace() -> ResultWorkspace {
-        ResultWorkspace::new(ResultDocument::unsaved(image()), None)
+        ResultWorkspace::with_config_path(ResultDocument::unsaved(image()), None, None)
     }
 
     fn add_number(state: &mut ResultWorkspace) -> AnnotationId {
