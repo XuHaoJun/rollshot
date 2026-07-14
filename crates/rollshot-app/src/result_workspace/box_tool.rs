@@ -108,7 +108,8 @@ pub(crate) fn resized_bounds(
         // Corner handles: Shift locks aspect ratio.
         TopLeft => {
             if shift && original.width > 0.0 && original.height > 0.0 {
-                let (mx, my) = shift_corner(p, right, bottom, original, min);
+                let (mx, my) =
+                    shift_corner(p, right, bottom, original, min, source_width, source_height);
                 (
                     mx.clamp(0.0, source_width as f32),
                     my.clamp(0.0, source_height as f32),
@@ -126,7 +127,8 @@ pub(crate) fn resized_bounds(
         }
         TopRight => {
             if shift && original.width > 0.0 && original.height > 0.0 {
-                let (mx, my) = shift_corner(p, left, bottom, original, min);
+                let (mx, my) =
+                    shift_corner(p, left, bottom, original, min, source_width, source_height);
                 (
                     left,
                     my.clamp(0.0, source_height as f32),
@@ -144,7 +146,8 @@ pub(crate) fn resized_bounds(
         }
         BottomRight => {
             if shift && original.width > 0.0 && original.height > 0.0 {
-                let (mx, my) = shift_corner(p, left, top, original, min);
+                let (mx, my) =
+                    shift_corner(p, left, top, original, min, source_width, source_height);
                 (
                     left,
                     top,
@@ -162,7 +165,8 @@ pub(crate) fn resized_bounds(
         }
         BottomLeft => {
             if shift && original.width > 0.0 && original.height > 0.0 {
-                let (mx, my) = shift_corner(p, right, top, original, min);
+                let (mx, my) =
+                    shift_corner(p, right, top, original, min, source_width, source_height);
                 (
                     mx.clamp(0.0, source_width as f32),
                     top,
@@ -207,37 +211,77 @@ fn shift_corner(
     fixed_y: f32,
     original: ImageRect,
     min: f32,
+    source_width: u32,
+    source_height: u32,
 ) -> (f32, f32) {
     let dx = (fixed_x - p.x).abs();
     let dy = (fixed_y - p.y).abs();
-    let s = (dx / original.width).min(dy / original.height);
-
-    let sign_x = if p.x <= fixed_x { 1.0 } else { -1.0 };
-    let sign_y = if p.y <= fixed_y { 1.0 } else { -1.0 };
-
-    let mx = fixed_x - sign_x * s * original.width;
-    let my = fixed_y - sign_y * s * original.height;
-
-    let mx = if (mx - fixed_x).abs() < min {
-        if mx <= fixed_x {
-            fixed_x - min
-        } else {
-            fixed_x + min
-        }
+    let minimum_scale = (min / original.width).max(min / original.height);
+    let original_dir_x = if fixed_x == original.x { 1.0 } else { -1.0 };
+    let original_dir_y = if fixed_y == original.y { 1.0 } else { -1.0 };
+    let dir_x = constrained_direction(
+        p.x,
+        fixed_x,
+        original_dir_x,
+        minimum_scale * original.width,
+        source_width as f32,
+    );
+    let dir_y = constrained_direction(
+        p.y,
+        fixed_y,
+        original_dir_y,
+        minimum_scale * original.height,
+        source_height as f32,
+    );
+    let available_x = if dir_x < 0.0 {
+        fixed_x
     } else {
-        mx
+        source_width as f32 - fixed_x
     };
-    let my = if (my - fixed_y).abs() < min {
-        if my <= fixed_y {
-            fixed_y - min
-        } else {
-            fixed_y + min
-        }
+    let available_y = if dir_y < 0.0 {
+        fixed_y
     } else {
-        my
+        source_height as f32 - fixed_y
     };
+    let maximum_scale = (available_x / original.width).min(available_y / original.height);
+    let pointer_scale = (dx / original.width).min(dy / original.height);
+    let s = pointer_scale.max(minimum_scale).min(maximum_scale);
+
+    let mx = fixed_x + dir_x * s * original.width;
+    let my = fixed_y + dir_y * s * original.height;
 
     (mx, my)
+}
+
+fn constrained_direction(
+    pointer: f32,
+    fixed: f32,
+    original_direction: f32,
+    required_distance: f32,
+    source_extent: f32,
+) -> f32 {
+    let desired = if pointer < fixed {
+        -1.0
+    } else if pointer > fixed {
+        1.0
+    } else {
+        -original_direction
+    };
+    let desired_room = if desired < 0.0 {
+        fixed
+    } else {
+        source_extent - fixed
+    };
+    let opposite_room = if desired < 0.0 {
+        source_extent - fixed
+    } else {
+        fixed
+    };
+    if desired_room < required_distance && opposite_room >= required_distance {
+        -desired
+    } else {
+        desired
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +631,54 @@ mod tests {
         let new_h = (50.0 - r.y).abs();
         // ratio should match original
         assert!((new_w / new_h - 80.0 / 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn corner_shift_preserves_aspect_ratio_at_minimum_size() {
+        let orig = ImageRect {
+            x: 10.0,
+            y: 10.0,
+            width: 80.0,
+            height: 40.0,
+        };
+        let r = resized_bounds(
+            orig,
+            ResizeHandle::TopLeft,
+            ImagePoint::new(89.0, 49.0),
+            true,
+            1.0,
+            200,
+            200,
+        );
+
+        assert!(r.width >= MIN_BOX_SCREEN);
+        assert!(r.height >= MIN_BOX_SCREEN);
+        assert!((r.width / r.height - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn corner_shift_minimum_uses_available_side_near_source_edge() {
+        let orig = ImageRect {
+            x: 1.0,
+            y: 20.0,
+            width: 80.0,
+            height: 40.0,
+        };
+        let r = resized_bounds(
+            orig,
+            ResizeHandle::TopRight,
+            ImagePoint::new(0.0, 59.0),
+            true,
+            1.0,
+            200,
+            200,
+        );
+
+        assert!(r.width >= MIN_BOX_SCREEN);
+        assert!(r.height >= MIN_BOX_SCREEN);
+        assert!((r.width / r.height - 2.0).abs() < 0.01);
+        assert!(r.x >= 0.0 && r.x + r.width <= 200.0);
+        assert!(r.y >= 0.0 && r.y + r.height <= 200.0);
     }
 
     #[test]

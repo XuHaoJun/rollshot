@@ -264,16 +264,17 @@ fn shape_stroke_controls(
         .as_ref()
         .map(|tx| tx.preview_stroke.width)
         .or_else(|| stroke_width(state, target))?;
+    let slider = slider(1.0_f32..=16.0_f32, width, Message::PreviewShapeStrokeWidth)
+        .step(1.0_f32)
+        .width(96);
+    let slider = match target {
+        PropertyTarget::ShapeTool(_) => slider.on_release(Message::ApplyShapeStyle),
+        _ => slider,
+    };
     Some(
-        row![
-            color_button("Stroke", ColorProperty::StrokeColor),
-            slider(1.0_f32..=16.0_f32, width, Message::PreviewShapeStrokeWidth)
-                .step(1.0_f32)
-                .on_release(Message::ApplyShapeStyle)
-                .width(96),
-        ]
-        .spacing(8)
-        .into(),
+        row![color_button("Stroke", ColorProperty::StrokeColor), slider]
+            .spacing(8)
+            .into(),
     )
 }
 
@@ -365,6 +366,8 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                 Some(controls.into())
             }
             Annotation::Shape { fill, .. } => {
+                use iced::widget::{button, text};
+
                 let stroke = shape_stroke_controls(state, target)?;
                 let fill_enabled = state
                     .editor
@@ -374,7 +377,16 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                     .map(|tx| tx.preview_fill.is_some())
                     .unwrap_or(fill.is_some());
                 let fill = fill_controls(fill_enabled);
-                Some(row![stroke, fill].spacing(8).into())
+                Some(
+                    row![
+                        stroke,
+                        fill,
+                        button(text("Apply")).on_press(Message::ApplyShapeStyle),
+                        button(text("Cancel")).on_press(Message::CancelShapeStyle),
+                    ]
+                    .spacing(8)
+                    .into(),
+                )
             }
             _ => None,
         },

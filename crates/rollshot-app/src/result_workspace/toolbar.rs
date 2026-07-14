@@ -105,13 +105,6 @@ impl ToolbarItem {
     };
 }
 
-fn other_shape_tool(remembered: rollshot_image_document::ShapeKind) -> Tool {
-    match remembered {
-        rollshot_image_document::ShapeKind::Rectangle => Tool::Ellipse,
-        rollshot_image_document::ShapeKind::Ellipse => Tool::Rectangle,
-    }
-}
-
 fn tool_item(tool: Tool) -> ToolbarItem {
     match tool {
         Tool::Select => ToolbarItem {
@@ -186,8 +179,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
             Tool::Text,
             Tool::Line,
             Tool::Arrow,
-            Tool::Rectangle,
-            Tool::Ellipse,
+            remembered.into(),
             Tool::Redact,
         ],
         ToolbarDensity::Narrow => vec![
@@ -216,7 +208,6 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
     if density == ToolbarDensity::Narrow {
         overflow.insert(0, tool_item(Tool::Redact));
         overflow.insert(0, tool_item(Tool::Line));
-        overflow.insert(0, tool_item(other_shape_tool(remembered)));
     }
 
     let more_active_tool = if overflow
@@ -783,7 +774,10 @@ mod tests {
     }
 
     fn state() -> ResultWorkspace {
-        ResultWorkspace::new(ResultDocument::unsaved(image()), None)
+        let mut state = ResultWorkspace::new(ResultDocument::unsaved(image()), None);
+        state.annotation_defaults.values = super::super::AnnotationDefaults::default();
+        state.annotation_defaults.config_path = None;
+        state
     }
 
     #[test]
@@ -873,7 +867,6 @@ mod tests {
                 Tool::Line,
                 Tool::Arrow,
                 Tool::Rectangle,
-                Tool::Ellipse,
                 Tool::Redact,
             ]
         );
@@ -977,22 +970,21 @@ mod tests {
     // -- shapes selector tests (Task 5) --------------------------------------
 
     #[test]
-    fn rectangle_is_initial_remembered_shape_in_visible_tools() {
+    fn densities_show_exactly_one_remembered_shape_control() {
         let s = state();
         assert_eq!(
             s.annotation_defaults.values.last_shape,
             rollshot_image_document::ShapeKind::Rectangle
         );
-        for width in [1100.0, 800.0] {
+        for width in [1100.0, 800.0, 640.0] {
             let model = toolbar_model(&s, width);
-            assert!(
-                model.visible_tools.contains(&Tool::Rectangle),
-                "Rectangle must be visible at width {width}"
-            );
-            assert!(
-                model.visible_tools.contains(&Tool::Ellipse),
-                "Ellipse must be visible at width {width}"
-            );
+            let visible_shapes = model
+                .visible_tools
+                .iter()
+                .filter(|tool| matches!(tool, Tool::Rectangle | Tool::Ellipse))
+                .copied()
+                .collect::<Vec<_>>();
+            assert_eq!(visible_shapes, vec![Tool::Rectangle], "width {width}");
         }
     }
 
@@ -1011,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_routes_non_remembered_shape_to_overflow() {
+    fn narrow_selector_keeps_non_remembered_shape_out_of_overflow() {
         let mut s = state();
         s.annotation_defaults.values.last_shape = rollshot_image_document::ShapeKind::Ellipse;
         let model = toolbar_model(&s, 640.0);
@@ -1023,13 +1015,10 @@ mod tests {
             !model.visible_tools.contains(&Tool::Rectangle),
             "Non-remembered Rectangle must be in overflow on narrow"
         );
-        assert!(
-            model
-                .more
-                .iter()
-                .any(|item| item.kind == ToolbarItemKind::Tool(Tool::Rectangle)),
-            "Rectangle must be in overflow on narrow when Ellipse is remembered"
-        );
+        assert!(!model.more.iter().any(|item| matches!(
+            item.kind,
+            ToolbarItemKind::Tool(Tool::Rectangle | Tool::Ellipse)
+        )));
     }
 
     #[test]

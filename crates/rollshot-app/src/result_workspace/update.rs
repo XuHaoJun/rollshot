@@ -1911,6 +1911,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 Some(t) => t,
                 None => return Task::none(),
             };
+            if let PropertyTarget::Annotation(id) = target {
+                if let Some(Annotation::Shape {
+                    kind, stroke, fill, ..
+                }) = state.document.image.annotation(id)
+                {
+                    let remembered = state.annotation_defaults.values.shape(*kind).fill_color;
+                    let new_tx =
+                        prepare_shape_transaction(*kind, Some(id), *stroke, *fill, remembered);
+                    match &mut state.editor.properties.shape_style {
+                        Some(tx) if tx.id == id => {}
+                        slot => *slot = Some(new_tx),
+                    }
+                }
+            }
             let original = match (&target, &prop) {
                 (PropertyTarget::NumberTool, ColorProperty::NumberAccent) => {
                     state.annotation_defaults.values.number.accent
@@ -1953,6 +1967,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 (PropertyTarget::Annotation(id), ColorProperty::StrokeColor) => {
                     match state.document.image.annotation(*id) {
                         Some(Annotation::TwoPoint { style, .. }) => style.color,
+                        Some(Annotation::Shape { .. }) => state
+                            .editor
+                            .properties
+                            .shape_style
+                            .as_ref()
+                            .map(|tx| tx.preview_stroke.color)
+                            .unwrap_or(StrokeStyle::default().color),
                         _ => return Task::none(),
                     }
                 }
@@ -1964,9 +1985,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 (PropertyTarget::Annotation(id), ColorProperty::ShapeFill) => {
                     match state.document.image.annotation(*id) {
-                        Some(Annotation::Shape { fill, .. }) => {
-                            fill.unwrap_or(Rgb8::new(0xE5, 0x48, 0x4D))
-                        }
+                        Some(Annotation::Shape { .. }) => state
+                            .editor
+                            .properties
+                            .shape_style
+                            .as_ref()
+                            .and_then(|tx| tx.preview_fill.or(Some(tx.remembered_fill_color)))
+                            .unwrap_or(Rgb8::new(0xE5, 0x48, 0x4D)),
                         _ => return Task::none(),
                     }
                 }
@@ -1991,6 +2016,18 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if let Some(tx) = &mut state.editor.properties.color {
                 tx.preview = rgb;
                 tx.hex = format!("#{:02X}{:02X}{:02X}", rgb.r, rgb.g, rgb.b);
+                if let Some(shape) = &mut state.editor.properties.shape_style {
+                    match tx.property {
+                        super::properties::ColorProperty::StrokeColor => {
+                            shape.preview_stroke.color = rgb;
+                        }
+                        super::properties::ColorProperty::ShapeFill => {
+                            shape.preview_fill = Some(rgb);
+                            shape.remembered_fill_color = rgb;
+                        }
+                        _ => {}
+                    }
+                }
             }
             Task::none()
         }
@@ -1998,6 +2035,18 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             if let Some(tx) = &mut state.editor.properties.color {
                 if let Ok(rgb) = super::properties::parse_hex_rgb(&input) {
                     tx.preview = rgb;
+                    if let Some(shape) = &mut state.editor.properties.shape_style {
+                        match tx.property {
+                            super::properties::ColorProperty::StrokeColor => {
+                                shape.preview_stroke.color = rgb;
+                            }
+                            super::properties::ColorProperty::ShapeFill => {
+                                shape.preview_fill = Some(rgb);
+                                shape.remembered_fill_color = rgb;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 tx.hex = input;
             }
@@ -2054,13 +2103,16 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                 }
                 PropertyTarget::ShapeTool(kind) => {
-                    if tx.property == ColorProperty::StrokeColor {
-                        state
-                            .annotation_defaults
-                            .values
-                            .shape_mut(kind)
-                            .stroke
-                            .color = tx.preview;
+                    let defaults = state.annotation_defaults.values.shape_mut(kind);
+                    match tx.property {
+                        ColorProperty::StrokeColor => defaults.stroke.color = tx.preview,
+                        ColorProperty::ShapeFill => defaults.fill_color = tx.preview,
+                        _ => {}
+                    }
+                    if matches!(
+                        tx.property,
+                        ColorProperty::StrokeColor | ColorProperty::ShapeFill
+                    ) {
                         persist_annotation_defaults(state);
                     }
                 }
@@ -2149,6 +2201,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             let Some(tx) = state.editor.properties.shape_style.take() else {
                 return Task::none();
             };
+            state.editor.properties.color = None;
+            state.editor.properties.popup = None;
             // For selected annotations: commit to document
             if tx.id.0 != u64::MAX {
                 if let Err(e) =
@@ -2159,11 +2213,16 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 {
                     state.message = Some(InlineMessage::Error(e.to_string()));
                 }
+            } else {
+                state.annotation_defaults.values.shape_mut(tx.kind).stroke = tx.preview_stroke;
+                persist_annotation_defaults(state);
             }
             Task::none()
         }
         Message::CancelShapeStyle => {
             state.editor.properties.shape_style = None;
+            state.editor.properties.color = None;
+            state.editor.properties.popup = None;
             Task::none()
         }
         Message::ToggleShapesMenu => {
@@ -2178,6 +2237,10 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 rollshot_image_document::ShapeKind::Rectangle => Tool::Rectangle,
                 rollshot_image_document::ShapeKind::Ellipse => Tool::Ellipse,
             };
+            commit_text_draft(state);
+            clear_property_transactions(state);
+            state.editor.more_menu_open = false;
+            state.editor.drag = None;
             state.editor.tool = tool;
             state.annotation_defaults.values.last_shape = kind;
             state.editor.shapes_menu_open = false;
@@ -2190,11 +2253,29 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 rollshot_image_document::ShapeKind::Rectangle => Tool::Rectangle,
                 rollshot_image_document::ShapeKind::Ellipse => Tool::Ellipse,
             };
+            commit_text_draft(state);
+            clear_property_transactions(state);
+            state.editor.more_menu_open = false;
+            state.editor.shapes_menu_open = false;
+            state.editor.drag = None;
             state.editor.tool = tool;
             Task::none()
         }
         Message::CancelColor => {
-            state.editor.properties.color = None;
+            if let Some(tx) = state.editor.properties.color.take() {
+                if let Some(shape) = &mut state.editor.properties.shape_style {
+                    match tx.property {
+                        super::properties::ColorProperty::StrokeColor => {
+                            shape.preview_stroke.color = tx.original;
+                        }
+                        super::properties::ColorProperty::ShapeFill => {
+                            shape.preview_fill = Some(tx.original);
+                            shape.remembered_fill_color = tx.original;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             state.editor.properties.popup = None;
             Task::none()
         }
@@ -2671,10 +2752,13 @@ mod tests {
     }
 
     fn workspace() -> super::super::ResultWorkspace {
-        super::super::ResultWorkspace::new(
+        let mut state = super::super::ResultWorkspace::new(
             super::super::document::ResultDocument::unsaved(image()),
             None,
-        )
+        );
+        state.annotation_defaults.values = super::super::AnnotationDefaults::default();
+        state.annotation_defaults.config_path = None;
+        state
     }
 
     fn workspace_with_arrow() -> super::super::ResultWorkspace {
@@ -5440,6 +5524,141 @@ mod tests {
     }
 
     #[test]
+    fn selected_shape_colors_compose_until_explicit_shape_apply() {
+        use super::super::properties::ColorProperty;
+
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let id = state.editor.selection.unwrap();
+        let before = state.document.image.state_id();
+
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::StrokeColor),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(1, 2, 3)));
+        let _ = update(&mut state, Message::ApplyColor);
+
+        assert_eq!(state.document.image.state_id(), before);
+        assert_eq!(
+            preview_annotation(&state)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .color,
+            Rgb8::new(1, 2, 3)
+        );
+
+        let _ = update(&mut state, Message::ToggleShapeFill);
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::ShapeFill),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(4, 5, 6)));
+        let _ = update(&mut state, Message::ApplyColor);
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Shape { stroke, fill, .. } => {
+                assert_eq!(stroke.color, Rgb8::new(1, 2, 3));
+                assert_eq!(*fill, Some(Rgb8::new(4, 5, 6)));
+            }
+            _ => panic!("expected Shape"),
+        }
+    }
+
+    #[test]
+    fn selected_shape_hex_color_updates_transaction_preview() {
+        use super::super::properties::ColorProperty;
+
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::StrokeColor),
+        );
+        let _ = update(&mut state, Message::ColorHexChanged("#0A141E".into()));
+
+        assert_eq!(
+            preview_annotation(&state)
+                .unwrap()
+                .stroke_style()
+                .unwrap()
+                .color,
+            Rgb8::new(10, 20, 30)
+        );
+    }
+
+    #[test]
+    fn selected_shape_apply_closes_nested_color_picker() {
+        use super::super::properties::ColorProperty;
+
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::StrokeColor),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+
+        assert!(state.editor.properties.color.is_none());
+        assert!(state.editor.properties.popup.is_none());
+    }
+
+    #[test]
+    fn selected_shape_cancel_closes_nested_color_picker() {
+        use super::super::properties::ColorProperty;
+
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let before = state.document.image.state_id();
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::ShapeFill),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
+        let _ = update(&mut state, Message::CancelShapeStyle);
+
+        assert!(state.editor.properties.shape_style.is_none());
+        assert!(state.editor.properties.color.is_none());
+        assert!(state.editor.properties.popup.is_none());
+        assert_eq!(state.document.image.state_id(), before);
+    }
+
+    #[test]
+    fn shape_tool_width_apply_updates_only_active_defaults() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Rectangle;
+        let ellipse_before = state.annotation_defaults.values.ellipse;
+
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(9.0));
+        let _ = update(&mut state, Message::ApplyShapeStyle);
+
+        assert_eq!(state.annotation_defaults.values.rectangle.stroke.width, 9.0);
+        assert_eq!(state.annotation_defaults.values.ellipse, ellipse_before);
+    }
+
+    #[test]
+    fn shape_tool_fill_color_apply_updates_remembered_default() {
+        use super::super::properties::ColorProperty;
+
+        let mut state = workspace();
+        state.editor.tool = Tool::Ellipse;
+        let rectangle_before = state.annotation_defaults.values.rectangle;
+
+        let _ = update(&mut state, Message::ToggleShapeFill);
+        let _ = update(
+            &mut state,
+            Message::OpenColorPicker(ColorProperty::ShapeFill),
+        );
+        let _ = update(&mut state, Message::PreviewColor(Rgb8::new(7, 8, 9)));
+        let _ = update(&mut state, Message::ApplyColor);
+
+        assert_eq!(
+            state.annotation_defaults.values.ellipse.fill_color,
+            Rgb8::new(7, 8, 9)
+        );
+        assert_eq!(state.annotation_defaults.values.rectangle, rectangle_before);
+    }
+
+    #[test]
     fn shape_tool_switch_discards_preview() {
         let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
         let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
@@ -5537,6 +5756,36 @@ mod tests {
             Message::SelectShape(rollshot_image_document::ShapeKind::Rectangle),
         );
         assert!(!state.editor.shapes_menu_open);
+    }
+
+    #[test]
+    fn selector_shape_switch_discards_selected_shape_transaction() {
+        let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+
+        let _ = update(
+            &mut state,
+            Message::SelectShape(rollshot_image_document::ShapeKind::Ellipse),
+        );
+
+        assert_eq!(state.editor.tool, Tool::Ellipse);
+        assert!(state.editor.properties.shape_style.is_none());
+        assert!(state.editor.properties.color.is_none());
+    }
+
+    #[test]
+    fn remembered_shape_switch_discards_other_shape_default_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Rectangle;
+        let _ = update(&mut state, Message::PreviewShapeStrokeWidth(12.0));
+        state.annotation_defaults.values.last_shape = rollshot_image_document::ShapeKind::Ellipse;
+
+        let _ = update(&mut state, Message::SelectRememberedShape);
+
+        assert_eq!(state.editor.tool, Tool::Ellipse);
+        assert!(state.editor.properties.shape_style.is_none());
+        assert_eq!(state.annotation_defaults.values.rectangle.stroke.width, 4.0);
+        assert_eq!(state.annotation_defaults.values.ellipse.stroke.width, 4.0);
     }
 
     #[test]
