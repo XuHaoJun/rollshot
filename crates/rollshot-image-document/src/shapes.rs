@@ -25,6 +25,11 @@ pub enum RenderShape {
         width: f32,
         color: Rgba8,
     },
+    Polyline {
+        points: Vec<ImagePoint>,
+        width: f32,
+        color: Rgba8,
+    },
     Rect {
         rect: ImageRect,
         color: Rgba8,

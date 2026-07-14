@@ -124,6 +124,62 @@ pub(crate) fn stroke_line(
     }
 }
 
+/// Anti-aliased polyline stroke with round caps and joins. The whole stroke
+/// composites with ONE source-over blend per pixel (coverage from the minimum
+/// distance to any segment), so a self-crossing stroke never darkens at its
+/// own overlaps (Slice 4 spec §8.2).
+pub(crate) fn stroke_polyline(
+    img: &mut RgbaImage,
+    points: &[ImagePoint],
+    width: f32,
+    color: Rgba8,
+) {
+    if img.width() == 0 || img.height() == 0 || points.len() < 2 {
+        return;
+    }
+    let radius = width / 2.0;
+    let bounds = crate::freehand::freehand_bounds(points, width).expanded(1.0);
+    let max_x = i32::try_from(img.width() - 1).unwrap_or(i32::MAX);
+    let max_y = i32::try_from(img.height() - 1).unwrap_or(i32::MAX);
+    let x0 = (bounds.x.floor() as i32).max(0);
+    let y0 = (bounds.y.floor() as i32).max(0);
+    let x1 = ((bounds.x + bounds.width).ceil() as i32).min(max_x);
+    let y1 = ((bounds.y + bounds.height).ceil() as i32).min(max_y);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let row_len = (x1 - x0 + 1) as usize;
+    let mut coverage = vec![0.0_f32; row_len];
+    for y in y0..=y1 {
+        coverage.fill(0.0);
+        let py = y as f32 + 0.5;
+        for pair in points.windows(2) {
+            let segment_bounds = ImageRect::from_corners(pair[0], pair[1]).expanded(radius + 1.0);
+            if py < segment_bounds.y || py > segment_bounds.y + segment_bounds.height {
+                continue;
+            }
+            let sx0 = (segment_bounds.x.floor() as i32).clamp(x0, x1);
+            let sx1 = ((segment_bounds.x + segment_bounds.width).ceil() as i32).clamp(x0, x1);
+            for x in sx0..=sx1 {
+                let p = ImagePoint::new(x as f32 + 0.5, py);
+                let distance = if pair[0] == pair[1] {
+                    p.distance(pair[0])
+                } else {
+                    crate::two_point::segment_distance(p, pair[0], pair[1])
+                };
+                let sample = (radius + 0.5 - distance).clamp(0.0, 1.0);
+                let index = (x - x0) as usize;
+                coverage[index] = coverage[index].max(sample);
+            }
+        }
+        for (offset, sample) in coverage.iter().copied().enumerate() {
+            if sample > 0.0 {
+                blend_px(img, x0 + offset as i32, y, color, sample);
+            }
+        }
+    }
+}
+
 /// Anti-aliased filled triangle via 4×4 supersampled coverage.
 pub(crate) fn fill_triangle(img: &mut RgbaImage, t: &[ImagePoint; 3], color: Rgba8) {
     let xs = [t[0].x, t[1].x, t[2].x];

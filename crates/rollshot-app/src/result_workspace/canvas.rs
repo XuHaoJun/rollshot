@@ -452,6 +452,36 @@ impl AnnotationCanvas<'_> {
                         .with_width(stroke_width * s),
                 );
             }
+            RenderShape::Polyline {
+                points,
+                width,
+                color,
+            } => {
+                if points.len() >= 2 {
+                    let t0 = Instant::now();
+                    let path = canvas::Path::new(|b| {
+                        b.move_to(Point::new(points[0].x * s, points[0].y * s));
+                        for p in &points[1..] {
+                            b.line_to(Point::new(p.x * s, p.y * s));
+                        }
+                    });
+                    frame.stroke(
+                        &path,
+                        canvas::Stroke::default()
+                            .with_line_cap(canvas::LineCap::Round)
+                            .with_line_join(canvas::LineJoin::Round)
+                            .with_color(token_color(*color))
+                            .with_width(width * s),
+                    );
+                    tracing::trace!(
+                        target: "rollshot::annotation",
+                        points = points.len(),
+                        elapsed_us = t0.elapsed().as_micros() as u64,
+                        draw_kind = "render_shape",
+                        "polyline stroke"
+                    );
+                }
+            }
         }
     }
 

@@ -8,7 +8,7 @@ use crate::annotation::Annotation;
 use crate::geometry::ImagePoint;
 use crate::raster::{
     fill_box_shape, fill_circle, fill_rect, fill_triangle, stroke_box_shape, stroke_circle,
-    stroke_line,
+    stroke_line, stroke_polyline,
 };
 use crate::shapes::{annotation_shapes, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
@@ -31,6 +31,11 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
             width,
             color,
         } => stroke_line(img, *start, *end, *width, *color),
+        RenderShape::Polyline {
+            points,
+            width,
+            color,
+        } => stroke_polyline(img, points, *width, *color),
         RenderShape::Rect { rect, color } => fill_rect(img, *rect, *color),
         RenderShape::Circle {
             center,
@@ -404,6 +409,53 @@ mod tests {
         let first = doc.flatten();
         let second = doc.flatten();
         assert_eq!(first.as_raw(), second.as_raw());
+    }
+
+    #[test]
+    fn polyline_self_crossing_blends_alpha_exactly_once() {
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let points = vec![
+            ImagePoint::new(5.0, 5.0),
+            ImagePoint::new(35.0, 35.0),
+            ImagePoint::new(5.0, 35.0),
+            ImagePoint::new(35.0, 5.0),
+        ];
+        let color = crate::geometry::Rgba8::new(0, 0, 0, 128);
+        crate::raster::stroke_polyline(&mut img, &points, 4.0, color);
+        let crossing = img.get_pixel(20, 20).0[0];
+        assert!((126..=129).contains(&crossing), "got {crossing}");
+        let single = img.get_pixel(10, 10).0[0];
+        assert_eq!(crossing, single);
+    }
+
+    #[test]
+    fn two_separate_polylines_darken_where_they_cross() {
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let color = crate::geometry::Rgba8::new(0, 0, 0, 128);
+        let a = vec![ImagePoint::new(5.0, 20.0), ImagePoint::new(35.0, 20.0)];
+        let b = vec![ImagePoint::new(20.0, 5.0), ImagePoint::new(20.0, 35.0)];
+        crate::raster::stroke_polyline(&mut img, &a, 4.0, color);
+        crate::raster::stroke_polyline(&mut img, &b, 4.0, color);
+        let crossing = img.get_pixel(20, 20).0[0];
+        let single = img.get_pixel(10, 20).0[0];
+        assert!(
+            crossing < single,
+            "two strokes must darken: {crossing} vs {single}"
+        );
+    }
+
+    #[test]
+    fn polyline_has_round_caps() {
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let points = vec![ImagePoint::new(10.0, 20.0), ImagePoint::new(30.0, 20.0)];
+        crate::raster::stroke_polyline(
+            &mut img,
+            &points,
+            8.0,
+            crate::geometry::Rgba8::new(0, 0, 0, 255),
+        );
+        assert!(img.get_pixel(33, 20).0[0] < 128);
+        assert_eq!(img.get_pixel(36, 20).0[0], 255);
     }
 
     #[test]

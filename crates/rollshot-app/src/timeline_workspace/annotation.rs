@@ -284,6 +284,31 @@ impl NumberAnnotationCanvas<'_> {
                             .with_width(stroke_width * s),
                     );
                 }
+                RenderShape::Polyline {
+                    points,
+                    width,
+                    color,
+                } => {
+                    if points.len() >= 2 {
+                        let path = canvas::Path::new(|b| {
+                            b.move_to(Point::new(
+                                points[0].x * self.scale,
+                                points[0].y * self.scale,
+                            ));
+                            for p in &points[1..] {
+                                b.line_to(Point::new(p.x * self.scale, p.y * self.scale));
+                            }
+                        });
+                        frame.stroke(
+                            &path,
+                            canvas::Stroke::default()
+                                .with_line_cap(canvas::LineCap::Round)
+                                .with_line_join(canvas::LineJoin::Round)
+                                .with_color(rgba_alpha(color, alpha))
+                                .with_width(width * self.scale),
+                        );
+                    }
+                }
                 RenderShape::Label {
                     anchor,
                     anchor_kind: TextAnchor::TopLeft,
