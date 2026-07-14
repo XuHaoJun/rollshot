@@ -2,6 +2,7 @@ pub mod actions;
 pub(crate) mod annotation_defaults;
 pub(crate) mod box_tool;
 pub(crate) mod canvas;
+mod freehand_tool;
 mod document;
 mod navigator;
 #[cfg(feature = "ocr")]
