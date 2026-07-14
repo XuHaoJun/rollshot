@@ -1,14 +1,66 @@
-use rollshot_image_document::{NumberSize, NumberStyle, Rgb8, StrokeStyle, TextSize, TextStyle};
+use rollshot_image_document::{
+    NumberSize, NumberStyle, Rgb8, ShapeKind, StrokeStyle, TextSize, TextStyle,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ShapeDefaults {
+    pub stroke: StrokeStyle,
+    pub fill_enabled: bool,
+    pub fill_color: Rgb8,
+}
+
+impl Default for ShapeDefaults {
+    fn default() -> Self {
+        Self {
+            stroke: StrokeStyle::default(),
+            fill_enabled: false,
+            fill_color: Rgb8::new(0xE5, 0x48, 0x4D),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnnotationDefaults {
     pub number: NumberStyle,
     pub text: TextStyle,
     pub line: StrokeStyle,
     pub arrow: StrokeStyle,
+    pub rectangle: ShapeDefaults,
+    pub ellipse: ShapeDefaults,
+    pub last_shape: ShapeKind,
+}
+
+impl Default for AnnotationDefaults {
+    fn default() -> Self {
+        Self {
+            number: NumberStyle::default(),
+            text: TextStyle::default(),
+            line: StrokeStyle::default(),
+            arrow: StrokeStyle::default(),
+            rectangle: ShapeDefaults::default(),
+            ellipse: ShapeDefaults::default(),
+            last_shape: ShapeKind::Rectangle,
+        }
+    }
+}
+
+impl AnnotationDefaults {
+    pub fn shape(&self, kind: ShapeKind) -> &ShapeDefaults {
+        match kind {
+            ShapeKind::Rectangle => &self.rectangle,
+            ShapeKind::Ellipse => &self.ellipse,
+        }
+    }
+
+    pub fn shape_mut(&mut self, kind: ShapeKind) -> &mut ShapeDefaults {
+        match kind {
+            ShapeKind::Rectangle => &mut self.rectangle,
+            ShapeKind::Ellipse => &mut self.ellipse,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +117,9 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
     let text = load_text_style(&section, &mut warnings);
     let line = load_stroke_style(&section, "line", &mut warnings);
     let arrow = load_stroke_style(&section, "arrow", &mut warnings);
+    let rectangle = load_shape_defaults(&section, "rectangle", &mut warnings);
+    let ellipse = load_shape_defaults(&section, "ellipse", &mut warnings);
+    let last_shape = load_last_shape(&section, &mut warnings);
 
     LoadedAnnotationDefaults {
         values: AnnotationDefaults {
@@ -72,6 +127,9 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
             text,
             line,
             arrow,
+            rectangle,
+            ellipse,
+            last_shape,
         },
         warnings,
     }
@@ -213,6 +271,62 @@ fn load_stroke_style(parent: &toml::Table, key: &str, warnings: &mut Vec<String>
     }
 }
 
+fn load_shape_defaults(
+    parent: &toml::Table,
+    key: &str,
+    warnings: &mut Vec<String>,
+) -> ShapeDefaults {
+    let table = match parent.get(key) {
+        Some(toml::Value::Table(t)) => t,
+        None => return ShapeDefaults::default(),
+        _ => {
+            warnings.push(format!(
+                "annotation_defaults.{key} is not a table — using defaults"
+            ));
+            return ShapeDefaults::default();
+        }
+    };
+
+    let stroke = load_stroke_style(table, "stroke", warnings);
+
+    let fill_enabled = table
+        .get("fill_enabled")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+
+    let fill_color = table
+        .get("fill_color")
+        .and_then(deserialize_rgb8)
+        .unwrap_or_else(|| {
+            if table.contains_key("fill_color") {
+                warnings.push(format!(
+                    "annotation_defaults.{key}.fill_color invalid — using default"
+                ));
+            }
+            ShapeDefaults::default().fill_color
+        });
+
+    ShapeDefaults {
+        stroke,
+        fill_enabled,
+        fill_color,
+    }
+}
+
+fn load_last_shape(parent: &toml::Table, warnings: &mut Vec<String>) -> ShapeKind {
+    match parent.get("last_shape").and_then(toml::Value::as_str) {
+        Some("rectangle") => ShapeKind::Rectangle,
+        Some("ellipse") => ShapeKind::Ellipse,
+        Some(other) => {
+            warnings.push(format!(
+                "annotation_defaults.last_shape invalid ({other:?}) — using default"
+            ));
+            ShapeKind::Rectangle
+        }
+        None => ShapeKind::Rectangle,
+    }
+}
+
 fn deserialize_rgb8(v: &toml::Value) -> Option<Rgb8> {
     // Try table form: { r: 0, g: 0, b: 0 }
     if let toml::Value::Table(t) = v {
@@ -258,6 +372,8 @@ pub(crate) fn save_to_with_writer(
     let mut persisted = values.clone();
     persisted.line.opacity = 1.0;
     persisted.arrow.opacity = 1.0;
+    persisted.rectangle.stroke.opacity = 1.0;
+    persisted.ellipse.stroke.opacity = 1.0;
     let mut section = toml::Value::try_from(&persisted)
         .map_err(|e| format!("serialize annotation defaults: {e}"))?;
     if let Some(text) = section
@@ -478,5 +594,122 @@ mod tests {
         let loaded = load_from(&ctx.path());
         assert_eq!(loaded.values, AnnotationDefaults::default());
         assert!(!loaded.warnings.is_empty());
+    }
+
+    // -- shape defaults (Task 3) ----------------------------------------------
+
+    #[test]
+    fn missing_file_produces_canonical_rectangle_and_ellipse_defaults() {
+        let ctx = TestContext::new();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.rectangle, ShapeDefaults::default());
+        assert_eq!(loaded.values.ellipse, ShapeDefaults::default());
+        assert_eq!(loaded.values.last_shape, ShapeKind::Rectangle);
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn missing_shape_fields_produce_independent_canonical_defaults() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults.rectangle.stroke]\nwidth = 8.0\nopacity = 1.0\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.rectangle.stroke.width, 8.0);
+        assert_eq!(loaded.values.ellipse, ShapeDefaults::default());
+    }
+
+    #[test]
+    fn malformed_rectangle_does_not_reset_ellipse_or_last_shape() {
+        let ctx = TestContext::new();
+        ctx.write_config(
+            "[annotation_defaults]\nlast_shape = \"ellipse\"\n\
+             [annotation_defaults.rectangle]\nfill_color = 99\n\
+             [annotation_defaults.ellipse]\nfill_enabled = true\n\
+             [annotation_defaults.ellipse.fill_color]\nr = 10\ng = 20\nb = 30\n",
+        );
+        let loaded = load_from(&ctx.path());
+        assert_eq!(
+            loaded.values.rectangle.fill_color,
+            ShapeDefaults::default().fill_color
+        );
+        assert!(loaded.values.ellipse.fill_enabled);
+        assert_eq!(loaded.values.ellipse.fill_color, Rgb8::new(10, 20, 30));
+        assert_eq!(loaded.values.last_shape, ShapeKind::Ellipse);
+    }
+
+    #[test]
+    fn non_opaque_shape_stroke_rejected_to_opacity_one_with_warning() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults.rectangle.stroke]\nopacity = 0.5\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.rectangle.stroke.opacity, 1.0);
+        assert!(!loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn rectangle_and_ellipse_changes_never_contaminate() {
+        let ctx = TestContext::new();
+        let mut values = AnnotationDefaults::default();
+        values.rectangle.stroke.width = 12.0;
+        values.rectangle.fill_enabled = true;
+        values.ellipse.stroke.color = Rgb8::new(0, 255, 0);
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.rectangle.stroke.width, 12.0);
+        assert!(loaded.values.rectangle.fill_enabled);
+        assert_eq!(loaded.values.ellipse.stroke.color, Rgb8::new(0, 255, 0));
+        assert_eq!(
+            loaded.values.ellipse.stroke.width,
+            StrokeStyle::default().width
+        );
+        assert!(!loaded.values.ellipse.fill_enabled);
+    }
+
+    #[test]
+    fn disabling_and_reloading_fill_retains_fill_color() {
+        let ctx = TestContext::new();
+        let mut values = AnnotationDefaults::default();
+        values.rectangle.fill_enabled = true;
+        values.rectangle.fill_color = Rgb8::new(10, 20, 30);
+        save_to(&ctx.path(), &values).unwrap();
+        values.rectangle.fill_enabled = false;
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert!(!loaded.values.rectangle.fill_enabled);
+        assert_eq!(loaded.values.rectangle.fill_color, Rgb8::new(10, 20, 30));
+    }
+
+    #[test]
+    fn valid_last_shape_round_trips_and_malformed_falls_back() {
+        let ctx = TestContext::new();
+        let values = AnnotationDefaults {
+            last_shape: ShapeKind::Ellipse,
+            ..AnnotationDefaults::default()
+        };
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.last_shape, ShapeKind::Ellipse);
+
+        ctx.write_config("[annotation_defaults]\nlast_shape = \"bogus\"\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.last_shape, ShapeKind::Rectangle);
+        assert!(!loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn save_forces_shape_stroke_opacities_and_preserves_existing_fields() {
+        let ctx = TestContext::new();
+        ctx.write_config(
+            "[annotation_defaults.number]\nsize = \"Large\"\n\
+             [annotation_defaults.line]\nwidth = 7.0\nopacity = 1.0\n",
+        );
+        let mut values = load_from(&ctx.path()).values;
+        values.rectangle.stroke.opacity = 0.3;
+        values.ellipse.stroke.opacity = 0.8;
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.rectangle.stroke.opacity, 1.0);
+        assert_eq!(loaded.values.ellipse.stroke.opacity, 1.0);
+        assert_eq!(loaded.values.number.size, NumberSize::Large);
+        assert_eq!(loaded.values.line.width, 7.0);
     }
 }

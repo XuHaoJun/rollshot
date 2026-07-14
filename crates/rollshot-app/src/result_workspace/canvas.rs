@@ -32,9 +32,30 @@ pub enum Tool {
     Text,
     Line,
     Arrow,
+    Rectangle,
+    Ellipse,
     Redact,
     #[cfg(feature = "ocr")]
     OcrText,
+}
+
+impl From<rollshot_image_document::ShapeKind> for Tool {
+    fn from(kind: rollshot_image_document::ShapeKind) -> Self {
+        match kind {
+            rollshot_image_document::ShapeKind::Rectangle => Tool::Rectangle,
+            rollshot_image_document::ShapeKind::Ellipse => Tool::Ellipse,
+        }
+    }
+}
+
+impl Tool {
+    pub fn as_shape_kind(self) -> Option<rollshot_image_document::ShapeKind> {
+        match self {
+            Tool::Rectangle => Some(rollshot_image_document::ShapeKind::Rectangle),
+            Tool::Ellipse => Some(rollshot_image_document::ShapeKind::Ellipse),
+            _ => None,
+        }
+    }
 }
 
 /// An in-progress pointer gesture. Exactly ONE document edit is submitted on
@@ -54,6 +75,13 @@ pub enum DragState {
     CreateRedaction {
         anchor: ImagePoint,
         current: ImagePoint,
+    },
+    CreateShape {
+        kind: rollshot_image_document::ShapeKind,
+        anchor: ImagePoint,
+        current: ImagePoint,
+        style: StrokeStyle,
+        fill: Option<rollshot_image_document::Rgb8>,
     },
     /// Select-tool drag of an existing annotation or one of its handles.
     EditAnnotation {
@@ -87,6 +115,7 @@ pub struct EditorState {
     pub navigator_open: bool,
     pub copy_menu_open: bool,
     pub more_menu_open: bool,
+    pub shapes_menu_open: bool,
     /// Document `state_id` at the last successful Save As (dirty marker).
     pub saved_state_id: u64,
     /// Last canvas press, for double-click detection.
@@ -109,6 +138,7 @@ impl EditorState {
             navigator_open,
             copy_menu_open: false,
             more_menu_open: false,
+            shapes_menu_open: false,
             saved_state_id,
             last_press: None,
             navigator_items: Vec::new(),
@@ -128,6 +158,7 @@ pub fn dragged_annotation(
     grab_offset: (f32, f32),
     shift: bool,
     image_size: (u32, u32),
+    scale: f32,
 ) -> Annotation {
     let mut next = original.clone();
     let (width, height) = image_size;
@@ -166,6 +197,20 @@ pub fn dragged_annotation(
         (Annotation::OpaqueRedaction { bounds, .. }, HitPart::Resize(handle)) => {
             *bounds = resized_rect(*bounds, handle, point);
         }
+        (Annotation::Shape { bounds, .. }, HitPart::Body) => {
+            *bounds = super::box_tool::moved_bounds(
+                *bounds,
+                point,
+                ImagePoint::new(grab_offset.0, grab_offset.1),
+                width,
+                height,
+            );
+        }
+        (Annotation::Shape { bounds, .. }, HitPart::Resize(handle)) => {
+            *bounds = super::box_tool::resized_bounds(
+                *bounds, handle, point, shift, scale, width, height,
+            );
+        }
         _ => {}
     }
     next
@@ -196,7 +241,7 @@ fn resized_rect(original: ImageRect, handle: ResizeHandle, p: ImagePoint) -> Ima
 use iced::widget::canvas;
 use iced::{mouse, Color, Rectangle, Renderer, Size, Theme, Vector};
 use rollshot_image_document::{
-    annotation_bounds, annotation_shapes, redaction_handles, style, RenderShape, TextAnchor,
+    annotation_bounds, annotation_shapes, resize_handles, style, RenderShape, TextAnchor,
 };
 
 use super::update::{direct_manipulation_hit, Message};
@@ -360,6 +405,53 @@ impl AnnotationCanvas<'_> {
                     ..canvas::Text::default()
                 });
             }
+            RenderShape::Box {
+                kind,
+                bounds,
+                stroke,
+                stroke_width,
+                fill,
+            } => {
+                use rollshot_image_document::ShapeKind;
+                let rect = iced::Rectangle {
+                    x: bounds.x * s,
+                    y: bounds.y * s,
+                    width: bounds.width * s,
+                    height: bounds.height * s,
+                };
+                let cx = rect.x + rect.width / 2.0;
+                let cy = rect.y + rect.height / 2.0;
+                let rx = rect.width / 2.0;
+                let ry = rect.height / 2.0;
+
+                let make_path = |kind: &ShapeKind| -> canvas::Path {
+                    match kind {
+                        ShapeKind::Rectangle => canvas::Path::rectangle(
+                            Point::new(rect.x, rect.y),
+                            Size::new(rect.width, rect.height),
+                        ),
+                        ShapeKind::Ellipse => canvas::Path::new(|b| {
+                            b.ellipse(canvas::path::arc::Elliptical {
+                                center: Point::new(cx, cy),
+                                radii: iced::Vector::new(rx, ry),
+                                rotation: iced::Radians(0.0),
+                                start_angle: iced::Radians(0.0),
+                                end_angle: iced::Radians(std::f32::consts::TAU),
+                            });
+                        }),
+                    }
+                };
+
+                if let Some(fill_color) = fill {
+                    frame.fill(&make_path(kind), token_color(*fill_color));
+                }
+                frame.stroke(
+                    &make_path(kind),
+                    canvas::Stroke::default()
+                        .with_color(token_color(*stroke))
+                        .with_width(stroke_width * s),
+                );
+            }
         }
     }
 
@@ -403,6 +495,29 @@ impl AnnotationCanvas<'_> {
                 let rect = ImageRect::from_corners(*anchor, *current);
                 (!rect.is_empty())
                     .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
+            }
+            Some(DragState::CreateShape {
+                kind,
+                anchor,
+                current,
+                style,
+                fill,
+            }) => {
+                let (w, h) = self.document.source().dimensions();
+                let bounds = super::box_tool::creation_bounds(
+                    *anchor,
+                    *current,
+                    self.modifiers.shift(),
+                    w,
+                    h,
+                );
+                (!bounds.is_empty()).then_some(Annotation::shape_with_style(
+                    AnnotationId(u64::MAX),
+                    *kind,
+                    bounds,
+                    *style,
+                    *fill,
+                ))
             }
             Some(DragState::EditAnnotation { current, .. }) => Some(current.clone()),
             _ => None,
@@ -451,7 +566,12 @@ impl AnnotationCanvas<'_> {
                 );
             }
             Annotation::OpaqueRedaction { bounds, .. } => {
-                for (_, p) in redaction_handles(*bounds) {
+                for (_, p) in resize_handles(*bounds) {
+                    handle(frame, p, white, accent);
+                }
+            }
+            Annotation::Shape { bounds, .. } => {
+                for (_, p) in resize_handles(*bounds) {
                     handle(frame, p, white, accent);
                 }
             }
@@ -737,6 +857,7 @@ mod tests {
             (5.0, 5.0),
             false,
             (200, 200),
+            1.0,
         );
         match moved {
             Annotation::NumberCallout { tip, bubble, .. } => {
@@ -762,6 +883,7 @@ mod tests {
             (10.0, 20.0),
             false,
             (200, 200),
+            1.0,
         );
         let moved_with_shift = dragged_annotation(
             &original,
@@ -770,6 +892,7 @@ mod tests {
             (10.0, 20.0),
             true,
             (200, 200),
+            1.0,
         );
         assert_eq!(moved_with_shift, moved, "body movement ignores Shift");
         let (before_start, before_end) = match original {
@@ -802,6 +925,7 @@ mod tests {
             (0.0, 0.0),
             false,
             (200, 200),
+            1.0,
         );
         let snapped_start = dragged_annotation(
             &original,
@@ -810,6 +934,7 @@ mod tests {
             (0.0, 0.0),
             true,
             (200, 200),
+            1.0,
         );
         let raw_end = ImagePoint::new(120.0, 70.0);
         let moved_end = dragged_annotation(
@@ -819,6 +944,7 @@ mod tests {
             (0.0, 0.0),
             false,
             (200, 200),
+            1.0,
         );
 
         assert!(matches!(

@@ -6,7 +6,10 @@ use image::RgbaImage;
 
 use crate::annotation::Annotation;
 use crate::geometry::ImagePoint;
-use crate::raster::{fill_circle, fill_rect, fill_triangle, stroke_circle, stroke_line};
+use crate::raster::{
+    fill_box_shape, fill_circle, fill_rect, fill_triangle, stroke_box_shape, stroke_circle,
+    stroke_line,
+};
 use crate::shapes::{annotation_shapes, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
 
@@ -58,6 +61,18 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
                 }
             };
             draw_block(img, top_left, content, *px, *bold, *color);
+        }
+        RenderShape::Box {
+            kind,
+            bounds,
+            stroke,
+            stroke_width,
+            fill,
+        } => {
+            if let Some(fill_color) = fill {
+                fill_box_shape(img, *kind, *bounds, *fill_color);
+            }
+            stroke_box_shape(img, *kind, *bounds, *stroke_width, *stroke);
         }
     }
 }
@@ -206,7 +221,8 @@ mod tests {
     #[test]
     fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
         let mut doc = ImageDocument::new(base(1000, 20_000));
-        for i in 0..20u32 {
+        // 14 rows × 7 types = 98, plus 1 Rectangle + 1 Ellipse = exactly 100.
+        for i in 0..14u32 {
             let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
             doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}"))
@@ -230,14 +246,228 @@ mod tests {
                 ImagePoint::new(900.0, y + 180.0),
             )
             .unwrap();
+            doc.add_shape(
+                crate::annotation::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 700.0,
+                    y: y + 200.0,
+                    width: 60.0,
+                    height: 80.0,
+                },
+            )
+            .unwrap();
+            doc.add_shape(
+                crate::annotation::ShapeKind::Ellipse,
+                ImageRect {
+                    x: 850.0,
+                    y: y + 200.0,
+                    width: 60.0,
+                    height: 80.0,
+                },
+            )
+            .unwrap();
         }
+        // Extra Rectangle + Ellipse to reach exactly 100.
+        let ey = 100.0 + 14.0 * 950.0;
+        doc.add_shape(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 100.0,
+                y: ey,
+                width: 60.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        let ey2 = 100.0 + 15.0 * 950.0;
+        doc.add_shape(
+            crate::annotation::ShapeKind::Ellipse,
+            ImageRect {
+                x: 300.0,
+                y: ey2,
+                width: 60.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
-        assert_eq!(flattened.dimensions(), doc.source().dimensions());
+        assert_eq!(
+            flattened.dimensions(),
+            doc.source().dimensions(),
+            "output dimensions match source"
+        );
+
+        // Representative Number (row 0) still paints.
         assert_ne!(
             flattened.get_pixel(160, 240),
             doc.source().get_pixel(160, 240)
         );
-        assert_eq!(doc.navigator_items().len(), 100);
+
+        // Representative Rectangle (row 0): no fill, stroke paints the edge.
+        // Row 0 y=100, shape at y+200=300. Bounds: (700, 300)–(760, 380).
+        // Interior (730, 340) must be source.
+        assert_eq!(
+            flattened.get_pixel(730, 340),
+            doc.source().get_pixel(730, 340),
+            "Rectangle interior without fill must be source"
+        );
+        // Left edge (700, 340) must be painted by stroke.
+        assert_ne!(
+            flattened.get_pixel(700, 340),
+            doc.source().get_pixel(700, 340),
+            "Rectangle edge must be painted by stroke"
+        );
+
+        // Representative Ellipse (row 0): no fill, stroke paints the boundary.
+        // Row 0 y=100, shape at y+200=300. Bounds: (850, 300)–(910, 380).
+        // Center (880, 340) must be source.
+        assert_eq!(
+            flattened.get_pixel(880, 340),
+            doc.source().get_pixel(880, 340),
+            "Ellipse center without fill must be source"
+        );
+        // Top of ellipse (880, 300) must be painted by stroke.
+        assert_ne!(
+            flattened.get_pixel(880, 300),
+            doc.source().get_pixel(880, 300),
+            "Ellipse boundary must be painted by stroke"
+        );
+
         assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());
+    }
+
+    #[test]
+    fn shape_fill_paints_over_source() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_shape_with_style(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            crate::style::StrokeStyle {
+                color: Rgb8::new(0, 0, 0),
+                width: 1.0,
+                opacity: 1.0,
+            },
+            Some(Rgb8::new(255, 0, 0)),
+        )
+        .unwrap();
+        let out = doc.flatten();
+        // Center of shape should be red (fill)
+        let px = out.get_pixel(20, 20).0;
+        assert!(
+            px[0] > 200 && px[1] < 50 && px[2] < 50,
+            "fill should be red"
+        );
+        // Source pixel should be unchanged
+        assert_eq!(doc.source().get_pixel(20, 20).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn shape_stroke_only_has_no_fill() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_shape(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        let out = doc.flatten();
+        // Center should be unchanged (no fill, stroke is only at edges)
+        assert_eq!(out.get_pixel(50, 50).0, [10, 20, 30, 255]);
+        // Edge should be painted
+        assert_ne!(out.get_pixel(10, 50).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn shape_flatten_is_deterministic() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_shape(
+            crate::annotation::ShapeKind::Ellipse,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 60.0,
+            },
+        )
+        .unwrap();
+        let first = doc.flatten();
+        let second = doc.flatten();
+        assert_eq!(first.as_raw(), second.as_raw());
+    }
+
+    #[test]
+    fn copy_original_remains_byte_identical_to_source() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(50.0, 50.0));
+        doc.add_redaction(ImageRect {
+            x: 20.0,
+            y: 20.0,
+            width: 30.0,
+            height: 30.0,
+        })
+        .unwrap();
+        doc.add_shape(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 60.0,
+                y: 60.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        )
+        .unwrap();
+
+        let source = doc.source().clone();
+        let copy_original = doc.source().clone();
+        assert_eq!(
+            copy_original.as_raw(),
+            source.as_raw(),
+            "Copy Original must be byte-identical to the unflattened source"
+        );
+
+        let flattened = doc.flatten();
+        assert_ne!(
+            flattened.as_raw(),
+            source.as_raw(),
+            "flattened output must differ from source when annotations exist"
+        );
+    }
+
+    #[test]
+    fn opaque_redaction_over_shape_retains_opaque_black() {
+        let mut doc = ImageDocument::new(base(100, 100));
+        doc.add_shape_with_style(
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0,
+            },
+            crate::style::StrokeStyle::default(),
+            Some(Rgb8::new(255, 0, 0)),
+        )
+        .unwrap();
+        doc.add_redaction(ImageRect {
+            x: 20.0,
+            y: 20.0,
+            width: 20.0,
+            height: 20.0,
+        })
+        .unwrap();
+        let out = doc.flatten();
+        // Redaction should be opaque black over the shape
+        assert_eq!(out.get_pixel(30, 30).0, [0, 0, 0, 255]);
     }
 }

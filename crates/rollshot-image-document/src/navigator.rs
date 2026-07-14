@@ -35,6 +35,10 @@ fn label(annotation: &Annotation) -> String {
             summary
         }
         Annotation::OpaqueRedaction { .. } => "Redaction".to_string(),
+        Annotation::Shape { kind, .. } => match kind {
+            crate::annotation::ShapeKind::Rectangle => "Rectangle".to_string(),
+            crate::annotation::ShapeKind::Ellipse => "Ellipse".to_string(),
+        },
     }
 }
 
@@ -187,5 +191,49 @@ mod tests {
         assert_eq!(items[1].label, "first line is quite long…");
         assert!(items[1].label.chars().count() <= 25);
         assert_eq!(items[2].label, "Redaction");
+    }
+
+    #[test]
+    fn shape_labels_are_rectangle_and_ellipse() {
+        let anns = vec![
+            Annotation::shape(
+                AnnotationId(10),
+                crate::annotation::ShapeKind::Rectangle,
+                ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+            ),
+            Annotation::shape(
+                AnnotationId(11),
+                crate::annotation::ShapeKind::Ellipse,
+                ImageRect {
+                    x: 20.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+            ),
+        ];
+        let items = navigator_items(&anns);
+        assert_eq!(items[0].label, "Rectangle");
+        assert_eq!(items[1].label, "Ellipse");
+    }
+
+    #[test]
+    fn shape_anchor_is_logical_top_left() {
+        let ann = Annotation::shape(
+            AnnotationId(12),
+            crate::annotation::ShapeKind::Rectangle,
+            ImageRect {
+                x: 15.0,
+                y: 25.0,
+                width: 30.0,
+                height: 40.0,
+            },
+        );
+        assert_eq!(ann.anchor(), ImagePoint::new(15.0, 25.0));
     }
 }

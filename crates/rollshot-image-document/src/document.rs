@@ -5,9 +5,9 @@ use std::collections::VecDeque;
 
 use image::RgbaImage;
 
-use crate::annotation::{Annotation, AnnotationId, TwoPointKind};
+use crate::annotation::{Annotation, AnnotationId, ShapeKind, TwoPointKind};
 use crate::edit_op::{BatchOutcome, EditOp};
-use crate::geometry::{ImagePoint, ImageRect};
+use crate::geometry::{ImagePoint, ImageRect, Rgb8};
 use crate::hit::Hit;
 use crate::navigator::NavigatorItem;
 use crate::style::StrokeStyle;
@@ -77,6 +77,8 @@ pub enum EditError {
     NonFiniteCoordinate,
     #[error("next number must be at least 1")]
     InvalidNextNumber,
+    #[error("shape bounds must be finite, positive, and cover at least one pixel")]
+    InvalidShapeBounds,
 }
 
 /// One restorable history state (mark-shot pattern: graph + counters).
@@ -491,6 +493,49 @@ impl ImageDocument {
         Ok(())
     }
 
+    pub fn add_shape(
+        &mut self,
+        kind: ShapeKind,
+        bounds: ImageRect,
+    ) -> Result<AnnotationId, EditError> {
+        self.add_shape_with_style(kind, bounds, StrokeStyle::default(), None)
+    }
+
+    pub fn add_shape_with_style(
+        &mut self,
+        kind: ShapeKind,
+        bounds: ImageRect,
+        stroke: StrokeStyle,
+        fill: Option<Rgb8>,
+    ) -> Result<AnnotationId, EditError> {
+        let outcome = self.apply_batch(vec![EditOp::AddShape {
+            kind,
+            bounds,
+            stroke,
+            fill,
+        }])?;
+        Ok(outcome.added_ids[0])
+    }
+
+    pub fn set_shape_bounds(
+        &mut self,
+        id: AnnotationId,
+        bounds: ImageRect,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdateShapeBounds { id, bounds }])?;
+        Ok(())
+    }
+
+    pub fn set_shape_style(
+        &mut self,
+        id: AnnotationId,
+        stroke: StrokeStyle,
+        fill: Option<Rgb8>,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdateShapeStyle { id, stroke, fill }])?;
+        Ok(())
+    }
+
     /// Apply many operations as ONE history entry (spec §6.5). Atomic: if any
     /// op is invalid the whole batch is rolled back — no mutation, no commit,
     /// no `state_id` change. Update*/Delete reference annotations existing
@@ -526,11 +571,14 @@ impl ImageDocument {
                 | EditOp::UpdateTextStyle { id, .. }
                 | EditOp::UpdateTwoPointPoints { id, .. }
                 | EditOp::UpdateStrokeStyle { id, .. }
+                | EditOp::UpdateShapeBounds { id, .. }
+                | EditOp::UpdateShapeStyle { id, .. }
                 | EditOp::Delete { id } => Some(*id),
                 EditOp::AddTwoPoint { .. }
                 | EditOp::AddRedaction { .. }
                 | EditOp::AddTextNote { .. }
                 | EditOp::AddNumberCallout { .. }
+                | EditOp::AddShape { .. }
                 | EditOp::SetNextNumber { .. } => None,
             };
             if referenced_id.is_some_and(|id| self.annotation(id).is_none()) {
@@ -742,6 +790,53 @@ impl ImageDocument {
                 }
                 self.next_number = value;
             }
+            EditOp::AddShape {
+                kind,
+                bounds,
+                stroke,
+                fill,
+            } => {
+                validate_stroke_style(stroke)?;
+                ensure_rect_finite(&bounds)?;
+                let clamped = bounds.clamp_to(w, h);
+                if clamped.width <= 0.0 || clamped.height <= 0.0 {
+                    return Err(EditError::InvalidShapeBounds);
+                }
+                let id = self.allocate_id();
+                self.annotations.push(Annotation::Shape {
+                    id,
+                    kind,
+                    bounds: clamped,
+                    stroke,
+                    fill,
+                });
+                added_ids.push(id);
+            }
+            EditOp::UpdateShapeBounds { id, bounds } => {
+                ensure_rect_finite(&bounds)?;
+                let clamped = bounds.clamp_to(w, h);
+                if clamped.width <= 0.0 || clamped.height <= 0.0 {
+                    return Err(EditError::InvalidShapeBounds);
+                }
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::Shape { bounds: b, .. } => *b = clamped,
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::UpdateShapeStyle { id, stroke, fill } => {
+                validate_stroke_style(stroke)?;
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::Shape {
+                        stroke: s, fill: f, ..
+                    } => {
+                        *s = stroke;
+                        *f = fill;
+                    }
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
         }
         Ok(())
     }
@@ -772,7 +867,7 @@ impl ImageDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotation::TwoPointKind;
+    use crate::annotation::{ShapeKind, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect, Rgb8};
     use crate::style::{NumberSize, NumberStyle, StrokeStyle, TextStyle};
     use image::{Rgba, RgbaImage};
@@ -1760,5 +1855,259 @@ mod tests {
 
     fn point(x: f32) -> ImagePoint {
         ImagePoint::new(x, x)
+    }
+
+    // --- Shape tests ---
+
+    #[test]
+    fn shape_add_canonical_and_explicit_fields() {
+        let mut d = test_doc();
+        let id = d
+            .add_shape(ShapeKind::Rectangle, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        match d.annotation(id).unwrap() {
+            Annotation::Shape {
+                kind,
+                bounds,
+                stroke,
+                fill,
+                ..
+            } => {
+                assert_eq!(*kind, ShapeKind::Rectangle);
+                assert_eq!(*bounds, rect(10.0, 20.0, 30.0, 40.0));
+                assert_eq!(*stroke, StrokeStyle::default());
+                assert_eq!(*fill, None);
+            }
+            _ => panic!("expected Shape"),
+        }
+    }
+
+    #[test]
+    fn shape_add_with_style_stores_explicit_fields() {
+        let mut d = test_doc();
+        let style = StrokeStyle {
+            color: Rgb8::new(1, 2, 3),
+            width: 7.0,
+            opacity: 1.0,
+        };
+        let id = d
+            .add_shape_with_style(
+                ShapeKind::Ellipse,
+                rect(10.0, 20.0, 30.0, 40.0),
+                style,
+                Some(Rgb8::new(4, 5, 6)),
+            )
+            .unwrap();
+        match d.annotation(id).unwrap() {
+            Annotation::Shape {
+                kind,
+                bounds,
+                stroke,
+                fill,
+                ..
+            } => {
+                assert_eq!(*kind, ShapeKind::Ellipse);
+                assert_eq!(*bounds, rect(10.0, 20.0, 30.0, 40.0));
+                assert_eq!(*stroke, style);
+                assert_eq!(*fill, Some(Rgb8::new(4, 5, 6)));
+            }
+            _ => panic!("expected Shape"),
+        }
+    }
+
+    #[test]
+    fn shape_ids_are_distinct_and_stable() {
+        let mut d = test_doc();
+        let a = d
+            .add_shape(ShapeKind::Rectangle, rect(0.0, 0.0, 10.0, 10.0))
+            .unwrap();
+        let b = d
+            .add_shape(ShapeKind::Ellipse, rect(20.0, 20.0, 10.0, 10.0))
+            .unwrap();
+        assert_ne!(a, b);
+        assert_eq!(d.annotations()[0].id(), a);
+        assert_eq!(d.annotations()[1].id(), b);
+    }
+
+    #[test]
+    fn shape_set_bounds_updates_and_is_undoable() {
+        let mut d = test_doc();
+        let id = d
+            .add_shape(ShapeKind::Rectangle, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        d.set_shape_bounds(id, rect(20.0, 30.0, 40.0, 50.0))
+            .unwrap();
+        match d.annotation(id).unwrap() {
+            Annotation::Shape { bounds, .. } => {
+                assert_eq!(*bounds, rect(20.0, 30.0, 40.0, 50.0));
+            }
+            _ => panic!("expected Shape"),
+        }
+        assert!(d.undo());
+        match d.annotation(id).unwrap() {
+            Annotation::Shape { bounds, .. } => {
+                assert_eq!(*bounds, rect(10.0, 20.0, 30.0, 40.0));
+            }
+            _ => panic!("expected Shape"),
+        }
+    }
+
+    #[test]
+    fn shape_set_style_updates_and_is_undoable() {
+        let mut d = test_doc();
+        let id = d
+            .add_shape(ShapeKind::Rectangle, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        let new_style = StrokeStyle {
+            color: Rgb8::new(10, 20, 30),
+            width: 8.0,
+            opacity: 0.5,
+        };
+        d.set_shape_style(id, new_style, Some(Rgb8::new(1, 2, 3)))
+            .unwrap();
+        match d.annotation(id).unwrap() {
+            Annotation::Shape { stroke, fill, .. } => {
+                assert_eq!(*stroke, new_style);
+                assert_eq!(*fill, Some(Rgb8::new(1, 2, 3)));
+            }
+            _ => panic!("expected Shape"),
+        }
+        assert!(d.undo());
+        match d.annotation(id).unwrap() {
+            Annotation::Shape { stroke, fill, .. } => {
+                assert_eq!(*stroke, StrokeStyle::default());
+                assert_eq!(*fill, None);
+            }
+            _ => panic!("expected Shape"),
+        }
+    }
+
+    #[test]
+    fn shape_rejects_non_finite_bounds() {
+        let mut d = test_doc();
+        let s = d.state_id();
+        assert_eq!(
+            d.add_shape(
+                ShapeKind::Rectangle,
+                ImageRect {
+                    x: f32::NAN,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                }
+            ),
+            Err(EditError::NonFiniteCoordinate)
+        );
+        assert_eq!(d.state_id(), s);
+        assert!(d.annotations().is_empty());
+    }
+
+    #[test]
+    fn shape_rejects_zero_dimensions() {
+        let mut d = test_doc();
+        assert_eq!(
+            d.add_shape(ShapeKind::Rectangle, rect(0.0, 0.0, 0.0, 10.0)),
+            Err(EditError::InvalidShapeBounds)
+        );
+        assert_eq!(
+            d.add_shape(ShapeKind::Rectangle, rect(0.0, 0.0, 10.0, 0.0)),
+            Err(EditError::InvalidShapeBounds)
+        );
+    }
+
+    #[test]
+    fn shape_rejects_invalid_stroke_width() {
+        let mut d = test_doc();
+        let bad = StrokeStyle {
+            width: 0.0,
+            ..StrokeStyle::default()
+        };
+        assert_eq!(
+            d.add_shape_with_style(ShapeKind::Rectangle, rect(0.0, 0.0, 10.0, 10.0), bad, None,),
+            Err(EditError::InvalidStrokeWidth)
+        );
+    }
+
+    #[test]
+    fn shape_rejects_invalid_opacity() {
+        let mut d = test_doc();
+        let bad = StrokeStyle {
+            opacity: 1.5,
+            ..StrokeStyle::default()
+        };
+        assert_eq!(
+            d.add_shape_with_style(ShapeKind::Rectangle, rect(0.0, 0.0, 10.0, 10.0), bad, None,),
+            Err(EditError::InvalidOpacity)
+        );
+    }
+
+    #[test]
+    fn shape_wrong_id_rejected() {
+        let mut d = test_doc();
+        assert_eq!(
+            d.set_shape_bounds(AnnotationId(999), rect(0.0, 0.0, 10.0, 10.0)),
+            Err(EditError::UnknownAnnotation)
+        );
+    }
+
+    #[test]
+    fn shape_wrong_kind_rejected() {
+        let mut d = test_doc();
+        let id = d.add_redaction(rect(0.0, 0.0, 10.0, 10.0)).unwrap();
+        assert_eq!(
+            d.set_shape_bounds(id, rect(0.0, 0.0, 10.0, 10.0)),
+            Err(EditError::WrongKind)
+        );
+    }
+
+    #[test]
+    fn shape_unchanged_bounds_is_noop() {
+        let mut d = test_doc();
+        let id = d
+            .add_shape(ShapeKind::Rectangle, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        let s = d.state_id();
+        d.set_shape_bounds(id, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        assert_eq!(d.state_id(), s, "unchanged bounds must not commit");
+    }
+
+    #[test]
+    fn shape_unchanged_style_is_noop() {
+        let mut d = test_doc();
+        let id = d
+            .add_shape(ShapeKind::Rectangle, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        let s = d.state_id();
+        d.set_shape_style(id, StrokeStyle::default(), None).unwrap();
+        assert_eq!(d.state_id(), s, "unchanged style must not commit");
+    }
+
+    #[test]
+    fn shape_delete_undo_redo_lifecycle() {
+        let mut d = test_doc();
+        let id = d
+            .add_shape(ShapeKind::Rectangle, rect(10.0, 20.0, 30.0, 40.0))
+            .unwrap();
+        d.delete_annotation(id).unwrap();
+        assert!(d.annotation(id).is_none());
+        assert!(d.undo());
+        assert!(d.annotation(id).is_some());
+        assert!(d.redo());
+        assert!(d.annotation(id).is_none());
+    }
+
+    #[test]
+    fn shape_redo_clears_on_new_edit() {
+        let mut d = test_doc();
+        let _ = d
+            .add_shape(ShapeKind::Rectangle, rect(0.0, 0.0, 10.0, 10.0))
+            .unwrap();
+        assert!(d.undo());
+        assert!(d.can_redo());
+        let _ = d
+            .add_shape(ShapeKind::Ellipse, rect(20.0, 20.0, 10.0, 10.0))
+            .unwrap();
+        assert!(!d.can_redo());
     }
 }

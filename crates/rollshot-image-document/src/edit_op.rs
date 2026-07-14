@@ -1,8 +1,8 @@
 //! Typed, agent-free document edit operations and their batch outcome.
 //! Applied atomically by `ImageDocument::apply_batch` (spec §6.5).
 
-use crate::annotation::{AnnotationId, TwoPointKind};
-use crate::geometry::{ImagePoint, ImageRect};
+use crate::annotation::{AnnotationId, ShapeKind, TwoPointKind};
+use crate::geometry::{ImagePoint, ImageRect, Rgb8};
 use crate::style::{NumberStyle, StrokeStyle, TextStyle};
 
 /// A single document mutation. Add* allocate new ids; Update*/Delete reference
@@ -67,6 +67,21 @@ pub enum EditOp {
     },
     Delete {
         id: AnnotationId,
+    },
+    AddShape {
+        kind: ShapeKind,
+        bounds: ImageRect,
+        stroke: StrokeStyle,
+        fill: Option<Rgb8>,
+    },
+    UpdateShapeBounds {
+        id: AnnotationId,
+        bounds: ImageRect,
+    },
+    UpdateShapeStyle {
+        id: AnnotationId,
+        stroke: StrokeStyle,
+        fill: Option<Rgb8>,
     },
 }
 

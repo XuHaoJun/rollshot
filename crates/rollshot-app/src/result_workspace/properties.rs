@@ -1,6 +1,8 @@
 use iced::Element;
 
-use rollshot_image_document::{Annotation, AnnotationId, Rgb8, TwoPointKind};
+use rollshot_image_document::{
+    Annotation, AnnotationId, Rgb8, ShapeKind, StrokeStyle, TwoPointKind,
+};
 
 use super::canvas::Tool;
 use super::Message;
@@ -11,16 +13,17 @@ pub enum PropertyTarget {
     NumberTool,
     TextTool,
     TwoPointTool(TwoPointKind),
+    ShapeTool(ShapeKind),
     Annotation(AnnotationId),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorProperty {
     NumberAccent,
     TextColor,
     TextBackground,
     StrokeColor,
+    ShapeFill,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +42,17 @@ pub struct StrokeWidthTransaction {
     pub preview: f32,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapeStyleTransaction {
+    pub id: AnnotationId,
+    pub kind: ShapeKind,
+    pub original_stroke: StrokeStyle,
+    pub original_fill: Option<Rgb8>,
+    pub preview_stroke: StrokeStyle,
+    pub preview_fill: Option<Rgb8>,
+    pub remembered_fill_color: Rgb8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
     CopyMenu,
@@ -57,8 +70,8 @@ pub enum PropertyFocus {
 pub struct PropertyState {
     pub color: Option<ColorTransaction>,
     pub width: Option<StrokeWidthTransaction>,
+    pub shape_style: Option<ShapeStyleTransaction>,
     pub next_number_input: String,
-    #[allow(dead_code)]
     pub focus: Option<PropertyFocus>,
     pub popup: Option<Popup>,
 }
@@ -70,6 +83,8 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
         Tool::Text => Some(PropertyTarget::TextTool),
         Tool::Line => Some(PropertyTarget::TwoPointTool(TwoPointKind::Line)),
         Tool::Arrow => Some(PropertyTarget::TwoPointTool(TwoPointKind::Arrow)),
+        Tool::Rectangle => Some(PropertyTarget::ShapeTool(ShapeKind::Rectangle)),
+        Tool::Ellipse => Some(PropertyTarget::ShapeTool(ShapeKind::Ellipse)),
         Tool::Select => {
             state
                 .editor
@@ -78,7 +93,8 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
                     Some(
                         Annotation::TwoPoint { .. }
                         | Annotation::NumberCallout { .. }
-                        | Annotation::TextNote { .. },
+                        | Annotation::TextNote { .. }
+                        | Annotation::Shape { .. },
                     ) => Some(PropertyTarget::Annotation(id)),
                     _ => None,
                 })
@@ -195,6 +211,9 @@ fn stroke_width(state: &ResultWorkspace, target: PropertyTarget) -> Option<f32> 
         PropertyTarget::TwoPointTool(TwoPointKind::Arrow) => {
             Some(state.annotation_defaults.values.arrow.width)
         }
+        PropertyTarget::ShapeTool(kind) => {
+            Some(state.annotation_defaults.values.shape(kind).stroke.width)
+        }
         PropertyTarget::Annotation(id) => state
             .document
             .image
@@ -230,6 +249,48 @@ fn stroke_controls(
         .spacing(8)
         .into(),
     )
+}
+
+fn shape_stroke_controls(
+    state: &ResultWorkspace,
+    target: PropertyTarget,
+) -> Option<Element<'static, Message>> {
+    use iced::widget::{row, slider};
+
+    let width = state
+        .editor
+        .properties
+        .shape_style
+        .as_ref()
+        .map(|tx| tx.preview_stroke.width)
+        .or_else(|| stroke_width(state, target))?;
+    let slider = slider(1.0_f32..=16.0_f32, width, Message::PreviewShapeStrokeWidth)
+        .step(1.0_f32)
+        .width(96);
+    let slider = match target {
+        PropertyTarget::ShapeTool(_) => slider.on_release(Message::ApplyShapeStyle),
+        _ => slider,
+    };
+    Some(
+        row![color_button("Stroke", ColorProperty::StrokeColor), slider]
+            .spacing(8)
+            .into(),
+    )
+}
+
+fn fill_controls(fill_enabled: bool) -> Element<'static, Message> {
+    use iced::widget::{button, row, text};
+
+    let fill_btn = button(text(if fill_enabled { "Fill On" } else { "Fill Off" }))
+        .on_press(Message::ToggleShapeFill);
+
+    let color_btn = button(text("Fill color")).on_press_maybe(if fill_enabled {
+        Some(Message::OpenColorPicker(ColorProperty::ShapeFill))
+    } else {
+        None
+    });
+
+    row![fill_btn, color_btn].spacing(8).into()
 }
 
 /// Build the property controls row for the current tool/selection.
@@ -273,6 +334,12 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
             Some(controls.into())
         }
         PropertyTarget::TwoPointTool(_) => stroke_controls(state, target),
+        PropertyTarget::ShapeTool(kind) => {
+            let defaults = state.annotation_defaults.values.shape(kind);
+            let stroke = shape_stroke_controls(state, target)?;
+            let fill = fill_controls(defaults.fill_enabled);
+            Some(row![stroke, fill].spacing(8).into())
+        }
         PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
             Annotation::TwoPoint { .. } => stroke_controls(state, target),
             Annotation::NumberCallout { style, .. } => Some(
@@ -297,6 +364,29 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                         controls.push(color_button("BG color", ColorProperty::TextBackground));
                 }
                 Some(controls.into())
+            }
+            Annotation::Shape { fill, .. } => {
+                use iced::widget::{button, text};
+
+                let stroke = shape_stroke_controls(state, target)?;
+                let fill_enabled = state
+                    .editor
+                    .properties
+                    .shape_style
+                    .as_ref()
+                    .map(|tx| tx.preview_fill.is_some())
+                    .unwrap_or(fill.is_some());
+                let fill = fill_controls(fill_enabled);
+                Some(
+                    row![
+                        stroke,
+                        fill,
+                        button(text("Apply")).on_press(Message::ApplyShapeStyle),
+                        button(text("Cancel")).on_press(Message::CancelShapeStyle),
+                    ]
+                    .spacing(8)
+                    .into(),
+                )
             }
             _ => None,
         },
@@ -398,6 +488,25 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             _ => None,
         },
         Annotation::OpaqueRedaction { .. } => None,
+        Annotation::Shape {
+            id,
+            kind,
+            bounds,
+            stroke: _,
+            fill: _,
+        } => {
+            let tx = state.editor.properties.shape_style.as_ref()?;
+            if tx.id != id {
+                return None;
+            }
+            Some(Annotation::Shape {
+                id,
+                kind,
+                bounds,
+                stroke: tx.preview_stroke,
+                fill: tx.preview_fill,
+            })
+        }
     }
 }
 
@@ -667,5 +776,110 @@ mod tests {
         assert!((rollshot_image_document::TextSize::Px18.pixels() - 18.0).abs() < f32::EPSILON);
         assert!((rollshot_image_document::TextSize::Px24.pixels() - 24.0).abs() < f32::EPSILON);
         assert!((rollshot_image_document::TextSize::Px32.pixels() - 32.0).abs() < f32::EPSILON);
+    }
+
+    // -- shape style tests (Task 3) ------------------------------------------
+
+    fn add_shape(
+        state: &mut ResultWorkspace,
+        kind: rollshot_image_document::ShapeKind,
+    ) -> rollshot_image_document::AnnotationId {
+        state
+            .document
+            .image
+            .add_shape(
+                kind,
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn rectangle_tool_resolves_to_shape_tool_target() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Rectangle;
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::ShapeTool(
+                rollshot_image_document::ShapeKind::Rectangle
+            ))
+        );
+    }
+
+    #[test]
+    fn ellipse_tool_resolves_to_shape_tool_target() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Ellipse;
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::ShapeTool(
+                rollshot_image_document::ShapeKind::Ellipse
+            ))
+        );
+    }
+
+    #[test]
+    fn selected_shape_resolves_to_annotation_target() {
+        let mut state = workspace();
+        let id = add_shape(&mut state, rollshot_image_document::ShapeKind::Rectangle);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::Annotation(id))
+        );
+    }
+
+    #[test]
+    fn shape_preview_applies_transaction_stroke_and_fill() {
+        let mut state = workspace();
+        let id = add_shape(&mut state, rollshot_image_document::ShapeKind::Rectangle);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let tx = ShapeStyleTransaction {
+            id,
+            kind: rollshot_image_document::ShapeKind::Rectangle,
+            original_stroke: StrokeStyle::default(),
+            original_fill: None,
+            preview_stroke: StrokeStyle {
+                width: 8.0,
+                ..StrokeStyle::default()
+            },
+            preview_fill: Some(Rgb8::new(0, 255, 0)),
+            remembered_fill_color: Rgb8::new(0xE5, 0x48, 0x4D),
+        };
+        state.editor.properties.shape_style = Some(tx);
+        let preview = preview_annotation(&state).unwrap();
+        match preview {
+            Annotation::Shape { stroke, fill, .. } => {
+                assert_eq!(stroke.width, 8.0);
+                assert_eq!(fill, Some(Rgb8::new(0, 255, 0)));
+            }
+            _ => panic!("expected Shape"),
+        }
+    }
+
+    #[test]
+    fn shape_preview_none_when_ids_dont_match() {
+        let mut state = workspace();
+        let id = add_shape(&mut state, rollshot_image_document::ShapeKind::Rectangle);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let tx = ShapeStyleTransaction {
+            id: rollshot_image_document::AnnotationId(u64::MAX),
+            kind: rollshot_image_document::ShapeKind::Rectangle,
+            original_stroke: StrokeStyle::default(),
+            original_fill: None,
+            preview_stroke: StrokeStyle::default(),
+            preview_fill: None,
+            remembered_fill_color: Rgb8::new(0xE5, 0x48, 0x4D),
+        };
+        state.editor.properties.shape_style = Some(tx);
+        assert!(preview_annotation(&state).is_none());
     }
 }

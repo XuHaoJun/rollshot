@@ -247,6 +247,43 @@ impl NumberAnnotationCanvas<'_> {
                     );
                     frame.fill(&path, rgba_alpha(color, alpha));
                 }
+                RenderShape::Box {
+                    kind,
+                    bounds,
+                    stroke,
+                    stroke_width,
+                    fill,
+                } => {
+                    let s = self.scale;
+                    let cx = bounds.x * s + bounds.width * s / 2.0;
+                    let cy = bounds.y * s + bounds.height * s / 2.0;
+                    let rx = bounds.width * s / 2.0;
+                    let ry = bounds.height * s / 2.0;
+                    let make_path = || match kind {
+                        rollshot_image_document::ShapeKind::Rectangle => canvas::Path::rectangle(
+                            Point::new(bounds.x * s, bounds.y * s),
+                            iced::Size::new(bounds.width * s, bounds.height * s),
+                        ),
+                        rollshot_image_document::ShapeKind::Ellipse => canvas::Path::new(|b| {
+                            b.ellipse(canvas::path::arc::Elliptical {
+                                center: Point::new(cx, cy),
+                                radii: iced::Vector::new(rx, ry),
+                                rotation: iced::Radians(0.0),
+                                start_angle: iced::Radians(0.0),
+                                end_angle: iced::Radians(std::f32::consts::TAU),
+                            });
+                        }),
+                    };
+                    if let Some(fill_color) = fill {
+                        frame.fill(&make_path(), rgba_alpha(fill_color, alpha));
+                    }
+                    frame.stroke(
+                        &make_path(),
+                        canvas::Stroke::default()
+                            .with_color(rgba_alpha(stroke, alpha))
+                            .with_width(stroke_width * s),
+                    );
+                }
                 RenderShape::Label {
                     anchor,
                     anchor_kind: TextAnchor::TopLeft,
@@ -761,5 +798,56 @@ mod tests {
             action.is_some(),
             "mutation-allowed canvas should publish pointer events"
         );
+    }
+
+    #[test]
+    fn timeline_annotation_tool_has_no_rectangle_or_ellipse_variant() {
+        let all_variants = [
+            AnnotationTool::Number,
+            AnnotationTool::Text,
+            AnnotationTool::Redaction,
+        ];
+        assert_eq!(
+            all_variants.len(),
+            3,
+            "Timeline has exactly 3 annotation tools"
+        );
+
+        for variant in &all_variants {
+            match variant {
+                AnnotationTool::Number | AnnotationTool::Text | AnnotationTool::Redaction => {}
+            }
+        }
+
+        let mut document = ImageDocument::new(::image::RgbaImage::from_pixel(
+            64,
+            64,
+            ::image::Rgba([10, 20, 30, 255]),
+        ));
+        document.add_number_callout(ImagePoint::new(8.0, 8.0), ImagePoint::new(24.0, 24.0));
+        document
+            .add_text_note(ImagePoint::new(4.0, 40.0), "label".to_string())
+            .unwrap();
+        document
+            .add_redaction(rollshot_image_document::ImageRect {
+                x: 32.0,
+                y: 8.0,
+                width: 16.0,
+                height: 12.0,
+            })
+            .unwrap();
+
+        assert_eq!(document.annotations().len(), 3);
+        for annotation in document.annotations() {
+            assert!(
+                matches!(
+                    annotation,
+                    rollshot_image_document::Annotation::NumberCallout { .. }
+                        | rollshot_image_document::Annotation::TextNote { .. }
+                        | rollshot_image_document::Annotation::OpaqueRedaction { .. }
+                ),
+                "Timeline document must only contain Number/Text/Redaction annotations"
+            );
+        }
     }
 }
