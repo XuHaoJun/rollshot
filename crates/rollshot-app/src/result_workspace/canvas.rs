@@ -34,6 +34,8 @@ pub enum Tool {
     Arrow,
     Rectangle,
     Ellipse,
+    Pen,
+    Highlighter,
     Redact,
     #[cfg(feature = "ocr")]
     OcrText,

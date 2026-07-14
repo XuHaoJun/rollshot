@@ -100,6 +100,7 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
                     _ => None,
                 })
         }
+        Tool::Pen | Tool::Highlighter => None,
         Tool::Redact => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,

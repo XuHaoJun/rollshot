@@ -488,9 +488,14 @@ pub(crate) fn direct_manipulation_hit(
                     part,
                 })
         }
-        Tool::Number | Tool::Text | Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse => {
-            None
-        }
+        Tool::Number
+        | Tool::Text
+        | Tool::Line
+        | Tool::Arrow
+        | Tool::Rectangle
+        | Tool::Ellipse
+        | Tool::Pen
+        | Tool::Highlighter => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -672,6 +677,8 @@ pub(crate) fn handle_canvas_pressed(
         }
         #[cfg(feature = "ocr")]
         Tool::OcrText => Task::none(),
+        // TODO: freehand gesture (later tasks)
+        Tool::Pen | Tool::Highlighter => Task::none(),
     }
 }
 
@@ -2696,6 +2703,8 @@ pub(crate) fn map_key_press(
             "u" => Some(Message::SelectTool(Tool::Rectangle)),
             "o" if !cfg!(feature = "ocr") => Some(Message::SelectTool(Tool::Ellipse)),
             "r" => Some(Message::SelectTool(Tool::Redact)),
+            "p" => Some(Message::SelectTool(Tool::Pen)),
+            "h" => Some(Message::SelectTool(Tool::Highlighter)),
             "s" => Some(Message::SelectRememberedShape),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
@@ -4340,6 +4349,46 @@ mod tests {
         use keyboard::Key;
         assert_eq!(
             map_key_press(&Key::Character("n".into()), zmod(), false),
+            None
+        );
+    }
+
+    // -- Pen & Highlighter shortcuts (Task 5) ------------------------------
+
+    #[test]
+    fn p_and_h_select_freehand_tools() {
+        let p = keyboard::Key::Character("p".into());
+        let h = keyboard::Key::Character("h".into());
+        assert_eq!(
+            map_key_press(&p, keyboard::Modifiers::default(), false),
+            Some(Message::SelectTool(Tool::Pen))
+        );
+        assert_eq!(
+            map_key_press(&h, keyboard::Modifiers::default(), false),
+            Some(Message::SelectTool(Tool::Highlighter))
+        );
+        // Captured input ignores tool shortcuts.
+        assert_eq!(map_key_press(&p, keyboard::Modifiers::default(), true), None);
+        assert_eq!(map_key_press(&h, keyboard::Modifiers::default(), true), None);
+    }
+
+    #[test]
+    fn command_modified_p_and_h_yield_to_command_handlers() {
+        // Command+P / Command+H should NOT trigger tool selection (they go to native handlers).
+        assert_eq!(
+            map_key_press(
+                &keyboard::Key::Character("p".into()),
+                zmod(),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            map_key_press(
+                &keyboard::Key::Character("h".into()),
+                zmod(),
+                false
+            ),
             None
         );
     }
