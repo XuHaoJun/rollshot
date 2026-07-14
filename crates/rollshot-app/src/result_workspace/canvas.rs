@@ -85,6 +85,14 @@ pub enum DragState {
         style: StrokeStyle,
         fill: Option<rollshot_image_document::Rgb8>,
     },
+    /// Pen/Highlighter: the first accumulating draft. `points` holds the
+    /// distance-filtered raw samples; RDP simplification runs once on release
+    /// (spec §7.1/§7.2).
+    CreateFreehand {
+        kind: rollshot_image_document::FreehandKind,
+        points: Vec<ImagePoint>,
+        style: StrokeStyle,
+    },
     /// Select-tool drag of an existing annotation or one of its handles.
     EditAnnotation {
         part: HitPart,
@@ -212,6 +220,10 @@ pub fn dragged_annotation(
             *bounds = super::box_tool::resized_bounds(
                 *bounds, handle, point, shift, scale, width, height,
             );
+        }
+        (Annotation::Freehand { points, .. }, HitPart::Body) => {
+            *points =
+                super::freehand_tool::translated_points(points, point, grab_offset, width, height);
         }
         _ => {}
     }
@@ -461,20 +473,7 @@ impl AnnotationCanvas<'_> {
             } => {
                 if points.len() >= 2 {
                     let t0 = Instant::now();
-                    let path = canvas::Path::new(|b| {
-                        b.move_to(Point::new(points[0].x * s, points[0].y * s));
-                        for p in &points[1..] {
-                            b.line_to(Point::new(p.x * s, p.y * s));
-                        }
-                    });
-                    frame.stroke(
-                        &path,
-                        canvas::Stroke::default()
-                            .with_line_cap(canvas::LineCap::Round)
-                            .with_line_join(canvas::LineJoin::Round)
-                            .with_color(token_color(*color))
-                            .with_width(width * s),
-                    );
+                    self.draw_polyline(frame, points, *width, token_color(*color));
                     tracing::trace!(
                         target: "rollshot::annotation",
                         points = points.len(),
@@ -490,6 +489,32 @@ impl AnnotationCanvas<'_> {
     fn draw_annotation(&self, frame: &mut canvas::Frame, annotation: &Annotation) {
         for shape in annotation_shapes(annotation) {
             self.draw_shape(frame, &shape);
+        }
+    }
+
+    fn draw_polyline(
+        &self,
+        frame: &mut canvas::Frame,
+        points: &[ImagePoint],
+        width: f32,
+        color: Color,
+    ) {
+        if points.len() >= 2 {
+            let s = self.scale;
+            let path = canvas::Path::new(|b| {
+                b.move_to(Point::new(points[0].x * s, points[0].y * s));
+                for p in &points[1..] {
+                    b.line_to(Point::new(p.x * s, p.y * s));
+                }
+            });
+            frame.stroke(
+                &path,
+                canvas::Stroke::default()
+                    .with_line_cap(canvas::LineCap::Round)
+                    .with_line_join(canvas::LineJoin::Round)
+                    .with_color(color)
+                    .with_width(width * s),
+            );
         }
     }
 
@@ -681,7 +706,21 @@ impl canvas::Program<Message> for AnnotationCanvas<'_> {
             }
         }
 
-        if let Some(draft) = self.draft_annotation() {
+        if let Some(DragState::CreateFreehand {
+            kind: _,
+            points,
+            style,
+        }) = &self.editor.drag
+        {
+            let alpha = (style.opacity * 255.0).round() as u8;
+            let color = rollshot_image_document::Rgba8 {
+                r: style.color.r,
+                g: style.color.g,
+                b: style.color.b,
+                a: alpha,
+            };
+            self.draw_polyline(&mut frame, points, style.width, token_color(color));
+        } else if let Some(draft) = self.draft_annotation() {
             self.draw_annotation(&mut frame, &draft);
         }
 
@@ -1101,6 +1140,31 @@ mod tests {
         assert_color_close(style.border, iced::Color::from_rgb(0.13, 0.40, 1.0));
         assert_color_close(style.badge, iced::Color::from_rgb(0.13, 0.40, 1.0));
         assert_eq!(style.border_width, 2.5);
+    }
+
+    #[test]
+    fn dragged_freehand_body_translates_all_points_with_clamp() {
+        let original = Annotation::freehand(
+            AnnotationId(1),
+            rollshot_image_document::FreehandKind::Pen,
+            vec![ImagePoint::new(10.0, 10.0), ImagePoint::new(20.0, 30.0)],
+        );
+        let next = dragged_annotation(
+            &original,
+            HitPart::Body,
+            ImagePoint::new(15.0, 15.0),
+            (0.0, 0.0), // grab at points[0]
+            false,
+            (100, 100),
+            1.0,
+        );
+        match next {
+            Annotation::Freehand { points, .. } => {
+                assert_eq!(points[0], ImagePoint::new(15.0, 15.0));
+                assert_eq!(points[1], ImagePoint::new(25.0, 35.0));
+            }
+            _ => panic!("expected freehand"),
+        }
     }
 
     #[test]

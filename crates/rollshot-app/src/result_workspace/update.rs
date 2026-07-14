@@ -391,6 +391,22 @@ fn active_two_point(state: &super::ResultWorkspace) -> Option<(TwoPointKind, Str
     }
 }
 
+fn active_freehand(
+    state: &super::ResultWorkspace,
+) -> Option<(rollshot_image_document::FreehandKind, StrokeStyle)> {
+    match state.editor.tool {
+        Tool::Pen => Some((
+            rollshot_image_document::FreehandKind::Pen,
+            state.annotation_defaults.values.pen,
+        )),
+        Tool::Highlighter => Some((
+            rollshot_image_document::FreehandKind::Highlighter,
+            state.annotation_defaults.values.highlighter,
+        )),
+        _ => None,
+    }
+}
+
 fn prepare_shape_transaction(
     kind: rollshot_image_document::ShapeKind,
     id: Option<AnnotationId>,
@@ -466,6 +482,9 @@ fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f3
         (Annotation::Shape { bounds, .. }, HitPart::Body) => {
             (point.x - bounds.x, point.y - bounds.y)
         }
+        (Annotation::Freehand { points, .. }, HitPart::Body) => {
+            (point.x - points[0].x, point.y - points[0].y)
+        }
         _ => (0.0, 0.0),
     }
 }
@@ -508,7 +527,15 @@ pub(crate) fn direct_manipulation_hit(
 /// The image Copy places on the clipboard: always the flattened document
 /// (pixel-identical to the source when no annotations exist — spec §12.1).
 pub(crate) fn copy_payload(state: &super::ResultWorkspace) -> RgbaImage {
-    state.document.image.flatten()
+    let started = std::time::Instant::now();
+    let out = state.document.image.flatten();
+    tracing::debug!(
+        target: "rollshot::annotation",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        annotations = state.document.image.annotations().len(),
+        "flatten for copy"
+    );
+    out
 }
 
 pub(crate) fn copy_original_payload(state: &super::ResultWorkspace) -> RgbaImage {
@@ -521,7 +548,15 @@ pub(crate) fn save_payload(state: &super::ResultWorkspace) -> RgbaImage {
     if state.document.image.annotations().is_empty() {
         state.document.image.source().clone()
     } else {
-        state.document.image.flatten()
+        let started = std::time::Instant::now();
+        let out = state.document.image.flatten();
+        tracing::debug!(
+            target: "rollshot::annotation",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            annotations = state.document.image.annotations().len(),
+            "flatten for save"
+        );
+        out
     }
 }
 
@@ -677,8 +712,17 @@ pub(crate) fn handle_canvas_pressed(
         }
         #[cfg(feature = "ocr")]
         Tool::OcrText => Task::none(),
-        // TODO: freehand gesture (later tasks)
-        Tool::Pen | Tool::Highlighter => Task::none(),
+        Tool::Pen | Tool::Highlighter => {
+            let (kind, style) = active_freehand(state)
+                .expect("pen and highlighter tools always provide freehand defaults");
+            let (w, h) = state.document.image.source().dimensions();
+            state.editor.drag = Some(DragState::CreateFreehand {
+                kind,
+                points: vec![point.clamp_to(w, h)],
+                style,
+            });
+            Task::none()
+        }
     }
 }
 
@@ -705,6 +749,14 @@ pub(crate) fn handle_canvas_moved(
         }
         Some(DragState::CreateShape { current, .. }) => {
             *current = point;
+            Task::none()
+        }
+        Some(DragState::CreateFreehand { points, .. }) => {
+            if let Some(last) = points.last().copied() {
+                if super::freehand_tool::should_accept_point(last, point, scale) {
+                    points.push(point);
+                }
+            }
             Task::none()
         }
         Some(DragState::EditAnnotation {
@@ -791,6 +843,37 @@ pub(crate) fn handle_canvas_released(
                     .add_shape_with_style(kind, bounds, style, fill)
                 {
                     state.message = Some(InlineMessage::Error(e.to_string()));
+                }
+            }
+        }
+        Some(DragState::CreateFreehand {
+            kind,
+            mut points,
+            style,
+        }) => {
+            if points
+                .last()
+                .is_some_and(|last| super::freehand_tool::should_accept_point(*last, point, scale))
+            {
+                points.push(point);
+            }
+            let input_points = points.len();
+            let epsilon = super::freehand_tool::RDP_EPSILON_SCREEN / scale;
+            let simplified = super::freehand_tool::simplify_rdp(&points, epsilon);
+            tracing::debug!(
+                target: "rollshot::annotation",
+                input_points,
+                output_points = simplified.len(),
+                kind = ?kind,
+                "freehand simplification"
+            );
+            if super::freehand_tool::path_meets_threshold(&simplified, scale) {
+                if let Err(error) = state
+                    .document
+                    .image
+                    .add_freehand_with_style(kind, simplified, style)
+                {
+                    state.message = Some(InlineMessage::Error(error.to_string()));
                 }
             }
         }
@@ -4368,27 +4451,25 @@ mod tests {
             Some(Message::SelectTool(Tool::Highlighter))
         );
         // Captured input ignores tool shortcuts.
-        assert_eq!(map_key_press(&p, keyboard::Modifiers::default(), true), None);
-        assert_eq!(map_key_press(&h, keyboard::Modifiers::default(), true), None);
+        assert_eq!(
+            map_key_press(&p, keyboard::Modifiers::default(), true),
+            None
+        );
+        assert_eq!(
+            map_key_press(&h, keyboard::Modifiers::default(), true),
+            None
+        );
     }
 
     #[test]
     fn command_modified_p_and_h_yield_to_command_handlers() {
         // Command+P / Command+H should NOT trigger tool selection (they go to native handlers).
         assert_eq!(
-            map_key_press(
-                &keyboard::Key::Character("p".into()),
-                zmod(),
-                false
-            ),
+            map_key_press(&keyboard::Key::Character("p".into()), zmod(), false),
             None
         );
         assert_eq!(
-            map_key_press(
-                &keyboard::Key::Character("h".into()),
-                zmod(),
-                false
-            ),
+            map_key_press(&keyboard::Key::Character("h".into()), zmod(), false),
             None
         );
     }
@@ -6165,5 +6246,200 @@ mod tests {
             "apply: state_id updated"
         );
         assert!(state.annotations_dirty(), "apply: dirty");
+    }
+
+    // -- freehand creation gesture (Task 7) ---------------------------------
+
+    #[test]
+    fn freehand_gesture_filters_samples_and_commits_simplified_stroke() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        for i in 1..=30 {
+            let _ = handle_canvas_moved(&mut state, ImagePoint::new(10.0 + i as f32, 10.0));
+        }
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(40.0, 10.0));
+        let annotations = state.document.image.annotations();
+        assert_eq!(annotations.len(), 1);
+        match &annotations[0] {
+            Annotation::Freehand { kind, points, .. } => {
+                assert_eq!(*kind, rollshot_image_document::FreehandKind::Pen);
+                assert_eq!(
+                    points.len(),
+                    2,
+                    "collinear stroke must simplify to endpoints"
+                );
+                assert_eq!(points[0], ImagePoint::new(10.0, 10.0));
+                assert_eq!(points[1], ImagePoint::new(40.0, 10.0));
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+        assert!(state.document.image.can_undo());
+        state.document.image.undo();
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn freehand_click_and_subthreshold_gestures_cancel() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Highlighter;
+        let t0 = Instant::now();
+        // Plain click.
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(10.0, 10.0));
+        // 2-px wiggle (below the 4-screen-px threshold at scale 1).
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(12.0, 10.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(12.0, 10.0));
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn highlighter_stroke_uses_highlighter_defaults() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Highlighter;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(40.0, 20.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(40.0, 20.0));
+        match &state.document.image.annotations()[0] {
+            Annotation::Freehand { style, .. } => {
+                assert_eq!(*style, StrokeStyle::highlighter_default());
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_clears_active_freehand_draft() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(80.0, 40.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreateFreehand { .. })
+        ));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+        assert_eq!(state.editor.tool, Tool::Pen);
+    }
+
+    #[test]
+    fn out_of_bounds_pointer_moves_and_release_are_clamped() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(50.0, 50.0), t0);
+        // Move past right edge.
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(150.0, 50.0));
+        // Move past bottom edge.
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(50.0, 150.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(150.0, 150.0));
+        if !state.document.image.annotations().is_empty() {
+            match &state.document.image.annotations()[0] {
+                Annotation::Freehand { points, .. } => {
+                    for p in points {
+                        assert!(p.x <= 100.0 && p.y <= 100.0, "point {p:?} out of bounds");
+                    }
+                }
+                other => panic!("expected freehand, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn select_body_movement_commits_one_history_entry_and_undo_restores_all_points() {
+        let mut state = workspace_with_size(200, 200);
+        let original_points = vec![
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(20.0, 30.0),
+            ImagePoint::new(40.0, 20.0),
+        ];
+        let id = state
+            .document
+            .image
+            .add_freehand_with_style(
+                rollshot_image_document::FreehandKind::Pen,
+                original_points.clone(),
+                StrokeStyle::default(),
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let before = state.document.image.state_id();
+
+        // Grab the body and drag.
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(20.0, 20.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(20.0, 20.0));
+
+        assert_ne!(state.document.image.state_id(), before);
+        // Exactly one history entry for the movement (plus one for creation).
+        assert!(state.document.image.can_undo());
+        state.document.image.undo(); // undo movement
+                                     // Points restored.
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Freehand { points, .. } => {
+                assert_eq!(*points, original_points);
+            }
+            other => panic!("expected freehand, got {other:?}"),
+        }
+        assert!(state.document.image.can_undo());
+        state.document.image.undo(); // undo creation
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn release_within_filter_does_not_append_redundant_endpoint() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        // Release at a point within 2 screen px of the last accepted point.
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(11.0, 10.0));
+        if !state.document.image.annotations().is_empty() {
+            match &state.document.image.annotations()[0] {
+                Annotation::Freehand { points, .. } => {
+                    // The redundant endpoint (11, 10) should not be appended
+                    // since it's within the 2-px filter distance at scale 1.
+                    for p in points {
+                        let dx = (p.x - 10.0).abs();
+                        let dy = (p.y - 10.0).abs();
+                        assert!(
+                            dx >= 2.0 || dy >= 2.0 || *p == ImagePoint::new(10.0, 10.0),
+                            "redundant point {p:?} should not be appended"
+                        );
+                    }
+                }
+                other => panic!("expected freehand, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn successful_creation_marks_dirty_and_refreshes_navigator_and_keeps_tool() {
+        let mut state = workspace_with_size(200, 200);
+        state.editor.saved_state_id = state.document.image.state_id();
+        state.editor.tool = Tool::Pen;
+        let t0 = Instant::now();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), t0);
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(60.0, 10.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(60.0, 10.0));
+
+        assert!(state.annotations_dirty());
+        let items = state.document.image.navigator_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            state.editor.tool,
+            Tool::Pen,
+            "tool stays active after creation"
+        );
+        assert_eq!(state.editor.selection, None, "new stroke is not selected");
     }
 }
