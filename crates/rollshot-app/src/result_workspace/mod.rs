@@ -9,6 +9,8 @@ mod navigator;
 pub(crate) mod ocr_layer;
 #[cfg(feature = "ocr")]
 pub(crate) mod ocr_text;
+#[allow(dead_code)]
+pub(crate) mod pixelate_preview;
 pub(crate) mod properties;
 mod secure_sharing;
 pub(crate) mod toolbar;
