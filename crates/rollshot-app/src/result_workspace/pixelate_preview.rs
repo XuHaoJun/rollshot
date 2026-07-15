@@ -192,7 +192,8 @@ impl PixelatePreviewCache {
         self.in_flight.retain(|key, _| requested_set.contains(key));
         let mut to_remove = Vec::new();
         for (&key, entry) in &self.entries {
-            if !requested_set.contains(&key) {
+            let bytes = checked_byte_len(entry.width, entry.height).unwrap_or(0);
+            if !requested_set.contains(&key) && bytes > self.byte_limit {
                 to_remove.push((key, entry.last_used));
             }
         }
@@ -689,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn retain_requested_preserves_requested_entries() {
+    fn retain_requested_preserves_offscreen_entries_under_limit() {
         let mut cache = PixelatePreviewCache::new(256);
         let k1 = key(1, region(0, 0, 4, 4), 16, 1.0);
         let k2 = key(1, region(4, 4, 4, 4), 16, 1.0);
@@ -699,8 +700,8 @@ mod tests {
         assert_eq!(cache.complete(pixels_for(req2, 4, 4)), Completion::Accepted);
         cache.retain_requested(&[k1]);
         assert!(cache.lookup(k1).is_some());
-        assert!(cache.lookup(k2).is_none());
-        assert_eq!(cache.retained_bytes(), 64);
+        assert!(cache.lookup(k2).is_some());
+        assert_eq!(cache.retained_bytes(), 128);
     }
 
     #[test]
