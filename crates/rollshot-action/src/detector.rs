@@ -203,6 +203,33 @@ impl Detector {
         )
     }
 
+    fn close_typing_window(&mut self, at_ms: Millis, luma: &LumaPlane) -> Option<CandidateMarker> {
+        let window = self.typing_window.take();
+        self.in_typing = false;
+        self.typing_force_end = false;
+        self.saw_change = false;
+        self.baseline = Some(luma.clone());
+        self.semantic_marker(
+            window?,
+            at_ms,
+            CandidateKind::Typing,
+            DetectReason::TypingSettled,
+        )
+    }
+
+    fn close_scroll_window(&mut self, at_ms: Millis, luma: &LumaPlane) -> Option<CandidateMarker> {
+        let window = self.scroll_window.take();
+        self.in_scroll = false;
+        self.saw_change = false;
+        self.baseline = Some(luma.clone());
+        self.semantic_marker(
+            window?,
+            at_ms,
+            CandidateKind::Scroll,
+            DetectReason::ScrollSettled,
+        )
+    }
+
     fn semantic_marker(
         &mut self,
         window: SemanticWindow,
@@ -345,49 +372,15 @@ impl Detector {
 
         // --- close semantic owners whose deadline/pause/dwell has passed ---
         if self.in_typing {
-            let pause_elapsed =
-                frame.at_ms.saturating_sub(self.typing_last_at) >= self.config.typing_pause_ms;
-            if self.typing_force_end || pause_elapsed {
-                // Move owned values before calling semantic_marker.
-                let window = self.typing_window.take();
-                let at = frame.at_ms;
-                self.in_typing = false;
-                self.typing_force_end = false;
-                self.saw_change = false;
-                self.baseline = Some(luma.clone());
-                if let Some(w) = window {
-                    if let Some(marker) = self.semantic_marker(
-                        w,
-                        at,
-                        CandidateKind::Typing,
-                        DetectReason::TypingSettled,
-                    ) {
-                        return Some(marker);
-                    }
-                }
-                return None;
+            let pause = frame.at_ms.saturating_sub(self.typing_last_at);
+            if self.typing_force_end || pause > self.config.typing_pause_ms {
+                return self.close_typing_window(frame.at_ms, luma);
             }
         }
         if self.in_scroll {
-            let dwell_elapsed =
-                frame.at_ms.saturating_sub(self.scroll_last_at) >= self.config.scroll_dwell_ms;
-            if dwell_elapsed {
-                let window = self.scroll_window.take();
-                let at = frame.at_ms;
-                self.in_scroll = false;
-                self.saw_change = false;
-                self.baseline = Some(luma.clone());
-                if let Some(w) = window {
-                    if let Some(marker) = self.semantic_marker(
-                        w,
-                        at,
-                        CandidateKind::Scroll,
-                        DetectReason::ScrollSettled,
-                    ) {
-                        return Some(marker);
-                    }
-                }
-                return None;
+            let dwell = frame.at_ms.saturating_sub(self.scroll_last_at);
+            if dwell > self.config.scroll_dwell_ms {
+                return self.close_scroll_window(frame.at_ms, luma);
             }
         }
 
@@ -417,6 +410,18 @@ impl Detector {
             if let Some(window) = self.scroll_window.as_mut() {
                 window.observe(frame, self.config.per_sample_threshold, !self.moving);
             }
+        }
+
+        // A frame exactly at a semantic timeout is still part of that window.
+        if self.in_typing
+            && frame.at_ms.saturating_sub(self.typing_last_at) >= self.config.typing_pause_ms
+        {
+            return self.close_typing_window(frame.at_ms, luma);
+        }
+        if self.in_scroll
+            && frame.at_ms.saturating_sub(self.scroll_last_at) >= self.config.scroll_dwell_ms
+        {
+            return self.close_scroll_window(frame.at_ms, luma);
         }
 
         // --- candidate decision (priority: typing > scroll > generic settle) ---
@@ -872,6 +877,19 @@ mod tests {
     }
 
     #[test]
+    fn typing_observes_a_response_exactly_at_the_pause_boundary() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::TypingActivity, 100));
+
+        let marker = det
+            .observe_frame(&af(1, 800, localized(0.0, 255.0)))
+            .expect("the exact-boundary frame should remain in the typing window");
+        assert_eq!(marker.kind, CandidateKind::Typing);
+        assert_eq!(marker.center_id, 1);
+    }
+
+    #[test]
     fn scroll_recovers_qualifying_peak_even_when_view_returns_to_baseline() {
         let mut det = Detector::new(cfg());
         det.observe_frame(&af(0, 0, uniform(0.0)));
@@ -884,6 +902,19 @@ mod tests {
         let marker = det
             .observe_frame(&af(3, 900, uniform(0.0)))
             .expect("qualifying scroll peak should be retained");
+        assert_eq!(marker.kind, CandidateKind::Scroll);
+        assert_eq!(marker.center_id, 1);
+    }
+
+    #[test]
+    fn scroll_observes_a_response_exactly_at_the_dwell_boundary() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+
+        let marker = det
+            .observe_frame(&af(1, 700, localized(0.0, 255.0)))
+            .expect("the exact-boundary frame should remain in the scroll window");
         assert_eq!(marker.kind, CandidateKind::Scroll);
         assert_eq!(marker.center_id, 1);
     }
