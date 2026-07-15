@@ -49,6 +49,7 @@ pub(crate) struct AnnotationDefaultsState {
 }
 
 use iced::{Point, Size, Vector};
+use pixelate_preview::PixelatePreviewCache;
 
 // ---------------------------------------------------------------------------
 // Inline message
@@ -151,6 +152,8 @@ pub struct ResultWorkspace {
     pub text_editor_id: iced::widget::Id,
     /// Loaded annotation style defaults from the shared config.toml.
     pub(crate) annotation_defaults: AnnotationDefaultsState,
+    /// Pixelate preview cache: keys → RGBA handles, LRU eviction.
+    pub(crate) pixelate_previews: PixelatePreviewCache,
 }
 
 impl ResultWorkspace {
@@ -241,6 +244,7 @@ impl ResultWorkspace {
                 config_path: None,
                 warning_reported: false,
             },
+            pixelate_previews: PixelatePreviewCache::new(64 * 1024 * 1024),
             document,
             message,
             image_handle,

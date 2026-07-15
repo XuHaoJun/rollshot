@@ -10,6 +10,7 @@ use super::canvas::{
     dragged_annotation, DragState, EditorState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
     DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
 };
+use super::pixelate_preview::{generate_preview, requested_pixelate_keys, source_id_from_arc};
 use super::two_point::{bounded_constrained_endpoint, gesture_meets_threshold};
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
 use rollshot_image_document::{
@@ -186,6 +187,14 @@ pub enum Message {
     SelectShape(rollshot_image_document::ShapeKind),
     /// Activate the remembered shape tool (primary button / `S` shortcut).
     SelectRememberedShape,
+    /// A pixelate preview generation completed (async worker).
+    PixelatePreviewReady(
+        super::pixelate_preview::PreviewRequest,
+        Result<
+            super::pixelate_preview::PreviewPixels,
+            super::pixelate_preview::PreviewGenerationError,
+        >,
+    ),
     #[cfg(feature = "ocr")]
     OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
     #[cfg(feature = "ocr")]
@@ -319,6 +328,18 @@ impl PartialEq for Message {
             (Self::ToggleShapesMenu, Self::ToggleShapesMenu) => true,
             (Self::SelectShape(a), Self::SelectShape(b)) => a == b,
             (Self::SelectRememberedShape, Self::SelectRememberedShape) => true,
+            (
+                Self::PixelatePreviewReady(a_req, a_res),
+                Self::PixelatePreviewReady(b_req, b_res),
+            ) => {
+                a_req.generation == b_req.generation
+                    && a_req.key == b_req.key
+                    && match (a_res, b_res) {
+                        (Ok(a), Ok(b)) => a.width == b.width && a.height == b.height,
+                        (Err(_), Err(_)) => true,
+                        _ => false,
+                    }
+            }
             #[cfg(feature = "ocr")]
             (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
             #[cfg(feature = "ocr")]
@@ -1015,7 +1036,8 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
     refresh_navigator(state);
     #[cfg(feature = "ocr")]
     refresh_ocr_redaction_mask(state);
-    task
+    let scheduling = schedule_pixelate_previews(state);
+    task.chain(scheduling)
 }
 
 fn refresh_navigator(state: &mut super::ResultWorkspace) {
@@ -1030,6 +1052,88 @@ fn refresh_navigator(state: &mut super::ResultWorkspace) {
 fn refresh_ocr_redaction_mask(state: &mut super::ResultWorkspace) {
     let redactions = redactions(&state.document.image);
     state.ocr_text.refresh_redactions(&redactions);
+}
+
+/// Collect requested pixelate preview keys, evict stale cache entries, and
+/// spawn workers for missing keys that are not already in-flight.
+fn schedule_pixelate_previews(state: &mut super::ResultWorkspace) -> Task<Message> {
+    let scale = current_scale(state);
+    let geometry = super::viewport::geometry_for(
+        state.viewport.zoom,
+        state.original_size(),
+        state.viewport_bounds,
+    );
+    let visible = super::canvas::visible_image_rect(
+        state.viewport.scroll_offset,
+        state.viewport_bounds,
+        geometry.scale,
+        geometry.image_origin,
+    );
+
+    // Collect transient draft/property/direct-manipulation Pixelate annotations.
+    let transient: Vec<Annotation> = {
+        let mut t = Vec::new();
+        if let Some(draft) = draft_pixelate_annotation(state) {
+            t.push(draft);
+        }
+        if let Some(ref preview) = super::properties::preview_annotation(state) {
+            if matches!(preview, Annotation::Pixelate { .. }) {
+                t.push(preview.clone());
+            }
+        }
+        t
+    };
+
+    let keys = requested_pixelate_keys(&state.document.image, &transient, visible, scale);
+    state.pixelate_previews.retain_requested(&keys);
+
+    let source = state.document.image.shared_source();
+    let mut tasks = Vec::new();
+    for key in keys {
+        if state.pixelate_previews.lookup(key).is_some() {
+            continue;
+        }
+        let Some(request) = state.pixelate_previews.begin_request(key) else {
+            continue;
+        };
+        let src = source.clone();
+        let req_for_message = request.clone();
+        tasks.push(iced::Task::perform(
+            async move {
+                match tokio::task::spawn_blocking(move || generate_preview(src, request)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(super::pixelate_preview::PreviewGenerationError::WorkerFailed),
+                }
+            },
+            move |result| Message::PixelatePreviewReady(req_for_message, result),
+        ));
+    }
+
+    if tasks.is_empty() {
+        Task::none()
+    } else {
+        Task::batch(tasks)
+    }
+}
+
+/// Extract the current Pixelate draft annotation from the editor drag state.
+fn draft_pixelate_annotation(state: &super::ResultWorkspace) -> Option<Annotation> {
+    let (w, h) = state.document.image.source().dimensions();
+    match &state.editor.drag {
+        Some(super::canvas::DragState::CreatePixelate { anchor, current }) => {
+            let bounds =
+                super::box_tool::creation_bounds(*anchor, *current, state.modifiers.shift(), w, h);
+            (!bounds.is_empty()).then_some(Annotation::pixelate(
+                AnnotationId(u64::MAX),
+                bounds,
+                state.annotation_defaults.values.pixelate_block_size,
+            ))
+        }
+        Some(super::canvas::DragState::EditAnnotation { current, .. }) => {
+            matches!(current, Annotation::Pixelate { .. }).then(|| current.clone())
+        }
+        _ => None,
+    }
 }
 
 fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
@@ -2533,6 +2637,29 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.shapes_menu_open = false;
             state.editor.drag = None;
             state.editor.tool = tool;
+            Task::none()
+        }
+        Message::PixelatePreviewReady(request, result) => {
+            use super::pixelate_preview::Completion;
+            match result {
+                Ok(pixels) => match state.pixelate_previews.complete(pixels) {
+                    Completion::Accepted => {}
+                    Completion::Stale => {}
+                },
+                Err(_) => {
+                    let should_warn = state.pixelate_previews.fail(request.clone());
+                    if should_warn {
+                        tracing::warn!(
+                            target: "rollshot::annotation",
+                            source_id = request.key.source_id,
+                            region_w = request.key.region.width,
+                            region_h = request.key.region.height,
+                            block_size = request.key.block_size,
+                            "pixelate preview generation failed"
+                        );
+                    }
+                }
+            }
             Task::none()
         }
         Message::CancelColor => {
@@ -7073,8 +7200,7 @@ mod tests {
         );
         match state.document.image.annotation(id).unwrap() {
             Annotation::Pixelate {
-                bounds,
-                block_size, ..
+                bounds, block_size, ..
             } => {
                 assert_eq!(*block_size, 16, "block_size preserved");
                 assert_eq!(bounds.width, 40.0, "width preserved");

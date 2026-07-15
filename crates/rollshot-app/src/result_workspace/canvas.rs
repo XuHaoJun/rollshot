@@ -274,7 +274,8 @@ fn resized_rect(original: ImageRect, handle: ResizeHandle, p: ImagePoint) -> Ima
 use iced::widget::canvas;
 use iced::{mouse, Color, Rectangle, Renderer, Size, Theme, Vector};
 use rollshot_image_document::{
-    annotation_bounds, annotation_shapes, resize_handles, style, RenderShape, TextAnchor,
+    annotation_bounds, annotation_commands, resize_handles, style, RenderCommand, RenderShape,
+    TextAnchor,
 };
 
 use super::update::{direct_manipulation_hit, Message};
@@ -320,6 +321,7 @@ pub struct AnnotationCanvas<'a> {
     pub editor: &'a EditorState,
     pub modifiers: iced::keyboard::Modifiers,
     pub scale: f32,
+    pub display_scale: f32,
     pub visible: ImageRect,
     pub annotation_defaults: &'a super::AnnotationDefaultsState,
     // SP6 workbench candidate overlay. `None` in Normal mode.
@@ -331,6 +333,8 @@ pub struct AnnotationCanvas<'a> {
     /// the committed shapes on canvas — without entering document history
     /// or flatten output.
     pub property_preview: Option<Annotation>,
+    /// Pixelate preview cache for rendering cached raster handles.
+    pub pixelate_previews: &'a super::pixelate_preview::PixelatePreviewCache,
 }
 
 fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> Option<ImagePoint> {
@@ -525,9 +529,80 @@ impl AnnotationCanvas<'_> {
             }
             return;
         }
-        for shape in annotation_shapes(annotation) {
-            self.draw_shape(frame, &shape);
+        for command in annotation_commands(annotation) {
+            match command {
+                RenderCommand::Shape(shape) => self.draw_shape(frame, &shape),
+                RenderCommand::Pixelate { bounds, block_size } => {
+                    self.draw_pixelate_command(frame, annotation.id(), bounds, block_size);
+                }
+            }
         }
+    }
+
+    fn draw_pixelate_command(
+        &self,
+        frame: &mut canvas::Frame,
+        annotation_id: rollshot_image_document::AnnotationId,
+        bounds: ImageRect,
+        block_size: u32,
+    ) {
+        use super::pixelate_preview::source_id_from_arc;
+        let source_id = source_id_from_arc(&self.document.shared_source());
+        let region = match rollshot_image_document::raster_region(
+            bounds,
+            self.document.source().width(),
+            self.document.source().height(),
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                self.draw_pixelate_outline(frame, bounds);
+                return;
+            }
+        };
+        let key = super::pixelate_preview::PreviewKey::new(
+            source_id,
+            region,
+            block_size,
+            self.display_scale,
+        );
+        if let Some((w, h, data)) = self.pixelate_previews.get(key) {
+            let handle = iced::widget::image::Handle::from_rgba(w, h, data.to_vec());
+            let s = self.scale;
+            let rect = iced::Rectangle {
+                x: bounds.x * s,
+                y: bounds.y * s,
+                width: bounds.width * s,
+                height: bounds.height * s,
+            };
+            frame.draw_image(
+                rect,
+                canvas::Image::new(handle)
+                    .filter_method(iced::widget::image::FilterMethod::Nearest)
+                    .snap(true),
+            );
+        } else {
+            self.draw_pixelate_outline(frame, bounds);
+        }
+    }
+
+    fn draw_pixelate_outline(&self, frame: &mut canvas::Frame, bounds: ImageRect) {
+        let s = self.scale;
+        let rect = iced::Rectangle {
+            x: bounds.x * s,
+            y: bounds.y * s,
+            width: bounds.width * s,
+            height: bounds.height * s,
+        };
+        let path = canvas::Path::rectangle(
+            iced::Point::new(rect.x, rect.y),
+            iced::Size::new(rect.width, rect.height),
+        );
+        frame.stroke(
+            &path,
+            canvas::Stroke::default()
+                .with_color(token_color(style::ACCENT))
+                .with_width(2.0),
+        );
     }
 
     fn draw_polyline(
@@ -1247,8 +1322,7 @@ mod tests {
         );
         match moved {
             Annotation::Pixelate {
-                bounds,
-                block_size, ..
+                bounds, block_size, ..
             } => {
                 assert_eq!(block_size, 16, "block_size unchanged");
                 assert_eq!(bounds.width, 40.0, "width preserved");
@@ -1283,8 +1357,7 @@ mod tests {
         );
         match resized {
             Annotation::Pixelate {
-                bounds,
-                block_size, ..
+                bounds, block_size, ..
             } => {
                 assert_eq!(block_size, 16, "block_size unchanged during resize");
                 assert_eq!(bounds.width, 60.0);

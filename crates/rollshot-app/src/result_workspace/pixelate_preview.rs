@@ -1,7 +1,9 @@
 use rollshot_image_document::pixelate::{PixelateError, RasterRegion};
+use rollshot_image_document::{Annotation, ImageDocument, ImageRect};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewKey {
@@ -108,6 +110,13 @@ impl PixelatePreviewCache {
         } else {
             None
         }
+    }
+
+    /// Non-mutating read for use during view rendering (no LRU update).
+    pub fn get(&self, key: PreviewKey) -> Option<(u32, u32, &[u8])> {
+        self.entries
+            .get(&key)
+            .map(|entry| (entry.width, entry.height, entry.rgba.as_slice()))
     }
 
     pub fn begin_request(&mut self, key: PreviewKey) -> Option<PreviewRequest> {
@@ -264,6 +273,139 @@ fn checked_byte_len(width: u32, height: u32) -> Option<usize> {
 
 pub fn source_id_from_arc<T>(arc: &Arc<T>) -> usize {
     Arc::as_ptr(arc) as usize
+}
+
+/// Pure collector: which preview keys are needed for the current view.
+///
+/// Walks committed annotations in graph order, filters by visible bounds,
+/// appends the current transient replacement/draft once, and deduplicates
+/// exact keys.
+pub(crate) fn requested_pixelate_keys(
+    document: &ImageDocument,
+    transient_annotations: &[Annotation],
+    visible_image_bounds: ImageRect,
+    display_scale: f32,
+) -> Vec<PreviewKey> {
+    let source = document.shared_source();
+    let source_id = source_id_from_arc(&source);
+    let mut seen = std::collections::HashSet::new();
+    let mut keys = Vec::new();
+
+    // Walk committed annotations in graph order.
+    for annotation in document.annotations() {
+        if !matches!(annotation, Annotation::Pixelate { .. }) {
+            continue;
+        }
+        let bounds = rollshot_image_document::annotation_bounds(annotation);
+        if !bounds.intersects(&visible_image_bounds) {
+            continue;
+        }
+        if let Annotation::Pixelate {
+            bounds, block_size, ..
+        } = annotation
+        {
+            let region = match rollshot_image_document::raster_region(
+                *bounds,
+                source.width(),
+                source.height(),
+            ) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let key = PreviewKey::new(source_id, region, *block_size, display_scale);
+            if seen.insert(key) {
+                keys.push(key);
+            }
+        }
+    }
+
+    // Append transient draft/property/direct-manipulation Pixelate once.
+    for annotation in transient_annotations {
+        if let Annotation::Pixelate {
+            bounds, block_size, ..
+        } = annotation
+        {
+            let region = match rollshot_image_document::raster_region(
+                *bounds,
+                source.width(),
+                source.height(),
+            ) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let key = PreviewKey::new(source_id, region, *block_size, display_scale);
+            if seen.insert(key) {
+                keys.push(key);
+            }
+        }
+    }
+
+    keys
+}
+
+/// Synchronous worker: generate a pixelate preview.
+///
+/// Calls the pixelate kernel at full source resolution, then downsizes the
+/// generated region when `display_scale < 1.0` using nearest-neighbor.
+pub(crate) fn generate_preview(
+    source: Arc<image::RgbaImage>,
+    request: PreviewRequest,
+) -> Result<PreviewPixels, PreviewGenerationError> {
+    let t0 = Instant::now();
+    let bounds = ImageRect {
+        x: request.key.region.x as f32,
+        y: request.key.region.y as f32,
+        width: request.key.region.width as f32,
+        height: request.key.region.height as f32,
+    };
+    let block_size = request.key.block_size;
+    let display_scale = f32::from_bits(request.key.display_scale_bits);
+
+    let pixelated = rollshot_image_document::pixelate_region(&source, bounds, block_size)
+        .map_err(PreviewGenerationError::Kernel)?;
+
+    let region = &pixelated.region;
+    let generated_bytes = region.byte_len();
+
+    let (out_w, out_h, rgba) = if display_scale < 1.0 {
+        let w = ((region.width as f32 * display_scale).round() as u32).max(1);
+        let h = ((region.height as f32 * display_scale).round() as u32).max(1);
+        let resized = image::imageops::resize(
+            &pixelated.pixels,
+            w,
+            h,
+            image::imageops::FilterType::Nearest,
+        );
+        (w, h, resized.into_raw())
+    } else {
+        (region.width, region.height, pixelated.pixels.into_raw())
+    };
+
+    tracing::trace!(
+        target: "rollshot::annotation",
+        source_id = request.key.source_id,
+        region_w = request.key.region.width,
+        region_h = request.key.region.height,
+        block_size,
+        cache_outcome = "generated",
+        generated_bytes,
+        elapsed_us = t0.elapsed().as_micros() as u64,
+        "preview generated"
+    );
+    tracing::debug!(
+        target: "rollshot::annotation",
+        "pixelate preview generated for {}x{} region, block_size={}",
+        request.key.region.width,
+        request.key.region.height,
+        block_size
+    );
+
+    Ok(PreviewPixels {
+        request,
+        width: out_w,
+        height: out_h,
+        rgba,
+    })
 }
 
 #[cfg(test)]
@@ -550,5 +692,359 @@ mod tests {
         assert_eq!(cache.retained_bytes(), 64);
         cache.clear_for_source(1);
         assert_eq!(cache.retained_bytes(), 0);
+    }
+
+    // -- Step 1: Scheduler tests -----------------------------------------------
+
+    use super::*;
+    use image::{Rgba, RgbaImage};
+    use rollshot_image_document::ImageDocument;
+
+    fn make_doc(w: u32, h: u32) -> ImageDocument {
+        ImageDocument::new(RgbaImage::from_pixel(w, h, Rgba([100, 150, 200, 255])))
+    }
+
+    fn visible_all(w: u32, h: u32) -> ImageRect {
+        ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32,
+            height: h as f32,
+        }
+    }
+
+    #[test]
+    fn collector_returns_keys_for_visible_committed_pixelate() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let keys = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].block_size, 16);
+    }
+
+    #[test]
+    fn collector_includes_transient_draft_pixelate() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let transient = Annotation::pixelate(
+            rollshot_image_document::AnnotationId(u64::MAX),
+            ImageRect {
+                x: 60.0,
+                y: 60.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            8,
+        );
+        let keys = requested_pixelate_keys(&doc, &[transient], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn collector_skips_annotations_outside_visible_bounds() {
+        let mut doc = make_doc(100, 10000);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 9000.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let visible = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 200.0,
+        };
+        let keys = requested_pixelate_keys(&doc, &[], visible, 1.0);
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn collector_deduplicates_exact_keys() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        // Same bounds, same block_size, same display_scale → same key.
+        let transient = Annotation::pixelate(
+            rollshot_image_document::AnnotationId(u64::MAX),
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let keys = requested_pixelate_keys(&doc, &[transient], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 1, "exact duplicates are deduped");
+    }
+
+    #[test]
+    fn no_new_key_for_scroll_only_repositioning() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let visible1 = ImageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let visible2 = ImageRect {
+            x: 5.0,
+            y: 5.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let k1 = requested_pixelate_keys(&doc, &[], visible1, 1.0);
+        let k2 = requested_pixelate_keys(&doc, &[], visible2, 1.0);
+        assert_eq!(k1, k2, "scrolling doesn't change keys for same annotation");
+    }
+
+    #[test]
+    fn geometry_change_produces_different_key() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let keys1 = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        // Move the annotation.
+        let annotations = doc.annotations();
+        let id = annotations[0].id();
+        doc.set_pixelate_bounds(
+            id,
+            ImageRect {
+                x: 20.0,
+                y: 20.0,
+                width: 40.0,
+                height: 30.0,
+            },
+        )
+        .unwrap();
+        let keys2 = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_ne!(keys1, keys2, "geometry change → different key");
+    }
+
+    #[test]
+    fn block_size_change_produces_different_key() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let keys1 = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        let id = doc.annotations()[0].id();
+        doc.set_pixelate_block_size(id, 32).unwrap();
+        let keys2 = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_ne!(keys1, keys2, "block_size change → different key");
+    }
+
+    #[test]
+    fn undo_removes_key_from_requested() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let keys = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 1);
+        doc.undo();
+        let keys = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 0, "undo removes the key");
+    }
+
+    #[test]
+    fn redo_restores_key() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        doc.undo();
+        doc.redo();
+        let keys = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 1, "redo restores the key");
+    }
+
+    #[test]
+    fn display_scale_change_produces_different_key() {
+        let mut doc = make_doc(100, 100);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let keys1 = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        let keys2 = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 0.5);
+        assert_ne!(keys1, keys2, "display_scale change → different key");
+    }
+
+    #[test]
+    fn collector_skips_non_pixelate_annotations() {
+        let mut doc = make_doc(100, 100);
+        doc.add_number_callout(
+            rollshot_image_document::ImagePoint::new(10.0, 10.0),
+            rollshot_image_document::ImagePoint::new(10.0, 10.0),
+        );
+        doc.add_redaction(ImageRect {
+            x: 10.0,
+            y: 10.0,
+            width: 20.0,
+            height: 20.0,
+        })
+        .unwrap();
+        let keys = requested_pixelate_keys(&doc, &[], visible_all(100, 100), 1.0);
+        assert_eq!(keys.len(), 0, "non-pixelate annotations are skipped");
+    }
+
+    #[test]
+    fn collector_preserves_graph_order() {
+        let mut doc = make_doc(200, 200);
+        doc.add_pixelate(
+            ImageRect {
+                x: 10.0,
+                y: 10.0,
+                width: 30.0,
+                height: 30.0,
+            },
+            16,
+        );
+        doc.add_pixelate(
+            ImageRect {
+                x: 80.0,
+                y: 80.0,
+                width: 30.0,
+                height: 30.0,
+            },
+            8,
+        );
+        let keys = requested_pixelate_keys(&doc, &[], visible_all(200, 200), 1.0);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].block_size, 16);
+        assert_eq!(keys[1].block_size, 8);
+    }
+
+    // -- generate_preview tests ------------------------------------------------
+
+    #[test]
+    fn generate_preview_produces_rgba_at_full_resolution() {
+        let source = Arc::new(RgbaImage::from_pixel(64, 64, Rgba([100, 150, 200, 255])));
+        let region = RasterRegion {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+        };
+        let request = PreviewRequest {
+            key: PreviewKey::new(source_id_from_arc(&source), region, 16, 1.0),
+            generation: 1,
+        };
+        let result = generate_preview(source, request).unwrap();
+        assert_eq!(result.width, 32);
+        assert_eq!(result.height, 32);
+        assert_eq!(result.rgba.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn generate_preview_downsizes_when_display_scale_below_one() {
+        let source = Arc::new(RgbaImage::from_pixel(64, 64, Rgba([100, 150, 200, 255])));
+        let region = RasterRegion {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+        };
+        let request = PreviewRequest {
+            key: PreviewKey::new(source_id_from_arc(&source), region, 16, 0.5),
+            generation: 1,
+        };
+        let result = generate_preview(source, request).unwrap();
+        assert_eq!(result.width, 16);
+        assert_eq!(result.height, 16);
+        assert_eq!(result.rgba.len(), 16 * 16 * 4);
+    }
+
+    #[test]
+    fn generate_preview_returns_error_for_invalid_bounds() {
+        let source = Arc::new(RgbaImage::from_pixel(10, 10, Rgba([0, 0, 0, 255])));
+        let region = RasterRegion {
+            x: 100,
+            y: 100,
+            width: 10,
+            height: 10,
+        };
+        let request = PreviewRequest {
+            key: PreviewKey::new(source_id_from_arc(&source), region, 16, 1.0),
+            generation: 1,
+        };
+        let result = generate_preview(source, request);
+        assert!(result.is_err());
     }
 }
