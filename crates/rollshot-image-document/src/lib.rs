@@ -13,6 +13,7 @@ mod freehand;
 mod geometry;
 mod hit;
 mod navigator;
+pub mod pixelate;
 mod raster;
 mod shapes;
 pub mod style;
@@ -30,3 +31,7 @@ pub use shapes::{annotation_bounds, annotation_shapes, text_plate_rect, RenderSh
 pub use style::{NumberSize, NumberStyle, StrokeStyle, TextSize, TextStyle};
 pub use text::{draw_text_block, measure_block};
 pub use two_point::{arrowhead_points, point_in_triangle, segment_distance, two_point_bounds};
+pub use pixelate::{
+    pixelate_region, raster_region, PixelateError, PixelatedRegion, RasterRegion,
+    DEFAULT_PIXELATE_BLOCK_SIZE, MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE,
+};

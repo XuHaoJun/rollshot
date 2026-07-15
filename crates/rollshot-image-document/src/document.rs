@@ -2,6 +2,7 @@
 //! number sequence, and snapshot-based history (spec §6, §10).
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use image::RgbaImage;
 
@@ -114,7 +115,7 @@ struct Snapshot {
 }
 
 pub struct ImageDocument {
-    source: RgbaImage,
+    source: Arc<RgbaImage>,
     annotations: Vec<Annotation>,
     next_number: u32,
     next_id: u64,
@@ -129,7 +130,7 @@ pub struct ImageDocument {
 impl ImageDocument {
     pub fn new(source: RgbaImage) -> Self {
         Self {
-            source,
+            source: Arc::new(source),
             annotations: Vec::new(),
             next_number: 1,
             next_id: 1,
@@ -142,6 +143,10 @@ impl ImageDocument {
 
     pub fn source(&self) -> &RgbaImage {
         &self.source
+    }
+
+    pub fn shared_source(&self) -> Arc<RgbaImage> {
+        Arc::clone(&self.source)
     }
 
     pub fn annotations(&self) -> &[Annotation] {
