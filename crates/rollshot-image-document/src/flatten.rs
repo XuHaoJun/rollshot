@@ -22,7 +22,17 @@ pub(crate) fn flatten_onto(source: &RgbaImage, annotations: &[Annotation]) -> Rg
                 RenderCommand::Shape(shape) => draw_shape(&mut out, &shape),
                 RenderCommand::Pixelate { bounds, block_size } => {
                     if let Ok(region) = pixelate_region(source, bounds, block_size) {
+                        let started = std::time::Instant::now();
                         apply_pixelate(&mut out, &region);
+                        tracing::debug!(
+                            target: "rollshot::annotation",
+                            operation = "pixelate_flatten",
+                            raster_width = region.region.width,
+                            raster_height = region.region.height,
+                            block_size,
+                            elapsed_us = started.elapsed().as_micros() as u64,
+                            "flattened pixelate annotation"
+                        );
                     }
                 }
             }
@@ -238,8 +248,9 @@ mod tests {
     #[test]
     fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
         let mut doc = ImageDocument::new(base(1000, 20_000));
-        // 14 rows × 7 types = 98, plus Pen (row 3) + Highlighter (row 10) = 100.
-        for i in 0..14u32 {
+        // 12 rows × 8 types = 96, plus Pen (row 3) + Highlighter (row 10) = 98,
+        // plus NumberCallout (row 0 extra) + TextNote (row 1 extra) = 100.
+        for i in 0..12u32 {
             let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
             doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}"))
@@ -283,34 +294,59 @@ mod tests {
                 },
             )
             .unwrap();
-            if i == 3 {
-                let pts: Vec<_> = (0..5)
-                    .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
-                    .collect();
-                doc.add_freehand_with_style(
-                    FreehandKind::Pen,
-                    pts,
-                    StrokeStyle {
-                        color: Rgb8::new(0, 0, 0),
-                        width: 2.0,
-                        opacity: 1.0,
-                    },
-                )
-                .unwrap();
-            }
-            if i == 10 {
-                let pts: Vec<_> = (0..5)
-                    .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
-                    .collect();
-                doc.add_freehand_with_style(
-                    FreehandKind::Highlighter,
-                    pts,
-                    StrokeStyle::highlighter_default(),
-                )
-                .unwrap();
-            }
+            doc.add_pixelate(
+                ImageRect {
+                    x: 950.0,
+                    y,
+                    width: 40.0,
+                    height: 40.0,
+                },
+                16,
+            )
+            .unwrap();
         }
-        // 14 rows × 7 types = 98, + Pen (row 3) + Highlighter (row 10) = 100.
+        // 12 rows × 8 types = 96, + Pen (row 3) + Highlighter (row 10) = 98.
+        // Extra NumberCallout at row 13, extra TextNote at row 13 = 100.
+        let extra_y = 100.0 + 13u32 as f32 * 950.0;
+        doc.add_number_callout(
+            ImagePoint::new(100.0, extra_y),
+            ImagePoint::new(160.0, extra_y),
+        );
+        doc.add_text_note(ImagePoint::new(300.0, extra_y), "extra text".to_string())
+            .unwrap();
+
+        // Pen (row 3)
+        {
+            let y = 100.0 + 3u32 as f32 * 950.0;
+            let pts: Vec<_> = (0..5)
+                .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
+                .collect();
+            doc.add_freehand_with_style(
+                FreehandKind::Pen,
+                pts,
+                StrokeStyle {
+                    color: Rgb8::new(0, 0, 0),
+                    width: 2.0,
+                    opacity: 1.0,
+                },
+            )
+            .unwrap();
+        }
+        // Highlighter (row 10)
+        {
+            let y = 100.0 + 10u32 as f32 * 950.0;
+            let pts: Vec<_> = (0..5)
+                .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
+                .collect();
+            doc.add_freehand_with_style(
+                FreehandKind::Highlighter,
+                pts,
+                StrokeStyle::highlighter_default(),
+            )
+            .unwrap();
+        }
+        // 12 rows × 8 types = 96, + Pen (row 3) + Highlighter (row 10) = 98,
+        // + extra NumberCallout + extra TextNote = 100.
 
         assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
@@ -354,6 +390,20 @@ mod tests {
             flattened.get_pixel(880, 300),
             doc.source().get_pixel(880, 300),
             "Ellipse boundary must be painted by stroke"
+        );
+
+        // Representative Pixelate (row 0): region (950, 100)–(990, 140).
+        // Source is uniform so pixelate averages to the same color; the
+        // dedicated pixelate unit tests verify non-trivial content.
+        // Here we only assert the flatten completes and the output covers
+        // the full source dimensions (already asserted above).
+
+        // Navigator must include Pixelate items.
+        assert!(
+            doc.navigator_items()
+                .iter()
+                .any(|item| item.label == "Pixelate"),
+            "Navigator must contain Pixelate entries"
         );
 
         assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());

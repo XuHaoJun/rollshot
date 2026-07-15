@@ -66,6 +66,19 @@ pub(crate) fn has_secure_redactions(document: &ResultDocument) -> bool {
         .any(|annotation| matches!(annotation, Annotation::OpaqueRedaction { .. }))
 }
 
+pub(crate) fn ocr_redaction_masks(
+    document: &rollshot_image_document::ImageDocument,
+) -> Vec<rollshot_image_document::ImageRect> {
+    document
+        .annotations()
+        .iter()
+        .filter_map(|annotation| match annotation {
+            Annotation::OpaqueRedaction { bounds, .. } => Some(*bounds),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn copy_label(document: &ResultDocument) -> &'static str {
     if has_secure_redactions(document) {
         "Copy Safe Image"
@@ -372,6 +385,75 @@ mod tests {
         assert!(
             !has_secure_redactions(&document),
             "removing OpaqueRedaction must clear secure-sharing classification"
+        );
+    }
+
+    #[test]
+    fn pixelate_alone_is_not_secure() {
+        let mut document = saved();
+        let original_bytes = document.image.source().as_raw().to_vec();
+        document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 2.0,
+                },
+                rollshot_image_document::pixelate::DEFAULT_PIXELATE_BLOCK_SIZE,
+            )
+            .unwrap();
+
+        assert!(!has_secure_redactions(&document));
+        assert_eq!(copy_label(&document), "Copy");
+        assert!(ocr_redaction_masks(&document.image).is_empty());
+        assert_eq!(
+            document.image.source().as_raw(),
+            original_bytes.as_slice(),
+            "source bytes must not change from adding a pixelate annotation"
+        );
+    }
+
+    #[test]
+    fn pixelate_beside_redaction_only_redaction_is_secure() {
+        let mut document = saved();
+        document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 2.0,
+                },
+                rollshot_image_document::pixelate::DEFAULT_PIXELATE_BLOCK_SIZE,
+            )
+            .unwrap();
+        let rid = add_redaction(&mut document);
+
+        assert!(
+            has_secure_redactions(&document),
+            "OpaqueRedaction beside Pixelate must trigger secure classification"
+        );
+        assert_eq!(copy_label(&document), "Copy Safe Image");
+
+        let masks = ocr_redaction_masks(&document.image);
+        assert_eq!(masks.len(), 1, "only OpaqueRedaction produces a mask");
+        assert_eq!(
+            masks[0],
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            }
+        );
+
+        document.image.delete_annotation(rid).unwrap();
+        assert!(
+            !has_secure_redactions(&document),
+            "removing OpaqueRedaction clears secure classification even with Pixelate present"
         );
     }
 }
