@@ -10,6 +10,7 @@ use super::canvas::{
     dragged_annotation, DragState, EditorState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
     DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
 };
+use super::pixelate_preview::{generate_preview, requested_pixelate_keys};
 use super::two_point::{bounded_constrained_endpoint, gesture_meets_threshold};
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
 use rollshot_image_document::{
@@ -174,12 +175,27 @@ pub enum Message {
     /// Cancel the shape style transaction without mutation.
     #[allow(dead_code)]
     CancelShapeStyle,
+    /// Live-preview a pixelate block size during slider interaction.
+    PreviewPixelateBlockSize(u32),
+    /// Commit the pixelate block size transaction.
+    ApplyPixelateBlockSize,
+    /// Cancel the pixelate block size transaction without mutation.
+    #[allow(dead_code)]
+    CancelPixelateBlockSize,
     /// Toggle the shapes selector menu.
     ToggleShapesMenu,
     /// Select a specific shape kind from the selector.
     SelectShape(rollshot_image_document::ShapeKind),
     /// Activate the remembered shape tool (primary button / `S` shortcut).
     SelectRememberedShape,
+    /// A pixelate preview generation completed (async worker).
+    PixelatePreviewReady(
+        super::pixelate_preview::PreviewRequest,
+        Result<
+            super::pixelate_preview::PreviewPixels,
+            super::pixelate_preview::PreviewGenerationError,
+        >,
+    ),
     #[cfg(feature = "ocr")]
     OcrPrepared(Result<Vec<super::ocr_text::OcrTextItem>, super::ocr_text::ProductOcrError>),
     #[cfg(feature = "ocr")]
@@ -307,9 +323,24 @@ impl PartialEq for Message {
             (Self::ToggleShapeFill, Self::ToggleShapeFill) => true,
             (Self::ApplyShapeStyle, Self::ApplyShapeStyle) => true,
             (Self::CancelShapeStyle, Self::CancelShapeStyle) => true,
+            (Self::PreviewPixelateBlockSize(a), Self::PreviewPixelateBlockSize(b)) => a == b,
+            (Self::ApplyPixelateBlockSize, Self::ApplyPixelateBlockSize) => true,
+            (Self::CancelPixelateBlockSize, Self::CancelPixelateBlockSize) => true,
             (Self::ToggleShapesMenu, Self::ToggleShapesMenu) => true,
             (Self::SelectShape(a), Self::SelectShape(b)) => a == b,
             (Self::SelectRememberedShape, Self::SelectRememberedShape) => true,
+            (
+                Self::PixelatePreviewReady(a_req, a_res),
+                Self::PixelatePreviewReady(b_req, b_res),
+            ) => {
+                a_req.generation == b_req.generation
+                    && a_req.key == b_req.key
+                    && match (a_res, b_res) {
+                        (Ok(a), Ok(b)) => a.width == b.width && a.height == b.height,
+                        (Err(_), Err(_)) => true,
+                        _ => false,
+                    }
+            }
             #[cfg(feature = "ocr")]
             (Self::OcrPrepared(a), Self::OcrPrepared(b)) => a == b,
             #[cfg(feature = "ocr")]
@@ -383,6 +414,7 @@ fn clear_property_transactions(state: &mut super::ResultWorkspace) {
     state.editor.properties.width = None;
     state.editor.properties.opacity = None;
     state.editor.properties.shape_style = None;
+    state.editor.properties.block_size = None;
     if state.editor.properties.popup == Some(super::properties::Popup::ColorPicker) {
         state.editor.properties.popup = None;
     }
@@ -495,6 +527,9 @@ fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f3
         (Annotation::Shape { bounds, .. }, HitPart::Body) => {
             (point.x - bounds.x, point.y - bounds.y)
         }
+        (Annotation::Pixelate { bounds, .. }, HitPart::Body) => {
+            (point.x - bounds.x, point.y - bounds.y)
+        }
         (Annotation::Freehand { points, .. }, HitPart::Body) => {
             (point.x - points[0].x, point.y - points[0].y)
         }
@@ -527,7 +562,8 @@ pub(crate) fn direct_manipulation_hit(
         | Tool::Rectangle
         | Tool::Ellipse
         | Tool::Pen
-        | Tool::Highlighter => None,
+        | Tool::Highlighter
+        | Tool::Pixelate => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -723,6 +759,13 @@ pub(crate) fn handle_canvas_pressed(
             });
             Task::none()
         }
+        Tool::Pixelate => {
+            state.editor.drag = Some(DragState::CreatePixelate {
+                anchor: point,
+                current: point,
+            });
+            Task::none()
+        }
         #[cfg(feature = "ocr")]
         Tool::OcrText => Task::none(),
         Tool::Pen | Tool::Highlighter => {
@@ -757,6 +800,10 @@ pub(crate) fn handle_canvas_moved(
             Task::none()
         }
         Some(DragState::CreateRedaction { current, .. }) => {
+            *current = point;
+            Task::none()
+        }
+        Some(DragState::CreatePixelate { current, .. }) => {
             *current = point;
             Task::none()
         }
@@ -839,6 +886,13 @@ pub(crate) fn handle_canvas_released(
                 .add_redaction(ImageRect::from_corners(anchor, point))
             {
                 set_selection(state, Some(id));
+            }
+        }
+        Some(DragState::CreatePixelate { anchor, .. }) => {
+            let bounds = super::box_tool::creation_bounds(anchor, point, shift, w, h);
+            if super::box_tool::meets_creation_threshold(bounds, scale) {
+                let block_size = state.annotation_defaults.values.pixelate_block_size;
+                let _ = state.document.image.add_pixelate(bounds, block_size);
             }
         }
         Some(DragState::CreateShape {
@@ -932,6 +986,10 @@ pub(crate) fn handle_canvas_released(
                         .document
                         .image
                         .set_freehand_points(original.id(), points.clone()),
+                    Annotation::Pixelate { bounds, .. } => state
+                        .document
+                        .image
+                        .set_pixelate_bounds(original.id(), *bounds),
                 };
                 if let Err(e) = result {
                     state.message = Some(InlineMessage::Error(e.to_string()));
@@ -952,7 +1010,8 @@ pub(crate) fn update(state: &mut super::ResultWorkspace, message: Message) -> Ta
     refresh_navigator(state);
     #[cfg(feature = "ocr")]
     refresh_ocr_redaction_mask(state);
-    task
+    let scheduling = schedule_pixelate_previews(state);
+    task.chain(scheduling)
 }
 
 fn refresh_navigator(state: &mut super::ResultWorkspace) {
@@ -967,6 +1026,88 @@ fn refresh_navigator(state: &mut super::ResultWorkspace) {
 fn refresh_ocr_redaction_mask(state: &mut super::ResultWorkspace) {
     let redactions = redactions(&state.document.image);
     state.ocr_text.refresh_redactions(&redactions);
+}
+
+/// Collect requested pixelate preview keys, evict stale cache entries, and
+/// spawn workers for missing keys that are not already in-flight.
+fn schedule_pixelate_previews(state: &mut super::ResultWorkspace) -> Task<Message> {
+    let scale = current_scale(state);
+    let geometry = super::viewport::geometry_for(
+        state.viewport.zoom,
+        state.original_size(),
+        state.viewport_bounds,
+    );
+    let visible = super::canvas::visible_image_rect(
+        state.viewport.scroll_offset,
+        state.viewport_bounds,
+        geometry.scale,
+        geometry.image_origin,
+    );
+
+    // Collect transient draft/property/direct-manipulation Pixelate annotations.
+    let transient: Vec<Annotation> = {
+        let mut t = Vec::new();
+        if let Some(draft) = draft_pixelate_annotation(state) {
+            t.push(draft);
+        }
+        if let Some(ref preview) = super::properties::preview_annotation(state) {
+            if matches!(preview, Annotation::Pixelate { .. }) {
+                t.push(preview.clone());
+            }
+        }
+        t
+    };
+
+    let keys = requested_pixelate_keys(&state.document.image, &transient, visible, scale);
+    state.pixelate_previews.retain_requested(&keys);
+
+    let source = state.document.image.shared_source();
+    let mut tasks = Vec::new();
+    for key in keys {
+        if state.pixelate_previews.lookup(key).is_some() {
+            continue;
+        }
+        let Some(request) = state.pixelate_previews.begin_request(key) else {
+            continue;
+        };
+        let src = source.clone();
+        let req_for_message = request.clone();
+        tasks.push(iced::Task::perform(
+            async move {
+                match tokio::task::spawn_blocking(move || generate_preview(src, request)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(super::pixelate_preview::PreviewGenerationError::WorkerFailed),
+                }
+            },
+            move |result| Message::PixelatePreviewReady(req_for_message, result),
+        ));
+    }
+
+    if tasks.is_empty() {
+        Task::none()
+    } else {
+        Task::batch(tasks)
+    }
+}
+
+/// Extract the current Pixelate draft annotation from the editor drag state.
+fn draft_pixelate_annotation(state: &super::ResultWorkspace) -> Option<Annotation> {
+    let (w, h) = state.document.image.source().dimensions();
+    match &state.editor.drag {
+        Some(super::canvas::DragState::CreatePixelate { anchor, current }) => {
+            let bounds =
+                super::box_tool::creation_bounds(*anchor, *current, state.modifiers.shift(), w, h);
+            (!bounds.is_empty()).then_some(Annotation::pixelate(
+                AnnotationId(u64::MAX),
+                bounds,
+                state.annotation_defaults.values.pixelate_block_size,
+            ))
+        }
+        Some(super::canvas::DragState::EditAnnotation { current, .. }) => {
+            matches!(current, Annotation::Pixelate { .. }).then(|| current.clone())
+        }
+        _ => None,
+    }
 }
 
 fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Message> {
@@ -1186,6 +1327,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.width = None;
             state.editor.properties.opacity = None;
             state.editor.properties.shape_style = None;
+            state.editor.properties.block_size = None;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
                 state.editor.drag = None;
@@ -1212,11 +1354,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 || state.editor.properties.width.is_some()
                 || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
+                || state.editor.properties.block_size.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
                 state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
+                state.editor.properties.block_size = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1237,11 +1381,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 || state.editor.properties.width.is_some()
                 || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
+                || state.editor.properties.block_size.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
                 state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
+                state.editor.properties.block_size = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1278,11 +1424,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 || state.editor.properties.width.is_some()
                 || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
+                || state.editor.properties.block_size.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
                 state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
+                state.editor.properties.block_size = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -2301,6 +2449,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     ColorProperty::ShapeFill => {}
                 },
+                PropertyTarget::PixelateTool => {}
             }
             Task::none()
         }
@@ -2363,6 +2512,71 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.popup = None;
             Task::none()
         }
+        Message::PreviewPixelateBlockSize(size) => {
+            use super::properties::{BlockSizeTarget, BlockSizeTransaction};
+            use rollshot_image_document::{MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE};
+            let clamped = size.clamp(MIN_PIXELATE_BLOCK_SIZE, MAX_PIXELATE_BLOCK_SIZE);
+            let target = match state.editor.tool {
+                Tool::Pixelate => BlockSizeTarget::ToolDefault,
+                Tool::Select => {
+                    if let Some(id) = state.editor.selection {
+                        BlockSizeTarget::Annotation(id)
+                    } else {
+                        return Task::none();
+                    }
+                }
+                _ => return Task::none(),
+            };
+            let original = match target {
+                BlockSizeTarget::ToolDefault => {
+                    state.annotation_defaults.values.pixelate_block_size
+                }
+                BlockSizeTarget::Annotation(id) => state
+                    .document
+                    .image
+                    .annotation(id)
+                    .and_then(|a| match a {
+                        Annotation::Pixelate { block_size, .. } => Some(*block_size),
+                        _ => None,
+                    })
+                    .unwrap_or(state.annotation_defaults.values.pixelate_block_size),
+            };
+            match &mut state.editor.properties.block_size {
+                Some(tx) if tx.target == target => {
+                    tx.preview = clamped;
+                }
+                _ => {
+                    state.editor.properties.block_size = Some(BlockSizeTransaction {
+                        target,
+                        original,
+                        preview: clamped,
+                    });
+                }
+            }
+            Task::none()
+        }
+        Message::ApplyPixelateBlockSize => {
+            use super::properties::BlockSizeTarget;
+            let Some(tx) = state.editor.properties.block_size.take() else {
+                return Task::none();
+            };
+            match tx.target {
+                BlockSizeTarget::ToolDefault => {
+                    state.annotation_defaults.values.pixelate_block_size = tx.preview;
+                    persist_annotation_defaults(state);
+                }
+                BlockSizeTarget::Annotation(id) => {
+                    if let Err(e) = state.document.image.set_pixelate_block_size(id, tx.preview) {
+                        state.message = Some(InlineMessage::Error(e.to_string()));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::CancelPixelateBlockSize => {
+            state.editor.properties.block_size = None;
+            Task::none()
+        }
         Message::ToggleShapesMenu => {
             state.editor.shapes_menu_open = !state.editor.shapes_menu_open;
             state.editor.more_menu_open = false;
@@ -2397,6 +2611,32 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.shapes_menu_open = false;
             state.editor.drag = None;
             state.editor.tool = tool;
+            Task::none()
+        }
+        Message::PixelatePreviewReady(request, result) => {
+            use super::pixelate_preview::Completion;
+            match result {
+                Ok(pixels) => match state.pixelate_previews.complete(pixels) {
+                    Completion::Accepted => {}
+                    Completion::Stale => {}
+                },
+                Err(_) => {
+                    let should_warn = state.pixelate_previews.fail(request.clone());
+                    if should_warn {
+                        state.message = Some(InlineMessage::Warning(
+                            "Pixelate preview unavailable; showing an outline instead.".into(),
+                        ));
+                        tracing::warn!(
+                            target: "rollshot::annotation",
+                            source_id = request.key.source_id,
+                            region_w = request.key.region.width,
+                            region_h = request.key.region.height,
+                            block_size = request.key.block_size,
+                            "pixelate preview generation failed"
+                        );
+                    }
+                }
+            }
             Task::none()
         }
         Message::CancelColor => {
@@ -2444,7 +2684,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 },
                 PropertyTarget::NumberTool
                 | PropertyTarget::TextTool
-                | PropertyTarget::ShapeTool(_) => return Task::none(),
+                | PropertyTarget::ShapeTool(_)
+                | PropertyTarget::PixelateTool => return Task::none(),
             };
             let transaction = state
                 .editor
@@ -2508,7 +2749,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 PropertyTarget::NumberTool
                 | PropertyTarget::TextTool
-                | PropertyTarget::ShapeTool(_) => {}
+                | PropertyTarget::ShapeTool(_)
+                | PropertyTarget::PixelateTool => {}
             }
             Task::none()
         }
@@ -2931,6 +3173,7 @@ pub(crate) fn map_key_press(
             "r" => Some(Message::SelectTool(Tool::Redact)),
             "p" => Some(Message::SelectTool(Tool::Pen)),
             "h" => Some(Message::SelectTool(Tool::Highlighter)),
+            "b" => Some(Message::SelectTool(Tool::Pixelate)),
             "s" => Some(Message::SelectRememberedShape),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
@@ -2996,6 +3239,33 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn preview_failure_reports_one_inline_warning() {
+        let mut state = workspace();
+        let key = super::super::pixelate_preview::PreviewKey::new(
+            1,
+            rollshot_image_document::RasterRegion {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            rollshot_image_document::DEFAULT_PIXELATE_BLOCK_SIZE,
+            1.0,
+        );
+        let request = state.pixelate_previews.begin_request(key).unwrap();
+
+        let _ = update_inner(
+            &mut state,
+            Message::PixelatePreviewReady(
+                request,
+                Err(super::super::pixelate_preview::PreviewGenerationError::WorkerFailed),
+            ),
+        );
+
+        assert!(matches!(state.message, Some(InlineMessage::Warning(_))));
     }
 
     fn workspace_with_arrow() -> super::super::ResultWorkspace {
@@ -6775,6 +7045,331 @@ mod tests {
         );
     }
 
+    // -- pixelate creation gesture (Task 5) ----------------------------------
+
+    #[test]
+    fn pixelate_release_commits_once_and_keeps_tool_active() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 12.0),
+            ImagePoint::new(40.0, 32.0),
+        );
+        assert_eq!(state.editor.tool, Tool::Pixelate);
+        assert_eq!(state.editor.selection, None);
+        assert_eq!(state.document.image.annotations().len(), 1);
+        assert!(
+            matches!(state.document.image.annotations()[0], Annotation::Pixelate { bounds, block_size: 16, .. } if bounds == ImageRect { x: 10.0, y: 12.0, width: 30.0, height: 20.0 })
+        );
+        assert!(state.document.image.undo());
+        assert!(state.document.image.annotations().is_empty());
+    }
+
+    #[test]
+    fn pixelate_reverse_drag_normalizes_bounds() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(40.0, 32.0),
+            ImagePoint::new(10.0, 12.0),
+        );
+        assert_eq!(state.document.image.annotations().len(), 1);
+        assert!(
+            matches!(state.document.image.annotations()[0], Annotation::Pixelate { bounds, .. } if bounds == ImageRect { x: 10.0, y: 12.0, width: 30.0, height: 20.0 })
+        );
+    }
+
+    #[test]
+    fn pixelate_shift_creates_square() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(
+            &mut state,
+            Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        );
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(40.0, 25.0),
+        );
+        assert_eq!(state.document.image.annotations().len(), 1);
+        match &state.document.image.annotations()[0] {
+            Annotation::Pixelate { bounds, .. } => {
+                assert_eq!(bounds.width, bounds.height, "shift must produce square");
+                assert_eq!(bounds.width, 15.0, "min delta = 15");
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_click_sub_threshold_creates_nothing() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(10.0, 10.0),
+        );
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn pixelate_escape_cancels_creation_without_history() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(40.0, 40.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreatePixelate { .. })
+        ));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+        assert_eq!(state.editor.tool, Tool::Pixelate);
+    }
+
+    #[test]
+    fn pixelate_creation_over_existing_annotation_does_not_edit_or_select_it() {
+        let mut state = workspace_with_size(100, 100);
+        let existing_id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(5.0, 5.0),
+            ImagePoint::new(30.0, 30.0),
+        );
+        assert_eq!(state.document.image.annotations().len(), 2);
+        assert_eq!(state.editor.selection, None);
+        assert_eq!(state.editor.tool, Tool::Pixelate);
+        assert!(state.document.image.annotation(existing_id).is_some());
+    }
+
+    // -- pixelate direct manipulation (Task 5) -------------------------------
+
+    fn workspace_with_pixelate() -> (super::super::ResultWorkspace, AnnotationId) {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        (state, id)
+    }
+
+    #[test]
+    fn select_mode_body_hit_on_pixelate_selects_and_starts_drag() {
+        let (mut state, id) = workspace_with_pixelate();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(70.0, 65.0), Instant::now());
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::EditAnnotation { .. })
+        ));
+        assert_eq!(state.editor.selection, Some(id));
+    }
+
+    #[test]
+    fn select_mode_empty_miss_on_pixelate_clears_selection() {
+        let (mut state, _id) = workspace_with_pixelate();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        assert!(state.editor.selection.is_none());
+        assert!(matches!(state.editor.drag, Some(DragState::Pan { .. })));
+    }
+
+    #[test]
+    fn pixelate_body_move_preserves_size_and_block_size() {
+        let (mut state, id) = workspace_with_pixelate();
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(100.0, 95.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate {
+                bounds, block_size, ..
+            } => {
+                assert_eq!(*block_size, 16, "block_size preserved");
+                assert_eq!(bounds.width, 40.0, "width preserved");
+                assert_eq!(bounds.height, 30.0, "height preserved");
+                assert_eq!(bounds.x, 80.0, "x moved");
+                assert_eq!(bounds.y, 80.0, "y moved");
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_body_move_clamps_to_image_bounds() {
+        let (mut state, id) = workspace_with_pixelate();
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(200.0, 200.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert!(bounds.x + bounds.width <= 200.0);
+                assert!(bounds.y + bounds.height <= 200.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_resize_from_handle_commits_new_bounds() {
+        let (mut state, id) = workspace_with_pixelate();
+        // BottomRight handle at (90, 80)
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(120.0, 110.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert_eq!(bounds.x, 50.0);
+                assert_eq!(bounds.y, 50.0);
+                assert_eq!(bounds.width, 70.0);
+                assert_eq!(bounds.height, 60.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_resize_from_inverted_handle_normalizes() {
+        let (mut state, id) = workspace_with_pixelate();
+        // Drag BottomRight past TopLeft
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(30.0, 30.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert!(bounds.width > 0.0);
+                assert!(bounds.height > 0.0);
+                assert_eq!(bounds.x, 30.0);
+                assert_eq!(bounds.y, 30.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_resize_with_shift_preserves_aspect_ratio() {
+        let (mut state, id) = workspace_with_pixelate();
+        let _ = update(
+            &mut state,
+            Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        );
+        // BottomRight handle at (90, 80)
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(110.0, 100.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                let ratio = bounds.width / bounds.height;
+                assert!(
+                    (ratio - 40.0 / 30.0).abs() < 0.01,
+                    "aspect ratio preserved: {ratio} vs {}",
+                    40.0 / 30.0
+                );
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_escape_restores_original_bounds() {
+        let (mut state, id) = workspace_with_pixelate();
+        let original = state.document.image.annotation(id).unwrap().clone();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(90.0, 80.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(120.0, 110.0));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert_eq!(state.document.image.annotation(id), Some(&original));
+    }
+
+    #[test]
+    fn pixelate_delete_removes_annotation() {
+        let (mut state, _id) = workspace_with_pixelate();
+        let _ = update(&mut state, Message::DeleteSelected);
+        assert!(state.document.image.annotations().is_empty());
+        assert_eq!(state.editor.selection, None);
+    }
+
+    #[test]
+    fn pixelate_move_or_resize_creates_one_undo_entry() {
+        let (mut state, id) = workspace_with_pixelate();
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(100.0, 95.0),
+        );
+        assert!(state.document.image.can_undo());
+        state.document.image.undo();
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert_eq!(bounds.x, 50.0);
+                assert_eq!(bounds.y, 50.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_tool_creates_over_selected_pixelate() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        state.editor.tool = Tool::Pixelate;
+        state.editor.selection = Some(id);
+
+        let original = state.document.image.annotation(id).unwrap().clone();
+
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(70.0, 65.0), Instant::now());
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreatePixelate { .. })
+        ));
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(110.0, 105.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(110.0, 105.0));
+
+        assert_eq!(state.document.image.annotation(id), Some(&original));
+        assert_eq!(state.document.image.annotations().len(), 2);
+    }
+
     #[test]
     fn apply_opacity_to_selected_pen_freehand_does_nothing() {
         let mut state = workspace();
@@ -6792,5 +7387,357 @@ mod tests {
         // PreviewStrokeOpacity targets Highlighter only; Pen selection → no-op
         let _ = update(&mut state, Message::PreviewStrokeOpacity(0.5));
         assert!(state.editor.properties.opacity.is_none());
+    }
+
+    // -- pixelate cache-isolation output tests (Task 8 review finding) -------
+
+    /// Build a workspace with a gradient image so pixelate produces visible
+    /// differences (uniform-color images hide pixelate effects).
+    fn workspace_with_gradient(w: u32, h: u32) -> super::super::ResultWorkspace {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255]),
+                );
+            }
+        }
+        let mut ws = super::super::ResultWorkspace::with_max_texture_dim(
+            super::super::document::ResultDocument::unsaved(img),
+            None,
+            super::super::DEFAULT_MAX_TEXTURE_DIM,
+        );
+        ws.viewport.zoom = ZoomMode::ActualSize;
+        ws.apply_viewport_bounds(Size::new(w as f32, h as f32));
+        ws
+    }
+
+    #[test]
+    fn pixelate_committed_appear_in_copy_and_save_with_empty_preview_cache() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        // Cache is empty (fresh workspace). Output must still contain the
+        // committed pixelate at full resolution via flatten, not the cache.
+        let source = state.document.image.source();
+        let copy = copy_payload(&state);
+        let save = save_payload(&state);
+        let flattened = state.document.image.flatten();
+
+        assert_eq!(copy, flattened, "copy must equal flatten");
+        assert_eq!(save, flattened, "save must equal flatten");
+        assert_ne!(
+            copy.get_pixel(40, 40),
+            source.get_pixel(40, 40),
+            "committed pixelate region must differ from source in output"
+        );
+    }
+
+    #[test]
+    fn pixelate_committed_appear_with_in_flight_preview_cache() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        // Put a request in-flight (simulates a pending async preview).
+        let source = state.document.image.shared_source();
+        let source_id = super::super::pixelate_preview::source_id_from_arc(&source);
+        let region = rollshot_image_document::pixelate::RasterRegion {
+            x: 10,
+            y: 10,
+            width: 60,
+            height: 60,
+        };
+        let key = super::super::pixelate_preview::PreviewKey::new(source_id, region, 16, 1.0);
+        let _request = state.pixelate_previews.begin_request(key);
+        assert!(
+            state.pixelate_previews.is_in_flight(key),
+            "precondition: key is in-flight"
+        );
+
+        let flattened = state.document.image.flatten();
+        let copy = copy_payload(&state);
+        assert_eq!(copy, flattened, "in-flight cache must not affect output");
+    }
+
+    #[test]
+    fn pixelate_committed_appear_with_failed_preview_cache() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        // Simulate a failed preview request.
+        let source = state.document.image.shared_source();
+        let source_id = super::super::pixelate_preview::source_id_from_arc(&source);
+        let region = rollshot_image_document::pixelate::RasterRegion {
+            x: 10,
+            y: 10,
+            width: 60,
+            height: 60,
+        };
+        let key = super::super::pixelate_preview::PreviewKey::new(source_id, region, 16, 1.0);
+        let request = state.pixelate_previews.begin_request(key).unwrap();
+        state.pixelate_previews.fail(request);
+
+        let flattened = state.document.image.flatten();
+        let copy = copy_payload(&state);
+        assert_eq!(copy, flattened, "failed cache must not affect output");
+    }
+
+    #[test]
+    fn copy_original_is_byte_identical_to_source() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let original = copy_original_payload(&state);
+        assert_eq!(
+            original.as_raw(),
+            state.document.image.source().as_raw(),
+            "Copy Original must return source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn pixelate_draft_and_property_preview_never_enter_output() {
+        let mut state = workspace_with_gradient(200, 200);
+        // Commit one pixelate so we have a selection target.
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+
+        // Start an in-progress pixelate creation (draft, not committed).
+        state.editor.tool = Tool::Pixelate;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(150.0, 150.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(180.0, 180.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreatePixelate { .. })
+        ));
+
+        // Also start a block-size property preview.
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(32));
+
+        let source = state.document.image.source();
+        let output = copy_payload(&state);
+        let flattened = state.document.image.flatten();
+        assert_eq!(output, flattened, "copy equals flatten");
+
+        // Draft center (165, 165) must NOT appear in output.
+        assert_eq!(
+            output.get_pixel(165, 165),
+            source.get_pixel(165, 165),
+            "uncommitted pixelate draft must stay out of output"
+        );
+        // Selection handle area (5, 5) must NOT appear in output.
+        assert_eq!(
+            output.get_pixel(5, 5),
+            source.get_pixel(5, 5),
+            "selection handle area must stay out of output"
+        );
+    }
+
+    #[test]
+    fn pixelate_block_size_editing_changes_output_by_resampling() {
+        let mut state = workspace_with_gradient(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let output_bs16 = state.document.image.flatten();
+
+        // Change block_size — this must produce a different flatten.
+        state
+            .document
+            .image
+            .set_pixelate_block_size(id, 32)
+            .unwrap();
+        let output_bs32 = state.document.image.flatten();
+
+        assert_ne!(
+            output_bs16, output_bs32,
+            "changing block_size must change flatten output"
+        );
+        // The source must still be immutable.
+        let source = state.document.image.source();
+        assert_eq!(
+            source.get_pixel(0, 0).0,
+            [0, 0, 0, 255],
+            "source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn pixelate_move_changes_output_by_resampling() {
+        let mut state = workspace_with_gradient(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let output_before = state.document.image.flatten();
+
+        // Move the pixelate annotation.
+        state
+            .document
+            .image
+            .set_pixelate_bounds(
+                id,
+                ImageRect {
+                    x: 80.0,
+                    y: 80.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+            )
+            .unwrap();
+        let output_after = state.document.image.flatten();
+
+        assert_ne!(
+            output_before, output_after,
+            "moving pixelate must change flatten output"
+        );
+    }
+
+    #[test]
+    fn pixelate_resize_changes_output_by_resampling() {
+        let mut state = workspace_with_gradient(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        let output_before = state.document.image.flatten();
+
+        // Resize the pixelate annotation.
+        state
+            .document
+            .image
+            .set_pixelate_bounds(
+                id,
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 100.0,
+                    height: 80.0,
+                },
+            )
+            .unwrap();
+        let output_after = state.document.image.flatten();
+
+        assert_ne!(
+            output_before, output_after,
+            "resizing pixelate must change flatten output"
+        );
+    }
+
+    #[test]
+    fn repeated_flatten_leaves_source_bytes_unchanged() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let source_before = state.document.image.source().as_raw().to_vec();
+
+        // Flatten multiple times.
+        let _ = state.document.image.flatten();
+        let _ = state.document.image.flatten();
+        let _ = state.document.image.flatten();
+
+        let source_after = state.document.image.source().as_raw().to_vec();
+        assert_eq!(
+            source_before, source_after,
+            "repeated flatten must not mutate source bytes"
+        );
     }
 }

@@ -76,6 +76,11 @@ pub enum Annotation {
         points: Vec<ImagePoint>,
         style: StrokeStyle,
     },
+    Pixelate {
+        id: AnnotationId,
+        bounds: ImageRect,
+        block_size: u32,
+    },
 }
 
 impl Annotation {
@@ -179,6 +184,14 @@ impl Annotation {
         Self::freehand_with_style(id, kind, points, style)
     }
 
+    pub fn pixelate(id: AnnotationId, bounds: ImageRect, block_size: u32) -> Self {
+        Self::Pixelate {
+            id,
+            bounds,
+            block_size,
+        }
+    }
+
     pub fn freehand_with_style(
         id: AnnotationId,
         kind: FreehandKind,
@@ -200,7 +213,8 @@ impl Annotation {
             | Annotation::TextNote { id, .. }
             | Annotation::OpaqueRedaction { id, .. }
             | Annotation::Shape { id, .. }
-            | Annotation::Freehand { id, .. } => *id,
+            | Annotation::Freehand { id, .. }
+            | Annotation::Pixelate { id, .. } => *id,
         }
     }
 
@@ -212,7 +226,9 @@ impl Annotation {
             }
             Annotation::NumberCallout { bubble, .. } => *bubble,
             Annotation::TextNote { position, .. } => *position,
-            Annotation::OpaqueRedaction { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
+            Annotation::OpaqueRedaction { bounds, .. } | Annotation::Pixelate { bounds, .. } => {
+                ImagePoint::new(bounds.x, bounds.y)
+            }
             Annotation::Shape { bounds, .. } => ImagePoint::new(bounds.x, bounds.y),
             Annotation::Freehand { points, .. } => ImagePoint::new(
                 points.iter().map(|p| p.x).fold(f32::MAX, f32::min),
@@ -458,5 +474,33 @@ mod tests {
         assert_eq!(pen, crate::annotation::FreehandKind::Pen);
         let copy = hl;
         assert_eq!(hl, copy);
+    }
+
+    #[test]
+    fn pixelate_constructor_stores_bounds_and_block_size() {
+        let ann = Annotation::pixelate(AnnotationId(1), ImageRect::new(10.0, 20.0, 30.0, 40.0), 16);
+        assert!(matches!(
+            ann,
+            Annotation::Pixelate {
+                id: AnnotationId(1),
+                bounds,
+                block_size: 16,
+            } if bounds == ImageRect::new(10.0, 20.0, 30.0, 40.0)
+        ));
+    }
+
+    #[test]
+    fn pixelate_id_and_anchor() {
+        let ann = Annotation::pixelate(AnnotationId(7), ImageRect::new(15.0, 25.0, 30.0, 40.0), 8);
+        assert_eq!(ann.id(), AnnotationId(7));
+        assert_eq!(ann.anchor(), ImagePoint::new(15.0, 25.0));
+    }
+
+    #[test]
+    fn pixelate_has_no_style_accessors() {
+        let ann = Annotation::pixelate(AnnotationId(1), ImageRect::new(0.0, 0.0, 10.0, 10.0), 16);
+        assert_eq!(ann.stroke_style(), None);
+        assert_eq!(ann.number_style(), None);
+        assert_eq!(ann.text_style(), None);
     }
 }

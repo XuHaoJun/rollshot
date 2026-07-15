@@ -1,5 +1,6 @@
 use rollshot_image_document::{
     NumberSize, NumberStyle, Rgb8, ShapeKind, StrokeStyle, TextSize, TextStyle,
+    DEFAULT_PIXELATE_BLOCK_SIZE, MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -33,6 +34,7 @@ pub struct AnnotationDefaults {
     pub last_shape: ShapeKind,
     pub pen: StrokeStyle,
     pub highlighter: StrokeStyle,
+    pub pixelate_block_size: u32,
 }
 
 impl Default for AnnotationDefaults {
@@ -47,6 +49,7 @@ impl Default for AnnotationDefaults {
             last_shape: ShapeKind::Rectangle,
             pen: StrokeStyle::default(),
             highlighter: StrokeStyle::highlighter_default(),
+            pixelate_block_size: DEFAULT_PIXELATE_BLOCK_SIZE,
         }
     }
 }
@@ -150,6 +153,7 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
         true,
         &mut warnings,
     );
+    let pixelate_block_size = load_pixelate_block_size(&section, &mut warnings);
 
     LoadedAnnotationDefaults {
         values: AnnotationDefaults {
@@ -162,6 +166,7 @@ pub fn load_from(path: &Path) -> LoadedAnnotationDefaults {
             last_shape,
             pen,
             highlighter,
+            pixelate_block_size,
         },
         warnings,
     }
@@ -364,6 +369,20 @@ fn load_last_shape(parent: &toml::Table, warnings: &mut Vec<String>) -> ShapeKin
             ShapeKind::Rectangle
         }
         None => ShapeKind::Rectangle,
+    }
+}
+
+fn load_pixelate_block_size(parent: &toml::Table, warnings: &mut Vec<String>) -> u32 {
+    match parent.get("pixelate_block_size") {
+        Some(value) => match value.as_integer().and_then(|v| u32::try_from(v).ok()) {
+            Some(v) if (MIN_PIXELATE_BLOCK_SIZE..=MAX_PIXELATE_BLOCK_SIZE).contains(&v) => v,
+            _ => {
+                warnings
+                    .push("annotation_defaults.pixelate_block_size invalid — using default".into());
+                DEFAULT_PIXELATE_BLOCK_SIZE
+            }
+        },
+        None => DEFAULT_PIXELATE_BLOCK_SIZE,
     }
 }
 
@@ -823,5 +842,68 @@ mod tests {
         );
         assert_eq!(loaded.values.highlighter.opacity, 0.4);
         assert!(!loaded.warnings.is_empty());
+    }
+
+    // -- pixelate block size (Task 4) ----------------------------------------
+
+    #[test]
+    fn missing_pixelate_block_size_defaults_to_16_without_warning() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults]\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pixelate_block_size, 16);
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn pixelate_block_size_round_trips_boundary_values() {
+        let ctx = TestContext::new();
+        let mut values = AnnotationDefaults {
+            pixelate_block_size: 4,
+            ..Default::default()
+        };
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pixelate_block_size, 4);
+
+        values.pixelate_block_size = 48;
+        save_to(&ctx.path(), &values).unwrap();
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pixelate_block_size, 48);
+    }
+
+    #[test]
+    fn invalid_pixelate_block_size_falls_back_to_16_with_one_warning() {
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults]\npixelate_block_size = \"big\"\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pixelate_block_size, 16);
+        assert_eq!(loaded.warnings.len(), 1);
+
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults]\npixelate_block_size = 3\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pixelate_block_size, 16);
+        assert_eq!(loaded.warnings.len(), 1);
+
+        let ctx = TestContext::new();
+        ctx.write_config("[annotation_defaults]\npixelate_block_size = 49\n");
+        let loaded = load_from(&ctx.path());
+        assert_eq!(loaded.values.pixelate_block_size, 16);
+        assert_eq!(loaded.warnings.len(), 1);
+    }
+
+    #[test]
+    fn failed_pixelate_save_retains_in_memory_value() {
+        let ctx = TestContext::new();
+        let values = AnnotationDefaults {
+            pixelate_block_size: 24,
+            ..Default::default()
+        };
+        let result = save_to_with_writer(&ctx.path(), &values, |_path, _bytes| {
+            Err("injected failure".to_string())
+        });
+        assert!(result.is_err());
+        assert_eq!(values.pixelate_block_size, 24);
     }
 }

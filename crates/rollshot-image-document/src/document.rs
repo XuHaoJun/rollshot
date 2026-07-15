@@ -2,6 +2,7 @@
 //! number sequence, and snapshot-based history (spec §6, §10).
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use image::RgbaImage;
 
@@ -102,6 +103,10 @@ pub enum EditError {
     InvalidShapeBounds,
     #[error("freehand strokes require at least two distinct finite points")]
     InvalidFreehandPath,
+    #[error("pixelate bounds must be finite, positive, and cover at least one pixel")]
+    InvalidPixelateBounds,
+    #[error("pixelate block size {0} is outside the allowed range")]
+    InvalidPixelateBlockSize(u32),
 }
 
 /// One restorable history state (mark-shot pattern: graph + counters).
@@ -114,7 +119,7 @@ struct Snapshot {
 }
 
 pub struct ImageDocument {
-    source: RgbaImage,
+    source: Arc<RgbaImage>,
     annotations: Vec<Annotation>,
     next_number: u32,
     next_id: u64,
@@ -129,7 +134,7 @@ pub struct ImageDocument {
 impl ImageDocument {
     pub fn new(source: RgbaImage) -> Self {
         Self {
-            source,
+            source: Arc::new(source),
             annotations: Vec::new(),
             next_number: 1,
             next_id: 1,
@@ -142,6 +147,10 @@ impl ImageDocument {
 
     pub fn source(&self) -> &RgbaImage {
         &self.source
+    }
+
+    pub fn shared_source(&self) -> Arc<RgbaImage> {
+        Arc::clone(&self.source)
     }
 
     pub fn annotations(&self) -> &[Annotation] {
@@ -582,6 +591,33 @@ impl ImageDocument {
         Ok(())
     }
 
+    pub fn add_pixelate(
+        &mut self,
+        bounds: ImageRect,
+        block_size: u32,
+    ) -> Result<AnnotationId, EditError> {
+        let outcome = self.apply_batch(vec![EditOp::AddPixelate { bounds, block_size }])?;
+        Ok(outcome.added_ids[0])
+    }
+
+    pub fn set_pixelate_bounds(
+        &mut self,
+        id: AnnotationId,
+        bounds: ImageRect,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdatePixelateBounds { id, bounds }])?;
+        Ok(())
+    }
+
+    pub fn set_pixelate_block_size(
+        &mut self,
+        id: AnnotationId,
+        block_size: u32,
+    ) -> Result<(), EditError> {
+        self.apply_batch(vec![EditOp::UpdatePixelateBlockSize { id, block_size }])?;
+        Ok(())
+    }
+
     /// Apply many operations as ONE history entry (spec §6.5). Atomic: if any
     /// op is invalid the whole batch is rolled back — no mutation, no commit,
     /// no `state_id` change. Update*/Delete reference annotations existing
@@ -620,6 +656,8 @@ impl ImageDocument {
                 | EditOp::UpdateShapeBounds { id, .. }
                 | EditOp::UpdateShapeStyle { id, .. }
                 | EditOp::UpdateFreehandPoints { id, .. }
+                | EditOp::UpdatePixelateBounds { id, .. }
+                | EditOp::UpdatePixelateBlockSize { id, .. }
                 | EditOp::Delete { id } => Some(*id),
                 EditOp::AddTwoPoint { .. }
                 | EditOp::AddRedaction { .. }
@@ -627,6 +665,7 @@ impl ImageDocument {
                 | EditOp::AddNumberCallout { .. }
                 | EditOp::AddShape { .. }
                 | EditOp::AddFreehand { .. }
+                | EditOp::AddPixelate { .. }
                 | EditOp::SetNextNumber { .. } => None,
             };
             if referenced_id.is_some_and(|id| self.annotation(id).is_none()) {
@@ -906,6 +945,57 @@ impl ImageDocument {
                 let index = self.annotation_index(id)?;
                 match &mut self.annotations[index] {
                     Annotation::Freehand { points: p, .. } => *p = points,
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::AddPixelate { bounds, block_size } => {
+                use crate::pixelate::{MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE};
+                if !(MIN_PIXELATE_BLOCK_SIZE..=MAX_PIXELATE_BLOCK_SIZE).contains(&block_size) {
+                    return Err(EditError::InvalidPixelateBlockSize(block_size));
+                }
+                ensure_rect_finite(&bounds)?;
+                let clamped = bounds.clamp_to(w, h);
+                if clamped.is_empty() {
+                    return Err(EditError::InvalidPixelateBounds);
+                }
+                let id = self.allocate_id();
+                self.annotations.push(Annotation::Pixelate {
+                    id,
+                    bounds: clamped,
+                    block_size,
+                });
+                added_ids.push(id);
+            }
+            EditOp::UpdatePixelateBounds { id, bounds } => {
+                ensure_rect_finite(&bounds)?;
+                let clamped = bounds.clamp_to(w, h);
+                if clamped.is_empty() {
+                    return Err(EditError::InvalidPixelateBounds);
+                }
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::Pixelate { bounds: b, .. } => {
+                        if *b == clamped {
+                            return Ok(());
+                        }
+                        *b = clamped;
+                    }
+                    _ => return Err(EditError::WrongKind),
+                }
+            }
+            EditOp::UpdatePixelateBlockSize { id, block_size } => {
+                use crate::pixelate::{MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE};
+                if !(MIN_PIXELATE_BLOCK_SIZE..=MAX_PIXELATE_BLOCK_SIZE).contains(&block_size) {
+                    return Err(EditError::InvalidPixelateBlockSize(block_size));
+                }
+                let index = self.annotation_index(id)?;
+                match &mut self.annotations[index] {
+                    Annotation::Pixelate { block_size: bs, .. } => {
+                        if *bs == block_size {
+                            return Ok(());
+                        }
+                        *bs = block_size;
+                    }
                     _ => return Err(EditError::WrongKind),
                 }
             }
@@ -2368,5 +2458,224 @@ mod tests {
         let s = d.state_id();
         d.set_stroke_style(id, StrokeStyle::default()).unwrap();
         assert_eq!(d.state_id(), s);
+    }
+
+    #[test]
+    fn shared_source_arc_sharing_contract() {
+        let d = doc();
+        let a = d.shared_source();
+        let b = d.shared_source();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "shared_source must return clones of the same Arc"
+        );
+
+        let before = d.source().as_raw().to_vec();
+        let mut flat = d.flatten();
+        // Mutate the flattened copy.
+        for px in flat.pixels_mut() {
+            px[0] = 255;
+        }
+        assert_eq!(
+            d.source().as_raw(),
+            before.as_slice(),
+            "mutating a flattened copy must not change the document source"
+        );
+    }
+
+    // --- Pixelate tests ---
+
+    fn document_32_by_32() -> ImageDocument {
+        ImageDocument::new(RgbaImage::from_pixel(32, 32, Rgba([10, 20, 30, 255])))
+    }
+
+    #[test]
+    fn pixelate_default_construction_uses_default_block_size() {
+        let mut d = document_32_by_32();
+        let id = d
+            .add_pixelate(ImageRect::new(2.0, 3.0, 12.0, 10.0), 16)
+            .unwrap();
+        match d.annotation(id) {
+            Some(Annotation::Pixelate {
+                bounds, block_size, ..
+            }) => {
+                assert_eq!(*bounds, ImageRect::new(2.0, 3.0, 12.0, 10.0));
+                assert_eq!(*block_size, 16);
+            }
+            _ => panic!("expected Pixelate"),
+        }
+    }
+
+    #[test]
+    fn pixelate_stable_identity_across_updates() {
+        let mut d = document_32_by_32();
+        let id = d
+            .add_pixelate(ImageRect::new(2.0, 3.0, 12.0, 10.0), 16)
+            .unwrap();
+        d.set_pixelate_bounds(id, ImageRect::new(4.0, 5.0, 8.0, 7.0))
+            .unwrap();
+        d.set_pixelate_block_size(id, 24).unwrap();
+        assert_eq!(d.annotation(id).unwrap().id(), id);
+    }
+
+    #[test]
+    fn pixelate_edits_are_validated_and_undo_as_single_entries() {
+        let mut document = document_32_by_32();
+        let id = document
+            .add_pixelate(ImageRect::new(2.0, 3.0, 12.0, 10.0), 16)
+            .unwrap();
+        document
+            .set_pixelate_bounds(id, ImageRect::new(4.0, 5.0, 8.0, 7.0))
+            .unwrap();
+        document.set_pixelate_block_size(id, 24).unwrap();
+        assert!(matches!(
+            document.annotation(id),
+            Some(Annotation::Pixelate {
+                bounds,
+                block_size: 24,
+                ..
+            }) if *bounds == ImageRect::new(4.0, 5.0, 8.0, 7.0)
+        ));
+        assert!(document.undo());
+        assert!(matches!(
+            document.annotation(id),
+            Some(Annotation::Pixelate { block_size: 16, .. })
+        ));
+        assert!(document.redo());
+        assert!(matches!(
+            document.annotation(id),
+            Some(Annotation::Pixelate { block_size: 24, .. })
+        ));
+    }
+
+    #[test]
+    fn pixelate_delete_undo_redo_lifecycle() {
+        let mut d = document_32_by_32();
+        let id = d
+            .add_pixelate(ImageRect::new(2.0, 3.0, 12.0, 10.0), 16)
+            .unwrap();
+        d.delete_annotation(id).unwrap();
+        assert!(d.annotation(id).is_none());
+        assert!(d.undo());
+        assert!(d.annotation(id).is_some());
+        assert!(d.redo());
+        assert!(d.annotation(id).is_none());
+    }
+
+    #[test]
+    fn pixelate_noop_bounds_update_creates_no_history() {
+        let mut d = document_32_by_32();
+        let bounds = ImageRect::new(2.0, 3.0, 12.0, 10.0);
+        let id = d.add_pixelate(bounds, 16).unwrap();
+        let s = d.state_id();
+        d.set_pixelate_bounds(id, bounds).unwrap();
+        assert_eq!(d.state_id(), s);
+    }
+
+    #[test]
+    fn pixelate_noop_block_size_update_creates_no_history() {
+        let mut d = document_32_by_32();
+        let id = d
+            .add_pixelate(ImageRect::new(2.0, 3.0, 12.0, 10.0), 16)
+            .unwrap();
+        let s = d.state_id();
+        d.set_pixelate_block_size(id, 16).unwrap();
+        assert_eq!(d.state_id(), s);
+    }
+
+    #[test]
+    fn pixelate_rejects_block_size_3_and_49() {
+        let mut d = document_32_by_32();
+        assert_eq!(
+            d.add_pixelate(ImageRect::new(1.0, 1.0, 5.0, 5.0), 3),
+            Err(EditError::InvalidPixelateBlockSize(3))
+        );
+        assert_eq!(
+            d.add_pixelate(ImageRect::new(1.0, 1.0, 5.0, 5.0), 49),
+            Err(EditError::InvalidPixelateBlockSize(49))
+        );
+        assert!(d.annotations().is_empty());
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn pixelate_rejects_non_finite_bounds() {
+        let mut d = document_32_by_32();
+        assert_eq!(
+            d.add_pixelate(
+                ImageRect {
+                    x: f32::NAN,
+                    y: 0.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
+                16
+            ),
+            Err(EditError::NonFiniteCoordinate)
+        );
+        assert!(d.annotations().is_empty());
+    }
+
+    #[test]
+    fn pixelate_rejects_empty_bounds_after_clamp() {
+        let mut d = document_32_by_32();
+        // Entirely outside the image
+        assert_eq!(
+            d.add_pixelate(ImageRect::new(500.0, 500.0, 10.0, 10.0), 16),
+            Err(EditError::InvalidPixelateBounds)
+        );
+        // Sub-pixel after clamp
+        assert_eq!(
+            d.add_pixelate(ImageRect::new(5.0, 5.0, 0.4, 50.0), 16),
+            Err(EditError::InvalidPixelateBounds)
+        );
+        assert!(d.annotations().is_empty());
+    }
+
+    #[test]
+    fn pixelate_wrong_kind_rejected() {
+        let mut d = document_32_by_32();
+        let id = d
+            .add_redaction(ImageRect::new(1.0, 1.0, 10.0, 10.0))
+            .unwrap();
+        assert_eq!(
+            d.set_pixelate_bounds(id, ImageRect::new(1.0, 1.0, 5.0, 5.0)),
+            Err(EditError::WrongKind)
+        );
+        assert_eq!(d.set_pixelate_block_size(id, 16), Err(EditError::WrongKind));
+    }
+
+    #[test]
+    fn invalid_pixelate_batch_is_atomic() {
+        let mut document = document_32_by_32();
+        let before = document.state_id();
+        let result = document.apply_batch(vec![
+            EditOp::AddPixelate {
+                bounds: ImageRect::new(1.0, 1.0, 5.0, 5.0),
+                block_size: 16,
+            },
+            EditOp::AddPixelate {
+                bounds: ImageRect::new(2.0, 2.0, 5.0, 5.0),
+                block_size: 49,
+            },
+        ]);
+        assert_eq!(result, Err(EditError::InvalidPixelateBlockSize(49)));
+        assert!(document.annotations().is_empty());
+        assert_eq!(document.state_id(), before);
+        assert!(!document.can_undo());
+    }
+
+    #[test]
+    fn pixelate_redo_clears_on_new_edit() {
+        let mut d = document_32_by_32();
+        let _ = d
+            .add_pixelate(ImageRect::new(1.0, 1.0, 10.0, 10.0), 16)
+            .unwrap();
+        assert!(d.undo());
+        assert!(d.can_redo());
+        let _ = d
+            .add_pixelate(ImageRect::new(5.0, 5.0, 10.0, 10.0), 8)
+            .unwrap();
+        assert!(!d.can_redo());
     }
 }

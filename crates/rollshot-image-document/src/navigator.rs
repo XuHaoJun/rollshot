@@ -35,6 +35,7 @@ fn label(annotation: &Annotation) -> String {
             summary
         }
         Annotation::OpaqueRedaction { .. } => "Redaction".to_string(),
+        Annotation::Pixelate { .. } => "Pixelate".to_string(),
         Annotation::Shape { kind, .. } => match kind {
             crate::annotation::ShapeKind::Rectangle => "Rectangle".to_string(),
             crate::annotation::ShapeKind::Ellipse => "Ellipse".to_string(),
@@ -273,5 +274,87 @@ mod tests {
         let items = navigator_items(&[a, b]);
         assert_eq!(items[0].id, AnnotationId(2), "lower y sorts first");
         assert_eq!(items[1].id, AnnotationId(5));
+    }
+
+    // --- Pixelate navigator tests ---
+
+    #[test]
+    fn pixelate_label_is_pixelate() {
+        let ann = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            16,
+        );
+        let items = navigator_items(&[ann]);
+        assert_eq!(items[0].label, "Pixelate");
+    }
+
+    #[test]
+    fn pixelate_anchor_is_top_left() {
+        let ann = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 15.0,
+                y: 25.0,
+                width: 30.0,
+                height: 40.0,
+            },
+            16,
+        );
+        assert_eq!(ann.anchor(), ImagePoint::new(15.0, 25.0));
+    }
+
+    #[test]
+    fn pixelate_reading_order_and_stable_id_tie_breaking() {
+        let a = Annotation::pixelate(
+            AnnotationId(5),
+            ImageRect {
+                x: 0.0,
+                y: 50.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            16,
+        );
+        let b = Annotation::pixelate(
+            AnnotationId(2),
+            ImageRect {
+                x: 0.0,
+                y: 10.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            16,
+        );
+        let items = navigator_items(&[a, b]);
+        assert_eq!(items[0].id, AnnotationId(2), "lower y sorts first");
+        assert_eq!(items[1].id, AnnotationId(5));
+    }
+
+    #[test]
+    fn pixelate_undo_redo_refresh_navigator() {
+        let mut doc = crate::document::ImageDocument::new(image::RgbaImage::new(100, 100));
+        let id = doc
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+                16,
+            )
+            .unwrap();
+        assert_eq!(doc.navigator_items().len(), 1);
+        assert_eq!(doc.navigator_items()[0].label, "Pixelate");
+        doc.delete_annotation(id).unwrap();
+        assert!(doc.navigator_items().is_empty());
+        assert!(doc.undo());
+        assert_eq!(doc.navigator_items().len(), 1);
     }
 }

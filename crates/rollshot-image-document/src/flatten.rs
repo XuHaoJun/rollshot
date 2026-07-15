@@ -6,18 +6,36 @@ use image::RgbaImage;
 
 use crate::annotation::Annotation;
 use crate::geometry::ImagePoint;
+use crate::pixelate::{apply_pixelate, pixelate_region};
 use crate::raster::{
     fill_box_shape, fill_circle, fill_rect, fill_triangle, stroke_box_shape, stroke_circle,
     stroke_line, stroke_polyline,
 };
-use crate::shapes::{annotation_shapes, RenderShape, TextAnchor};
+use crate::shapes::{annotation_commands, RenderCommand, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
 
 pub(crate) fn flatten_onto(source: &RgbaImage, annotations: &[Annotation]) -> RgbaImage {
     let mut out = source.clone();
     for annotation in annotations {
-        for shape in annotation_shapes(annotation) {
-            draw_shape(&mut out, &shape);
+        for command in annotation_commands(annotation) {
+            match command {
+                RenderCommand::Shape(shape) => draw_shape(&mut out, &shape),
+                RenderCommand::Pixelate { bounds, block_size } => {
+                    let started = std::time::Instant::now();
+                    if let Ok(region) = pixelate_region(source, bounds, block_size) {
+                        apply_pixelate(&mut out, &region);
+                        tracing::debug!(
+                            target: "rollshot::annotation",
+                            operation = "pixelate_flatten",
+                            raster_width = region.region.width,
+                            raster_height = region.region.height,
+                            block_size,
+                            elapsed_us = started.elapsed().as_micros() as u64,
+                            "flattened pixelate annotation"
+                        );
+                    }
+                }
+            }
         }
     }
     out
@@ -84,9 +102,12 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
 
 #[cfg(test)]
 mod tests {
-    use crate::annotation::FreehandKind;
-    use crate::geometry::{ImagePoint, ImageRect};
-    use crate::{ImageDocument, Rgb8, StrokeStyle, TwoPointKind};
+    use super::flatten_onto;
+    use crate::annotation::{Annotation, AnnotationId, FreehandKind, TwoPointKind};
+    use crate::geometry::{ImagePoint, ImageRect, Rgb8};
+    use crate::pixelate::{apply_pixelate, pixelate_region};
+    use crate::shapes::{annotation_commands, RenderCommand};
+    use crate::{ImageDocument, StrokeStyle};
     use image::{Rgba, RgbaImage};
 
     fn base(w: u32, h: u32) -> RgbaImage {
@@ -227,8 +248,9 @@ mod tests {
     #[test]
     fn hundred_mixed_annotations_on_long_image_include_line_and_arrow() {
         let mut doc = ImageDocument::new(base(1000, 20_000));
-        // 14 rows × 7 types = 98, plus Pen (row 3) + Highlighter (row 10) = 100.
-        for i in 0..14u32 {
+        // 12 rows × 8 types = 96, plus Pen (row 3) + Highlighter (row 10) = 98,
+        // plus NumberCallout (row 0 extra) + TextNote (row 1 extra) = 100.
+        for i in 0..12u32 {
             let y = 100.0 + i as f32 * 950.0;
             doc.add_number_callout(ImagePoint::new(100.0, y), ImagePoint::new(160.0, y));
             doc.add_text_note(ImagePoint::new(300.0, y), format!("step {i}"))
@@ -272,34 +294,59 @@ mod tests {
                 },
             )
             .unwrap();
-            if i == 3 {
-                let pts: Vec<_> = (0..5)
-                    .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
-                    .collect();
-                doc.add_freehand_with_style(
-                    FreehandKind::Pen,
-                    pts,
-                    StrokeStyle {
-                        color: Rgb8::new(0, 0, 0),
-                        width: 2.0,
-                        opacity: 1.0,
-                    },
-                )
-                .unwrap();
-            }
-            if i == 10 {
-                let pts: Vec<_> = (0..5)
-                    .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
-                    .collect();
-                doc.add_freehand_with_style(
-                    FreehandKind::Highlighter,
-                    pts,
-                    StrokeStyle::highlighter_default(),
-                )
-                .unwrap();
-            }
+            doc.add_pixelate(
+                ImageRect {
+                    x: 950.0,
+                    y,
+                    width: 40.0,
+                    height: 40.0,
+                },
+                16,
+            )
+            .unwrap();
         }
-        // 14 rows × 7 types = 98, + Pen (row 3) + Highlighter (row 10) = 100.
+        // 12 rows × 8 types = 96, + Pen (row 3) + Highlighter (row 10) = 98.
+        // Extra NumberCallout at row 13, extra TextNote at row 13 = 100.
+        let extra_y = 100.0 + 13_f32 * 950.0;
+        doc.add_number_callout(
+            ImagePoint::new(100.0, extra_y),
+            ImagePoint::new(160.0, extra_y),
+        );
+        doc.add_text_note(ImagePoint::new(300.0, extra_y), "extra text".to_string())
+            .unwrap();
+
+        // Pen (row 3)
+        {
+            let y = 100.0 + 3_f32 * 950.0;
+            let pts: Vec<_> = (0..5)
+                .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
+                .collect();
+            doc.add_freehand_with_style(
+                FreehandKind::Pen,
+                pts,
+                StrokeStyle {
+                    color: Rgb8::new(0, 0, 0),
+                    width: 2.0,
+                    opacity: 1.0,
+                },
+            )
+            .unwrap();
+        }
+        // Highlighter (row 10)
+        {
+            let y = 100.0 + 10_f32 * 950.0;
+            let pts: Vec<_> = (0..5)
+                .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
+                .collect();
+            doc.add_freehand_with_style(
+                FreehandKind::Highlighter,
+                pts,
+                StrokeStyle::highlighter_default(),
+            )
+            .unwrap();
+        }
+        // 12 rows × 8 types = 96, + Pen (row 3) + Highlighter (row 10) = 98,
+        // + extra NumberCallout + extra TextNote = 100.
 
         assert_eq!(doc.navigator_items().len(), 100);
         let flattened = doc.flatten();
@@ -343,6 +390,20 @@ mod tests {
             flattened.get_pixel(880, 300),
             doc.source().get_pixel(880, 300),
             "Ellipse boundary must be painted by stroke"
+        );
+
+        // Representative Pixelate (row 0): region (950, 100)–(990, 140).
+        // Source is uniform so pixelate averages to the same color; the
+        // dedicated pixelate unit tests verify non-trivial content.
+        // Here we only assert the flatten completes and the output covers
+        // the full source dimensions (already asserted above).
+
+        // Navigator must include Pixelate items.
+        assert!(
+            doc.navigator_items()
+                .iter()
+                .any(|item| item.label == "Pixelate"),
+            "Navigator must contain Pixelate entries"
         );
 
         assert!(doc.hit_test(ImagePoint::new(160.0, 240.0), 8.0).is_some());
@@ -569,5 +630,133 @@ mod tests {
         .unwrap();
         let out = doc.flatten();
         assert_eq!(out.get_pixel(20, 20).0, [0xE5, 0x48, 0x4D, 255]);
+    }
+
+    // --- Task 3: RenderCommand and pixelate flatten tests ---
+
+    fn four_quadrant_fixture() -> RgbaImage {
+        let mut img = RgbaImage::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x < 8 && y < 8 {
+                    [255u8, 0, 0, 255]
+                } else if x >= 8 && y < 8 {
+                    [0, 255, 0, 255]
+                } else if x < 8 && y >= 8 {
+                    [0, 0, 255, 255]
+                } else {
+                    [255, 255, 0, 255]
+                };
+                img.put_pixel(x, y, Rgba(color));
+            }
+        }
+        img
+    }
+
+    fn red_rectangle_over_center() -> Annotation {
+        Annotation::OpaqueRedaction {
+            id: AnnotationId(100),
+            bounds: ImageRect::new(2.0, 2.0, 12.0, 12.0),
+        }
+    }
+
+    fn pixelate_center(block_size: u32) -> Annotation {
+        Annotation::pixelate(
+            AnnotationId(101),
+            ImageRect::new(2.0, 2.0, 12.0, 12.0),
+            block_size,
+        )
+    }
+
+    fn blue_arrow_over_center() -> Annotation {
+        Annotation::two_point_with_style(
+            AnnotationId(102),
+            TwoPointKind::Arrow,
+            ImagePoint::new(2.0, 2.0),
+            ImagePoint::new(14.0, 14.0),
+            StrokeStyle {
+                color: Rgb8::new(0, 0, 255),
+                width: 4.0,
+                opacity: 1.0,
+            },
+        )
+    }
+
+    fn pixelated_source_center(source: &RgbaImage) -> RgbaImage {
+        let mut out = source.clone();
+        let region = pixelate_region(source, ImageRect::new(2.0, 2.0, 12.0, 12.0), 4).unwrap();
+        apply_pixelate(&mut out, &region);
+        out
+    }
+
+    fn asymmetric_source_fixture() -> RgbaImage {
+        let mut img = RgbaImage::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([x as u8 * 16, y as u8 * 16, (x + y) as u8 * 8, 255]),
+                );
+            }
+        }
+        img
+    }
+
+    fn pixelate_rect(x: f32, y: f32, w: f32, h: f32, block_size: u32) -> Annotation {
+        Annotation::pixelate(AnnotationId(200), ImageRect::new(x, y, w, h), block_size)
+    }
+
+    fn crop(img: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
+        let mut cropped = RgbaImage::new(w, h);
+        for dy in 0..h {
+            for dx in 0..w {
+                cropped.put_pixel(dx, dy, *img.get_pixel(x + dx, y + dy));
+            }
+        }
+        cropped
+    }
+
+    #[test]
+    fn pixelate_lowers_to_one_raster_command() {
+        let annotation =
+            Annotation::pixelate(AnnotationId(7), ImageRect::new(3.0, 4.0, 8.0, 9.0), 16);
+        assert_eq!(
+            annotation_commands(&annotation),
+            vec![RenderCommand::Pixelate {
+                bounds: ImageRect::new(3.0, 4.0, 8.0, 9.0),
+                block_size: 16,
+            }]
+        );
+    }
+
+    #[test]
+    fn pixelate_covers_earlier_annotations_but_later_annotations_cover_pixelate() {
+        let source = four_quadrant_fixture();
+        let earlier = red_rectangle_over_center();
+        let pixelate = pixelate_center(4);
+        let later = blue_arrow_over_center();
+        let only_earlier = flatten_onto(&source, &[earlier.clone(), pixelate.clone()]);
+        let with_later = flatten_onto(&source, &[earlier, pixelate, later]);
+        assert_eq!(
+            only_earlier.get_pixel(4, 4),
+            pixelated_source_center(&source).get_pixel(4, 4)
+        );
+        assert_eq!(with_later.get_pixel(4, 4).0, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn overlapping_pixelates_each_sample_original_source() {
+        let source = asymmetric_source_fixture();
+        let twice = flatten_onto(
+            &source,
+            &[
+                pixelate_rect(0.0, 0.0, 8.0, 8.0, 4),
+                pixelate_rect(2.0, 2.0, 6.0, 6.0, 4),
+            ],
+        );
+        let second_only = flatten_onto(&source, &[pixelate_rect(2.0, 2.0, 6.0, 6.0, 4)]);
+        assert_eq!(crop(&twice, 2, 2, 6, 6), crop(&second_only, 2, 2, 6, 6));
+        assert_eq!(source, asymmetric_source_fixture());
     }
 }

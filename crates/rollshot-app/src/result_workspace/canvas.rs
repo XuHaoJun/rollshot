@@ -37,6 +37,7 @@ pub enum Tool {
     Pen,
     Highlighter,
     Redact,
+    Pixelate,
     #[cfg(feature = "ocr")]
     OcrText,
 }
@@ -75,6 +76,10 @@ pub enum DragState {
         style: StrokeStyle,
     },
     CreateRedaction {
+        anchor: ImagePoint,
+        current: ImagePoint,
+    },
+    CreatePixelate {
         anchor: ImagePoint,
         current: ImagePoint,
     },
@@ -221,6 +226,20 @@ pub fn dragged_annotation(
                 *bounds, handle, point, shift, scale, width, height,
             );
         }
+        (Annotation::Pixelate { bounds, .. }, HitPart::Body) => {
+            *bounds = super::box_tool::moved_bounds(
+                *bounds,
+                point,
+                ImagePoint::new(grab_offset.0, grab_offset.1),
+                width,
+                height,
+            );
+        }
+        (Annotation::Pixelate { bounds, .. }, HitPart::Resize(handle)) => {
+            *bounds = super::box_tool::resized_bounds(
+                *bounds, handle, point, shift, scale, width, height,
+            );
+        }
         (Annotation::Freehand { points, .. }, HitPart::Body) => {
             *points =
                 super::freehand_tool::translated_points(points, point, grab_offset, width, height);
@@ -255,7 +274,8 @@ fn resized_rect(original: ImageRect, handle: ResizeHandle, p: ImagePoint) -> Ima
 use iced::widget::canvas;
 use iced::{mouse, Color, Rectangle, Renderer, Size, Theme, Vector};
 use rollshot_image_document::{
-    annotation_bounds, annotation_shapes, resize_handles, style, RenderShape, TextAnchor,
+    annotation_bounds, annotation_commands, resize_handles, style, RenderCommand, RenderShape,
+    TextAnchor,
 };
 
 use super::update::{direct_manipulation_hit, Message};
@@ -301,6 +321,7 @@ pub struct AnnotationCanvas<'a> {
     pub editor: &'a EditorState,
     pub modifiers: iced::keyboard::Modifiers,
     pub scale: f32,
+    pub display_scale: f32,
     pub visible: ImageRect,
     pub annotation_defaults: &'a super::AnnotationDefaultsState,
     // SP6 workbench candidate overlay. `None` in Normal mode.
@@ -312,12 +333,26 @@ pub struct AnnotationCanvas<'a> {
     /// the committed shapes on canvas — without entering document history
     /// or flatten output.
     pub property_preview: Option<Annotation>,
+    /// Pixelate preview cache for rendering cached raster handles.
+    pub pixelate_previews: &'a super::pixelate_preview::PixelatePreviewCache,
 }
 
 fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> Option<ImagePoint> {
     cursor
         .position_from(Point::new(bounds.x, bounds.y))
         .map(|local| ImagePoint::new(local.x / scale, local.y / scale))
+}
+
+fn pixelate_preview_rect(
+    region: rollshot_image_document::RasterRegion,
+    scale: f32,
+) -> iced::Rectangle {
+    iced::Rectangle {
+        x: region.x as f32 * scale,
+        y: region.y as f32 * scale,
+        width: region.width as f32 * scale,
+        height: region.height as f32 * scale,
+    }
 }
 
 impl AnnotationCanvas<'_> {
@@ -506,9 +541,74 @@ impl AnnotationCanvas<'_> {
             }
             return;
         }
-        for shape in annotation_shapes(annotation) {
-            self.draw_shape(frame, &shape);
+        for command in annotation_commands(annotation) {
+            match command {
+                RenderCommand::Shape(shape) => self.draw_shape(frame, &shape),
+                RenderCommand::Pixelate { bounds, block_size } => {
+                    self.draw_pixelate_command(frame, annotation.id(), bounds, block_size);
+                }
+            }
         }
+    }
+
+    fn draw_pixelate_command(
+        &self,
+        frame: &mut canvas::Frame,
+        _annotation_id: rollshot_image_document::AnnotationId,
+        bounds: ImageRect,
+        block_size: u32,
+    ) {
+        use super::pixelate_preview::source_id_from_arc;
+        let source_id = source_id_from_arc(&self.document.shared_source());
+        let region = match rollshot_image_document::raster_region(
+            bounds,
+            self.document.source().width(),
+            self.document.source().height(),
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                self.draw_pixelate_outline(frame, bounds);
+                return;
+            }
+        };
+        let key = super::pixelate_preview::PreviewKey::new(
+            source_id,
+            region,
+            block_size,
+            self.display_scale,
+        );
+        if let Some((w, h, data)) = self.pixelate_previews.get(key) {
+            let handle = iced::widget::image::Handle::from_rgba(w, h, data.to_vec());
+            let rect = pixelate_preview_rect(region, self.scale);
+            frame.draw_image(
+                rect,
+                canvas::Image::new(handle)
+                    .filter_method(iced::widget::image::FilterMethod::Nearest)
+                    .snap(true),
+            );
+        } else {
+            self.draw_pixelate_outline(frame, bounds);
+        }
+    }
+
+    fn draw_pixelate_outline(&self, frame: &mut canvas::Frame, bounds: ImageRect) {
+        let s = self.scale;
+        let rect = iced::Rectangle {
+            x: bounds.x * s,
+            y: bounds.y * s,
+            width: bounds.width * s,
+            height: bounds.height * s,
+        };
+        let path = canvas::Path::rectangle(
+            iced::Point::new(rect.x, rect.y),
+            iced::Size::new(rect.width, rect.height),
+        );
+        frame.stroke(
+            &path,
+            canvas::Stroke::default()
+                .with_color(token_color(style::ACCENT))
+                .with_width(2.0),
+        );
     }
 
     fn draw_polyline(
@@ -571,6 +671,21 @@ impl AnnotationCanvas<'_> {
                 let rect = ImageRect::from_corners(*anchor, *current);
                 (!rect.is_empty())
                     .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
+            }
+            Some(DragState::CreatePixelate { anchor, current }) => {
+                let (w, h) = self.document.source().dimensions();
+                let bounds = super::box_tool::creation_bounds(
+                    *anchor,
+                    *current,
+                    self.modifiers.shift(),
+                    w,
+                    h,
+                );
+                (!bounds.is_empty()).then_some(Annotation::pixelate(
+                    AnnotationId(u64::MAX),
+                    bounds,
+                    self.annotation_defaults.values.pixelate_block_size,
+                ))
             }
             Some(DragState::CreateShape {
                 kind,
@@ -647,6 +762,11 @@ impl AnnotationCanvas<'_> {
                 }
             }
             Annotation::Shape { bounds, .. } => {
+                for (_, p) in resize_handles(*bounds) {
+                    handle(frame, p, white, accent);
+                }
+            }
+            Annotation::Pixelate { bounds, .. } => {
                 for (_, p) in resize_handles(*bounds) {
                     handle(frame, p, white, accent);
                 }
@@ -911,6 +1031,24 @@ pub fn hit_test_proposal_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixelate_preview_rect_uses_integer_raster_region() {
+        let rect = pixelate_preview_rect(
+            rollshot_image_document::RasterRegion {
+                x: 10,
+                y: 20,
+                width: 31,
+                height: 41,
+            },
+            0.5,
+        );
+
+        assert_eq!(
+            rect,
+            iced::Rectangle::new([5.0, 10.0].into(), [15.5, 20.5].into())
+        );
+    }
 
     #[test]
     fn resize_from_each_side_normalizes_inverted_drags() {
@@ -1182,6 +1320,74 @@ mod tests {
                 assert_eq!(points[1], ImagePoint::new(25.0, 35.0));
             }
             _ => panic!("expected freehand"),
+        }
+    }
+
+    #[test]
+    fn dragged_pixelate_body_preserves_size_and_block_size() {
+        let original = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 20.0,
+                y: 20.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let moved = dragged_annotation(
+            &original,
+            HitPart::Body,
+            ImagePoint::new(60.0, 50.0),
+            (5.0, 5.0),
+            false,
+            (200, 200),
+            1.0,
+        );
+        match moved {
+            Annotation::Pixelate {
+                bounds, block_size, ..
+            } => {
+                assert_eq!(block_size, 16, "block_size unchanged");
+                assert_eq!(bounds.width, 40.0, "width preserved");
+                assert_eq!(bounds.height, 30.0, "height preserved");
+                assert_eq!(bounds.x, 55.0, "x moved by pointer - offset");
+                assert_eq!(bounds.y, 45.0, "y moved by pointer - offset");
+            }
+            _ => panic!("expected Pixelate"),
+        }
+    }
+
+    #[test]
+    fn dragged_pixelate_resize_preserves_block_size() {
+        let original = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 20.0,
+                y: 20.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let resized = dragged_annotation(
+            &original,
+            HitPart::Resize(ResizeHandle::BottomRight),
+            ImagePoint::new(80.0, 70.0),
+            (0.0, 0.0),
+            false,
+            (200, 200),
+            1.0,
+        );
+        match resized {
+            Annotation::Pixelate {
+                bounds, block_size, ..
+            } => {
+                assert_eq!(block_size, 16, "block_size unchanged during resize");
+                assert_eq!(bounds.width, 60.0);
+                assert_eq!(bounds.height, 50.0);
+            }
+            _ => panic!("expected Pixelate"),
         }
     }
 

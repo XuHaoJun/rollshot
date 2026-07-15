@@ -139,6 +139,7 @@ pub(crate) fn canvas_view<'a>(
         editor: &state.editor,
         modifiers: state.modifiers,
         scale: geometry.scale,
+        display_scale: geometry.scale,
         visible: super::canvas::visible_image_rect(
             state.viewport.scroll_offset,
             state.viewport_bounds,
@@ -150,6 +151,7 @@ pub(crate) fn canvas_view<'a>(
         review,
         selected_candidate,
         property_preview: super::properties::preview_annotation(state),
+        pixelate_previews: &state.pixelate_previews,
     })
     .width(Length::Fixed(geometry.rendered_size.width))
     .height(Length::Fixed(geometry.rendered_size.height));

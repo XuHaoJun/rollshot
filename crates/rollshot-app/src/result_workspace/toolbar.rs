@@ -157,6 +157,11 @@ fn tool_item(tool: Tool) -> ToolbarItem {
             label: "Highlighter",
             shortcut: "H",
         },
+        Tool::Pixelate => ToolbarItem {
+            kind: ToolbarItemKind::Tool(Tool::Pixelate),
+            label: "Pixelate",
+            shortcut: "B",
+        },
         #[cfg(feature = "ocr")]
         Tool::OcrText => ToolbarItem {
             kind: ToolbarItemKind::Ocr,
@@ -193,6 +198,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
             Tool::Pen,
             Tool::Highlighter,
             Tool::Redact,
+            Tool::Pixelate,
         ],
         ToolbarDensity::Narrow => vec![
             Tool::Select,
@@ -221,6 +227,7 @@ pub fn toolbar_model(state: &ResultWorkspace, width: f32) -> ToolbarModel {
     if density == ToolbarDensity::Narrow {
         overflow.insert(0, tool_item(Tool::Redact));
         overflow.insert(0, tool_item(Tool::Highlighter));
+        overflow.insert(0, tool_item(Tool::Pixelate));
         overflow.insert(0, tool_item(Tool::Line));
     }
 
@@ -486,6 +493,10 @@ fn tool_tooltip(tool: Tool) -> String {
         Tool::Arrow => "Arrow (A) — Shift: Snap to 45°".into(),
         Tool::Rectangle => "Rectangle (S) — Shift: Square".into(),
         Tool::Ellipse => "Ellipse (S) — Shift: Circle".into(),
+        Tool::Pixelate => {
+            "Pixelate (B) — visual obfuscation only; use Redact to securely remove information."
+                .into()
+        }
         _ => {
             let item = tool_item(tool);
             shortcut_label(item.label, item.shortcut)
@@ -881,6 +892,7 @@ mod tests {
                 Tool::Pen,
                 Tool::Highlighter,
                 Tool::Redact,
+                Tool::Pixelate,
             ]
         );
     }
@@ -1145,6 +1157,7 @@ mod tests {
                 Tool::Pen,
                 Tool::Highlighter,
                 Tool::Redact,
+                Tool::Pixelate,
             ]
         );
     }
@@ -1166,5 +1179,121 @@ mod tests {
         assert!(more_tools.contains(&Tool::Line));
         assert!(more_tools.contains(&Tool::Highlighter));
         assert!(more_tools.contains(&Tool::Redact));
+    }
+
+    // -- pixelate tool (Task 4) -----------------------------------------------
+
+    use iced::keyboard::key::Key;
+    use iced::keyboard::Modifiers;
+
+    fn wide_tools() -> Vec<Tool> {
+        toolbar_model(&state(), 1100.0).visible_tools
+    }
+
+    fn compact_tools() -> Vec<Tool> {
+        toolbar_model(&state(), 800.0).visible_tools
+    }
+
+    fn narrow_visible_tools() -> Vec<Tool> {
+        toolbar_model(&state(), 600.0).visible_tools
+    }
+
+    fn narrow_more_tools() -> Vec<Tool> {
+        toolbar_model(&state(), 600.0)
+            .more
+            .iter()
+            .filter_map(|i| match i.kind {
+                ToolbarItemKind::Tool(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_for_shortcut(key: Key, modifiers: Modifiers, captured: bool) -> Option<Tool> {
+        use super::super::update::map_key_press;
+        map_key_press(&key, modifiers, captured).and_then(|msg| match msg {
+            super::super::update::Message::SelectTool(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn wide_tools_include_pixelate() {
+        assert_eq!(
+            wide_tools(),
+            vec![
+                Tool::Select,
+                Tool::Number,
+                Tool::Text,
+                Tool::Line,
+                Tool::Arrow,
+                Tool::Rectangle,
+                Tool::Pen,
+                Tool::Highlighter,
+                Tool::Redact,
+                Tool::Pixelate,
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_tools_include_pixelate() {
+        assert_eq!(
+            compact_tools(),
+            vec![
+                Tool::Select,
+                Tool::Number,
+                Tool::Text,
+                Tool::Line,
+                Tool::Arrow,
+                Tool::Rectangle,
+                Tool::Pen,
+                Tool::Highlighter,
+                Tool::Redact,
+                Tool::Pixelate,
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_visible_tools_exclude_pixelate() {
+        assert!(!narrow_visible_tools().contains(&Tool::Pixelate));
+    }
+
+    #[test]
+    fn narrow_more_tools_include_pixelate() {
+        assert!(narrow_more_tools().contains(&Tool::Pixelate));
+    }
+
+    #[test]
+    fn b_shortcut_selects_pixelate() {
+        assert_eq!(
+            tool_for_shortcut(Key::Character("b".into()), Modifiers::default(), false),
+            Some(Tool::Pixelate)
+        );
+    }
+
+    #[test]
+    fn b_shortcut_with_alt_ignored() {
+        assert_eq!(
+            tool_for_shortcut(Key::Character("b".into()), Modifiers::ALT, false),
+            None
+        );
+    }
+
+    #[test]
+    fn b_shortcut_when_captured_ignored() {
+        assert_eq!(
+            tool_for_shortcut(Key::Character("b".into()), Modifiers::default(), true),
+            None
+        );
+    }
+
+    #[test]
+    fn pixelate_tooltip() {
+        assert_eq!(
+            tool_tooltip(Tool::Pixelate),
+            "Pixelate (B) — visual obfuscation only; use Redact to securely remove information."
+        );
     }
 }

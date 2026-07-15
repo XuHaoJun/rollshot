@@ -16,6 +16,13 @@ pub enum TextAnchor {
     Center,
 }
 
+/// A render instruction: either a vector shape or a raster pixelate command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderCommand {
+    Shape(RenderShape),
+    Pixelate { bounds: ImageRect, block_size: u32 },
+}
+
 /// A framework-neutral drawing primitive in image coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderShape {
@@ -125,7 +132,7 @@ pub fn text_plate_rect(position: ImagePoint, text: &str, style: TextStyle) -> Im
 /// Drawing primitives for one committed annotation, in paint order.
 /// Flattening never includes selection handles, hover effects, or drafts
 /// (spec §6) — those are editor concerns and never enter this model.
-pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
+pub fn annotation_commands(annotation: &Annotation) -> Vec<RenderCommand> {
     match annotation {
         Annotation::TwoPoint {
             kind,
@@ -136,19 +143,19 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
         } => {
             let alpha = (style.opacity * 255.0).round() as u8;
             let color = style.color.with_alpha(alpha);
-            let mut shapes = vec![RenderShape::Line {
+            let mut cmds = vec![RenderCommand::Shape(RenderShape::Line {
                 start: *start,
                 end: *end,
                 width: style.width,
                 color,
-            }];
+            })];
             if *kind == TwoPointKind::Arrow && start.distance(*end) > 0.0 {
-                shapes.push(RenderShape::Triangle {
+                cmds.push(RenderCommand::Shape(RenderShape::Triangle {
                     points: arrowhead_points(*start, *end, style.width),
                     color,
-                });
+                }));
             }
-            shapes
+            cmds
         }
         Annotation::NumberCallout {
             number,
@@ -159,31 +166,31 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
         } => {
             let radius = number_radius(*style);
             let outline_width = style::NUMBER_BUBBLE_OUTLINE_WIDTH * style.size.scale();
-            let mut shapes = Vec::with_capacity(3);
+            let mut cmds = Vec::with_capacity(3);
             if let Some(points) = leader_triangle(*tip, *bubble, *style) {
-                shapes.push(RenderShape::Triangle {
+                cmds.push(RenderCommand::Shape(RenderShape::Triangle {
                     points,
                     color: style.accent.opaque(),
-                });
+                }));
             }
-            shapes.push(RenderShape::Circle {
+            cmds.push(RenderCommand::Shape(RenderShape::Circle {
                 center: *bubble,
                 radius,
                 fill: style.accent.opaque(),
                 outline_width,
                 outline: style::WHITE,
-            });
+            }));
             let label = number.to_string();
             let px = number_label_px(&label, *style);
-            shapes.push(RenderShape::Label {
+            cmds.push(RenderCommand::Shape(RenderShape::Label {
                 anchor: *bubble,
                 anchor_kind: TextAnchor::Center,
                 content: label,
                 px,
                 bold: true,
                 color: style::WHITE,
-            });
-            shapes
+            }));
+            cmds
         }
         Annotation::TextNote {
             position,
@@ -192,29 +199,39 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
             ..
         } => {
             let pad = style::TEXT_NOTE_PLATE_PADDING;
-            let mut shapes = Vec::with_capacity(2);
+            let mut cmds = Vec::with_capacity(2);
             if let Some(bg) = style.background {
-                shapes.push(RenderShape::Rect {
+                cmds.push(RenderCommand::Shape(RenderShape::Rect {
                     rect: text_plate_rect(*position, text, *style),
                     color: bg.with_alpha(TEXT_BACKGROUND_ALPHA),
-                });
+                }));
             }
             let label_x = position.x + pad;
             let label_y = position.y + pad;
-            shapes.push(RenderShape::Label {
+            cmds.push(RenderCommand::Shape(RenderShape::Label {
                 anchor: ImagePoint::new(label_x, label_y),
                 anchor_kind: TextAnchor::TopLeft,
                 content: text.clone(),
                 px: style.font_size.pixels(),
                 bold: false,
                 color: style.text_color.opaque(),
-            });
-            shapes
+            }));
+            cmds
         }
-        Annotation::OpaqueRedaction { bounds, .. } => vec![RenderShape::Rect {
-            rect: *bounds,
-            color: style::REDACTION_FILL,
-        }],
+        Annotation::OpaqueRedaction { bounds, .. } => {
+            vec![RenderCommand::Shape(RenderShape::Rect {
+                rect: *bounds,
+                color: style::REDACTION_FILL,
+            })]
+        }
+        Annotation::Pixelate {
+            bounds, block_size, ..
+        } => {
+            vec![RenderCommand::Pixelate {
+                bounds: *bounds,
+                block_size: *block_size,
+            }]
+        }
         Annotation::Shape {
             kind,
             bounds,
@@ -225,23 +242,36 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
             let alpha = (stroke.opacity * 255.0).round() as u8;
             let stroke_color = stroke.color.with_alpha(alpha);
             let fill_color = fill.map(|c| c.opaque());
-            vec![RenderShape::Box {
+            vec![RenderCommand::Shape(RenderShape::Box {
                 kind: *kind,
                 bounds: *bounds,
                 stroke: stroke_color,
                 stroke_width: stroke.width,
                 fill: fill_color,
-            }]
+            })]
         }
         Annotation::Freehand { points, style, .. } => {
             let alpha = (style.opacity * 255.0).round() as u8;
-            vec![RenderShape::Polyline {
+            vec![RenderCommand::Shape(RenderShape::Polyline {
                 points: points.clone(),
                 width: style.width,
                 color: style.color.with_alpha(alpha),
-            }]
+            })]
         }
     }
+}
+
+/// Drawing primitives for one committed annotation, in paint order.
+/// Filters [`annotation_commands`] to vector shapes only, for callers
+/// that do not handle raster commands.
+pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
+    annotation_commands(annotation)
+        .into_iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Conservative image-space bounds of an annotation's visuals — used for
@@ -285,7 +315,7 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
             style,
             ..
         } => text_plate_rect(*position, text, *style),
-        Annotation::OpaqueRedaction { bounds, .. } => *bounds,
+        Annotation::OpaqueRedaction { bounds, .. } | Annotation::Pixelate { bounds, .. } => *bounds,
         Annotation::Shape { bounds, stroke, .. } => {
             crate::box_shape::shape_visual_bounds(*bounds, stroke.width)
         }

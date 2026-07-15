@@ -42,6 +42,15 @@ pub struct ImageRect {
 }
 
 impl ImageRect {
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     pub fn is_finite(&self) -> bool {
         self.x.is_finite()
             && self.y.is_finite()

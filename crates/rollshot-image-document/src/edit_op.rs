@@ -92,6 +92,18 @@ pub enum EditOp {
         id: AnnotationId,
         points: Vec<ImagePoint>,
     },
+    AddPixelate {
+        bounds: ImageRect,
+        block_size: u32,
+    },
+    UpdatePixelateBounds {
+        id: AnnotationId,
+        bounds: ImageRect,
+    },
+    UpdatePixelateBlockSize {
+        id: AnnotationId,
+        block_size: u32,
+    },
 }
 
 /// Result of a successful `apply_batch`: ids allocated for the Add* ops, in the
