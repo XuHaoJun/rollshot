@@ -2374,4 +2374,24 @@ mod tests {
         d.set_stroke_style(id, StrokeStyle::default()).unwrap();
         assert_eq!(d.state_id(), s);
     }
+
+    #[test]
+    fn shared_source_arc_sharing_contract() {
+        let d = doc();
+        let a = d.shared_source();
+        let b = d.shared_source();
+        assert!(Arc::ptr_eq(&a, &b), "shared_source must return clones of the same Arc");
+
+        let before = d.source().as_raw().to_vec();
+        let mut flat = d.flatten();
+        // Mutate the flattened copy.
+        for px in flat.pixels_mut() {
+            px[0] = 255;
+        }
+        assert_eq!(
+            d.source().as_raw(),
+            before.as_slice(),
+            "mutating a flattened copy must not change the document source"
+        );
+    }
 }
