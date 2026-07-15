@@ -9,7 +9,9 @@ use image::RgbaImage;
 use crate::detector::{CandidateMarker, Detector, DetectorConfig};
 use crate::diagnostics::TARGET_ACTION;
 use crate::frame_store::{FrameStore, StoreConfig};
-use crate::models::{CandidateId, CandidateStep, CaptureRegion, Millis, TimedSemanticAction};
+use crate::models::{
+    CandidateId, CandidateStep, CaptureRegion, FrameId, Millis, TimedSemanticAction,
+};
 
 /// Output of a finished recording: detected candidates and the frame store that
 /// still holds their retained keyframe/nearby pixels.
@@ -20,7 +22,17 @@ pub struct Recording {
 
 struct Pending {
     marker: CandidateMarker,
+    observed_through_id: FrameId,
     resolve_at: u64,
+}
+
+fn remaining_after_frames(
+    center_id: FrameId,
+    observed_through_id: FrameId,
+    window_after: u64,
+) -> u64 {
+    let already_observed = observed_through_id.saturating_sub(center_id);
+    window_after.saturating_sub(already_observed)
 }
 
 pub struct ActionRecorder {
@@ -30,6 +42,7 @@ pub struct ActionRecorder {
     detector: Detector,
     window_after: u64,
     frame_count: u64,
+    last_analyzed_id: Option<FrameId>,
     pending: Vec<Pending>,
     candidates: Vec<CandidateStep>,
     next_candidate_id: CandidateId,
@@ -44,6 +57,7 @@ impl ActionRecorder {
             detector: Detector::new(det),
             window_after,
             frame_count: 0,
+            last_analyzed_id: None,
             pending: Vec::new(),
             candidates: Vec::new(),
             next_candidate_id: 0,
@@ -55,11 +69,9 @@ impl ActionRecorder {
         self.store.ingest(image, at_ms);
         self.frame_count += 1;
         while let Some(frame) = self.store.take_analysis() {
+            self.last_analyzed_id = Some(frame.id);
             if let Some(marker) = self.detector.observe_frame(&frame) {
-                self.pending.push(Pending {
-                    marker,
-                    resolve_at: self.frame_count + self.window_after,
-                });
+                self.queue_marker(marker, frame.id, false);
             }
         }
         self.resolve_ready();
@@ -77,21 +89,17 @@ impl ActionRecorder {
 
     pub fn finish(mut self) -> Recording {
         while let Some(frame) = self.store.take_analysis() {
+            self.last_analyzed_id = Some(frame.id);
             if let Some(marker) = self.detector.observe_frame(&frame) {
-                self.pending.push(Pending {
-                    marker,
-                    resolve_at: self.frame_count,
-                });
+                self.queue_marker(marker, frame.id, true);
             }
         }
         if let Some(marker) = self.detector.finish() {
-            self.pending.push(Pending {
-                marker,
-                resolve_at: self.frame_count,
-            });
+            let observed = self.last_analyzed_id.unwrap_or(marker.center_id);
+            self.queue_marker(marker, observed, true);
         }
         for p in std::mem::take(&mut self.pending) {
-            self.finalize(p.marker);
+            self.finalize(p);
         }
         Recording {
             candidates: self.candidates,
@@ -99,12 +107,30 @@ impl ActionRecorder {
         }
     }
 
+    fn queue_marker(
+        &mut self,
+        marker: CandidateMarker,
+        observed_through_id: FrameId,
+        finishing: bool,
+    ) {
+        let remaining = if finishing {
+            0
+        } else {
+            remaining_after_frames(marker.center_id, observed_through_id, self.window_after)
+        };
+        self.pending.push(Pending {
+            marker,
+            observed_through_id,
+            resolve_at: self.frame_count.saturating_add(remaining),
+        });
+    }
+
     fn resolve_ready(&mut self) {
         let now = self.frame_count;
         let mut still = Vec::new();
         for p in std::mem::take(&mut self.pending) {
             if p.resolve_at <= now {
-                self.finalize(p.marker);
+                self.finalize(p);
             } else {
                 still.push(p);
             }
@@ -112,12 +138,17 @@ impl ActionRecorder {
         self.pending = still;
     }
 
-    fn finalize(&mut self, marker: CandidateMarker) {
+    fn finalize(&mut self, pending: Pending) {
+        let marker = pending.marker;
         let window = self.store.retain_window(marker.center_id);
         if window.is_empty() {
+            let ring_bounds = self.store.ring_bounds();
             tracing::debug!(
                 target: TARGET_ACTION,
                 center = marker.center_id,
+                observed_through = pending.observed_through_id,
+                ring_oldest = ring_bounds.map(|bounds| bounds.0),
+                ring_newest = ring_bounds.map(|bounds| bounds.1),
                 "candidate window unavailable; dropping (bounded loss)"
             );
             return;
@@ -143,7 +174,9 @@ mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
     use crate::frame_store::StoreConfig;
-    use crate::models::{CandidateKind, CaptureRegion};
+    use crate::models::{
+        CandidateKind, CaptureRegion, MouseButton, SemanticAction, TimedSemanticAction,
+    };
     use image::{Rgba, RgbaImage};
 
     fn region() -> CaptureRegion {
@@ -218,6 +251,16 @@ mod tests {
     }
 
     #[test]
+    fn peak_marker_waits_only_for_after_frames_not_already_observed() {
+        assert_eq!(remaining_after_frames(2, 7, 8), 3);
+    }
+
+    #[test]
+    fn current_frame_marker_keeps_the_existing_full_after_window() {
+        assert_eq!(remaining_after_frames(7, 7, 8), 8);
+    }
+
+    #[test]
     fn ingest_never_blocks_and_every_keyframe_survives_a_burst() {
         let mut rec = ActionRecorder::new(region(), store_cfg(), cfg());
         rec.ingest_frame(black(), 0);
@@ -232,5 +275,41 @@ mod tests {
                 "every step keyframe must be retained for export"
             );
         }
+    }
+
+    fn localized_image() -> RgbaImage {
+        let mut image = black();
+        for y in 0..2 {
+            for x in 0..2 {
+                image.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        image
+    }
+
+    #[test]
+    fn transient_click_peak_is_retained_as_keyframe_after_window_closes() {
+        let mut config = cfg();
+        config.area_threshold = 0.10;
+        let mut rec = ActionRecorder::new(region(), store_cfg(), config);
+        rec.ingest_frame(black(), 0);
+        rec.ingest_event(TimedSemanticAction {
+            action: SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            at_ms: 100,
+        });
+        rec.ingest_frame(localized_image(), 200); // id 1: important peak
+        rec.ingest_frame(black(), 400);
+        rec.ingest_frame(black(), 800); // closes click window
+
+        let recording = rec.finish();
+        assert_eq!(recording.candidates.len(), 1);
+        let step = &recording.candidates[0];
+        assert_eq!(step.kind, CandidateKind::Click);
+        assert_eq!(step.keyframe, 1);
+        assert!(step.nearby.contains(&1));
+        assert!(recording.store.retained(1).is_some());
     }
 }
