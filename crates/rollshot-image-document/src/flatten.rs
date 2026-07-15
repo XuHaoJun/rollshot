@@ -21,8 +21,8 @@ pub(crate) fn flatten_onto(source: &RgbaImage, annotations: &[Annotation]) -> Rg
             match command {
                 RenderCommand::Shape(shape) => draw_shape(&mut out, &shape),
                 RenderCommand::Pixelate { bounds, block_size } => {
+                    let started = std::time::Instant::now();
                     if let Ok(region) = pixelate_region(source, bounds, block_size) {
-                        let started = std::time::Instant::now();
                         apply_pixelate(&mut out, &region);
                         tracing::debug!(
                             target: "rollshot::annotation",
