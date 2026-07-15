@@ -505,6 +505,9 @@ fn grab_offset(annotation: &Annotation, part: HitPart, point: ImagePoint) -> (f3
         (Annotation::Shape { bounds, .. }, HitPart::Body) => {
             (point.x - bounds.x, point.y - bounds.y)
         }
+        (Annotation::Pixelate { bounds, .. }, HitPart::Body) => {
+            (point.x - bounds.x, point.y - bounds.y)
+        }
         (Annotation::Freehand { points, .. }, HitPart::Body) => {
             (point.x - points[0].x, point.y - points[0].y)
         }
@@ -530,6 +533,16 @@ pub(crate) fn direct_manipulation_hit(
                     part,
                 })
         }
+        Tool::Pixelate => {
+            let annotation = document.annotation(editor.selection?)?;
+            matches!(annotation, Annotation::Pixelate { .. })
+                .then(|| hit_test_annotation(annotation, point, tolerance))
+                .flatten()
+                .map(|part| Hit {
+                    id: annotation.id(),
+                    part,
+                })
+        }
         Tool::Number
         | Tool::Text
         | Tool::Line
@@ -537,8 +550,7 @@ pub(crate) fn direct_manipulation_hit(
         | Tool::Rectangle
         | Tool::Ellipse
         | Tool::Pen
-        | Tool::Highlighter
-        | Tool::Pixelate => None,
+        | Tool::Highlighter => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -735,6 +747,24 @@ pub(crate) fn handle_canvas_pressed(
             Task::none()
         }
         Tool::Pixelate => {
+            if let Some(hit) =
+                direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance)
+            {
+                let original = state
+                    .document
+                    .image
+                    .annotation(hit.id)
+                    .expect("hit returns existing annotations")
+                    .clone();
+                state.editor.drag = Some(DragState::EditAnnotation {
+                    part: hit.part,
+                    grab_offset: grab_offset(&original, hit.part, point),
+                    raw_point: point,
+                    current: original.clone(),
+                    original,
+                });
+                return Task::none();
+            }
             state.editor.drag = Some(DragState::CreatePixelate {
                 anchor: point,
                 current: point,
@@ -864,13 +894,10 @@ pub(crate) fn handle_canvas_released(
             }
         }
         Some(DragState::CreatePixelate { anchor, .. }) => {
-            let block_size = state.annotation_defaults.values.pixelate_block_size;
-            if let Ok(id) = state
-                .document
-                .image
-                .add_pixelate(ImageRect::from_corners(anchor, point), block_size)
-            {
-                set_selection(state, Some(id));
+            let bounds = super::box_tool::creation_bounds(anchor, point, shift, w, h);
+            if super::box_tool::meets_creation_threshold(bounds, scale) {
+                let block_size = state.annotation_defaults.values.pixelate_block_size;
+                let _ = state.document.image.add_pixelate(bounds, block_size);
             }
         }
         Some(DragState::CreateShape {
@@ -6885,6 +6912,336 @@ mod tests {
             state.editor.properties.opacity.as_ref().unwrap().preview,
             1.0
         );
+    }
+
+    // -- pixelate creation gesture (Task 5) ----------------------------------
+
+    #[test]
+    fn pixelate_release_commits_once_and_keeps_tool_active() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 12.0),
+            ImagePoint::new(40.0, 32.0),
+        );
+        assert_eq!(state.editor.tool, Tool::Pixelate);
+        assert_eq!(state.editor.selection, None);
+        assert_eq!(state.document.image.annotations().len(), 1);
+        assert!(
+            matches!(state.document.image.annotations()[0], Annotation::Pixelate { bounds, block_size: 16, .. } if bounds == ImageRect { x: 10.0, y: 12.0, width: 30.0, height: 20.0 })
+        );
+        assert!(state.document.image.undo());
+        assert!(state.document.image.annotations().is_empty());
+    }
+
+    #[test]
+    fn pixelate_reverse_drag_normalizes_bounds() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(40.0, 32.0),
+            ImagePoint::new(10.0, 12.0),
+        );
+        assert_eq!(state.document.image.annotations().len(), 1);
+        assert!(
+            matches!(state.document.image.annotations()[0], Annotation::Pixelate { bounds, .. } if bounds == ImageRect { x: 10.0, y: 12.0, width: 30.0, height: 20.0 })
+        );
+    }
+
+    #[test]
+    fn pixelate_shift_creates_square() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(
+            &mut state,
+            Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        );
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(40.0, 25.0),
+        );
+        assert_eq!(state.document.image.annotations().len(), 1);
+        match &state.document.image.annotations()[0] {
+            Annotation::Pixelate { bounds, .. } => {
+                assert_eq!(bounds.width, bounds.height, "shift must produce square");
+                assert_eq!(bounds.width, 15.0, "min delta = 15");
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_click_sub_threshold_creates_nothing() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(10.0, 10.0),
+            ImagePoint::new(10.0, 10.0),
+        );
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+    }
+
+    #[test]
+    fn pixelate_escape_cancels_creation_without_history() {
+        let mut state = workspace_with_size(100, 100);
+        state.editor.tool = Tool::Pixelate;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(40.0, 40.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreatePixelate { .. })
+        ));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert!(state.document.image.annotations().is_empty());
+        assert!(!state.document.image.can_undo());
+        assert_eq!(state.editor.tool, Tool::Pixelate);
+    }
+
+    #[test]
+    fn pixelate_creation_over_existing_annotation_does_not_edit_or_select_it() {
+        let mut state = workspace_with_size(100, 100);
+        let existing_id = state
+            .document
+            .image
+            .add_number_callout(ImagePoint::new(10.0, 10.0), ImagePoint::new(10.0, 10.0));
+        state.editor.tool = Tool::Pixelate;
+        press_move_release(
+            &mut state,
+            ImagePoint::new(5.0, 5.0),
+            ImagePoint::new(30.0, 30.0),
+        );
+        assert_eq!(state.document.image.annotations().len(), 2);
+        assert_eq!(state.editor.selection, None);
+        assert_eq!(state.editor.tool, Tool::Pixelate);
+        assert!(state.document.image.annotation(existing_id).is_some());
+    }
+
+    // -- pixelate direct manipulation (Task 5) -------------------------------
+
+    fn workspace_with_pixelate() -> (super::super::ResultWorkspace, AnnotationId) {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        (state, id)
+    }
+
+    #[test]
+    fn select_mode_body_hit_on_pixelate_selects_and_starts_drag() {
+        let (mut state, id) = workspace_with_pixelate();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(70.0, 65.0), Instant::now());
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::EditAnnotation { .. })
+        ));
+        assert_eq!(state.editor.selection, Some(id));
+    }
+
+    #[test]
+    fn select_mode_empty_miss_on_pixelate_clears_selection() {
+        let (mut state, _id) = workspace_with_pixelate();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        assert!(state.editor.selection.is_none());
+        assert!(matches!(state.editor.drag, Some(DragState::Pan { .. })));
+    }
+
+    #[test]
+    fn pixelate_body_move_preserves_size_and_block_size() {
+        let (mut state, id) = workspace_with_pixelate();
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(100.0, 95.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate {
+                bounds,
+                block_size, ..
+            } => {
+                assert_eq!(*block_size, 16, "block_size preserved");
+                assert_eq!(bounds.width, 40.0, "width preserved");
+                assert_eq!(bounds.height, 30.0, "height preserved");
+                assert_eq!(bounds.x, 80.0, "x moved");
+                assert_eq!(bounds.y, 80.0, "y moved");
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_body_move_clamps_to_image_bounds() {
+        let (mut state, id) = workspace_with_pixelate();
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(200.0, 200.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert!(bounds.x + bounds.width <= 200.0);
+                assert!(bounds.y + bounds.height <= 200.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_resize_from_handle_commits_new_bounds() {
+        let (mut state, id) = workspace_with_pixelate();
+        // BottomRight handle at (90, 80)
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(120.0, 110.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert_eq!(bounds.x, 50.0);
+                assert_eq!(bounds.y, 50.0);
+                assert_eq!(bounds.width, 70.0);
+                assert_eq!(bounds.height, 60.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_resize_from_inverted_handle_normalizes() {
+        let (mut state, id) = workspace_with_pixelate();
+        // Drag BottomRight past TopLeft
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(30.0, 30.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert!(bounds.width > 0.0);
+                assert!(bounds.height > 0.0);
+                assert_eq!(bounds.x, 30.0);
+                assert_eq!(bounds.y, 30.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_resize_with_shift_preserves_aspect_ratio() {
+        let (mut state, id) = workspace_with_pixelate();
+        let _ = update(
+            &mut state,
+            Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        );
+        // BottomRight handle at (90, 80)
+        press_move_release(
+            &mut state,
+            ImagePoint::new(90.0, 80.0),
+            ImagePoint::new(110.0, 100.0),
+        );
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                let ratio = bounds.width / bounds.height;
+                assert!(
+                    (ratio - 40.0 / 30.0).abs() < 0.01,
+                    "aspect ratio preserved: {ratio} vs {}",
+                    40.0 / 30.0
+                );
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_escape_restores_original_bounds() {
+        let (mut state, id) = workspace_with_pixelate();
+        let original = state.document.image.annotation(id).unwrap().clone();
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(90.0, 80.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(120.0, 110.0));
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.drag.is_none());
+        assert_eq!(state.document.image.annotation(id), Some(&original));
+    }
+
+    #[test]
+    fn pixelate_delete_removes_annotation() {
+        let (mut state, id) = workspace_with_pixelate();
+        let _ = update(&mut state, Message::DeleteSelected);
+        assert!(state.document.image.annotations().is_empty());
+        assert_eq!(state.editor.selection, None);
+    }
+
+    #[test]
+    fn pixelate_move_or_resize_creates_one_undo_entry() {
+        let (mut state, id) = workspace_with_pixelate();
+        press_move_release(
+            &mut state,
+            ImagePoint::new(70.0, 65.0),
+            ImagePoint::new(100.0, 95.0),
+        );
+        assert!(state.document.image.can_undo());
+        state.document.image.undo();
+        match state.document.image.annotation(id).unwrap() {
+            Annotation::Pixelate { bounds, .. } => {
+                assert_eq!(bounds.x, 50.0);
+                assert_eq!(bounds.y, 50.0);
+            }
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixelate_tool_hit_tests_selected_pixelate_only() {
+        let mut state = workspace_with_size(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        state.editor.tool = Tool::Pixelate;
+        state.editor.selection = Some(id);
+
+        // Hit on body starts EditAnnotation drag
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(70.0, 65.0), Instant::now());
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::EditAnnotation { .. })
+        ));
+
+        // Reset
+        state.editor.drag = None;
+
+        // Miss on empty canvas starts CreatePixelate
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreatePixelate { .. })
+        ));
     }
 
     #[test]

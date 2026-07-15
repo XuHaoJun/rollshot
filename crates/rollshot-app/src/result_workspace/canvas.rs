@@ -226,6 +226,20 @@ pub fn dragged_annotation(
                 *bounds, handle, point, shift, scale, width, height,
             );
         }
+        (Annotation::Pixelate { bounds, .. }, HitPart::Body) => {
+            *bounds = super::box_tool::moved_bounds(
+                *bounds,
+                point,
+                ImagePoint::new(grab_offset.0, grab_offset.1),
+                width,
+                height,
+            );
+        }
+        (Annotation::Pixelate { bounds, .. }, HitPart::Resize(handle)) => {
+            *bounds = super::box_tool::resized_bounds(
+                *bounds, handle, point, shift, scale, width, height,
+            );
+        }
         (Annotation::Freehand { points, .. }, HitPart::Body) => {
             *points =
                 super::freehand_tool::translated_points(points, point, grab_offset, width, height);
@@ -578,10 +592,17 @@ impl AnnotationCanvas<'_> {
                     .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
             }
             Some(DragState::CreatePixelate { anchor, current }) => {
-                let rect = ImageRect::from_corners(*anchor, *current);
-                (!rect.is_empty()).then_some(Annotation::pixelate(
+                let (w, h) = self.document.source().dimensions();
+                let bounds = super::box_tool::creation_bounds(
+                    *anchor,
+                    *current,
+                    self.modifiers.shift(),
+                    w,
+                    h,
+                );
+                (!bounds.is_empty()).then_some(Annotation::pixelate(
                     AnnotationId(u64::MAX),
-                    rect,
+                    bounds,
                     self.annotation_defaults.values.pixelate_block_size,
                 ))
             }
@@ -1200,6 +1221,76 @@ mod tests {
                 assert_eq!(points[1], ImagePoint::new(25.0, 35.0));
             }
             _ => panic!("expected freehand"),
+        }
+    }
+
+    #[test]
+    fn dragged_pixelate_body_preserves_size_and_block_size() {
+        let original = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 20.0,
+                y: 20.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let moved = dragged_annotation(
+            &original,
+            HitPart::Body,
+            ImagePoint::new(60.0, 50.0),
+            (5.0, 5.0),
+            false,
+            (200, 200),
+            1.0,
+        );
+        match moved {
+            Annotation::Pixelate {
+                bounds,
+                block_size, ..
+            } => {
+                assert_eq!(block_size, 16, "block_size unchanged");
+                assert_eq!(bounds.width, 40.0, "width preserved");
+                assert_eq!(bounds.height, 30.0, "height preserved");
+                assert_eq!(bounds.x, 55.0, "x moved by pointer - offset");
+                assert_eq!(bounds.y, 45.0, "y moved by pointer - offset");
+            }
+            _ => panic!("expected Pixelate"),
+        }
+    }
+
+    #[test]
+    fn dragged_pixelate_resize_preserves_block_size() {
+        let original = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 20.0,
+                y: 20.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let resized = dragged_annotation(
+            &original,
+            HitPart::Resize(ResizeHandle::BottomRight),
+            ImagePoint::new(80.0, 70.0),
+            (0.0, 0.0),
+            false,
+            (200, 200),
+            1.0,
+        );
+        match resized {
+            Annotation::Pixelate {
+                bounds,
+                block_size, ..
+            } => {
+                assert_eq!(block_size, 16, "block_size unchanged during resize");
+                assert_eq!(bounds.width, 60.0);
+                assert_eq!(bounds.height, 50.0);
+            }
+            _ => panic!("expected Pixelate"),
         }
     }
 
