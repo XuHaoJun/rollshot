@@ -19,6 +19,8 @@ mod input;
 mod metrics;
 mod models;
 mod recorder;
+#[cfg(test)]
+mod semantic_fixture_tests;
 mod storyboard;
 mod video;
 pub mod visual_annotation_proposal;
