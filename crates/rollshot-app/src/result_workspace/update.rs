@@ -555,16 +555,6 @@ pub(crate) fn direct_manipulation_hit(
                     part,
                 })
         }
-        Tool::Pixelate => {
-            let annotation = document.annotation(editor.selection?)?;
-            matches!(annotation, Annotation::Pixelate { .. })
-                .then(|| hit_test_annotation(annotation, point, tolerance))
-                .flatten()
-                .map(|part| Hit {
-                    id: annotation.id(),
-                    part,
-                })
-        }
         Tool::Number
         | Tool::Text
         | Tool::Line
@@ -572,7 +562,8 @@ pub(crate) fn direct_manipulation_hit(
         | Tool::Rectangle
         | Tool::Ellipse
         | Tool::Pen
-        | Tool::Highlighter => None,
+        | Tool::Highlighter
+        | Tool::Pixelate => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -769,24 +760,6 @@ pub(crate) fn handle_canvas_pressed(
             Task::none()
         }
         Tool::Pixelate => {
-            if let Some(hit) =
-                direct_manipulation_hit(&state.document.image, &state.editor, point, tolerance)
-            {
-                let original = state
-                    .document
-                    .image
-                    .annotation(hit.id)
-                    .expect("hit returns existing annotations")
-                    .clone();
-                state.editor.drag = Some(DragState::EditAnnotation {
-                    part: hit.part,
-                    grab_offset: grab_offset(&original, hit.part, point),
-                    raw_point: point,
-                    current: original.clone(),
-                    original,
-                });
-                return Task::none();
-            }
             state.editor.drag = Some(DragState::CreatePixelate {
                 anchor: point,
                 current: point,
@@ -7365,7 +7338,7 @@ mod tests {
     }
 
     #[test]
-    fn pixelate_tool_hit_tests_selected_pixelate_only() {
+    fn pixelate_tool_creates_over_selected_pixelate() {
         let mut state = workspace_with_size(200, 200);
         let id = state
             .document
@@ -7383,22 +7356,18 @@ mod tests {
         state.editor.tool = Tool::Pixelate;
         state.editor.selection = Some(id);
 
-        // Hit on body starts EditAnnotation drag
+        let original = state.document.image.annotation(id).unwrap().clone();
+
         let _ = handle_canvas_pressed(&mut state, ImagePoint::new(70.0, 65.0), Instant::now());
-        assert!(matches!(
-            state.editor.drag,
-            Some(DragState::EditAnnotation { .. })
-        ));
-
-        // Reset
-        state.editor.drag = None;
-
-        // Miss on empty canvas starts CreatePixelate
-        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(10.0, 10.0), Instant::now());
         assert!(matches!(
             state.editor.drag,
             Some(DragState::CreatePixelate { .. })
         ));
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(110.0, 105.0));
+        let _ = handle_canvas_released(&mut state, ImagePoint::new(110.0, 105.0));
+
+        assert_eq!(state.document.image.annotation(id), Some(&original));
+        assert_eq!(state.document.image.annotations().len(), 2);
     }
 
     #[test]
