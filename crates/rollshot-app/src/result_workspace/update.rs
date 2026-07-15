@@ -10,7 +10,7 @@ use super::canvas::{
     dragged_annotation, DragState, EditorState, TextDraft, Tool, DOUBLE_CLICK_SLOP_SCREEN,
     DOUBLE_CLICK_WINDOW_MS, HIT_TOLERANCE_SCREEN,
 };
-use super::pixelate_preview::{generate_preview, requested_pixelate_keys, source_id_from_arc};
+use super::pixelate_preview::{generate_preview, requested_pixelate_keys};
 use super::two_point::{bounded_constrained_endpoint, gesture_meets_threshold};
 use super::{CloseDecision, InlineMessage, WHEEL_LINE_PX};
 use rollshot_image_document::{
@@ -180,6 +180,7 @@ pub enum Message {
     /// Commit the pixelate block size transaction.
     ApplyPixelateBlockSize,
     /// Cancel the pixelate block size transaction without mutation.
+    #[allow(dead_code)]
     CancelPixelateBlockSize,
     /// Toggle the shapes selector menu.
     ToggleShapesMenu,
@@ -7308,7 +7309,7 @@ mod tests {
 
     #[test]
     fn pixelate_delete_removes_annotation() {
-        let (mut state, id) = workspace_with_pixelate();
+        let (mut state, _id) = workspace_with_pixelate();
         let _ = update(&mut state, Message::DeleteSelected);
         assert!(state.document.image.annotations().is_empty());
         assert_eq!(state.editor.selection, None);
@@ -7400,12 +7401,7 @@ mod tests {
                 img.put_pixel(
                     x,
                     y,
-                    Rgba([
-                        (x % 256) as u8,
-                        (y % 256) as u8,
-                        ((x + y) % 256) as u8,
-                        255,
-                    ]),
+                    Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255]),
                 );
             }
         }
@@ -7616,7 +7612,11 @@ mod tests {
         let output_bs16 = state.document.image.flatten();
 
         // Change block_size — this must produce a different flatten.
-        state.document.image.set_pixelate_block_size(id, 32).unwrap();
+        state
+            .document
+            .image
+            .set_pixelate_block_size(id, 32)
+            .unwrap();
         let output_bs32 = state.document.image.flatten();
 
         assert_ne!(

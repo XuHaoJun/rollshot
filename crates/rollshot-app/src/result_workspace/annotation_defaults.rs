@@ -858,8 +858,10 @@ mod tests {
     #[test]
     fn pixelate_block_size_round_trips_boundary_values() {
         let ctx = TestContext::new();
-        let mut values = AnnotationDefaults::default();
-        values.pixelate_block_size = 4;
+        let mut values = AnnotationDefaults {
+            pixelate_block_size: 4,
+            ..Default::default()
+        };
         save_to(&ctx.path(), &values).unwrap();
         let loaded = load_from(&ctx.path());
         assert_eq!(loaded.values.pixelate_block_size, 4);
@@ -894,8 +896,10 @@ mod tests {
     #[test]
     fn failed_pixelate_save_retains_in_memory_value() {
         let ctx = TestContext::new();
-        let mut values = AnnotationDefaults::default();
-        values.pixelate_block_size = 24;
+        let values = AnnotationDefaults {
+            pixelate_block_size: 24,
+            ..Default::default()
+        };
         let result = save_to_with_writer(&ctx.path(), &values, |_path, _bytes| {
             Err("injected failure".to_string())
         });

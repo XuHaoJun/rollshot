@@ -696,9 +696,12 @@ mod tests {
 
     // -- Step 1: Scheduler tests -----------------------------------------------
 
-    use super::*;
+    use super::{
+        generate_preview, requested_pixelate_keys, source_id_from_arc, PreviewKey, PreviewRequest,
+        RasterRegion,
+    };
     use image::{Rgba, RgbaImage};
-    use rollshot_image_document::ImageDocument;
+    use rollshot_image_document::{Annotation, ImageDocument, ImageRect};
 
     fn make_doc(w: u32, h: u32) -> ImageDocument {
         ImageDocument::new(RgbaImage::from_pixel(w, h, Rgba([100, 150, 200, 255])))
@@ -716,7 +719,7 @@ mod tests {
     #[test]
     fn collector_returns_keys_for_visible_committed_pixelate() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -733,7 +736,7 @@ mod tests {
     #[test]
     fn collector_includes_transient_draft_pixelate() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -759,7 +762,7 @@ mod tests {
     #[test]
     fn collector_skips_annotations_outside_visible_bounds() {
         let mut doc = make_doc(100, 10000);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -768,7 +771,7 @@ mod tests {
             },
             16,
         );
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 9000.0,
@@ -790,7 +793,7 @@ mod tests {
     #[test]
     fn collector_deduplicates_exact_keys() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -817,7 +820,7 @@ mod tests {
     #[test]
     fn no_new_key_for_scroll_only_repositioning() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -846,7 +849,7 @@ mod tests {
     #[test]
     fn geometry_change_produces_different_key() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -876,7 +879,7 @@ mod tests {
     #[test]
     fn block_size_change_produces_different_key() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -895,7 +898,7 @@ mod tests {
     #[test]
     fn undo_removes_key_from_requested() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -914,7 +917,7 @@ mod tests {
     #[test]
     fn redo_restores_key() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -932,7 +935,7 @@ mod tests {
     #[test]
     fn display_scale_change_produces_different_key() {
         let mut doc = make_doc(100, 100);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -967,7 +970,7 @@ mod tests {
     #[test]
     fn collector_preserves_graph_order() {
         let mut doc = make_doc(200, 200);
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 10.0,
                 y: 10.0,
@@ -976,7 +979,7 @@ mod tests {
             },
             16,
         );
-        doc.add_pixelate(
+        let _ = doc.add_pixelate(
             ImageRect {
                 x: 80.0,
                 y: 80.0,

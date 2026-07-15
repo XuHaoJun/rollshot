@@ -542,7 +542,7 @@ impl AnnotationCanvas<'_> {
     fn draw_pixelate_command(
         &self,
         frame: &mut canvas::Frame,
-        annotation_id: rollshot_image_document::AnnotationId,
+        _annotation_id: rollshot_image_document::AnnotationId,
         bounds: ImageRect,
         block_size: u32,
     ) {
