@@ -142,7 +142,6 @@ pub struct Detector {
     typing_force_end: bool,
     in_scroll: bool,
     scroll_last_at: Millis,
-    pre_scroll_baseline: Option<LumaPlane>,
 }
 
 impl Detector {
@@ -165,7 +164,6 @@ impl Detector {
             typing_force_end: false,
             in_scroll: false,
             scroll_last_at: 0,
-            pre_scroll_baseline: None,
         }
     }
 
@@ -245,7 +243,6 @@ impl Detector {
                 if !self.in_typing {
                     // Typing supersedes and clears scroll/click.
                     self.in_scroll = false;
-                    self.pre_scroll_baseline = None;
                     self.scroll_window = None;
                     self.typing_window = self
                         .prev
@@ -267,7 +264,6 @@ impl Detector {
             SemanticAction::ScrollActivity => {
                 if !self.in_typing && !self.in_scroll {
                     let baseline = self.prev.clone().or_else(|| self.baseline.clone());
-                    self.pre_scroll_baseline = baseline.clone();
                     self.scroll_window = baseline.map(SemanticWindow::new);
                     self.click_open_until = None;
                     self.click_window = None;
@@ -324,7 +320,6 @@ impl Detector {
             self.typing_force_end = false;
             self.typing_window = None;
             self.in_scroll = false;
-            self.pre_scroll_baseline = None;
             self.scroll_window = None;
             return None;
         }
@@ -461,7 +456,7 @@ impl Detector {
     }
 
     pub fn finish(&mut self) -> Option<CandidateMarker> {
-        let (id, at) = self.last_frame?;
+        let (_, at) = self.last_frame?;
 
         // Flush an open click window through the same selection helper.
         if self.click_open_until.is_some() {
@@ -492,27 +487,12 @@ impl Detector {
             self.in_scroll = false;
             self.saw_change = false;
             if let Some(w) = window {
-                let luma = self.prev.clone()?;
-                let frame = AnalysisFrame {
-                    id,
-                    at_ms: at,
-                    luma,
-                };
-                let selected = w.choose();
-                if selected.is_some() {
-                    let meaningful = match &self.pre_scroll_baseline {
-                        Some(b) => motion(b, &frame.luma, &self.config),
-                        None => self.meaningful_vs_baseline(&frame.luma),
-                    };
-                    if meaningful {
-                        return self.semantic_marker(
-                            w,
-                            at,
-                            CandidateKind::Scroll,
-                            DetectReason::ScrollSettled,
-                        );
-                    }
-                }
+                return self.semantic_marker(
+                    w,
+                    at,
+                    CandidateKind::Scroll,
+                    DetectReason::ScrollSettled,
+                );
             }
             return None;
         }
@@ -833,6 +813,22 @@ mod tests {
         det.observe_frame(&af(4, 400, quadrant(0.0, 255.0))); // dwell not elapsed (400-300 < 600)
         let m = det.finish();
         assert_eq!(m.map(|m| m.kind), Some(CandidateKind::Scroll));
+    }
+
+    #[test]
+    fn localized_scroll_peak_closes_on_finish_before_dwell() {
+        let mut config = cfg();
+        config.area_threshold = 0.10;
+        let mut det = Detector::new(config);
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+        det.observe_frame(&af(1, 200, localized(0.0, 255.0)));
+
+        let marker = det
+            .finish()
+            .expect("finish should preserve the qualifying semantic peak");
+        assert_eq!(marker.kind, CandidateKind::Scroll);
+        assert_eq!(marker.center_id, 1);
     }
 
     fn uniform_4x4(v: f32) -> LumaPlane {
