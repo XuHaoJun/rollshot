@@ -80,7 +80,10 @@ impl ActionRecorder {
     /// Feed a privacy-filtered semantic event to the detector. (P0a never calls
     /// this — `VisualOnlySource` produces none — but P0b wires real events here.)
     pub fn ingest_event(&mut self, ev: TimedSemanticAction) {
-        self.detector.observe_event(ev);
+        if let Some(marker) = self.detector.observe_event(ev) {
+            let observed = self.last_analyzed_id.unwrap_or(marker.center_id);
+            self.queue_marker(marker, observed, false);
+        }
     }
 
     pub fn dropped_analysis(&self) -> u64 {
@@ -311,5 +314,34 @@ mod tests {
         assert_eq!(step.keyframe, 1);
         assert!(step.nearby.contains(&1));
         assert!(recording.store.retained(1).is_some());
+    }
+
+    #[test]
+    fn later_click_preserves_the_prior_clicks_observed_peak() {
+        let mut config = cfg();
+        config.area_threshold = 0.10;
+        let mut rec = ActionRecorder::new(region(), store_cfg(), config);
+        rec.ingest_frame(black(), 0);
+        rec.ingest_event(TimedSemanticAction {
+            action: SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            at_ms: 100,
+        });
+        rec.ingest_frame(localized_image(), 200);
+        rec.ingest_event(TimedSemanticAction {
+            action: SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            at_ms: 300,
+        });
+        rec.ingest_frame(localized_image(), 1000);
+
+        let recording = rec.finish();
+        assert_eq!(recording.candidates.len(), 1);
+        assert_eq!(recording.candidates[0].kind, CandidateKind::Click);
+        assert_eq!(recording.candidates[0].keyframe, 1);
     }
 }

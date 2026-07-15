@@ -251,20 +251,23 @@ impl Detector {
     }
 
     /// Observe a privacy-filtered semantic event. Opens click windows and
-    /// typing/scroll sessions; never inspects key values or text.
-    pub fn observe_event(&mut self, ev: TimedSemanticAction) {
+    /// typing/scroll sessions; never inspects key values or text. A later click
+    /// returns the completed marker from the prior click window, if any.
+    pub fn observe_event(&mut self, ev: TimedSemanticAction) -> Option<CandidateMarker> {
         match ev.action {
             SemanticAction::Click { .. } => {
                 // Click is lowest priority: suppressed when typing or scroll owns.
                 if self.in_typing || self.in_scroll {
-                    return;
+                    return None;
                 }
+                let prior = self.close_click_window(ev.at_ms);
                 self.click_open_until = Some(ev.at_ms.saturating_add(self.config.click_window_ms));
                 self.click_window = self
                     .prev
                     .clone()
                     .or_else(|| self.baseline.clone())
                     .map(SemanticWindow::new);
+                prior
             }
             SemanticAction::TypingActivity => {
                 if !self.in_typing {
@@ -281,12 +284,14 @@ impl Detector {
                 }
                 self.in_typing = true;
                 self.typing_last_at = ev.at_ms;
+                None
             }
             SemanticAction::SemanticKey(_) => {
                 if self.in_typing {
                     self.typing_last_at = ev.at_ms;
                     self.typing_force_end = true;
                 }
+                None
             }
             SemanticAction::ScrollActivity => {
                 if !self.in_typing && !self.in_scroll {
@@ -299,6 +304,7 @@ impl Detector {
                 if !self.in_typing {
                     self.scroll_last_at = ev.at_ms;
                 }
+                None
             }
         }
     }
