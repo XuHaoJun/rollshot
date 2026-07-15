@@ -86,7 +86,8 @@ pub struct PixelatePreviewCache {
     retained_bytes: usize,
     clock: u64,
     generation_counter: u64,
-    failure_counts: HashMap<PreviewKey, u32>,
+    failed_keys: std::collections::HashSet<PreviewKey>,
+    failure_warning_reported: bool,
 }
 
 impl PixelatePreviewCache {
@@ -98,7 +99,8 @@ impl PixelatePreviewCache {
             retained_bytes: 0,
             clock: 0,
             generation_counter: 0,
-            failure_counts: HashMap::new(),
+            failed_keys: std::collections::HashSet::new(),
+            failure_warning_reported: false,
         }
     }
 
@@ -120,7 +122,7 @@ impl PixelatePreviewCache {
     }
 
     pub fn begin_request(&mut self, key: PreviewKey) -> Option<PreviewRequest> {
-        if self.in_flight.contains_key(&key) {
+        if self.in_flight.contains_key(&key) || self.failed_keys.contains(&key) {
             return None;
         }
         self.generation_counter += 1;
@@ -175,14 +177,19 @@ impl PixelatePreviewCache {
             return false;
         }
         self.in_flight.remove(&key);
-        let count = self.failure_counts.entry(key).or_insert(0);
-        *count += 1;
-        *count == 1
+        self.failed_keys.insert(key);
+        if self.failure_warning_reported {
+            false
+        } else {
+            self.failure_warning_reported = true;
+            true
+        }
     }
 
     pub fn retain_requested(&mut self, requested: &[PreviewKey]) {
         let requested_set: std::collections::HashSet<PreviewKey> =
             requested.iter().copied().collect();
+        self.in_flight.retain(|key, _| requested_set.contains(key));
         let mut to_remove = Vec::new();
         for (&key, entry) in &self.entries {
             if !requested_set.contains(&key) {
@@ -219,13 +226,13 @@ impl PixelatePreviewCache {
     pub fn invalidate_key(&mut self, key: PreviewKey) {
         self.in_flight.remove(&key);
         self.generation_counter += 1;
-        self.failure_counts.remove(&key);
+        self.failed_keys.remove(&key);
     }
 
     pub fn clear_for_source(&mut self, source_id: usize) {
         self.entries.retain(|k, _| k.source_id != source_id);
         self.in_flight.retain(|k, _| k.source_id != source_id);
-        self.failure_counts.retain(|k, _| k.source_id != source_id);
+        self.failed_keys.retain(|k| k.source_id != source_id);
         self.recalculate_retained_bytes();
     }
 
@@ -647,8 +654,24 @@ mod tests {
         let k = key(1, region(0, 0, 8, 8), 16, 1.0);
         let r1 = cache.begin_request(k).unwrap();
         assert!(cache.fail(r1));
+        assert!(cache.begin_request(k).is_none());
+
+        cache.invalidate_key(k);
         let r2 = cache.begin_request(k).unwrap();
         assert!(!cache.fail(r2));
+    }
+
+    #[test]
+    fn failure_after_key_becomes_unrequested_is_stale() {
+        let mut cache = PixelatePreviewCache::new(1024);
+        let k = key(1, region(0, 0, 8, 8), 16, 1.0);
+        let stale_request = cache.begin_request(k).unwrap();
+
+        cache.retain_requested(&[]);
+
+        assert!(!cache.fail(stale_request));
+        let current_request = cache.begin_request(k).unwrap();
+        assert!(cache.fail(current_request));
     }
 
     #[test]

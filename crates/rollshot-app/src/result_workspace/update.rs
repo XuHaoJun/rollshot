@@ -2650,6 +2650,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 Err(_) => {
                     let should_warn = state.pixelate_previews.fail(request.clone());
                     if should_warn {
+                        state.message = Some(InlineMessage::Warning(
+                            "Pixelate preview unavailable; showing an outline instead.".into(),
+                        ));
                         tracing::warn!(
                             target: "rollshot::annotation",
                             source_id = request.key.source_id,
@@ -3263,6 +3266,33 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn preview_failure_reports_one_inline_warning() {
+        let mut state = workspace();
+        let key = super::super::pixelate_preview::PreviewKey::new(
+            1,
+            rollshot_image_document::RasterRegion {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            rollshot_image_document::DEFAULT_PIXELATE_BLOCK_SIZE,
+            1.0,
+        );
+        let request = state.pixelate_previews.begin_request(key).unwrap();
+
+        let _ = update_inner(
+            &mut state,
+            Message::PixelatePreviewReady(
+                request,
+                Err(super::super::pixelate_preview::PreviewGenerationError::WorkerFailed),
+            ),
+        );
+
+        assert!(matches!(state.message, Some(InlineMessage::Warning(_))));
     }
 
     fn workspace_with_arrow() -> super::super::ResultWorkspace {
