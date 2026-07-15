@@ -6,18 +6,26 @@ use image::RgbaImage;
 
 use crate::annotation::Annotation;
 use crate::geometry::ImagePoint;
+use crate::pixelate::{apply_pixelate, pixelate_region};
 use crate::raster::{
     fill_box_shape, fill_circle, fill_rect, fill_triangle, stroke_box_shape, stroke_circle,
     stroke_line, stroke_polyline,
 };
-use crate::shapes::{annotation_shapes, RenderShape, TextAnchor};
+use crate::shapes::{annotation_commands, RenderCommand, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
 
 pub(crate) fn flatten_onto(source: &RgbaImage, annotations: &[Annotation]) -> RgbaImage {
     let mut out = source.clone();
     for annotation in annotations {
-        for shape in annotation_shapes(annotation) {
-            draw_shape(&mut out, &shape);
+        for command in annotation_commands(annotation) {
+            match command {
+                RenderCommand::Shape(shape) => draw_shape(&mut out, &shape),
+                RenderCommand::Pixelate { bounds, block_size } => {
+                    if let Ok(region) = pixelate_region(source, bounds, block_size) {
+                        apply_pixelate(&mut out, &region);
+                    }
+                }
+            }
         }
     }
     out
@@ -84,9 +92,12 @@ fn draw_shape(img: &mut RgbaImage, shape: &RenderShape) {
 
 #[cfg(test)]
 mod tests {
-    use crate::annotation::FreehandKind;
-    use crate::geometry::{ImagePoint, ImageRect};
-    use crate::{ImageDocument, Rgb8, StrokeStyle, TwoPointKind};
+    use super::flatten_onto;
+    use crate::annotation::{Annotation, AnnotationId, FreehandKind, TwoPointKind};
+    use crate::geometry::{ImagePoint, ImageRect, Rgb8};
+    use crate::pixelate::{apply_pixelate, pixelate_region};
+    use crate::shapes::{annotation_commands, RenderCommand};
+    use crate::{ImageDocument, StrokeStyle};
     use image::{Rgba, RgbaImage};
 
     fn base(w: u32, h: u32) -> RgbaImage {
@@ -569,5 +580,133 @@ mod tests {
         .unwrap();
         let out = doc.flatten();
         assert_eq!(out.get_pixel(20, 20).0, [0xE5, 0x48, 0x4D, 255]);
+    }
+
+    // --- Task 3: RenderCommand and pixelate flatten tests ---
+
+    fn four_quadrant_fixture() -> RgbaImage {
+        let mut img = RgbaImage::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x < 8 && y < 8 {
+                    [255u8, 0, 0, 255]
+                } else if x >= 8 && y < 8 {
+                    [0, 255, 0, 255]
+                } else if x < 8 && y >= 8 {
+                    [0, 0, 255, 255]
+                } else {
+                    [255, 255, 0, 255]
+                };
+                img.put_pixel(x, y, Rgba(color));
+            }
+        }
+        img
+    }
+
+    fn red_rectangle_over_center() -> Annotation {
+        Annotation::OpaqueRedaction {
+            id: AnnotationId(100),
+            bounds: ImageRect::new(2.0, 2.0, 12.0, 12.0),
+        }
+    }
+
+    fn pixelate_center(block_size: u32) -> Annotation {
+        Annotation::pixelate(
+            AnnotationId(101),
+            ImageRect::new(2.0, 2.0, 12.0, 12.0),
+            block_size,
+        )
+    }
+
+    fn blue_arrow_over_center() -> Annotation {
+        Annotation::two_point_with_style(
+            AnnotationId(102),
+            TwoPointKind::Arrow,
+            ImagePoint::new(2.0, 2.0),
+            ImagePoint::new(14.0, 14.0),
+            StrokeStyle {
+                color: Rgb8::new(0, 0, 255),
+                width: 4.0,
+                opacity: 1.0,
+            },
+        )
+    }
+
+    fn pixelated_source_center(source: &RgbaImage) -> RgbaImage {
+        let mut out = source.clone();
+        let region = pixelate_region(source, ImageRect::new(2.0, 2.0, 12.0, 12.0), 4).unwrap();
+        apply_pixelate(&mut out, &region);
+        out
+    }
+
+    fn asymmetric_source_fixture() -> RgbaImage {
+        let mut img = RgbaImage::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([x as u8 * 16, y as u8 * 16, (x + y) as u8 * 8, 255]),
+                );
+            }
+        }
+        img
+    }
+
+    fn pixelate_rect(x: f32, y: f32, w: f32, h: f32, block_size: u32) -> Annotation {
+        Annotation::pixelate(AnnotationId(200), ImageRect::new(x, y, w, h), block_size)
+    }
+
+    fn crop(img: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
+        let mut cropped = RgbaImage::new(w, h);
+        for dy in 0..h {
+            for dx in 0..w {
+                cropped.put_pixel(dx, dy, *img.get_pixel(x + dx, y + dy));
+            }
+        }
+        cropped
+    }
+
+    #[test]
+    fn pixelate_lowers_to_one_raster_command() {
+        let annotation =
+            Annotation::pixelate(AnnotationId(7), ImageRect::new(3.0, 4.0, 8.0, 9.0), 16);
+        assert_eq!(
+            annotation_commands(&annotation),
+            vec![RenderCommand::Pixelate {
+                bounds: ImageRect::new(3.0, 4.0, 8.0, 9.0),
+                block_size: 16,
+            }]
+        );
+    }
+
+    #[test]
+    fn pixelate_covers_earlier_annotations_but_later_annotations_cover_pixelate() {
+        let source = four_quadrant_fixture();
+        let earlier = red_rectangle_over_center();
+        let pixelate = pixelate_center(4);
+        let later = blue_arrow_over_center();
+        let only_earlier = flatten_onto(&source, &[earlier.clone(), pixelate.clone()]);
+        let with_later = flatten_onto(&source, &[earlier, pixelate, later]);
+        assert_eq!(
+            only_earlier.get_pixel(4, 4),
+            pixelated_source_center(&source).get_pixel(4, 4)
+        );
+        assert_eq!(with_later.get_pixel(4, 4).0, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn overlapping_pixelates_each_sample_original_source() {
+        let source = asymmetric_source_fixture();
+        let twice = flatten_onto(
+            &source,
+            &[
+                pixelate_rect(0.0, 0.0, 8.0, 8.0, 4),
+                pixelate_rect(2.0, 2.0, 6.0, 6.0, 4),
+            ],
+        );
+        let second_only = flatten_onto(&source, &[pixelate_rect(2.0, 2.0, 6.0, 6.0, 4)]);
+        assert_eq!(crop(&twice, 2, 2, 6, 6), crop(&second_only, 2, 2, 6, 6));
+        assert_eq!(source, asymmetric_source_fixture());
     }
 }
