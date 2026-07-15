@@ -41,7 +41,7 @@
 - Modify `crates/rollshot-app/src/result_workspace/{annotation_defaults,canvas,mod,properties,toolbar,update,view}.rs`: tool lifecycle, defaults, properties, preview scheduling, iced drawing, keyboard and toolbar behavior.
 - Modify `crates/rollshot-app/src/result_workspace/{ocr_text,secure_sharing}.rs`: negative security-boundary tests only; production matching remains Opaque Redaction-only.
 - Modify `crates/rollshot-app/src/timeline_workspace/annotation.rs`: exhaustive compatibility only; no Timeline Pixelate authoring surface.
-- Modify any compiler-identified exhaustive `Annotation` consumer in `crates/rollshot-app`, `crates/rollshot-automation`, or `crates/rollshot-edit-proposal` only enough to preserve its existing unsupported/generic behavior; declare the exact path in the active task before editing it.
+- Modify any compiler-identified exhaustive `Annotation` consumer in `crates/rollshot-app`, `crates/rollshot-automation`, or `crates/rollshot-edit-proposal` only enough to preserve its existing unsupported/generic behavior; declare the exact path in the active task before editing it. Adding `Tool::Pixelate` (Task 4) likewise requires updating every exhaustive `Tool` match in `crates/rollshot-app/src/result_workspace` (canvas, update, view, toolbar, properties, mod); Task 4's file list already covers these, so no extra catch-all is needed for `Tool`.
 - Modify `docs/superpowers/specs/2026-07-12-annotation-editor-umbrella-design.md` only for Slice 5 registry transitions and evidence; do not rewrite the historical Slice 5 spec or this plan after handoff.
 
 ## Execution And Test Flow
@@ -126,6 +126,23 @@ fn transparent_colors_are_averaged_in_premultiplied_space() {
     let result = pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 1.0), 4).unwrap();
     assert_eq!(result.pixels.get_pixel(0, 0).0, [255, 0, 0, 128]);
     assert_eq!(result.pixels.get_pixel(1, 0).0, [255, 0, 0, 128]);
+}
+
+#[test]
+fn partial_alpha_is_averaged_in_premultiplied_space() {
+    // Opaque red [255,0,0,255] + semi-transparent blue [0,0,255,128].
+    // Premultiplied average then un-premultiply yields [170,0,85,192]:
+    // alpha_sum=383, premul=[65025,0,32640], out_alpha=192,
+    // out_r=round(65025/383)=170, out_b=round(32640/383)=85.
+    let source = RgbaImage::from_raw(
+        2,
+        1,
+        vec![255, 0, 0, 255, 0, 0, 255, 128],
+    )
+    .unwrap();
+    let result = pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 1.0), 4).unwrap();
+    assert_eq!(result.pixels.get_pixel(0, 0).0, [170, 0, 85, 192]);
+    assert_eq!(result.pixels.get_pixel(1, 0).0, [170, 0, 85, 192]);
 }
 
 #[test]
@@ -402,11 +419,11 @@ Expected: FAIL because the field does not exist.
 
 Initialize missing/invalid data with `DEFAULT_PIXELATE_BLOCK_SIZE`, validate against `MIN_PIXELATE_BLOCK_SIZE..=MAX_PIXELATE_BLOCK_SIZE`, and save the integer with existing fields.
 
-Add tests asserting:
+Add tests asserting (`wide_tools`, `compact_tools`, `narrow_visible_tools`, `narrow_more_tools`, and `tool_for_shortcut` are test helpers created in this step; the shape slot reflects the default remembered shape `Tool::Rectangle` from `AnnotationDefaults::default().last_shape` — the current toolbar has no `Tool::Shapes` variant, only `Tool::Rectangle`/`Tool::Ellipse` behind a shapes menu):
 
 ```rust
-assert_eq!(wide_tools(), vec![Select, Number, Text, Line, Arrow, Shapes, Pen, Highlighter, Redact, Pixelate]);
-assert_eq!(compact_tools(), vec![Select, Number, Text, Line, Arrow, Shapes, Pen, Highlighter, Redact, Pixelate]);
+assert_eq!(wide_tools(), vec![Select, Number, Text, Line, Arrow, Rectangle, Pen, Highlighter, Redact, Pixelate]);
+assert_eq!(compact_tools(), vec![Select, Number, Text, Line, Arrow, Rectangle, Pen, Highlighter, Redact, Pixelate]);
 assert!(!narrow_visible_tools().contains(&Pixelate));
 assert!(narrow_more_tools().contains(&Pixelate));
 assert_eq!(tool_for_shortcut(Key::Character("b".into()), Modifiers::default(), false), Some(Tool::Pixelate));
@@ -627,6 +644,8 @@ Task::perform(
 ```
 
 `generate_preview` calls the Task 1 kernel at full source resolution, then downsizes the generated region only when `display_scale < 1.0`, using `image::imageops::FilterType::Nearest`. It returns RGBA bytes; the update thread constructs the iced handle after exact completion acceptance. Batch generated tasks with the existing update task; do not add a subscription.
+
+Full-resolution-then-downsize is required so the preview block grid matches flatten semantics (spec §8/§9); the cost is a transient `region.width * region.height * 4`-byte allocation off-thread during generation. This transient is NOT covered by the 64 MiB retained-byte cap (which bounds only cached handles); it is bounded by the Pixelate annotation's source-clamped region rather than the viewport-visible intersection, freed when `generate_preview` returns, and isolated on the `spawn_blocking` worker so it never blocks the UI thread. For typical screenshot regions this is a few MB; an extreme full-long-image Pixelate can transiently allocate tens of MB before downsize. Task 9's long-image timing evidence must measure this path, and Slice 5 cannot advance from Handoff if the allocation causes unacceptable interaction latency or memory pressure on either platform.
 
 Trace lookup/request/completion at `trace` with `source_id`, region dimensions, `block_size`, `cache_outcome`, `generated_bytes`, and elapsed microseconds. Trace successful generation at `debug` target `rollshot::annotation`.
 
