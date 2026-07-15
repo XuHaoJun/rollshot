@@ -7388,4 +7388,357 @@ mod tests {
         let _ = update(&mut state, Message::PreviewStrokeOpacity(0.5));
         assert!(state.editor.properties.opacity.is_none());
     }
+
+    // -- pixelate cache-isolation output tests (Task 8 review finding) -------
+
+    /// Build a workspace with a gradient image so pixelate produces visible
+    /// differences (uniform-color images hide pixelate effects).
+    fn workspace_with_gradient(w: u32, h: u32) -> super::super::ResultWorkspace {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        (x % 256) as u8,
+                        (y % 256) as u8,
+                        ((x + y) % 256) as u8,
+                        255,
+                    ]),
+                );
+            }
+        }
+        let mut ws = super::super::ResultWorkspace::with_max_texture_dim(
+            super::super::document::ResultDocument::unsaved(img),
+            None,
+            super::super::DEFAULT_MAX_TEXTURE_DIM,
+        );
+        ws.viewport.zoom = ZoomMode::ActualSize;
+        ws.apply_viewport_bounds(Size::new(w as f32, h as f32));
+        ws
+    }
+
+    #[test]
+    fn pixelate_committed_appear_in_copy_and_save_with_empty_preview_cache() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        // Cache is empty (fresh workspace). Output must still contain the
+        // committed pixelate at full resolution via flatten, not the cache.
+        let source = state.document.image.source();
+        let copy = copy_payload(&state);
+        let save = save_payload(&state);
+        let flattened = state.document.image.flatten();
+
+        assert_eq!(copy, flattened, "copy must equal flatten");
+        assert_eq!(save, flattened, "save must equal flatten");
+        assert_ne!(
+            copy.get_pixel(40, 40),
+            source.get_pixel(40, 40),
+            "committed pixelate region must differ from source in output"
+        );
+    }
+
+    #[test]
+    fn pixelate_committed_appear_with_in_flight_preview_cache() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        // Put a request in-flight (simulates a pending async preview).
+        let source = state.document.image.shared_source();
+        let source_id = super::super::pixelate_preview::source_id_from_arc(&source);
+        let region = rollshot_image_document::pixelate::RasterRegion {
+            x: 10,
+            y: 10,
+            width: 60,
+            height: 60,
+        };
+        let key = super::super::pixelate_preview::PreviewKey::new(source_id, region, 16, 1.0);
+        let _request = state.pixelate_previews.begin_request(key);
+        assert!(
+            state.pixelate_previews.is_in_flight(key),
+            "precondition: key is in-flight"
+        );
+
+        let flattened = state.document.image.flatten();
+        let copy = copy_payload(&state);
+        assert_eq!(copy, flattened, "in-flight cache must not affect output");
+    }
+
+    #[test]
+    fn pixelate_committed_appear_with_failed_preview_cache() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        // Simulate a failed preview request.
+        let source = state.document.image.shared_source();
+        let source_id = super::super::pixelate_preview::source_id_from_arc(&source);
+        let region = rollshot_image_document::pixelate::RasterRegion {
+            x: 10,
+            y: 10,
+            width: 60,
+            height: 60,
+        };
+        let key = super::super::pixelate_preview::PreviewKey::new(source_id, region, 16, 1.0);
+        let request = state.pixelate_previews.begin_request(key).unwrap();
+        state.pixelate_previews.fail(request);
+
+        let flattened = state.document.image.flatten();
+        let copy = copy_payload(&state);
+        assert_eq!(copy, flattened, "failed cache must not affect output");
+    }
+
+    #[test]
+    fn copy_original_is_byte_identical_to_source() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let original = copy_original_payload(&state);
+        assert_eq!(
+            original.as_raw(),
+            state.document.image.source().as_raw(),
+            "Copy Original must return source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn pixelate_draft_and_property_preview_never_enter_output() {
+        let mut state = workspace_with_gradient(200, 200);
+        // Commit one pixelate so we have a selection target.
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+
+        // Start an in-progress pixelate creation (draft, not committed).
+        state.editor.tool = Tool::Pixelate;
+        let _ = handle_canvas_pressed(&mut state, ImagePoint::new(150.0, 150.0), Instant::now());
+        let _ = handle_canvas_moved(&mut state, ImagePoint::new(180.0, 180.0));
+        assert!(matches!(
+            state.editor.drag,
+            Some(DragState::CreatePixelate { .. })
+        ));
+
+        // Also start a block-size property preview.
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(32));
+
+        let source = state.document.image.source();
+        let output = copy_payload(&state);
+        let flattened = state.document.image.flatten();
+        assert_eq!(output, flattened, "copy equals flatten");
+
+        // Draft center (165, 165) must NOT appear in output.
+        assert_eq!(
+            output.get_pixel(165, 165),
+            source.get_pixel(165, 165),
+            "uncommitted pixelate draft must stay out of output"
+        );
+        // Selection handle area (5, 5) must NOT appear in output.
+        assert_eq!(
+            output.get_pixel(5, 5),
+            source.get_pixel(5, 5),
+            "selection handle area must stay out of output"
+        );
+    }
+
+    #[test]
+    fn pixelate_block_size_editing_changes_output_by_resampling() {
+        let mut state = workspace_with_gradient(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let output_bs16 = state.document.image.flatten();
+
+        // Change block_size — this must produce a different flatten.
+        state.document.image.set_pixelate_block_size(id, 32).unwrap();
+        let output_bs32 = state.document.image.flatten();
+
+        assert_ne!(
+            output_bs16, output_bs32,
+            "changing block_size must change flatten output"
+        );
+        // The source must still be immutable.
+        let source = state.document.image.source();
+        assert_eq!(
+            source.get_pixel(0, 0).0,
+            [0, 0, 0, 255],
+            "source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn pixelate_move_changes_output_by_resampling() {
+        let mut state = workspace_with_gradient(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let output_before = state.document.image.flatten();
+
+        // Move the pixelate annotation.
+        state
+            .document
+            .image
+            .set_pixelate_bounds(
+                id,
+                ImageRect {
+                    x: 80.0,
+                    y: 80.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+            )
+            .unwrap();
+        let output_after = state.document.image.flatten();
+
+        assert_ne!(
+            output_before, output_after,
+            "moving pixelate must change flatten output"
+        );
+    }
+
+    #[test]
+    fn pixelate_resize_changes_output_by_resampling() {
+        let mut state = workspace_with_gradient(200, 200);
+        let id = state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 40.0,
+                    height: 30.0,
+                },
+                16,
+            )
+            .unwrap();
+        let output_before = state.document.image.flatten();
+
+        // Resize the pixelate annotation.
+        state
+            .document
+            .image
+            .set_pixelate_bounds(
+                id,
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 100.0,
+                    height: 80.0,
+                },
+            )
+            .unwrap();
+        let output_after = state.document.image.flatten();
+
+        assert_ne!(
+            output_before, output_after,
+            "resizing pixelate must change flatten output"
+        );
+    }
+
+    #[test]
+    fn repeated_flatten_leaves_source_bytes_unchanged() {
+        let mut state = workspace_with_gradient(200, 200);
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 60.0,
+                    height: 60.0,
+                },
+                16,
+            )
+            .unwrap();
+        let source_before = state.document.image.source().as_raw().to_vec();
+
+        // Flatten multiple times.
+        let _ = state.document.image.flatten();
+        let _ = state.document.image.flatten();
+        let _ = state.document.image.flatten();
+
+        let source_after = state.document.image.source().as_raw().to_vec();
+        assert_eq!(
+            source_before, source_after,
+            "repeated flatten must not mutate source bytes"
+        );
+    }
 }
