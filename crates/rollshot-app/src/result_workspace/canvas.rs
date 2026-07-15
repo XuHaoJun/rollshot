@@ -651,6 +651,11 @@ impl AnnotationCanvas<'_> {
                     handle(frame, p, white, accent);
                 }
             }
+            Annotation::Pixelate { bounds, .. } => {
+                for (_, p) in resize_handles(*bounds) {
+                    handle(frame, p, white, accent);
+                }
+            }
             Annotation::Freehand { .. } => {
                 let b = annotation_bounds(annotation);
                 frame.stroke(

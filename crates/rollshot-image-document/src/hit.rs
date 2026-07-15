@@ -101,7 +101,7 @@ pub fn hit_test_annotation(
             .expanded(tolerance)
             .contains(point)
             .then_some(HitPart::Body),
-        Annotation::OpaqueRedaction { bounds, .. } => {
+        Annotation::OpaqueRedaction { bounds, .. } | Annotation::Pixelate { bounds, .. } => {
             for (handle, anchor) in resize_handles(*bounds) {
                 if point.distance(anchor) <= tolerance * 1.5 {
                     return Some(HitPart::Resize(handle));
@@ -465,5 +465,108 @@ mod tests {
         ];
         let hit = hit_test(&anns, ImagePoint::new(50.0, 50.0), 2.0).unwrap();
         assert_eq!(hit.id, AnnotationId(2));
+    }
+
+    // --- Pixelate hit tests ---
+
+    #[test]
+    fn pixelate_body_hit_and_outside_miss() {
+        let ann = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        assert_eq!(
+            hit_test_annotation(&ann, ImagePoint::new(70.0, 65.0), TOL),
+            Some(HitPart::Body)
+        );
+        assert_eq!(
+            hit_test_annotation(&ann, ImagePoint::new(10.0, 10.0), TOL),
+            None
+        );
+    }
+
+    #[test]
+    fn pixelate_resize_handles_beat_body() {
+        let ann = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 50.0,
+                y: 50.0,
+                width: 40.0,
+                height: 30.0,
+            },
+            16,
+        );
+        let corner = hit_test_annotation(&ann, ImagePoint::new(50.0, 50.0), TOL).unwrap();
+        assert_eq!(corner, HitPart::Resize(ResizeHandle::TopLeft));
+        let edge = hit_test_annotation(&ann, ImagePoint::new(70.0, 80.0), TOL).unwrap();
+        assert_eq!(edge, HitPart::Resize(ResizeHandle::Bottom));
+    }
+
+    #[test]
+    fn pixelate_all_eight_resize_handles() {
+        let ann = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 20.0,
+                y: 20.0,
+                width: 60.0,
+                height: 40.0,
+            },
+            16,
+        );
+        let expected = [
+            (ImagePoint::new(20.0, 20.0), ResizeHandle::TopLeft),
+            (ImagePoint::new(50.0, 20.0), ResizeHandle::Top),
+            (ImagePoint::new(80.0, 20.0), ResizeHandle::TopRight),
+            (ImagePoint::new(80.0, 40.0), ResizeHandle::Right),
+            (ImagePoint::new(80.0, 60.0), ResizeHandle::BottomRight),
+            (ImagePoint::new(50.0, 60.0), ResizeHandle::Bottom),
+            (ImagePoint::new(20.0, 60.0), ResizeHandle::BottomLeft),
+            (ImagePoint::new(20.0, 40.0), ResizeHandle::Left),
+        ];
+        for (point, handle) in expected {
+            let hit = hit_test_annotation(&ann, point, TOL).unwrap();
+            assert_eq!(
+                hit,
+                HitPart::Resize(handle),
+                "expected {:?} at {:?}",
+                handle,
+                point
+            );
+        }
+    }
+
+    #[test]
+    fn pixelate_annotation_bounds_equals_bounds() {
+        let bounds = ImageRect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        };
+        let ann = Annotation::pixelate(AnnotationId(1), bounds, 16);
+        assert_eq!(crate::shapes::annotation_bounds(&ann), bounds);
+    }
+
+    #[test]
+    fn pixelate_annotation_shapes_is_empty() {
+        let ann = Annotation::pixelate(
+            AnnotationId(1),
+            ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            16,
+        );
+        assert!(crate::shapes::annotation_shapes(&ann).is_empty());
     }
 }

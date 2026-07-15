@@ -582,6 +582,7 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
             _ => None,
         },
         Annotation::OpaqueRedaction { .. } => None,
+        Annotation::Pixelate { .. } => None,
         Annotation::Freehand {
             id,
             kind,

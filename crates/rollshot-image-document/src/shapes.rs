@@ -215,6 +215,7 @@ pub fn annotation_shapes(annotation: &Annotation) -> Vec<RenderShape> {
             rect: *bounds,
             color: style::REDACTION_FILL,
         }],
+        Annotation::Pixelate { .. } => Vec::new(),
         Annotation::Shape {
             kind,
             bounds,
@@ -285,7 +286,7 @@ pub fn annotation_bounds(annotation: &Annotation) -> ImageRect {
             style,
             ..
         } => text_plate_rect(*position, text, *style),
-        Annotation::OpaqueRedaction { bounds, .. } => *bounds,
+        Annotation::OpaqueRedaction { bounds, .. } | Annotation::Pixelate { bounds, .. } => *bounds,
         Annotation::Shape { bounds, stroke, .. } => {
             crate::box_shape::shape_visual_bounds(*bounds, stroke.width)
         }

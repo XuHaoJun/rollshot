@@ -932,6 +932,10 @@ pub(crate) fn handle_canvas_released(
                         .document
                         .image
                         .set_freehand_points(original.id(), points.clone()),
+                    Annotation::Pixelate { bounds, .. } => state
+                        .document
+                        .image
+                        .set_pixelate_bounds(original.id(), *bounds),
                 };
                 if let Err(e) = result {
                     state.message = Some(InlineMessage::Error(e.to_string()));

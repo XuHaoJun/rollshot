@@ -83,7 +83,9 @@ pub fn pixelate_region(
             let mut premul = [0_u64; 3];
             for y in 0..cell_h {
                 for x in 0..cell_w {
-                    let p = source.get_pixel(region.x + local_x + x, region.y + local_y + y).0;
+                    let p = source
+                        .get_pixel(region.x + local_x + x, region.y + local_y + y)
+                        .0;
                     let a = u64::from(p[3]);
                     alpha_sum += a;
                     for channel in 0..3 {
@@ -164,9 +166,13 @@ mod tests {
             for x in 0..bw {
                 let actual = result.pixels.get_pixel(bx + x, by + y).0;
                 assert_eq!(
-                    actual, expected,
+                    actual,
+                    expected,
                     "pixel at local ({}, {}) expected {:?}, got {:?}",
-                    bx + x, by + y, expected, actual,
+                    bx + x,
+                    by + y,
+                    expected,
+                    actual,
                 );
             }
         }
@@ -175,13 +181,16 @@ mod tests {
     #[test]
     fn grid_is_region_local_and_partial_cells_use_actual_pixels() {
         let source = numbered_10_by_7_opaque_image();
-        let result = pixelate_region(
-            &source,
-            ImageRect::new(1.0, 1.0, 8.0, 6.0),
-            4,
-        )
-        .unwrap();
-        assert_eq!(result.region, RasterRegion { x: 1, y: 1, width: 8, height: 6 });
+        let result = pixelate_region(&source, ImageRect::new(1.0, 1.0, 8.0, 6.0), 4).unwrap();
+        assert_eq!(
+            result.region,
+            RasterRegion {
+                x: 1,
+                y: 1,
+                width: 8,
+                height: 6
+            }
+        );
         assert_block_equals_average(&source, &result, (0, 0, 4, 4));
         assert_block_equals_average(&source, &result, (4, 0, 4, 4));
         assert_block_equals_average(&source, &result, (0, 4, 4, 2));
@@ -190,12 +199,7 @@ mod tests {
 
     #[test]
     fn transparent_colors_are_averaged_in_premultiplied_space() {
-        let source = RgbaImage::from_raw(
-            2,
-            1,
-            vec![255, 0, 0, 255, 0, 0, 255, 0],
-        )
-        .unwrap();
+        let source = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 0]).unwrap();
         let result = pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 1.0), 4).unwrap();
         assert_eq!(result.pixels.get_pixel(0, 0).0, [255, 0, 0, 128]);
         assert_eq!(result.pixels.get_pixel(1, 0).0, [255, 0, 0, 128]);
@@ -203,12 +207,7 @@ mod tests {
 
     #[test]
     fn partial_alpha_is_averaged_in_premultiplied_space() {
-        let source = RgbaImage::from_raw(
-            2,
-            1,
-            vec![255, 0, 0, 255, 0, 0, 255, 128],
-        )
-        .unwrap();
+        let source = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 128]).unwrap();
         let result = pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 1.0), 4).unwrap();
         assert_eq!(result.pixels.get_pixel(0, 0).0, [170, 0, 85, 192]);
         assert_eq!(result.pixels.get_pixel(1, 0).0, [170, 0, 85, 192]);
@@ -217,9 +216,21 @@ mod tests {
     #[test]
     fn validation_rejects_invalid_strength_and_empty_clamped_region() {
         let source = RgbaImage::new(8, 8);
-        assert_eq!(pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 2.0), 3), Err(PixelateError::InvalidBlockSize(3)));
-        assert_eq!(pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 2.0), 49), Err(PixelateError::InvalidBlockSize(49)));
-        assert_eq!(pixelate_region(&source, ImageRect::new(20.0, 20.0, 2.0, 2.0), 16), Err(PixelateError::InvalidBounds));
-        assert_eq!(pixelate_region(&source, ImageRect::new(f32::NAN, 0.0, 2.0, 2.0), 16), Err(PixelateError::InvalidBounds));
+        assert_eq!(
+            pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 2.0), 3),
+            Err(PixelateError::InvalidBlockSize(3))
+        );
+        assert_eq!(
+            pixelate_region(&source, ImageRect::new(0.0, 0.0, 2.0, 2.0), 49),
+            Err(PixelateError::InvalidBlockSize(49))
+        );
+        assert_eq!(
+            pixelate_region(&source, ImageRect::new(20.0, 20.0, 2.0, 2.0), 16),
+            Err(PixelateError::InvalidBounds)
+        );
+        assert_eq!(
+            pixelate_region(&source, ImageRect::new(f32::NAN, 0.0, 2.0, 2.0), 16),
+            Err(PixelateError::InvalidBounds)
+        );
     }
 }
