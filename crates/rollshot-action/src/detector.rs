@@ -9,7 +9,7 @@
 
 use crate::diagnostics::TARGET_DETECTOR;
 use crate::frame_store::AnalysisFrame;
-use crate::metrics::{changed_area_ratio, masked_luma_diff, LumaPlane};
+use crate::metrics::{change_stats, changed_area_ratio, masked_luma_diff, ChangeStats, LumaPlane};
 use crate::models::{
     CandidateKind, DetectReason, FrameId, Millis, SemanticAction, TimedSemanticAction,
 };
@@ -59,6 +59,64 @@ pub struct CandidateMarker {
     pub center_id: FrameId,
 }
 
+const SEMANTIC_MIN_CHANGED_SAMPLES: u32 = 4;
+const SEMANTIC_MIN_CHANGED_MEAN_DELTA: f32 = 24.0;
+
+#[derive(Debug, Clone, Copy)]
+struct PeakObservation {
+    id: FrameId,
+    at_ms: Millis,
+    stats: ChangeStats,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticWindow {
+    baseline: LumaPlane,
+    peak: Option<PeakObservation>,
+    stable: Option<PeakObservation>,
+}
+
+impl SemanticWindow {
+    fn new(baseline: LumaPlane) -> Self {
+        Self {
+            baseline,
+            peak: None,
+            stable: None,
+        }
+    }
+
+    fn observe(&mut self, frame: &AnalysisFrame, per_sample: f32, stable: bool) {
+        let stats = change_stats(&self.baseline, &frame.luma, None, per_sample);
+        if !semantic_meaningful(stats) {
+            return;
+        }
+        let observation = PeakObservation {
+            id: frame.id,
+            at_ms: frame.at_ms,
+            stats,
+        };
+        let replace = self
+            .peak
+            .is_none_or(|peak| stats.normalized_mean_diff > peak.stats.normalized_mean_diff);
+        if replace {
+            self.peak = Some(observation);
+        }
+        if stable {
+            self.stable = Some(observation);
+        }
+    }
+
+    fn choose(&self) -> Option<PeakObservation> {
+        self.stable.or(self.peak)
+    }
+}
+
+fn semantic_meaningful(stats: ChangeStats) -> bool {
+    stats.normalized_mean_diff > 0.0
+        && stats.changed_samples >= SEMANTIC_MIN_CHANGED_SAMPLES
+        && stats.changed_mean_delta >= SEMANTIC_MIN_CHANGED_MEAN_DELTA
+}
+
 /// Frame-to-frame motion test: meaningful diff AND meaningful changed area.
 fn motion(a: &LumaPlane, b: &LumaPlane, config: &DetectorConfig) -> bool {
     masked_luma_diff(a, b, None) > config.diff_threshold
@@ -76,6 +134,7 @@ pub struct Detector {
     last_frame: Option<(FrameId, Millis)>,
     // event sessions
     click_open_until: Option<Millis>,
+    click_window: Option<SemanticWindow>,
     in_typing: bool,
     typing_last_at: Millis,
     typing_force_end: bool,
@@ -96,6 +155,7 @@ impl Detector {
             last_candidate_ms: None,
             last_frame: None,
             click_open_until: None,
+            click_window: None,
             in_typing: false,
             typing_last_at: 0,
             typing_force_end: false,
@@ -123,9 +183,27 @@ impl Detector {
         match self.click_open_until {
             Some(until) if at_ms <= until => {
                 self.click_open_until = None;
+                self.click_window = None;
                 true
             }
             _ => false,
+        }
+    }
+
+    fn close_click_window(&mut self, at_ms: Millis) -> Option<CandidateMarker> {
+        self.click_open_until = None;
+        let window = self.click_window.take()?;
+        let obs = window.choose()?;
+        if self.cooldown_ok(at_ms) {
+            self.last_candidate_ms = Some(at_ms);
+            Some(CandidateMarker {
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: obs.at_ms,
+                center_id: obs.id,
+            })
+        } else {
+            None
         }
     }
 
@@ -135,6 +213,11 @@ impl Detector {
         match ev.action {
             SemanticAction::Click { .. } => {
                 self.click_open_until = Some(ev.at_ms.saturating_add(self.config.click_window_ms));
+                self.click_window = self
+                    .prev
+                    .clone()
+                    .or_else(|| self.baseline.clone())
+                    .map(SemanticWindow::new);
             }
             SemanticAction::TypingActivity => {
                 self.in_typing = true;
@@ -163,6 +246,9 @@ impl Detector {
         if self.baseline.is_none() {
             self.baseline = Some(luma.clone());
             self.prev = Some(luma.clone());
+            if self.click_open_until.is_some() && self.click_window.is_none() {
+                self.click_window = Some(SemanticWindow::new(luma.clone()));
+            }
             return None;
         }
 
@@ -202,6 +288,23 @@ impl Detector {
             }
         }
         self.prev = Some(luma.clone());
+
+        // --- click semantic window lifecycle ---
+        let until = self.click_open_until;
+        if until.is_some_and(|deadline| frame.at_ms > deadline) {
+            if let Some(marker) = self.close_click_window(frame.at_ms) {
+                return Some(marker);
+            }
+        } else {
+            if let Some(window) = self.click_window.as_mut() {
+                window.observe(frame, self.config.per_sample_threshold, !self.moving);
+            }
+            if until == Some(frame.at_ms) {
+                if let Some(marker) = self.close_click_window(frame.at_ms) {
+                    return Some(marker);
+                }
+            }
+        }
 
         // --- candidate decision (priority: typing > scroll > generic settle) ---
 
@@ -285,6 +388,13 @@ impl Detector {
     }
 
     pub fn finish(&mut self) -> Option<CandidateMarker> {
+        // Flush an open click window through the same selection helper.
+        if self.click_open_until.is_some() {
+            let (_, at) = self.last_frame.unwrap_or((0, 0));
+            if let Some(marker) = self.close_click_window(at) {
+                return Some(marker);
+            }
+        }
         // An open typing burst closes into one step at recording finish.
         if self.in_typing {
             self.in_typing = false;
@@ -654,5 +764,105 @@ mod tests {
         det.observe_event(ev(SemanticAction::ScrollActivity, 200));
         det.observe_frame(&af(2, 200, uniform(0.0))); // back to A
         assert!(det.finish().is_none());
+    }
+
+    fn localized(base: f32, changed: f32) -> LumaPlane {
+        let mut s = vec![base; 64];
+        for y in 0..2 {
+            for x in 0..2 {
+                s[y * 8 + x] = changed;
+            }
+        }
+        LumaPlane {
+            width: 8,
+            height: 8,
+            samples: s,
+        }
+    }
+
+    #[test]
+    fn click_recovers_localized_change_below_visual_area_threshold() {
+        let mut config = cfg();
+        config.area_threshold = 0.10; // localized area is 4/64 = 0.0625
+        let mut det = Detector::new(config);
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+
+        assert!(det
+            .observe_frame(&af(1, 200, localized(0.0, 255.0)))
+            .is_none());
+        let marker = det
+            .observe_frame(&af(2, 800, localized(0.0, 255.0)))
+            .expect("semantic click window should recover the localized response");
+
+        assert_eq!(marker.kind, CandidateKind::Click);
+        assert_eq!(marker.reason, DetectReason::ClickConfirmed);
+        assert_eq!(marker.center_id, 1); // frame 2 is post-deadline and only closes the window
+    }
+
+    #[test]
+    fn click_recovers_transient_peak_that_returns_to_baseline() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det
+            .observe_frame(&af(1, 200, quadrant(0.0, 255.0)))
+            .is_none());
+        assert!(det.observe_frame(&af(2, 400, uniform(0.0))).is_none());
+        let marker = det
+            .observe_frame(&af(3, 800, uniform(0.0)))
+            .expect("remembered popover peak should survive the return to baseline");
+
+        assert_eq!(marker.kind, CandidateKind::Click);
+        assert_eq!(marker.center_id, 1);
+        assert_eq!(marker.at_ms, 200);
+    }
+
+    #[test]
+    fn click_with_no_visual_response_still_emits_nothing_after_window_closes() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det.observe_frame(&af(1, 800, uniform(0.0))).is_none());
+        assert!(det.finish().is_none());
+    }
+
+    #[test]
+    fn click_peak_closes_on_finish_before_deadline() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det
+            .observe_frame(&af(1, 200, localized(0.0, 255.0)))
+            .is_none());
+        let marker = det
+            .finish()
+            .expect("finish should flush the observed click peak");
+        assert_eq!(marker.kind, CandidateKind::Click);
+        assert_eq!(marker.center_id, 1);
     }
 }
