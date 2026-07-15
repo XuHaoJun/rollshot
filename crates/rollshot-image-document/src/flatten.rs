@@ -307,7 +307,7 @@ mod tests {
         }
         // 12 rows × 8 types = 96, + Pen (row 3) + Highlighter (row 10) = 98.
         // Extra NumberCallout at row 13, extra TextNote at row 13 = 100.
-        let extra_y = 100.0 + 13u32 as f32 * 950.0;
+        let extra_y = 100.0 + 13_f32 * 950.0;
         doc.add_number_callout(
             ImagePoint::new(100.0, extra_y),
             ImagePoint::new(160.0, extra_y),
@@ -317,7 +317,7 @@ mod tests {
 
         // Pen (row 3)
         {
-            let y = 100.0 + 3u32 as f32 * 950.0;
+            let y = 100.0 + 3_f32 * 950.0;
             let pts: Vec<_> = (0..5)
                 .map(|p| ImagePoint::new(400.0 + p as f32 * 20.0, y + 100.0 + p as f32 * 30.0))
                 .collect();
@@ -334,7 +334,7 @@ mod tests {
         }
         // Highlighter (row 10)
         {
-            let y = 100.0 + 10u32 as f32 * 950.0;
+            let y = 100.0 + 10_f32 * 950.0;
             let pts: Vec<_> = (0..5)
                 .map(|p| ImagePoint::new(150.0 + p as f32 * 15.0, y + 100.0 + p as f32 * 30.0))
                 .collect();

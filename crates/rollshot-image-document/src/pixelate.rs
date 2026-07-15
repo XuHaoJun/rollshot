@@ -96,6 +96,7 @@ pub fn pixelate_region(
             let out_alpha = ((alpha_sum + sample_count / 2) / sample_count) as u8;
             let mut out = [0_u8; 4];
             out[3] = out_alpha;
+            #[allow(clippy::manual_checked_ops)]
             if alpha_sum != 0 {
                 for channel in 0..3 {
                     out[channel] = ((premul[channel] + alpha_sum / 2) / alpha_sum) as u8;
@@ -157,6 +158,7 @@ mod tests {
         let out_alpha = ((alpha_sum + sample_count / 2) / sample_count) as u8;
         let mut expected = [0u8; 4];
         expected[3] = out_alpha;
+        #[allow(clippy::manual_checked_ops)]
         if alpha_sum != 0 {
             for c in 0..3 {
                 expected[c] = ((premul[c] + alpha_sum / 2) / alpha_sum) as u8;
