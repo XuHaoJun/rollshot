@@ -15,6 +15,7 @@ pub enum PropertyTarget {
     TwoPointTool(TwoPointKind),
     ShapeTool(ShapeKind),
     FreehandTool(FreehandKind),
+    PixelateTool,
     Annotation(AnnotationId),
 }
 
@@ -50,6 +51,19 @@ pub struct OpacityTransaction {
     pub preview: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockSizeTarget {
+    ToolDefault,
+    Annotation(AnnotationId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockSizeTransaction {
+    pub(crate) target: BlockSizeTarget,
+    pub(crate) original: u32,
+    pub(crate) preview: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeStyleTransaction {
     pub id: AnnotationId,
@@ -80,6 +94,7 @@ pub struct PropertyState {
     pub width: Option<StrokeWidthTransaction>,
     pub opacity: Option<OpacityTransaction>,
     pub shape_style: Option<ShapeStyleTransaction>,
+    pub block_size: Option<BlockSizeTransaction>,
     pub next_number_input: String,
     pub focus: Option<PropertyFocus>,
     pub popup: Option<Popup>,
@@ -104,7 +119,8 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
                         | Annotation::NumberCallout { .. }
                         | Annotation::TextNote { .. }
                         | Annotation::Shape { .. }
-                        | Annotation::Freehand { .. },
+                        | Annotation::Freehand { .. }
+                        | Annotation::Pixelate { .. },
                     ) => Some(PropertyTarget::Annotation(id)),
                     _ => None,
                 })
@@ -112,6 +128,7 @@ pub fn property_target(state: &ResultWorkspace) -> Option<PropertyTarget> {
         Tool::Pen => Some(PropertyTarget::FreehandTool(FreehandKind::Pen)),
         Tool::Highlighter => Some(PropertyTarget::FreehandTool(FreehandKind::Highlighter)),
         Tool::Redact => None,
+        Tool::Pixelate => Some(PropertyTarget::PixelateTool),
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -236,7 +253,9 @@ fn stroke_width(state: &ResultWorkspace, target: PropertyTarget) -> Option<f32> 
             .annotation(id)?
             .stroke_style()
             .map(|s| s.width),
-        PropertyTarget::NumberTool | PropertyTarget::TextTool => None,
+        PropertyTarget::NumberTool | PropertyTarget::TextTool | PropertyTarget::PixelateTool => {
+            None
+        }
     }
 }
 
@@ -365,6 +384,53 @@ fn opacity_control(state: &ResultWorkspace, target: PropertyTarget) -> Element<'
     .into()
 }
 
+fn pixelate_block_size_value(state: &ResultWorkspace, target: PropertyTarget) -> u32 {
+    let committed = match target {
+        PropertyTarget::PixelateTool => state.annotation_defaults.values.pixelate_block_size,
+        PropertyTarget::Annotation(id) => state
+            .document
+            .image
+            .annotation(id)
+            .and_then(|a| match a {
+                Annotation::Pixelate { block_size, .. } => Some(*block_size),
+                _ => None,
+            })
+            .unwrap_or(state.annotation_defaults.values.pixelate_block_size),
+        _ => state.annotation_defaults.values.pixelate_block_size,
+    };
+    state
+        .editor
+        .properties
+        .block_size
+        .as_ref()
+        .filter(|tx| match (&tx.target, target) {
+            (BlockSizeTarget::ToolDefault, PropertyTarget::PixelateTool) => true,
+            (BlockSizeTarget::Annotation(aid), PropertyTarget::Annotation(id)) => *aid == id,
+            _ => false,
+        })
+        .map(|tx| tx.preview)
+        .unwrap_or(committed)
+}
+
+fn pixelate_block_size_control(value: u32) -> Element<'static, Message> {
+    use iced::widget::{row, slider, text};
+
+    row![
+        text(format!("{value} px")).size(12),
+        slider(
+            rollshot_image_document::MIN_PIXELATE_BLOCK_SIZE as f32
+                ..=rollshot_image_document::MAX_PIXELATE_BLOCK_SIZE as f32,
+            value as f32,
+            |v| Message::PreviewPixelateBlockSize(v as u32),
+        )
+        .step(1.0_f32)
+        .on_release(Message::ApplyPixelateBlockSize)
+        .width(96),
+    ]
+    .spacing(4)
+    .into()
+}
+
 /// Build the property controls row for the current tool/selection.
 ///
 /// Returns `None` when the active tool has no associated properties (Redact,
@@ -423,67 +489,84 @@ pub fn view(state: &ResultWorkspace) -> Option<Element<'_, Message>> {
                 ),
             }
         }
-        PropertyTarget::Annotation(id) => match state.document.image.annotation(id)? {
-            Annotation::TwoPoint { .. } => stroke_controls(state, target),
-            Annotation::NumberCallout { style, .. } => Some(
-                row![
-                    color_button("Color", ColorProperty::NumberAccent),
-                    number_size_row(style.size)
-                ]
-                .spacing(8)
-                .into(),
-            ),
-            Annotation::TextNote { style, .. } => {
-                let size = text_size_row(style.font_size);
-                let bg = text_bg_toggle(style.background.is_some());
-                let mut controls = row![
-                    color_button("Text color", ColorProperty::TextColor),
-                    size,
-                    bg
-                ]
-                .spacing(8);
-                if style.background.is_some() {
-                    controls =
-                        controls.push(color_button("BG color", ColorProperty::TextBackground));
-                }
-                Some(controls.into())
-            }
-            Annotation::Shape { fill, .. } => {
-                use iced::widget::{button, text};
-
-                let stroke = shape_stroke_controls(state, target)?;
-                let fill_enabled = state
-                    .editor
-                    .properties
-                    .shape_style
-                    .as_ref()
-                    .map(|tx| tx.preview_fill.is_some())
-                    .unwrap_or(fill.is_some());
-                let fill = fill_controls(fill_enabled);
-                Some(
+        PropertyTarget::PixelateTool => {
+            let value = pixelate_block_size_value(state, target);
+            Some(pixelate_block_size_control(value))
+        }
+        PropertyTarget::Annotation(id) => {
+            match state.document.image.annotation(id)? {
+                Annotation::TwoPoint { .. } => stroke_controls(state, target),
+                Annotation::NumberCallout { style, .. } => Some(
                     row![
-                        stroke,
-                        fill,
-                        button(text("Apply")).on_press(Message::ApplyShapeStyle),
-                        button(text("Cancel")).on_press(Message::CancelShapeStyle),
+                        color_button("Color", ColorProperty::NumberAccent),
+                        number_size_row(style.size)
                     ]
                     .spacing(8)
                     .into(),
-                )
-            }
-            Annotation::Freehand { kind, .. } => {
-                let stroke = stroke_controls(state, target)?;
-                match kind {
-                    FreehandKind::Pen => Some(stroke),
-                    FreehandKind::Highlighter => Some(
-                        iced::widget::row![stroke, opacity_control(state, target)]
-                            .spacing(8)
-                            .into(),
-                    ),
+                ),
+                Annotation::TextNote { style, .. } => {
+                    let size = text_size_row(style.font_size);
+                    let bg = text_bg_toggle(style.background.is_some());
+                    let mut controls = row![
+                        color_button("Text color", ColorProperty::TextColor),
+                        size,
+                        bg
+                    ]
+                    .spacing(8);
+                    if style.background.is_some() {
+                        controls =
+                            controls.push(color_button("BG color", ColorProperty::TextBackground));
+                    }
+                    Some(controls.into())
                 }
+                Annotation::Shape { fill, .. } => {
+                    use iced::widget::{button, text};
+
+                    let stroke = shape_stroke_controls(state, target)?;
+                    let fill_enabled = state
+                        .editor
+                        .properties
+                        .shape_style
+                        .as_ref()
+                        .map(|tx| tx.preview_fill.is_some())
+                        .unwrap_or(fill.is_some());
+                    let fill = fill_controls(fill_enabled);
+                    Some(
+                        row![
+                            stroke,
+                            fill,
+                            button(text("Apply")).on_press(Message::ApplyShapeStyle),
+                            button(text("Cancel")).on_press(Message::CancelShapeStyle),
+                        ]
+                        .spacing(8)
+                        .into(),
+                    )
+                }
+                Annotation::Freehand { kind, .. } => {
+                    let stroke = stroke_controls(state, target)?;
+                    match kind {
+                        FreehandKind::Pen => Some(stroke),
+                        FreehandKind::Highlighter => Some(
+                            iced::widget::row![stroke, opacity_control(state, target)]
+                                .spacing(8)
+                                .into(),
+                        ),
+                    }
+                }
+                Annotation::Pixelate { id, block_size, .. } => {
+                    let value = state
+                    .editor
+                    .properties
+                    .block_size
+                    .as_ref()
+                    .filter(|tx| matches!(tx.target, BlockSizeTarget::Annotation(aid) if aid == *id))
+                    .map(|tx| tx.preview)
+                    .unwrap_or(*block_size);
+                    Some(pixelate_block_size_control(value))
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
     }
 }
 
@@ -643,6 +726,7 @@ pub fn preview_annotation(state: &ResultWorkspace) -> Option<Annotation> {
 mod tests {
     use super::*;
     use crate::result_workspace::document::ResultDocument;
+    use crate::result_workspace::update::{update, Message};
     use image::{Rgba, RgbaImage};
     use rollshot_image_document::{ImagePoint, ImageRect};
 
@@ -1173,5 +1257,209 @@ mod tests {
         };
         state.editor.properties.shape_style = Some(tx);
         assert!(preview_annotation(&state).is_none());
+    }
+
+    // -- pixelate block size (Task 4) ----------------------------------------
+
+    fn add_pixelate(state: &mut ResultWorkspace, block_size: u32) -> AnnotationId {
+        state
+            .document
+            .image
+            .add_pixelate(
+                ImageRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+                block_size,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn pixelate_tool_target_is_pixelate_tool() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        assert_eq!(property_target(&state), Some(PropertyTarget::PixelateTool));
+    }
+
+    #[test]
+    fn pixelate_tool_preview_then_apply_updates_default() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        // Preview 24
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert_eq!(
+            state.editor.properties.block_size.as_ref().unwrap().preview,
+            24
+        );
+        // Apply
+        let _ = update(&mut state, Message::ApplyPixelateBlockSize);
+        assert_eq!(state.annotation_defaults.values.pixelate_block_size, 24);
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn selected_pixelate_preview_then_apply_commits_edit() {
+        let mut state = workspace();
+        let id = add_pixelate(&mut state, 16);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        // Preview 24
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert_eq!(
+            state.editor.properties.block_size.as_ref().unwrap().preview,
+            24
+        );
+        // Apply → commits one edit
+        let state_id_before = state.document.image.state_id();
+        let _ = update(&mut state, Message::ApplyPixelateBlockSize);
+        assert!(state.document.image.state_id() != state_id_before);
+        // Verify the annotation now has block_size 24
+        match state.document.image.annotation(id) {
+            Some(Annotation::Pixelate { block_size, .. }) => assert_eq!(*block_size, 24),
+            other => panic!("expected Pixelate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selected_pixelate_edit_does_not_change_tool_default() {
+        let mut state = workspace();
+        let id = add_pixelate(&mut state, 16);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        let _ = update(&mut state, Message::ApplyPixelateBlockSize);
+        assert_eq!(
+            state.annotation_defaults.values.pixelate_block_size, 16,
+            "tool default must not change"
+        );
+    }
+
+    #[test]
+    fn escape_cancels_block_size_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert!(state.editor.properties.block_size.is_some());
+        let _ = update(&mut state, Message::EscapePressed);
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn undo_cancels_block_size_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert!(state.editor.properties.block_size.is_some());
+        let _ = update(&mut state, Message::Undo);
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn redo_cancels_block_size_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert!(state.editor.properties.block_size.is_some());
+        let _ = update(&mut state, Message::Redo);
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn tool_change_cancels_block_size_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert!(state.editor.properties.block_size.is_some());
+        let _ = update(&mut state, Message::SelectTool(Tool::Select));
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn selection_change_cancels_block_size_transaction() {
+        let mut state = workspace();
+        let id = add_pixelate(&mut state, 16);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert!(state.editor.properties.block_size.is_some());
+        // Switching tool changes selection context
+        let _ = update(&mut state, Message::SelectTool(Tool::Number));
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn block_size_clamps_to_valid_range() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        // Below minimum
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(2));
+        assert_eq!(
+            state.editor.properties.block_size.as_ref().unwrap().preview,
+            4
+        );
+        // Above maximum
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(100));
+        assert_eq!(
+            state.editor.properties.block_size.as_ref().unwrap().preview,
+            48
+        );
+        // Valid
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(16));
+        assert_eq!(
+            state.editor.properties.block_size.as_ref().unwrap().preview,
+            16
+        );
+    }
+
+    #[test]
+    fn cancel_pixelate_block_size_clears_transaction() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Pixelate;
+        let _ = update(&mut state, Message::PreviewPixelateBlockSize(24));
+        assert!(state.editor.properties.block_size.is_some());
+        let _ = update(&mut state, Message::CancelPixelateBlockSize);
+        assert!(state.editor.properties.block_size.is_none());
+    }
+
+    #[test]
+    fn pixelate_property_target_for_selected_annotation() {
+        let mut state = workspace();
+        let id = add_pixelate(&mut state, 16);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        assert_eq!(
+            property_target(&state),
+            Some(PropertyTarget::Annotation(id))
+        );
+    }
+
+    #[test]
+    fn redact_and_pixelate_do_not_share_properties() {
+        let mut state = workspace();
+        state.editor.tool = Tool::Redact;
+        assert_eq!(property_target(&state), None);
+        state.editor.tool = Tool::Pixelate;
+        assert_eq!(property_target(&state), Some(PropertyTarget::PixelateTool));
+    }
+
+    #[test]
+    fn pixelate_preview_annotation_is_none() {
+        let mut state = workspace();
+        let id = add_pixelate(&mut state, 16);
+        state.editor.tool = Tool::Select;
+        state.editor.selection = Some(id);
+        assert!(
+            preview_annotation(&state).is_none(),
+            "Pixelate annotations have no preview clone"
+        );
+    }
+
+    #[test]
+    fn property_state_default_has_no_block_size() {
+        let ps = PropertyState::default();
+        assert!(ps.block_size.is_none());
     }
 }

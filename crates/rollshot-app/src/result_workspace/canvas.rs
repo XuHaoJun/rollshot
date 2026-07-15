@@ -37,6 +37,7 @@ pub enum Tool {
     Pen,
     Highlighter,
     Redact,
+    Pixelate,
     #[cfg(feature = "ocr")]
     OcrText,
 }
@@ -75,6 +76,10 @@ pub enum DragState {
         style: StrokeStyle,
     },
     CreateRedaction {
+        anchor: ImagePoint,
+        current: ImagePoint,
+    },
+    CreatePixelate {
         anchor: ImagePoint,
         current: ImagePoint,
     },
@@ -571,6 +576,14 @@ impl AnnotationCanvas<'_> {
                 let rect = ImageRect::from_corners(*anchor, *current);
                 (!rect.is_empty())
                     .then_some(Annotation::opaque_redaction(AnnotationId(u64::MAX), rect))
+            }
+            Some(DragState::CreatePixelate { anchor, current }) => {
+                let rect = ImageRect::from_corners(*anchor, *current);
+                (!rect.is_empty()).then_some(Annotation::pixelate(
+                    AnnotationId(u64::MAX),
+                    rect,
+                    self.annotation_defaults.values.pixelate_block_size,
+                ))
             }
             Some(DragState::CreateShape {
                 kind,

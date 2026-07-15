@@ -174,6 +174,12 @@ pub enum Message {
     /// Cancel the shape style transaction without mutation.
     #[allow(dead_code)]
     CancelShapeStyle,
+    /// Live-preview a pixelate block size during slider interaction.
+    PreviewPixelateBlockSize(u32),
+    /// Commit the pixelate block size transaction.
+    ApplyPixelateBlockSize,
+    /// Cancel the pixelate block size transaction without mutation.
+    CancelPixelateBlockSize,
     /// Toggle the shapes selector menu.
     ToggleShapesMenu,
     /// Select a specific shape kind from the selector.
@@ -307,6 +313,9 @@ impl PartialEq for Message {
             (Self::ToggleShapeFill, Self::ToggleShapeFill) => true,
             (Self::ApplyShapeStyle, Self::ApplyShapeStyle) => true,
             (Self::CancelShapeStyle, Self::CancelShapeStyle) => true,
+            (Self::PreviewPixelateBlockSize(a), Self::PreviewPixelateBlockSize(b)) => a == b,
+            (Self::ApplyPixelateBlockSize, Self::ApplyPixelateBlockSize) => true,
+            (Self::CancelPixelateBlockSize, Self::CancelPixelateBlockSize) => true,
             (Self::ToggleShapesMenu, Self::ToggleShapesMenu) => true,
             (Self::SelectShape(a), Self::SelectShape(b)) => a == b,
             (Self::SelectRememberedShape, Self::SelectRememberedShape) => true,
@@ -383,6 +392,7 @@ fn clear_property_transactions(state: &mut super::ResultWorkspace) {
     state.editor.properties.width = None;
     state.editor.properties.opacity = None;
     state.editor.properties.shape_style = None;
+    state.editor.properties.block_size = None;
     if state.editor.properties.popup == Some(super::properties::Popup::ColorPicker) {
         state.editor.properties.popup = None;
     }
@@ -527,7 +537,8 @@ pub(crate) fn direct_manipulation_hit(
         | Tool::Rectangle
         | Tool::Ellipse
         | Tool::Pen
-        | Tool::Highlighter => None,
+        | Tool::Highlighter
+        | Tool::Pixelate => None,
         #[cfg(feature = "ocr")]
         Tool::OcrText => None,
     }
@@ -723,6 +734,13 @@ pub(crate) fn handle_canvas_pressed(
             });
             Task::none()
         }
+        Tool::Pixelate => {
+            state.editor.drag = Some(DragState::CreatePixelate {
+                anchor: point,
+                current: point,
+            });
+            Task::none()
+        }
         #[cfg(feature = "ocr")]
         Tool::OcrText => Task::none(),
         Tool::Pen | Tool::Highlighter => {
@@ -757,6 +775,10 @@ pub(crate) fn handle_canvas_moved(
             Task::none()
         }
         Some(DragState::CreateRedaction { current, .. }) => {
+            *current = point;
+            Task::none()
+        }
+        Some(DragState::CreatePixelate { current, .. }) => {
             *current = point;
             Task::none()
         }
@@ -837,6 +859,16 @@ pub(crate) fn handle_canvas_released(
                 .document
                 .image
                 .add_redaction(ImageRect::from_corners(anchor, point))
+            {
+                set_selection(state, Some(id));
+            }
+        }
+        Some(DragState::CreatePixelate { anchor, .. }) => {
+            let block_size = state.annotation_defaults.values.pixelate_block_size;
+            if let Ok(id) = state
+                .document
+                .image
+                .add_pixelate(ImageRect::from_corners(anchor, point), block_size)
             {
                 set_selection(state, Some(id));
             }
@@ -1190,6 +1222,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.width = None;
             state.editor.properties.opacity = None;
             state.editor.properties.shape_style = None;
+            state.editor.properties.block_size = None;
             #[cfg(feature = "ocr")]
             if tool == Tool::OcrText {
                 state.editor.drag = None;
@@ -1216,11 +1249,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 || state.editor.properties.width.is_some()
                 || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
+                || state.editor.properties.block_size.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
                 state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
+                state.editor.properties.block_size = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1241,11 +1276,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 || state.editor.properties.width.is_some()
                 || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
+                || state.editor.properties.block_size.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
                 state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
+                state.editor.properties.block_size = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -1282,11 +1319,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 || state.editor.properties.width.is_some()
                 || state.editor.properties.opacity.is_some()
                 || state.editor.properties.shape_style.is_some()
+                || state.editor.properties.block_size.is_some()
             {
                 state.editor.properties.color = None;
                 state.editor.properties.width = None;
                 state.editor.properties.opacity = None;
                 state.editor.properties.shape_style = None;
+                state.editor.properties.block_size = None;
                 state.editor.properties.popup = None;
                 return Task::none();
             }
@@ -2305,6 +2344,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     ColorProperty::ShapeFill => {}
                 },
+                PropertyTarget::PixelateTool => {}
             }
             Task::none()
         }
@@ -2365,6 +2405,71 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             state.editor.properties.shape_style = None;
             state.editor.properties.color = None;
             state.editor.properties.popup = None;
+            Task::none()
+        }
+        Message::PreviewPixelateBlockSize(size) => {
+            use super::properties::{BlockSizeTarget, BlockSizeTransaction};
+            use rollshot_image_document::{MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE};
+            let clamped = size.clamp(MIN_PIXELATE_BLOCK_SIZE, MAX_PIXELATE_BLOCK_SIZE);
+            let target = match state.editor.tool {
+                Tool::Pixelate => BlockSizeTarget::ToolDefault,
+                Tool::Select => {
+                    if let Some(id) = state.editor.selection {
+                        BlockSizeTarget::Annotation(id)
+                    } else {
+                        return Task::none();
+                    }
+                }
+                _ => return Task::none(),
+            };
+            let original = match target {
+                BlockSizeTarget::ToolDefault => {
+                    state.annotation_defaults.values.pixelate_block_size
+                }
+                BlockSizeTarget::Annotation(id) => state
+                    .document
+                    .image
+                    .annotation(id)
+                    .and_then(|a| match a {
+                        Annotation::Pixelate { block_size, .. } => Some(*block_size),
+                        _ => None,
+                    })
+                    .unwrap_or(state.annotation_defaults.values.pixelate_block_size),
+            };
+            match &mut state.editor.properties.block_size {
+                Some(tx) if tx.target == target => {
+                    tx.preview = clamped;
+                }
+                _ => {
+                    state.editor.properties.block_size = Some(BlockSizeTransaction {
+                        target,
+                        original,
+                        preview: clamped,
+                    });
+                }
+            }
+            Task::none()
+        }
+        Message::ApplyPixelateBlockSize => {
+            use super::properties::BlockSizeTarget;
+            let Some(tx) = state.editor.properties.block_size.take() else {
+                return Task::none();
+            };
+            match tx.target {
+                BlockSizeTarget::ToolDefault => {
+                    state.annotation_defaults.values.pixelate_block_size = tx.preview;
+                    persist_annotation_defaults(state);
+                }
+                BlockSizeTarget::Annotation(id) => {
+                    if let Err(e) = state.document.image.set_pixelate_block_size(id, tx.preview) {
+                        state.message = Some(InlineMessage::Error(e.to_string()));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::CancelPixelateBlockSize => {
+            state.editor.properties.block_size = None;
             Task::none()
         }
         Message::ToggleShapesMenu => {
@@ -2448,7 +2553,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 },
                 PropertyTarget::NumberTool
                 | PropertyTarget::TextTool
-                | PropertyTarget::ShapeTool(_) => return Task::none(),
+                | PropertyTarget::ShapeTool(_)
+                | PropertyTarget::PixelateTool => return Task::none(),
             };
             let transaction = state
                 .editor
@@ -2512,7 +2618,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
                 PropertyTarget::NumberTool
                 | PropertyTarget::TextTool
-                | PropertyTarget::ShapeTool(_) => {}
+                | PropertyTarget::ShapeTool(_)
+                | PropertyTarget::PixelateTool => {}
             }
             Task::none()
         }
@@ -2935,6 +3042,7 @@ pub(crate) fn map_key_press(
             "r" => Some(Message::SelectTool(Tool::Redact)),
             "p" => Some(Message::SelectTool(Tool::Pen)),
             "h" => Some(Message::SelectTool(Tool::Highlighter)),
+            "b" => Some(Message::SelectTool(Tool::Pixelate)),
             "s" => Some(Message::SelectRememberedShape),
             #[cfg(feature = "ocr")]
             "o" => Some(Message::SelectTool(Tool::OcrText)),
