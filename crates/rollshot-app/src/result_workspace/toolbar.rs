@@ -493,7 +493,10 @@ fn tool_tooltip(tool: Tool) -> String {
         Tool::Arrow => "Arrow (A) — Shift: Snap to 45°".into(),
         Tool::Rectangle => "Rectangle (S) — Shift: Square".into(),
         Tool::Ellipse => "Ellipse (S) — Shift: Circle".into(),
-        Tool::Pixelate => "Pixelate (B)".into(),
+        Tool::Pixelate => {
+            "Pixelate (B) — visual obfuscation only; use Redact to securely remove information."
+                .into()
+        }
         _ => {
             let item = tool_item(tool);
             shortcut_label(item.label, item.shortcut)
@@ -1288,6 +1291,9 @@ mod tests {
 
     #[test]
     fn pixelate_tooltip() {
-        assert_eq!(tool_tooltip(Tool::Pixelate), "Pixelate (B)");
+        assert_eq!(
+            tool_tooltip(Tool::Pixelate),
+            "Pixelate (B) — visual obfuscation only; use Redact to securely remove information."
+        );
     }
 }
