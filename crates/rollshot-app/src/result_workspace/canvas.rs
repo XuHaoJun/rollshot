@@ -343,6 +343,18 @@ fn release_image_point(cursor: mouse::Cursor, bounds: Rectangle, scale: f32) -> 
         .map(|local| ImagePoint::new(local.x / scale, local.y / scale))
 }
 
+fn pixelate_preview_rect(
+    region: rollshot_image_document::RasterRegion,
+    scale: f32,
+) -> iced::Rectangle {
+    iced::Rectangle {
+        x: region.x as f32 * scale,
+        y: region.y as f32 * scale,
+        width: region.width as f32 * scale,
+        height: region.height as f32 * scale,
+    }
+}
+
 impl AnnotationCanvas<'_> {
     fn image_point(&self, local: Point) -> ImagePoint {
         ImagePoint::new(local.x / self.scale, local.y / self.scale)
@@ -567,13 +579,7 @@ impl AnnotationCanvas<'_> {
         );
         if let Some((w, h, data)) = self.pixelate_previews.get(key) {
             let handle = iced::widget::image::Handle::from_rgba(w, h, data.to_vec());
-            let s = self.scale;
-            let rect = iced::Rectangle {
-                x: bounds.x * s,
-                y: bounds.y * s,
-                width: bounds.width * s,
-                height: bounds.height * s,
-            };
+            let rect = pixelate_preview_rect(region, self.scale);
             frame.draw_image(
                 rect,
                 canvas::Image::new(handle)
@@ -1025,6 +1031,24 @@ pub fn hit_test_proposal_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixelate_preview_rect_uses_integer_raster_region() {
+        let rect = pixelate_preview_rect(
+            rollshot_image_document::RasterRegion {
+                x: 10,
+                y: 20,
+                width: 31,
+                height: 41,
+            },
+            0.5,
+        );
+
+        assert_eq!(
+            rect,
+            iced::Rectangle::new([5.0, 10.0].into(), [15.5, 20.5].into())
+        );
+    }
 
     #[test]
     fn resize_from_each_side_normalizes_inverted_drags() {
