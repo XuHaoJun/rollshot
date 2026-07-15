@@ -9,7 +9,7 @@
 
 use crate::diagnostics::TARGET_DETECTOR;
 use crate::frame_store::AnalysisFrame;
-use crate::metrics::{changed_area_ratio, masked_luma_diff, LumaPlane};
+use crate::metrics::{change_stats, changed_area_ratio, masked_luma_diff, ChangeStats, LumaPlane};
 use crate::models::{
     CandidateKind, DetectReason, FrameId, Millis, SemanticAction, TimedSemanticAction,
 };
@@ -59,6 +59,64 @@ pub struct CandidateMarker {
     pub center_id: FrameId,
 }
 
+const SEMANTIC_MIN_CHANGED_SAMPLES: u32 = 4;
+const SEMANTIC_MIN_CHANGED_MEAN_DELTA: f32 = 24.0;
+
+#[derive(Debug, Clone, Copy)]
+struct PeakObservation {
+    id: FrameId,
+    at_ms: Millis,
+    stats: ChangeStats,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticWindow {
+    baseline: LumaPlane,
+    peak: Option<PeakObservation>,
+    stable: Option<PeakObservation>,
+}
+
+impl SemanticWindow {
+    fn new(baseline: LumaPlane) -> Self {
+        Self {
+            baseline,
+            peak: None,
+            stable: None,
+        }
+    }
+
+    fn observe(&mut self, frame: &AnalysisFrame, per_sample: f32, stable: bool) {
+        let stats = change_stats(&self.baseline, &frame.luma, None, per_sample);
+        if !semantic_meaningful(stats) {
+            return;
+        }
+        let observation = PeakObservation {
+            id: frame.id,
+            at_ms: frame.at_ms,
+            stats,
+        };
+        let replace = self
+            .peak
+            .is_none_or(|peak| stats.normalized_mean_diff > peak.stats.normalized_mean_diff);
+        if replace {
+            self.peak = Some(observation);
+        }
+        if stable {
+            self.stable = Some(observation);
+        }
+    }
+
+    fn choose(&self) -> Option<PeakObservation> {
+        self.stable.or(self.peak)
+    }
+}
+
+fn semantic_meaningful(stats: ChangeStats) -> bool {
+    stats.normalized_mean_diff > 0.0
+        && stats.changed_samples >= SEMANTIC_MIN_CHANGED_SAMPLES
+        && stats.changed_mean_delta >= SEMANTIC_MIN_CHANGED_MEAN_DELTA
+}
+
 /// Frame-to-frame motion test: meaningful diff AND meaningful changed area.
 fn motion(a: &LumaPlane, b: &LumaPlane, config: &DetectorConfig) -> bool {
     masked_luma_diff(a, b, None) > config.diff_threshold
@@ -76,12 +134,14 @@ pub struct Detector {
     last_frame: Option<(FrameId, Millis)>,
     // event sessions
     click_open_until: Option<Millis>,
+    click_window: Option<SemanticWindow>,
+    typing_window: Option<SemanticWindow>,
+    scroll_window: Option<SemanticWindow>,
     in_typing: bool,
     typing_last_at: Millis,
     typing_force_end: bool,
     in_scroll: bool,
     scroll_last_at: Millis,
-    pre_scroll_baseline: Option<LumaPlane>,
 }
 
 impl Detector {
@@ -96,12 +156,14 @@ impl Detector {
             last_candidate_ms: None,
             last_frame: None,
             click_open_until: None,
+            click_window: None,
+            typing_window: None,
+            scroll_window: None,
             in_typing: false,
             typing_last_at: 0,
             typing_force_end: false,
             in_scroll: false,
             scroll_last_at: 0,
-            pre_scroll_baseline: None,
         }
     }
 
@@ -123,35 +185,126 @@ impl Detector {
         match self.click_open_until {
             Some(until) if at_ms <= until => {
                 self.click_open_until = None;
+                self.click_window = None;
                 true
             }
             _ => false,
         }
     }
 
+    fn close_click_window(&mut self, at_ms: Millis) -> Option<CandidateMarker> {
+        self.click_open_until = None;
+        let window = self.click_window.take()?;
+        self.semantic_marker(
+            window,
+            at_ms,
+            CandidateKind::Click,
+            DetectReason::ClickConfirmed,
+        )
+    }
+
+    fn close_typing_window(&mut self, at_ms: Millis, luma: &LumaPlane) -> Option<CandidateMarker> {
+        let window = self.typing_window.take();
+        self.in_typing = false;
+        self.typing_force_end = false;
+        self.saw_change = false;
+        self.baseline = Some(luma.clone());
+        self.semantic_marker(
+            window?,
+            at_ms,
+            CandidateKind::Typing,
+            DetectReason::TypingSettled,
+        )
+    }
+
+    fn close_scroll_window(&mut self, at_ms: Millis, luma: &LumaPlane) -> Option<CandidateMarker> {
+        let window = self.scroll_window.take();
+        self.in_scroll = false;
+        self.saw_change = false;
+        self.baseline = Some(luma.clone());
+        self.semantic_marker(
+            window?,
+            at_ms,
+            CandidateKind::Scroll,
+            DetectReason::ScrollSettled,
+        )
+    }
+
+    fn semantic_marker(
+        &mut self,
+        window: SemanticWindow,
+        at_ms: Millis,
+        kind: CandidateKind,
+        reason: DetectReason,
+    ) -> Option<CandidateMarker> {
+        let selected = window.choose()?;
+        if !self.cooldown_ok(at_ms) {
+            return None;
+        }
+        self.last_candidate_ms = Some(at_ms);
+        Some(CandidateMarker {
+            kind,
+            reason,
+            at_ms: selected.at_ms,
+            center_id: selected.id,
+        })
+    }
+
     /// Observe a privacy-filtered semantic event. Opens click windows and
-    /// typing/scroll sessions; never inspects key values or text.
-    pub fn observe_event(&mut self, ev: TimedSemanticAction) {
+    /// typing/scroll sessions; never inspects key values or text. A later click
+    /// returns the completed marker from the prior click window, if any.
+    pub fn observe_event(&mut self, ev: TimedSemanticAction) -> Option<CandidateMarker> {
         match ev.action {
             SemanticAction::Click { .. } => {
+                // Click is lowest priority: suppressed when typing or scroll owns.
+                if self.in_typing || self.in_scroll {
+                    return None;
+                }
+                let prior = self.close_click_window(ev.at_ms);
                 self.click_open_until = Some(ev.at_ms.saturating_add(self.config.click_window_ms));
+                self.click_window = self
+                    .prev
+                    .clone()
+                    .or_else(|| self.baseline.clone())
+                    .map(SemanticWindow::new);
+                prior
             }
             SemanticAction::TypingActivity => {
+                if !self.in_typing {
+                    // Typing supersedes and clears scroll/click.
+                    self.in_scroll = false;
+                    self.scroll_window = None;
+                    self.typing_window = self
+                        .prev
+                        .clone()
+                        .or_else(|| self.baseline.clone())
+                        .map(SemanticWindow::new);
+                    self.click_open_until = None;
+                    self.click_window = None;
+                }
                 self.in_typing = true;
                 self.typing_last_at = ev.at_ms;
+                None
             }
             SemanticAction::SemanticKey(_) => {
                 if self.in_typing {
                     self.typing_last_at = ev.at_ms;
                     self.typing_force_end = true;
                 }
+                None
             }
             SemanticAction::ScrollActivity => {
-                if !self.in_scroll {
+                if !self.in_typing && !self.in_scroll {
+                    let baseline = self.prev.clone().or_else(|| self.baseline.clone());
+                    self.scroll_window = baseline.map(SemanticWindow::new);
+                    self.click_open_until = None;
+                    self.click_window = None;
                     self.in_scroll = true;
-                    self.pre_scroll_baseline = self.baseline.clone();
                 }
-                self.scroll_last_at = ev.at_ms;
+                if !self.in_typing {
+                    self.scroll_last_at = ev.at_ms;
+                }
+                None
             }
         }
     }
@@ -163,25 +316,45 @@ impl Detector {
         if self.baseline.is_none() {
             self.baseline = Some(luma.clone());
             self.prev = Some(luma.clone());
+            if self.click_open_until.is_some() && self.click_window.is_none() {
+                self.click_window = Some(SemanticWindow::new(luma.clone()));
+            }
+            if self.in_typing && self.typing_window.is_none() {
+                self.typing_window = Some(SemanticWindow::new(luma.clone()));
+            }
+            if self.in_scroll && self.scroll_window.is_none() {
+                self.scroll_window = Some(SemanticWindow::new(luma.clone()));
+            }
             return None;
         }
 
-        // A change in analysis-plane dimensions (e.g. a mid-recording region
-        // resize) makes the masked diff fall back to "no motion", so visual
-        // detection is degraded until the baseline is re-established. Surface it
-        // once at the transition; re-baseline handling is owned by the app
-        // integration (Plan 2).
-        if let Some(prev) = &self.prev {
-            if prev.width != luma.width || prev.height != luma.height {
-                tracing::debug!(
-                    target: TARGET_DETECTOR,
-                    prev_w = prev.width,
-                    prev_h = prev.height,
-                    new_w = luma.width,
-                    new_h = luma.height,
-                    "analysis frame dimensions changed; visual diff degraded until re-baseline"
-                );
-            }
+        // Dimension-change recovery: discard all semantic windows and re-baseline.
+        let dimension_change = self.prev.as_ref().and_then(|prev| {
+            (prev.width != luma.width || prev.height != luma.height)
+                .then_some((prev.width, prev.height))
+        });
+        if let Some((prev_w, prev_h)) = dimension_change {
+            tracing::debug!(
+                target: TARGET_DETECTOR,
+                prev_w,
+                prev_h,
+                new_w = luma.width,
+                new_h = luma.height,
+                "analysis frame dimensions changed; discarding semantic windows and re-baselining"
+            );
+            self.prev = Some(luma.clone());
+            self.baseline = Some(luma.clone());
+            self.moving = false;
+            self.stable_count = 0;
+            self.saw_change = false;
+            self.click_open_until = None;
+            self.click_window = None;
+            self.in_typing = false;
+            self.typing_force_end = false;
+            self.typing_window = None;
+            self.in_scroll = false;
+            self.scroll_window = None;
+            return None;
         }
 
         // --- movement bookkeeping (runs every frame) ---
@@ -203,54 +376,63 @@ impl Detector {
         }
         self.prev = Some(luma.clone());
 
-        // --- candidate decision (priority: typing > scroll > generic settle) ---
-
-        // 1. Typing burst ends on Enter/Tab or a long enough pause.
-        if self.in_typing
-            && (self.typing_force_end
-                || frame.at_ms.saturating_sub(self.typing_last_at) >= self.config.typing_pause_ms)
-        {
-            self.in_typing = false;
-            self.typing_force_end = false;
-            self.saw_change = false;
-            self.baseline = Some(luma.clone());
-            if self.cooldown_ok(frame.at_ms) {
-                self.last_candidate_ms = Some(frame.at_ms);
-                return Some(CandidateMarker {
-                    kind: CandidateKind::Typing,
-                    reason: DetectReason::TypingSettled,
-                    at_ms: frame.at_ms,
-                    center_id: frame.id,
-                });
+        // --- close semantic owners whose deadline/pause/dwell has passed ---
+        if self.in_typing {
+            let pause = frame.at_ms.saturating_sub(self.typing_last_at);
+            if self.typing_force_end || pause > self.config.typing_pause_ms {
+                return self.close_typing_window(frame.at_ms, luma);
             }
-            return None;
+        }
+        if self.in_scroll {
+            let dwell = frame.at_ms.saturating_sub(self.scroll_last_at);
+            if dwell > self.config.scroll_dwell_ms {
+                return self.close_scroll_window(frame.at_ms, luma);
+            }
         }
 
-        // 2. Scroll ends after a settled dwell; compare to the pre-scroll state.
+        // --- click semantic window lifecycle ---
+        let until = self.click_open_until;
+        if until.is_some_and(|deadline| frame.at_ms > deadline) {
+            if let Some(marker) = self.close_click_window(frame.at_ms) {
+                return Some(marker);
+            }
+        } else {
+            if let Some(window) = self.click_window.as_mut() {
+                window.observe(frame, self.config.per_sample_threshold, !self.moving);
+            }
+            if until == Some(frame.at_ms) {
+                if let Some(marker) = self.close_click_window(frame.at_ms) {
+                    return Some(marker);
+                }
+            }
+        }
+
+        // --- update only the highest-priority semantic owner ---
+        if self.in_typing {
+            if let Some(window) = self.typing_window.as_mut() {
+                window.observe(frame, self.config.per_sample_threshold, !self.moving);
+            }
+        } else if self.in_scroll {
+            if let Some(window) = self.scroll_window.as_mut() {
+                window.observe(frame, self.config.per_sample_threshold, !self.moving);
+            }
+        }
+
+        // A frame exactly at a semantic timeout is still part of that window.
+        if self.in_typing
+            && frame.at_ms.saturating_sub(self.typing_last_at) >= self.config.typing_pause_ms
+        {
+            return self.close_typing_window(frame.at_ms, luma);
+        }
         if self.in_scroll
             && frame.at_ms.saturating_sub(self.scroll_last_at) >= self.config.scroll_dwell_ms
-            && !self.moving
         {
-            let meaningful = match &self.pre_scroll_baseline {
-                Some(b) => motion(b, luma, &self.config),
-                None => self.meaningful_vs_baseline(luma),
-            };
-            self.in_scroll = false;
-            self.saw_change = false;
-            self.baseline = Some(luma.clone());
-            if meaningful && self.cooldown_ok(frame.at_ms) {
-                self.last_candidate_ms = Some(frame.at_ms);
-                return Some(CandidateMarker {
-                    kind: CandidateKind::Scroll,
-                    reason: DetectReason::ScrollSettled,
-                    at_ms: frame.at_ms,
-                    center_id: frame.id,
-                });
-            }
-            return None;
+            return self.close_scroll_window(frame.at_ms, luma);
         }
 
-        // 3. Generic settle. Suppressed while a typing/scroll session owns the
+        // --- candidate decision (priority: typing > scroll > generic settle) ---
+
+        // Generic settle. Suppressed while a typing/scroll session owns the
         // change; otherwise becomes a Click (if within a click window) or a
         // plain visual change.
         if settled_this_frame && !self.in_typing && !self.in_scroll {
@@ -285,47 +467,47 @@ impl Detector {
     }
 
     pub fn finish(&mut self) -> Option<CandidateMarker> {
+        let (_, at) = self.last_frame?;
+
+        // Flush an open click window through the same selection helper.
+        if self.click_open_until.is_some() {
+            if let Some(marker) = self.close_click_window(at) {
+                return Some(marker);
+            }
+        }
+
         // An open typing burst closes into one step at recording finish.
         if self.in_typing {
+            let window = self.typing_window.take();
             self.in_typing = false;
             self.typing_force_end = false;
-            let (id, at) = self.last_frame?;
-            if self.cooldown_ok(at) {
-                self.last_candidate_ms = Some(at);
-                return Some(CandidateMarker {
-                    kind: CandidateKind::Typing,
-                    reason: DetectReason::TypingSettled,
-                    at_ms: at,
-                    center_id: id,
-                });
+            if let Some(w) = window {
+                return self.semantic_marker(
+                    w,
+                    at,
+                    CandidateKind::Typing,
+                    DetectReason::TypingSettled,
+                );
             }
             return None;
         }
-        // An open scroll session closes into one step at recording finish, even
-        // if its settle-dwell never elapsed, when the final state differs
-        // meaningfully from the pre-scroll baseline. Typing takes priority above
-        // when both are open, mirroring `observe_frame`.
+
+        // An open scroll session closes into one step at recording finish.
         if self.in_scroll {
+            let window = self.scroll_window.take();
             self.in_scroll = false;
             self.saw_change = false;
-            let (Some(luma), Some((id, at))) = (self.prev.clone(), self.last_frame) else {
-                return None;
-            };
-            let meaningful = match &self.pre_scroll_baseline {
-                Some(b) => motion(b, &luma, &self.config),
-                None => self.meaningful_vs_baseline(&luma),
-            };
-            if meaningful && self.cooldown_ok(at) {
-                self.last_candidate_ms = Some(at);
-                return Some(CandidateMarker {
-                    kind: CandidateKind::Scroll,
-                    reason: DetectReason::ScrollSettled,
-                    at_ms: at,
-                    center_id: id,
-                });
+            if let Some(w) = window {
+                return self.semantic_marker(
+                    w,
+                    at,
+                    CandidateKind::Scroll,
+                    DetectReason::ScrollSettled,
+                );
             }
             return None;
         }
+
         // A visual change still in progress flushes if it differs from baseline.
         if self.moving && self.saw_change {
             let (Some(luma), Some((id, at))) = (self.prev.clone(), self.last_frame) else {
@@ -645,14 +827,249 @@ mod tests {
     }
 
     #[test]
-    fn scroll_returning_to_baseline_emits_nothing_on_finish() {
-        // Scrolling that ends back at the pre-scroll state is not a step.
-        let mut det = Detector::new(cfg());
-        det.observe_frame(&af(0, 0, uniform(0.0))); // pre-scroll baseline A
+    fn localized_scroll_peak_closes_on_finish_before_dwell() {
+        let mut config = cfg();
+        config.area_threshold = 0.10;
+        let mut det = Detector::new(config);
+        det.observe_frame(&af(0, 0, uniform(0.0)));
         det.observe_event(ev(SemanticAction::ScrollActivity, 100));
-        det.observe_frame(&af(1, 100, quadrant(0.0, 255.0))); // moving (B)
-        det.observe_event(ev(SemanticAction::ScrollActivity, 200));
-        det.observe_frame(&af(2, 200, uniform(0.0))); // back to A
+        det.observe_frame(&af(1, 200, localized(0.0, 255.0)));
+
+        let marker = det
+            .finish()
+            .expect("finish should preserve the qualifying semantic peak");
+        assert_eq!(marker.kind, CandidateKind::Scroll);
+        assert_eq!(marker.center_id, 1);
+    }
+
+    fn uniform_4x4(v: f32) -> LumaPlane {
+        LumaPlane {
+            width: 4,
+            height: 4,
+            samples: vec![v; 16],
+        }
+    }
+
+    #[test]
+    fn typing_recovers_localized_text_change_below_visual_area_threshold() {
+        let mut config = cfg();
+        config.area_threshold = 0.10;
+        let mut det = Detector::new(config);
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::TypingActivity, 100));
+        assert!(det
+            .observe_frame(&af(1, 200, localized(0.0, 255.0)))
+            .is_none());
+        assert!(det
+            .observe_frame(&af(2, 400, localized(0.0, 255.0)))
+            .is_none());
+        assert!(det
+            .observe_frame(&af(3, 600, localized(0.0, 255.0)))
+            .is_none());
+        let marker = det
+            .observe_frame(&af(4, 900, localized(0.0, 255.0)))
+            .expect("typing pause should close on the localized completed state");
+        assert_eq!(marker.kind, CandidateKind::Typing);
+        assert_eq!(marker.center_id, 3);
+    }
+
+    #[test]
+    fn typing_without_visual_response_emits_nothing() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::TypingActivity, 100));
+        assert!(det.observe_frame(&af(1, 900, uniform(0.0))).is_none());
         assert!(det.finish().is_none());
+    }
+
+    #[test]
+    fn typing_observes_a_response_exactly_at_the_pause_boundary() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::TypingActivity, 100));
+
+        let marker = det
+            .observe_frame(&af(1, 800, localized(0.0, 255.0)))
+            .expect("the exact-boundary frame should remain in the typing window");
+        assert_eq!(marker.kind, CandidateKind::Typing);
+        assert_eq!(marker.center_id, 1);
+    }
+
+    #[test]
+    fn scroll_recovers_qualifying_peak_even_when_view_returns_to_baseline() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+        assert!(det
+            .observe_frame(&af(1, 200, quadrant(0.0, 255.0)))
+            .is_none());
+        det.observe_event(ev(SemanticAction::ScrollActivity, 250));
+        assert!(det.observe_frame(&af(2, 300, uniform(0.0))).is_none());
+        let marker = det
+            .observe_frame(&af(3, 900, uniform(0.0)))
+            .expect("qualifying scroll peak should be retained");
+        assert_eq!(marker.kind, CandidateKind::Scroll);
+        assert_eq!(marker.center_id, 1);
+    }
+
+    #[test]
+    fn scroll_observes_a_response_exactly_at_the_dwell_boundary() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+
+        let marker = det
+            .observe_frame(&af(1, 700, localized(0.0, 255.0)))
+            .expect("the exact-boundary frame should remain in the scroll window");
+        assert_eq!(marker.kind, CandidateKind::Scroll);
+        assert_eq!(marker.center_id, 1);
+    }
+
+    #[test]
+    fn scroll_returning_to_baseline_without_a_qualifying_peak_emits_nothing() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(SemanticAction::ScrollActivity, 100));
+        det.observe_frame(&af(1, 200, one_pixel(0.0, 13.0)));
+        det.observe_frame(&af(2, 300, uniform(0.0)));
+        assert!(det.finish().is_none());
+    }
+
+    #[test]
+    fn typing_supersedes_open_click_without_duplicate_candidate() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        det.observe_event(ev(SemanticAction::TypingActivity, 150));
+        assert!(det
+            .observe_frame(&af(1, 200, localized(0.0, 255.0)))
+            .is_none());
+        let marker = det
+            .observe_frame(&af(2, 900, localized(0.0, 255.0)))
+            .expect("typing should own the shared visual response");
+        assert_eq!(marker.kind, CandidateKind::Typing);
+        assert!(det.finish().is_none());
+    }
+
+    #[test]
+    fn dimension_change_discards_semantic_window_and_rebaselines() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det.observe_frame(&af(1, 200, uniform_4x4(255.0))).is_none());
+        assert!(det.observe_frame(&af(2, 800, uniform_4x4(255.0))).is_none());
+        assert!(det.finish().is_none());
+    }
+
+    fn localized(base: f32, changed: f32) -> LumaPlane {
+        let mut s = vec![base; 64];
+        for y in 0..2 {
+            for x in 0..2 {
+                s[y * 8 + x] = changed;
+            }
+        }
+        LumaPlane {
+            width: 8,
+            height: 8,
+            samples: s,
+        }
+    }
+
+    #[test]
+    fn click_recovers_localized_change_below_visual_area_threshold() {
+        let mut config = cfg();
+        config.area_threshold = 0.10; // localized area is 4/64 = 0.0625
+        let mut det = Detector::new(config);
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+
+        assert!(det
+            .observe_frame(&af(1, 200, localized(0.0, 255.0)))
+            .is_none());
+        let marker = det
+            .observe_frame(&af(2, 800, localized(0.0, 255.0)))
+            .expect("semantic click window should recover the localized response");
+
+        assert_eq!(marker.kind, CandidateKind::Click);
+        assert_eq!(marker.reason, DetectReason::ClickConfirmed);
+        assert_eq!(marker.center_id, 1); // frame 2 is post-deadline and only closes the window
+    }
+
+    #[test]
+    fn click_recovers_transient_peak_that_returns_to_baseline() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det
+            .observe_frame(&af(1, 200, quadrant(0.0, 255.0)))
+            .is_none());
+        assert!(det.observe_frame(&af(2, 400, uniform(0.0))).is_none());
+        let marker = det
+            .observe_frame(&af(3, 800, uniform(0.0)))
+            .expect("remembered popover peak should survive the return to baseline");
+
+        assert_eq!(marker.kind, CandidateKind::Click);
+        assert_eq!(marker.center_id, 1);
+        assert_eq!(marker.at_ms, 200);
+    }
+
+    #[test]
+    fn click_with_no_visual_response_still_emits_nothing_after_window_closes() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det.observe_frame(&af(1, 800, uniform(0.0))).is_none());
+        assert!(det.finish().is_none());
+    }
+
+    #[test]
+    fn click_peak_closes_on_finish_before_deadline() {
+        let mut det = Detector::new(cfg());
+        det.observe_frame(&af(0, 0, uniform(0.0)));
+        det.observe_event(ev(
+            SemanticAction::Click {
+                button: MouseButton::Left,
+                position: None,
+            },
+            100,
+        ));
+        assert!(det
+            .observe_frame(&af(1, 200, localized(0.0, 255.0)))
+            .is_none());
+        let marker = det
+            .finish()
+            .expect("finish should flush the observed click peak");
+        assert_eq!(marker.kind, CandidateKind::Click);
+        assert_eq!(marker.center_id, 1);
     }
 }

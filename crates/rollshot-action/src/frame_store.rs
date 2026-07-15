@@ -151,6 +151,10 @@ impl FrameStore {
         self.retained.get(&id)
     }
 
+    pub(crate) fn ring_bounds(&self) -> Option<(FrameId, FrameId)> {
+        Some((self.ring.front()?.id, self.ring.back()?.id))
+    }
+
     #[cfg(test)]
     pub fn retained_ids_for_test(&self) -> Vec<crate::models::FrameId> {
         self.retained.keys().copied().collect()
@@ -263,5 +267,23 @@ mod tests {
         assert_eq!(store.nearby(&window, 4), vec![3, 4, 5]);
         // Small windows are returned whole.
         assert_eq!(store.nearby(&[9, 10], 9), vec![9, 10]);
+    }
+
+    #[test]
+    fn ring_bounds_report_oldest_and_newest_without_exposing_pixels() {
+        let mut store = small_store();
+        assert_eq!(store.ring_bounds(), None);
+        for i in 0..4u64 {
+            store.ingest(frame(i as u8), i * 100);
+        }
+        assert_eq!(store.ring_bounds(), Some((0, 3)));
+    }
+
+    #[test]
+    fn default_ring_covers_product_click_window_and_replacement_context_at_five_fps() {
+        let store = StoreConfig::default();
+        let click_frames = 600u64.div_ceil(200) as usize;
+        let required = store.window_before + click_frames + store.window_after + 1;
+        assert!(store.ring_capacity >= required);
     }
 }

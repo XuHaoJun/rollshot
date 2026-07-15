@@ -74,6 +74,68 @@ fn in_mask(mask: Option<Rect>, x: u32, y: u32) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ChangeStats {
+    pub normalized_mean_diff: f32,
+    pub changed_samples: u32,
+    pub changed_ratio: f32,
+    pub changed_mean_delta: f32,
+}
+
+impl ChangeStats {
+    pub const ZERO: Self = Self {
+        normalized_mean_diff: 0.0,
+        changed_samples: 0,
+        changed_ratio: 0.0,
+        changed_mean_delta: 0.0,
+    };
+}
+
+pub(crate) fn change_stats(
+    a: &LumaPlane,
+    b: &LumaPlane,
+    mask: Option<Rect>,
+    per_sample: f32,
+) -> ChangeStats {
+    if a.width != b.width || a.height != b.height || a.samples.is_empty() {
+        return ChangeStats::ZERO;
+    }
+
+    let mut total_delta = 0.0f32;
+    let mut changed_delta = 0.0f32;
+    let mut sampled = 0u32;
+    let mut changed = 0u32;
+    for y in 0..a.height {
+        for x in 0..a.width {
+            if in_mask(mask, x, y) {
+                continue;
+            }
+            let i = (y * a.width + x) as usize;
+            let delta = (a.samples[i] - b.samples[i]).abs();
+            total_delta += delta;
+            sampled += 1;
+            if delta > per_sample {
+                changed += 1;
+                changed_delta += delta;
+            }
+        }
+    }
+    if sampled == 0 {
+        return ChangeStats::ZERO;
+    }
+
+    ChangeStats {
+        normalized_mean_diff: (total_delta / sampled as f32) / 255.0,
+        changed_samples: changed,
+        changed_ratio: changed as f32 / sampled as f32,
+        changed_mean_delta: if changed == 0 {
+            0.0
+        } else {
+            changed_delta / changed as f32
+        },
+    }
+}
+
 /// Mean absolute luma difference over unmasked samples, normalized to `[0, 1]`.
 /// Returns `0.0` on dimension mismatch or empty planes.
 pub fn masked_luma_diff(a: &LumaPlane, b: &LumaPlane, mask: Option<Rect>) -> f32 {
@@ -172,6 +234,58 @@ mod tests {
         // 16 of 64 samples changed.
         assert!((changed_area_ratio(&a, &b, None, 12.0) - 0.25).abs() < 1e-6);
         assert!(masked_luma_diff(&a, &b, None) > 0.0);
+    }
+
+    #[test]
+    fn change_stats_reports_localized_change_count_ratio_and_intensity() {
+        let a = LumaPlane {
+            width: 4,
+            height: 2,
+            samples: vec![0.0; 8],
+        };
+        let b = LumaPlane {
+            width: 4,
+            height: 2,
+            samples: vec![40.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+
+        let stats = change_stats(&a, &b, None, 12.0);
+
+        assert!((stats.normalized_mean_diff - (60.0 / 8.0 / 255.0)).abs() < 1e-6);
+        assert_eq!(stats.changed_samples, 2);
+        assert!((stats.changed_ratio - 0.25).abs() < 1e-6);
+        assert!((stats.changed_mean_delta - 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn change_stats_returns_zero_for_mismatched_or_fully_masked_planes() {
+        let a = LumaPlane {
+            width: 2,
+            height: 2,
+            samples: vec![0.0; 4],
+        };
+        let mismatched = LumaPlane {
+            width: 1,
+            height: 2,
+            samples: vec![255.0; 2],
+        };
+        assert_eq!(change_stats(&a, &mismatched, None, 12.0), ChangeStats::ZERO);
+
+        let changed = LumaPlane {
+            width: 2,
+            height: 2,
+            samples: vec![255.0; 4],
+        };
+        let full_mask = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        assert_eq!(
+            change_stats(&a, &changed, Some(full_mask), 12.0),
+            ChangeStats::ZERO
+        );
     }
 
     #[test]
