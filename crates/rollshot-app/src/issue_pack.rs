@@ -66,17 +66,15 @@ pub(crate) struct ActionGuideIssueAssets {
 }
 
 #[cfg(feature = "action-guide")]
-pub(crate) struct ActionGuideExportSource<'a> {
-    pub guide: &'a rollshot_action::Guide,
-    pub store: &'a rollshot_action::FrameStore,
-    pub region: rollshot_action::CaptureRegion,
-    pub capability: rollshot_action::InputCapability,
-    pub source_kind: rollshot_action::InputSourceKind,
+#[derive(Clone)]
+pub(crate) struct ActionGuideExportSource {
+    pub job: rollshot_action::ReviewedGuideExportJob,
     pub include_gif: bool,
-    pub storyboard_image: Option<image::RgbaImage>,
+    pub gif_frames: Vec<std::sync::Arc<RgbaImage>>,
 }
 
 #[cfg(feature = "action-guide")]
+#[allow(dead_code)]
 fn non_empty_caption(caption: &str) -> Option<String> {
     let caption = caption.trim();
     (!caption.is_empty()).then(|| caption.to_string())
@@ -84,6 +82,7 @@ fn non_empty_caption(caption: &str) -> Option<String> {
 
 #[cfg(feature = "action-guide")]
 impl ActionGuideIssueAssets {
+    #[allow(dead_code)]
     pub(crate) fn from_guide(guide: &rollshot_action::Guide, include_gif: bool) -> Self {
         let steps = guide
             .steps()
@@ -94,6 +93,24 @@ impl ActionGuideIssueAssets {
                 title: step.title.clone(),
                 caption: non_empty_caption(&step.caption),
                 keyframe_path: format!("action-guide/keyframes/{:03}.png", i + 1),
+            })
+            .collect();
+        Self { steps, include_gif }
+    }
+
+    pub(crate) fn from_job(
+        job: &rollshot_action::ReviewedGuideExportJob,
+        include_gif: bool,
+    ) -> Self {
+        let steps = job
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(offset, step)| IssuePackStep {
+                index: step.index,
+                title: step.title.clone(),
+                caption: step.caption.clone(),
+                keyframe_path: format!("action-guide/keyframes/{:03}.png", offset + 1),
             })
             .collect();
         Self { steps, include_gif }
@@ -166,6 +183,7 @@ pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: 
     ));
     md.push_str("## Attachments\n\n");
     if input.action_guide.is_some() {
+        md.push_str("- `action-guide/index.html`\n");
         md.push_str("- `action-guide/steps.md`\n");
         md.push_str("- `action-guide/session.json`\n");
     }
@@ -195,6 +213,10 @@ pub(crate) fn manifest_assets(
         });
     }
     if let Some(action) = &input.action_guide {
+        assets.push(AssetEntry {
+            kind: "action_html".to_string(),
+            path: "action-guide/index.html".to_string(),
+        });
         assets.push(AssetEntry {
             kind: "action_steps".to_string(),
             path: "action-guide/steps.md".to_string(),
@@ -391,19 +413,19 @@ pub(crate) fn export_folder(
 #[cfg(feature = "action-guide")]
 pub(crate) fn export_folder_with_action_guide(
     input: &IssuePackInput,
-    action: Option<ActionGuideExportSource<'_>>,
+    action: Option<ActionGuideExportSource>,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
     export_folder_impl(input, action, destination_parent)
 }
 
 #[cfg(not(feature = "action-guide"))]
-type ActionGuideExportSource<'a> = std::marker::PhantomData<&'a ()>;
+type ActionGuideExportSource = std::marker::PhantomData<()>;
 
 fn export_folder_impl(
     input: &IssuePackInput,
-    #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource<'_>>,
-    #[cfg(not(feature = "action-guide"))] _action: Option<ActionGuideExportSource<'_>>,
+    #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource>,
+    #[cfg(not(feature = "action-guide"))] _action: Option<ActionGuideExportSource>,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
     validate(input)?;
@@ -463,7 +485,7 @@ fn build_folder(
     input: &IssuePackInput,
     tmp_dir: &Path,
     warnings: &mut Vec<IssuePackWarning>,
-    #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource<'_>>,
+    #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource>,
 ) -> Result<(), IssuePackError> {
     std::fs::create_dir_all(tmp_dir).map_err(|e| IssuePackError::Io(e.to_string()))?;
 
@@ -478,43 +500,36 @@ fn build_folder(
 
     #[cfg(feature = "action-guide")]
     if let Some(action) = action {
-        #[allow(deprecated)]
-        rollshot_action::export_guide(
-            action.guide,
-            action.store,
-            action.region,
-            action.capability,
-            action.source_kind,
-            tmp_dir,
-        )
-        .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
+        rollshot_action::render_guide_folder(&action.job, &tmp_dir.join("action-guide"))
+            .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
 
         let storyboard_path = tmp_dir.join("action-guide/storyboard.png");
-        let storyboard_result = if let Some(image) = action.storyboard_image.as_ref() {
-            write_optional_storyboard_image(&storyboard_path, image)
-                .map_err(|error| error.to_string())
-        } else {
-            rollshot_action::export_storyboard(
-                action.guide,
-                action.store,
-                rollshot_action::StoryboardOptions::default(),
-                &storyboard_path,
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-        };
+        let storyboard_result = rollshot_action::render_reviewed_storyboard(
+            &action.job,
+            rollshot_action::StoryboardOptions::default(),
+        );
         if let Err(error) = storyboard_result {
             warnings.push(IssuePackWarning {
                 code: "storyboard_export_failed".to_string(),
                 message: format!("Storyboard export failed: {error}"),
             });
+        } else if let Ok(rendered) = storyboard_result {
+            if let Err(error) = rendered
+                .image
+                .save_with_format(&storyboard_path, image::ImageFormat::Png)
+            {
+                warnings.push(IssuePackWarning {
+                    code: "storyboard_export_failed".to_string(),
+                    message: format!("Storyboard export failed: {error}"),
+                });
+            }
         }
 
         if action.include_gif {
             let gif_path = tmp_dir.join("action-guide/guide.gif");
-            if let Err(error) = rollshot_action::export_gif(
-                action.guide,
-                action.store,
+            let frames = action.gif_frames.iter().map(std::sync::Arc::as_ref);
+            if let Err(error) = rollshot_action::export_gif_images(
+                frames,
                 rollshot_action::GifOptions::default(),
                 &gif_path,
             ) {
@@ -546,27 +561,6 @@ fn swap_folder(tmp_dir: &Path, final_dir: &Path) -> Result<(), IssuePackError> {
     std::fs::rename(tmp_dir, final_dir).map_err(|e| IssuePackError::Io(e.to_string()))
 }
 
-#[cfg(feature = "action-guide")]
-fn write_optional_storyboard_image(
-    path: &Path,
-    image: &RgbaImage,
-) -> Result<(), image::ImageError> {
-    let tmp = path.with_extension("png.tmp");
-    match image.save_with_format(&tmp, image::ImageFormat::Png) {
-        Ok(()) => {
-            if let Err(error) = std::fs::rename(&tmp, path) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(image::ImageError::IoError(error));
-            }
-            Ok(())
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(error)
-        }
-    }
-}
-
 pub(crate) fn export_zip(
     input: &IssuePackInput,
     destination_parent: &Path,
@@ -581,7 +575,7 @@ pub(crate) fn export_zip(
 #[cfg(feature = "action-guide")]
 pub(crate) fn export_zip_with_action_guide(
     input: &IssuePackInput,
-    action: Option<ActionGuideExportSource<'_>>,
+    action: Option<ActionGuideExportSource>,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
     let mut result = export_folder_with_action_guide(input, action, destination_parent)?;
@@ -791,6 +785,7 @@ mod tests {
                 "issue.md",
                 "manifest.json",
                 "images/final-redacted.png",
+                "action-guide/index.html",
                 "action-guide/steps.md",
                 "action-guide/session.json",
                 "action-guide/keyframes/001.png",
@@ -1053,8 +1048,10 @@ mod action_guide_tests {
     use image::{Rgba, RgbaImage};
     use rollshot_action::{
         ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
-        FrameStore, Guide, InputCapability, InputSourceKind, Recording, StoreConfig,
+        FrameStore, Guide, InputCapability, InputSourceKind, Recording, ReviewedGuideExportJob,
+        ReviewedGuideStep, ReviewedStepImage, StoreConfig,
     };
+    use std::sync::Arc;
 
     fn region() -> CaptureRegion {
         CaptureRegion {
@@ -1123,6 +1120,72 @@ mod action_guide_tests {
         )
     }
 
+    fn build_job(
+        guide: &Guide,
+        store: &FrameStore,
+        region: CaptureRegion,
+        capability: InputCapability,
+        source_kind: InputSourceKind,
+    ) -> Result<ReviewedGuideExportJob, String> {
+        let steps = guide
+            .steps()
+            .iter()
+            .map(|step| {
+                let frame = store
+                    .retained(step.keyframe)
+                    .ok_or_else(|| format!("keyframe {} not retained", step.keyframe))?;
+                Ok(ReviewedGuideStep {
+                    index: step.index,
+                    title: step.title.clone(),
+                    caption: {
+                        let trimmed = step.caption.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    },
+                    kind: step.kind,
+                    reason: step.reason,
+                    at_ms: step.at_ms,
+                    image: ReviewedStepImage::Retained(Arc::clone(&frame.image)),
+                    hotspots: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(ReviewedGuideExportJob {
+            title: guide.effective_title().to_string(),
+            region,
+            input_source: source_kind,
+            input_capability: capability,
+            steps,
+        })
+    }
+
+    fn job_export_source(
+        guide: &Guide,
+        store: &FrameStore,
+        region: CaptureRegion,
+        capability: InputCapability,
+        source_kind: InputSourceKind,
+        include_gif: bool,
+    ) -> ActionGuideExportSource {
+        let gif_frames = if include_gif {
+            guide
+                .steps()
+                .iter()
+                .map(|step| Arc::clone(&store.retained(step.keyframe).unwrap().image))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        ActionGuideExportSource {
+            job: build_job(guide, store, region, capability, source_kind).unwrap(),
+            include_gif,
+            gif_frames,
+        }
+    }
+
     #[test]
     fn action_guide_issue_assets_maps_non_empty_captions() {
         let recording = recording();
@@ -1150,19 +1213,18 @@ mod action_guide_tests {
         }]);
         input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, false));
         let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-            storyboard_image: None,
-        };
 
-        let err = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap_err();
-
-        assert!(err.to_string().contains("export failed"), "err = {err}");
+        // build_job fails because keyframe 9999 is not retained.
+        let job_result = build_job(&guide, &store, region, capability, source_kind);
+        assert!(
+            job_result.is_err(),
+            "build_job should fail for missing keyframe"
+        );
+        let err = job_result.err().unwrap();
+        assert!(
+            err.contains("not retained"),
+            "error should mention missing keyframe: {err}"
+        );
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
     }
 
@@ -1170,17 +1232,9 @@ mod action_guide_tests {
     fn action_keyframes_are_listed_as_reviewed_evidence_not_redacted_assets() {
         let (input, guide, store, region, capability, source_kind) = action_input();
         let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-            storyboard_image: None,
-        };
+        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
 
-        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
         let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
 
         assert!(
@@ -1197,11 +1251,9 @@ mod action_guide_tests {
         count: usize,
     ) -> (
         IssuePackInput,
-        Guide,
+        ReviewedGuideExportJob,
         FrameStore,
         CaptureRegion,
-        InputCapability,
-        InputSourceKind,
     ) {
         let mut store = FrameStore::new(StoreConfig {
             ring_capacity: count + 16,
@@ -1230,32 +1282,25 @@ mod action_guide_tests {
         input.evidence_review.result_workspace_images_reviewed = false;
         input.evidence_review.action_guide_keyframes_reviewed = true;
         input.redaction.result_workspace_images_are_flattened = false;
-        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, false));
-        (
-            input,
-            guide,
-            store,
+        let job = build_job(
+            &guide,
+            &store,
             region(),
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
         )
+        .unwrap();
+        input.action_guide = Some(ActionGuideIssueAssets::from_job(&job, false));
+        (input, job, store, region())
     }
 
     #[test]
     fn export_folder_includes_action_guide_folder() {
         let (input, guide, store, region, capability, source_kind) = action_input();
         let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-            storyboard_image: None,
-        };
+        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
 
-        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
 
         assert!(result.directory.join("action-guide/steps.md").exists());
         assert!(result.directory.join("action-guide/session.json").exists());
@@ -1301,19 +1346,15 @@ mod action_guide_tests {
     #[test]
     fn storyboard_export_failure_warns_without_blocking_issue_pack() {
         // 260 steps at default keyframe size exceeds StoryboardOptions::default().max_canvas_pixels
-        let (input, guide, store, region, capability, source_kind) = many_step_action_input(260);
+        let (input, job, _store, _region) = many_step_action_input(260);
         let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
+        let source = ActionGuideExportSource {
+            job,
             include_gif: false,
-            storyboard_image: None,
+            gif_frames: Vec::new(),
         };
 
-        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
 
         assert!(result.directory.join("action-guide/steps.md").exists());
         assert!(result
@@ -1351,17 +1392,9 @@ mod action_guide_tests {
             derived_from_original: true,
         });
         let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-            storyboard_image: None,
-        };
+        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
 
-        let result = export_folder_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
 
         assert!(result
             .directory
@@ -1391,17 +1424,9 @@ mod action_guide_tests {
     fn export_zip_with_action_guide_includes_storyboard() {
         let (input, guide, store, region, capability, source_kind) = action_input();
         let tmp = tempfile::tempdir().unwrap();
-        let action = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-            storyboard_image: None,
-        };
+        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
 
-        let result = export_zip_with_action_guide(&input, Some(action), tmp.path()).unwrap();
+        let result = export_zip_with_action_guide(&input, Some(source), tmp.path()).unwrap();
         let zip_path = result.zip_path.clone().expect("zip path");
         let file = std::fs::File::open(zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -1418,29 +1443,129 @@ mod action_guide_tests {
     }
 
     #[test]
-    fn action_guide_issue_pack_uses_supplied_storyboard_image() {
+    fn action_guide_issue_pack_renders_storyboard_from_job_data() {
         let (input, guide, store, region, capability, source_kind) = action_input();
         let temp = tempfile::tempdir().unwrap();
-        let storyboard = image::RgbaImage::from_pixel(16, 16, image::Rgba([17, 34, 51, 255]));
-        let source = ActionGuideExportSource {
-            guide: &guide,
-            store: &store,
-            region,
-            capability,
-            source_kind,
-            include_gif: false,
-            storyboard_image: Some(storyboard),
-        };
+        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
 
         let result =
             export_folder_with_action_guide(&input, Some(source), temp.path()).expect("issue pack");
 
-        let decoded =
-            image::ImageReader::open(result.directory.join("action-guide/storyboard.png"))
-                .unwrap()
-                .decode()
-                .unwrap()
-                .to_rgba8();
-        assert_eq!(decoded.get_pixel(0, 0).0, [17, 34, 51, 255]);
+        assert!(result
+            .directory
+            .join("action-guide/storyboard.png")
+            .exists());
+        assert!(
+            result.warnings.is_empty(),
+            "warnings = {:?}",
+            result.warnings
+        );
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"action_storyboard\""),
+            "manifest = {manifest}"
+        );
+    }
+
+    fn issue_pack_test_job() -> rollshot_action::ReviewedGuideExportJob {
+        rollshot_action::ReviewedGuideExportJob {
+            title: "Checkout failure".into(),
+            region: rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: rollshot_action::InputSourceKind::LinuxEvdev,
+            input_capability: rollshot_action::InputCapability::SemanticEvents,
+            steps: vec![rollshot_action::ReviewedGuideStep {
+                index: 1,
+                title: "Submit order".into(),
+                caption: Some("Confirm the request".into()),
+                kind: rollshot_action::CandidateKind::Click,
+                reason: rollshot_action::DetectReason::ClickConfirmed,
+                at_ms: 100,
+                image: rollshot_action::ReviewedStepImage::Retained(Arc::new(RgbaImage::new(8, 8))),
+                hotspots: vec![rollshot_action::GuideHotspot {
+                    annotation_id: 1,
+                    bounds: rollshot_action::NormalizedRect {
+                        x: 0.1,
+                        y: 0.1,
+                        width: 0.2,
+                        height: 0.2,
+                    },
+                    explanation: "Open Settings".into(),
+                }],
+            }],
+        }
+    }
+
+    fn owned_action_source() -> ActionGuideExportSource {
+        ActionGuideExportSource {
+            job: issue_pack_test_job(),
+            include_gif: false,
+            gif_frames: vec![Arc::new(RgbaImage::new(8, 8))],
+        }
+    }
+
+    fn reviewed_issue_pack_input() -> IssuePackInput {
+        let mut input = super::tests::base_input();
+        input.final_image = None;
+        input.action_guide = Some(ActionGuideIssueAssets::from_job(
+            &issue_pack_test_job(),
+            false,
+        ));
+        input.evidence_review.required = true;
+        input.evidence_review.completed = true;
+        input.evidence_review.action_guide_keyframes_reviewed = true;
+        input
+    }
+
+    #[test]
+    fn issue_pack_lists_and_writes_interactive_guide() {
+        let parent = tempfile::tempdir().unwrap();
+        let input = reviewed_issue_pack_input();
+        let result =
+            export_folder_with_action_guide(&input, Some(owned_action_source()), parent.path())
+                .unwrap();
+        assert!(result.directory.join("action-guide/index.html").is_file());
+        let issue = std::fs::read_to_string(result.directory.join("issue.md")).unwrap();
+        assert!(issue.contains("`action-guide/index.html`"));
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(manifest.contains("\"action_html\""));
+    }
+
+    #[test]
+    fn issue_pack_html_failure_rolls_back_outer_transaction() {
+        let parent = tempfile::tempdir().unwrap();
+        let mut source = owned_action_source();
+        source.job.steps[0].hotspots[0].explanation.clear();
+        assert!(export_folder_with_action_guide(
+            &reviewed_issue_pack_input(),
+            Some(source),
+            parent.path()
+        )
+        .is_err());
+        assert!(std::fs::read_dir(parent.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn issue_pack_zip_includes_interactive_guide_html() {
+        let parent = tempfile::tempdir().unwrap();
+        let input = reviewed_issue_pack_input();
+        let result =
+            export_zip_with_action_guide(&input, Some(owned_action_source()), parent.path())
+                .unwrap();
+        let zip_path = result.zip_path.clone().expect("zip path");
+        let file = std::fs::File::open(zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        assert!(
+            names.contains(&"action-guide/index.html".to_string()),
+            "names = {names:?}"
+        );
     }
 }

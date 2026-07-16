@@ -44,17 +44,44 @@ pub fn export_gif(
         return Err(GifError::Empty);
     }
 
-    // One (possibly downscaled) RGBA frame per step, in order.
-    let mut images = Vec::with_capacity(guide.steps().len());
-    for (i, step) in guide.steps().iter().enumerate() {
-        let retained = store
-            .retained(step.keyframe)
-            .ok_or(GifError::KeyframeMissing { index: i + 1 })?;
-        images.push(downscale(&retained.image, opts.max_width));
-    }
+    let images = guide
+        .steps()
+        .iter()
+        .enumerate()
+        .map(|(i, step)| {
+            let retained = store
+                .retained(step.keyframe)
+                .ok_or(GifError::KeyframeMissing { index: i + 1 })?;
+            Ok(downscale(&retained.image, opts.max_width))
+        })
+        .collect::<Result<Vec<_>, GifError>>()?;
 
-    // Encode into an in-memory buffer. The encoder is scoped so it is dropped
-    // (and the GIF trailer flushed) before the buffer is read.
+    encode_images(images, opts.frame_dwell_ms, out_path)
+}
+
+/// Encode pre-collected RGBA frames into an infinitely-looping GIF.
+/// Each image is downscaled to `opts.max_width` before encoding.
+/// Writes atomically; on any error nothing is left at `out_path`.
+pub fn export_gif_images<'a>(
+    images: impl IntoIterator<Item = &'a RgbaImage>,
+    opts: GifOptions,
+    out_path: &Path,
+) -> Result<(), GifError> {
+    let images = images
+        .into_iter()
+        .map(|image| downscale(image, opts.max_width))
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return Err(GifError::Empty);
+    }
+    encode_images(images, opts.frame_dwell_ms, out_path)
+}
+
+fn encode_images(
+    images: Vec<RgbaImage>,
+    frame_dwell_ms: u32,
+    out_path: &Path,
+) -> Result<(), GifError> {
     let mut buf: Vec<u8> = Vec::new();
     {
         let mut encoder = GifEncoder::new(&mut buf);
@@ -62,13 +89,12 @@ pub fn export_gif(
             .set_repeat(Repeat::Infinite)
             .map_err(|source| GifError::Encode { source })?;
         for image in images {
-            let delay = Delay::from_numer_denom_ms(opts.frame_dwell_ms, 1);
+            let delay = Delay::from_numer_denom_ms(frame_dwell_ms, 1);
             encoder
                 .encode_frame(Frame::from_parts(image, 0, 0, delay))
                 .map_err(|source| GifError::Encode { source })?;
         }
     }
-
     write_atomic(out_path, &buf)
 }
 

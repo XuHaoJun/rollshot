@@ -10,6 +10,7 @@ use crate::models::{
 
 pub const GUIDE_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Clone)]
 pub struct ReviewedGuideExportJob {
     pub title: String,
     pub region: CaptureRegion,
@@ -18,6 +19,7 @@ pub struct ReviewedGuideExportJob {
     pub steps: Vec<ReviewedGuideStep>,
 }
 
+#[derive(Clone)]
 pub struct ReviewedGuideStep {
     pub index: usize,
     pub title: String,
@@ -29,6 +31,7 @@ pub struct ReviewedGuideStep {
     pub hotspots: Vec<GuideHotspot>,
 }
 
+#[derive(Clone)]
 pub enum ReviewedStepImage {
     Retained(Arc<RgbaImage>),
     Annotated(FlattenSnapshot),

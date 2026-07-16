@@ -10,6 +10,12 @@ use rollshot_image_document::Annotation;
 
 use super::TimelineWorkspace;
 
+#[derive(Clone)]
+pub(crate) struct PendingIssuePackExport {
+    pub input: crate::issue_pack::IssuePackInput,
+    pub source: crate::issue_pack::ActionGuideExportSource,
+}
+
 pub(crate) struct PendingStandaloneExport {
     pub operation_id: u64,
     pub created_at: DateTime<Local>,
@@ -227,6 +233,39 @@ pub(crate) fn build_reviewed_export_job(
     };
     job.validate()?;
     Ok(job)
+}
+
+pub(crate) fn prepare_issue_pack_export(
+    state: &TimelineWorkspace,
+) -> Result<PendingIssuePackExport, String> {
+    let include_gif = state
+        .issue_pack
+        .as_ref()
+        .is_some_and(|dialog| dialog.include_gif);
+    let job = build_reviewed_export_job(state).map_err(|error| error.to_string())?;
+    let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
+    let input = super::update::timeline_issue_pack_input(state, assets);
+    let gif_frames = state
+        .guide
+        .steps()
+        .iter()
+        .enumerate()
+        .map(|(offset, step)| {
+            state
+                .store
+                .retained(step.keyframe)
+                .map(|frame| Arc::clone(&frame.image))
+                .ok_or_else(|| format!("step {} keyframe is unavailable", offset + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PendingIssuePackExport {
+        input,
+        source: crate::issue_pack::ActionGuideExportSource {
+            job,
+            include_gif,
+            gif_frames,
+        },
+    })
 }
 
 fn build_hotspots(

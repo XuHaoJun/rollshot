@@ -557,26 +557,36 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         Message::IssuePackFolderChosen(None) => {
             if let Some(dialog) = &mut state.issue_pack {
                 dialog.pending_kind = None;
+                dialog.pending_export = None;
             }
             Task::none()
         }
         Message::IssuePackFolderChosen(Some(parent)) => {
-            let kind = state
-                .issue_pack
-                .as_ref()
-                .and_then(|dialog| dialog.pending_kind)
-                .unwrap_or(super::IssuePackKind::Folder);
-            let input = timeline_issue_pack_input(state);
-            let action = timeline_issue_pack_action(state);
+            let (kind, pending) = {
+                let Some(dialog) = state.issue_pack.as_mut() else {
+                    return Task::none();
+                };
+                let kind = dialog
+                    .pending_kind
+                    .take()
+                    .unwrap_or(super::IssuePackKind::Folder);
+                let Some(pending) = dialog.pending_export.take() else {
+                    return Task::none();
+                };
+                (kind, pending)
+            };
+            state.issue_pack.as_mut().unwrap().pending_kind = None;
             let result = match kind {
                 super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
-                    &input,
-                    Some(action),
+                    &pending.input,
+                    Some(pending.source),
                     &parent,
                 ),
-                super::IssuePackKind::Zip => {
-                    crate::issue_pack::export_zip_with_action_guide(&input, Some(action), &parent)
-                }
+                super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide(
+                    &pending.input,
+                    Some(pending.source),
+                    &parent,
+                ),
             };
             update(
                 state,
@@ -1448,11 +1458,10 @@ async fn download_managed_ffmpeg_task() -> Result<PathBuf, String> {
         .map_err(|error| format!("managed FFmpeg download task failed: {error}"))?
 }
 
-fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::IssuePackInput {
-    let include_gif = state
-        .issue_pack
-        .as_ref()
-        .is_some_and(|dialog| dialog.include_gif);
+pub(crate) fn timeline_issue_pack_input(
+    state: &TimelineWorkspace,
+    assets: crate::issue_pack::ActionGuideIssueAssets,
+) -> crate::issue_pack::IssuePackInput {
     let reviewed = state
         .issue_pack
         .as_ref()
@@ -1463,10 +1472,7 @@ fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::Is
         rollshot_version: env!("CARGO_PKG_VERSION").to_string(),
         platform: crate::issue_pack::PlatformInfo::current(),
         final_image: None,
-        action_guide: Some(crate::issue_pack::ActionGuideIssueAssets::from_guide(
-            &state.guide,
-            include_gif,
-        )),
+        action_guide: Some(assets),
         ocr_snippets: Vec::new(),
         evidence_review: crate::issue_pack::EvidenceReviewSummary {
             required: true,
@@ -1484,39 +1490,27 @@ fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::Is
     }
 }
 
-fn timeline_issue_pack_action(
-    state: &TimelineWorkspace,
-) -> crate::issue_pack::ActionGuideExportSource<'_> {
-    let include_gif = state
-        .issue_pack
-        .as_ref()
-        .is_some_and(|dialog| dialog.include_gif);
-    let storyboard_image = render_timeline_storyboard(state, StoryboardOptions::default())
-        .ok()
-        .map(|r| r.image);
-    crate::issue_pack::ActionGuideExportSource {
-        guide: &state.guide,
-        store: &state.store,
-        region: state.region,
-        capability: state.capability,
-        source_kind: state.source_kind,
-        include_gif,
-        storyboard_image,
-    }
-}
-
 fn begin_issue_pack_export(
     state: &mut TimelineWorkspace,
     kind: super::IssuePackKind,
 ) -> Task<Message> {
-    let Some(dialog) = &mut state.issue_pack else {
+    if state.issue_pack.is_none() {
         return Task::none();
-    };
-    if !dialog.review_confirmed {
+    }
+    if !state.issue_pack.as_ref().unwrap().review_confirmed {
         state.message = Some("Review every keyframe before sharing.".to_string());
         return Task::none();
     }
+    let pending = match super::guide_export::prepare_issue_pack_export(state) {
+        Ok(pending) => pending,
+        Err(error) => {
+            state.message = Some(error);
+            return Task::none();
+        }
+    };
+    let dialog = state.issue_pack.as_mut().unwrap();
     dialog.pending_kind = Some(kind);
+    dialog.pending_export = Some(pending);
     Task::perform(
         pick_export_dir(picker_default_dir()),
         Message::IssuePackFolderChosen,
@@ -1706,6 +1700,7 @@ fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline_workspace::guide_export;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
     use crate::timeline_workspace::visual_annotation_agent::VisualSuggestionConsent;
     use crate::timeline_workspace::{
@@ -1987,13 +1982,34 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         let _ = update(&mut state, Message::ExportBugReport);
+        assert!(
+            state.issue_pack.is_some(),
+            "dialog should exist after ExportBugReport"
+        );
+        // begin_issue_pack_export checks review_confirmed before preparing.
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert!(
+            state.message.is_some(),
+            "message should be set after IssuePackExportFolder, got None"
+        );
+        // The picker should not have opened; no pending_export was set.
+        // Simulate the picker returning anyway to verify nothing is written.
         let _ = update(
             &mut state,
             Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
         );
 
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
-        assert!(state.message.as_ref().unwrap().contains("review"));
+        assert!(
+            state
+                .message
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("review"),
+            "message = {:?}",
+            state.message
+        );
     }
 
     #[test]
@@ -2007,6 +2023,18 @@ mod tests {
         );
         let _ = update(&mut state, Message::ExportBugReport);
         let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        // IssuePackExportFolder calls begin_issue_pack_export which prepares
+        // the owned source before opening the picker.
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert!(
+            state
+                .issue_pack
+                .as_ref()
+                .and_then(|d| d.pending_export.as_ref())
+                .is_some(),
+            "pending_export should be set after IssuePackExportFolder"
+        );
+        // Simulate the picker returning a path.
         let _ = update(
             &mut state,
             Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
@@ -2021,7 +2049,7 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("rollshot-issue-pack-")
             })
-            .unwrap();
+            .expect("issue pack directory should exist");
         let md = std::fs::read_to_string(pack.join("issue.md")).unwrap();
         assert!(md.contains("Open Settings"), "md = {md}");
         assert!(pack.join("action-guide/steps.md").exists());
@@ -2384,13 +2412,20 @@ mod tests {
             review_confirmed: true,
             pending_kind: None,
             include_gif: false,
+            pending_export: None,
         });
-        let before = {
-            let action = timeline_issue_pack_action(&state);
-            action
-                .storyboard_image
-                .expect("storyboard before annotation")
-        };
+        let original = state
+            .store
+            .retained(state.guide.steps()[0].keyframe)
+            .unwrap()
+            .image
+            .clone();
+        let before = rollshot_action::render_reviewed_storyboard(
+            &guide_export::build_reviewed_export_job(&state).unwrap(),
+            rollshot_action::StoryboardOptions::default(),
+        )
+        .expect("storyboard before annotation")
+        .image;
 
         let step = state.selected_step().unwrap().clone();
         let doc = state
@@ -2406,14 +2441,22 @@ mod tests {
             })
             .unwrap();
 
-        let action = timeline_issue_pack_action(&state);
+        let after = rollshot_action::render_reviewed_storyboard(
+            &guide_export::build_reviewed_export_job(&state).unwrap(),
+            rollshot_action::StoryboardOptions::default(),
+        )
+        .expect("storyboard after annotation")
+        .image;
 
-        assert!(action.storyboard_image.is_some());
-        let image = action.storyboard_image.as_ref().unwrap();
         assert_ne!(
             before.as_raw(),
-            image.as_raw(),
+            after.as_raw(),
             "Issue Pack storyboard image should use flattened annotated keyframes"
+        );
+        assert_eq!(
+            state.store.retained(step.keyframe).unwrap().image.as_raw(),
+            original.as_raw(),
+            "retained keyframe must be unchanged after annotation"
         );
     }
 
@@ -2800,7 +2843,13 @@ mod tests {
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
         );
 
-        let input = timeline_issue_pack_input(&state);
+        let include_gif = state
+            .issue_pack
+            .as_ref()
+            .is_some_and(|dialog| dialog.include_gif);
+        let assets =
+            crate::issue_pack::ActionGuideIssueAssets::from_guide(&state.guide, include_gif);
+        let input = timeline_issue_pack_input(&state, assets);
         let first_step = &input.action_guide.as_ref().unwrap().steps[0];
 
         assert_eq!(first_step.title, "Open Preferences");

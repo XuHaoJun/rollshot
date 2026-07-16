@@ -70,11 +70,26 @@ pub(crate) struct StoryboardPreviewState {
     pub copy_state: StoryboardCopyState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct IssuePackDialog {
     pub review_confirmed: bool,
     pub pending_kind: Option<IssuePackKind>,
     pub include_gif: bool,
+    pub pending_export: Option<guide_export::PendingIssuePackExport>,
+}
+
+impl std::fmt::Debug for IssuePackDialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssuePackDialog")
+            .field("review_confirmed", &self.review_confirmed)
+            .field("pending_kind", &self.pending_kind)
+            .field("include_gif", &self.include_gif)
+            .field(
+                "pending_export",
+                &self.pending_export.as_ref().map(|_| ".."),
+            )
+            .finish()
+    }
 }
 
 impl IssuePackDialog {
@@ -83,6 +98,7 @@ impl IssuePackDialog {
             review_confirmed: false,
             pending_kind: None,
             include_gif: true,
+            pending_export: None,
         }
     }
 }
