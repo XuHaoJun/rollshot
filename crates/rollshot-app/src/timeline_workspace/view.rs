@@ -6,6 +6,10 @@ use iced::{mouse, Alignment, Color, Element, Length, Theme};
 
 use super::{Message, TimelineWorkspace};
 
+fn guide_title_input_value(state: &TimelineWorkspace) -> &str {
+    state.guide.title()
+}
+
 pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
     let body: Element<Message> = column![
         header(state),
@@ -79,7 +83,7 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             .height(Length::Shrink)
             .into(),
     };
-    let guide_title_input = text_input("Guide title", state.guide.effective_title())
+    let guide_title_input = text_input("Guide title", guide_title_input_value(state))
         .on_input(Message::GuideTitleChanged);
 
     let export_busy = matches!(
@@ -1006,6 +1010,18 @@ mod tests {
             capability,
             InputSourceKind::LinuxEvdev,
         )
+    }
+
+    #[test]
+    fn guide_title_input_preserves_empty_editable_value() {
+        let mut state = ws(
+            recording_from_frames(),
+            rollshot_action::InputCapability::SemanticEvents,
+        );
+        state.guide.set_title(String::new());
+
+        assert_eq!(guide_title_input_value(&state), "");
+        assert_eq!(state.guide.effective_title(), "Action Guide");
     }
 
     #[test]

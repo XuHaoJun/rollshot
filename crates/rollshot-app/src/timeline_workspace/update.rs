@@ -70,7 +70,10 @@ pub enum Message {
     /// Begin exporting an Issue Pack to a ZIP file.
     IssuePackExportZip,
     /// The async folder-picker returned (None = cancelled).
-    IssuePackFolderChosen(Option<PathBuf>),
+    IssuePackFolderChosen {
+        operation_id: u64,
+        parent: Option<PathBuf>,
+    },
     /// Background Issue Pack export completed.
     IssuePackFinished {
         operation_id: u64,
@@ -303,13 +306,31 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::OpenExportedGuide => {
             if let Some(export) = &state.last_export {
-                let _ = crate::platform_actions::open_path(&export.index_html);
+                let path = export.index_html.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::platform_actions::open_path(&path)
+                        })
+                        .await
+                        .map_err(|_| "Open Guide action worker failed".to_string())?
+                    },
+                    Message::PlatformActionFinished,
+                );
             }
             Task::none()
         }
         Message::ShowExportedGuideInFolder => {
             if let Some(export) = &state.last_export {
-                let _ = crate::platform_actions::reveal(&export.directory);
+                let path = export.directory.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || crate::platform_actions::reveal(&path))
+                            .await
+                            .map_err(|_| "Show in Folder action worker failed".to_string())?
+                    },
+                    Message::PlatformActionFinished,
+                );
             }
             Task::none()
         }
@@ -532,15 +553,23 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             begin_issue_pack_export(state, super::IssuePackKind::Folder)
         }
         Message::IssuePackExportZip => begin_issue_pack_export(state, super::IssuePackKind::Zip),
-        Message::IssuePackFolderChosen(None) => {
-            if let Some(dialog) = &mut state.issue_pack {
+        Message::IssuePackFolderChosen {
+            operation_id,
+            parent,
+        } => {
+            let Some(dialog) = state.issue_pack.as_ref() else {
+                return Task::none();
+            };
+            if dialog.operation_id != operation_id {
+                return Task::none();
+            }
+            let Some(parent) = parent else {
+                let dialog = state.issue_pack.as_mut().unwrap();
                 dialog.pending_kind = None;
                 dialog.pending_export = None;
                 dialog.exporting = false;
-            }
-            Task::none()
-        }
-        Message::IssuePackFolderChosen(Some(parent)) => {
+                return Task::none();
+            };
             let (kind, pending, operation_id) = {
                 let Some(dialog) = state.issue_pack.as_mut() else {
                     return Task::none();
@@ -1506,10 +1535,12 @@ fn begin_issue_pack_export(
     dialog.operation_id = operation_id;
     dialog.pending_kind = Some(kind);
     dialog.pending_export = Some(pending);
-    Task::perform(
-        pick_export_dir(picker_default_dir()),
-        Message::IssuePackFolderChosen,
-    )
+    Task::perform(pick_export_dir(picker_default_dir()), move |parent| {
+        Message::IssuePackFolderChosen {
+            operation_id,
+            parent,
+        }
+    })
 }
 
 fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePoint {
@@ -1888,6 +1919,18 @@ mod tests {
     }
 
     #[test]
+    fn post_export_platform_actions_schedule_result_messages() {
+        let mut state = ws(recording_from_frames());
+        state.last_export = Some(fake_result("/tmp/action-guide"));
+
+        let open_task = update(&mut state, Message::OpenExportedGuide);
+        let reveal_task = update(&mut state, Message::ShowExportedGuideInFolder);
+
+        assert!(open_task.units() > 0);
+        assert!(reveal_task.units() > 0);
+    }
+
+    #[test]
     fn export_gif_path_chosen_writes_file_and_keeps_window_open() {
         let mut state = ws(recording_from_frames());
         let tmp = tempfile::tempdir().unwrap();
@@ -1944,7 +1987,10 @@ mod tests {
         // Simulate the picker returning anyway to verify nothing is written.
         let _ = update(
             &mut state,
-            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+            Message::IssuePackFolderChosen {
+                operation_id: 0,
+                parent: Some(tmp.path().to_path_buf()),
+            },
         );
 
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
@@ -1990,7 +2036,10 @@ mod tests {
         // Simulate the picker returning a path. This spawns an async task.
         let task = update(
             &mut state,
-            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+            Message::IssuePackFolderChosen {
+                operation_id: 1,
+                parent: Some(tmp.path().to_path_buf()),
+            },
         );
         assert!(
             state.issue_pack.as_ref().unwrap().exporting,
@@ -2009,6 +2058,37 @@ mod tests {
         let _ = update(&mut state, Message::IssuePackCancel);
 
         assert!(state.issue_pack.is_none());
+    }
+
+    #[test]
+    fn stale_issue_pack_picker_result_does_not_consume_current_export() {
+        let mut state = ws(recording_from_frames());
+        let stale_parent = tempfile::tempdir().unwrap();
+
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert_eq!(state.issue_pack.as_ref().unwrap().operation_id, 1);
+
+        let _ = update(&mut state, Message::IssuePackCancel);
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert_eq!(state.issue_pack.as_ref().unwrap().operation_id, 2);
+
+        let task = update(
+            &mut state,
+            Message::IssuePackFolderChosen {
+                operation_id: 1,
+                parent: Some(stale_parent.path().to_path_buf()),
+            },
+        );
+
+        let dialog = state.issue_pack.as_ref().unwrap();
+        assert_eq!(task.units(), 0);
+        assert_eq!(dialog.operation_id, 2);
+        assert!(dialog.pending_export.is_some());
+        assert!(!dialog.exporting);
     }
 
     #[test]

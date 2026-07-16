@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Local};
@@ -104,6 +105,17 @@ fn commit_noreplace(temp: &Path, destination: &Path) -> Result<(), rustix::io::E
     renameat_with(CWD, temp, CWD, destination, RenameFlags::NOREPLACE)
 }
 
+fn unique_temp_path(parent: &Path, operation_id: u64) -> PathBuf {
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+    let temp_id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        ".tmp-{}-{}-{}",
+        std::process::id(),
+        operation_id,
+        temp_id
+    ))
+}
+
 struct TempGuideGuard {
     path: Option<PathBuf>,
 }
@@ -141,11 +153,10 @@ fn export_standalone_with_commit_hook(
         job,
     } = request;
 
-    let tmp_name = format!(".tmp-{}", operation_id);
-    let tmp = parent.join(&tmp_name);
-    let mut guard = TempGuideGuard::new(tmp.clone());
+    let tmp = unique_temp_path(&parent, operation_id);
 
     rollshot_action::render_guide_folder(&job, &tmp).map_err(|error| format!("{error}"))?;
+    let mut guard = TempGuideGuard::new(tmp.clone());
 
     let mut suffix = 1u32;
     loop {
@@ -440,6 +451,18 @@ mod tests {
             second.file_name().unwrap(),
             "checkout-failure-2026-07-16-090807-2"
         );
+    }
+
+    #[test]
+    fn temp_paths_are_unique_even_when_operation_ids_match() {
+        let parent = tempfile::tempdir().unwrap();
+
+        let first = unique_temp_path(parent.path(), 1);
+        let second = unique_temp_path(parent.path(), 1);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(parent.path()));
+        assert_eq!(second.parent(), Some(parent.path()));
     }
 
     #[test]
