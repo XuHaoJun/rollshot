@@ -5,6 +5,7 @@
 //! independent of session length (spec §Fixed Bounds And Capture Rate).
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use image::RgbaImage;
 
@@ -44,7 +45,7 @@ impl Default for StoreConfig {
 struct RingFrame {
     id: FrameId,
     at_ms: Millis,
-    image: RgbaImage,
+    image: Arc<RgbaImage>,
 }
 
 /// A downsampled luma frame queued for the detector.
@@ -60,7 +61,7 @@ pub struct AnalysisFrame {
 pub struct RetainedFrame {
     pub id: FrameId,
     pub at_ms: Millis,
-    pub image: RgbaImage,
+    pub image: Arc<RgbaImage>,
 }
 
 pub struct FrameStore {
@@ -100,6 +101,7 @@ impl FrameStore {
         let id = self.next_id;
         self.next_id += 1;
         let luma = downsample_luma(&image, self.config.analysis_width);
+        let image = Arc::new(image);
 
         self.ring.push_back(RingFrame { id, at_ms, image });
         if self.ring.len() > self.config.ring_capacity {
@@ -139,7 +141,7 @@ impl FrameStore {
             self.retained.entry(f.id).or_insert_with(|| RetainedFrame {
                 id: f.id,
                 at_ms: f.at_ms,
-                image: f.image.clone(),
+                image: Arc::clone(&f.image),
             });
             ids.push(f.id);
         }
@@ -184,6 +186,7 @@ impl FrameStore {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+    use std::sync::Arc;
 
     fn frame(v: u8) -> RgbaImage {
         RgbaImage::from_pixel(8, 8, Rgba([v, v, v, 255]))
@@ -285,5 +288,16 @@ mod tests {
         let click_frames = 600u64.div_ceil(200) as usize;
         let required = store.window_before + click_frames + store.window_after + 1;
         assert!(store.ring_capacity >= required);
+    }
+
+    #[test]
+    fn retained_window_shares_ring_pixels() {
+        let mut store = small_store();
+        let id = store.ingest(RgbaImage::new(4, 4), 0);
+        store.retain_window(id);
+
+        let ring = &store.ring.back().unwrap().image;
+        let retained = &store.retained(id).unwrap().image;
+        assert!(Arc::ptr_eq(ring, retained));
     }
 }

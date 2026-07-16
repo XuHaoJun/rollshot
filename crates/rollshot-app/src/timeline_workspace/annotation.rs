@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use iced::widget::{canvas, image, text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Theme};
@@ -41,7 +42,7 @@ impl ActionGuidePresentation {
                 StepAnnotationDocument {
                     source: step.source,
                     keyframe: step.keyframe,
-                    document: ImageDocument::new(frame.image.clone()),
+                    document: ImageDocument::from_shared_source(Arc::clone(&frame.image)),
                 },
             );
         }

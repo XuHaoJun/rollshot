@@ -24,6 +24,7 @@ pub use annotation::{Annotation, AnnotationId, FreehandKind, ShapeKind, TwoPoint
 pub use callout_placement::place_number_callout_bubble;
 pub use document::{EditError, ImageDocument, HISTORY_LIMIT};
 pub use edit_op::{BatchOutcome, EditOp};
+pub use flatten::FlattenSnapshot;
 pub use geometry::{ImagePoint, ImageRect, Rgb8, Rgba8};
 pub use hit::{hit_test_annotation, resize_handles, Hit, HitPart, ResizeHandle};
 pub use navigator::NavigatorItem;

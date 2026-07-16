@@ -2,6 +2,8 @@
 //! (spec §11.2). Selection, hover, viewport, and drafts never reach this
 //! module — it consumes only the committed annotation graph.
 
+use std::sync::Arc;
+
 use image::RgbaImage;
 
 use crate::annotation::Annotation;
@@ -13,6 +15,37 @@ use crate::raster::{
 };
 use crate::shapes::{annotation_commands, RenderCommand, RenderShape, TextAnchor};
 use crate::text::{draw_block, measure_block};
+
+#[derive(Debug, Clone)]
+pub struct FlattenSnapshot {
+    source: Arc<RgbaImage>,
+    annotations: Vec<Annotation>,
+}
+
+impl FlattenSnapshot {
+    pub(crate) fn new(source: Arc<RgbaImage>, annotations: Vec<Annotation>) -> Self {
+        Self {
+            source,
+            annotations,
+        }
+    }
+
+    pub fn shared_source(&self) -> Arc<RgbaImage> {
+        Arc::clone(&self.source)
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.source.dimensions()
+    }
+
+    pub fn annotations(&self) -> &[Annotation] {
+        &self.annotations
+    }
+
+    pub fn flatten(&self) -> RgbaImage {
+        flatten_onto(&self.source, &self.annotations)
+    }
+}
 
 pub(crate) fn flatten_onto(source: &RgbaImage, annotations: &[Annotation]) -> RgbaImage {
     let mut out = source.clone();
