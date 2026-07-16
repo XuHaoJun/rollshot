@@ -7,6 +7,7 @@
 pub mod model;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::diagnostics::TARGET_EXPORT;
 use crate::error::ExportError;
@@ -71,29 +72,42 @@ pub fn export_guide(
     if guide.is_empty() {
         return Err(ExportError::Empty);
     }
-    let final_dir = out_dir.join("action-guide");
-    let tmp_dir = out_dir.join(".action-guide.tmp");
-
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir).map_err(|source| ExportError::Io {
-            path: tmp_dir.display().to_string(),
-            source,
-        })?;
-    }
-
-    // Build everything in the temp dir, then swap it into place. On ANY failure
-    // — during build OR during the swap — remove the temp dir so no partial
-    // `.action-guide.tmp` artifact is left behind and the editable session is
-    // preserved.
-    if let Err(err) = build(guide, store, region, capability, source, &tmp_dir)
-        .and_then(|()| swap_into_place(&tmp_dir, &final_dir))
-    {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        tracing::debug!(target: TARGET_EXPORT, "export failed; temp dir rolled back");
-        return Err(err);
-    }
-    tracing::info!(target: TARGET_EXPORT, steps = guide.steps().len(), "export complete");
-    Ok(final_dir)
+    let steps: Result<Vec<model::ReviewedGuideStep>, ExportError> = guide
+        .steps()
+        .iter()
+        .enumerate()
+        .map(|(i, step)| {
+            let frame = store
+                .retained(step.keyframe)
+                .ok_or_else(|| ExportError::Io {
+                    path: format!("keyframes/{:03}.png", i + 1),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "keyframe pixels not retained",
+                    ),
+                })?;
+            let caption = non_empty_caption(&step.caption).map(str::to_string);
+            Ok(model::ReviewedGuideStep {
+                index: step.index,
+                title: step.title.clone(),
+                caption,
+                kind: step.kind,
+                reason: step.reason,
+                at_ms: step.at_ms,
+                image: model::ReviewedStepImage::Retained(Arc::clone(&frame.image)),
+                hotspots: Vec::new(),
+            })
+        })
+        .collect();
+    let job = model::ReviewedGuideExportJob {
+        title: guide.effective_title().to_string(),
+        region,
+        input_source: source,
+        input_capability: capability,
+        steps: steps?,
+    };
+    let destination = out_dir.join("action-guide");
+    render_guide_folder(&job, &destination)
 }
 
 pub fn render_guide_folder(
@@ -179,101 +193,6 @@ fn write_text(path: PathBuf, contents: &str) -> Result<(), ExportError> {
         path: path.display().to_string(),
         source,
     })
-}
-
-/// Replace `final_dir` with the freshly-built `tmp_dir`: remove the previous
-/// export (if any), then rename the temp dir into place.
-fn swap_into_place(tmp_dir: &Path, final_dir: &Path) -> Result<(), ExportError> {
-    if final_dir.exists() {
-        std::fs::remove_dir_all(final_dir).map_err(|source| ExportError::Io {
-            path: final_dir.display().to_string(),
-            source,
-        })?;
-    }
-    std::fs::rename(tmp_dir, final_dir).map_err(|source| ExportError::Io {
-        path: final_dir.display().to_string(),
-        source,
-    })
-}
-
-fn build(
-    guide: &Guide,
-    store: &FrameStore,
-    region: CaptureRegion,
-    capability: InputCapability,
-    source: InputSourceKind,
-    tmp: &Path,
-) -> Result<(), ExportError> {
-    let keyframes = tmp.join("keyframes");
-    std::fs::create_dir_all(&keyframes).map_err(|source| ExportError::Io {
-        path: keyframes.display().to_string(),
-        source,
-    })?;
-
-    let mut md = String::from("# Action Guide\n\n");
-    let mut steps = Vec::new();
-
-    for (i, step) in guide.steps().iter().enumerate() {
-        let n = i + 1;
-        let file_name = format!("{n:03}.png");
-        let rel = format!("keyframes/{file_name}");
-        let frame = store
-            .retained(step.keyframe)
-            .ok_or_else(|| ExportError::Io {
-                path: rel.clone(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "keyframe pixels not retained",
-                ),
-            })?;
-        let png_path = keyframes.join(&file_name);
-        frame
-            .image
-            .save_with_format(&png_path, image::ImageFormat::Png)
-            .map_err(|source| ExportError::Encode {
-                path: png_path.display().to_string(),
-                source,
-            })?;
-        let caption = non_empty_caption(&step.caption);
-        md.push_str(&format!("{n}. {}\n\n", step.title));
-        if let Some(caption) = caption {
-            md.push_str(&format!("   {caption}\n\n"));
-        }
-        md.push_str(&format!("   ![]({rel})\n\n"));
-        steps.push(ManifestStep {
-            index: step.index,
-            title: step.title.clone(),
-            caption: caption.map(str::to_string),
-            kind: step.kind,
-            reason: step.reason,
-            at_ms: step.at_ms,
-            keyframe_file: rel,
-            hotspots: Vec::new(),
-        });
-    }
-
-    std::fs::write(tmp.join("steps.md"), md).map_err(|source| ExportError::Io {
-        path: tmp.join("steps.md").display().to_string(),
-        source,
-    })?;
-
-    let manifest = SessionManifest {
-        schema_version: 0,
-        title: crate::guide::DEFAULT_GUIDE_TITLE.to_string(),
-        region,
-        input_source: source,
-        input_capability: capability,
-        steps,
-    };
-    let json = serde_json::to_string_pretty(&manifest).map_err(|e| ExportError::Io {
-        path: "session.json".to_string(),
-        source: std::io::Error::other(e.to_string()),
-    })?;
-    std::fs::write(tmp.join("session.json"), json).map_err(|source| ExportError::Io {
-        path: tmp.join("session.json").display().to_string(),
-        source,
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -678,5 +597,68 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn redaction_replaces_source_pixels_and_png_has_no_ancillary_source_payload() {
+        let source_color = Rgba([42, 87, 129, 255]);
+        let source = RgbaImage::from_pixel(8, 8, source_color);
+        let mut document = rollshot_image_document::ImageDocument::new(source.clone());
+        document
+            .add_redaction(rollshot_image_document::ImageRect::new(0.0, 0.0, 4.0, 4.0))
+            .unwrap();
+        let snapshot = document.flatten_snapshot();
+        let job = ReviewedGuideExportJob {
+            title: "Redaction test".into(),
+            region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: InputSourceKind::LinuxEvdev,
+            input_capability: InputCapability::SemanticEvents,
+            steps: vec![ReviewedGuideStep {
+                index: 1,
+                title: "Redacted step".into(),
+                caption: None,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: 0,
+                image: ReviewedStepImage::Annotated(snapshot),
+                hotspots: Vec::new(),
+            }],
+        };
+        let parent = temp_dir("redaction-payload");
+        let destination = parent.join("guide");
+        render_guide_folder(&job, &destination).unwrap();
+
+        let png_bytes = std::fs::read(destination.join("keyframes/001.png")).unwrap();
+        let decoded = image::load_from_memory(&png_bytes).unwrap().to_rgba8();
+
+        assert_ne!(
+            decoded.get_pixel(2, 2).0,
+            source_color.0,
+            "redacted pixel must differ from source"
+        );
+        assert_eq!(
+            decoded.get_pixel(2, 2).0,
+            [0, 0, 0, 255],
+            "redacted pixel must be opaque black"
+        );
+        assert_eq!(
+            decoded.get_pixel(6, 6).0,
+            source_color.0,
+            "unredacted pixel must match source"
+        );
+
+        let source_pattern = source_color.0;
+        for (offset, window) in png_bytes.windows(4).enumerate() {
+            if window == source_pattern {
+                panic!("source pixel pattern found in PNG ancillary data at byte offset {offset}");
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
