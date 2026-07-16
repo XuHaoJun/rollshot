@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Action Guide</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; }
+    #reader { display: grid; grid-template-columns: 18rem 1fr; min-height: 100vh; }
+    nav, main { padding: 1rem; }
+    #image-shell { position: relative; display: inline-block; transform-origin: top left; }
+    #step-image { display: block; max-width: 100%; height: auto; }
+    #hotspots { position: absolute; inset: 0; }
+    .hotspot { position: absolute; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <a href="#step-content">Skip to current step</a>
+  <div id="reader">
+    <nav aria-label="Guide steps">
+      <h1 id="guide-title"></h1>
+      <label for="search">Search guide</label>
+      <input id="search" type="search">
+      <div id="step-list"></div>
+    </nav>
+    <main id="step-content" tabindex="-1">
+      <p id="step-progress" data-testid="step-progress"></p>
+      <div id="image-viewport">
+        <div id="image-shell">
+          <img id="step-image" alt="">
+          <div id="hotspots"></div>
+        </div>
+        <p id="image-loading" role="status">Loading image…</p>
+        <p id="image-error" hidden>Image unavailable</p>
+      </div>
+      <h2 id="step-title"></h2>
+      <p id="step-caption"></p>
+      <button type="button" data-action="previous" aria-label="Previous step">Previous</button>
+      <button type="button" data-action="next" aria-label="Next step">Next</button>
+      <button type="button" data-action="copy">Copy step text</button>
+      <button type="button" data-action="zoom-out" aria-label="Zoom out">−</button>
+      <span id="zoom-value" data-testid="zoom-value">100%</span>
+      <button type="button" data-action="zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" data-action="zoom-reset" aria-label="Reset zoom">Reset</button>
+      <div id="popover" role="dialog" aria-label="Annotation explanation" hidden></div>
+      <div id="copy-panel" hidden>
+        <label for="copy-fallback">Step text for manual copy</label>
+        <textarea id="copy-fallback" readonly></textarea>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+    </main>
+  </div>
+  <noscript><a href="steps.md">Open the Markdown guide</a></noscript>
+  <script id="guide-data" type="application/json">__ROLLSHOT_GUIDE_DATA__</script>
+  <script>
+    const guide = JSON.parse(document.getElementById('guide-data').textContent);
+    const first = guide.steps[0];
+    document.title = guide.title;
+    document.getElementById('guide-title').textContent = guide.title;
+    document.getElementById('step-progress').textContent = `Step 1 of ${guide.steps.length}`;
+    document.getElementById('step-title').textContent = first.title;
+    document.getElementById('step-caption').textContent = first.caption || '';
+    const image = document.getElementById('step-image');
+    image.onload = () => { document.getElementById('image-loading').hidden = true; };
+    image.onerror = () => {
+      document.getElementById('image-loading').hidden = true;
+      document.getElementById('image-error').hidden = false;
+    };
+    image.src = first.keyframeFile;
+    image.alt = `Step 1: ${first.title}`;
+  </script>
+</body>
+</html>

@@ -42,7 +42,6 @@ impl ReviewedStepImage {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn with_flattened_image<T>(
         &self,
         use_image: impl FnOnce(&RgbaImage) -> Result<T, ExportError>,

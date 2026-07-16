@@ -14,18 +14,20 @@ pub enum DetectError {
 
 /// Export failure. On any error, the exporter leaves no partial `action-guide/`
 /// directory and the editable session stays intact (spec §Export).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, serde::Serialize)]
 pub enum ExportError {
     #[error("export I/O error at {path}: {source}")]
     Io {
         path: String,
         #[source]
+        #[serde(skip)]
         source: std::io::Error,
     },
     #[error("failed to encode PNG at {path}: {source}")]
     Encode {
         path: String,
         #[source]
+        #[serde(skip)]
         source: image::ImageError,
     },
     #[error("cannot export a guide with no steps")]
@@ -36,6 +38,25 @@ pub enum ExportError {
     InvalidHotspot { step: usize, category: &'static str },
     #[error("destination already exists: {path}")]
     DestinationExists { path: String },
+    #[error("serialization failed for {category}")]
+    Serialize { category: &'static str },
+    #[error("template error in {category}")]
+    Template { category: &'static str },
+}
+
+impl ExportError {
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "io",
+            Self::Encode { .. } => "encode",
+            Self::Empty => "empty",
+            Self::MissingKeyframe { .. } => "missing_keyframe",
+            Self::InvalidHotspot { .. } => "invalid_hotspot",
+            Self::DestinationExists { .. } => "destination_exists",
+            Self::Serialize { .. } => "serialize",
+            Self::Template { .. } => "template",
+        }
+    }
 }
 
 /// Summary-GIF export failure. On any error, no file is left at the target path

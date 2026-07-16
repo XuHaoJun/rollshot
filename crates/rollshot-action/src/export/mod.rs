@@ -15,13 +15,28 @@ use crate::guide::Guide;
 use crate::models::{
     CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind, Millis,
 };
+use model::{GuideHotspot, ReviewedGuideExportJob, GUIDE_SCHEMA_VERSION};
+
+mod html;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionManifest {
+    #[serde(default = "legacy_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_manifest_title")]
+    pub title: String,
     pub region: CaptureRegion,
     pub input_source: InputSourceKind,
     pub input_capability: InputCapability,
     pub steps: Vec<ManifestStep>,
+}
+
+fn legacy_schema_version() -> u32 {
+    0
+}
+
+fn default_manifest_title() -> String {
+    crate::guide::DEFAULT_GUIDE_TITLE.to_string()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,6 +49,8 @@ pub struct ManifestStep {
     pub reason: DetectReason,
     pub at_ms: Millis,
     pub keyframe_file: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hotspots: Vec<GuideHotspot>,
 }
 
 fn non_empty_caption(caption: &str) -> Option<&str> {
@@ -42,6 +59,7 @@ fn non_empty_caption(caption: &str) -> Option<&str> {
 }
 
 /// Export `guide` into `out_dir/action-guide/`. Returns the created directory.
+#[deprecated(note = "build a ReviewedGuideExportJob and call render_guide_folder")]
 pub fn export_guide(
     guide: &Guide,
     store: &FrameStore,
@@ -76,6 +94,91 @@ pub fn export_guide(
     }
     tracing::info!(target: TARGET_EXPORT, steps = guide.steps().len(), "export complete");
     Ok(final_dir)
+}
+
+pub fn render_guide_folder(
+    job: &ReviewedGuideExportJob,
+    destination: &Path,
+) -> Result<PathBuf, ExportError> {
+    job.validate()?;
+    if destination.exists() {
+        return Err(ExportError::DestinationExists {
+            path: destination.display().to_string(),
+        });
+    }
+    std::fs::create_dir(destination).map_err(|source| ExportError::Io {
+        path: destination.display().to_string(),
+        source,
+    })?;
+    let result = (|| {
+        std::fs::create_dir(destination.join("keyframes")).map_err(|source| ExportError::Io {
+            path: destination.display().to_string(),
+            source,
+        })?;
+        build_folder(job, destination)
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(destination);
+        tracing::debug!(target: TARGET_EXPORT, category = error.category(), "guide export rolled back");
+        return Err(error);
+    }
+    tracing::info!(target: TARGET_EXPORT, steps = job.steps.len(), "guide export complete");
+    Ok(destination.to_path_buf())
+}
+
+fn build_folder(job: &ReviewedGuideExportJob, destination: &Path) -> Result<(), ExportError> {
+    let mut markdown = format!("# {}\n\n", job.title);
+    let mut manifest_steps = Vec::with_capacity(job.steps.len());
+    for (offset, step) in job.steps.iter().enumerate() {
+        let file_name = format!("{:03}.png", offset + 1);
+        let relative = format!("keyframes/{file_name}");
+        let path = destination.join(&relative);
+        step.image.with_flattened_image(|image| {
+            image
+                .save_with_format(&path, image::ImageFormat::Png)
+                .map_err(|source| ExportError::Encode {
+                    path: path.display().to_string(),
+                    source,
+                })
+        })?;
+        markdown.push_str(&format!("{}. {}\n\n", step.index, step.title));
+        if let Some(caption) = &step.caption {
+            markdown.push_str(&format!("   {caption}\n\n"));
+        }
+        markdown.push_str(&format!("   ![]({relative})\n\n"));
+        manifest_steps.push(ManifestStep {
+            index: step.index,
+            title: step.title.clone(),
+            caption: step.caption.clone(),
+            kind: step.kind,
+            reason: step.reason,
+            at_ms: step.at_ms,
+            keyframe_file: relative,
+            hotspots: step.hotspots.clone(),
+        });
+    }
+    write_text(destination.join("steps.md"), &markdown)?;
+    let manifest = SessionManifest {
+        schema_version: GUIDE_SCHEMA_VERSION,
+        title: job.title.clone(),
+        region: job.region,
+        input_source: job.input_source,
+        input_capability: job.input_capability,
+        steps: manifest_steps,
+    };
+    let json = serde_json::to_string_pretty(&manifest).map_err(|_| ExportError::Serialize {
+        category: "session_manifest",
+    })?;
+    write_text(destination.join("session.json"), &json)?;
+    write_text(destination.join("index.html"), &html::render(job)?)?;
+    Ok(())
+}
+
+fn write_text(path: PathBuf, contents: &str) -> Result<(), ExportError> {
+    std::fs::write(&path, contents).map_err(|source| ExportError::Io {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 /// Replace `final_dir` with the freshly-built `tmp_dir`: remove the previous
@@ -145,6 +248,7 @@ fn build(
             reason: step.reason,
             at_ms: step.at_ms,
             keyframe_file: rel,
+            hotspots: Vec::new(),
         });
     }
 
@@ -154,6 +258,8 @@ fn build(
     })?;
 
     let manifest = SessionManifest {
+        schema_version: 0,
+        title: crate::guide::DEFAULT_GUIDE_TITLE.to_string(),
         region,
         input_source: source,
         input_capability: capability,
@@ -171,6 +277,7 @@ fn build(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
@@ -181,6 +288,7 @@ mod tests {
     };
     use crate::recorder::ActionRecorder;
     use image::{Rgba, RgbaImage};
+    use model::{GuideHotspot, ReviewedGuideExportJob, ReviewedGuideStep, ReviewedStepImage};
     use std::path::PathBuf;
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -466,5 +574,109 @@ mod tests {
 
         assert_eq!(parsed.steps.len(), 1);
         assert_eq!(parsed.steps[0].caption, None);
+    }
+
+    #[test]
+    fn session_manifest_deserializes_pre_v1_json_shape() {
+        let json = r#"{
+  "region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+  "input_source": "linux-evdev",
+  "input_capability": "semantic-events",
+  "steps": [
+    {
+      "index": 1,
+      "title": "Click",
+      "kind": "click",
+      "reason": "click-confirmed",
+      "at_ms": 0,
+      "keyframe_file": "keyframes/001.png"
+    }
+  ]
+}"#;
+        let parsed: SessionManifest = serde_json::from_str(json).expect("manifest parses");
+        assert_eq!(parsed.schema_version, 0, "legacy schema defaults to 0");
+        assert_eq!(
+            parsed.title, "Action Guide",
+            "legacy title defaults to Action Guide"
+        );
+    }
+
+    #[test]
+    fn renderer_writes_all_required_artifacts_from_one_job() {
+        let parent = temp_dir("required");
+        let destination = parent.join("guide");
+        let job = annotated_job();
+
+        let result = render_guide_folder(&job, &destination).unwrap();
+
+        assert_eq!(result, destination);
+        for relative in [
+            "index.html",
+            "steps.md",
+            "session.json",
+            "keyframes/001.png",
+        ] {
+            assert!(result.join(relative).is_file(), "missing {relative}");
+        }
+        let manifest: SessionManifest =
+            serde_json::from_slice(&std::fs::read(result.join("session.json")).unwrap()).unwrap();
+        assert_eq!(manifest.schema_version, GUIDE_SCHEMA_VERSION);
+        assert_eq!(manifest.title, "Checkout failure");
+        assert_eq!(manifest.steps[0].title, "Submit order");
+    }
+
+    #[test]
+    fn renderer_never_replaces_destination_and_cleans_failed_build() {
+        let parent = temp_dir("noclobber");
+        let destination = parent.join("guide");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep.txt"), "old").unwrap();
+        let error = render_guide_folder(&annotated_job(), &destination).unwrap_err();
+        assert!(matches!(error, ExportError::DestinationExists { .. }));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
+            "old"
+        );
+    }
+
+    fn annotated_job() -> ReviewedGuideExportJob {
+        let mut document = rollshot_image_document::ImageDocument::new(RgbaImage::from_pixel(
+            8,
+            8,
+            Rgba([20, 30, 40, 255]),
+        ));
+        document
+            .add_redaction(rollshot_image_document::ImageRect::new(0.0, 0.0, 4.0, 4.0))
+            .unwrap();
+        ReviewedGuideExportJob {
+            title: "Checkout failure".into(),
+            region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: InputSourceKind::LinuxEvdev,
+            input_capability: InputCapability::SemanticEvents,
+            steps: vec![ReviewedGuideStep {
+                index: 1,
+                title: "Submit order".into(),
+                caption: Some("Confirm the request".into()),
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: 100,
+                image: ReviewedStepImage::Annotated(document.flatten_snapshot()),
+                hotspots: vec![GuideHotspot {
+                    annotation_id: 1,
+                    bounds: model::NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.5,
+                        height: 0.5,
+                    },
+                    explanation: "Open Settings".into(),
+                }],
+            }],
+        }
     }
 }
