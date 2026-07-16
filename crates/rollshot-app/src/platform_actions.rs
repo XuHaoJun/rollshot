@@ -26,17 +26,12 @@ impl PlatformCommand {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn open_command(path: &Path) -> Result<PlatformCommand, String> {
     #[cfg(target_os = "macos")]
     return Ok(PlatformCommand::new("open").arg(path));
     #[cfg(target_os = "linux")]
     return Ok(PlatformCommand::new("xdg-open").arg(path));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = path;
-        Err("open is not supported on this platform".to_string())
-    }
 }
 
 fn run_command_with(
@@ -46,7 +41,7 @@ fn run_command_with(
     spawn(command).map_err(|error| format!("open failed: {error}"))
 }
 
-#[allow(dead_code)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
     let command = open_command(path)?;
     run_command_with(&command, PlatformCommand::spawn)
@@ -118,6 +113,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn open_command_constructs_platform_command() {
         let command = open_command(Path::new("/tmp/test.html")).unwrap();
         #[cfg(target_os = "macos")]

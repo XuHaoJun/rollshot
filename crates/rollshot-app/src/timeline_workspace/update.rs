@@ -22,8 +22,6 @@ pub enum Message {
     ConfirmDiscard,
     ExportRequested,
     #[allow(dead_code)]
-    ExportDirChosen(Option<PathBuf>),
-    #[allow(dead_code)]
     GuideTitleChanged(String),
     #[allow(dead_code)]
     AnnotationExplanationChanged(rollshot_image_document::AnnotationId, String),
@@ -237,27 +235,6 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 }
             })
         }
-        Message::ExportDirChosen(None) => Task::none(),
-        Message::ExportDirChosen(Some(dir)) => match export_to(state, &dir) {
-            Ok(out) => {
-                tracing::info!(
-                    target: "rollshot::action::export",
-                    path = %out.display(),
-                    "guide exported"
-                );
-                state.message = None;
-                iced::exit()
-            }
-            Err(error) => {
-                tracing::error!(
-                    target: "rollshot::action::export",
-                    %error,
-                    "guide export failed"
-                );
-                state.message = Some(error);
-                Task::none()
-            }
-        },
         Message::GuideTitleChanged(title) => {
             state.guide.set_title(title);
             Task::none()
@@ -1350,15 +1327,6 @@ pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
     iced::window::close_requests().map(|_id| Message::CloseRequested)
 }
 
-/// Export the (possibly edited) guide into `out_dir/action-guide/`.
-fn export_to(state: &TimelineWorkspace, out_dir: &Path) -> Result<PathBuf, String> {
-    let job = super::guide_export::build_reviewed_export_job(state)
-        .map_err(|e| format!("export failed: {e}"))?;
-    let destination = out_dir.join("action-guide");
-    rollshot_action::render_guide_folder(&job, &destination)
-        .map_err(|e| format!("export failed: {e}"))
-}
-
 /// Initial directory for the folder picker: the user's Pictures dir, or temp.
 fn picker_default_dir() -> PathBuf {
     dirs::picture_dir().unwrap_or_else(std::env::temp_dir)
@@ -1585,58 +1553,6 @@ fn apply_export_finished(
             state.message = Some(format!("Action Guide export failed: {error}"));
         }
     }
-}
-
-#[allow(dead_code)]
-fn apply_export_dir_chosen(
-    state: &mut TimelineWorkspace,
-    operation_id: u64,
-    parent: Option<std::path::PathBuf>,
-) -> Task<Message> {
-    let Some(parent) = parent else {
-        if let super::GuideExportState::PickingDestination {
-            operation_id: current,
-            ..
-        } = &state.export_state
-        {
-            if operation_id == *current {
-                state.export_state = super::GuideExportState::Idle;
-            }
-        }
-        return Task::none();
-    };
-    let super::GuideExportState::PickingDestination {
-        operation_id: current,
-        ..
-    } = &state.export_state
-    else {
-        return Task::none();
-    };
-    if operation_id != *current {
-        return Task::none();
-    }
-    let old = std::mem::replace(&mut state.export_state, super::GuideExportState::Idle);
-    let super::GuideExportState::PickingDestination {
-        operation_id: _,
-        pending,
-    } = old
-    else {
-        unreachable!("just matched");
-    };
-    let request = super::guide_export::StandaloneExportRequest {
-        operation_id: pending.operation_id,
-        parent,
-        created_at: pending.created_at,
-        job: pending.job,
-    };
-    state.export_state = super::GuideExportState::Exporting { operation_id };
-    Task::perform(
-        super::guide_export::run_standalone_export(request),
-        move |result| Message::ExportFinished {
-            operation_id,
-            result,
-        },
-    )
 }
 
 fn with_annotation_document(
@@ -1925,45 +1841,50 @@ mod tests {
     }
 
     #[test]
-    fn export_dir_chosen_writes_guide_folder_and_clears_message() {
+    fn export_dir_chosen_with_id_starts_async_export() {
         let mut state = ws(recording_from_frames());
         state.message = Some("stale".to_string());
+        begin_export(&mut state, 1).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let _ = update(
             &mut state,
-            Message::ExportDirChosen(Some(tmp.path().to_path_buf())),
+            Message::ExportDirChosenWithId {
+                operation_id: 1,
+                parent: Some(tmp.path().to_path_buf()),
+            },
         );
-        assert!(tmp.path().join("action-guide/steps.md").exists());
-        assert!(tmp.path().join("action-guide/session.json").exists());
         assert!(
-            state.message.is_none(),
-            "successful export clears the banner"
+            matches!(
+                state.export_state,
+                super::super::GuideExportState::Exporting { operation_id: 1 }
+            ),
+            "should transition to Exporting, got {:?}",
+            state.export_state
         );
     }
 
     #[test]
-    fn export_empty_guide_sets_error_and_writes_nothing() {
+    fn export_empty_guide_with_id_starts_async_export() {
         let mut state = ws(synthetic_recording(0));
-        let tmp = tempfile::tempdir().unwrap();
-        let _ = update(
-            &mut state,
-            Message::ExportDirChosen(Some(tmp.path().to_path_buf())),
-        );
-        assert!(
-            !tmp.path().join("action-guide").exists(),
-            "empty guide must not write a folder"
-        );
-        assert!(
-            state.message.is_some(),
-            "export failure surfaces an inline message"
-        );
+        let result = begin_export(&mut state, 1);
+        assert!(result.is_err(), "empty guide should fail begin_export");
     }
 
     #[test]
-    fn export_cancelled_picker_is_a_no_op() {
+    fn export_cancelled_picker_with_id_resets_to_idle() {
         let mut state = ws(recording_from_frames());
-        let _ = update(&mut state, Message::ExportDirChosen(None));
-        assert!(state.message.is_none());
+        begin_export(&mut state, 1).unwrap();
+        let _ = update(
+            &mut state,
+            Message::ExportDirChosenWithId {
+                operation_id: 1,
+                parent: None,
+            },
+        );
+        assert!(
+            matches!(state.export_state, super::super::GuideExportState::Idle),
+            "cancel should reset to Idle"
+        );
     }
 
     #[test]
@@ -4139,7 +4060,13 @@ key_source = { Env = "OPENAI_API_KEY" }
     fn picker_cancel_and_stale_results_do_not_mutate_current_operation() {
         let mut state = ws(recording_from_frames());
         begin_export(&mut state, 41).unwrap();
-        let _ = apply_export_dir_chosen(&mut state, 41, None);
+        let _ = update(
+            &mut state,
+            Message::ExportDirChosenWithId {
+                operation_id: 41,
+                parent: None,
+            },
+        );
         assert!(matches!(
             state.export_state,
             super::super::GuideExportState::Idle
