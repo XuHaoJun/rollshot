@@ -97,7 +97,7 @@ impl ReviewedGuideExportJob {
         if self.title.trim().is_empty() {
             return Err(ExportError::InvalidHotspot {
                 step: 0,
-                category: "empty_text",
+                category: "empty_title",
             });
         }
         if self.steps.is_empty() {
@@ -108,7 +108,7 @@ impl ReviewedGuideExportJob {
             if step.index != expected {
                 return Err(ExportError::InvalidHotspot {
                     step: step.index,
-                    category: "empty_text",
+                    category: "invalid_index",
                 });
             }
             for hotspot in &step.hotspots {
