@@ -1,5 +1,7 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Local};
 use rollshot_action::{
     ExportError, GuideHotspot, NormalizedRect, ReviewedGuideExportJob, ReviewedGuideStep,
     ReviewedStepImage,
@@ -7,6 +9,168 @@ use rollshot_action::{
 use rollshot_image_document::Annotation;
 
 use super::TimelineWorkspace;
+
+pub(crate) struct PendingStandaloneExport {
+    pub operation_id: u64,
+    pub created_at: DateTime<Local>,
+    pub job: ReviewedGuideExportJob,
+}
+
+impl std::fmt::Debug for PendingStandaloneExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingStandaloneExport")
+            .field("operation_id", &self.operation_id)
+            .field("created_at", &self.created_at)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct StandaloneExportRequest {
+    pub operation_id: u64,
+    pub parent: PathBuf,
+    pub created_at: DateTime<Local>,
+    pub job: ReviewedGuideExportJob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StandaloneExportResult {
+    pub operation_id: u64,
+    pub directory: PathBuf,
+    pub index_html: PathBuf,
+}
+
+pub(crate) async fn run_standalone_export(
+    request: StandaloneExportRequest,
+) -> Result<StandaloneExportResult, String> {
+    tokio::task::spawn_blocking(move || export_standalone(request))
+        .await
+        .map_err(|_| "Action Guide export worker failed".to_string())?
+}
+
+fn safe_slug(title: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    let mut count = 0u32;
+    for ch in title.chars() {
+        if count >= 80 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+            count += 1;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    if slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "action-guide".to_string()
+    } else {
+        slug
+    }
+}
+
+fn choose_destination(
+    parent: &Path,
+    title: &str,
+    created_at: DateTime<Local>,
+    suffix: u32,
+) -> PathBuf {
+    let base = format!(
+        "{}-{}",
+        safe_slug(title),
+        created_at.format("%Y-%m-%d-%H%M%S")
+    );
+    let name = if suffix == 1 {
+        base
+    } else {
+        format!("{base}-{suffix}")
+    };
+    parent.join(name)
+}
+
+fn commit_noreplace(temp: &Path, destination: &Path) -> Result<(), rustix::io::Errno> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    renameat_with(CWD, temp, CWD, destination, RenameFlags::NOREPLACE)
+}
+
+struct TempGuideGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempGuideGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn mark_committed(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempGuideGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+fn export_standalone(request: StandaloneExportRequest) -> Result<StandaloneExportResult, String> {
+    export_standalone_with_commit_hook(request, |_, _| {})
+}
+
+fn export_standalone_with_commit_hook(
+    request: StandaloneExportRequest,
+    mut commit_hook: impl FnMut(u32, &Path),
+) -> Result<StandaloneExportResult, String> {
+    let StandaloneExportRequest {
+        operation_id,
+        parent,
+        created_at,
+        job,
+    } = request;
+
+    let tmp_name = format!(".tmp-{}", operation_id);
+    let tmp = parent.join(&tmp_name);
+    let mut guard = TempGuideGuard::new(tmp.clone());
+
+    rollshot_action::render_guide_folder(&job, &tmp).map_err(|error| format!("{error}"))?;
+
+    let mut suffix = 1u32;
+    loop {
+        let destination = choose_destination(&parent, &job.title, created_at, suffix);
+        commit_hook(suffix, &destination);
+        match commit_noreplace(&tmp, &destination) {
+            Ok(()) => {
+                guard.mark_committed();
+                let index_html = destination.join("index.html");
+                return Ok(StandaloneExportResult {
+                    operation_id,
+                    directory: destination,
+                    index_html,
+                });
+            }
+            Err(rustix::io::Errno::EXIST) => {
+                suffix += 1;
+            }
+            Err(
+                rustix::io::Errno::NOSYS | rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP,
+            ) => {
+                return Err(
+                    "atomic no-replace commit is unsupported on this filesystem".to_string()
+                );
+            }
+            Err(errno) => {
+                return Err(format!("commit failed: {errno}"));
+            }
+        }
+    }
+}
 
 pub(crate) fn build_reviewed_export_job(
     state: &TimelineWorkspace,
@@ -117,6 +281,7 @@ fn normalize_and_clamp(annotation: &Annotation, width: u32, height: u32) -> Norm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use rollshot_action::{CaptureRegion, InputCapability, InputSourceKind, ReviewedStepImage};
     use rollshot_image_document::ImagePoint;
 
@@ -132,6 +297,22 @@ mod tests {
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
         )
+    }
+
+    fn standalone_request(parent: &std::path::Path) -> StandaloneExportRequest {
+        let ws = real_workspace();
+        let job = build_reviewed_export_job(&ws).unwrap();
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 7, 16)
+            .unwrap()
+            .and_hms_opt(9, 8, 7)
+            .unwrap();
+        let created_at = chrono::Local.from_local_datetime(&naive).unwrap();
+        StandaloneExportRequest {
+            operation_id: 1,
+            parent: parent.to_path_buf(),
+            created_at,
+            job,
+        }
     }
 
     #[test]
@@ -199,5 +380,72 @@ mod tests {
         assert_eq!(job.title, exported_title);
         assert_eq!(job.steps[0].title, exported_step_title);
         job.validate().unwrap();
+    }
+
+    #[test]
+    fn folder_name_uses_title_time_and_numeric_suffix_without_replacing() {
+        let parent = tempfile::tempdir().unwrap();
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 7, 16)
+            .unwrap()
+            .and_hms_opt(9, 8, 7)
+            .unwrap();
+        let at = chrono::Local.from_local_datetime(&naive).unwrap();
+        let first = choose_destination(parent.path(), "Checkout / Failure", at, 1);
+        assert_eq!(
+            first.file_name().unwrap(),
+            "checkout-failure-2026-07-16-090807"
+        );
+        std::fs::create_dir(&first).unwrap();
+        let second = choose_destination(parent.path(), "Checkout / Failure", at, 2);
+        assert_eq!(
+            second.file_name().unwrap(),
+            "checkout-failure-2026-07-16-090807-2"
+        );
+    }
+
+    #[test]
+    fn failed_standalone_export_removes_temp_and_keeps_existing_output() {
+        let parent = tempfile::tempdir().unwrap();
+        let existing = parent.path().join("action-guide-2026-07-16-090807");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::write(existing.join("keep"), "safe").unwrap();
+        let mut request = standalone_request(parent.path());
+        request.job.steps.clear();
+        let result = export_standalone(request);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("steps"));
+        assert_eq!(
+            std::fs::read_to_string(existing.join("keep")).unwrap(),
+            "safe"
+        );
+        assert!(std::fs::read_dir(parent.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp-")));
+    }
+
+    #[test]
+    fn commit_collision_retries_without_replacing_external_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let request = standalone_request(parent.path());
+        let first = choose_destination(parent.path(), &request.job.title, request.created_at, 1);
+        let result = export_standalone_with_commit_hook(request, |attempt, destination| {
+            if attempt == 1 {
+                std::fs::create_dir(destination).unwrap();
+                std::fs::write(destination.join("external"), "safe").unwrap();
+            }
+        })
+        .unwrap();
+        assert!(result
+            .directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-2"));
+        assert_eq!(
+            std::fs::read_to_string(first.join("external")).unwrap(),
+            "safe"
+        );
     }
 }

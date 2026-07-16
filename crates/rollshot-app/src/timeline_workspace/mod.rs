@@ -16,9 +16,9 @@
 //! Done  (exit; temporary assets dropped on app exit)
 //! ```
 
-mod annotation;
+pub(crate) mod annotation;
 mod caption_agent;
-mod guide_export;
+pub(crate) mod guide_export;
 mod storyboard_copy;
 mod update;
 mod view;
@@ -129,6 +129,31 @@ pub(crate) enum VisualAnnotationSuggestionState {
     },
 }
 
+/// Export state machine for standalone Action Guide export.
+///
+/// ```text
+/// Idle ──► PickingDestination { operation_id, pending }
+///              │  chosen parent ──► Exporting { operation_id }
+///              │  cancelled ──────► Idle
+///              v
+///         Exporting { operation_id }
+///              │  success ──► Succeeded
+///              │  failure ──► Idle (recoverable banner)
+///              │  stale result ──► ignored
+/// ```
+#[derive(Debug)]
+pub(crate) enum GuideExportState {
+    Idle,
+    PickingDestination {
+        operation_id: u64,
+        pending: guide_export::PendingStandaloneExport,
+    },
+    Exporting {
+        operation_id: u64,
+    },
+    Succeeded,
+}
+
 /// The Action Guide review/export workspace. Owns the editable guide and the
 /// frame store moved out of the finished `Recording`.
 pub struct TimelineWorkspace {
@@ -172,6 +197,12 @@ pub struct TimelineWorkspace {
     /// Monotonic operation id for storyboard copy provenance and late-result
     /// race protection. Incremented on each [`CopyStoryboardRequested`].
     pub(crate) storyboard_copy_operation_id: u64,
+    /// Current standalone export lifecycle state.
+    pub(crate) export_state: GuideExportState,
+    /// Result of the last successful standalone export, if any.
+    pub(crate) last_export: Option<guide_export::StandaloneExportResult>,
+    /// Monotonic operation id for standalone export provenance.
+    pub(crate) next_export_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -208,6 +239,9 @@ impl TimelineWorkspace {
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
+            export_state: GuideExportState::Idle,
+            last_export: None,
+            next_export_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -526,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn export_guide_metadata_contains_no_provider_or_model_data() {
         let ws = workspace(recording_from_frames());
         let tmp = tempfile::tempdir().unwrap();

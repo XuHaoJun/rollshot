@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use iced::Task;
+#[allow(deprecated)]
+use rollshot_action::export_guide;
 use rollshot_action::{
-    export_gif, export_guide, export_video, GifOptions, StoryboardError, StoryboardOptions,
+    export_gif, export_video, GifOptions, StoryboardError, StoryboardOptions,
     StoryboardRenderResult, VideoOptions,
 };
 use rollshot_image_document::ImagePoint;
@@ -21,7 +23,26 @@ pub enum Message {
     CancelDiscard,
     ConfirmDiscard,
     ExportRequested,
+    #[allow(dead_code)]
     ExportDirChosen(Option<PathBuf>),
+    #[allow(dead_code)]
+    GuideTitleChanged(String),
+    #[allow(dead_code)]
+    AnnotationExplanationChanged(rollshot_image_document::AnnotationId, String),
+    ExportDirChosenWithId {
+        operation_id: u64,
+        parent: Option<PathBuf>,
+    },
+    ExportFinished {
+        operation_id: u64,
+        result: Result<super::guide_export::StandaloneExportResult, String>,
+    },
+    #[allow(dead_code)]
+    OpenExportedGuide,
+    #[allow(dead_code)]
+    ShowExportedGuideInFolder,
+    #[allow(dead_code)]
+    PlatformActionFinished(Result<(), String>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
     ExportStoryboardRequested,
@@ -186,10 +207,34 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::ExportRequested => {
             state.message = None;
-            Task::perform(
-                pick_export_dir(picker_default_dir()),
-                Message::ExportDirChosen,
-            )
+            match &state.export_state {
+                super::GuideExportState::Idle | super::GuideExportState::Succeeded => {}
+                _ => return Task::none(),
+            }
+            let job = match super::guide_export::build_reviewed_export_job(state) {
+                Ok(job) => job,
+                Err(error) => {
+                    state.message = Some(format!("{error}"));
+                    return Task::none();
+                }
+            };
+            state.next_export_operation_id = state.next_export_operation_id.saturating_add(1);
+            let operation_id = state.next_export_operation_id;
+            let created_at = chrono::Local::now();
+            state.export_state = super::GuideExportState::PickingDestination {
+                operation_id,
+                pending: super::guide_export::PendingStandaloneExport {
+                    operation_id,
+                    created_at,
+                    job,
+                },
+            };
+            Task::perform(pick_export_dir(picker_default_dir()), move |path| {
+                Message::ExportDirChosenWithId {
+                    operation_id,
+                    parent: path,
+                }
+            })
         }
         Message::ExportDirChosen(None) => Task::none(),
         Message::ExportDirChosen(Some(dir)) => match export_to(state, &dir) {
@@ -212,6 +257,89 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 Task::none()
             }
         },
+        Message::GuideTitleChanged(title) => {
+            state.guide.set_title(title);
+            Task::none()
+        }
+        Message::AnnotationExplanationChanged(id, text) => {
+            if let Some(session) = &state.annotation_session {
+                let _ = state.presentation.set_explanation(session.source, id, text);
+            }
+            Task::none()
+        }
+        Message::ExportDirChosenWithId {
+            operation_id,
+            parent,
+        } => {
+            let Some(parent) = parent else {
+                if let super::GuideExportState::PickingDestination {
+                    operation_id: current,
+                    ..
+                } = &state.export_state
+                {
+                    if operation_id == *current {
+                        state.export_state = super::GuideExportState::Idle;
+                    }
+                }
+                return Task::none();
+            };
+            let super::GuideExportState::PickingDestination {
+                operation_id: current,
+                ..
+            } = &state.export_state
+            else {
+                return Task::none();
+            };
+            if operation_id != *current {
+                return Task::none();
+            }
+            let old = std::mem::replace(&mut state.export_state, super::GuideExportState::Idle);
+            let super::GuideExportState::PickingDestination {
+                operation_id: _,
+                pending,
+            } = old
+            else {
+                unreachable!("just matched");
+            };
+            let request = super::guide_export::StandaloneExportRequest {
+                operation_id: pending.operation_id,
+                parent,
+                created_at: pending.created_at,
+                job: pending.job,
+            };
+            state.export_state = super::GuideExportState::Exporting { operation_id };
+            Task::perform(
+                super::guide_export::run_standalone_export(request),
+                move |result| Message::ExportFinished {
+                    operation_id,
+                    result,
+                },
+            )
+        }
+        Message::ExportFinished {
+            operation_id,
+            result,
+        } => {
+            apply_export_finished(state, operation_id, result);
+            Task::none()
+        }
+        Message::OpenExportedGuide => {
+            if let Some(export) = &state.last_export {
+                let _ = crate::platform_actions::open_path(&export.index_html);
+            }
+            Task::none()
+        }
+        Message::ShowExportedGuideInFolder => {
+            if let Some(export) = &state.last_export {
+                let _ = crate::platform_actions::reveal(&export.directory);
+            }
+            Task::none()
+        }
+        Message::PlatformActionFinished(Ok(())) => Task::none(),
+        Message::PlatformActionFinished(Err(error)) => {
+            state.message = Some(error);
+            Task::none()
+        }
         Message::ExportGifRequested => {
             state.message = None;
             Task::perform(
@@ -1206,6 +1334,7 @@ pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
 }
 
 /// Export the (possibly edited) guide into `out_dir/action-guide/`.
+#[allow(deprecated)]
 fn export_to(state: &TimelineWorkspace, out_dir: &Path) -> Result<PathBuf, String> {
     export_guide(
         &state.guide,
@@ -1408,6 +1537,85 @@ fn dismiss_stale_visual_annotation_review(state: &mut TimelineWorkspace) {
         state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
         state.message = Some("Annotation suggestions are stale; regenerate them.".to_string());
     }
+}
+
+fn apply_export_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<super::guide_export::StandaloneExportResult, String>,
+) {
+    let super::GuideExportState::Exporting {
+        operation_id: current,
+    } = &state.export_state
+    else {
+        return;
+    };
+    if operation_id != *current {
+        return;
+    }
+    match result {
+        Ok(exported) => {
+            state.export_state = super::GuideExportState::Succeeded;
+            state.last_export = Some(exported);
+            state.message = Some("Action Guide exported.".into());
+        }
+        Err(error) => {
+            state.export_state = super::GuideExportState::Idle;
+            state.message = Some(format!("Action Guide export failed: {error}"));
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn apply_export_dir_chosen(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    parent: Option<std::path::PathBuf>,
+) -> Task<Message> {
+    let Some(parent) = parent else {
+        if let super::GuideExportState::PickingDestination {
+            operation_id: current,
+            ..
+        } = &state.export_state
+        {
+            if operation_id == *current {
+                state.export_state = super::GuideExportState::Idle;
+            }
+        }
+        return Task::none();
+    };
+    let super::GuideExportState::PickingDestination {
+        operation_id: current,
+        ..
+    } = &state.export_state
+    else {
+        return Task::none();
+    };
+    if operation_id != *current {
+        return Task::none();
+    }
+    let old = std::mem::replace(&mut state.export_state, super::GuideExportState::Idle);
+    let super::GuideExportState::PickingDestination {
+        operation_id: _,
+        pending,
+    } = old
+    else {
+        unreachable!("just matched");
+    };
+    let request = super::guide_export::StandaloneExportRequest {
+        operation_id: pending.operation_id,
+        parent,
+        created_at: pending.created_at,
+        job: pending.job,
+    };
+    state.export_state = super::GuideExportState::Exporting { operation_id };
+    Task::perform(
+        super::guide_export::run_standalone_export(request),
+        move |result| Message::ExportFinished {
+            operation_id,
+            result,
+        },
+    )
 }
 
 fn with_annotation_document(
@@ -3778,6 +3986,98 @@ key_source = { Env = "OPENAI_API_KEY" }
         assert!(matches!(
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::Running { .. }
+        ));
+    }
+
+    fn begin_export(state: &mut TimelineWorkspace, operation_id: u64) -> Result<(), String> {
+        let job = super::super::guide_export::build_reviewed_export_job(state)
+            .map_err(|e| format!("{e}"))?;
+        let created_at = chrono::Local::now();
+        state.export_state = super::super::GuideExportState::PickingDestination {
+            operation_id,
+            pending: super::super::guide_export::PendingStandaloneExport {
+                operation_id,
+                created_at,
+                job,
+            },
+        };
+        Ok(())
+    }
+
+    fn fake_result(path: &str) -> super::super::guide_export::StandaloneExportResult {
+        let directory = std::path::PathBuf::from(path);
+        super::super::guide_export::StandaloneExportResult {
+            operation_id: 0,
+            index_html: directory.join("index.html"),
+            directory,
+        }
+    }
+
+    #[test]
+    fn export_completion_keeps_workspace_and_exposes_open_actions() {
+        let mut state = ws(synthetic_recording(1));
+        state.export_state = super::super::GuideExportState::Exporting { operation_id: 7 };
+        let directory = std::path::PathBuf::from("/tmp/guide");
+        let index_html = directory.join("index.html");
+        apply_export_finished(
+            &mut state,
+            7,
+            Ok(super::super::guide_export::StandaloneExportResult {
+                operation_id: 7,
+                directory: directory.clone(),
+                index_html: index_html.clone(),
+            }),
+        );
+        assert!(matches!(
+            state.export_state,
+            super::super::GuideExportState::Succeeded
+        ));
+        assert_eq!(state.last_export.as_ref().unwrap().index_html, index_html);
+    }
+
+    #[test]
+    fn callout_explanation_message_updates_only_matching_annotation() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.annotation_session.as_ref().unwrap().source;
+        let id = state
+            .presentation
+            .doc_mut(source)
+            .unwrap()
+            .document
+            .add_number_callout(
+                rollshot_image_document::ImagePoint::new(2.0, 2.0),
+                rollshot_image_document::ImagePoint::new(8.0, 8.0),
+            );
+        let _ = update(
+            &mut state,
+            Message::AnnotationExplanationChanged(id, "Open Settings".into()),
+        );
+        assert_eq!(
+            state.presentation.explanation(source, id),
+            Some("Open Settings")
+        );
+    }
+
+    #[test]
+    fn picker_cancel_and_stale_results_do_not_mutate_current_operation() {
+        let mut state = ws(recording_from_frames());
+        begin_export(&mut state, 41).unwrap();
+        let _ = apply_export_dir_chosen(&mut state, 41, None);
+        assert!(matches!(
+            state.export_state,
+            super::super::GuideExportState::Idle
+        ));
+        assert!(state.last_export.is_none());
+
+        begin_export(&mut state, 42).unwrap();
+        apply_export_finished(&mut state, 41, Ok(fake_result("/tmp/stale")));
+        assert!(matches!(
+            state.export_state,
+            super::super::GuideExportState::PickingDestination {
+                operation_id: 42,
+                ..
+            }
         ));
     }
 }

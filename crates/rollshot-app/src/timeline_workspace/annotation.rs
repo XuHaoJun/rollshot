@@ -73,6 +73,7 @@ impl ActionGuidePresentation {
         self.docs.retain(|source, _| keep.contains(source));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn doc_mut(&mut self, source: CandidateId) -> Option<&mut StepAnnotationDocument> {
         self.docs.get_mut(&source)
     }
@@ -92,6 +93,7 @@ impl ActionGuidePresentation {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn explanation(&self, source: CandidateId, id: AnnotationId) -> Option<&str> {
         self.docs
             .get(&source)

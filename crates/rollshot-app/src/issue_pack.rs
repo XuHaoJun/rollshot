@@ -478,6 +478,7 @@ fn build_folder(
 
     #[cfg(feature = "action-guide")]
     if let Some(action) = action {
+        #[allow(deprecated)]
         rollshot_action::export_guide(
             action.guide,
             action.store,
