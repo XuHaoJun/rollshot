@@ -87,6 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if destination.exists() {
         std::fs::remove_dir_all(&destination)?;
     }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let job = fixture_job();
     rollshot_action::render_guide_folder(&job, &destination)?;
     Ok(())

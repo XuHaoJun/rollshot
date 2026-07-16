@@ -27,6 +27,7 @@ impl PlatformCommand {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(dead_code)]
 fn open_command(path: &Path) -> Result<PlatformCommand, String> {
     #[cfg(target_os = "macos")]
     return Ok(PlatformCommand::new("open").arg(path));
@@ -42,6 +43,7 @@ fn run_command_with(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(dead_code)]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
     let command = open_command(path)?;
     run_command_with(&command, PlatformCommand::spawn)
