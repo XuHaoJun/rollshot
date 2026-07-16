@@ -55,8 +55,8 @@ fn safe_slug(title: &str) -> String {
         if count >= 80 {
             break;
         }
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
+        if ch.is_alphanumeric() {
+            slug.push(ch.to_lowercase().next().unwrap_or(ch));
             prev_dash = false;
             count += 1;
         } else if !prev_dash && !slug.is_empty() {
@@ -423,6 +423,47 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains(".tmp-")));
+    }
+
+    #[test]
+    fn concurrent_standalone_exports_retain_both_outputs() {
+        let parent = tempfile::tempdir().unwrap();
+
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 7, 16)
+            .unwrap()
+            .and_hms_opt(9, 8, 7)
+            .unwrap();
+        let created_at = chrono::Local.from_local_datetime(&naive).unwrap();
+
+        let ws1 = real_workspace();
+        let mut ws2 = real_workspace();
+        ws2.guide.set_title("Second Guide".into());
+
+        let job1 = build_reviewed_export_job(&ws1).unwrap();
+        let job2 = build_reviewed_export_job(&ws2).unwrap();
+
+        let req1 = StandaloneExportRequest {
+            operation_id: 100,
+            parent: parent.path().to_path_buf(),
+            created_at,
+            job: job1,
+        };
+        let req2 = StandaloneExportRequest {
+            operation_id: 200,
+            parent: parent.path().to_path_buf(),
+            created_at,
+            job: job2,
+        };
+
+        let handle1 = std::thread::spawn(move || export_standalone(req1));
+        let handle2 = std::thread::spawn(move || export_standalone(req2));
+
+        let result1 = handle1.join().unwrap().unwrap();
+        let result2 = handle2.join().unwrap().unwrap();
+
+        assert_ne!(result1.directory, result2.directory);
+        assert!(result1.index_html.exists());
+        assert!(result2.index_html.exists());
     }
 
     #[test]
