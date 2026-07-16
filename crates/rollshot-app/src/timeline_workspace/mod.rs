@@ -18,6 +18,7 @@
 
 mod annotation;
 mod caption_agent;
+mod guide_export;
 mod storyboard_copy;
 mod update;
 mod view;
