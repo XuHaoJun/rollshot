@@ -16,8 +16,9 @@
 //! Done  (exit; temporary assets dropped on app exit)
 //! ```
 
-mod annotation;
+pub(crate) mod annotation;
 mod caption_agent;
+pub(crate) mod guide_export;
 mod storyboard_copy;
 mod update;
 mod view;
@@ -69,11 +70,30 @@ pub(crate) struct StoryboardPreviewState {
     pub copy_state: StoryboardCopyState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct IssuePackDialog {
     pub review_confirmed: bool,
     pub pending_kind: Option<IssuePackKind>,
     pub include_gif: bool,
+    pub pending_export: Option<guide_export::PendingIssuePackExport>,
+    pub operation_id: u64,
+    pub exporting: bool,
+}
+
+impl std::fmt::Debug for IssuePackDialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssuePackDialog")
+            .field("review_confirmed", &self.review_confirmed)
+            .field("pending_kind", &self.pending_kind)
+            .field("include_gif", &self.include_gif)
+            .field(
+                "pending_export",
+                &self.pending_export.as_ref().map(|_| ".."),
+            )
+            .field("operation_id", &self.operation_id)
+            .field("exporting", &self.exporting)
+            .finish()
+    }
 }
 
 impl IssuePackDialog {
@@ -82,6 +102,9 @@ impl IssuePackDialog {
             review_confirmed: false,
             pending_kind: None,
             include_gif: true,
+            pending_export: None,
+            operation_id: 0,
+            exporting: false,
         }
     }
 }
@@ -128,6 +151,31 @@ pub(crate) enum VisualAnnotationSuggestionState {
     },
 }
 
+/// Export state machine for standalone Action Guide export.
+///
+/// ```text
+/// Idle ──► PickingDestination { operation_id, pending }
+///              │  chosen parent ──► Exporting { operation_id }
+///              │  cancelled ──────► Idle
+///              v
+///         Exporting { operation_id }
+///              │  success ──► Succeeded
+///              │  failure ──► Idle (recoverable banner)
+///              │  stale result ──► ignored
+/// ```
+#[derive(Debug)]
+pub(crate) enum GuideExportState {
+    Idle,
+    PickingDestination {
+        operation_id: u64,
+        pending: guide_export::PendingStandaloneExport,
+    },
+    Exporting {
+        operation_id: u64,
+    },
+    Succeeded,
+}
+
 /// The Action Guide review/export workspace. Owns the editable guide and the
 /// frame store moved out of the finished `Recording`.
 pub struct TimelineWorkspace {
@@ -171,6 +219,14 @@ pub struct TimelineWorkspace {
     /// Monotonic operation id for storyboard copy provenance and late-result
     /// race protection. Incremented on each [`CopyStoryboardRequested`].
     pub(crate) storyboard_copy_operation_id: u64,
+    /// Current standalone export lifecycle state.
+    pub(crate) export_state: GuideExportState,
+    /// Result of the last successful standalone export, if any.
+    pub(crate) last_export: Option<guide_export::StandaloneExportResult>,
+    /// Monotonic operation id for standalone export provenance.
+    pub(crate) next_export_operation_id: u64,
+    /// Monotonic operation id for Issue Pack export provenance.
+    pub(crate) next_issue_pack_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -207,6 +263,10 @@ impl TimelineWorkspace {
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
+            export_state: GuideExportState::Idle,
+            last_export: None,
+            next_export_operation_id: 0,
+            next_issue_pack_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -528,21 +588,10 @@ mod tests {
     fn export_guide_metadata_contains_no_provider_or_model_data() {
         let ws = workspace(recording_from_frames());
         let tmp = tempfile::tempdir().unwrap();
-        let guide = ws.guide.clone();
-        let region = ws.region;
-        let capability = ws.capability;
-        let source_kind = ws.source_kind;
-        let store = &ws.store;
+        let job = super::guide_export::build_reviewed_export_job(&ws).unwrap();
 
-        let path = rollshot_action::export_guide(
-            &guide,
-            store,
-            region,
-            capability,
-            source_kind,
-            tmp.path(),
-        )
-        .expect("export_guide");
+        let path = rollshot_action::render_guide_folder(&job, &tmp.path().join("action-guide"))
+            .expect("render_guide_folder");
 
         let session_json =
             std::fs::read_to_string(path.join("session.json")).expect("session.json");

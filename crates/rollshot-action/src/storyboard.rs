@@ -109,6 +109,42 @@ pub fn render_storyboard(
     render_storyboard_steps(&steps, opts)
 }
 
+pub fn render_reviewed_storyboard(
+    job: &crate::export::model::ReviewedGuideExportJob,
+    opts: StoryboardOptions,
+) -> Result<StoryboardRenderResult, StoryboardError> {
+    if job.steps.is_empty() {
+        return Err(StoryboardError::Empty);
+    }
+
+    let mut owned = Vec::with_capacity(job.steps.len());
+    for step in &job.steps {
+        step.image
+            .with_flattened_image(|image| {
+                owned.push(downscale(image, opts.max_width));
+                Ok(())
+            })
+            .map_err(|error| StoryboardError::Io {
+                path: String::new(),
+                source: std::io::Error::other(error.to_string()),
+            })?;
+    }
+
+    let steps: Vec<StoryboardStep<'_>> = job
+        .steps
+        .iter()
+        .zip(owned.iter())
+        .map(|(step, image)| StoryboardStep {
+            index: step.index,
+            title: &step.title,
+            caption: step.caption.as_deref().and_then(non_empty_caption),
+            image,
+        })
+        .collect();
+
+    render_storyboard_steps(&steps, opts)
+}
+
 pub fn render_storyboard_steps(
     steps: &[StoryboardStep<'_>],
     opts: StoryboardOptions,

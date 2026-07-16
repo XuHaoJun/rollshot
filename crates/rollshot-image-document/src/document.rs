@@ -133,8 +133,12 @@ pub struct ImageDocument {
 
 impl ImageDocument {
     pub fn new(source: RgbaImage) -> Self {
+        Self::from_shared_source(Arc::new(source))
+    }
+
+    pub fn from_shared_source(source: Arc<RgbaImage>) -> Self {
         Self {
-            source: Arc::new(source),
+            source,
             annotations: Vec::new(),
             next_number: 1,
             next_id: 1,
@@ -181,6 +185,10 @@ impl ImageDocument {
     /// non-mutating; called only for explicit Copy/Save actions (spec §11.2).
     pub fn flatten(&self) -> RgbaImage {
         crate::flatten::flatten_onto(&self.source, &self.annotations)
+    }
+
+    pub fn flatten_snapshot(&self) -> crate::FlattenSnapshot {
+        crate::FlattenSnapshot::new(self.shared_source(), self.annotations.clone())
     }
 
     pub fn can_undo(&self) -> bool {
@@ -2677,5 +2685,23 @@ mod tests {
             .add_pixelate(ImageRect::new(5.0, 5.0, 10.0, 10.0), 8)
             .unwrap();
         assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn from_shared_source_and_flatten_snapshot_reuse_pixels_without_history() {
+        let source = Arc::new(RgbaImage::from_pixel(8, 8, Rgba([9, 8, 7, 255])));
+        let mut document = ImageDocument::from_shared_source(Arc::clone(&source));
+        document
+            .add_redaction(ImageRect::new(0.0, 0.0, 4.0, 4.0))
+            .unwrap();
+
+        let snapshot = document.flatten_snapshot();
+
+        assert!(Arc::ptr_eq(&snapshot.shared_source(), &source));
+        assert_eq!(snapshot.dimensions(), (8, 8));
+        assert_eq!(snapshot.annotations(), document.annotations());
+        assert_eq!(snapshot.flatten(), document.flatten());
+        assert!(document.undo());
+        assert_eq!(snapshot.annotations().len(), 1);
     }
 }

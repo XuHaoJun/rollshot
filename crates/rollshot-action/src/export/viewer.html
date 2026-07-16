@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Action Guide</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f8; --panel: #fff; --text: #202124; --muted: #62666d;
+      --line: #d9dce1; --accent: #2563eb; --focus: #f59e0b;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+    html[data-theme="dark"] {
+      --bg: #15171a; --panel: #202328; --text: #f4f5f6; --muted: #b7bbc2;
+      --line: #3a3f47; --accent: #78a7ff; --focus: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--text); background: var(--bg); }
+    body > a { position: fixed; left: 1rem; top: -4rem; z-index: 20; }
+    body > a:focus { top: 1rem; padding: .5rem; background: var(--panel); }
+    button, input, textarea { font: inherit; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 3px solid var(--focus); outline-offset: 2px;
+    }
+    #reader { display: grid; grid-template-columns: 19rem minmax(0, 1fr); min-height: 100vh; }
+    nav { padding: 1rem; border-right: 1px solid var(--line); background: var(--panel); }
+    #search { width: 100%; margin: .5rem 0 1rem; }
+    #step-list { display: grid; gap: .4rem; }
+    #step-list button { text-align: left; padding: .65rem; }
+    #step-list [aria-current="step"] { border-color: var(--accent); color: var(--accent); }
+    main { min-width: 0; padding: 1rem 1.5rem 2rem; }
+    #image-viewport { overflow: auto; min-height: 12rem; padding: 1rem; text-align: center; }
+    #image-shell { position: relative; display: inline-block; transform-origin: top left; }
+    #step-image { display: block; max-width: min(100%, 1200px); height: auto; }
+    #hotspots { position: absolute; inset: 0; }
+    .hotspot { position: absolute; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 20%, transparent); }
+    #popover { position: fixed; max-width: 24rem; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--panel); box-shadow: 0 .5rem 2rem #0004; }
+    #copy-panel textarea { width: min(100%, 44rem); min-height: 9rem; }
+    #drawer-toggle { display: none; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      #reader { display: block; }
+      #drawer-toggle { display: block; position: fixed; right: 1rem; top: 1rem; z-index: 12; }
+      nav { display: none; position: fixed; inset: 0 25% 0 0; z-index: 11; overflow: auto; box-shadow: .5rem 0 2rem #0005; }
+      nav.open { display: block; }
+      main { padding-top: 4rem; }
+      #popover { position: static; max-width: none; margin-top: 1rem; box-shadow: none; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      #image-shell, #popover { transition: transform 120ms ease, opacity 120ms ease; }
+    }
+  </style>
+</head>
+<body>
+  <a href="#step-content">Skip to current step</a>
+  <div id="reader">
+    <button id="drawer-toggle" type="button" data-action="toggle-drawer"
+            aria-label="Toggle steps" aria-expanded="false">Steps</button>
+    <nav aria-label="Guide steps">
+      <h1 id="guide-title"></h1>
+      <label for="search">Search guide</label>
+      <input id="search" type="search">
+      <div id="step-list"></div>
+    </nav>
+    <main id="step-content" tabindex="-1">
+      <p id="step-progress" data-testid="step-progress"></p>
+      <div id="image-viewport">
+        <div id="image-shell">
+          <img id="step-image" alt="">
+          <div id="hotspots"></div>
+        </div>
+        <p id="image-loading" role="status">Loading image…</p>
+        <p id="image-error" hidden>Image unavailable</p>
+      </div>
+      <h2 id="step-title"></h2>
+      <p id="step-caption"></p>
+      <button type="button" data-action="previous" aria-label="Previous step">Previous</button>
+      <button type="button" data-action="next" aria-label="Next step">Next</button>
+      <button type="button" data-action="copy">Copy step text</button>
+      <button type="button" data-action="zoom-out" aria-label="Zoom out">−</button>
+      <span id="zoom-value" data-testid="zoom-value">100%</span>
+      <button type="button" data-action="zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" data-action="zoom-reset" aria-label="Reset zoom">Reset</button>
+      <div id="popover" role="dialog" aria-label="Annotation explanation" hidden></div>
+      <div id="copy-panel" hidden>
+        <label for="copy-fallback">Step text for manual copy</label>
+        <textarea id="copy-fallback" readonly></textarea>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+    </main>
+  </div>
+  <noscript><a href="steps.md">Open the Markdown guide</a></noscript>
+  <script id="guide-data" type="application/json">__ROLLSHOT_GUIDE_DATA__</script>
+  <script>
+    const guide = JSON.parse(document.getElementById('guide-data').textContent);
+    const state = { step: 0, zoom: 1, query: '', openHotspot: null, drawerOpen: false };
+    const MIN_ZOOM = 0.5;
+    const MAX_ZOOM = 3;
+    const ZOOM_STEP = 0.25;
+
+    const elements = {
+      reader: document.getElementById('reader'),
+      title: document.getElementById('guide-title'),
+      search: document.getElementById('search'),
+      list: document.getElementById('step-list'),
+      progress: document.getElementById('step-progress'),
+      stepTitle: document.getElementById('step-title'),
+      caption: document.getElementById('step-caption'),
+      image: document.getElementById('step-image'),
+      imageLoading: document.getElementById('image-loading'),
+      imageError: document.getElementById('image-error'),
+      shell: document.getElementById('image-shell'),
+      hotspots: document.getElementById('hotspots'),
+      popover: document.getElementById('popover'),
+      zoom: document.getElementById('zoom-value'),
+      status: document.getElementById('status'),
+      copyPanel: document.getElementById('copy-panel'),
+      copyFallback: document.getElementById('copy-fallback')
+    };
+
+    const normalized = guide.steps.map(step => ({
+      title: step.title.toLocaleLowerCase(),
+      caption: (step.caption || '').toLocaleLowerCase(),
+      hotspots: step.hotspots.map(hotspot => hotspot.explanation.toLocaleLowerCase())
+    }));
+
+    function ownsKeyboard(event) {
+      const target = event.target;
+      return target instanceof Element &&
+        (target.matches('input,textarea,select') || target.isContentEditable);
+    }
+
+    function setHighlightedText(element, text, query) {
+      element.replaceChildren();
+      const q = query.trim().toLocaleLowerCase();
+      const at = q ? text.toLocaleLowerCase().indexOf(q) : -1;
+      if (at < 0) { element.textContent = text; return; }
+      element.append(document.createTextNode(text.slice(0, at)));
+      const mark = document.createElement('mark');
+      mark.textContent = text.slice(at, at + query.trim().length);
+      element.append(mark, document.createTextNode(text.slice(at + query.trim().length)));
+    }
+
+    function searchableResults(query) {
+      const q = query.trim().toLocaleLowerCase();
+      if (!q) return guide.steps.map((step, index) => ({ kind: 'step', index, step }));
+      const results = [];
+      if (guide.title.toLocaleLowerCase().includes(q)) results.push({ kind: 'guide', index: 0 });
+      normalized.forEach((value, index) => {
+        const hotspot = value.hotspots.findIndex(text => text.includes(q));
+        if (value.title.includes(q) || value.caption.includes(q) || hotspot >= 0) {
+          results.push({ kind: 'step', index, hotspot: hotspot >= 0 ? hotspot : null });
+        }
+      });
+      return results;
+    }
+
+    function renderSteps() {
+      setHighlightedText(elements.title, guide.title, state.query);
+      elements.list.replaceChildren();
+      for (const result of searchableResults(state.query)) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.action = 'select-step';
+        button.dataset.step = String(result.index);
+        if (result.hotspot !== undefined && result.hotspot !== null) {
+          button.dataset.hotspot = String(guide.steps[result.index].hotspots[result.hotspot].annotationId);
+        }
+        if (result.kind === 'guide') {
+          button.dataset.resultKind = 'guide';
+          button.textContent = `Guide: ${guide.title}`;
+        } else {
+          button.textContent = `Step ${result.index + 1}: ${guide.steps[result.index].title}`;
+          if (result.index === state.step) button.setAttribute('aria-current', 'step');
+        }
+        elements.list.append(button);
+      }
+    }
+
+    function renderHotspots() {
+      elements.hotspots.replaceChildren();
+      const step = guide.steps[state.step];
+      for (const hotspot of step.hotspots) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'hotspot';
+        button.dataset.action = 'hotspot';
+        button.dataset.hotspot = String(hotspot.annotationId);
+        button.setAttribute('aria-label', hotspot.explanation);
+        button.style.left = `${hotspot.bounds.x * 100}%`;
+        button.style.top = `${hotspot.bounds.y * 100}%`;
+        button.style.width = `${hotspot.bounds.width * 100}%`;
+        button.style.height = `${hotspot.bounds.height * 100}%`;
+        button.setAttribute('aria-expanded', String(state.openHotspot === hotspot.annotationId));
+        elements.hotspots.append(button);
+      }
+    }
+
+    function openHotspot(id) {
+      const hotspot = guide.steps[state.step].hotspots.find(value => value.annotationId === id);
+      state.openHotspot = hotspot ? id : null;
+      elements.popover.hidden = !hotspot;
+      setHighlightedText(elements.popover, hotspot ? hotspot.explanation : '', state.query);
+      for (const button of elements.hotspots.querySelectorAll('.hotspot')) {
+        button.setAttribute('aria-expanded', String(Number(button.dataset.hotspot) === state.openHotspot));
+      }
+      positionPopover();
+    }
+
+    function positionPopover() {
+      if (state.openHotspot !== null && innerWidth > 760) {
+        const anchor = elements.hotspots
+          .querySelector(`[data-hotspot="${state.openHotspot}"]`)
+          ?.getBoundingClientRect();
+        if (!anchor) return;
+        elements.popover.style.left = `${Math.min(innerWidth - 400, anchor.right + 8)}px`;
+        elements.popover.style.top = `${Math.max(8, Math.min(innerHeight - 160, anchor.top))}px`;
+      } else {
+        elements.popover.style.removeProperty('left');
+        elements.popover.style.removeProperty('top');
+      }
+    }
+
+    function preloadAdjacent() {
+      for (const index of [state.step - 1, state.step + 1]) {
+        if (guide.steps[index]) {
+          const preload = new Image();
+          preload.src = guide.steps[index].keyframeFile;
+        }
+      }
+    }
+
+    function renderStep() {
+      const step = guide.steps[state.step];
+      elements.progress.textContent = `Step ${state.step + 1} of ${guide.steps.length}`;
+      setHighlightedText(elements.stepTitle, step.title, state.query);
+      setHighlightedText(elements.caption, step.caption || '', state.query);
+      elements.imageLoading.hidden = false;
+      elements.imageError.hidden = true;
+      elements.image.hidden = false;
+      elements.hotspots.hidden = false;
+      elements.image.alt = `Step ${state.step + 1}: ${step.title}`;
+      elements.image.onload = () => {
+        elements.imageLoading.hidden = true;
+        elements.imageError.hidden = true;
+        elements.hotspots.hidden = false;
+        positionPopover();
+      };
+      elements.image.onerror = () => {
+        elements.imageLoading.hidden = true;
+        elements.image.hidden = true;
+        elements.hotspots.hidden = true;
+        elements.imageError.hidden = false;
+      };
+      elements.image.src = step.keyframeFile;
+      renderHotspots();
+      renderSteps();
+      preloadAdjacent();
+    }
+
+    function selectStep(index, hotspotId = null) {
+      state.step = Math.max(0, Math.min(guide.steps.length - 1, index));
+      state.openHotspot = null;
+      elements.popover.hidden = true;
+      renderStep();
+      if (hotspotId !== null) openHotspot(hotspotId);
+    }
+
+    function setZoom(value) {
+      state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value));
+      elements.shell.style.transform = `scale(${state.zoom})`;
+      elements.zoom.textContent = `${Math.round(state.zoom * 100)}%`;
+      positionPopover();
+    }
+
+    function stepCopyText(step) {
+      return [
+        `Step ${step.index}: ${step.title}`,
+        step.caption || '',
+        ...step.hotspots.map(hotspot => hotspot.explanation)
+      ].filter(Boolean).join('\n\n');
+    }
+
+    async function copyStepText() {
+      const text = stepCopyText(guide.steps[state.step]);
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+        await navigator.clipboard.writeText(text);
+        elements.copyPanel.hidden = true;
+        elements.status.textContent = 'Copied';
+        setTimeout(() => {
+          if (elements.status.textContent === 'Copied') elements.status.textContent = '';
+        }, 1800);
+      } catch (_) {
+        elements.copyPanel.hidden = false;
+        elements.copyFallback.value = text;
+        elements.copyFallback.focus();
+        elements.copyFallback.select();
+        elements.status.textContent = 'Copy was blocked. Press Ctrl/Cmd+C to copy the selected text.';
+      }
+    }
+
+    elements.reader.addEventListener('click', event => {
+      const control = event.target.closest('[data-action]');
+      if (!control) {
+        if (event.target.closest('#image-viewport') && state.openHotspot !== null) openHotspot(null);
+        return;
+      }
+      const action = control.dataset.action;
+      if (action === 'previous') selectStep(state.step - 1);
+      if (action === 'next') selectStep(state.step + 1);
+      if (action === 'select-step') selectStep(Number(control.dataset.step), control.dataset.hotspot ? Number(control.dataset.hotspot) : null);
+      if (action === 'hotspot') openHotspot(Number(control.dataset.hotspot));
+      if (action === 'copy') void copyStepText();
+      if (action === 'zoom-in') setZoom(state.zoom + ZOOM_STEP);
+      if (action === 'zoom-out') setZoom(state.zoom - ZOOM_STEP);
+      if (action === 'zoom-reset') setZoom(1);
+      if (action === 'toggle-drawer') {
+        state.drawerOpen = !state.drawerOpen;
+        document.querySelector('nav').classList.toggle('open', state.drawerOpen);
+        control.setAttribute('aria-expanded', String(state.drawerOpen));
+      }
+    });
+
+    elements.search.addEventListener('input', event => {
+      state.query = event.target.value;
+      renderSteps();
+      const step = guide.steps[state.step];
+      setHighlightedText(elements.stepTitle, step.title, state.query);
+      setHighlightedText(elements.caption, step.caption || '', state.query);
+      if (state.openHotspot !== null) openHotspot(state.openHotspot);
+    });
+
+    document.getElementById('image-viewport').addEventListener('scroll', positionPopover, { passive: true });
+    window.addEventListener('resize', positionPopover, { passive: true });
+
+    document.addEventListener('keydown', event => {
+      if (event.key === '/' && !ownsKeyboard(event)) { event.preventDefault(); elements.search.focus(); return; }
+      if (event.key === 'Escape') {
+        if (state.openHotspot !== null) openHotspot(null);
+        else {
+          state.query = '';
+          elements.search.value = '';
+          renderSteps();
+          setHighlightedText(elements.stepTitle, guide.steps[state.step].title, '');
+          setHighlightedText(elements.caption, guide.steps[state.step].caption || '', '');
+        }
+        return;
+      }
+      if (ownsKeyboard(event)) return;
+      if (event.key === 'ArrowLeft') selectStep(state.step - 1);
+      if (event.key === 'ArrowRight') selectStep(state.step + 1);
+      if (event.key === '+' || event.key === '=') setZoom(state.zoom + ZOOM_STEP);
+      if (event.key === '-') setZoom(state.zoom - ZOOM_STEP);
+      if (event.key === '0') setZoom(1);
+    });
+
+    const dark = matchMedia('(prefers-color-scheme: dark)');
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+    document.documentElement.dataset.theme = dark.matches ? 'dark' : 'light';
+    document.documentElement.dataset.motion = reduced.matches ? 'reduce' : 'full';
+    elements.title.textContent = guide.title;
+    document.title = guide.title;
+    renderStep();
+  </script>
+</body>
+</html>

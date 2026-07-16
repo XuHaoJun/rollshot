@@ -32,10 +32,14 @@ pub use caption_proposal::{
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
 pub use error::{DetectError, ExportError, GifError, StoryboardError, VideoError};
 pub use events::EventAggregator;
-pub use export::{export_guide, ManifestStep, SessionManifest};
+pub use export::model::{
+    GuideHotspot, NormalizedRect, ReviewedGuideExportJob, ReviewedGuideStep, ReviewedStepImage,
+    GUIDE_SCHEMA_VERSION,
+};
+pub use export::{model as export_model, render_guide_folder, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
-pub use gif::{export_gif, GifOptions};
-pub use guide::Guide;
+pub use gif::{export_gif, export_gif_images, GifOptions};
+pub use guide::{Guide, DEFAULT_GUIDE_TITLE};
 pub use input::{SemanticInputSource, StartedSemanticInput, VisualOnlySource};
 pub use metrics::{changed_area_ratio, downsample_luma, masked_luma_diff, LumaPlane, Rect};
 pub use models::{
@@ -45,8 +49,8 @@ pub use models::{
 };
 pub use recorder::{ActionRecorder, Recording};
 pub use storyboard::{
-    export_storyboard, render_storyboard, render_storyboard_steps, StoryboardExportResult,
-    StoryboardOptions, StoryboardRenderResult, StoryboardStep,
+    export_storyboard, render_reviewed_storyboard, render_storyboard, render_storyboard_steps,
+    StoryboardExportResult, StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
 pub use video::{export_video, VideoOptions};
 pub use visual_annotation_proposal::{

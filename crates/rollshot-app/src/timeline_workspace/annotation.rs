@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use iced::widget::{canvas, image, text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Theme};
@@ -13,6 +14,7 @@ pub(crate) struct StepAnnotationDocument {
     pub source: CandidateId,
     pub keyframe: FrameId,
     pub document: ImageDocument,
+    pub explanations: BTreeMap<AnnotationId, String>,
 }
 
 #[derive(Default)]
@@ -41,7 +43,8 @@ impl ActionGuidePresentation {
                 StepAnnotationDocument {
                     source: step.source,
                     keyframe: step.keyframe,
-                    document: ImageDocument::new(frame.image.clone()),
+                    document: ImageDocument::from_shared_source(Arc::clone(&frame.image)),
+                    explanations: BTreeMap::new(),
                 },
             );
         }
@@ -68,6 +71,34 @@ impl ActionGuidePresentation {
     pub(crate) fn retain_sources(&mut self, sources: impl IntoIterator<Item = CandidateId>) {
         let keep: BTreeSet<_> = sources.into_iter().collect();
         self.docs.retain(|source, _| keep.contains(source));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn doc_mut(&mut self, source: CandidateId) -> Option<&mut StepAnnotationDocument> {
+        self.docs.get_mut(&source)
+    }
+
+    pub(crate) fn set_explanation(
+        &mut self,
+        source: CandidateId,
+        id: AnnotationId,
+        explanation: String,
+    ) -> bool {
+        match self.docs.get_mut(&source) {
+            Some(doc) => {
+                doc.explanations.insert(id, explanation);
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn explanation(&self, source: CandidateId, id: AnnotationId) -> Option<&str> {
+        self.docs
+            .get(&source)
+            .and_then(|doc| doc.explanations.get(&id))
+            .map(String::as_str)
     }
 }
 
@@ -874,5 +905,33 @@ mod tests {
                 "Timeline document must only contain Number/Text/Redaction annotations"
             );
         }
+    }
+
+    #[test]
+    fn callout_explanation_is_keyed_by_annotation_and_survives_temporary_absence() {
+        let mut presentation = ActionGuidePresentation::new();
+        let store = frame_store_with_two_frames();
+        let guide = guide();
+        let step = guide.steps()[0].clone();
+        let doc = presentation.document_for_step(&step, &store).unwrap();
+        let id = doc
+            .document
+            .add_number_callout(ImagePoint::new(1.0, 1.0), ImagePoint::new(4.0, 4.0));
+
+        assert!(presentation.set_explanation(step.source, id, "Click Settings".into()));
+        assert_eq!(
+            presentation.explanation(step.source, id),
+            Some("Click Settings")
+        );
+        presentation
+            .doc_mut(step.source)
+            .unwrap()
+            .document
+            .delete_annotation(id)
+            .unwrap();
+        assert_eq!(
+            presentation.explanation(step.source, id),
+            Some("Click Settings")
+        );
     }
 }

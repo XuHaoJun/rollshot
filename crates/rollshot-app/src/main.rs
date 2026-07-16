@@ -24,6 +24,7 @@ mod macos_recording_tray;
 mod issue_pack;
 mod macos_native_drag;
 mod macos_thumbnail;
+mod platform_actions;
 mod post_capture;
 pub(crate) mod product_ocr;
 mod quick_ocr;

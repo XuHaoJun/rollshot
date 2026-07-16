@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use iced::Task;
 use rollshot_action::{
-    export_gif, export_guide, export_video, GifOptions, StoryboardError, StoryboardOptions,
+    export_gif, export_video, GifOptions, StoryboardError, StoryboardOptions,
     StoryboardRenderResult, VideoOptions,
 };
 use rollshot_image_document::ImagePoint;
@@ -21,7 +21,24 @@ pub enum Message {
     CancelDiscard,
     ConfirmDiscard,
     ExportRequested,
-    ExportDirChosen(Option<PathBuf>),
+    #[allow(dead_code)]
+    GuideTitleChanged(String),
+    #[allow(dead_code)]
+    AnnotationExplanationChanged(rollshot_image_document::AnnotationId, String),
+    ExportDirChosenWithId {
+        operation_id: u64,
+        parent: Option<PathBuf>,
+    },
+    ExportFinished {
+        operation_id: u64,
+        result: Result<super::guide_export::StandaloneExportResult, String>,
+    },
+    #[allow(dead_code)]
+    OpenExportedGuide,
+    #[allow(dead_code)]
+    ShowExportedGuideInFolder,
+    #[allow(dead_code)]
+    PlatformActionFinished(Result<(), String>),
     ExportGifRequested,
     ExportGifPathChosen(Option<PathBuf>),
     ExportStoryboardRequested,
@@ -53,9 +70,15 @@ pub enum Message {
     /// Begin exporting an Issue Pack to a ZIP file.
     IssuePackExportZip,
     /// The async folder-picker returned (None = cancelled).
-    IssuePackFolderChosen(Option<PathBuf>),
+    IssuePackFolderChosen {
+        operation_id: u64,
+        parent: Option<PathBuf>,
+    },
     /// Background Issue Pack export completed.
-    IssuePackFinished(Result<crate::issue_pack::IssuePackExportResult, String>),
+    IssuePackFinished {
+        operation_id: u64,
+        result: Result<crate::issue_pack::IssuePackExportResult, String>,
+    },
     /// Close the Issue Pack dialog without exporting.
     IssuePackCancel,
     #[cfg(target_os = "macos")]
@@ -186,32 +209,136 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
         }
         Message::ExportRequested => {
             state.message = None;
+            match &state.export_state {
+                super::GuideExportState::Idle | super::GuideExportState::Succeeded => {}
+                _ => return Task::none(),
+            }
+            let job = match super::guide_export::build_reviewed_export_job(state) {
+                Ok(job) => job,
+                Err(error) => {
+                    state.message = Some(format!("{error}"));
+                    return Task::none();
+                }
+            };
+            state.next_export_operation_id = state.next_export_operation_id.saturating_add(1);
+            let operation_id = state.next_export_operation_id;
+            let created_at = chrono::Local::now();
+            state.export_state = super::GuideExportState::PickingDestination {
+                operation_id,
+                pending: super::guide_export::PendingStandaloneExport {
+                    operation_id,
+                    created_at,
+                    job,
+                },
+            };
+            Task::perform(pick_export_dir(picker_default_dir()), move |path| {
+                Message::ExportDirChosenWithId {
+                    operation_id,
+                    parent: path,
+                }
+            })
+        }
+        Message::GuideTitleChanged(title) => {
+            state.guide.set_title(title);
+            Task::none()
+        }
+        Message::AnnotationExplanationChanged(id, text) => {
+            if let Some(session) = &state.annotation_session {
+                let _ = state.presentation.set_explanation(session.source, id, text);
+            }
+            Task::none()
+        }
+        Message::ExportDirChosenWithId {
+            operation_id,
+            parent,
+        } => {
+            let Some(parent) = parent else {
+                if let super::GuideExportState::PickingDestination {
+                    operation_id: current,
+                    ..
+                } = &state.export_state
+                {
+                    if operation_id == *current {
+                        state.export_state = super::GuideExportState::Idle;
+                    }
+                }
+                return Task::none();
+            };
+            let super::GuideExportState::PickingDestination {
+                operation_id: current,
+                ..
+            } = &state.export_state
+            else {
+                return Task::none();
+            };
+            if operation_id != *current {
+                return Task::none();
+            }
+            let old = std::mem::replace(&mut state.export_state, super::GuideExportState::Idle);
+            let super::GuideExportState::PickingDestination {
+                operation_id: _,
+                pending,
+            } = old
+            else {
+                unreachable!("just matched");
+            };
+            let request = super::guide_export::StandaloneExportRequest {
+                operation_id: pending.operation_id,
+                parent,
+                created_at: pending.created_at,
+                job: pending.job,
+            };
+            state.export_state = super::GuideExportState::Exporting { operation_id };
             Task::perform(
-                pick_export_dir(picker_default_dir()),
-                Message::ExportDirChosen,
+                super::guide_export::run_standalone_export(request),
+                move |result| Message::ExportFinished {
+                    operation_id,
+                    result,
+                },
             )
         }
-        Message::ExportDirChosen(None) => Task::none(),
-        Message::ExportDirChosen(Some(dir)) => match export_to(state, &dir) {
-            Ok(out) => {
-                tracing::info!(
-                    target: "rollshot::action::export",
-                    path = %out.display(),
-                    "guide exported"
+        Message::ExportFinished {
+            operation_id,
+            result,
+        } => {
+            apply_export_finished(state, operation_id, result);
+            Task::none()
+        }
+        Message::OpenExportedGuide => {
+            if let Some(export) = &state.last_export {
+                let path = export.index_html.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::platform_actions::open_path(&path)
+                        })
+                        .await
+                        .map_err(|_| "Open Guide action worker failed".to_string())?
+                    },
+                    Message::PlatformActionFinished,
                 );
-                state.message = None;
-                iced::exit()
             }
-            Err(error) => {
-                tracing::error!(
-                    target: "rollshot::action::export",
-                    %error,
-                    "guide export failed"
+            Task::none()
+        }
+        Message::ShowExportedGuideInFolder => {
+            if let Some(export) = &state.last_export {
+                let path = export.directory.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || crate::platform_actions::reveal(&path))
+                            .await
+                            .map_err(|_| "Show in Folder action worker failed".to_string())?
+                    },
+                    Message::PlatformActionFinished,
                 );
-                state.message = Some(error);
-                Task::none()
             }
-        },
+            Task::none()
+        }
+        Message::PlatformActionFinished(Ok(())) => Task::none(),
+        Message::PlatformActionFinished(Err(error)) => {
+            state.message = Some(error);
+            Task::none()
+        }
         Message::ExportGifRequested => {
             state.message = None;
             Task::perform(
@@ -426,58 +553,82 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             begin_issue_pack_export(state, super::IssuePackKind::Folder)
         }
         Message::IssuePackExportZip => begin_issue_pack_export(state, super::IssuePackKind::Zip),
-        Message::IssuePackFolderChosen(None) => {
-            if let Some(dialog) = &mut state.issue_pack {
-                dialog.pending_kind = None;
-            }
-            Task::none()
-        }
-        Message::IssuePackFolderChosen(Some(parent)) => {
-            let kind = state
-                .issue_pack
-                .as_ref()
-                .and_then(|dialog| dialog.pending_kind)
-                .unwrap_or(super::IssuePackKind::Folder);
-            let input = timeline_issue_pack_input(state);
-            let action = timeline_issue_pack_action(state);
-            let result = match kind {
-                super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
-                    &input,
-                    Some(action),
-                    &parent,
-                ),
-                super::IssuePackKind::Zip => {
-                    crate::issue_pack::export_zip_with_action_guide(&input, Some(action), &parent)
-                }
+        Message::IssuePackFolderChosen {
+            operation_id,
+            parent,
+        } => {
+            let Some(dialog) = state.issue_pack.as_ref() else {
+                return Task::none();
             };
-            update(
-                state,
-                Message::IssuePackFinished(result.map_err(|e| e.to_string())),
+            if dialog.operation_id != operation_id {
+                return Task::none();
+            }
+            let Some(parent) = parent else {
+                let dialog = state.issue_pack.as_mut().unwrap();
+                dialog.pending_kind = None;
+                dialog.pending_export = None;
+                dialog.exporting = false;
+                return Task::none();
+            };
+            let (kind, pending, operation_id) = {
+                let Some(dialog) = state.issue_pack.as_mut() else {
+                    return Task::none();
+                };
+                let kind = dialog
+                    .pending_kind
+                    .take()
+                    .unwrap_or(super::IssuePackKind::Folder);
+                let Some(pending) = dialog.pending_export.take() else {
+                    return Task::none();
+                };
+                let operation_id = dialog.operation_id;
+                dialog.exporting = true;
+                (kind, pending, operation_id)
+            };
+            Task::perform(
+                run_issue_pack_export(pending, kind, parent),
+                move |result| Message::IssuePackFinished {
+                    operation_id,
+                    result,
+                },
             )
         }
-        Message::IssuePackFinished(Ok(result)) => {
-            let mut text = match result.zip_path.as_ref() {
-                Some(path) => format!("Bug report ZIP saved to {}", path.display()),
-                None => format!("Bug report saved to {}", result.directory.display()),
+        Message::IssuePackFinished {
+            operation_id,
+            result,
+        } => {
+            let Some(dialog) = &mut state.issue_pack else {
+                return Task::none();
             };
-            if !result.warnings.is_empty() {
-                let warning_text = result
-                    .warnings
-                    .iter()
-                    .map(|warning| warning.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                text = format!("{text}\nWarnings: {warning_text}");
+            if dialog.operation_id != operation_id {
+                return Task::none();
             }
-            state.issue_pack = None;
-            state.message = Some(text);
-            Task::none()
-        }
-        Message::IssuePackFinished(Err(error)) => {
-            if let Some(dialog) = &mut state.issue_pack {
-                dialog.pending_kind = None;
+            dialog.exporting = false;
+            match result {
+                Ok(result) => {
+                    let mut text = match result.zip_path.as_ref() {
+                        Some(path) => format!("Bug report ZIP saved to {}", path.display()),
+                        None => format!("Bug report saved to {}", result.directory.display()),
+                    };
+                    if !result.warnings.is_empty() {
+                        let warning_text = result
+                            .warnings
+                            .iter()
+                            .map(|warning| warning.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        text = format!("{text}\nWarnings: {warning_text}");
+                    }
+                    state.issue_pack = None;
+                    state.message = Some(text);
+                }
+                Err(error) => {
+                    if let Some(dialog) = &mut state.issue_pack {
+                        dialog.pending_kind = None;
+                    }
+                    state.message = Some(error);
+                }
             }
-            state.message = Some(error);
             Task::none()
         }
         Message::IssuePackCancel => {
@@ -1205,19 +1356,6 @@ pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
     iced::window::close_requests().map(|_id| Message::CloseRequested)
 }
 
-/// Export the (possibly edited) guide into `out_dir/action-guide/`.
-fn export_to(state: &TimelineWorkspace, out_dir: &Path) -> Result<PathBuf, String> {
-    export_guide(
-        &state.guide,
-        &state.store,
-        state.region,
-        state.capability,
-        state.source_kind,
-        out_dir,
-    )
-    .map_err(|e| format!("export failed: {e}"))
-}
-
 /// Initial directory for the folder picker: the user's Pictures dir, or temp.
 fn picker_default_dir() -> PathBuf {
     dirs::picture_dir().unwrap_or_else(std::env::temp_dir)
@@ -1313,17 +1451,38 @@ async fn pick_mp4_save_path(default_dir: PathBuf) -> Option<PathBuf> {
         .map(|handle| handle.path().to_path_buf())
 }
 
+async fn run_issue_pack_export(
+    pending: super::guide_export::PendingIssuePackExport,
+    kind: super::IssuePackKind,
+    parent: PathBuf,
+) -> Result<crate::issue_pack::IssuePackExportResult, String> {
+    tokio::task::spawn_blocking(move || match kind {
+        super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
+            &pending.input,
+            Some(pending.source),
+            &parent,
+        ),
+        super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide(
+            &pending.input,
+            Some(pending.source),
+            &parent,
+        ),
+    })
+    .await
+    .map_err(|error| format!("Issue Pack export worker failed: {error}"))?
+    .map_err(|error| error.to_string())
+}
+
 async fn download_managed_ffmpeg_task() -> Result<PathBuf, String> {
     tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
         .await
         .map_err(|error| format!("managed FFmpeg download task failed: {error}"))?
 }
 
-fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::IssuePackInput {
-    let include_gif = state
-        .issue_pack
-        .as_ref()
-        .is_some_and(|dialog| dialog.include_gif);
+pub(crate) fn timeline_issue_pack_input(
+    state: &TimelineWorkspace,
+    assets: crate::issue_pack::ActionGuideIssueAssets,
+) -> crate::issue_pack::IssuePackInput {
     let reviewed = state
         .issue_pack
         .as_ref()
@@ -1334,10 +1493,7 @@ fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::Is
         rollshot_version: env!("CARGO_PKG_VERSION").to_string(),
         platform: crate::issue_pack::PlatformInfo::current(),
         final_image: None,
-        action_guide: Some(crate::issue_pack::ActionGuideIssueAssets::from_guide(
-            &state.guide,
-            include_gif,
-        )),
+        action_guide: Some(assets),
         ocr_snippets: Vec::new(),
         evidence_review: crate::issue_pack::EvidenceReviewSummary {
             required: true,
@@ -1355,43 +1511,36 @@ fn timeline_issue_pack_input(state: &TimelineWorkspace) -> crate::issue_pack::Is
     }
 }
 
-fn timeline_issue_pack_action(
-    state: &TimelineWorkspace,
-) -> crate::issue_pack::ActionGuideExportSource<'_> {
-    let include_gif = state
-        .issue_pack
-        .as_ref()
-        .is_some_and(|dialog| dialog.include_gif);
-    let storyboard_image = render_timeline_storyboard(state, StoryboardOptions::default())
-        .ok()
-        .map(|r| r.image);
-    crate::issue_pack::ActionGuideExportSource {
-        guide: &state.guide,
-        store: &state.store,
-        region: state.region,
-        capability: state.capability,
-        source_kind: state.source_kind,
-        include_gif,
-        storyboard_image,
-    }
-}
-
 fn begin_issue_pack_export(
     state: &mut TimelineWorkspace,
     kind: super::IssuePackKind,
 ) -> Task<Message> {
-    let Some(dialog) = &mut state.issue_pack else {
+    if state.issue_pack.is_none() {
         return Task::none();
-    };
-    if !dialog.review_confirmed {
+    }
+    if !state.issue_pack.as_ref().unwrap().review_confirmed {
         state.message = Some("Review every keyframe before sharing.".to_string());
         return Task::none();
     }
+    let pending = match super::guide_export::prepare_issue_pack_export(state) {
+        Ok(pending) => pending,
+        Err(error) => {
+            state.message = Some(error);
+            return Task::none();
+        }
+    };
+    state.next_issue_pack_operation_id = state.next_issue_pack_operation_id.saturating_add(1);
+    let operation_id = state.next_issue_pack_operation_id;
+    let dialog = state.issue_pack.as_mut().unwrap();
+    dialog.operation_id = operation_id;
     dialog.pending_kind = Some(kind);
-    Task::perform(
-        pick_export_dir(picker_default_dir()),
-        Message::IssuePackFolderChosen,
-    )
+    dialog.pending_export = Some(pending);
+    Task::perform(pick_export_dir(picker_default_dir()), move |parent| {
+        Message::IssuePackFolderChosen {
+            operation_id,
+            parent,
+        }
+    })
 }
 
 fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePoint {
@@ -1407,6 +1556,33 @@ fn dismiss_stale_visual_annotation_review(state: &mut TimelineWorkspace) {
     ) {
         state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
         state.message = Some("Annotation suggestions are stale; regenerate them.".to_string());
+    }
+}
+
+fn apply_export_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<super::guide_export::StandaloneExportResult, String>,
+) {
+    let super::GuideExportState::Exporting {
+        operation_id: current,
+    } = &state.export_state
+    else {
+        return;
+    };
+    if operation_id != *current {
+        return;
+    }
+    match result {
+        Ok(exported) => {
+            state.export_state = super::GuideExportState::Succeeded;
+            state.last_export = Some(exported);
+            state.message = Some("Action Guide exported.".into());
+        }
+        Err(error) => {
+            state.export_state = super::GuideExportState::Idle;
+            state.message = Some(format!("Action Guide export failed: {error}"));
+        }
     }
 }
 
@@ -1498,6 +1674,7 @@ fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline_workspace::guide_export;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
     use crate::timeline_workspace::visual_annotation_agent::VisualSuggestionConsent;
     use crate::timeline_workspace::{
@@ -1695,45 +1872,62 @@ mod tests {
     }
 
     #[test]
-    fn export_dir_chosen_writes_guide_folder_and_clears_message() {
+    fn export_dir_chosen_with_id_starts_async_export() {
         let mut state = ws(recording_from_frames());
         state.message = Some("stale".to_string());
+        begin_export(&mut state, 1).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let _ = update(
             &mut state,
-            Message::ExportDirChosen(Some(tmp.path().to_path_buf())),
+            Message::ExportDirChosenWithId {
+                operation_id: 1,
+                parent: Some(tmp.path().to_path_buf()),
+            },
         );
-        assert!(tmp.path().join("action-guide/steps.md").exists());
-        assert!(tmp.path().join("action-guide/session.json").exists());
         assert!(
-            state.message.is_none(),
-            "successful export clears the banner"
+            matches!(
+                state.export_state,
+                super::super::GuideExportState::Exporting { operation_id: 1 }
+            ),
+            "should transition to Exporting, got {:?}",
+            state.export_state
         );
     }
 
     #[test]
-    fn export_empty_guide_sets_error_and_writes_nothing() {
+    fn export_empty_guide_with_id_starts_async_export() {
         let mut state = ws(synthetic_recording(0));
-        let tmp = tempfile::tempdir().unwrap();
+        let result = begin_export(&mut state, 1);
+        assert!(result.is_err(), "empty guide should fail begin_export");
+    }
+
+    #[test]
+    fn export_cancelled_picker_with_id_resets_to_idle() {
+        let mut state = ws(recording_from_frames());
+        begin_export(&mut state, 1).unwrap();
         let _ = update(
             &mut state,
-            Message::ExportDirChosen(Some(tmp.path().to_path_buf())),
+            Message::ExportDirChosenWithId {
+                operation_id: 1,
+                parent: None,
+            },
         );
         assert!(
-            !tmp.path().join("action-guide").exists(),
-            "empty guide must not write a folder"
-        );
-        assert!(
-            state.message.is_some(),
-            "export failure surfaces an inline message"
+            matches!(state.export_state, super::super::GuideExportState::Idle),
+            "cancel should reset to Idle"
         );
     }
 
     #[test]
-    fn export_cancelled_picker_is_a_no_op() {
+    fn post_export_platform_actions_schedule_result_messages() {
         let mut state = ws(recording_from_frames());
-        let _ = update(&mut state, Message::ExportDirChosen(None));
-        assert!(state.message.is_none());
+        state.last_export = Some(fake_result("/tmp/action-guide"));
+
+        let open_task = update(&mut state, Message::OpenExportedGuide);
+        let reveal_task = update(&mut state, Message::ShowExportedGuideInFolder);
+
+        assert!(open_task.units() > 0);
+        assert!(reveal_task.units() > 0);
     }
 
     #[test]
@@ -1779,13 +1973,37 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         let _ = update(&mut state, Message::ExportBugReport);
+        assert!(
+            state.issue_pack.is_some(),
+            "dialog should exist after ExportBugReport"
+        );
+        // begin_issue_pack_export checks review_confirmed before preparing.
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert!(
+            state.message.is_some(),
+            "message should be set after IssuePackExportFolder, got None"
+        );
+        // The picker should not have opened; no pending_export was set.
+        // Simulate the picker returning anyway to verify nothing is written.
         let _ = update(
             &mut state,
-            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+            Message::IssuePackFolderChosen {
+                operation_id: 0,
+                parent: Some(tmp.path().to_path_buf()),
+            },
         );
 
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
-        assert!(state.message.as_ref().unwrap().contains("review"));
+        assert!(
+            state
+                .message
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("review"),
+            "message = {:?}",
+            state.message
+        );
     }
 
     #[test]
@@ -1799,25 +2017,38 @@ mod tests {
         );
         let _ = update(&mut state, Message::ExportBugReport);
         let _ = update(&mut state, Message::IssuePackReviewChanged(true));
-        let _ = update(
-            &mut state,
-            Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
+        // IssuePackExportFolder calls begin_issue_pack_export which prepares
+        // the owned source before opening the picker.
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert!(
+            state
+                .issue_pack
+                .as_ref()
+                .and_then(|d| d.pending_export.as_ref())
+                .is_some(),
+            "pending_export should be set after IssuePackExportFolder"
         );
-
-        let pack = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("rollshot-issue-pack-")
-            })
-            .unwrap();
-        let md = std::fs::read_to_string(pack.join("issue.md")).unwrap();
-        assert!(md.contains("Open Settings"), "md = {md}");
-        assert!(pack.join("action-guide/steps.md").exists());
-        assert!(pack.join("action-guide/session.json").exists());
+        assert_eq!(
+            state.issue_pack.as_ref().unwrap().operation_id,
+            1,
+            "operation_id should be allocated"
+        );
+        // Simulate the picker returning a path. This spawns an async task.
+        let task = update(
+            &mut state,
+            Message::IssuePackFolderChosen {
+                operation_id: 1,
+                parent: Some(tmp.path().to_path_buf()),
+            },
+        );
+        assert!(
+            state.issue_pack.as_ref().unwrap().exporting,
+            "exporting should be true after picker returns"
+        );
+        assert!(
+            task.units() > 0,
+            "picker return should spawn an async export task"
+        );
     }
 
     #[test]
@@ -1827,6 +2058,37 @@ mod tests {
         let _ = update(&mut state, Message::IssuePackCancel);
 
         assert!(state.issue_pack.is_none());
+    }
+
+    #[test]
+    fn stale_issue_pack_picker_result_does_not_consume_current_export() {
+        let mut state = ws(recording_from_frames());
+        let stale_parent = tempfile::tempdir().unwrap();
+
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert_eq!(state.issue_pack.as_ref().unwrap().operation_id, 1);
+
+        let _ = update(&mut state, Message::IssuePackCancel);
+        let _ = update(&mut state, Message::ExportBugReport);
+        let _ = update(&mut state, Message::IssuePackReviewChanged(true));
+        let _ = update(&mut state, Message::IssuePackExportFolder);
+        assert_eq!(state.issue_pack.as_ref().unwrap().operation_id, 2);
+
+        let task = update(
+            &mut state,
+            Message::IssuePackFolderChosen {
+                operation_id: 1,
+                parent: Some(stale_parent.path().to_path_buf()),
+            },
+        );
+
+        let dialog = state.issue_pack.as_ref().unwrap();
+        assert_eq!(task.units(), 0);
+        assert_eq!(dialog.operation_id, 2);
+        assert!(dialog.pending_export.is_some());
+        assert!(!dialog.exporting);
     }
 
     #[test]
@@ -2176,13 +2438,22 @@ mod tests {
             review_confirmed: true,
             pending_kind: None,
             include_gif: false,
+            pending_export: None,
+            operation_id: 0,
+            exporting: false,
         });
-        let before = {
-            let action = timeline_issue_pack_action(&state);
-            action
-                .storyboard_image
-                .expect("storyboard before annotation")
-        };
+        let original = state
+            .store
+            .retained(state.guide.steps()[0].keyframe)
+            .unwrap()
+            .image
+            .clone();
+        let before = rollshot_action::render_reviewed_storyboard(
+            &guide_export::build_reviewed_export_job(&state).unwrap(),
+            rollshot_action::StoryboardOptions::default(),
+        )
+        .expect("storyboard before annotation")
+        .image;
 
         let step = state.selected_step().unwrap().clone();
         let doc = state
@@ -2198,14 +2469,22 @@ mod tests {
             })
             .unwrap();
 
-        let action = timeline_issue_pack_action(&state);
+        let after = rollshot_action::render_reviewed_storyboard(
+            &guide_export::build_reviewed_export_job(&state).unwrap(),
+            rollshot_action::StoryboardOptions::default(),
+        )
+        .expect("storyboard after annotation")
+        .image;
 
-        assert!(action.storyboard_image.is_some());
-        let image = action.storyboard_image.as_ref().unwrap();
         assert_ne!(
             before.as_raw(),
-            image.as_raw(),
+            after.as_raw(),
             "Issue Pack storyboard image should use flattened annotated keyframes"
+        );
+        assert_eq!(
+            state.store.retained(step.keyframe).unwrap().image.as_raw(),
+            original.as_raw(),
+            "retained keyframe must be unchanged after annotation"
         );
     }
 
@@ -2592,7 +2871,13 @@ mod tests {
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
         );
 
-        let input = timeline_issue_pack_input(&state);
+        let job = guide_export::build_reviewed_export_job(&state).unwrap();
+        let include_gif = state
+            .issue_pack
+            .as_ref()
+            .is_some_and(|dialog| dialog.include_gif);
+        let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
+        let input = timeline_issue_pack_input(&state, assets);
         let first_step = &input.action_guide.as_ref().unwrap().steps[0];
 
         assert_eq!(first_step.title, "Open Preferences");
@@ -3778,6 +4063,104 @@ key_source = { Env = "OPENAI_API_KEY" }
         assert!(matches!(
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::Running { .. }
+        ));
+    }
+
+    fn begin_export(state: &mut TimelineWorkspace, operation_id: u64) -> Result<(), String> {
+        let job = super::super::guide_export::build_reviewed_export_job(state)
+            .map_err(|e| format!("{e}"))?;
+        let created_at = chrono::Local::now();
+        state.export_state = super::super::GuideExportState::PickingDestination {
+            operation_id,
+            pending: super::super::guide_export::PendingStandaloneExport {
+                operation_id,
+                created_at,
+                job,
+            },
+        };
+        Ok(())
+    }
+
+    fn fake_result(path: &str) -> super::super::guide_export::StandaloneExportResult {
+        let directory = std::path::PathBuf::from(path);
+        super::super::guide_export::StandaloneExportResult {
+            operation_id: 0,
+            index_html: directory.join("index.html"),
+            directory,
+        }
+    }
+
+    #[test]
+    fn export_completion_keeps_workspace_and_exposes_open_actions() {
+        let mut state = ws(synthetic_recording(1));
+        state.export_state = super::super::GuideExportState::Exporting { operation_id: 7 };
+        let directory = std::path::PathBuf::from("/tmp/guide");
+        let index_html = directory.join("index.html");
+        apply_export_finished(
+            &mut state,
+            7,
+            Ok(super::super::guide_export::StandaloneExportResult {
+                operation_id: 7,
+                directory: directory.clone(),
+                index_html: index_html.clone(),
+            }),
+        );
+        assert!(matches!(
+            state.export_state,
+            super::super::GuideExportState::Succeeded
+        ));
+        assert_eq!(state.last_export.as_ref().unwrap().index_html, index_html);
+    }
+
+    #[test]
+    fn callout_explanation_message_updates_only_matching_annotation() {
+        let mut state = ws(recording_from_frames());
+        let _ = update(&mut state, Message::AnnotateStepRequested);
+        let source = state.annotation_session.as_ref().unwrap().source;
+        let id = state
+            .presentation
+            .doc_mut(source)
+            .unwrap()
+            .document
+            .add_number_callout(
+                rollshot_image_document::ImagePoint::new(2.0, 2.0),
+                rollshot_image_document::ImagePoint::new(8.0, 8.0),
+            );
+        let _ = update(
+            &mut state,
+            Message::AnnotationExplanationChanged(id, "Open Settings".into()),
+        );
+        assert_eq!(
+            state.presentation.explanation(source, id),
+            Some("Open Settings")
+        );
+    }
+
+    #[test]
+    fn picker_cancel_and_stale_results_do_not_mutate_current_operation() {
+        let mut state = ws(recording_from_frames());
+        begin_export(&mut state, 41).unwrap();
+        let _ = update(
+            &mut state,
+            Message::ExportDirChosenWithId {
+                operation_id: 41,
+                parent: None,
+            },
+        );
+        assert!(matches!(
+            state.export_state,
+            super::super::GuideExportState::Idle
+        ));
+        assert!(state.last_export.is_none());
+
+        begin_export(&mut state, 42).unwrap();
+        apply_export_finished(&mut state, 41, Ok(fake_result("/tmp/stale")));
+        assert!(matches!(
+            state.export_state,
+            super::super::GuideExportState::PickingDestination {
+                operation_id: 42,
+                ..
+            }
         ));
     }
 }

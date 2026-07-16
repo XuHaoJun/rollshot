@@ -37,6 +37,7 @@ rollshot-iced-overlay = { path = "../rollshot-iced-overlay" }
 rollshot-image-document = { path = "../rollshot-image-document", features = ["serde"] }
 rollshot-preset = { path = "../rollshot-preset" }
 rollshot-vision = { path = "../rollshot-vision" }
+rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

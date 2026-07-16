@@ -5,8 +5,11 @@
 
 use crate::models::{default_title, CandidateStep, FrameId, GuideStep};
 
+pub const DEFAULT_GUIDE_TITLE: &str = "Action Guide";
+
 #[derive(Clone)]
 pub struct Guide {
+    title: String,
     steps: Vec<GuideStep>,
 }
 
@@ -29,7 +32,27 @@ impl Guide {
                 source: c.id,
             })
             .collect();
-        Self { steps }
+        Self {
+            title: DEFAULT_GUIDE_TITLE.to_string(),
+            steps,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn set_title(&mut self, title: String) {
+        self.title = title;
+    }
+
+    pub fn effective_title(&self) -> &str {
+        let trimmed = self.title.trim();
+        if trimmed.is_empty() {
+            DEFAULT_GUIDE_TITLE
+        } else {
+            trimmed
+        }
     }
 
     pub fn steps(&self) -> &[GuideStep] {
@@ -191,5 +214,16 @@ mod tests {
         assert!(g.replace_keyframe(1, 6));
         assert_eq!(g.steps()[0].caption, "The save action loses state.");
         assert_eq!(g.steps()[0].keyframe, 6);
+    }
+
+    #[test]
+    fn guide_title_is_editable_with_export_fallback() {
+        let mut guide = Guide::from_candidates(vec![cand(0, CandidateKind::Click, 5, vec![5])]);
+        assert_eq!(guide.title(), "Action Guide");
+        guide.set_title("  Checkout failure  ".to_string());
+        assert_eq!(guide.title(), "  Checkout failure  ");
+        assert_eq!(guide.effective_title(), "Checkout failure");
+        guide.set_title("   ".to_string());
+        assert_eq!(guide.effective_title(), "Action Guide");
     }
 }

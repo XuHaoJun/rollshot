@@ -586,6 +586,31 @@ denying it is a capture failure, not a visual-only degradation.
 temporary system-tray icon to finish recording. Requires a system tray
 (StatusNotifierItem host); KDE Plasma provides one.
 
+### Action Guide offline reader
+
+When you export a standalone Action Guide, the output is a self-contained folder:
+
+```text
+<guide-title>-<YYYY-MM-DD-HHMMSS>/
+  index.html
+  steps.md
+  session.json
+  keyframes/
+```
+
+Recipients double-click `index.html` to open the interactive guide reader in a
+browser. The reader works entirely offline — no server, CDN, or network access
+is required. The whole folder must be moved or shared together; `index.html`
+reads `session.json` and `keyframes/` relative to its own location.
+
+`steps.md` is a plain Markdown fallback that works without JavaScript. OCR
+search and single-file HTML export are not included in this release.
+
+After a successful standalone export, the timeline workspace shows **Open
+Guide** (launches `index.html`) and **Show in Folder** (reveals the directory in
+the system file manager). The same folder structure is included inside Issue
+Pack exports.
+
 ## Manual Self-Hosted Workflow
 
 `.github/workflows/real-capture.yml` reserves the manual smoke-test path for

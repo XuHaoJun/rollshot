@@ -38,7 +38,7 @@ pub(crate) fn snapshot_storyboard(
             {
                 doc.document.flatten()
             }
-            _ => frame.image.clone(),
+            _ => (*frame.image).clone(),
         };
         let caption = {
             let caption = step.caption.trim();
@@ -202,7 +202,7 @@ mod tests {
 
         assert_ne!(
             input.steps[0].image,
-            state
+            *state
                 .store
                 .retained(state.guide.steps()[0].keyframe)
                 .unwrap()

@@ -6,6 +6,10 @@ use iced::{mouse, Alignment, Color, Element, Length, Theme};
 
 use super::{Message, TimelineWorkspace};
 
+fn guide_title_input_value(state: &TimelineWorkspace) -> &str {
+    state.guide.title()
+}
+
 pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
     let body: Element<Message> = column![
         header(state),
@@ -79,29 +83,59 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             .height(Length::Shrink)
             .into(),
     };
+    let guide_title_input = text_input("Guide title", guide_title_input_value(state))
+        .on_input(Message::GuideTitleChanged);
+
+    let export_busy = matches!(
+        state.export_state,
+        super::GuideExportState::PickingDestination { .. }
+            | super::GuideExportState::Exporting { .. }
+    );
+
+    let mut export_controls: Element<Message> = row![button(text("Export Guide"))
+        .on_press_maybe((!export_busy).then_some(Message::ExportRequested))
+        .style(button::primary),]
+    .spacing(8)
+    .into();
+
+    if let super::GuideExportState::Succeeded = &state.export_state {
+        export_controls = row![
+            button(text("Export Guide"))
+                .on_press_maybe((!export_busy).then_some(Message::ExportRequested))
+                .style(button::primary),
+            button(text("Open Guide"))
+                .on_press(Message::OpenExportedGuide)
+                .style(button::secondary),
+            button(text("Show in Folder"))
+                .on_press(Message::ShowExportedGuideInFolder)
+                .style(button::secondary),
+        ]
+        .spacing(8)
+        .into();
+    }
+
     row![
         advisory,
+        guide_title_input,
         Space::new().width(Length::Fill),
         button(text("Discard"))
             .on_press(Message::DiscardRequested)
             .style(button::secondary),
         button(text("Export GIF"))
-            .on_press(Message::ExportGifRequested)
+            .on_press_maybe((!export_busy).then_some(Message::ExportGifRequested))
             .style(button::secondary),
         button(text("Preview Storyboard"))
-            .on_press(Message::PreviewStoryboardRequested)
+            .on_press_maybe((!export_busy).then_some(Message::PreviewStoryboardRequested))
             .style(button::secondary),
         button(text("Export Storyboard"))
-            .on_press(Message::ExportStoryboardRequested)
+            .on_press_maybe((!export_busy).then_some(Message::ExportStoryboardRequested))
             .style(button::secondary),
         button(text("Export MP4"))
-            .on_press(Message::ExportMp4Requested)
+            .on_press_maybe((!export_busy).then_some(Message::ExportMp4Requested))
             .style(button::secondary),
-        button(text("Export Guide"))
-            .on_press(Message::ExportRequested)
-            .style(button::primary),
+        export_controls,
         button(text("Export Bug Report..."))
-            .on_press(Message::ExportBugReport)
+            .on_press_maybe((!export_busy).then_some(Message::ExportBugReport))
             .style(button::secondary),
     ]
     .spacing(8)
@@ -315,7 +349,8 @@ fn issue_pack_modal<'a>(
     state: &'a TimelineWorkspace,
 ) -> Element<'a, Message> {
     let dialog = state.issue_pack.as_ref().expect("checked by caller");
-    let export_enabled = dialog.review_confirmed && dialog.pending_kind.is_none();
+    let export_enabled =
+        dialog.review_confirmed && dialog.pending_kind.is_none() && !dialog.exporting;
     let steps = state.guide.steps().len();
 
     let dialog_view = container(
@@ -708,6 +743,31 @@ fn annotation_modal<'a>(
                 .height(Length::Fixed(rendered.height))
                 .style(container::rounded_box),
             review_panel,
+            {
+                let mut explanation_inputs = column![].spacing(4);
+                for item in doc.document.navigator_items() {
+                    let annotation = doc.document.annotation(item.id);
+                    if let Some(rollshot_image_document::Annotation::NumberCallout { id, .. }) =
+                        annotation
+                    {
+                        let current = doc.explanations.get(id).map(String::as_str).unwrap_or("");
+                        let annotation_id = *id;
+                        explanation_inputs = explanation_inputs.push(
+                            row![
+                                text(format!("Callout {}: ", id.0)).size(12),
+                                text_input("Optional explanation", current,)
+                                    .on_input(move |text| {
+                                        Message::AnnotationExplanationChanged(annotation_id, text)
+                                    })
+                                    .width(Length::Fill),
+                            ]
+                            .spacing(4)
+                            .align_y(Alignment::Center),
+                        );
+                    }
+                }
+                explanation_inputs
+            },
             row![
                 button(text("Done"))
                     .on_press(Message::AnnotationDone)
@@ -950,6 +1010,18 @@ mod tests {
             capability,
             InputSourceKind::LinuxEvdev,
         )
+    }
+
+    #[test]
+    fn guide_title_input_preserves_empty_editable_value() {
+        let mut state = ws(
+            recording_from_frames(),
+            rollshot_action::InputCapability::SemanticEvents,
+        );
+        state.guide.set_title(String::new());
+
+        assert_eq!(guide_title_input_value(&state), "");
+        assert_eq!(state.guide.effective_title(), "Action Guide");
     }
 
     #[test]
