@@ -58,3 +58,24 @@ jobs:
           cargo check -p rollshot-macos-oneshot --all-targets
           cargo check -p rollshot-macos-input --all-targets
           cargo check -p rollshot-linux-input --all-targets
+
+  html-guide-e2e:
+    name: Offline HTML Guide
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/html-guide-e2e/package-lock.json
+      - name: Install browser test dependencies
+        working-directory: scripts/html-guide-e2e
+        run: npm ci
+      - name: Install Playwright browsers
+        working-directory: scripts/html-guide-e2e
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Test offline reader
+        working-directory: scripts/html-guide-e2e
+        run: npm test

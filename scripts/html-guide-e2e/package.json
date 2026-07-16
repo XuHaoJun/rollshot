@@ -1,0 +1,12 @@
+{
+  "name": "rollshot-html-guide-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fixture": "cd ../.. && cargo run -p rollshot-action --example export_html_fixture -- scripts/html-guide-e2e/.tmp/guide",
+    "test": "npm run fixture && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0"
+  }
+}
