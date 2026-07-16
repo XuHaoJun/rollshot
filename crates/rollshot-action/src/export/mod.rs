@@ -7,12 +7,9 @@
 pub mod model;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::diagnostics::TARGET_EXPORT;
 use crate::error::ExportError;
-use crate::frame_store::FrameStore;
-use crate::guide::Guide;
 use crate::models::{
     CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind, Millis,
 };
