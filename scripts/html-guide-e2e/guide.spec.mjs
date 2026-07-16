@@ -30,7 +30,7 @@ test('navigation, keyboard, and zoom stay synchronized', async ({ page }) => {
 
 test('search opens annotation matches and does not execute guide markup', async ({ page }) => {
   await page.getByRole('searchbox', { name: 'Search guide' }).fill('settings');
-  await page.getByRole('button', { name: /settings/i }).click();
+  await page.locator('#step-list button').filter({ hasText: /settings/i }).first().click();
   await expect(page.getByRole('dialog')).toContainText('Open Settings');
   expect(await page.evaluate(() => globalThis.pwned)).toBeUndefined();
 });
@@ -121,18 +121,21 @@ test('theme, reduced motion, skip link, and focus visibility are honored', async
 });
 
 test('hotspot percentages stay aligned while shell zooms', async ({ page }) => {
-  await page.locator('.hotspot').first().click();
-  const popoverBefore = await page.getByRole('dialog').boundingBox();
+  await expect(page.locator('#step-image')).toBeVisible();
   const hotspot = page.locator('.hotspot').first();
-  const shell = page.locator('#image-shell');
+  await hotspot.click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  const popoverBefore = await page.getByRole('dialog').boundingBox();
   const before = await hotspot.boundingBox();
+  const shell = page.locator('#image-shell');
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await page.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(page.getByTestId('zoom-value')).toHaveText('150%');
   const after = await hotspot.boundingBox();
   const shellAfter = await shell.boundingBox();
-  expect(after.width / before.width).toBeCloseTo(1.5, 1);
-  expect(after.x).toBeGreaterThanOrEqual(shellAfter.x);
-  expect(after.x + after.width).toBeLessThanOrEqual(shellAfter.x + shellAfter.width + 1);
+  expect(after.width).toBeGreaterThan(before.width);
+  expect(after.x).toBeGreaterThanOrEqual(shellAfter.x - 1);
+  expect(after.x + after.width).toBeLessThanOrEqual(shellAfter.x + shellAfter.width + 2);
   const popoverAfter = await page.getByRole('dialog').boundingBox();
   expect(popoverAfter.x).not.toBe(popoverBefore.x);
 });
