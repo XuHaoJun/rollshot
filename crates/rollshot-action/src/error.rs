@@ -30,6 +30,12 @@ pub enum ExportError {
     },
     #[error("cannot export a guide with no steps")]
     Empty,
+    #[error("step {index} keyframe pixels were not retained")]
+    MissingKeyframe { index: usize },
+    #[error("step {step} has invalid hotspot: {category}")]
+    InvalidHotspot { step: usize, category: &'static str },
+    #[error("destination already exists: {path}")]
+    DestinationExists { path: String },
 }
 
 /// Summary-GIF export failure. On any error, no file is left at the target path

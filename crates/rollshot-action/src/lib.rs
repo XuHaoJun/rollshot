@@ -32,10 +32,14 @@ pub use caption_proposal::{
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
 pub use error::{DetectError, ExportError, GifError, StoryboardError, VideoError};
 pub use events::EventAggregator;
-pub use export::{export_guide, ManifestStep, SessionManifest};
+pub use export::model::{
+    GuideHotspot, NormalizedRect, ReviewedGuideExportJob, ReviewedGuideStep, ReviewedStepImage,
+    GUIDE_SCHEMA_VERSION,
+};
+pub use export::{export_guide, model as export_model, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
 pub use gif::{export_gif, GifOptions};
-pub use guide::Guide;
+pub use guide::{Guide, DEFAULT_GUIDE_TITLE};
 pub use input::{SemanticInputSource, StartedSemanticInput, VisualOnlySource};
 pub use metrics::{changed_area_ratio, downsample_luma, masked_luma_diff, LumaPlane, Rect};
 pub use models::{

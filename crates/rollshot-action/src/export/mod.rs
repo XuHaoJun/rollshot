@@ -4,6 +4,8 @@
 //! there is never a partial export and the editable session is preserved.
 //! `session.json` serializes only step metadata + capability — never raw input.
 
+pub mod model;
+
 use std::path::{Path, PathBuf};
 
 use crate::diagnostics::TARGET_EXPORT;
