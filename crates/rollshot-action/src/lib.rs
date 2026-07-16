@@ -36,10 +36,7 @@ pub use export::model::{
     GuideHotspot, NormalizedRect, ReviewedGuideExportJob, ReviewedGuideStep, ReviewedStepImage,
     GUIDE_SCHEMA_VERSION,
 };
-#[allow(deprecated)]
-pub use export::{
-    export_guide, model as export_model, render_guide_folder, ManifestStep, SessionManifest,
-};
+pub use export::{model as export_model, render_guide_folder, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
 pub use gif::{export_gif, export_gif_images, GifOptions};
 pub use guide::{Guide, DEFAULT_GUIDE_TITLE};

@@ -74,30 +74,7 @@ pub(crate) struct ActionGuideExportSource {
 }
 
 #[cfg(feature = "action-guide")]
-#[allow(dead_code)]
-fn non_empty_caption(caption: &str) -> Option<String> {
-    let caption = caption.trim();
-    (!caption.is_empty()).then(|| caption.to_string())
-}
-
-#[cfg(feature = "action-guide")]
 impl ActionGuideIssueAssets {
-    #[allow(dead_code)]
-    pub(crate) fn from_guide(guide: &rollshot_action::Guide, include_gif: bool) -> Self {
-        let steps = guide
-            .steps()
-            .iter()
-            .enumerate()
-            .map(|(i, step)| IssuePackStep {
-                index: i + 1,
-                title: step.title.clone(),
-                caption: non_empty_caption(&step.caption),
-                keyframe_path: format!("action-guide/keyframes/{:03}.png", i + 1),
-            })
-            .collect();
-        Self { steps, include_gif }
-    }
-
     pub(crate) fn from_job(
         job: &rollshot_action::ReviewedGuideExportJob,
         include_gif: bool,
@@ -1095,11 +1072,9 @@ mod action_guide_tests {
 
     fn action_input() -> (
         IssuePackInput,
-        Guide,
+        ReviewedGuideExportJob,
         FrameStore,
         CaptureRegion,
-        InputCapability,
-        InputSourceKind,
     ) {
         let recording = recording();
         let guide = Guide::from_candidates(recording.candidates);
@@ -1109,15 +1084,16 @@ mod action_guide_tests {
         input.evidence_review.result_workspace_images_reviewed = false;
         input.evidence_review.action_guide_keyframes_reviewed = true;
         input.redaction.result_workspace_images_are_flattened = false;
-        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, true));
-        (
-            input,
-            guide,
-            store,
+        let job = build_job(
+            &guide,
+            &store,
             region(),
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
         )
+        .unwrap();
+        input.action_guide = Some(ActionGuideIssueAssets::from_job(&job, true));
+        (input, job, store, region())
     }
 
     fn build_job(
@@ -1162,37 +1138,22 @@ mod action_guide_tests {
         })
     }
 
-    fn job_export_source(
-        guide: &Guide,
-        store: &FrameStore,
-        region: CaptureRegion,
-        capability: InputCapability,
-        source_kind: InputSourceKind,
-        include_gif: bool,
-    ) -> ActionGuideExportSource {
-        let gif_frames = if include_gif {
-            guide
-                .steps()
-                .iter()
-                .map(|step| Arc::clone(&store.retained(step.keyframe).unwrap().image))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        ActionGuideExportSource {
-            job: build_job(guide, store, region, capability, source_kind).unwrap(),
-            include_gif,
-            gif_frames,
-        }
-    }
-
     #[test]
     fn action_guide_issue_assets_maps_non_empty_captions() {
         let recording = recording();
         let mut guide = Guide::from_candidates(recording.candidates);
         assert!(guide.set_caption(1, "The value is lost after Save.".to_string()));
+        let store = recording.store;
+        let job = build_job(
+            &guide,
+            &store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+        )
+        .unwrap();
 
-        let assets = ActionGuideIssueAssets::from_guide(&guide, false);
+        let assets = ActionGuideIssueAssets::from_job(&job, false);
 
         assert_eq!(
             assets.steps[0].caption.as_deref(),
@@ -1202,7 +1163,7 @@ mod action_guide_tests {
 
     #[test]
     fn action_guide_only_missing_keyframe_rolls_back_temp_output() {
-        let (mut input, _guide, store, region, capability, source_kind) = action_input();
+        let (_input, _job, store, _region) = action_input();
         let guide = Guide::from_candidates(vec![CandidateStep {
             id: 1,
             kind: CandidateKind::Click,
@@ -1211,11 +1172,16 @@ mod action_guide_tests {
             keyframe: 9999,
             nearby: vec![9999],
         }]);
-        input.action_guide = Some(ActionGuideIssueAssets::from_guide(&guide, false));
         let tmp = tempfile::tempdir().unwrap();
 
         // build_job fails because keyframe 9999 is not retained.
-        let job_result = build_job(&guide, &store, region, capability, source_kind);
+        let job_result = build_job(
+            &guide,
+            &store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+        );
         assert!(
             job_result.is_err(),
             "build_job should fail for missing keyframe"
@@ -1230,9 +1196,13 @@ mod action_guide_tests {
 
     #[test]
     fn action_keyframes_are_listed_as_reviewed_evidence_not_redacted_assets() {
-        let (input, guide, store, region, capability, source_kind) = action_input();
+        let (input, job, _store, _region) = action_input();
         let tmp = tempfile::tempdir().unwrap();
-        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
+        let source = ActionGuideExportSource {
+            job,
+            include_gif: false,
+            gif_frames: Vec::new(),
+        };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
         let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
@@ -1296,9 +1266,13 @@ mod action_guide_tests {
 
     #[test]
     fn export_folder_includes_action_guide_folder() {
-        let (input, guide, store, region, capability, source_kind) = action_input();
+        let (input, job, _store, _region) = action_input();
         let tmp = tempfile::tempdir().unwrap();
-        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
+        let source = ActionGuideExportSource {
+            job,
+            include_gif: false,
+            gif_frames: Vec::new(),
+        };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
 
@@ -1384,7 +1358,7 @@ mod action_guide_tests {
 
     #[test]
     fn combined_screenshot_and_action_guide_includes_storyboard() {
-        let (mut input, guide, store, region, capability, source_kind) = action_input();
+        let (mut input, job, _store, _region) = action_input();
         // Restore the final_image that action_input() clears
         input.final_image = Some(SafeImageAsset {
             file_name: "final-redacted.png".to_string(),
@@ -1392,7 +1366,11 @@ mod action_guide_tests {
             derived_from_original: true,
         });
         let tmp = tempfile::tempdir().unwrap();
-        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
+        let source = ActionGuideExportSource {
+            job,
+            include_gif: false,
+            gif_frames: Vec::new(),
+        };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
 
@@ -1422,9 +1400,13 @@ mod action_guide_tests {
 
     #[test]
     fn export_zip_with_action_guide_includes_storyboard() {
-        let (input, guide, store, region, capability, source_kind) = action_input();
+        let (input, job, _store, _region) = action_input();
         let tmp = tempfile::tempdir().unwrap();
-        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
+        let source = ActionGuideExportSource {
+            job,
+            include_gif: false,
+            gif_frames: Vec::new(),
+        };
 
         let result = export_zip_with_action_guide(&input, Some(source), tmp.path()).unwrap();
         let zip_path = result.zip_path.clone().expect("zip path");
@@ -1444,9 +1426,13 @@ mod action_guide_tests {
 
     #[test]
     fn action_guide_issue_pack_renders_storyboard_from_job_data() {
-        let (input, guide, store, region, capability, source_kind) = action_input();
+        let (input, job, _store, _region) = action_input();
         let temp = tempfile::tempdir().unwrap();
-        let source = job_export_source(&guide, &store, region, capability, source_kind, false);
+        let source = ActionGuideExportSource {
+            job,
+            include_gif: false,
+            gif_frames: Vec::new(),
+        };
 
         let result =
             export_folder_with_action_guide(&input, Some(source), temp.path()).expect("issue pack");

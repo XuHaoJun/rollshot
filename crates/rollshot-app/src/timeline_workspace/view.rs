@@ -345,7 +345,8 @@ fn issue_pack_modal<'a>(
     state: &'a TimelineWorkspace,
 ) -> Element<'a, Message> {
     let dialog = state.issue_pack.as_ref().expect("checked by caller");
-    let export_enabled = dialog.review_confirmed && dialog.pending_kind.is_none();
+    let export_enabled =
+        dialog.review_confirmed && dialog.pending_kind.is_none() && !dialog.exporting;
     let steps = state.guide.steps().len();
 
     let dialog_view = container(

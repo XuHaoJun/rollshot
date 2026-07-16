@@ -76,6 +76,8 @@ pub(crate) struct IssuePackDialog {
     pub pending_kind: Option<IssuePackKind>,
     pub include_gif: bool,
     pub pending_export: Option<guide_export::PendingIssuePackExport>,
+    pub operation_id: u64,
+    pub exporting: bool,
 }
 
 impl std::fmt::Debug for IssuePackDialog {
@@ -88,6 +90,8 @@ impl std::fmt::Debug for IssuePackDialog {
                 "pending_export",
                 &self.pending_export.as_ref().map(|_| ".."),
             )
+            .field("operation_id", &self.operation_id)
+            .field("exporting", &self.exporting)
             .finish()
     }
 }
@@ -99,6 +103,8 @@ impl IssuePackDialog {
             pending_kind: None,
             include_gif: true,
             pending_export: None,
+            operation_id: 0,
+            exporting: false,
         }
     }
 }
@@ -219,6 +225,8 @@ pub struct TimelineWorkspace {
     pub(crate) last_export: Option<guide_export::StandaloneExportResult>,
     /// Monotonic operation id for standalone export provenance.
     pub(crate) next_export_operation_id: u64,
+    /// Monotonic operation id for Issue Pack export provenance.
+    pub(crate) next_issue_pack_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -258,6 +266,7 @@ impl TimelineWorkspace {
             export_state: GuideExportState::Idle,
             last_export: None,
             next_export_operation_id: 0,
+            next_issue_pack_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -576,25 +585,13 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn export_guide_metadata_contains_no_provider_or_model_data() {
         let ws = workspace(recording_from_frames());
         let tmp = tempfile::tempdir().unwrap();
-        let guide = ws.guide.clone();
-        let region = ws.region;
-        let capability = ws.capability;
-        let source_kind = ws.source_kind;
-        let store = &ws.store;
+        let job = super::guide_export::build_reviewed_export_job(&ws).unwrap();
 
-        let path = rollshot_action::export_guide(
-            &guide,
-            store,
-            region,
-            capability,
-            source_kind,
-            tmp.path(),
-        )
-        .expect("export_guide");
+        let path = rollshot_action::render_guide_folder(&job, &tmp.path().join("action-guide"))
+            .expect("render_guide_folder");
 
         let session_json =
             std::fs::read_to_string(path.join("session.json")).expect("session.json");

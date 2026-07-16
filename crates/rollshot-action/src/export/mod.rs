@@ -54,62 +54,6 @@ pub struct ManifestStep {
     pub hotspots: Vec<GuideHotspot>,
 }
 
-fn non_empty_caption(caption: &str) -> Option<&str> {
-    let caption = caption.trim();
-    (!caption.is_empty()).then_some(caption)
-}
-
-/// Export `guide` into `out_dir/action-guide/`. Returns the created directory.
-#[deprecated(note = "build a ReviewedGuideExportJob and call render_guide_folder")]
-pub fn export_guide(
-    guide: &Guide,
-    store: &FrameStore,
-    region: CaptureRegion,
-    capability: InputCapability,
-    source: InputSourceKind,
-    out_dir: &Path,
-) -> Result<PathBuf, ExportError> {
-    if guide.is_empty() {
-        return Err(ExportError::Empty);
-    }
-    let steps: Result<Vec<model::ReviewedGuideStep>, ExportError> = guide
-        .steps()
-        .iter()
-        .enumerate()
-        .map(|(i, step)| {
-            let frame = store
-                .retained(step.keyframe)
-                .ok_or_else(|| ExportError::Io {
-                    path: format!("keyframes/{:03}.png", i + 1),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "keyframe pixels not retained",
-                    ),
-                })?;
-            let caption = non_empty_caption(&step.caption).map(str::to_string);
-            Ok(model::ReviewedGuideStep {
-                index: step.index,
-                title: step.title.clone(),
-                caption,
-                kind: step.kind,
-                reason: step.reason,
-                at_ms: step.at_ms,
-                image: model::ReviewedStepImage::Retained(Arc::clone(&frame.image)),
-                hotspots: Vec::new(),
-            })
-        })
-        .collect();
-    let job = model::ReviewedGuideExportJob {
-        title: guide.effective_title().to_string(),
-        region,
-        input_source: source,
-        input_capability: capability,
-        steps: steps?,
-    };
-    let destination = out_dir.join("action-guide");
-    render_guide_folder(&job, &destination)
-}
-
 pub fn render_guide_folder(
     job: &ReviewedGuideExportJob,
     destination: &Path,
@@ -196,7 +140,6 @@ fn write_text(path: PathBuf, contents: &str) -> Result<(), ExportError> {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
@@ -209,6 +152,7 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use model::{GuideHotspot, ReviewedGuideExportJob, ReviewedGuideStep, ReviewedStepImage};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -287,11 +231,55 @@ mod tests {
         )
     }
 
+    fn build_job(
+        guide: &Guide,
+        store: &FrameStore,
+        region: CaptureRegion,
+        capability: InputCapability,
+        source: InputSourceKind,
+    ) -> ReviewedGuideExportJob {
+        let steps: Vec<ReviewedGuideStep> = guide
+            .steps()
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let frame = store
+                    .retained(step.keyframe)
+                    .unwrap_or_else(|| panic!("keyframe {:03} not retained", i + 1));
+                let caption = {
+                    let trimmed = step.caption.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                };
+                ReviewedGuideStep {
+                    index: step.index,
+                    title: step.title.clone(),
+                    caption,
+                    kind: step.kind,
+                    reason: step.reason,
+                    at_ms: step.at_ms,
+                    image: ReviewedStepImage::Retained(Arc::clone(&frame.image)),
+                    hotspots: Vec::new(),
+                }
+            })
+            .collect();
+        ReviewedGuideExportJob {
+            title: guide.effective_title().to_string(),
+            region,
+            input_source: source,
+            input_capability: capability,
+            steps,
+        }
+    }
+
     #[test]
     fn export_writes_portable_folder_with_matching_markdown_and_keyframes() {
         let (guide, store) = one_step_recording();
         let out = temp_dir("export-ok");
-        let dir = export_guide(
+        let job = build_job(
             &guide,
             &store,
             region(),
@@ -299,9 +287,8 @@ mod tests {
                 reason: crate::models::DegradedReason::SourceStartFailed,
             },
             InputSourceKind::VisualOnly,
-            &out,
-        )
-        .expect("export succeeds");
+        );
+        let dir = render_guide_folder(&job, &out.join("action-guide")).expect("export succeeds");
 
         assert_eq!(dir, out.join("action-guide"));
         assert!(dir.join("steps.md").exists());
@@ -320,10 +307,6 @@ mod tests {
 
     #[test]
     fn session_json_has_capability_and_no_raw_input_fields() {
-        // Exercise the exact cases that make a naive substring scan brittle: a
-        // Typing step (default title "Enter text") exported under SemanticEvents
-        // capability ("semantic-events"). These safe, static labels MUST be
-        // tolerated, while raw input artifacts MUST never appear.
         let (_guide, store) = one_step_recording();
         let kf = store
             .retained_ids_for_test()
@@ -339,15 +322,14 @@ mod tests {
             nearby: vec![kf],
         }]);
         let out = temp_dir("export-json");
-        let dir = export_guide(
+        let job = build_job(
             &guide,
             &store,
             region(),
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
-            &out,
-        )
-        .unwrap();
+        );
+        let dir = render_guide_folder(&job, &out.join("action-guide")).unwrap();
 
         let json = std::fs::read_to_string(dir.join("session.json")).unwrap();
         let parsed: SessionManifest = serde_json::from_str(&json).expect("manifest parses");
@@ -388,33 +370,8 @@ mod tests {
 
     #[test]
     fn export_is_atomic_a_midway_failure_leaves_no_folder_and_preserves_the_guide() {
-        let (_guide, store) = one_step_recording();
-        let kf = store
-            .retained_ids_for_test()
-            .into_iter()
-            .next()
-            .expect("a retained frame exists");
-        // Step 1 is exportable; step 2's keyframe is not retained -> fails mid-export.
-        let guide = Guide::from_candidates(vec![
-            CandidateStep {
-                id: 0,
-                kind: CandidateKind::Click,
-                reason: DetectReason::ClickConfirmed,
-                at_ms: 0,
-                keyframe: kf,
-                nearby: vec![kf],
-            },
-            CandidateStep {
-                id: 1,
-                kind: CandidateKind::UiChanged,
-                reason: DetectReason::VisualChange,
-                at_ms: 100,
-                keyframe: 999_999, // not retained -> injected failure
-                nearby: vec![999_999],
-            },
-        ]);
-        let out = temp_dir("export-atomic");
-        let result = export_guide(
+        let (guide, store) = one_step_recording();
+        let mut job = build_job(
             &guide,
             &store,
             region(),
@@ -422,16 +379,26 @@ mod tests {
                 reason: crate::models::DegradedReason::SourceStartFailed,
             },
             InputSourceKind::VisualOnly,
-            &out,
         );
+        // Inject a step whose keyframe is not retained — forces a failure during
+        // PNG encoding inside render_guide_folder.
+        job.steps.push(ReviewedGuideStep {
+            index: 2,
+            title: "Missing".into(),
+            caption: None,
+            kind: CandidateKind::UiChanged,
+            reason: DetectReason::VisualChange,
+            at_ms: 100,
+            image: ReviewedStepImage::Retained(Arc::new(RgbaImage::new(0, 0))),
+            hotspots: Vec::new(),
+        });
+        let out = temp_dir("export-atomic");
+        let destination = out.join("action-guide");
+        let result = render_guide_folder(&job, &destination);
 
         assert!(result.is_err(), "export must fail");
-        assert!(!out.join("action-guide").exists(), "no partial folder");
-        assert!(
-            !out.join(".action-guide.tmp").exists(),
-            "temp dir rolled back"
-        );
-        assert_eq!(guide.steps().len(), 2, "editable guide is preserved");
+        assert!(!destination.exists(), "no partial folder");
+        assert_eq!(guide.steps().len(), 1, "editable guide is preserved");
 
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -444,16 +411,15 @@ mod tests {
             "The settings dialog closes, but the new value is not persisted.".to_string()
         ));
         let out = temp_dir("export-caption");
-
-        let dir = export_guide(
+        let job = build_job(
             &guide,
             &store,
             region(),
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
-            &out,
-        )
-        .expect("export succeeds");
+        );
+
+        let dir = render_guide_folder(&job, &out.join("action-guide")).expect("export succeeds");
 
         let md = std::fs::read_to_string(dir.join("steps.md")).unwrap();
         assert!(

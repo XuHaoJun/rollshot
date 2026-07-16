@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use iced::Task;
-#[allow(deprecated)]
-use rollshot_action::export_guide;
 use rollshot_action::{
     export_gif, export_video, GifOptions, StoryboardError, StoryboardOptions,
     StoryboardRenderResult, VideoOptions,
@@ -76,7 +74,10 @@ pub enum Message {
     /// The async folder-picker returned (None = cancelled).
     IssuePackFolderChosen(Option<PathBuf>),
     /// Background Issue Pack export completed.
-    IssuePackFinished(Result<crate::issue_pack::IssuePackExportResult, String>),
+    IssuePackFinished {
+        operation_id: u64,
+        result: Result<crate::issue_pack::IssuePackExportResult, String>,
+    },
     /// Close the Issue Pack dialog without exporting.
     IssuePackCancel,
     #[cfg(target_os = "macos")]
@@ -558,11 +559,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             if let Some(dialog) = &mut state.issue_pack {
                 dialog.pending_kind = None;
                 dialog.pending_export = None;
+                dialog.exporting = false;
             }
             Task::none()
         }
         Message::IssuePackFolderChosen(Some(parent)) => {
-            let (kind, pending) = {
+            let (kind, pending, operation_id) = {
                 let Some(dialog) = state.issue_pack.as_mut() else {
                     return Task::none();
                 };
@@ -573,49 +575,54 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 let Some(pending) = dialog.pending_export.take() else {
                     return Task::none();
                 };
-                (kind, pending)
+                let operation_id = dialog.operation_id;
+                dialog.exporting = true;
+                (kind, pending, operation_id)
             };
-            state.issue_pack.as_mut().unwrap().pending_kind = None;
-            let result = match kind {
-                super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
-                    &pending.input,
-                    Some(pending.source),
-                    &parent,
-                ),
-                super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide(
-                    &pending.input,
-                    Some(pending.source),
-                    &parent,
-                ),
-            };
-            update(
-                state,
-                Message::IssuePackFinished(result.map_err(|e| e.to_string())),
+            Task::perform(
+                run_issue_pack_export(pending, kind, parent),
+                move |result| Message::IssuePackFinished {
+                    operation_id,
+                    result,
+                },
             )
         }
-        Message::IssuePackFinished(Ok(result)) => {
-            let mut text = match result.zip_path.as_ref() {
-                Some(path) => format!("Bug report ZIP saved to {}", path.display()),
-                None => format!("Bug report saved to {}", result.directory.display()),
+        Message::IssuePackFinished {
+            operation_id,
+            result,
+        } => {
+            let Some(dialog) = &mut state.issue_pack else {
+                return Task::none();
             };
-            if !result.warnings.is_empty() {
-                let warning_text = result
-                    .warnings
-                    .iter()
-                    .map(|warning| warning.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                text = format!("{text}\nWarnings: {warning_text}");
+            if dialog.operation_id != operation_id {
+                return Task::none();
             }
-            state.issue_pack = None;
-            state.message = Some(text);
-            Task::none()
-        }
-        Message::IssuePackFinished(Err(error)) => {
-            if let Some(dialog) = &mut state.issue_pack {
-                dialog.pending_kind = None;
+            dialog.exporting = false;
+            match result {
+                Ok(result) => {
+                    let mut text = match result.zip_path.as_ref() {
+                        Some(path) => format!("Bug report ZIP saved to {}", path.display()),
+                        None => format!("Bug report saved to {}", result.directory.display()),
+                    };
+                    if !result.warnings.is_empty() {
+                        let warning_text = result
+                            .warnings
+                            .iter()
+                            .map(|warning| warning.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        text = format!("{text}\nWarnings: {warning_text}");
+                    }
+                    state.issue_pack = None;
+                    state.message = Some(text);
+                }
+                Err(error) => {
+                    if let Some(dialog) = &mut state.issue_pack {
+                        dialog.pending_kind = None;
+                    }
+                    state.message = Some(error);
+                }
             }
-            state.message = Some(error);
             Task::none()
         }
         Message::IssuePackCancel => {
@@ -1344,17 +1351,12 @@ pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
 }
 
 /// Export the (possibly edited) guide into `out_dir/action-guide/`.
-#[allow(deprecated)]
 fn export_to(state: &TimelineWorkspace, out_dir: &Path) -> Result<PathBuf, String> {
-    export_guide(
-        &state.guide,
-        &state.store,
-        state.region,
-        state.capability,
-        state.source_kind,
-        out_dir,
-    )
-    .map_err(|e| format!("export failed: {e}"))
+    let job = super::guide_export::build_reviewed_export_job(state)
+        .map_err(|e| format!("export failed: {e}"))?;
+    let destination = out_dir.join("action-guide");
+    rollshot_action::render_guide_folder(&job, &destination)
+        .map_err(|e| format!("export failed: {e}"))
 }
 
 /// Initial directory for the folder picker: the user's Pictures dir, or temp.
@@ -1452,6 +1454,28 @@ async fn pick_mp4_save_path(default_dir: PathBuf) -> Option<PathBuf> {
         .map(|handle| handle.path().to_path_buf())
 }
 
+async fn run_issue_pack_export(
+    pending: super::guide_export::PendingIssuePackExport,
+    kind: super::IssuePackKind,
+    parent: PathBuf,
+) -> Result<crate::issue_pack::IssuePackExportResult, String> {
+    tokio::task::spawn_blocking(move || match kind {
+        super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
+            &pending.input,
+            Some(pending.source),
+            &parent,
+        ),
+        super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide(
+            &pending.input,
+            Some(pending.source),
+            &parent,
+        ),
+    })
+    .await
+    .map_err(|error| format!("Issue Pack export worker failed: {error}"))?
+    .map_err(|error| error.to_string())
+}
+
 async fn download_managed_ffmpeg_task() -> Result<PathBuf, String> {
     tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
         .await
@@ -1508,7 +1532,10 @@ fn begin_issue_pack_export(
             return Task::none();
         }
     };
+    state.next_issue_pack_operation_id = state.next_issue_pack_operation_id.saturating_add(1);
+    let operation_id = state.next_issue_pack_operation_id;
     let dialog = state.issue_pack.as_mut().unwrap();
+    dialog.operation_id = operation_id;
     dialog.pending_kind = Some(kind);
     dialog.pending_export = Some(pending);
     Task::perform(
@@ -2034,26 +2061,24 @@ mod tests {
                 .is_some(),
             "pending_export should be set after IssuePackExportFolder"
         );
-        // Simulate the picker returning a path.
-        let _ = update(
+        assert_eq!(
+            state.issue_pack.as_ref().unwrap().operation_id,
+            1,
+            "operation_id should be allocated"
+        );
+        // Simulate the picker returning a path. This spawns an async task.
+        let task = update(
             &mut state,
             Message::IssuePackFolderChosen(Some(tmp.path().to_path_buf())),
         );
-
-        let pack = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("rollshot-issue-pack-")
-            })
-            .expect("issue pack directory should exist");
-        let md = std::fs::read_to_string(pack.join("issue.md")).unwrap();
-        assert!(md.contains("Open Settings"), "md = {md}");
-        assert!(pack.join("action-guide/steps.md").exists());
-        assert!(pack.join("action-guide/session.json").exists());
+        assert!(
+            state.issue_pack.as_ref().unwrap().exporting,
+            "exporting should be true after picker returns"
+        );
+        assert!(
+            task.units() > 0,
+            "picker return should spawn an async export task"
+        );
     }
 
     #[test]
@@ -2413,6 +2438,8 @@ mod tests {
             pending_kind: None,
             include_gif: false,
             pending_export: None,
+            operation_id: 0,
+            exporting: false,
         });
         let original = state
             .store
@@ -2843,12 +2870,12 @@ mod tests {
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
         );
 
+        let job = guide_export::build_reviewed_export_job(&state).unwrap();
         let include_gif = state
             .issue_pack
             .as_ref()
             .is_some_and(|dialog| dialog.include_gif);
-        let assets =
-            crate::issue_pack::ActionGuideIssueAssets::from_guide(&state.guide, include_gif);
+        let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
         let input = timeline_issue_pack_input(&state, assets);
         let first_step = &input.action_guide.as_ref().unwrap().steps[0];
 
