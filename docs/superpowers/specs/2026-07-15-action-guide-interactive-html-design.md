@@ -1,9 +1,10 @@
 # Action Guide Interactive HTML Design
 
 **Date:** 2026-07-15  
-**Status:** Approved design  
+**Status:** Approved design; engineering-reviewed  
 **Branch:** `feat/interactive-html-guide`  
 **Scope:** Add a deterministic offline `index.html` reader to every exported Action Guide folder
+**Engineering review:** 2026-07-16, auto mode
 
 ## Purpose
 
@@ -68,6 +69,17 @@ snapshot path establishes the relevant safety pattern: use
 the reviewed retained keyframe otherwise.
 
 OCR snippets are not currently persisted in the Action Guide export contract.
+
+`NumberCallout` currently stores its number and geometry but no explanatory
+text. The Timeline Workspace therefore needs Guide-specific explanation state;
+the renderer cannot infer explanations from the existing annotation graph.
+
+The standalone and Issue Pack exporters currently receive `Guide` and
+`FrameStore` directly, while only the Timeline Workspace owns committed
+annotation presentation. Both export paths are synchronous after the picker
+returns. The implementation must replace those borrowed export inputs with one
+owned reviewed export job before either path can produce the same flattened
+keyframes and remain responsive.
 
 ## User Experience
 
@@ -145,6 +157,14 @@ text and is an explanatory callout or text annotation. Lines, arrows,
 rectangles, highlights, and other visual-only shapes do not create empty or
 invented interactions.
 
+For v1, `TextNote.text` is its explanation. A `NumberCallout` explanation is
+optional Guide-specific presentation metadata keyed by `AnnotationId` inside
+the matching step annotation document. It is editable in the Timeline
+Workspace, is retained while an annotation is temporarily absent so delete-undo
+restores it, and is exported only when the referenced annotation still exists.
+This avoids changing the general-purpose `rollshot-image-document::Annotation`
+shape solely for Action Guides.
+
 A hotspot is a keyboard-focusable semantic button aligned to the annotation's
 exported image-space target. Selecting it opens one anchored popover containing
 the annotation explanation. Selecting another hotspot replaces the open
@@ -203,7 +223,7 @@ The selected approach is one generated HTML entry point plus existing image
 assets:
 
 ```text
-index.html          HTML + CSS + JavaScript + encoded viewer snapshot
+index.html          HTML + CSS + JavaScript + encoded viewer-data snapshot
 steps.md            human-readable portable fallback
 session.json        machine-readable export metadata
 keyframes/*.png     reviewed flattened step images
@@ -211,45 +231,57 @@ keyframes/*.png     reviewed flattened step images
 
 This deliberately duplicates small textual metadata between `session.json`
 and `index.html`. It avoids local-file `fetch()` restrictions and reduces the
-number of files that must remain together. The reviewed in-memory snapshot is
+number of files that must remain together. The immutable reviewed export job is
 the source for all outputs; neither serialized artifact is used to generate the
 other.
 
 ## Components and Responsibilities
 
-### Reviewed Guide snapshot
+### Owned reviewed export job
 
-Export begins by constructing one immutable owned snapshot of reviewed state:
+Export begins by freezing one immutable owned job from reviewed state:
 
 ```text
-ReviewedGuideSnapshot
+ReviewedGuideExportJob
   guide title
   capture and semantic metadata
   steps[]
     index, title, caption, event metadata
-    final flattened image
+    shared immutable reviewed source pixels
+    current committed annotation snapshot, without history
     relative keyframe path
     interactive hotspots[]
       normalized image position and hit area
       explanation text
 ```
 
-The snapshot includes only committed current state. It excludes:
+The job includes only committed current state. It excludes:
 
-- Original pixels hidden by redaction
+- Any separately serialized or exported copy of original pixels hidden by redaction
 - Annotation history and undo/redo state
 - Pending or rejected LLM suggestions
 - Provider, model, prompt, and provenance data
 - Raw semantic input payloads
 - OCR data
 
-For a step with a matching committed annotation document, snapshotting uses the
-document's flattened result. Otherwise it clones the retained reviewed
-keyframe. This follows the existing Storyboard snapshot model.
+For a step with a matching committed annotation document, the job owns an
+immutable flatten snapshot: a shared source-pixel `Arc` plus cloned current
+annotations. Otherwise it shares the retained reviewed keyframe. The worker
+flattens and encodes one step at a time and drops that materialized bitmap
+before continuing. Unredacted source pixels may therefore exist transiently in
+the private in-memory job, as they already do in the editor, but they are never
+written or embedded; every exported PNG is the final flattened result.
+
+`rollshot-image-document` provides the history-free flatten snapshot primitive.
+`rollshot-action` owns `ReviewedGuideExportJob`, hotspot data, validation, and
+the deterministic folder renderer. `rollshot-app` is the adapter that joins
+`Guide`, `FrameStore`, and `ActionGuidePresentation` into the owned job. This
+keeps both standalone and Issue Pack exports on one renderer without moving UI
+state into the Action Guide engine.
 
 ### Guide folder renderer
 
-One deterministic renderer consumes the snapshot and writes PNG, Markdown,
+One deterministic renderer consumes the owned job and writes PNG, Markdown,
 manifest, and HTML outputs. All representations therefore share title, order,
 text, metadata, and final reviewed pixels.
 
@@ -262,10 +294,10 @@ The renderer:
 - Produces deterministic content apart from explicitly supplied export-time
   metadata and unique destination naming.
 
-The subsequent engineering review must choose concrete crate placement, Rust
-API signatures, and ownership types without changing the fixed architectural
-boundary: snapshot reviewed state once, then render every artifact from that
-snapshot.
+The renderer accepts an exact destination directory; it does not choose
+standalone naming and does not assume the fixed name `action-guide`. The app
+owns standalone destination naming and post-export actions. Issue Pack owns its
+outer transaction and supplies `<pack-temp>/action-guide` as the destination.
 
 ### HTML viewer
 
@@ -287,6 +319,12 @@ Text serialization must prevent `</script>` and equivalent payloads from
 escaping the embedded data context. Viewer rendering uses text nodes or
 equivalent escaped APIs; Guide content is never assigned as trusted HTML.
 
+Viewer data is serialized as JSON in a non-executable
+`<script type="application/json">` element. The renderer escapes `<`, `>`, `&`,
+U+2028, and U+2029 before embedding; the viewer reads `textContent`, parses it,
+and renders user content with `textContent`/DOM node APIs. No Guide text is
+interpolated into executable JavaScript, CSS, element attributes, or HTML.
+
 Every exported keyframe is the final reviewed flattened image. Redaction is a
 pixel-level export operation, not an HTML overlay. Removing CSS, JavaScript, or
 DOM elements must not reveal hidden content.
@@ -302,7 +340,7 @@ clipboard payloads, provider data, or raw input events.
 
 ## Export Lifecycle and Error Handling
 
-Before filesystem writes, snapshot validation requires:
+Before filesystem writes, export-job validation requires:
 
 - At least one Guide step.
 - A usable title after fallback.
@@ -310,11 +348,17 @@ Before filesystem writes, snapshot validation requires:
 - Non-empty explanation text for every hotspot.
 - Finite hotspot geometry whose hit area intersects its image.
 
-Standalone export writes to a uniquely named temporary sibling directory. It
-writes every required artifact and only then renames the directory into place.
-Any snapshot, encode, template, write, or rename failure removes the temporary
-directory, preserves the editable Timeline Workspace, and reports a recoverable
-error. No final or temporary partial Guide remains.
+Standalone export chooses a unique final name under a short-lived exclusive
+Rollshot parent-directory lock, creates a uniquely named temporary sibling,
+writes every required artifact, checks again that the final path is absent,
+and only then renames the directory into place. It never calls the current
+replacement-style `swap_into_place` path and never deletes an existing final
+directory. A conflicting external filesystem writer causes a recoverable
+failure rather than replacement.
+
+Any job construction, encode, template, write, or rename failure removes the
+temporary directory, preserves the editable Timeline Workspace, and reports a
+recoverable error. No final or temporary partial Guide remains.
 
 Issue Pack export uses the same required Guide renderer inside the existing
 outer Issue Pack transaction. A failure to generate `index.html` fails and
@@ -333,13 +377,263 @@ If an exported folder is later damaged:
 - Initial reader load decodes only the current keyframe and may preload the
   immediately adjacent keyframes. It does not decode the full Guide.
 - Search operates only on embedded textual metadata.
+- Searchable strings are normalized once at initialization; query work is
+  linear in the number of steps and explanations.
 - Zoom uses browser presentation transforms and does not allocate a new bitmap.
+- One delegated event handler services step rows and hotspots; navigation does
+  not accumulate listeners or retained DOM subtrees.
 - Step changes show a short explicit loading state while the next image decodes
   instead of presenting unexplained blank content.
-- The exporter owns one reviewed flattened image per step in its immutable
-  snapshot. The engineering review must confirm peak-memory bounds and whether
-  the current Storyboard snapshot ownership pattern is acceptable for long
-  Guides.
+- The Timeline Workspace starts rendering through `Task::perform`; blocking
+  flatten/PNG/filesystem work runs in `tokio::task::spawn_blocking` and reports
+  completion back through a message. Export controls are disabled while that
+  job is active, but editing remains available after success or failure.
+- Retained frame pixels are shared into the job with `Arc<RgbaImage>`. The
+  worker materializes, encodes, and drops one final step image at a time, so
+  added peak memory is bounded to roughly one RGBA image, its PNG buffer, and
+  small metadata rather than one flattened bitmap per Guide step.
+
+## Engineering Review Decisions
+
+### Auto decision D1 — Keep callout explanations in Action Guide presentation
+
+**Context:** `TextNote` already has text; `NumberCallout` has only number and
+geometry, and changing the shared annotation enum has a high cross-workspace
+blast radius. **ELI10:** the numbered bubble and the sentence explaining it are
+two different things today. **Stakes:** without a persisted sentence, numbered
+hotspots would be empty or invented.
+
+**Recommendation:** add an explanation map keyed by `AnnotationId` to each
+Timeline step annotation document. Snapshotting joins only live explanatory
+annotations, using navigator presentation order. **Completeness:** complete for
+v1 because exports originate from Timeline Workspace presentation.
+
+- Put text on every `Annotation` variant: unified, but a broad model/API change
+  with unrelated result-workspace and automation churn.
+- Put optional text only on `NumberCallout`: history-safe, but still couples a
+  general drawing primitive to Guide semantics.
+- Use the presentation map: smallest ownership-correct change; it requires the
+  Timeline editor to maintain a selected-callout explanation field.
+
+**Effort / maintenance / net:** medium / low / selected. Stale map entries are
+harmless and are never exported; retaining them also preserves text across
+delete-undo.
+
+### Auto decision D2 — Use an owned cross-path export job
+
+**Context:** only the app can see Guide data, retained frames, and committed
+presentation together. Issue Pack currently lacks the presentation. **ELI10:**
+both export buttons must take the same sealed box of reviewed data to the same
+printer. **Stakes:** separate borrowed inputs would keep producing raw Issue
+Pack keyframes or allow UI edits to race an export.
+
+**Recommendation:** build `ReviewedGuideExportJob` once in `rollshot-app`, then
+pass ownership to the `rollshot-action` renderer for standalone and Issue Pack
+flows. `ActionGuideIssueAssets` must derive from this job rather than separately
+from `Guide`. **Completeness:** complete; optional GIF behavior remains a
+separate existing derivative and is not redefined by this feature.
+
+- Extend the old borrowed exporter: low initial effort, but cannot safely move
+  to a worker or include presentation without lifetime coupling.
+- Duplicate an HTML renderer in Issue Pack: fast locally, but guarantees format
+  drift and violates required-artifact rollback semantics.
+- Owned common job: moderate refactor, one source of truth, straightforward
+  testing.
+
+**Effort / maintenance / net:** medium / low / selected.
+
+### Auto decision D3 — Stream final pixels on a blocking worker
+
+**Context:** the existing Storyboard snapshot clones one final bitmap per step;
+that can approach gigabytes for long full-resolution Guides. Export is also
+currently synchronous in the iced update path. **ELI10:** carry one large
+picture through the machine at a time, not the whole album. **Stakes:** UI
+freezes and out-of-memory failures are otherwise plausible.
+
+**Recommendation:** share retained/source images with `Arc`, freeze annotation
+lists and metadata, then flatten, encode, write, and drop one step at a time in
+`spawn_blocking`. **Completeness:** complete for exporter-added memory; the
+existing editor continues to own its normal retained frames.
+
+- Reuse the Storyboard all-images snapshot: least code, unacceptable unbounded
+  added memory.
+- Export synchronously one step at a time: bounded memory, but freezes the UI.
+- Owned shared job plus worker streaming: more foundation work, bounded memory
+  and responsive lifecycle.
+
+**Effort / maintenance / net:** medium-high / medium / selected. This requires
+focused compatibility tests where retained frame image ownership changes from
+owned `RgbaImage` to shared `Arc<RgbaImage>`.
+
+### Auto decision D4 — Separate rendering from destination policy
+
+**Context:** the current exporter always replaces `out/action-guide`; standalone
+exports must be unique while Issue Pack already owns an outer transaction.
+**ELI10:** the printer should print into the folder it is handed, while the two
+callers decide which folder is safe. **Stakes:** reusing replacement code could
+silently delete a prior Guide.
+
+**Recommendation:** renderer takes an exact destination; standalone uses locked
+name allocation and a temp sibling, while Issue Pack renders inside its outer
+temp tree. Never remove a final destination. **Completeness:** complete for
+Rollshot writers; an external collision is detected and returned as an error.
+
+- Keep fixed `action-guide`: incompatible with standalone naming.
+- Add flags to one exporter: compact signature but mixes naming, transaction,
+  and rendering policy.
+- Exact destination plus caller-owned policy: slightly more API surface, clear
+  transaction ownership.
+
+**Effort / maintenance / net:** medium / low / selected.
+
+### Auto decision D5 — Treat clipboard as capability-detected enhancement
+
+**Context:** clipboard writes require a secure context and user activation;
+browser policy under `file://` is not identical everywhere. Local file URLs are
+generally potentially trustworthy, but permission rejection remains normal.
+**ELI10:** ask the browser to copy, but always show the words when it says no.
+**Stakes:** false “Copied” feedback destroys trust in the core offline promise.
+
+**Recommendation:** attempt `navigator.clipboard.writeText` only from the button
+activation and only when present. On rejection, open a focused read-only
+textarea/dialog, select all text, and instruct `Ctrl/Cmd+C`; do not depend on
+deprecated `execCommand`. **Completeness:** complete across browser policy
+differences because manual copy remains available.
+
+- Promise Clipboard API success: simplest UI, incorrect cross-browser contract.
+- Fall back to `execCommand`: sometimes works, deprecated and still policy-bound.
+- Honest manual fallback: a little more UI, stable and testable.
+
+**Effort / maintenance / net:** low / low / selected.
+
+### Auto decision D6 — Version the exported data contract
+
+**Context:** `session.json` has no schema version or Guide title, while embedded
+viewer data becomes a second consumer of the same metadata. **ELI10:** put a
+version number on the box before other tools start opening it. **Stakes:** later
+container reuse would otherwise require guessing field meanings.
+
+**Recommendation:** add `schema_version: 1` and `title` to the manifest and
+viewer snapshot, keep old manifest deserialization compatible with serde
+defaults, and test identical normalized step metadata across all outputs.
+**Completeness:** complete for the v1 reader contract; it does not promise a
+general migration framework.
+
+- Leave the manifest unchanged: smallest diff, creates immediate ambiguity.
+- Create a separate HTML-only schema: isolates viewer, duplicates semantic
+  contracts.
+- Version shared normalized export metadata: modest change, clear future path.
+
+**Effort / maintenance / net:** low / low / selected.
+
+### Auto decision D7 — Reuse platform shell integration and keep workspace state
+
+**Context:** `result_workspace::actions::reveal` already implements macOS and
+Linux reveal behavior, but Timeline export currently exits after success and
+there is no shared open-file helper. **ELI10:** keep the editor open and give it
+two ordinary OS buttons. **Stakes:** duplicating commands creates platform drift;
+exiting loses the promised recovery and follow-up workflow.
+
+**Recommendation:** promote the reveal helper to shared app infrastructure, add
+`open_path` using `open` on macOS and `xdg-open` on Linux, and store the latest
+successful `index.html`/folder paths in Timeline state. Spawn success means
+“launch requested,” not proof that a browser displayed the file.
+**Completeness:** complete for Rollshot's supported Linux/macOS product paths.
+
+- Duplicate shell commands in Timeline: low effort, duplicate tests and drift.
+- Add a browser-opening crate: portable abstraction, unnecessary dependency for
+  two supported platforms.
+- Promote current helper and add its sibling: small, consistent change.
+
+**Effort / maintenance / net:** low / low / selected.
+
+### Auto decision D8 — Add focused Playwright `file://` coverage
+
+**Context:** Rust tests can validate emitted bytes and PNGs but cannot prove
+keyboard, responsive DOM, clipboard fallback, or lazy image behavior. The repo
+has no current browser-test project. **ELI10:** test the little offline website
+in real browser engines, not only as a long string. **Stakes:** the signature
+reader experience could regress while all Rust tests stay green.
+
+**Recommendation:** add one small pinned Playwright test package under
+`scripts/html-guide-e2e/`; generate fixtures through the Rust renderer and open
+them with a `file://` URL in Chromium and Firefox CI projects. Keep WebKit as a
+useful compatibility signal and retain real Safari as manual macOS verification.
+Block non-`file:` requests in the test context. **Completeness:** complete for
+automated browser behavior; OS shell actions remain Rust/platform tests.
+
+- Rust/string tests only: no new toolchain, poor behavioral confidence.
+- Hand-written WebDriver integration: stays Rust-heavy, much more harness code.
+- Focused Playwright project: one extra pinned dev toolchain, best browser-level
+  coverage and failure diagnostics.
+
+**Effort / maintenance / net:** medium / medium / selected. This dependency is
+test-only and does not enter Rollshot binaries or exported folders.
+
+## Implementation Plan Constraints
+
+The later `superpowers:writing-plans` pass must decompose work in this order:
+
+1. Export contracts and ownership — Guide title, explanation map, shared frame
+   pixels, history-free flatten snapshot, manifest v1. Verify with focused unit
+   and compatibility tests.
+2. Deterministic renderer and transaction — validation, sequential flatten/PNG,
+   Markdown/JSON/HTML, rollback, unique destination policy. Verify with tempdir
+   integration tests and adversarial strings.
+3. HTML viewer — implement against a checked-in/generated v1 fixture while step
+   2 stabilizes. Verify with Playwright under `file://`.
+4. Timeline Workspace integration — title/explanation editing, owned job build,
+   background task states, Open Guide, Show in Folder. Verify state-machine and
+   platform helper tests.
+5. Issue Pack integration — consume the same owned job, list `index.html` in
+   assets/attachments, and preserve the outer transaction. Verify folder and ZIP
+   rollback/output tests.
+6. Cross-platform runtime verification — Linux and macOS export plus Chrome,
+   Firefox, and Safari checks from the Testing section.
+
+After the v1 schema fixture is fixed, renderer work (step 2), viewer behavior
+(step 3), and most Timeline UI state work (step 4) may proceed in parallel.
+Issue Pack integration depends on the renderer API; runtime verification
+depends on all implementation tasks.
+
+## What Already Exists
+
+- Deterministic `Guide` step metadata and retained keyframes in
+  `rollshot-action`.
+- Atomic temporary-folder export tests for Markdown, manifest, and PNG assets.
+- Committed Timeline annotation documents and `ImageDocument::flatten()`.
+- Stable annotation navigator ordering and image-space bounds/centers.
+- Annotation-aware Storyboard snapshotting, useful as behavior reference.
+- Issue Pack folder/ZIP outer transactions and asset manifests.
+- Linux/macOS reveal behavior in Result Workspace.
+- iced async tasks and an existing `spawn_blocking` Storyboard-copy pattern.
+
+## Explicitly Not in Scope
+
+In addition to Non-Goals below: changing capture backends, recording, step
+detection, semantic event privacy, OCR persistence, result-workspace annotation
+semantics, GIF/MP4 rendering semantics, a hosted HTTP viewer, Windows shell
+integration, and a general-purpose browser application framework are not part
+of this work.
+
+## Failure Modes
+
+| Failure | Automated check | Product behavior | User visibility |
+| --- | --- | --- | --- |
+| Empty Guide or missing keyframe | export-job validation test | no job starts, no files | recoverable export error |
+| Invalid/non-finite hotspot | validation/property tests | reject before writes | recoverable annotation validation error |
+| PNG/HTML/manifest write fails | injected filesystem failure | remove temp, preserve final/workspace | export failed banner |
+| Final-name collision | same-second and external-collision tests | choose suffix or fail; never delete | success path or recoverable error |
+| Worker panic/cancel | iced message/state test | clear busy state; temp guard cleans up | export failed/cancelled banner |
+| Issue Pack HTML failure | folder/ZIP integration test | outer transaction rolls back | Issue Pack export error |
+| Missing PNG after export | Playwright fixture | only that step shows unavailable state | inline `Image unavailable` |
+| Clipboard denied | Playwright permission rejection | selected manual-copy field | explicit manual-copy instructions |
+| Shell opener/reveal fails | injected command-runner tests | Guide remains exported and paths retained | action-specific error, export remains successful |
+| Malicious text payload | serializer and browser tests | rendered only as text | no script/markup execution |
+
+Diagnostics for validation errors must log only structural fields such as step
+index, annotation kind, and error category; they must not log Guide text or
+destination paths containing the title.
 
 ## Testing
 
@@ -374,6 +668,23 @@ If an exported folder is later damaged:
   behavior work as specified.
 - Initial load does not decode all keyframes.
 
+The automated browser matrix is Chromium and Firefox. Playwright WebKit is an
+additional compatibility signal, not a substitute for the manual Safari check.
+Tests reject any HTTP(S) request and allow only the document plus relative
+`file:` keyframes.
+
+### Coverage map
+
+| Layer | Required coverage |
+| --- | --- |
+| `rollshot-image-document` | immutable flatten snapshot equals document flatten; redaction output excludes source pixels; no history copied |
+| `rollshot-action` model | Guide title default/edit; manifest v1 old-read compatibility; shared retained-image behavior |
+| `rollshot-action` renderer | validation, output parity, escaping, sequential pixel processing, rollback, deterministic artifacts |
+| Timeline Workspace | explanation lifecycle, snapshot isolation, busy/success/failure state, no exit after export |
+| Issue Pack | same flattened keyframes and HTML, manifest/attachment listing, folder and ZIP rollback |
+| HTML viewer | navigation, search, hotspots, zoom, keyboard, themes, accessibility, missing images, copy fallback, no network/lazy decode |
+| Platform helpers | macOS `open`/reveal and Linux `xdg-open`/reveal command construction plus spawn errors |
+
 ### Runtime verification
 
 - Export one reviewed Action Guide through the active Linux product path.
@@ -392,8 +703,13 @@ A recipient without network access, a local server, an LLM, Rollshot, or any
 other runtime can double-click `index.html` and fully read the reviewed Guide.
 The reader supports navigation, eligible annotation explanations, search,
 zoom, keyboard operation, and honest copy feedback. Every artifact reflects one
-reviewed snapshot. Export never silently replaces earlier output, leaves a
-half-built folder, or exposes pixels hidden by a redaction.
+immutable reviewed export job. Export never silently replaces earlier output,
+leaves a half-built folder, or exposes pixels hidden by a redaction.
+
+The engineering feasibility gate additionally requires that export filesystem
+and pixel work run off the iced update thread, added peak bitmap memory does not
+scale with step count, and both standalone and Issue Pack outputs consume the
+same owned reviewed job.
 
 ## Non-Goals
 
