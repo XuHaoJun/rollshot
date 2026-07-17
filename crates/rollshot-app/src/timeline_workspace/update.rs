@@ -413,6 +413,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::effect(super::Effect::CloseWorkspace)
         }
         Message::ExportRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             state.message = None;
             match &state.export_state {
                 super::GuideExportState::Idle | super::GuideExportState::Succeeded => {}
@@ -585,6 +593,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::none()
         }
         Message::PreviewStoryboardRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             state.message = None;
             match render_timeline_storyboard(state, storyboard_preview_options()) {
                 Ok(rendered) => {
@@ -620,6 +636,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::none()
         }
         Message::CopyStoryboardRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             let Some(preview) = &state.storyboard_preview else {
                 return Update::none();
             };
@@ -713,6 +737,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::none()
         }
         Message::ExportStoryboardRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             state.message = None;
             state.storyboard_preview = None;
             Update::task(Task::perform(
@@ -2007,6 +2039,14 @@ pub(crate) fn timeline_issue_pack_input(
 }
 
 fn begin_issue_pack_export(state: &mut TimelineWorkspace, kind: super::IssuePackKind) -> Update {
+    #[cfg(feature = "action-guide")]
+    if state
+        .frame_source
+        .as_ref()
+        .is_some_and(|fs| fs.in_memory().is_none())
+    {
+        return Update::none();
+    }
     if state.issue_pack.is_none() {
         return Update::none();
     }
@@ -2263,9 +2303,7 @@ fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf
     };
 
     let destination = match &state.project_session {
-        Some(ProjectSession::Saved { root, .. }) => {
-            super::project::SaveDestination::SaveAs(root.clone())
-        }
+        Some(ProjectSession::Saved { .. }) => super::project::SaveDestination::SaveAs(parent),
         _ => super::project::SaveDestination::FirstSave(parent),
     };
 

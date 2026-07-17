@@ -47,8 +47,9 @@ pub(crate) enum Message {
     WindowReady,
 }
 
+#[derive(Clone)]
 pub(crate) enum ProjectOpenResult {
-    Workspace(Box<crate::timeline_workspace::TimelineWorkspace>),
+    Workspace(std::sync::Arc<crate::timeline_workspace::TimelineWorkspace>),
     WriterLocked { path: std::path::PathBuf },
     Error(String),
 }
@@ -61,16 +62,6 @@ impl std::fmt::Debug for ProjectOpenResult {
                 f.debug_struct("WriterLocked").field("path", path).finish()
             }
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
-        }
-    }
-}
-
-impl Clone for ProjectOpenResult {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Workspace(_) => panic!("ProjectOpenResult::Workspace cannot be cloned"),
-            Self::WriterLocked { path } => Self::WriterLocked { path: path.clone() },
-            Self::Error(e) => Self::Error(e.clone()),
         }
     }
 }
@@ -164,7 +155,10 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             }
             match result {
                 ProjectOpenResult::Workspace(ws) => {
-                    state.timeline = Some(*ws);
+                    state.timeline = Some(match std::sync::Arc::try_unwrap(ws) {
+                        Ok(ws) => ws,
+                        Err(_) => unreachable!("sole ownership"),
+                    });
                     state.phase = Phase::Timeline;
                     state.home.opening = false;
                     iced::Task::none()
@@ -299,7 +293,7 @@ async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> Project
                 opened.loaded,
                 opened.access,
             ) {
-                Ok(ws) => ProjectOpenResult::Workspace(Box::new(ws)),
+                Ok(ws) => ProjectOpenResult::Workspace(std::sync::Arc::new(ws)),
                 Err(e) => ProjectOpenResult::Error(format!("Failed to build workspace: {e:?}")),
             }
         }
@@ -521,7 +515,7 @@ mod tests {
         let ws = test_timeline();
         let task = update(
             &mut state,
-            Message::ProjectOpened(ProjectOpenResult::Workspace(Box::new(ws))),
+            Message::ProjectOpened(ProjectOpenResult::Workspace(std::sync::Arc::new(ws))),
         );
         assert_eq!(state.phase, Phase::Timeline);
         assert!(state.timeline.is_some());
@@ -632,7 +626,7 @@ mod tests {
         let ws = test_timeline();
         let task = update(
             &mut state,
-            Message::ProjectOpened(ProjectOpenResult::Workspace(Box::new(ws))),
+            Message::ProjectOpened(ProjectOpenResult::Workspace(std::sync::Arc::new(ws))),
         );
         assert_eq!(state.phase, Phase::Home);
         assert!(state.timeline.is_none());

@@ -126,11 +126,24 @@ pub enum Message {
 }
 
 #[cfg(feature = "action-guide")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum ProjectOpenResult {
-    Workspace(Box<TimelineWorkspace>),
+    Workspace(std::sync::Arc<TimelineWorkspace>),
     WriterLocked { path: std::path::PathBuf },
     Error(String),
+}
+
+#[cfg(feature = "action-guide")]
+impl std::fmt::Debug for ProjectOpenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Workspace(_) => f.debug_tuple("Workspace").field(&"..").finish(),
+            Self::WriterLocked { path } => {
+                f.debug_struct("WriterLocked").field("path", path).finish()
+            }
+            Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
+        }
+    }
 }
 
 /// The current phase of the product daemon.
@@ -562,7 +575,10 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             }
             match result {
                 ProjectOpenResult::Workspace(ws) => {
-                    product.phase = Phase::Timeline(*ws);
+                    product.phase = Phase::Timeline(match std::sync::Arc::try_unwrap(ws) {
+                        Ok(ws) => ws,
+                        Err(_) => unreachable!("sole ownership"),
+                    });
                     let (id, open) = window::open(workspace_window_settings());
                     product.workspace_window = Some(id);
                     open.map(Message::WorkspaceWindowReady)
@@ -1143,7 +1159,7 @@ async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> Project
                 opened.loaded,
                 opened.access,
             ) {
-                Ok(ws) => ProjectOpenResult::Workspace(Box::new(ws)),
+                Ok(ws) => ProjectOpenResult::Workspace(std::sync::Arc::new(ws)),
                 Err(e) => ProjectOpenResult::Error(format!("Failed to build workspace: {e:?}")),
             }
         }
@@ -1674,7 +1690,7 @@ mod tests {
             let ws = test_timeline();
             let task = update(
                 &mut product,
-                Message::ProjectOpened(ProjectOpenResult::Workspace(Box::new(ws))),
+                Message::ProjectOpened(ProjectOpenResult::Workspace(std::sync::Arc::new(ws))),
             );
             assert!(matches!(product.phase, Phase::Timeline(_)));
             assert!(task.units() > 0, "should open workspace window");
@@ -1764,7 +1780,7 @@ mod tests {
             let ws = test_timeline();
             let task = update(
                 &mut product,
-                Message::ProjectOpened(ProjectOpenResult::Workspace(Box::new(ws))),
+                Message::ProjectOpened(ProjectOpenResult::Workspace(std::sync::Arc::new(ws))),
             );
             assert!(matches!(product.phase, Phase::Home(_)));
             assert!(task.units() == 0);
