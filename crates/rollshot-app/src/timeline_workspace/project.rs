@@ -296,8 +296,10 @@ mod tests {
         assert_eq!(ws.guide.steps()[0].title, "Click");
         assert_eq!(ws.guide.steps()[0].keyframe, 1);
         assert_eq!(ws.guide.steps()[0].source, 1);
+        assert_eq!(ws.guide.steps()[0].nearby, vec![1]);
         assert_eq!(ws.guide.steps()[1].index, 2);
         assert_eq!(ws.guide.steps()[1].source, 2);
+        assert_eq!(ws.guide.steps()[1].nearby, vec![2]);
     }
 
     #[test]
