@@ -57,7 +57,9 @@ impl ProjectFrameSource {
 
     pub fn cached(&mut self, id: FrameId) -> Option<Arc<RgbaImage>> {
         if let Some(img) = self.cache.get(&id) {
-            self.lru.retain(|&x| x != id);
+            if let Some(pos) = self.lru.iter().position(|&x| x == id) {
+                self.lru.remove(pos);
+            }
             self.lru.push_back(id);
             Some(Arc::clone(img))
         } else {
@@ -144,7 +146,7 @@ impl StepFrameSource {
         }
     }
 
-    pub fn snapshot_frame(&self, id: FrameId) -> Option<SnapshotFrame> {
+    pub fn snapshot_frame(&mut self, id: FrameId) -> Option<SnapshotFrame> {
         match self {
             Self::InMemory(store) => {
                 let rf = store.retained(id)?;
@@ -155,12 +157,12 @@ impl StepFrameSource {
                 })
             }
             Self::Project(src) => {
-                let frame = src.catalog.get(&id)?;
-                if let Some(img) = src.cache.get(&id) {
+                let frame = src.catalog.get(&id)?.clone();
+                if let Some(img) = src.cached(id) {
                     Some(SnapshotFrame {
                         id: frame.id,
                         at_ms: frame.at_ms,
-                        payload: SnapshotFramePayload::Pixels(Arc::clone(img)),
+                        payload: SnapshotFramePayload::Pixels(img),
                     })
                 } else {
                     Some(SnapshotFrame {
@@ -168,7 +170,7 @@ impl StepFrameSource {
                         at_ms: frame.at_ms,
                         payload: SnapshotFramePayload::ExistingAsset {
                             project_root: src.root.clone(),
-                            sha256: frame.sha256.clone(),
+                            sha256: frame.sha256,
                             width: frame.width,
                             height: frame.height,
                         },
