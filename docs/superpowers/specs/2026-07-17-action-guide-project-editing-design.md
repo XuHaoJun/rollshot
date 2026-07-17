@@ -322,8 +322,12 @@ V1 validation requires:
 - Step presentation order is contiguous and every current or nearby frame
   reference resolves.
 - A step's current keyframe appears in its ordered nearby frame list.
-- Every referenced frame decodes to the declared dimensions, matches its
-  digest, and matches the project capture-region dimensions.
+- Save-time validation fully decodes every newly encoded frame, verifies its
+  declared dimensions and digest, and requires it to match the project
+  capture-region dimensions.
+- Open-time validation verifies every referenced asset's existence, encoded
+  byte digest, and PNG header dimensions without materializing full RGBA
+  pixels. Full pixel decode remains lazy.
 - An annotation document refers to the same current keyframe as its owning
   step, and all geometry/style data is valid for that source image.
 
@@ -553,6 +557,11 @@ locking on an unsupported filesystem.
 Opening a project first loads and validates bounded textual metadata. It does
 not eagerly decode every retained full-resolution frame.
 
+Before constructing a writable workspace, Open streams every referenced asset
+to verify its digest and reads its PNG header to verify dimensions. This bounds
+memory and does not materialize RGBA pixels. A project that fails these checks
+does not open as writable.
+
 The first workspace presentation resolves only the selected step's current
 keyframe and nearby strip. Other assets load as the user changes steps. Loading
 shows an explicit step-local state rather than a blank image.
@@ -560,6 +569,11 @@ shows an explicit step-local state rather than a blank image.
 Decoded project images use a bounded cache. Cache eviction may drop decoded
 pixels but never the immutable on-disk asset reference. Added memory must not
 grow linearly with the total number of project steps and nearby frames.
+
+If a digest-valid PNG nevertheless fails full pixel decode when first resolved,
+the workspace immediately enters a corrupted read-only state, reports the
+affected step/asset category, and disables Save and Publish. It never continues
+as a partially writable project.
 
 Home and Recent Projects never decode frame assets. Background publish processes
 one step image at a time, preserving the existing bounded flatten-and-encode
@@ -589,7 +603,8 @@ every decoded keyframe in memory when the job is frozen.
 | Asset encode/write/hash verification fails | Leave prior project revision intact; workspace remains dirty |
 | Manifest validation or atomic replace fails | Leave prior revision openable; workspace remains dirty |
 | Manifest revision changed outside this writer | Reject Save as a conflict; preserve both the external committed revision and local dirty edits |
-| Required project asset missing or corrupt on open | Do not construct a partial writable workspace; identify affected step/asset category |
+| Required asset missing, hash-mismatched, or header-invalid on open | Do not construct a writable workspace; identify affected step/asset category |
+| Digest-valid asset fails lazy pixel decode | Downgrade the workspace to corrupted read-only; disable Save and Publish; identify affected step/asset category |
 | Unknown newer schema | Refuse writable open; explain that a newer Rollshot is required |
 | Writer lock held | Offer read-only open or cancel |
 | `publish-state.json` missing or corrupt | Open normally; treat all enabled outputs as stale |
@@ -611,6 +626,8 @@ every decoded keyframe in memory when the job is frozen.
 - Delete and keyframe replacement state survive reopen.
 - Content-addressed frames deduplicate identical images and reject hash or
   dimension mismatch.
+- Open validates every referenced asset's digest and PNG header without full
+  pixel decode; Save fully decodes newly encoded assets before commit.
 - Unknown newer schema, malformed JSON, duplicate IDs, missing references,
   invalid order, and illegal paths fail with stable categories.
 - Annotation snapshot round trips every supported annotation variant, geometry,
@@ -650,7 +667,9 @@ introduced.
 ### Loader security
 
 - Reject `..`, absolute paths, symlink escapes, invalid content hashes,
-  undecodable PNGs, and project-root escapes.
+  invalid PNG headers, and project-root escapes before writable open.
+- A digest-valid asset that fails lazy full decode transitions the workspace to
+  corrupted read-only and rejects Save/Publish.
 - Reject a project where a required keyframe or annotation source is missing.
 - Diagnostics tests assert that Guide text, annotation text, image content, and
   title-bearing paths are absent.
