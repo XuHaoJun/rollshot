@@ -51,13 +51,16 @@ pub enum ProjectError {
 
     #[error("invalid manifest ({category}) step={step_id:?} frame={frame_id:?}")]
     InvalidManifest {
-        category: String,
+        category: ProjectErrorCategory,
         step_id: Option<u64>,
         frame_id: Option<u64>,
     },
 
     #[error("invalid asset ({category}) frame={frame_id}")]
-    InvalidAsset { category: String, frame_id: u64 },
+    InvalidAsset {
+        category: ProjectErrorCategory,
+        frame_id: u64,
+    },
 
     #[error("encode error: {message}")]
     Encode { message: String },
