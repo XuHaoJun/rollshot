@@ -505,11 +505,9 @@ fn load_assets_dir_replaced_with_symlink() {
     std::os::unix::fs::symlink(&external, root.join("assets")).unwrap();
 
     let err = load_project(&root).unwrap_err();
-    assert!(
-        err.category() == "io" || err.category() == "invalid-asset",
-        "expected io or invalid-asset, got: {}",
-        err.category()
-    );
+    // open_project_asset uses NOFOLLOW at every level, so a symlink produces
+    // ELOOP → io unconditionally (never reaches the invalid-asset stat check).
+    assert_eq!(err.category(), "io");
 }
 
 #[test]
@@ -524,11 +522,9 @@ fn load_frames_dir_replaced_with_symlink() {
     std::os::unix::fs::symlink(&external, root.join("assets/frames")).unwrap();
 
     let err = load_project(&root).unwrap_err();
-    assert!(
-        err.category() == "io" || err.category() == "invalid-asset",
-        "expected io or invalid-asset, got: {}",
-        err.category()
-    );
+    // open_project_asset uses NOFOLLOW at every level, so a symlink produces
+    // ELOOP → io unconditionally (never reaches the invalid-asset stat check).
+    assert_eq!(err.category(), "io");
 }
 
 #[test]
@@ -545,11 +541,9 @@ fn load_png_replaced_with_symlink() {
     std::os::unix::fs::symlink(&target, &asset_path).unwrap();
 
     let err = load_project(&root).unwrap_err();
-    assert!(
-        err.category() == "io" || err.category() == "invalid-asset",
-        "expected io or invalid-asset, got: {}",
-        err.category()
-    );
+    // open_project_asset uses NOFOLLOW at every level, so a symlink produces
+    // ELOOP → io unconditionally (never reaches the invalid-asset stat check).
+    assert_eq!(err.category(), "io");
 }
 
 #[test]
@@ -583,6 +577,23 @@ fn create_rejects_pre_created_destination() {
         .filter_map(|e| e.ok())
         .collect();
     assert!(entries.is_empty(), "no partial writes on DestinationExists");
+}
+
+#[test]
+fn save_project_as_rejects_pre_created_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("guide.rollshot-guide");
+    setup_project(&root);
+
+    // Attempt Save As to the same existing destination
+    let pixels = pixel(640, 480);
+    let snap = build_initial_snapshot(pixels.clone(), pixels);
+    let err = save_project_as(&snap, &root).unwrap_err();
+    assert_eq!(err.category(), "destination-exists");
+
+    // Original project untouched (still revision 1)
+    let loaded = load_project(&root).unwrap();
+    assert_eq!(loaded.manifest.revision, 1);
 }
 
 #[cfg(unix)]
