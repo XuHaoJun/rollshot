@@ -7,7 +7,7 @@ use crate::models::{default_title, CandidateStep, FrameId, GuideStep};
 
 pub const DEFAULT_GUIDE_TITLE: &str = "Action Guide";
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Guide {
     title: String,
     steps: Vec<GuideStep>,
@@ -16,6 +16,27 @@ pub struct Guide {
 impl Guide {
     /// Build a guide from detector candidates, assigning 1-based order and
     /// deterministic default titles.
+    pub fn from_reviewed_steps(title: String, steps: Vec<GuideStep>) -> Result<Self, &'static str> {
+        if steps.is_empty() {
+            return Err("empty_guide");
+        }
+        if steps
+            .iter()
+            .enumerate()
+            .any(|(offset, step)| step.index != offset + 1)
+        {
+            return Err("invalid_step_order");
+        }
+        let mut sources = std::collections::BTreeSet::new();
+        if steps
+            .iter()
+            .any(|step| step.source == 0 || !sources.insert(step.source))
+        {
+            return Err("invalid_step_source");
+        }
+        Ok(Self { title, steps })
+    }
+
     pub fn from_candidates(candidates: Vec<CandidateStep>) -> Self {
         let steps = candidates
             .into_iter()
@@ -141,6 +162,20 @@ mod tests {
         }
     }
 
+    fn reviewed_step(index: usize, source: u64, keyframe: u64) -> GuideStep {
+        GuideStep {
+            index,
+            title: format!("Step {index}"),
+            caption: String::new(),
+            kind: CandidateKind::Click,
+            reason: DetectReason::VisualChange,
+            at_ms: 0,
+            keyframe,
+            nearby: vec![keyframe],
+            source,
+        }
+    }
+
     #[test]
     fn from_candidates_numbers_steps_and_applies_default_titles() {
         let g = Guide::from_candidates(vec![
@@ -225,5 +260,53 @@ mod tests {
         assert_eq!(guide.effective_title(), "Checkout failure");
         guide.set_title("   ".to_string());
         assert_eq!(guide.effective_title(), "Action Guide");
+    }
+
+    #[test]
+    fn from_reviewed_steps_accepts_valid_two_step_guide() {
+        let g = Guide::from_reviewed_steps(
+            "Test".into(),
+            vec![reviewed_step(1, 1, 5), reviewed_step(2, 2, 10)],
+        )
+        .expect("valid guide");
+        assert_eq!(g.title(), "Test");
+        assert_eq!(g.steps().len(), 2);
+        assert_eq!(g.steps()[0].source, 1);
+        assert_eq!(g.steps()[1].source, 2);
+    }
+
+    #[test]
+    fn from_reviewed_steps_rejects_empty() {
+        assert_eq!(
+            Guide::from_reviewed_steps("T".into(), vec![]),
+            Err("empty_guide")
+        );
+    }
+
+    #[test]
+    fn from_reviewed_steps_rejects_non_contiguous_order() {
+        let steps = vec![reviewed_step(1, 1, 5), reviewed_step(3, 2, 10)];
+        assert_eq!(
+            Guide::from_reviewed_steps("T".into(), steps),
+            Err("invalid_step_order")
+        );
+    }
+
+    #[test]
+    fn from_reviewed_steps_rejects_zero_source() {
+        let steps = vec![reviewed_step(1, 0, 5)];
+        assert_eq!(
+            Guide::from_reviewed_steps("T".into(), steps),
+            Err("invalid_step_source")
+        );
+    }
+
+    #[test]
+    fn from_reviewed_steps_rejects_duplicate_source() {
+        let steps = vec![reviewed_step(1, 1, 5), reviewed_step(2, 1, 10)];
+        assert_eq!(
+            Guide::from_reviewed_steps("T".into(), steps),
+            Err("invalid_step_source")
+        );
     }
 }

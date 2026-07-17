@@ -60,7 +60,7 @@ impl ActionRecorder {
             last_analyzed_id: None,
             pending: Vec::new(),
             candidates: Vec::new(),
-            next_candidate_id: 0,
+            next_candidate_id: 1,
         }
     }
 
@@ -343,5 +343,21 @@ mod tests {
         assert_eq!(recording.candidates.len(), 1);
         assert_eq!(recording.candidates[0].kind, CandidateKind::Click);
         assert_eq!(recording.candidates[0].keyframe, 1);
+    }
+
+    #[test]
+    fn candidate_ids_begin_at_one() {
+        let mut rec = ActionRecorder::new(region(), store_cfg(), cfg());
+        rec.ingest_frame(black(), 0);
+        rec.ingest_frame(quadrant(), 100);
+        rec.ingest_frame(quadrant(), 200);
+        rec.ingest_frame(quadrant(), 300);
+        rec.ingest_frame(quadrant(), 400);
+        rec.ingest_frame(quadrant(), 500);
+        rec.ingest_frame(quadrant(), 600);
+        let recording = rec.finish();
+        for step in &recording.candidates {
+            assert!(step.id >= 1, "candidate IDs must be >= 1, got {}", step.id);
+        }
     }
 }

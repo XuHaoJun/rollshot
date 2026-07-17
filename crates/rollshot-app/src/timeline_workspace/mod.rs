@@ -25,6 +25,9 @@ mod view;
 #[cfg(feature = "action-guide")]
 mod visual_annotation_agent;
 
+#[cfg(feature = "action-guide")]
+pub(crate) mod project;
+
 pub use update::{subscription, update, Message};
 pub use view::view;
 
@@ -227,6 +230,15 @@ pub struct TimelineWorkspace {
     pub(crate) next_export_operation_id: u64,
     /// Monotonic operation id for Issue Pack export provenance.
     pub(crate) next_issue_pack_operation_id: u64,
+    #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
+    pub(crate) frame_source: Option<rollshot_action::StepFrameSource>,
+    #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
+    pub(crate) project_session: Option<project::ProjectSession>,
+    #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
+    pub(crate) enabled_outputs: rollshot_action::project::EnabledOutputs,
 }
 
 impl TimelineWorkspace {
@@ -267,6 +279,12 @@ impl TimelineWorkspace {
             last_export: None,
             next_export_operation_id: 0,
             next_issue_pack_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            frame_source: None,
+            #[cfg(feature = "action-guide")]
+            project_session: None,
+            #[cfg(feature = "action-guide")]
+            enabled_outputs: Default::default(),
         };
         ws.rebuild_selection_handles();
         ws

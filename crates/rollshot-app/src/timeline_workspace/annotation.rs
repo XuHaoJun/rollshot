@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use iced::widget::{canvas, image, text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Theme};
+use rollshot_action::project::PersistedStepAnnotations;
 use rollshot_action::{CandidateId, FrameId, FrameStore, GuideStep};
 use rollshot_image_document::{
     annotation_shapes, Annotation, AnnotationId, ImageDocument, ImagePoint, RenderShape, Rgba8,
@@ -17,9 +18,18 @@ pub(crate) struct StepAnnotationDocument {
     pub explanations: BTreeMap<AnnotationId, String>,
 }
 
+#[allow(dead_code)]
+pub(crate) enum StepAnnotationState {
+    Pending {
+        keyframe: FrameId,
+        persisted: PersistedStepAnnotations,
+    },
+    Loaded(StepAnnotationDocument),
+}
+
 #[derive(Default)]
 pub(crate) struct ActionGuidePresentation {
-    docs: BTreeMap<CandidateId, StepAnnotationDocument>,
+    docs: BTreeMap<CandidateId, StepAnnotationState>,
 }
 
 impl ActionGuidePresentation {
@@ -32,34 +42,115 @@ impl ActionGuidePresentation {
         step: &GuideStep,
         store: &FrameStore,
     ) -> Option<&mut StepAnnotationDocument> {
-        let needs_new = self
-            .docs
-            .get(&step.source)
-            .is_none_or(|doc| doc.keyframe != step.keyframe);
+        let needs_new = match self.docs.get(&step.source) {
+            Some(StepAnnotationState::Loaded(doc)) => doc.keyframe != step.keyframe,
+            _ => true,
+        };
         if needs_new {
             let frame = store.retained(step.keyframe)?;
             self.docs.insert(
                 step.source,
-                StepAnnotationDocument {
+                StepAnnotationState::Loaded(StepAnnotationDocument {
                     source: step.source,
                     keyframe: step.keyframe,
                     document: ImageDocument::from_shared_source(Arc::clone(&frame.image)),
                     explanations: BTreeMap::new(),
-                },
+                }),
             );
         }
-        self.docs.get_mut(&step.source)
+        match self.docs.get_mut(&step.source) {
+            Some(StepAnnotationState::Loaded(doc)) => Some(doc),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_pending(
+        &mut self,
+        source: CandidateId,
+        keyframe: FrameId,
+        persisted: PersistedStepAnnotations,
+    ) {
+        self.docs.insert(
+            source,
+            StepAnnotationState::Pending {
+                keyframe,
+                persisted,
+            },
+        );
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn hydrate_for_step(
+        &mut self,
+        source: CandidateId,
+        image: Arc<::image::RgbaImage>,
+    ) -> Option<&mut StepAnnotationDocument> {
+        let state = self.docs.remove(&source)?;
+        let (keyframe, persisted) = match state {
+            StepAnnotationState::Loaded(_) => {
+                self.docs.insert(source, state);
+                return match self.docs.get_mut(&source) {
+                    Some(StepAnnotationState::Loaded(doc)) => Some(doc),
+                    _ => None,
+                };
+            }
+            StepAnnotationState::Pending {
+                keyframe,
+                persisted,
+            } => (keyframe, persisted),
+        };
+        let document =
+            ImageDocument::from_persisted_annotations(image, persisted.annotations).ok()?;
+        let valid_ids: BTreeSet<_> = document.annotations().iter().map(|a| a.id()).collect();
+        let explanations: BTreeMap<_, _> = persisted
+            .explanations
+            .into_iter()
+            .filter(|(id, _)| valid_ids.contains(id))
+            .collect();
+        let doc = StepAnnotationDocument {
+            source,
+            keyframe,
+            document,
+            explanations,
+        };
+        self.docs.insert(source, StepAnnotationState::Loaded(doc));
+        match self.docs.get_mut(&source) {
+            Some(StepAnnotationState::Loaded(doc)) => Some(doc),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn snapshot_for_source(
+        &self,
+        source: CandidateId,
+    ) -> Option<PersistedStepAnnotations> {
+        match self.docs.get(&source)? {
+            StepAnnotationState::Pending { persisted, .. } => Some(persisted.clone()),
+            StepAnnotationState::Loaded(doc) => Some(PersistedStepAnnotations {
+                annotations: doc.document.annotations().to_vec(),
+                explanations: doc.explanations.clone(),
+            }),
+        }
     }
 
     pub(crate) fn doc(&self, source: CandidateId) -> Option<&StepAnnotationDocument> {
-        self.docs.get(&source)
+        match self.docs.get(&source) {
+            Some(StepAnnotationState::Loaded(doc)) => Some(doc),
+            _ => None,
+        }
     }
 
     #[allow(dead_code)]
     pub(crate) fn has_annotations(&self, source: CandidateId) -> bool {
-        self.docs
-            .get(&source)
-            .is_some_and(|doc| !doc.document.annotations().is_empty())
+        match self.docs.get(&source) {
+            Some(StepAnnotationState::Loaded(doc)) => !doc.document.annotations().is_empty(),
+            Some(StepAnnotationState::Pending { persisted, .. }) => {
+                !persisted.annotations.is_empty()
+            }
+            None => false,
+        }
     }
 
     #[allow(dead_code)]
@@ -75,7 +166,10 @@ impl ActionGuidePresentation {
 
     #[allow(dead_code)]
     pub(crate) fn doc_mut(&mut self, source: CandidateId) -> Option<&mut StepAnnotationDocument> {
-        self.docs.get_mut(&source)
+        match self.docs.get_mut(&source) {
+            Some(StepAnnotationState::Loaded(doc)) => Some(doc),
+            _ => None,
+        }
     }
 
     pub(crate) fn set_explanation(
@@ -85,20 +179,23 @@ impl ActionGuidePresentation {
         explanation: String,
     ) -> bool {
         match self.docs.get_mut(&source) {
-            Some(doc) => {
+            Some(StepAnnotationState::Loaded(doc)) => {
                 doc.explanations.insert(id, explanation);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn explanation(&self, source: CandidateId, id: AnnotationId) -> Option<&str> {
-        self.docs
-            .get(&source)
-            .and_then(|doc| doc.explanations.get(&id))
-            .map(String::as_str)
+        match self.docs.get(&source) {
+            Some(StepAnnotationState::Loaded(doc)) => doc.explanations.get(&id).map(String::as_str),
+            Some(StepAnnotationState::Pending { persisted, .. }) => {
+                persisted.explanations.get(&id).map(String::as_str)
+            }
+            None => None,
+        }
     }
 }
 
