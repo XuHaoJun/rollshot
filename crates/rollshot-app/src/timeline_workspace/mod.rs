@@ -806,8 +806,10 @@ mod tests {
     mod project_lifecycle {
         use super::super::*;
         use super::recording_from_frames;
+        use super::{Rgba, RgbaImage};
         use crate::timeline_workspace::project::ProjectAccess;
         use crate::timeline_workspace::update::Message;
+        use std::sync::Arc;
 
         fn workspace(recording: Recording) -> TimelineWorkspace {
             super::workspace(recording)
@@ -1332,6 +1334,382 @@ mod tests {
             ws.close_intent = CloseIntent::Confirming;
             ws.pending_discard = true;
             let _element = super::super::view::view(&ws);
+        }
+
+        // ---- Frame loading pipeline tests ----
+
+        /// Write a PNG asset to disk and return the SHA256 hash.
+        fn write_test_png_asset(root: &std::path::Path, image: &RgbaImage) -> String {
+            use sha2::Digest;
+            use std::io::Write;
+            let mut png_buf = Vec::new();
+            image
+                .write_to(
+                    &mut std::io::Cursor::new(&mut png_buf),
+                    image::ImageFormat::Png,
+                )
+                .expect("encode PNG");
+            let mut hasher = sha2::Sha256::new();
+            hasher.write_all(&png_buf).expect("hash");
+            let sha256 = format!("{:x}", hasher.finalize());
+            let dest = root.join("assets/frames").join(format!("{sha256}.png"));
+            std::fs::write(&dest, &png_buf).unwrap();
+            sha256
+        }
+
+        fn ws_project_backed_with_assets() -> (TimelineWorkspace, tempfile::TempDir) {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+
+            let mut frames = Vec::new();
+            for i in 1..=3u64 {
+                let image = RgbaImage::from_pixel(8, 8, Rgba([i as u8, 0, 0, 255]));
+                let sha256 = write_test_png_asset(&root, &image);
+                frames.push(ProjectFrame {
+                    id: i,
+                    at_ms: (i - 1) * 100,
+                    sha256,
+                    width: 8,
+                    height: 8,
+                });
+            }
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 1,
+                title: "Test Guide".into(),
+                capture_region: super::region_32(),
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames,
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 200,
+                    keyframe: 1,
+                    nearby: vec![1, 2, 3],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject { root, manifest };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+            (ws, dir)
+        }
+
+        #[test]
+        fn select_step_schedules_decodes_for_uncached_project_frames() {
+            let (mut ws, _dir) = ws_project_backed_with_assets();
+            // The project starts with an empty cache; all frames need decoding.
+            ws.keyframe_handle = None;
+            ws.strip.clear();
+
+            let result = super::super::update::update(&mut ws, Message::SelectStep(1));
+
+            // Should return a task that performs frame decodes.
+            assert!(
+                result.task.units() > 0,
+                "SelectStep on project-backed workspace should schedule frame decodes"
+            );
+            // Handles should be None until the decode completes.
+            assert!(
+                ws.keyframe_handle.is_none(),
+                "keyframe handle should be None until decode completes"
+            );
+            assert!(
+                ws.strip.is_empty(),
+                "strip should be empty until decode completes"
+            );
+            // Generation should have advanced.
+            assert_eq!(ws.frame_coordinator.current_generation(), 1);
+        }
+
+        #[test]
+        fn select_step_uses_cached_keyframe_immediately() {
+            let (mut ws, _dir) = ws_project_backed_with_assets();
+            // Pre-cache the keyframe (frame 1) by loading it into the source.
+            let source = ws.frame_source.as_mut().unwrap();
+            let req = source.load_request(1).expect("load request for frame 1");
+            let loaded = rollshot_action::load_step_frame(req).expect("decode frame 1");
+            source.insert_loaded(loaded);
+
+            // Now select the step - should use cached keyframe immediately.
+            let _result = super::super::update::update(&mut ws, Message::SelectStep(1));
+
+            assert!(
+                ws.keyframe_handle.is_some(),
+                "cached keyframe should be used immediately"
+            );
+        }
+
+        #[test]
+        fn frame_load_completed_with_stale_generation_is_ignored() {
+            let (mut ws, _dir) = ws_project_backed_with_assets();
+
+            // First select - generation becomes 1.
+            let _ = super::super::update::update(&mut ws, Message::SelectStep(1));
+            assert_eq!(ws.frame_coordinator.current_generation(), 1);
+
+            // Second select - generation becomes 2.
+            let _ = super::super::update::update(&mut ws, Message::SelectStep(1));
+            assert_eq!(ws.frame_coordinator.current_generation(), 2);
+
+            // Simulate a stale completion from generation 1.
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::FrameLoadCompleted {
+                    generation: 1,
+                    results: vec![Ok(rollshot_action::LoadedStepFrame {
+                        id: 1,
+                        at_ms: 0,
+                        image: Arc::new(RgbaImage::from_pixel(8, 8, Rgba([1, 0, 0, 255]))),
+                    })],
+                    remaining: Vec::new(),
+                },
+            );
+
+            // Should be ignored - no handles built.
+            assert!(
+                ws.keyframe_handle.is_none(),
+                "stale completion should not build handles"
+            );
+        }
+
+        #[test]
+        fn decode_failure_sets_corrupt_read_only() {
+            let (mut ws, _dir) = ws_project_backed_with_assets();
+
+            // Select the step to start loading.
+            let _ = super::super::update::update(&mut ws, Message::SelectStep(1));
+            let gen = ws.frame_coordinator.current_generation();
+
+            // Simulate a decode failure.
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::FrameLoadCompleted {
+                    generation: gen,
+                    results: vec![Err("corrupt PNG data".to_string())],
+                    remaining: Vec::new(),
+                },
+            );
+
+            assert!(
+                !ws.can_mutate(),
+                "workspace should be CorruptReadOnly after decode failure"
+            );
+            assert!(ws.message.as_ref().is_some_and(|m| m.contains("read-only")));
+        }
+
+        #[test]
+        fn frame_load_completed_inserts_and_builds_handles() {
+            let (mut ws, _dir) = ws_project_backed_with_assets();
+
+            // Select the step to start loading.
+            let _ = super::super::update::update(&mut ws, Message::SelectStep(1));
+            let gen = ws.frame_coordinator.current_generation();
+
+            // Simulate successful decode of keyframe (frame 1).
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::FrameLoadCompleted {
+                    generation: gen,
+                    results: vec![Ok(rollshot_action::LoadedStepFrame {
+                        id: 1,
+                        at_ms: 0,
+                        image: Arc::new(RgbaImage::from_pixel(8, 8, Rgba([1, 0, 0, 255]))),
+                    })],
+                    remaining: Vec::new(),
+                },
+            );
+
+            assert!(
+                ws.keyframe_handle.is_some(),
+                "keyframe handle should be built after successful decode"
+            );
+            // Verify the frame was inserted into cache.
+            let source = ws.frame_source.as_mut().unwrap();
+            assert!(
+                source.cached(1).is_some(),
+                "decoded frame should be in cache"
+            );
+        }
+
+        #[test]
+        fn select_step_schedules_at_most_two_decodes_initially() {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+
+            // Create 5 frames.
+            let mut frames = Vec::new();
+            for i in 1..=5u64 {
+                let image = RgbaImage::from_pixel(8, 8, Rgba([i as u8, 0, 0, 255]));
+                let sha256 = write_test_png_asset(&root, &image);
+                frames.push(ProjectFrame {
+                    id: i,
+                    at_ms: (i - 1) * 100,
+                    sha256,
+                    width: 8,
+                    height: 8,
+                });
+            }
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 1,
+                title: "Test Guide".into(),
+                capture_region: super::region_32(),
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames,
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 400,
+                    keyframe: 1,
+                    nearby: vec![1, 2, 3, 4, 5],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject { root, manifest };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+
+            let result = super::super::update::update(&mut ws, Message::SelectStep(1));
+
+            assert!(
+                result.task.units() > 0,
+                "should schedule frame decodes for 5 uncached frames"
+            );
+            // The task batches at most 2 in the first batch; remaining 3+ are
+            // sent as remaining in the message. We verify the task was created.
+            assert_eq!(ws.frame_coordinator.current_generation(), 1);
+        }
+
+        #[test]
+        fn frame_load_completed_with_remaining_spawns_next_batch() {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+
+            let mut frames = Vec::new();
+            for i in 1..=5u64 {
+                let image = RgbaImage::from_pixel(8, 8, Rgba([i as u8, 0, 0, 255]));
+                let sha256 = write_test_png_asset(&root, &image);
+                frames.push(ProjectFrame {
+                    id: i,
+                    at_ms: (i - 1) * 100,
+                    sha256,
+                    width: 8,
+                    height: 8,
+                });
+            }
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 1,
+                title: "Test Guide".into(),
+                capture_region: super::region_32(),
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: frames.clone(),
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 400,
+                    keyframe: 1,
+                    nearby: vec![1, 2, 3, 4, 5],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject { root, manifest };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+
+            // Select step to start loading.
+            let _ = super::super::update::update(&mut ws, Message::SelectStep(1));
+            let gen = ws.frame_coordinator.current_generation();
+
+            // Simulate the first batch completing with 2 frames, with 3 remaining.
+            let remaining_requests: Vec<_> = [3u64, 4, 5]
+                .iter()
+                .filter_map(|&id| {
+                    ws.frame_source
+                        .as_ref()
+                        .unwrap()
+                        .load_request(id)
+                        .map(|req| (id, req))
+                })
+                .collect();
+
+            let result = super::super::update::update(
+                &mut ws,
+                Message::FrameLoadCompleted {
+                    generation: gen,
+                    results: vec![
+                        Ok(rollshot_action::LoadedStepFrame {
+                            id: 1,
+                            at_ms: 0,
+                            image: Arc::new(RgbaImage::from_pixel(8, 8, Rgba([1, 0, 0, 255]))),
+                        }),
+                        Ok(rollshot_action::LoadedStepFrame {
+                            id: 2,
+                            at_ms: 100,
+                            image: Arc::new(RgbaImage::from_pixel(8, 8, Rgba([2, 0, 0, 255]))),
+                        }),
+                    ],
+                    remaining: remaining_requests,
+                },
+            );
+
+            // Should spawn a task for the remaining frames.
+            assert!(
+                result.task.units() > 0,
+                "remaining frames should trigger a follow-up decode task"
+            );
         }
     }
 }

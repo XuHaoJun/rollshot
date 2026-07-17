@@ -169,6 +169,14 @@ pub enum Message {
     CloseSaveAndClose,
     CloseDiscard,
     CloseCancel,
+    FrameLoadCompleted {
+        generation: u64,
+        results: Vec<Result<rollshot_action::LoadedStepFrame, String>>,
+        remaining: Vec<(
+            rollshot_action::FrameId,
+            rollshot_action::StepFrameLoadRequest,
+        )>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -193,7 +201,108 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::SelectStep(index) => {
             if state.guide.steps().iter().any(|s| s.index == index) {
                 state.selected = Some(index);
-                state.rebuild_selection_handles();
+                #[cfg(feature = "action-guide")]
+                {
+                    // Extract selected step info before borrowing frame_source.
+                    let (keyframe, source_id) = {
+                        let Some(step) = state.selected_step() else {
+                            return Update::none();
+                        };
+                        (step.keyframe, step.source)
+                    };
+                    let nearby = state
+                        .selected_step()
+                        .map(|s| s.nearby.clone())
+                        .unwrap_or_default();
+
+                    if let Some(ref mut source) = state.frame_source {
+                        // Project-backed: clear old handles, use cache, spawn decodes.
+                        state.keyframe_handle = None;
+                        state.strip.clear();
+                        let gen = state.frame_coordinator.advance_generation();
+                        // Try cache for current keyframe first.
+                        if let Some(img) = source.cached(keyframe) {
+                            state.keyframe_handle = Some(super::build_handle(
+                                &::image::ImageBuffer::from_raw(
+                                    img.width(),
+                                    img.height(),
+                                    img.as_raw().to_vec(),
+                                )
+                                .unwrap_or_else(|| {
+                                    ::image::RgbaImage::new(img.width(), img.height())
+                                }),
+                            ));
+                            state.presentation.hydrate_for_step(source_id, img);
+                        }
+                        // Try cache for nearby strip frames.
+                        for &id in &nearby {
+                            if let Some(img) = source.cached(id) {
+                                state.strip.push(super::StripFrame {
+                                    id,
+                                    handle: super::build_handle(
+                                        &::image::ImageBuffer::from_raw(
+                                            img.width(),
+                                            img.height(),
+                                            img.as_raw().to_vec(),
+                                        )
+                                        .unwrap_or_else(
+                                            || ::image::RgbaImage::new(img.width(), img.height()),
+                                        ),
+                                    ),
+                                });
+                            }
+                        }
+                        // Collect uncached IDs (keyframe first, then nearby).
+                        let mut uncached = Vec::new();
+                        if state.keyframe_handle.is_none() {
+                            uncached.push(keyframe);
+                        }
+                        for &id in &nearby {
+                            if !state.strip.iter().any(|f| f.id == id) {
+                                uncached.push(id);
+                            }
+                        }
+                        if uncached.is_empty() {
+                            return Update::none();
+                        }
+                        // Build load requests for uncached frames.
+                        let requests: Vec<_> = uncached
+                            .iter()
+                            .filter_map(|&id| source.load_request(id).map(|req| (id, req)))
+                            .collect();
+                        if requests.is_empty() {
+                            return Update::none();
+                        }
+                        // Spawn up to 2 concurrent decode tasks.
+                        let semaphore = state.frame_coordinator.semaphore.clone();
+                        let (first_batch, remaining) = if requests.len() > 2 {
+                            (requests[..2].to_vec(), requests[2..].to_vec())
+                        } else {
+                            (requests.clone(), Vec::new())
+                        };
+                        let all_remaining = remaining;
+                        let gen_for_task = gen;
+                        let sem_for_task = semaphore;
+                        let task = iced::Task::perform(
+                            frame_decode_task(
+                                gen_for_task,
+                                sem_for_task,
+                                first_batch,
+                                all_remaining,
+                            ),
+                            move |msg| msg,
+                        );
+                        return Update::task(task);
+                    }
+                }
+                #[cfg(not(feature = "action-guide"))]
+                {
+                    state.rebuild_selection_handles();
+                }
+                #[cfg(feature = "action-guide")]
+                if state.frame_source.is_none() {
+                    state.rebuild_selection_handles();
+                }
             }
             Update::none()
         }
@@ -1554,6 +1663,21 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             state.pending_discard = false;
             Update::none()
         }
+        Message::FrameLoadCompleted {
+            generation,
+            results,
+            remaining,
+        } => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_frame_load_completed(state, generation, results, remaining)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                let _ = (generation, results, remaining);
+                Update::none()
+            }
+        }
     }
 }
 
@@ -1616,6 +1740,169 @@ fn write_storyboard_png_atomic(
             source,
         }
     })
+}
+
+/// Async frame decode task for project-backed workspaces.
+///
+/// Acquires semaphore permits (max 2 concurrent), decodes each frame,
+/// and returns results along with remaining frames that weren't started.
+/// The generation token is checked by the handler on completion.
+async fn frame_decode_task(
+    generation: u64,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    batch: Vec<(
+        rollshot_action::FrameId,
+        rollshot_action::StepFrameLoadRequest,
+    )>,
+    remaining: Vec<(
+        rollshot_action::FrameId,
+        rollshot_action::StepFrameLoadRequest,
+    )>,
+) -> Message {
+    use rollshot_action::load_step_frame;
+
+    let mut results = Vec::with_capacity(batch.len());
+    for (_id, request) in batch {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            load_step_frame(request)
+        })
+        .await
+        .map_err(|e| format!("decode worker failed: {e}"))
+        .and_then(|r| r.map_err(|e| format!("frame decode failed: {e}")));
+        results.push(result);
+    }
+    Message::FrameLoadCompleted {
+        generation,
+        results,
+        remaining,
+    }
+}
+
+/// Handle the completion of a frame decode batch for project-backed workspaces.
+///
+/// Verifies the generation token matches the current coordinator generation.
+/// Stale results are dropped without cache insertion or handle creation.
+/// Current results are inserted into the byte-bounded cache, renderer handles
+/// are built, and annotations are hydrated for the current keyframe.
+/// If any required frame fails to decode, sets CorruptReadOnly access.
+#[cfg(feature = "action-guide")]
+fn handle_frame_load_completed(
+    state: &mut TimelineWorkspace,
+    generation: u64,
+    results: Vec<Result<rollshot_action::LoadedStepFrame, String>>,
+    remaining: Vec<(
+        rollshot_action::FrameId,
+        rollshot_action::StepFrameLoadRequest,
+    )>,
+) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    let current_gen = state.frame_coordinator.current_generation();
+    if generation != current_gen {
+        // Stale completion from a previous step selection. Drop silently.
+        tracing::debug!(
+            target: "rollshot::frame_load",
+            completed_gen = generation,
+            current_gen,
+            "stale frame load completion dropped"
+        );
+        return Update::none();
+    }
+
+    // Extract selected step info before borrowing frame_source.
+    let (keyframe, source_id) = {
+        let Some(step) = state.selected_step() else {
+            return Update::none();
+        };
+        (step.keyframe, step.source)
+    };
+
+    let Some(ref mut source) = state.frame_source else {
+        return Update::none();
+    };
+
+    let mut any_required_failed = false;
+
+    for result in results {
+        match result {
+            Ok(loaded) => {
+                let loaded_id = loaded.id;
+                let is_keyframe = loaded_id == keyframe;
+                source.insert_loaded(loaded);
+                if is_keyframe {
+                    // Build handle and hydrate annotations for current keyframe.
+                    if let Some(img) = source.cached(keyframe) {
+                        state.keyframe_handle = Some(super::build_handle(
+                            &::image::ImageBuffer::from_raw(
+                                img.width(),
+                                img.height(),
+                                img.as_raw().to_vec(),
+                            )
+                            .unwrap_or_else(|| ::image::RgbaImage::new(img.width(), img.height())),
+                        ));
+                        state.presentation.hydrate_for_step(source_id, img);
+                    }
+                } else {
+                    // Build strip handle for nearby frame.
+                    if let Some(img) = source.cached(loaded_id) {
+                        state.strip.push(super::StripFrame {
+                            id: loaded_id,
+                            handle: super::build_handle(
+                                &::image::ImageBuffer::from_raw(
+                                    img.width(),
+                                    img.height(),
+                                    img.as_raw().to_vec(),
+                                )
+                                .unwrap_or_else(|| {
+                                    ::image::RgbaImage::new(img.width(), img.height())
+                                }),
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "rollshot::frame_load",
+                    %error,
+                    "frame decode failed"
+                );
+                // Check if this was a required frame (keyframe or nearby).
+                // If so, mark as CorruptReadOnly.
+                any_required_failed = true;
+            }
+        }
+    }
+
+    if any_required_failed {
+        // Set CorruptReadOnly access to prevent further mutations.
+        if let Some(ProjectSession::Saved { access, .. }) = &mut state.project_session {
+            *access = ProjectAccess::CorruptReadOnly;
+            state.save_state = super::ProjectSaveState::Clean;
+        }
+        state.message = Some(
+            "A required frame could not be decoded. The project is now read-only.".to_string(),
+        );
+        return Update::none();
+    }
+
+    // Spawn remaining frames if any.
+    if !remaining.is_empty() {
+        let semaphore = state.frame_coordinator.semaphore.clone();
+        let gen = generation;
+        return Update::task(iced::Task::perform(
+            frame_decode_task(gen, semaphore, remaining, Vec::new()),
+            move |msg| msg,
+        ));
+    }
+
+    Update::none()
 }
 
 async fn pick_export_dir(default_dir: PathBuf) -> Option<PathBuf> {

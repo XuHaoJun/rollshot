@@ -19,7 +19,30 @@ pub struct LoadedStepFrame {
     pub image: Arc<RgbaImage>,
 }
 
-#[derive(Clone)]
+impl Clone for LoadedStepFrame {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            at_ms: self.at_ms,
+            image: Arc::clone(&self.image),
+        }
+    }
+}
+
+impl std::fmt::Debug for LoadedStepFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedStepFrame")
+            .field("id", &self.id)
+            .field("at_ms", &self.at_ms)
+            .field(
+                "image",
+                &format!("{}x{}", self.image.width(), self.image.height()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct StepFrameLoadRequest {
     pub project_root: PathBuf,
     pub frame: ProjectFrame,
