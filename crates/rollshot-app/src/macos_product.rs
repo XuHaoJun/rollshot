@@ -86,6 +86,7 @@ pub enum Message {
     /// Async inspection of a directory completed.
     #[cfg(feature = "action-guide")]
     SelectionInspected {
+        #[allow(dead_code)]
         path: std::path::PathBuf,
         kind: SelectedDirectoryKind,
     },

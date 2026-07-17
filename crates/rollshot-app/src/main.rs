@@ -183,27 +183,6 @@ fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
     }
 }
 
-#[cfg(all(feature = "action-guide", target_os = "macos"))]
-fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
-    use rollshot_capture::CaptureRequest;
-
-    let request = if fullscreen {
-        CaptureRequest::action_guide_fullscreen()
-    } else {
-        CaptureRequest::action_guide_region()
-    };
-    macos_product::run(
-        rollshot_iced_overlay::OverlayConfig {
-            backend: "auto".to_string(),
-            fps: 5,
-            show_cursor: false,
-            request,
-            target_output_name: None,
-        },
-        post_capture::CapturePurpose::Present,
-    )
-}
-
 #[cfg(all(feature = "action-guide", target_os = "linux"))]
 fn run_action_guide_launch(launch: launch::ActionGuideLaunch) -> Result<(), String> {
     use crate::action_guide_home::ActionGuideIntent;
