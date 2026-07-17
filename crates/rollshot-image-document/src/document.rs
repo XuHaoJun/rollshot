@@ -80,13 +80,17 @@ fn clamp_freehand_points(
 }
 
 fn validate_rect_in_bounds(r: &ImageRect, width: u32, height: u32) -> Result<(), EditError> {
-    ensure_rect_finite(r)?;
     if r.width <= 0.0 || r.height <= 0.0 {
         return Err(EditError::ZeroArea);
     }
+    // All coordinates must be finite
+    if !r.x.is_finite() || !r.y.is_finite() || !r.width.is_finite() || !r.height.is_finite() {
+        return Err(EditError::ZeroArea);
+    }
+    // Rect must intersect [0, source_width) x [0, source_height)
     let w = width as f32;
     let h = height as f32;
-    if r.x + r.width <= 0.0 || r.y + r.height <= 0.0 || r.x >= w || r.y >= h {
+    if r.x >= w || r.y >= h || r.x + r.width <= 0.0 || r.y + r.height <= 0.0 {
         return Err(EditError::ZeroArea);
     }
     Ok(())
@@ -149,13 +153,7 @@ fn validate_persisted_annotation(
         }
         Annotation::Shape { bounds, stroke, .. } => {
             validate_stroke_style(*stroke)?;
-            ensure_rect_finite(bounds)?;
-            if bounds.width <= 0.0 || bounds.height <= 0.0 {
-                return Err(EditError::InvalidShapeBounds);
-            }
-            if bounds.x < 0.0 || bounds.x > w || bounds.y < 0.0 || bounds.y > h {
-                return Err(EditError::InvalidShapeBounds);
-            }
+            validate_rect_in_bounds(bounds, width, height)?;
         }
         Annotation::Freehand { points, style, .. } => {
             validate_stroke_style(*style)?;
