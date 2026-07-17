@@ -33,7 +33,10 @@ impl RecentProjects {
         let path = config_dir.join(FILE_NAME);
         let entries = match std::fs::read_to_string(&path) {
             Ok(text) => parse_recent_json(&text),
-            Err(_) => Vec::new(),
+            Err(_) => {
+                tracing::warn!(target: "rollshot::action_guide_home", "failed to read recent projects file, starting empty");
+                Vec::new()
+            }
         };
         Self {
             dir: config_dir.to_path_buf(),
@@ -75,26 +78,39 @@ impl RecentProjects {
             entries: self.entries.clone(),
         };
         let json = serde_json::to_string_pretty(&file)
-            .map_err(|e| format!("failed to serialize recent projects: {e}"))?;
+            .map_err(|e| {
+                tracing::error!(target: "rollshot::action_guide_home", error = %e, "failed to serialize recent projects");
+                format!("failed to serialize recent projects: {e}")
+            })?;
 
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| format!("failed to create config directory: {e}"))?;
+        std::fs::create_dir_all(&self.dir).map_err(|e| {
+            tracing::error!(target: "rollshot::action_guide_home", error = %e, "failed to create config directory");
+            format!("failed to create config directory: {e}")
+        })?;
 
         let target = self.dir.join(FILE_NAME);
         let temp = self
             .dir
             .join(format!("{FILE_NAME}.tmp.{}", std::process::id()));
 
-        std::fs::write(&temp, json.as_bytes())
-            .map_err(|e| format!("failed to write temp recent file: {e}"))?;
+        std::fs::write(&temp, json.as_bytes()).map_err(|e| {
+            tracing::error!(target: "rollshot::action_guide_home", error = %e, "failed to write temp recent file");
+            format!("failed to write temp recent file: {e}")
+        })?;
 
-        let file = std::fs::File::open(&temp)
-            .map_err(|e| format!("failed to open temp recent file for sync: {e}"))?;
-        file.sync_all()
-            .map_err(|e| format!("failed to sync temp recent file: {e}"))?;
+        let file = std::fs::File::open(&temp).map_err(|e| {
+            tracing::error!(target: "rollshot::action_guide_home", error = %e, "failed to open temp recent file for sync");
+            format!("failed to open temp recent file for sync: {e}")
+        })?;
+        file.sync_all().map_err(|e| {
+            tracing::error!(target: "rollshot::action_guide_home", error = %e, "failed to sync temp recent file");
+            format!("failed to sync temp recent file: {e}")
+        })?;
 
-        std::fs::rename(&temp, &target)
-            .map_err(|e| format!("failed to rename temp recent file: {e}"))?;
+        std::fs::rename(&temp, &target).map_err(|e| {
+            tracing::error!(target: "rollshot::action_guide_home", error = %e, "failed to rename temp recent file");
+            format!("failed to rename temp recent file: {e}")
+        })?;
 
         if let Ok(dir_file) = std::fs::File::open(&self.dir) {
             let _ = dir_file.sync_all();
@@ -107,9 +123,13 @@ impl RecentProjects {
 fn parse_recent_json(text: &str) -> Vec<RecentEntry> {
     let file: RecentFile = match serde_json::from_str(text) {
         Ok(f) => f,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(target: "rollshot::action_guide_home", error = %e, "failed to parse recent projects file, starting empty");
+            return Vec::new();
+        }
     };
     if file.schema_version != 1 {
+        tracing::warn!(target: "rollshot::action_guide_home", version = file.schema_version, "unsupported schema version, starting empty");
         return Vec::new();
     }
     file.entries
@@ -226,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn save_does_not_destroy_prior_file_on_rename_failure() {
+    fn save_replaces_prior_content() {
         let (_dir, config_dir) = setup();
         let mut recent = RecentProjects::load(&config_dir);
 
