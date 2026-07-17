@@ -22,6 +22,7 @@ pub mod project;
 mod recorder;
 #[cfg(test)]
 mod semantic_fixture_tests;
+pub mod step_frame_source;
 mod storyboard;
 mod video;
 pub mod visual_annotation_proposal;
@@ -49,6 +50,10 @@ pub use models::{
     MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
 };
 pub use recorder::{ActionRecorder, Recording};
+pub use step_frame_source::{
+    load_step_frame, LoadedStepFrame, ProjectFrameSource, StepFrameLoadRequest, StepFrameSource,
+    DEFAULT_PROJECT_FRAME_CACHE_BYTES,
+};
 pub use storyboard::{
     export_storyboard, render_reviewed_storyboard, render_storyboard, render_storyboard_steps,
     StoryboardExportResult, StoryboardOptions, StoryboardRenderResult, StoryboardStep,

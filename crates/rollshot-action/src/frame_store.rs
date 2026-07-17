@@ -153,6 +153,11 @@ impl FrameStore {
         self.retained.get(&id)
     }
 
+    pub fn retained_shared(&self, id: FrameId) -> Option<(Millis, Arc<RgbaImage>)> {
+        let rf = self.retained.get(&id)?;
+        Some((rf.at_ms, Arc::clone(&rf.image)))
+    }
+
     pub(crate) fn ring_bounds(&self) -> Option<(FrameId, FrameId)> {
         Some((self.ring.front()?.id, self.ring.back()?.id))
     }
