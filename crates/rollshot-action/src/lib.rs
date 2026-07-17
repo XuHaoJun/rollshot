@@ -18,6 +18,7 @@ mod guide;
 mod input;
 mod metrics;
 mod models;
+pub mod project;
 mod recorder;
 #[cfg(test)]
 mod semantic_fixture_tests;
