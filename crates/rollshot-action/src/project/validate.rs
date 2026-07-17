@@ -420,6 +420,27 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_missing_nearby_frame() {
+        let mut manifest = valid_manifest();
+        manifest.steps[0].nearby = vec![1, 99];
+        let error = validate_manifest_structure(&manifest).unwrap_err();
+        assert_eq!(error.category(), "missing-nearby-frame");
+    }
+
+    #[test]
+    fn manifest_rejects_zero_capture_region() {
+        let mut manifest = valid_manifest();
+        manifest.capture_region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        let error = validate_manifest_structure(&manifest).unwrap_err();
+        assert_eq!(error.category(), "zero-capture-region");
+    }
+
+    #[test]
     fn manifest_rejects_frame_dimension_mismatch() {
         let mut manifest = valid_manifest();
         manifest.frames[0].width = 16;
