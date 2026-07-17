@@ -1629,11 +1629,8 @@ mod tests {
             let mut product = product_in_home_phase();
             let project_path = PathBuf::from("/some/path");
             if let Phase::Home(ref mut home) = product.phase {
-                home.recent.record_open_at(
-                    project_path.clone(),
-                    "Test Project".into(),
-                    1,
-                );
+                home.recent
+                    .record_open_at(project_path.clone(), "Test Project".into(), 1);
             }
             let task = update(
                 &mut product,
