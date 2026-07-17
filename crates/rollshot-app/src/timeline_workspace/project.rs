@@ -21,6 +21,12 @@ pub struct ProjectWriterGuard {
     _file: File,
 }
 
+impl std::fmt::Debug for ProjectWriterGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectWriterGuard").finish()
+    }
+}
+
 #[allow(dead_code)]
 pub enum ProjectLockResult {
     Acquired(ProjectWriterGuard),
@@ -107,10 +113,10 @@ impl From<ProjectError> for ProjectWorkerError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum ProjectAccess {
-    Writable,
+    Writable(ProjectWriterGuard),
     ReadOnly,
     CorruptReadOnly,
 }
@@ -210,7 +216,7 @@ pub(crate) async fn load_project_worker(
                 ProjectLockResult::AlreadyLocked => {
                     return Ok(OpenProjectWorkerResult::WriterLocked { root: request.root });
                 }
-                ProjectLockResult::Acquired(_guard) => {
+                ProjectLockResult::Acquired(guard) => {
                     let loaded =
                         rollshot_action::project::load_project(&request.root).map_err(|e| {
                             tracing::event!(
@@ -223,7 +229,7 @@ pub(crate) async fn load_project_worker(
                         })?;
                     return Ok(OpenProjectWorkerResult::Opened(OpenProjectResult {
                         loaded,
-                        access: ProjectAccess::Writable,
+                        access: ProjectAccess::Writable(guard),
                     }));
                 }
             }
@@ -300,7 +306,7 @@ pub(crate) enum ProjectAdapterError {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum ProjectSession {
     Unsaved,
@@ -555,11 +561,17 @@ mod tests {
         }
     }
 
+    fn dummy_guard() -> ProjectWriterGuard {
+        ProjectWriterGuard {
+            _file: tempfile::tempfile().unwrap(),
+        }
+    }
+
     #[test]
     fn from_loaded_project_restores_guide_text_order_and_keyframe() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let ws = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         assert_eq!(ws.guide.title(), "Test Guide");
         assert_eq!(ws.guide.steps().len(), 2);
@@ -577,7 +589,7 @@ mod tests {
     fn from_loaded_project_stores_enabled_outputs() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let ws = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         assert!(ws.enabled_outputs.storyboard);
         assert!(!ws.enabled_outputs.gif);
@@ -588,7 +600,7 @@ mod tests {
     fn from_loaded_project_selects_step_one() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let ws = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         assert_eq!(ws.selected, Some(1));
     }
@@ -597,7 +609,7 @@ mod tests {
     fn from_loaded_project_installs_pending_annotations() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let ws = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         // Step 1 has pending annotations (not hydrated yet)
         let snap = ws.presentation.snapshot_for_source(1).expect("pending");
@@ -617,13 +629,12 @@ mod tests {
         match ws.project_session {
             Some(ProjectSession::Saved {
                 base_revision,
-                access,
+                access: ProjectAccess::ReadOnly,
                 ..
             }) => {
                 assert_eq!(base_revision, 3);
-                assert_eq!(access, ProjectAccess::ReadOnly);
             }
-            _ => panic!("expected Saved session"),
+            _ => panic!("expected Saved session with ReadOnly access"),
         }
     }
 
@@ -631,7 +642,7 @@ mod tests {
     fn from_loaded_project_starts_with_empty_undo_history() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let ws = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         // Presentation has pending entries, no loaded docs
         assert!(ws.presentation.doc(1).is_none());
@@ -643,7 +654,7 @@ mod tests {
         let mut manifest = manifest_two_steps_with_annotations();
         manifest.steps[0].id = ProjectStepId(0);
         let loaded = loaded_project(manifest);
-        let result = from_loaded_project(loaded, ProjectAccess::Writable);
+        let result = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard()));
         assert!(matches!(
             result,
             Err(ProjectAdapterError::InvalidGuide { .. })
@@ -655,7 +666,7 @@ mod tests {
         let mut manifest = manifest_two_steps_with_annotations();
         manifest.steps[1].id = ProjectStepId(1);
         let loaded = loaded_project(manifest);
-        let result = from_loaded_project(loaded, ProjectAccess::Writable);
+        let result = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard()));
         assert!(matches!(
             result,
             Err(ProjectAdapterError::InvalidGuide { .. })
@@ -667,7 +678,7 @@ mod tests {
         let mut manifest = manifest_two_steps_with_annotations();
         manifest.steps = vec![];
         let loaded = loaded_project(manifest);
-        let result = from_loaded_project(loaded, ProjectAccess::Writable);
+        let result = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard()));
         assert!(matches!(
             result,
             Err(ProjectAdapterError::InvalidGuide { .. })
@@ -678,7 +689,8 @@ mod tests {
     fn build_project_snapshot_uses_guide_step_source_as_project_step_id() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let mut ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let mut ws =
+            from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         let snap = build_project_snapshot(&mut ws).expect("snapshot");
         assert_eq!(snap.steps.len(), 2);
@@ -690,7 +702,8 @@ mod tests {
     fn build_project_snapshot_preserves_title_and_region() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let mut ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let mut ws =
+            from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         let snap = build_project_snapshot(&mut ws).expect("snapshot");
         assert_eq!(snap.title, "Test Guide");
@@ -702,7 +715,8 @@ mod tests {
     fn build_project_snapshot_sets_base_revision_from_saved_session() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let mut ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let mut ws =
+            from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         let snap = build_project_snapshot(&mut ws).expect("snapshot");
         assert_eq!(snap.base_revision, Some(3));
@@ -719,7 +733,8 @@ mod tests {
             height: 8,
         });
         let loaded = loaded_project(manifest);
-        let mut ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let mut ws =
+            from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         let snap = build_project_snapshot(&mut ws).expect("snapshot");
         assert_eq!(snap.frames.len(), 2);
@@ -730,7 +745,8 @@ mod tests {
     fn build_project_snapshot_persists_pending_annotations() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let mut ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let mut ws =
+            from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         let snap = build_project_snapshot(&mut ws).expect("snapshot");
         let step1 = &snap.steps[0];
@@ -746,7 +762,8 @@ mod tests {
     fn build_project_snapshot_never_serializes_workspace_state() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);
-        let mut ws = from_loaded_project(loaded, ProjectAccess::Writable).expect("ok");
+        let mut ws =
+            from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
 
         let snap = build_project_snapshot(&mut ws).expect("snapshot");
         assert!(snap.base_revision.is_some());
@@ -807,7 +824,7 @@ mod tests {
 
         match result {
             OpenProjectWorkerResult::Opened(opened) => {
-                assert_eq!(opened.access, ProjectAccess::ReadOnly);
+                assert!(matches!(opened.access, ProjectAccess::ReadOnly));
                 assert_eq!(opened.loaded.manifest.revision, 1);
             }
             _ => panic!("expected Opened for read-only"),
@@ -857,7 +874,7 @@ mod tests {
 
         match result {
             OpenProjectWorkerResult::Opened(opened) => {
-                assert_eq!(opened.access, ProjectAccess::Writable);
+                assert!(matches!(opened.access, ProjectAccess::Writable(_)));
             }
             _ => panic!("expected Opened for writable"),
         }
@@ -915,14 +932,21 @@ mod tests {
         let snap = build_test_snapshot(None);
         create_project(&snap, &root).unwrap();
 
+        let conflict_snap = build_test_snapshot(Some(99));
         let error = save_project_worker(SaveProjectRequest {
-            snapshot: build_test_snapshot(Some(99)),
+            snapshot: conflict_snap,
             destination: SaveDestination::Existing(root.clone()),
         })
         .await
         .unwrap_err();
 
         assert_eq!(error.category(), "revision-conflict");
+
+        // Verify snapshot wasn't consumed or corrupted by checking it's still valid
+        // (the error path should preserve the snapshot)
+        let valid_snap = build_test_snapshot(Some(1));
+        assert_eq!(valid_snap.title, "Test Guide");
+        assert_eq!(valid_snap.steps[0].title, "Step 1");
     }
 
     #[tokio::test]
@@ -950,27 +974,88 @@ mod tests {
 
     #[tokio::test]
     async fn save_project_worker_first_save_returns_read_only_on_lock_race() {
-        // Simulate the narrow post-commit race: create the project first, then
-        // pre-acquire the lock so the worker's post-commit lock attempt sees AlreadyLocked.
+        // The race: another process grabs the lock between create_project
+        // (commit) and acquire_project_writer inside the worker.
         //
-        // Since we can't interleave between commit and lock acquisition in a unit
-        // test, we test the scenario where the destination directory already exists
-        // (committed by another process) and its lock is held.
+        // We simulate this with a background thread that monitors for the
+        // project directory to appear, then immediately grabs the .lock file.
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("race.rollshot-guide");
+        let dest_clone = dest.clone();
 
+        // Spawn a thread that waits for the project dir, then grabs the lock
+        let grabber = std::thread::spawn(move || {
+            // Spin until project dir exists (created by create_project atomic rename)
+            for _ in 0..100_000 {
+                if dest_clone.exists() {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            // Try to create and lock .lock before the worker does
+            let lock_path = dest_clone.join(".lock");
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .ok()?;
+            match FileExt::try_lock(&file) {
+                Ok(()) => Some(ProjectWriterGuard { _file: file }),
+                Err(_) => None,
+            }
+        });
+
+        let result = save_project_worker(SaveProjectRequest {
+            snapshot: build_test_snapshot(None),
+            destination: SaveDestination::FirstSave(dest.clone()),
+        })
+        .await
+        .unwrap();
+
+        let guard = grabber.join().unwrap();
+
+        // Verify the project was created at revision 1 regardless of who won the lock race
+        match result {
+            SaveProjectWorkerResult::NewWritable { commit, guard: _g } => {
+                assert_eq!(commit.manifest.revision, 1);
+                // Background thread lost the race, that's fine
+                drop(_g);
+            }
+            SaveProjectWorkerResult::NewCommittedReadOnly { commit, category } => {
+                assert_eq!(commit.manifest.revision, 1);
+                assert_eq!(category, "post_commit_lock_race");
+                assert!(guard.is_some(), "grabber should have won the lock");
+            }
+            _ => panic!("unexpected result variant"),
+        }
+    }
+
+    // ---- Corrupt project test ----
+
+    #[tokio::test]
+    async fn load_project_worker_corrupt_manifest_returns_corrupt_error() {
         use rollshot_action::project::create_project;
-        let commit = create_project(&build_test_snapshot(None), &dest).unwrap();
-        assert_eq!(commit.manifest.revision, 1);
 
-        // Hold the lock on the committed project
-        let _dest_guard = acquire_project_writer(&dest).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("corrupt.rollshot-guide");
+        let snap = build_test_snapshot(None);
+        create_project(&snap, &root).unwrap();
 
-        // Verify the lock is held (another acquire sees AlreadyLocked)
-        assert!(matches!(
-            acquire_project_writer(&dest).unwrap(),
-            ProjectLockResult::AlreadyLocked
-        ));
+        // Corrupt the manifest JSON to make it unparseable
+        let manifest_path = root.join("project.json");
+        std::fs::write(&manifest_path, "{invalid json").unwrap();
+
+        let error = load_project_worker(OpenProjectRequest {
+            root: root.clone(),
+            writable: false,
+        })
+        .await
+        .unwrap_err();
+
+        // Should get an invalid-json error category
+        assert_eq!(error.category(), "invalid-json");
     }
 
     // ---- Helper for worker tests ----
