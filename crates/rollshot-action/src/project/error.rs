@@ -12,6 +12,50 @@ pub enum ProjectErrorCategory {
     DestinationExists,
     UnsupportedAtomicCommit,
     RevisionConflict,
+    ZeroRevision,
+    EmptySteps,
+    EmptyFrames,
+    DuplicateFrameId,
+    DuplicateStepId,
+    NonContiguousOrder,
+    MissingKeyframe,
+    KeyframeNotNearby,
+    DuplicateNearbyId,
+    MissingNearbyFrame,
+    FrameDimensionMismatch,
+    ZeroCaptureRegion,
+    MissingExplanationAnnotation,
+    AnnotationValidationFailed,
+}
+
+impl ProjectErrorCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::InvalidJson => "invalid-json",
+            Self::UnsupportedSchema => "unsupported-schema",
+            Self::InvalidManifest => "invalid-manifest",
+            Self::InvalidAsset => "invalid-asset",
+            Self::Encode => "encode",
+            Self::DestinationExists => "destination-exists",
+            Self::UnsupportedAtomicCommit => "unsupported-atomic-commit",
+            Self::RevisionConflict => "revision-conflict",
+            Self::ZeroRevision => "zero-revision",
+            Self::EmptySteps => "empty-steps",
+            Self::EmptyFrames => "empty-frames",
+            Self::DuplicateFrameId => "duplicate-frame-id",
+            Self::DuplicateStepId => "duplicate-step-id",
+            Self::NonContiguousOrder => "non-contiguous-order",
+            Self::MissingKeyframe => "missing-keyframe",
+            Self::KeyframeNotNearby => "keyframe-not-nearby",
+            Self::DuplicateNearbyId => "duplicate-nearby-id",
+            Self::MissingNearbyFrame => "missing-nearby-frame",
+            Self::FrameDimensionMismatch => "frame-dimension-mismatch",
+            Self::ZeroCaptureRegion => "zero-capture-region",
+            Self::MissingExplanationAnnotation => "missing-explanation-annotation",
+            Self::AnnotationValidationFailed => "annotation-validation-failed",
+        }
+    }
 }
 
 impl std::fmt::Display for ProjectErrorCategory {
@@ -26,6 +70,20 @@ impl std::fmt::Display for ProjectErrorCategory {
             Self::DestinationExists => write!(f, "destination-exists"),
             Self::UnsupportedAtomicCommit => write!(f, "unsupported-atomic-commit"),
             Self::RevisionConflict => write!(f, "revision-conflict"),
+            Self::ZeroRevision => write!(f, "zero-revision"),
+            Self::EmptySteps => write!(f, "empty-steps"),
+            Self::EmptyFrames => write!(f, "empty-frames"),
+            Self::DuplicateFrameId => write!(f, "duplicate-frame-id"),
+            Self::DuplicateStepId => write!(f, "duplicate-step-id"),
+            Self::NonContiguousOrder => write!(f, "non-contiguous-order"),
+            Self::MissingKeyframe => write!(f, "missing-keyframe"),
+            Self::KeyframeNotNearby => write!(f, "keyframe-not-nearby"),
+            Self::DuplicateNearbyId => write!(f, "duplicate-nearby-id"),
+            Self::MissingNearbyFrame => write!(f, "missing-nearby-frame"),
+            Self::FrameDimensionMismatch => write!(f, "frame-dimension-mismatch"),
+            Self::ZeroCaptureRegion => write!(f, "zero-capture-region"),
+            Self::MissingExplanationAnnotation => write!(f, "missing-explanation-annotation"),
+            Self::AnnotationValidationFailed => write!(f, "annotation-validation-failed"),
         }
     }
 }
@@ -46,8 +104,8 @@ pub enum ProjectError {
         source: serde_json::Error,
     },
 
-    #[error("unsupported schema version {version} at {path}")]
-    UnsupportedSchema { path: PathBuf, version: u32 },
+    #[error("unsupported schema version {version}")]
+    UnsupportedSchema { path: Option<PathBuf>, version: u32 },
 
     #[error("invalid manifest ({category}) step={step_id:?} frame={frame_id:?}")]
     InvalidManifest {
@@ -77,17 +135,29 @@ pub enum ProjectError {
 
 impl ProjectError {
     /// Privacy-safe category for structured logging. Never includes paths.
-    pub fn category(&self) -> ProjectErrorCategory {
+    pub fn category(&self) -> &str {
         match self {
-            Self::Io { .. } => ProjectErrorCategory::Io,
-            Self::InvalidJson { .. } => ProjectErrorCategory::InvalidJson,
-            Self::UnsupportedSchema { .. } => ProjectErrorCategory::UnsupportedSchema,
-            Self::InvalidManifest { .. } => ProjectErrorCategory::InvalidManifest,
-            Self::InvalidAsset { .. } => ProjectErrorCategory::InvalidAsset,
-            Self::Encode { .. } => ProjectErrorCategory::Encode,
-            Self::DestinationExists { .. } => ProjectErrorCategory::DestinationExists,
-            Self::UnsupportedAtomicCommit { .. } => ProjectErrorCategory::UnsupportedAtomicCommit,
-            Self::RevisionConflict { .. } => ProjectErrorCategory::RevisionConflict,
+            Self::Io { .. } => "io",
+            Self::InvalidJson { .. } => "invalid-json",
+            Self::UnsupportedSchema { .. } => "unsupported-schema",
+            Self::InvalidManifest { category, .. } => category.as_str(),
+            Self::InvalidAsset { .. } => "invalid-asset",
+            Self::Encode { .. } => "encode",
+            Self::DestinationExists { .. } => "destination-exists",
+            Self::UnsupportedAtomicCommit { .. } => "unsupported-atomic-commit",
+            Self::RevisionConflict { .. } => "revision-conflict",
+        }
+    }
+
+    pub(crate) fn invalid_manifest(
+        category: ProjectErrorCategory,
+        step_id: Option<u64>,
+        frame_id: Option<u64>,
+    ) -> Self {
+        Self::InvalidManifest {
+            category,
+            step_id,
+            frame_id,
         }
     }
 }
