@@ -112,6 +112,17 @@ fn open_project_asset(root: &Path, sha256: &str) -> Result<std::fs::File, Projec
 }
 
 #[allow(dead_code)]
+fn read_asset_bytes(root: &Path, sha256: &str) -> Result<Vec<u8>, ProjectError> {
+    let mut file = open_project_asset(root, sha256)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(|e| ProjectError::Io {
+        path: asset_relative_path(sha256),
+        source: e,
+    })?;
+    Ok(buf)
+}
+
+#[allow(dead_code)]
 pub(crate) fn inspect_png_asset(
     root: &Path,
     sha256: &str,
@@ -271,7 +282,8 @@ pub(crate) fn materialize_asset(
             width,
             height,
         } => {
-            // Stream-verify digest and header
+            // Stream-verify digest and header, then read bytes from
+            // the same safe openat handle (no path reopening).
             let inspected = inspect_png_asset(&project_root, &sha256, width, height)?;
             if inspected.sha256 != sha256 {
                 return Err(ProjectError::InvalidAsset {
@@ -279,26 +291,15 @@ pub(crate) fn materialize_asset(
                     frame_id,
                 });
             }
-            // Read raw bytes for copying
-            let bytes = std::fs::read(
-                project_root
-                    .join("assets/frames")
-                    .join(format!("{sha256}.png")),
-            )
-            .map_err(|e| ProjectError::Io {
-                path: project_root
-                    .join("assets/frames")
-                    .join(format!("{sha256}.png")),
-                source: e,
-            })?;
+            let bytes = read_asset_bytes(&project_root, &sha256)?;
             (bytes, sha256, width, height)
         }
     };
 
     let final_path = frames_dir.join(format!("{sha256}.png"));
 
-    // If final path exists, verify and return
-    if final_path.exists() {
+    // If final path exists, verify and return (symlink_metadata to avoid following symlinks)
+    if std::fs::symlink_metadata(&final_path).is_ok() {
         let _ = inspect_png_asset(root, &sha256, width, height)?;
         return Ok(ProjectFrame {
             id: frame_id,
