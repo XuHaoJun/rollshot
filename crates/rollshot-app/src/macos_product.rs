@@ -505,11 +505,7 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                             return Task::none();
                         }
                     };
-                    let recording_tray = Some(
-                        crate::macos_recording_tray::Guard::start()
-                            .transpose()
-                            .unwrap_or(None),
-                    );
+                    let recording_tray = Some(crate::macos_recording_tray::Guard::start().ok());
                     product.phase = Phase::Capture(component);
                     product.recording_tray = recording_tray;
                     open_task
@@ -1541,7 +1537,7 @@ mod tests {
     #[cfg(feature = "action-guide")]
     mod action_guide_project_tests {
         use super::super::*;
-        use crate::action_guide_home::{self, ActionGuideHome, ActionGuideIntent};
+        use crate::action_guide_home::{self, ActionGuideHome};
         use crate::timeline_workspace;
         use image::{Rgba, RgbaImage};
         use rollshot_action::{ActionRecorder, CaptureRegion, DetectorConfig, StoreConfig};
@@ -1802,8 +1798,6 @@ mod tests {
 
         #[test]
         fn complete_action_recording_enters_timeline_with_save_first() {
-            use crate::action_guide_home::recent::RecentProjects;
-
             let recording = test_recording();
             let region = CaptureRegion {
                 x: 0,
@@ -1811,7 +1805,7 @@ mod tests {
                 width: 32,
                 height: 32,
             };
-            let mut product = product_in_capture_phase();
+            let mut product = super::product_in_capture_phase();
             let _task = complete_action_recording(
                 &mut product,
                 recording,
