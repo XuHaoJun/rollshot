@@ -1,6 +1,7 @@
 mod assets;
 mod error;
 mod model;
+mod store;
 mod validate;
 
 pub use error::{ProjectError, ProjectErrorCategory};
@@ -9,6 +10,7 @@ pub use model::{
     ProjectManifestV1, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
     SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
 };
+pub use store::{create_project, load_project, save_project, save_project_as};
 pub use validate::{validate_manifest_structure, validate_snapshot_structure};
 
 #[allow(unused_imports)]
