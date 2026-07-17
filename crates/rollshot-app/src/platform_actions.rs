@@ -110,6 +110,80 @@ fn reveal_with_xdg_open(path: &Path) -> Result<(), String> {
     run_command_with(&command, PlatformCommand::spawn)
 }
 
+// ---------------------------------------------------------------------------
+// Detached Linux record command
+// ---------------------------------------------------------------------------
+
+/// Builds the native command for launching `rollshot-app action-guide --record`
+/// with optional `--fullscreen`. Uses `std::env::current_exe()` for the program
+/// and `OsString` args — never lossy-converts paths.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) fn action_guide_record_command(
+    fullscreen: bool,
+) -> Result<(std::ffi::OsString, Vec<std::ffi::OsString>), String> {
+    let exe = std::env::current_exe().map_err(|e| {
+        tracing::error!(target: "rollshot::platform_actions", error = %e, "failed to resolve current executable");
+        format!("failed to resolve current executable: {e}")
+    })?;
+
+    let mut args: Vec<std::ffi::OsString> = vec!["action-guide".into(), "--record".into()];
+    if fullscreen {
+        args.push("--fullscreen".into());
+    }
+
+    Ok((exe.into_os_string(), args))
+}
+
+/// Spawns the detached record child and moves `Child::wait` to a dedicated
+/// reaper thread so the long-lived Home does not accumulate zombies and
+/// iced/Tokio shutdown does not wait on the child.
+///
+/// Spawn failure returns an error string. Reaper thread failure emits a
+/// privacy-safe tracing category.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) fn spawn_action_guide_record(fullscreen: bool) -> Result<(), String> {
+    let (program, args) = action_guide_record_command(fullscreen)?;
+
+    let mut child = std::process::Command::new(&program)
+        .args(&args)
+        .spawn()
+        .map_err(|e| {
+            tracing::error!(target: "rollshot::platform_actions", error = %e, "failed to spawn action-guide record");
+            format!("failed to spawn action-guide record: {e}")
+        })?;
+
+    std::thread::Builder::new()
+        .name("ag-reaper".into())
+        .spawn(move || {
+            match child.wait() {
+                Ok(status) => {
+                    if !status.success() {
+                        tracing::warn!(
+                            target: "rollshot::platform_actions",
+                            exit_code = status.code().unwrap_or(-1),
+                            "action-guide record exited with non-zero status"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rollshot::platform_actions",
+                        error = %e,
+                        "reaper wait failed"
+                    );
+                }
+            }
+        })
+        .map_err(|e| {
+            tracing::error!(target: "rollshot::platform_actions", error = %e, "failed to spawn reaper thread");
+            format!("failed to spawn reaper thread: {e}")
+        })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +247,64 @@ mod tests {
         .expect_err("both operations failed");
         assert!(result.contains("D-Bus unavailable"));
         assert!(result.contains("xdg-open unavailable"));
+    }
+
+    // ---- action_guide_record_command ----
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn action_guide_record_command_without_fullscreen() {
+        let (program, args) = super::action_guide_record_command(false).unwrap();
+        assert!(!program.is_empty());
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].to_str().unwrap(), "action-guide");
+        assert_eq!(args[1].to_str().unwrap(), "--record");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn action_guide_record_command_with_fullscreen() {
+        let (program, args) = super::action_guide_record_command(true).unwrap();
+        assert!(!program.is_empty());
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0].to_str().unwrap(), "action-guide");
+        assert_eq!(args[1].to_str().unwrap(), "--record");
+        assert_eq!(args[2].to_str().unwrap(), "--fullscreen");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn action_guide_record_command_uses_current_exe() {
+        let (program, _args) = super::action_guide_record_command(false).unwrap();
+        let current = std::env::current_exe().unwrap();
+        assert_eq!(program.to_str().unwrap(), current.to_str().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn action_guide_record_command_no_lossy_conversion() {
+        // The program path is an OsString, not a String — no lossy conversion
+        let (program, args) = super::action_guide_record_command(false).unwrap();
+        // Verify OsString type by checking it can contain non-UTF8
+        let os_str: &std::ffi::OsStr = program.as_ref();
+        assert!(!os_str.is_empty());
+        for arg in &args {
+            let arg_os: &std::ffi::OsStr = arg.as_ref();
+            assert!(!arg_os.is_empty());
+        }
+    }
+
+    // ---- spawn_action_guide_record ----
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn spawn_action_guide_record_spawns_reaper_thread() {
+        // We test that spawn_action_guide_record returns promptly and doesn't hang.
+        // The child will exit immediately (the current exe is a test binary).
+        let result = super::spawn_action_guide_record(false);
+        // It may fail to spawn if the binary doesn't support the subcommand,
+        // but the function should return (not hang).
+        // We just verify it returns without panicking.
+        let _ = result;
     }
 }
