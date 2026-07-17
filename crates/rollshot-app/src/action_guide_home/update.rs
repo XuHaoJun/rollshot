@@ -213,25 +213,6 @@ mod tests {
         (dir, ActionGuideHome::new(recent))
     }
 
-    fn setup_home_with_recent(
-        path: PathBuf,
-        name: &str,
-        available: bool,
-    ) -> (TempDir, ActionGuideHome) {
-        let dir = TempDir::new().unwrap();
-        let config_dir = dir.path().join("rollshot");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let mut recent = RecentProjects::load(&config_dir);
-        recent.record_open_at(path, name.into(), 1);
-        if !available {
-            // Force availability to false by refreshing against a nonexistent path
-            // (entries added above default to available=true, so we need to manipulate)
-            // Actually we need to make the path not exist. Let's just use a path that doesn't exist.
-            // For the test we'll handle this differently.
-        }
-        (dir, ActionGuideHome::new(recent))
-    }
-
     // ---- Record New ----
 
     #[test]
