@@ -28,13 +28,41 @@ mod visual_annotation_agent;
 #[cfg(feature = "action-guide")]
 pub(crate) mod project;
 
-pub use update::{subscription, update, Message};
+pub use update::{subscription, update, Message, Update};
 pub use view::view;
 
 use rollshot_action::{
     CaptureRegion, FrameId, FrameStore, Guide, GuideStep, InputCapability, InputSourceKind,
     Recording,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectSaveState {
+    Unsaved,
+    Clean,
+    Dirty,
+    Saving,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FirstSavePrompt {
+    Hidden,
+    Visible,
+    Picking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseIntent {
+    None,
+    Confirming,
+    SaveThenClose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Effect {
+    None,
+    CloseWorkspace,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IssuePackKind {
@@ -179,6 +207,49 @@ pub(crate) enum GuideExportState {
     Succeeded,
 }
 
+/// Coordinates lazy frame loading for project-backed workspaces.
+///
+/// Uses a generation token to skip stale loads and a semaphore to bound
+/// concurrent decodes to two.
+///
+/// ```text
+/// select step → clear old handles, compute required IDs
+///   → cache hit → use immediately
+///   → cache miss → advance generation, await semaphore permit
+///     → recheck generation before spawn_blocking
+///     → load_step_frame (decode PNG)
+///     → verify generation/selected-step
+///     → stale → drop silently
+///     → current → insert cache, build handle, hydrate annotations
+/// ```
+pub(crate) struct FrameLoadCoordinator {
+    generation: std::sync::atomic::AtomicU64,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    required_ids: Vec<rollshot_action::FrameId>,
+    loading_ids: std::collections::BTreeSet<rollshot_action::FrameId>,
+}
+
+impl FrameLoadCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            generation: std::sync::atomic::AtomicU64::new(0),
+            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            required_ids: Vec::new(),
+            loading_ids: std::collections::BTreeSet::new(),
+        }
+    }
+
+    pub(crate) fn advance_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+
+    pub(crate) fn current_generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// The Action Guide review/export workspace. Owns the editable guide and the
 /// frame store moved out of the finished `Recording`.
 pub struct TimelineWorkspace {
@@ -239,6 +310,17 @@ pub struct TimelineWorkspace {
     #[cfg(feature = "action-guide")]
     #[allow(dead_code)]
     pub(crate) enabled_outputs: rollshot_action::project::EnabledOutputs,
+    #[cfg(feature = "action-guide")]
+    pub(crate) save_state: ProjectSaveState,
+    #[cfg(feature = "action-guide")]
+    pub(crate) first_save_prompt: FirstSavePrompt,
+    #[cfg(feature = "action-guide")]
+    pub(crate) close_intent: CloseIntent,
+    #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
+    pub(crate) frame_coordinator: FrameLoadCoordinator,
+    #[cfg(feature = "action-guide")]
+    pub(crate) last_save_error: Option<String>,
 }
 
 impl TimelineWorkspace {
@@ -285,6 +367,16 @@ impl TimelineWorkspace {
             project_session: None,
             #[cfg(feature = "action-guide")]
             enabled_outputs: Default::default(),
+            #[cfg(feature = "action-guide")]
+            save_state: ProjectSaveState::Unsaved,
+            #[cfg(feature = "action-guide")]
+            first_save_prompt: FirstSavePrompt::Visible,
+            #[cfg(feature = "action-guide")]
+            close_intent: CloseIntent::None,
+            #[cfg(feature = "action-guide")]
+            frame_coordinator: FrameLoadCoordinator::new(),
+            #[cfg(feature = "action-guide")]
+            last_save_error: None,
         };
         ws.rebuild_selection_handles();
         ws
@@ -322,6 +414,30 @@ impl TimelineWorkspace {
                 let handle = build_handle(&frame.image);
                 self.strip.push(StripFrame { id, handle });
             }
+        }
+    }
+
+    /// Returns `true` when the workspace is in a state that allows persisted
+    /// mutations. Draft selection/tool/modal changes are NOT gated by this.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn can_mutate(&self) -> bool {
+        match &self.project_session {
+            Some(project::ProjectSession::Saved {
+                access: project::ProjectAccess::ReadOnly
+                | project::ProjectAccess::CorruptReadOnly,
+                ..
+            }) => false,
+            _ => true,
+        }
+    }
+
+    /// Mark the project dirty after a successful persisted mutation.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn mark_project_dirty(&mut self) {
+        if self.save_state == ProjectSaveState::Clean
+            || self.save_state == ProjectSaveState::Saving
+        {
+            self.save_state = ProjectSaveState::Dirty;
         }
     }
 }
@@ -380,7 +496,15 @@ pub fn run(
         )
     };
 
-    iced::application(boot, update, view)
+    fn update_task(state: &mut TimelineWorkspace, message: Message) -> iced::Task<Message> {
+        let result = update(state, message);
+        match result.effect {
+            Effect::CloseWorkspace => iced::exit(),
+            Effect::None => result.task,
+        }
+    }
+
+    iced::application(boot, update_task, view)
         .title("Rollshot — Action Guide")
         .font(rollshot_image_document::style::FONT_REGULAR_BYTES)
         .font(rollshot_image_document::style::FONT_BOLD_BYTES)
@@ -665,5 +789,316 @@ mod tests {
         );
         // Whether or not the handler succeeds (depends on provider config),
         // it must never touch the visual annotation consent state.
+    }
+
+    // ---- Project lifecycle tests (Task 6) ----
+
+    #[cfg(feature = "action-guide")]
+    mod project_lifecycle {
+        use super::super::*;
+        use super::recording_from_frames;
+        use crate::timeline_workspace::project::ProjectAccess;
+        use crate::timeline_workspace::update::Message;
+
+        fn workspace(recording: Recording) -> TimelineWorkspace {
+            super::workspace(recording)
+        }
+
+        fn ws_project_backed() -> TimelineWorkspace {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{
+                CandidateKind, DetectReason, InputCapability, InputSourceKind,
+            };
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 1,
+                title: "Test Guide".into(),
+                capture_region: super::region_32(),
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1, 2, 3],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok")
+        }
+
+        fn ws_project_backed_read_only() -> TimelineWorkspace {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{
+                CandidateKind, DetectReason, InputCapability, InputSourceKind,
+            };
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 1,
+                title: "Test Guide".into(),
+                capture_region: super::region_32(),
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1, 2, 3],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::ReadOnly,
+            )
+            .expect("ok")
+        }
+
+        #[test]
+        fn fresh_recording_starts_with_save_first_prompt_visible() {
+            let ws = workspace(recording_from_frames());
+            assert!(ws.project_session.is_none());
+            assert_eq!(ws.save_state, ProjectSaveState::Unsaved);
+            assert_eq!(ws.first_save_prompt, FirstSavePrompt::Visible);
+        }
+
+        #[test]
+        fn save_later_hides_prompt_and_keeps_unsaved() {
+            let mut ws = workspace(recording_from_frames());
+            ws.first_save_prompt = FirstSavePrompt::Visible;
+            ws.save_state = ProjectSaveState::Unsaved;
+
+            let _ = super::super::update::update(&mut ws, Message::SaveLater);
+
+            assert_eq!(ws.first_save_prompt, FirstSavePrompt::Hidden);
+            assert_eq!(ws.save_state, ProjectSaveState::Unsaved);
+        }
+
+        #[test]
+        fn project_backed_workspace_starts_clean_with_hidden_prompt() {
+            let ws = ws_project_backed();
+            assert!(ws.project_session.is_some());
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+            assert_eq!(ws.first_save_prompt, FirstSavePrompt::Hidden);
+        }
+
+        #[test]
+        fn title_change_marks_dirty_when_project_is_clean() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::TitleChanged("New Title".into()),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn caption_change_marks_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::CaptionChanged("New caption".into()),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn read_only_workspace_cannot_mutate() {
+            let ws = ws_project_backed_read_only();
+            assert!(!ws.can_mutate());
+        }
+
+        #[test]
+        fn close_workspace_emits_close_workspace_effect() {
+            let mut ws = workspace(recording_from_frames());
+            ws.pending_discard = true;
+
+            let result = super::super::update::update(&mut ws, Message::CloseSaveAndClose);
+
+            assert_eq!(result.effect, Effect::CloseWorkspace);
+            assert!(!ws.pending_discard);
+        }
+
+        #[test]
+        fn close_discard_emits_close_workspace_effect() {
+            let mut ws = workspace(recording_from_frames());
+            ws.pending_discard = true;
+
+            let result = super::super::update::update(&mut ws, Message::CloseDiscard);
+
+            assert_eq!(result.effect, Effect::CloseWorkspace);
+            assert!(!ws.pending_discard);
+        }
+
+        #[test]
+        fn close_cancel_returns_to_workspace() {
+            let mut ws = workspace(recording_from_frames());
+            ws.pending_discard = true;
+
+            let result = super::super::update::update(&mut ws, Message::CloseCancel);
+
+            assert_eq!(result.effect, Effect::None);
+            assert!(!ws.pending_discard);
+        }
+
+        #[test]
+        fn delete_step_is_noop_when_read_only() {
+            let mut ws = ws_project_backed_read_only();
+            assert!(!ws.can_mutate());
+            let step_count_before = ws.guide.steps().len();
+
+            let _ = super::super::update::update(&mut ws, Message::DeleteStep);
+
+            assert_eq!(ws.guide.steps().len(), step_count_before);
+        }
+
+        #[test]
+        fn delete_step_marks_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(&mut ws, Message::DeleteStep);
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn replace_keyframe_marks_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+            let step = ws.selected_step().cloned().unwrap();
+            let replacement = *step.nearby.iter().find(|&&f| f != step.keyframe).unwrap();
+
+            let _ = super::super::update::update(&mut ws, Message::ReplaceKeyframe(replacement));
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn guide_title_change_marks_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::GuideTitleChanged("New Guide Title".into()),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn read_only_rejects_title_change() {
+            let mut ws = ws_project_backed_read_only();
+            let title_before = ws.guide.steps()[0].title.clone();
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::TitleChanged("Should Not Apply".into()),
+            );
+
+            assert_eq!(ws.guide.steps()[0].title, title_before);
+        }
+
+        #[test]
+        fn read_only_rejects_caption_change() {
+            let mut ws = ws_project_backed_read_only();
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::CaptionChanged("Should Not Apply".into()),
+            );
+
+            assert_eq!(ws.guide.steps()[0].caption, "");
+        }
+
+        #[test]
+        fn read_only_rejects_replace_keyframe() {
+            let mut ws = ws_project_backed_read_only();
+            let step = ws.selected_step().cloned().unwrap();
+            let replacement = *step.nearby.iter().find(|&&f| f != step.keyframe).unwrap();
+            let keyframe_before = ws.selected_step().unwrap().keyframe;
+
+            let _ = super::super::update::update(&mut ws, Message::ReplaceKeyframe(replacement));
+
+            assert_eq!(ws.selected_step().unwrap().keyframe, keyframe_before);
+        }
+
+        #[test]
+        fn read_only_rejects_guide_title_change() {
+            let mut ws = ws_project_backed_read_only();
+            let title_before = ws.guide.title().to_string();
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::GuideTitleChanged("Should Not Apply".into()),
+            );
+
+            assert_eq!(ws.guide.title(), title_before);
+        }
+
+        #[test]
+        fn select_step_does_not_mark_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(&mut ws, Message::SelectStep(1));
+
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+        }
+
+        #[test]
+        fn annotation_tool_change_does_not_mark_dirty() {
+            use crate::timeline_workspace::annotation::AnnotationTool;
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(&mut ws, Message::AnnotateStepRequested);
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::AnnotationToolChanged(AnnotationTool::Text),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+        }
     }
 }

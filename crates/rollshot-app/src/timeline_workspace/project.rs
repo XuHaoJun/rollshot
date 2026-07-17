@@ -21,6 +21,15 @@ pub struct ProjectWriterGuard {
     _file: File,
 }
 
+impl ProjectWriterGuard {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            _file: tempfile::tempfile().unwrap(),
+        }
+    }
+}
+
 impl std::fmt::Debug for ProjectWriterGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectWriterGuard").finish()
@@ -389,6 +398,11 @@ pub(crate) fn from_loaded_project(
             access,
         }),
         enabled_outputs: manifest.enabled_outputs,
+        save_state: super::ProjectSaveState::Clean,
+        first_save_prompt: super::FirstSavePrompt::Hidden,
+        close_intent: super::CloseIntent::None,
+        frame_coordinator: super::FrameLoadCoordinator::new(),
+        last_save_error: None,
     };
 
     ws.rebuild_selection_handles();
