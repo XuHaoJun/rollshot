@@ -44,6 +44,13 @@ impl RecentProjects {
         }
     }
 
+    pub fn empty() -> Self {
+        Self {
+            dir: std::path::PathBuf::new(),
+            entries: Vec::new(),
+        }
+    }
+
     pub fn entries(&self) -> &[RecentEntry] {
         &self.entries
     }

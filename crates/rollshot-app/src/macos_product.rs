@@ -35,6 +35,8 @@ use rollshot_capture::{CaptureScope, Workflow};
 use rollshot_iced_overlay::macos_capture::{Component, HostEffect};
 use rollshot_iced_overlay::{CaptureResult, OverlayConfig};
 
+#[cfg(feature = "action-guide")]
+use crate::action_guide_home::{self, ActionGuideHome, ActionGuideIntent, SelectedDirectoryKind};
 use crate::diagnostics::TARGET_APP;
 use crate::macos_native_drag::{self, NativeDragResult};
 use crate::macos_thumbnail::{self, release_action, ThumbnailAction, ThumbnailState};
@@ -78,6 +80,24 @@ pub enum Message {
     Timeline(timeline_workspace::Message),
     #[cfg(feature = "action-guide")]
     RecordingTray(crate::macos_recording_tray::Event),
+    /// Action Guide Home screen message.
+    #[cfg(feature = "action-guide")]
+    HomeMsg(action_guide_home::Message),
+    /// Async inspection of a directory completed.
+    #[cfg(feature = "action-guide")]
+    SelectionInspected {
+        path: std::path::PathBuf,
+        kind: SelectedDirectoryKind,
+    },
+    /// Async project open completed.
+    #[cfg(feature = "action-guide")]
+    ProjectOpened(ProjectOpenResult),
+    /// User chose "Open Read-Only" in the lock-conflict dialog.
+    #[cfg(feature = "action-guide")]
+    OpenReadOnly,
+    /// User chose "Cancel" in the lock-conflict dialog.
+    #[cfg(feature = "action-guide")]
+    CancelLockedOpen,
     /// Thumbnail pressed (button down).
     ThumbnailPressed,
     /// Thumbnail released (button up): click vs. native-drag decision.
@@ -105,9 +125,23 @@ pub enum Message {
     },
 }
 
+#[cfg(feature = "action-guide")]
+#[derive(Debug, Clone)]
+pub(crate) enum ProjectOpenResult {
+    Workspace(Box<TimelineWorkspace>),
+    WriterLocked { path: std::path::PathBuf },
+    Error(String),
+}
+
 /// The current phase of the product daemon.
 #[allow(clippy::large_enum_variant)]
 pub enum Phase {
+    #[cfg(feature = "action-guide")]
+    Home(ActionGuideHome),
+    #[cfg(feature = "action-guide")]
+    Opening(ActionGuideHome),
+    #[cfg(feature = "action-guide")]
+    LockConflict(ActionGuideHome),
     Capture(Component),
     Thumbnail(ThumbnailState),
     Workspace(ResultWorkspace),
@@ -129,6 +163,8 @@ pub struct MacosProduct {
     thumbnail_cursor: Point,
     #[cfg(feature = "action-guide")]
     recording_tray: Option<crate::macos_recording_tray::Guard>,
+    #[cfg(feature = "action-guide")]
+    lock_conflict_path: Option<std::path::PathBuf>,
 }
 
 impl MacosProduct {
@@ -189,6 +225,8 @@ impl MacosProduct {
                         thumbnail_cursor: Point::ORIGIN,
                         #[cfg(feature = "action-guide")]
                         recording_tray,
+                        #[cfg(feature = "action-guide")]
+                        lock_conflict_path: None,
                     },
                     open_task,
                 )))
@@ -234,6 +272,8 @@ impl MacosProduct {
             thumbnail_cursor: Point::ORIGIN,
             #[cfg(feature = "action-guide")]
             recording_tray: None,
+            #[cfg(feature = "action-guide")]
+            lock_conflict_path: None,
         }
     }
 
@@ -266,6 +306,23 @@ impl MacosProduct {
             Phase::Workspace(ws) => Some(ws),
             _ => None,
         }
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub fn new_action_guide(
+        recent: crate::action_guide_home::recent::RecentProjects,
+    ) -> (Self, Task<Message>) {
+        let product = MacosProduct {
+            phase: Phase::Home(ActionGuideHome::new(recent)),
+            purpose: CapturePurpose::Present,
+            document: None,
+            thumbnail_window: None,
+            workspace_window: None,
+            thumbnail_cursor: Point::ORIGIN,
+            recording_tray: None,
+            lock_conflict_path: None,
+        };
+        (product, Task::none())
     }
 }
 
@@ -366,7 +423,18 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             let Phase::Timeline(workspace) = &mut product.phase else {
                 return Task::none();
             };
-            timeline_workspace::update(workspace, msg).map(Message::Timeline)
+            let result = timeline_workspace::update(workspace, msg);
+            match result.effect {
+                timeline_workspace::Effect::None => result.task.map(Message::Timeline),
+                timeline_workspace::Effect::CloseWorkspace => {
+                    let mut close_tasks = Vec::new();
+                    if let Some(id) = product.workspace_window.take() {
+                        close_tasks.push(window::close(id));
+                    }
+                    product.phase = Phase::Home(ActionGuideHome::new_empty());
+                    Task::batch(close_tasks)
+                }
+            }
         }
         #[cfg(feature = "action-guide")]
         Message::RecordingTray(event) => {
@@ -378,6 +446,185 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 crate::macos_recording_tray::Event::Cancel => component.cancel_action_recording(),
             };
             apply_capture_host_effect(product, effect)
+        }
+        #[cfg(feature = "action-guide")]
+        Message::HomeMsg(home_msg) => {
+            let Phase::Home(ref mut home) = &mut product.phase else {
+                return Task::none();
+            };
+            let result = home.update(home_msg);
+            match result.effect {
+                action_guide_home::Effect::None => result.task.map(Message::HomeMsg),
+                action_guide_home::Effect::PickProject => result.task.map(Message::HomeMsg),
+                action_guide_home::Effect::InspectSelection(path) => {
+                    let Phase::Home(home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::Opening(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    product.phase = Phase::Opening(home);
+                    Task::perform(inspect_and_open(path), |msg| msg)
+                }
+                action_guide_home::Effect::RecordNew => {
+                    let config = OverlayConfig {
+                        backend: "auto".to_string(),
+                        fps: 5,
+                        show_cursor: false,
+                        request: rollshot_capture::CaptureRequest::action_guide_fullscreen(),
+                        target_output_name: None,
+                    };
+                    let action_input_source = Some(crate::action_input::create_input_source());
+                    let component = match Component::new(&config, action_input_source)
+                        .map_err(|error| error.to_string())
+                    {
+                        Ok(Some(c)) => c,
+                        Ok(None) => return Task::none(),
+                        Err(error) => {
+                            tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
+                            return Task::none();
+                        }
+                    };
+                    let (component, open_task) = match open_capture_window(component, &config) {
+                        Ok(pair) => pair,
+                        Err(error) => {
+                            tracing::error!(target: TARGET_APP, %error, "action guide capture window failed");
+                            return Task::none();
+                        }
+                    };
+                    let recording_tray = Some(
+                        crate::macos_recording_tray::Guard::start()
+                            .transpose()
+                            .unwrap_or(None),
+                    );
+                    product.phase = Phase::Capture(component);
+                    product.recording_tray = recording_tray;
+                    open_task
+                }
+                action_guide_home::Effect::OpenProject(path) => {
+                    let Phase::Home(home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::Opening(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    product.phase = Phase::Opening(home);
+                    Task::perform(open_project_task(path, true), |msg| msg)
+                }
+                action_guide_home::Effect::OpenLegacyReader(_path) => {
+                    if let Phase::Home(ref mut home) = &mut product.phase {
+                        home.message = Some(
+                            "Legacy readers are not yet supported in the integrated host.".into(),
+                        );
+                    }
+                    Task::none()
+                }
+            }
+        }
+        #[cfg(feature = "action-guide")]
+        Message::SelectionInspected { path: _, kind } => {
+            let Phase::Opening(ref mut home) = &mut product.phase else {
+                return Task::none();
+            };
+            match kind {
+                SelectedDirectoryKind::Project(project_path) => {
+                    Task::perform(open_project_task(project_path, true), |msg| msg)
+                }
+                SelectedDirectoryKind::LegacyReader(_reader_path) => {
+                    home.message =
+                        Some("Legacy readers are not yet supported in the integrated host.".into());
+                    let Phase::Opening(home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::Home(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    product.phase = Phase::Home(home);
+                    Task::none()
+                }
+                SelectedDirectoryKind::Invalid => {
+                    home.message = Some("Selected path is not a valid project".into());
+                    let Phase::Opening(home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::Home(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    product.phase = Phase::Home(home);
+                    Task::none()
+                }
+            }
+        }
+        #[cfg(feature = "action-guide")]
+        Message::ProjectOpened(result) => {
+            if !matches!(product.phase, Phase::Opening(_)) {
+                return Task::none();
+            }
+            match result {
+                ProjectOpenResult::Workspace(ws) => {
+                    product.phase = Phase::Timeline(*ws);
+                    let (id, open) = window::open(workspace_window_settings());
+                    product.workspace_window = Some(id);
+                    open.map(Message::WorkspaceWindowReady)
+                }
+                ProjectOpenResult::WriterLocked { path } => {
+                    let Phase::Opening(home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::LockConflict(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    product.lock_conflict_path = Some(path);
+                    product.phase = Phase::LockConflict(home);
+                    Task::none()
+                }
+                ProjectOpenResult::Error(error) => {
+                    if let Phase::Opening(ref mut home) = &mut product.phase {
+                        home.message = Some(error);
+                    }
+                    let Phase::Opening(home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::Home(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    product.phase = Phase::Home(home);
+                    Task::none()
+                }
+            }
+        }
+        #[cfg(feature = "action-guide")]
+        Message::OpenReadOnly => {
+            let Some(path) = product.lock_conflict_path.take() else {
+                let Phase::LockConflict(home) = std::mem::replace(
+                    &mut product.phase,
+                    Phase::Home(ActionGuideHome::new_empty()),
+                ) else {
+                    unreachable!();
+                };
+                product.phase = Phase::Home(home);
+                return Task::none();
+            };
+            let Phase::LockConflict(home) = std::mem::replace(
+                &mut product.phase,
+                Phase::Opening(ActionGuideHome::new_empty()),
+            ) else {
+                unreachable!();
+            };
+            product.phase = Phase::Opening(home);
+            Task::perform(open_project_task(path, false), |msg| msg)
+        }
+        #[cfg(feature = "action-guide")]
+        Message::CancelLockedOpen => {
+            product.lock_conflict_path = None;
+            let Phase::LockConflict(home) = std::mem::replace(
+                &mut product.phase,
+                Phase::Home(ActionGuideHome::new_empty()),
+            ) else {
+                unreachable!();
+            };
+            product.phase = Phase::Home(home);
+            Task::none()
         }
         Message::ThumbnailCursorMoved(position) => {
             product.thumbnail_cursor = position;
@@ -655,6 +902,8 @@ fn open_presentation_window(product: &mut MacosProduct) -> Task<Message> {
             open.map(Message::WorkspaceWindowReady)
         }
         Phase::Capture(_) => Task::none(),
+        #[cfg(feature = "action-guide")]
+        Phase::Home(_) | Phase::Opening(_) | Phase::LockConflict(_) => Task::none(),
     }
 }
 
@@ -715,6 +964,12 @@ fn poll_native_drag(product: &MacosProduct) -> Option<NativeDragResult> {
 
 fn view(product: &MacosProduct, window: window::Id) -> Element<'_, Message> {
     match &product.phase {
+        #[cfg(feature = "action-guide")]
+        Phase::Home(home) => action_guide_home::view::view(home).map(Message::HomeMsg),
+        #[cfg(feature = "action-guide")]
+        Phase::Opening(home) => action_guide_home::view::view(home).map(Message::HomeMsg),
+        #[cfg(feature = "action-guide")]
+        Phase::LockConflict(_) => lock_conflict_view(),
         Phase::Capture(component) if component.owns_window(window) => {
             component.view(window).map(Message::Capture)
         }
@@ -730,6 +985,10 @@ fn view(product: &MacosProduct, window: window::Id) -> Element<'_, Message> {
 
 fn subscription(product: &MacosProduct) -> iced::Subscription<Message> {
     let phase = match &product.phase {
+        #[cfg(feature = "action-guide")]
+        Phase::Home(_) | Phase::Opening(_) | Phase::LockConflict(_) => {
+            action_guide_home::update::subscription().map(Message::HomeMsg)
+        }
         Phase::Capture(component) => component.subscription().map(Message::Capture),
         Phase::Thumbnail(_) => {
             let tick = iced::time::every(std::time::Duration::from_millis(250))
@@ -759,6 +1018,35 @@ fn subscription(product: &MacosProduct) -> iced::Subscription<Message> {
         ]);
     }
     phase
+}
+
+#[cfg(feature = "action-guide")]
+fn lock_conflict_view<'a>() -> Element<'a, Message> {
+    use iced::widget::{button, column, container, row, text};
+
+    let body = column![
+        text("Project is open in another window").size(18),
+        text("The project is currently locked by another process.").size(14),
+        row![
+            button(text("Open Read-Only").size(14))
+                .on_press(Message::OpenReadOnly)
+                .padding([8, 16]),
+            button(text("Cancel").size(14))
+                .on_press(Message::CancelLockedOpen)
+                .padding([8, 16]),
+        ]
+        .spacing(12),
+    ]
+    .spacing(12)
+    .padding(24)
+    .align_x(iced::Alignment::Center);
+
+    container(body)
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+        .center_x(iced::Length::Fill)
+        .center_y(iced::Length::Fill)
+        .into()
 }
 
 fn theme(product: &MacosProduct, window: window::Id) -> iced::Theme {
@@ -812,6 +1100,139 @@ pub fn run(config: OverlayConfig, purpose: CapturePurpose) -> Result<(), String>
     .map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "action-guide")]
+async fn inspect_and_open(path: std::path::PathBuf) -> Message {
+    let kind = tokio::task::spawn_blocking(move || {
+        action_guide_home::update::inspect_selection_shape(&path)
+    })
+    .await
+    .unwrap_or(SelectedDirectoryKind::Invalid);
+    Message::SelectionInspected {
+        path: kind_path(&kind),
+        kind,
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn kind_path(kind: &SelectedDirectoryKind) -> std::path::PathBuf {
+    match kind {
+        SelectedDirectoryKind::Project(p) | SelectedDirectoryKind::LegacyReader(p) => p.clone(),
+        SelectedDirectoryKind::Invalid => std::path::PathBuf::new(),
+    }
+}
+
+#[cfg(feature = "action-guide")]
+async fn open_project_task(path: std::path::PathBuf, writable: bool) -> Message {
+    let result = open_project_inner(path, writable).await;
+    Message::ProjectOpened(result)
+}
+
+#[cfg(feature = "action-guide")]
+async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> ProjectOpenResult {
+    let request = crate::timeline_workspace::project::OpenProjectRequest {
+        root: path,
+        writable,
+    };
+    let result = match crate::timeline_workspace::project::load_project_worker(request).await {
+        Ok(r) => r,
+        Err(e) => return ProjectOpenResult::Error(e.message_for_ui()),
+    };
+    match result {
+        crate::timeline_workspace::project::OpenProjectWorkerResult::Opened(opened) => {
+            match crate::timeline_workspace::project::from_loaded_project(
+                opened.loaded,
+                opened.access,
+            ) {
+                Ok(ws) => ProjectOpenResult::Workspace(Box::new(ws)),
+                Err(e) => ProjectOpenResult::Error(format!("Failed to build workspace: {e:?}")),
+            }
+        }
+        crate::timeline_workspace::project::OpenProjectWorkerResult::WriterLocked { root } => {
+            ProjectOpenResult::WriterLocked { path: root }
+        }
+    }
+}
+
+/// Start the Action Guide product daemon on macOS with the Home phase.
+#[cfg(feature = "action-guide")]
+pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
+    use std::sync::Mutex;
+
+    let config_dir =
+        crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
+    let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
+
+    let boot_data = Arc::new(Mutex::new(Some((initial, recent))));
+    let boot = move || {
+        let (boot_initial, recent) = boot_data
+            .lock()
+            .unwrap()
+            .take()
+            .expect("boot data already consumed");
+        let (mut product, base_task) = MacosProduct::new_action_guide(recent);
+        let mut tasks = vec![base_task];
+
+        match boot_initial {
+            ActionGuideIntent::Home => {}
+            ActionGuideIntent::Record { fullscreen: _ } => {
+                // Record New from the Home phase is handled through the Home
+                // message loop; here we just boot to Home.
+            }
+            ActionGuideIntent::Open { path: Some(path) } => {
+                let Phase::Home(home) = std::mem::replace(
+                    &mut product.phase,
+                    Phase::Opening(ActionGuideHome::new_empty()),
+                ) else {
+                    unreachable!();
+                };
+                product.phase = Phase::Opening(home);
+                tasks.push(Task::perform(inspect_and_open(path), |msg| msg));
+            }
+            ActionGuideIntent::Open { path: None } => {
+                if let Phase::Home(ref mut home) = &mut product.phase {
+                    home.opening = true;
+                }
+                tasks.push(Task::perform(pick_project_folder(), Message::HomeMsg));
+            }
+        }
+
+        (product, Task::batch(tasks))
+    };
+
+    iced::daemon(boot, update, view)
+        .title(action_guide_title)
+        .subscription(subscription)
+        .font(rollshot_image_document::style::FONT_REGULAR_BYTES)
+        .font(rollshot_image_document::style::FONT_BOLD_BYTES)
+        .theme(theme)
+        .style(style)
+        .run()
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "action-guide")]
+fn action_guide_title(product: &MacosProduct, _window: window::Id) -> String {
+    match &product.phase {
+        Phase::Home(_) | Phase::Opening(_) | Phase::LockConflict(_) => {
+            "Rollshot — Action Guide".to_string()
+        }
+        Phase::Timeline(_) => "Rollshot — Timeline".to_string(),
+        _ => String::new(),
+    }
+}
+
+#[cfg(feature = "action-guide")]
+async fn pick_project_folder() -> action_guide_home::Message {
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("Open Action Guide Project")
+        .pick_folder()
+        .await;
+    match folder {
+        Some(handle) => action_guide_home::Message::RecentSelected(handle.path().to_path_buf()),
+        None => action_guide_home::Message::PickerCancelled,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,6 +1270,8 @@ mod tests {
             thumbnail_cursor: Point::ORIGIN,
             #[cfg(feature = "action-guide")]
             recording_tray: None,
+            #[cfg(feature = "action-guide")]
+            lock_conflict_path: None,
         }
     }
 
@@ -867,6 +1290,8 @@ mod tests {
             thumbnail_cursor: Point::ORIGIN,
             #[cfg(feature = "action-guide")]
             recording_tray: None,
+            #[cfg(feature = "action-guide")]
+            lock_conflict_path: None,
         }
     }
 
@@ -1093,5 +1518,291 @@ mod tests {
         );
         // graphical_feedback=true should not panic; NoopFeedback absorbs the call.
         assert!(matches!(product.phase, Phase::Capture(_)));
+    }
+
+    // ---- Action Guide phase tests (Task 8) ----
+
+    #[cfg(feature = "action-guide")]
+    mod action_guide_project_tests {
+        use super::super::*;
+        use crate::action_guide_home::{self, ActionGuideHome, ActionGuideIntent};
+        use crate::timeline_workspace;
+        use image::{Rgba, RgbaImage};
+        use rollshot_action::{ActionRecorder, CaptureRegion, DetectorConfig, StoreConfig};
+        use std::path::PathBuf;
+
+        fn test_recording() -> rollshot_action::Recording {
+            let region = CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            };
+            let det = DetectorConfig {
+                diff_threshold: 0.01,
+                area_threshold: 0.05,
+                cooldown_ms: 0,
+                ..DetectorConfig::default()
+            };
+            let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
+            rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+            for i in 1..=6 {
+                let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
+                for y in 0..16 {
+                    for x in 0..16 {
+                        img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                    }
+                }
+                rec.ingest_frame(img, i * 100);
+            }
+            rec.finish()
+        }
+
+        fn test_timeline() -> TimelineWorkspace {
+            TimelineWorkspace::new(
+                test_recording(),
+                CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                rollshot_action::InputCapability::SemanticEvents,
+                rollshot_action::InputSourceKind::MacosCgEvent,
+            )
+        }
+
+        fn product_in_home_phase() -> MacosProduct {
+            let (product, _task) = MacosProduct::new_action_guide(
+                crate::action_guide_home::recent::RecentProjects::empty(),
+            );
+            product
+        }
+
+        #[test]
+        fn home_launch_starts_in_home_phase() {
+            let product = product_in_home_phase();
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn record_new_enters_capture_phase() {
+            let mut product = product_in_home_phase();
+            let task = update(
+                &mut product,
+                Message::HomeMsg(action_guide_home::Message::RecordNew),
+            );
+            // RecordNew transitions to Capture phase (if Component::new succeeds under test).
+            // Under cfg(test), Component::new uses a test factory; we verify the phase transition.
+            assert!(
+                matches!(product.phase, Phase::Capture(_)),
+                "RecordNew should transition to Capture phase"
+            );
+            drop(task);
+        }
+
+        #[test]
+        fn open_picker_stays_in_home_phase() {
+            let mut product = product_in_home_phase();
+            let _task = update(
+                &mut product,
+                Message::HomeMsg(action_guide_home::Message::OpenPicker),
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn home_inspect_selection_enters_opening_phase() {
+            let mut product = product_in_home_phase();
+            let task = update(
+                &mut product,
+                Message::HomeMsg(action_guide_home::Message::RecentSelected(PathBuf::from(
+                    "/some/path",
+                ))),
+            );
+            assert!(matches!(product.phase, Phase::Opening(_)));
+            assert!(task.units() > 0, "should return inspect task");
+        }
+
+        #[test]
+        fn inspection_project_stays_in_opening() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Opening(ActionGuideHome::new_empty());
+            let task = update(
+                &mut product,
+                Message::SelectionInspected {
+                    path: PathBuf::from("/some/project"),
+                    kind: SelectedDirectoryKind::Project(PathBuf::from("/some/project")),
+                },
+            );
+            assert!(matches!(product.phase, Phase::Opening(_)));
+            assert!(task.units() > 0, "should return open task");
+        }
+
+        #[test]
+        fn inspection_invalid_returns_to_home() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Opening(ActionGuideHome::new_empty());
+            let _task = update(
+                &mut product,
+                Message::SelectionInspected {
+                    path: PathBuf::from("/invalid"),
+                    kind: SelectedDirectoryKind::Invalid,
+                },
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn inspection_legacy_reader_returns_to_home() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Opening(ActionGuideHome::new_empty());
+            let _task = update(
+                &mut product,
+                Message::SelectionInspected {
+                    path: PathBuf::from("/legacy"),
+                    kind: SelectedDirectoryKind::LegacyReader(PathBuf::from("/legacy")),
+                },
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn project_opened_workspace_enters_timeline_phase() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Opening(ActionGuideHome::new_empty());
+            let ws = test_timeline();
+            let task = update(
+                &mut product,
+                Message::ProjectOpened(ProjectOpenResult::Workspace(Box::new(ws))),
+            );
+            assert!(matches!(product.phase, Phase::Timeline(_)));
+            assert!(task.units() > 0, "should open workspace window");
+        }
+
+        #[test]
+        fn writer_locked_enters_lock_conflict_phase() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Opening(ActionGuideHome::new_empty());
+            let _task = update(
+                &mut product,
+                Message::ProjectOpened(ProjectOpenResult::WriterLocked {
+                    path: PathBuf::from("/locked/project"),
+                }),
+            );
+            assert!(matches!(product.phase, Phase::LockConflict(_)));
+            assert!(product.lock_conflict_path.is_some());
+        }
+
+        #[test]
+        fn open_read_only_from_lock_conflict() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::LockConflict(ActionGuideHome::new_empty());
+            product.lock_conflict_path = Some(PathBuf::from("/locked/project"));
+            let task = update(&mut product, Message::OpenReadOnly);
+            assert!(matches!(product.phase, Phase::Opening(_)));
+            assert!(product.lock_conflict_path.is_none());
+            assert!(task.units() > 0, "should return open task");
+        }
+
+        #[test]
+        fn open_read_only_without_path_returns_home() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::LockConflict(ActionGuideHome::new_empty());
+            product.lock_conflict_path = None;
+            let _task = update(&mut product, Message::OpenReadOnly);
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn cancel_locked_open_returns_to_home() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::LockConflict(ActionGuideHome::new_empty());
+            product.lock_conflict_path = Some(PathBuf::from("/locked/project"));
+            let _task = update(&mut product, Message::CancelLockedOpen);
+            assert!(matches!(product.phase, Phase::Home(_)));
+            assert!(product.lock_conflict_path.is_none());
+        }
+
+        #[test]
+        fn timeline_close_workspace_returns_to_home() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Timeline(test_timeline());
+            let _task = update(
+                &mut product,
+                Message::Timeline(timeline_workspace::Message::ConfirmDiscard),
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn project_open_error_returns_to_home_with_message() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Opening(ActionGuideHome::new_empty());
+            let _task = update(
+                &mut product,
+                Message::ProjectOpened(ProjectOpenResult::Error("lock failed".into())),
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn home_message_ignored_when_not_in_home_phase() {
+            let mut product = product_in_home_phase();
+            product.phase = Phase::Timeline(test_timeline());
+            let task = update(
+                &mut product,
+                Message::HomeMsg(action_guide_home::Message::RecordNew),
+            );
+            assert!(matches!(product.phase, Phase::Timeline(_)));
+            assert!(task.units() == 0);
+        }
+
+        #[test]
+        fn project_opened_ignored_when_not_opening() {
+            let mut product = product_in_home_phase();
+            let ws = test_timeline();
+            let task = update(
+                &mut product,
+                Message::ProjectOpened(ProjectOpenResult::Workspace(Box::new(ws))),
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+            assert!(task.units() == 0);
+        }
+
+        #[test]
+        fn selection_inspected_ignored_when_not_opening() {
+            let mut product = product_in_home_phase();
+            let task = update(
+                &mut product,
+                Message::SelectionInspected {
+                    path: PathBuf::from("/some/project"),
+                    kind: SelectedDirectoryKind::Project(PathBuf::from("/some/project")),
+                },
+            );
+            assert!(matches!(product.phase, Phase::Home(_)));
+            assert!(task.units() == 0);
+        }
+
+        #[test]
+        fn complete_action_recording_enters_timeline_with_save_first() {
+            use crate::action_guide_home::recent::RecentProjects;
+
+            let recording = test_recording();
+            let region = CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            };
+            let mut product = product_in_capture_phase();
+            let _task = complete_action_recording(
+                &mut product,
+                recording,
+                rollshot_action::InputCapability::SemanticEvents,
+                region,
+            );
+            assert!(matches!(product.phase, Phase::Timeline(_)));
+        }
     }
 }

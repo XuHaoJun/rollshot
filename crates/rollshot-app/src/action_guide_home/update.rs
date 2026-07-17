@@ -76,6 +76,10 @@ impl ActionGuideHome {
         }
     }
 
+    pub fn new_empty() -> Self {
+        Self::new(RecentProjects::empty())
+    }
+
     pub fn update(&mut self, message: Message) -> Update {
         match message {
             Message::RecordNew => Update {
