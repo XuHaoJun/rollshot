@@ -28,6 +28,7 @@ mod visual_annotation_agent;
 #[cfg(feature = "action-guide")]
 pub(crate) mod project;
 
+#[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};
 pub use view::view;
 
@@ -223,9 +224,13 @@ pub(crate) enum GuideExportState {
 ///     → current → insert cache, build handle, hydrate annotations
 /// ```
 pub(crate) struct FrameLoadCoordinator {
+    #[allow(dead_code)]
     generation: std::sync::atomic::AtomicU64,
+    #[allow(dead_code)]
     semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    #[allow(dead_code)]
     required_ids: Vec<rollshot_action::FrameId>,
+    #[allow(dead_code)]
     loading_ids: std::collections::BTreeSet<rollshot_action::FrameId>,
 }
 
@@ -239,12 +244,14 @@ impl FrameLoadCoordinator {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn advance_generation(&self) -> u64 {
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1
     }
 
+    #[allow(dead_code)]
     pub(crate) fn current_generation(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -321,6 +328,9 @@ pub struct TimelineWorkspace {
     pub(crate) frame_coordinator: FrameLoadCoordinator,
     #[cfg(feature = "action-guide")]
     pub(crate) last_save_error: Option<String>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) pending_writer_guard:
+        std::sync::Arc<std::sync::Mutex<Option<project::ProjectWriterGuard>>>,
 }
 
 impl TimelineWorkspace {
@@ -377,6 +387,8 @@ impl TimelineWorkspace {
             frame_coordinator: FrameLoadCoordinator::new(),
             #[cfg(feature = "action-guide")]
             last_save_error: None,
+            #[cfg(feature = "action-guide")]
+            pending_writer_guard: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         ws.rebuild_selection_handles();
         ws
@@ -421,21 +433,18 @@ impl TimelineWorkspace {
     /// mutations. Draft selection/tool/modal changes are NOT gated by this.
     #[cfg(feature = "action-guide")]
     pub(crate) fn can_mutate(&self) -> bool {
-        match &self.project_session {
+        !matches!(
+            &self.project_session,
             Some(project::ProjectSession::Saved {
-                access: project::ProjectAccess::ReadOnly
-                | project::ProjectAccess::CorruptReadOnly,
+                access: project::ProjectAccess::ReadOnly | project::ProjectAccess::CorruptReadOnly,
                 ..
-            }) => false,
-            _ => true,
-        }
+            })
+        )
     }
-
     /// Mark the project dirty after a successful persisted mutation.
     #[cfg(feature = "action-guide")]
     pub(crate) fn mark_project_dirty(&mut self) {
-        if self.save_state == ProjectSaveState::Clean
-            || self.save_state == ProjectSaveState::Saving
+        if self.save_state == ProjectSaveState::Clean || self.save_state == ProjectSaveState::Saving
         {
             self.save_state = ProjectSaveState::Dirty;
         }
@@ -806,11 +815,9 @@ mod tests {
 
         fn ws_project_backed() -> TimelineWorkspace {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
             };
-            use rollshot_action::{
-                CandidateKind, DetectReason, InputCapability, InputSourceKind,
-            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
             let manifest = ProjectManifestV1 {
                 schema_version: 1,
@@ -820,7 +827,29 @@ mod tests {
                 input_source: InputSourceKind::LinuxEvdev,
                 input_capability: InputCapability::SemanticEvents,
                 enabled_outputs: EnabledOutputs::default(),
-                frames: vec![],
+                frames: vec![
+                    ProjectFrame {
+                        id: 1,
+                        at_ms: 0,
+                        sha256: "a".into(),
+                        width: 32,
+                        height: 32,
+                    },
+                    ProjectFrame {
+                        id: 2,
+                        at_ms: 50,
+                        sha256: "b".into(),
+                        width: 32,
+                        height: 32,
+                    },
+                    ProjectFrame {
+                        id: 3,
+                        at_ms: 100,
+                        sha256: "c".into(),
+                        width: 32,
+                        height: 32,
+                    },
+                ],
                 steps: vec![ProjectStep {
                     id: ProjectStepId(1),
                     order: 1,
@@ -848,11 +877,9 @@ mod tests {
 
         fn ws_project_backed_read_only() -> TimelineWorkspace {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
             };
-            use rollshot_action::{
-                CandidateKind, DetectReason, InputCapability, InputSourceKind,
-            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
             let manifest = ProjectManifestV1 {
                 schema_version: 1,
@@ -862,7 +889,29 @@ mod tests {
                 input_source: InputSourceKind::LinuxEvdev,
                 input_capability: InputCapability::SemanticEvents,
                 enabled_outputs: EnabledOutputs::default(),
-                frames: vec![],
+                frames: vec![
+                    ProjectFrame {
+                        id: 1,
+                        at_ms: 0,
+                        sha256: "a".into(),
+                        width: 32,
+                        height: 32,
+                    },
+                    ProjectFrame {
+                        id: 2,
+                        at_ms: 50,
+                        sha256: "b".into(),
+                        width: 32,
+                        height: 32,
+                    },
+                    ProjectFrame {
+                        id: 3,
+                        at_ms: 100,
+                        sha256: "c".into(),
+                        width: 32,
+                        height: 32,
+                    },
+                ],
                 steps: vec![ProjectStep {
                     id: ProjectStepId(1),
                     order: 1,
@@ -880,11 +929,8 @@ mod tests {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest,
             };
-            crate::timeline_workspace::project::from_loaded_project(
-                loaded,
-                ProjectAccess::ReadOnly,
-            )
-            .expect("ok")
+            crate::timeline_workspace::project::from_loaded_project(loaded, ProjectAccess::ReadOnly)
+                .expect("ok")
         }
 
         #[test]
@@ -920,10 +966,8 @@ mod tests {
             let mut ws = ws_project_backed();
             ws.save_state = ProjectSaveState::Clean;
 
-            let _ = super::super::update::update(
-                &mut ws,
-                Message::TitleChanged("New Title".into()),
-            );
+            let _ =
+                super::super::update::update(&mut ws, Message::TitleChanged("New Title".into()));
 
             assert_eq!(ws.save_state, ProjectSaveState::Dirty);
         }
@@ -1099,6 +1143,195 @@ mod tests {
             );
 
             assert_eq!(ws.save_state, ProjectSaveState::Clean);
+        }
+
+        #[test]
+        fn save_requested_for_first_save_sets_picking() {
+            let mut ws = workspace(recording_from_frames());
+            ws.first_save_prompt = FirstSavePrompt::Hidden;
+            ws.save_state = ProjectSaveState::Unsaved;
+
+            let result = super::super::update::update(&mut ws, Message::SaveRequested);
+
+            assert_eq!(ws.first_save_prompt, FirstSavePrompt::Picking);
+            assert!(result.task.units() > 0, "should return a picker task");
+        }
+
+        #[test]
+        fn save_picker_cancel_returns_to_visible() {
+            let mut ws = workspace(recording_from_frames());
+            ws.first_save_prompt = FirstSavePrompt::Picking;
+
+            let _ = super::super::update::update(&mut ws, Message::SavePickerChosen(None));
+
+            assert_eq!(ws.first_save_prompt, FirstSavePrompt::Visible);
+        }
+
+        #[test]
+        fn save_worker_outcome_existing_saved_sets_clean() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::SaveWorkerFinished(
+                    super::super::update::SaveWorkerOutcome::ExistingSaved { revision: 5 },
+                ),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+            assert!(ws.message.as_ref().is_some_and(|m| m.contains("Saved")));
+        }
+
+        #[test]
+        fn save_worker_outcome_failed_preserves_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::Failed(
+                    "disk full".to_string(),
+                )),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+            assert!(ws.last_save_error.is_some());
+        }
+
+        #[test]
+        fn save_worker_outcome_committed_read_only_sets_clean_and_read_only() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::SaveWorkerFinished(
+                    super::super::update::SaveWorkerOutcome::NewCommittedReadOnly {
+                        root: std::path::PathBuf::from("/tmp/test"),
+                        revision: 1,
+                        category: "post_commit_lock_race",
+                    },
+                ),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+            assert!(!ws.can_mutate());
+        }
+
+        #[test]
+        fn close_dirty_project_shows_confirm_modal() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _ = super::super::update::update(&mut ws, Message::CloseRequested);
+
+            assert!(ws.pending_discard);
+            assert_eq!(ws.close_intent, CloseIntent::Confirming);
+        }
+
+        #[test]
+        fn close_clean_project_emits_close_workspace() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let result = super::super::update::update(&mut ws, Message::CloseRequested);
+
+            assert_eq!(result.effect, Effect::CloseWorkspace);
+        }
+
+        #[test]
+        fn close_save_and_close_with_dirty_project_triggers_save() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+            ws.close_intent = CloseIntent::Confirming;
+
+            let _result = super::super::update::update(&mut ws, Message::CloseSaveAndClose);
+
+            assert_eq!(ws.close_intent, CloseIntent::SaveThenClose);
+            assert_eq!(ws.save_state, ProjectSaveState::Saving);
+        }
+
+        #[test]
+        fn close_cancel_clears_close_intent_and_returns_to_workspace() {
+            let mut ws = ws_project_backed();
+            ws.close_intent = CloseIntent::Confirming;
+            ws.pending_discard = true;
+
+            let result = super::super::update::update(&mut ws, Message::CloseCancel);
+
+            assert_eq!(result.effect, Effect::None);
+            assert_eq!(ws.close_intent, CloseIntent::None);
+            assert!(!ws.pending_discard);
+        }
+
+        #[test]
+        fn read_only_workspace_rejects_all_mutations() {
+            let mut ws = ws_project_backed_read_only();
+            assert!(!ws.can_mutate());
+
+            let step_count = ws.guide.steps().len();
+            let title_before = ws.guide.steps()[0].title.clone();
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::TitleChanged("Should Not Apply".into()),
+            );
+            assert_eq!(ws.guide.steps()[0].title, title_before);
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::CaptionChanged("Should Not Apply".into()),
+            );
+            assert_eq!(ws.guide.steps()[0].caption, "");
+
+            let _ = super::super::update::update(&mut ws, Message::DeleteStep);
+            assert_eq!(ws.guide.steps().len(), step_count);
+
+            let step = ws.selected_step().cloned().unwrap();
+            let replacement = *step.nearby.iter().find(|&&f| f != step.keyframe).unwrap();
+            let _ = super::super::update::update(&mut ws, Message::ReplaceKeyframe(replacement));
+            assert_eq!(ws.selected_step().unwrap().keyframe, step.keyframe);
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::GuideTitleChanged("Should Not Apply".into()),
+            );
+            assert_eq!(ws.guide.title(), "Test Guide");
+        }
+
+        #[test]
+        fn project_backed_view_builds_with_read_only_banner() {
+            let ws = ws_project_backed_read_only();
+            let _element = super::super::view::view(&ws);
+        }
+
+        #[test]
+        fn project_backed_view_builds_with_save_state_indicators() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+            {
+                let _element = super::super::view::view(&ws);
+            }
+
+            ws.save_state = ProjectSaveState::Saving;
+            {
+                let _element = super::super::view::view(&ws);
+            }
+
+            ws.save_state = ProjectSaveState::Clean;
+            {
+                let _element = super::super::view::view(&ws);
+            }
+        }
+
+        #[test]
+        fn close_confirm_modal_shows_when_close_intent_confirming() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+            ws.close_intent = CloseIntent::Confirming;
+            ws.pending_discard = true;
+            let _element = super::super::view::view(&ws);
         }
     }
 }

@@ -403,6 +403,7 @@ pub(crate) fn from_loaded_project(
         close_intent: super::CloseIntent::None,
         frame_coordinator: super::FrameLoadCoordinator::new(),
         last_save_error: None,
+        pending_writer_guard: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
 
     ws.rebuild_selection_handles();

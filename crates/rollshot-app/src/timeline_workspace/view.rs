@@ -11,8 +11,44 @@ fn guide_title_input_value(state: &TimelineWorkspace) -> &str {
 }
 
 pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
+    #[cfg(feature = "action-guide")]
+    let read_only_banner: Element<Message> = match &state.project_session {
+        Some(super::project::ProjectSession::Saved {
+            access: super::project::ProjectAccess::ReadOnly,
+            ..
+        }) => container(
+            row![text("This project is read-only. Editing is disabled.").size(13),]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        )
+        .padding(8)
+        .into(),
+        Some(super::project::ProjectSession::Saved {
+            access: super::project::ProjectAccess::CorruptReadOnly,
+            ..
+        }) => container(
+            row![
+                text("This project is corrupt and read-only. Some frames may be missing.").size(13),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding(8)
+        .into(),
+        _ => Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into(),
+    };
+    #[cfg(not(feature = "action-guide"))]
+    let read_only_banner: Element<Message> = Space::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(0.0))
+        .into();
+
     let body: Element<Message> = column![
         header(state),
+        read_only_banner,
         message_row(state),
         main_area(state),
         strip_row(state),
@@ -52,7 +88,16 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
     };
 
     if state.pending_discard {
-        discard_modal(body)
+        #[cfg(feature = "action-guide")]
+        let is_project_close = state.close_intent == super::CloseIntent::Confirming;
+        #[cfg(not(feature = "action-guide"))]
+        let is_project_close = false;
+
+        if is_project_close {
+            close_confirm_modal(body, state)
+        } else {
+            discard_modal(body)
+        }
     } else {
         body
     }
@@ -83,8 +128,73 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             .height(Length::Shrink)
             .into(),
     };
+
+    #[cfg(feature = "action-guide")]
+    let mutation_allowed = state.can_mutate();
+    #[cfg(not(feature = "action-guide"))]
+    let mutation_allowed = true;
+
     let guide_title_input = text_input("Guide title", guide_title_input_value(state))
-        .on_input(Message::GuideTitleChanged);
+        .on_input_maybe(if mutation_allowed {
+            Some(Message::GuideTitleChanged)
+        } else {
+            None
+        });
+
+    #[cfg(feature = "action-guide")]
+    let save_indicator: Element<Message> = match state.save_state {
+        super::ProjectSaveState::Unsaved => {
+            if state.first_save_prompt == super::FirstSavePrompt::Visible {
+                row![
+                    text("Save your guide to keep it.").size(13),
+                    button(text("Save"))
+                        .on_press(Message::SaveRequested)
+                        .style(button::primary),
+                    button(text("Save later"))
+                        .on_press(Message::SaveLater)
+                        .style(button::secondary),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
+            } else {
+                Space::new()
+                    .width(Length::Shrink)
+                    .height(Length::Shrink)
+                    .into()
+            }
+        }
+        super::ProjectSaveState::Dirty => text("Unsaved changes").size(13).into(),
+        super::ProjectSaveState::Saving => text("Saving\u{2026}").size(13).into(),
+        super::ProjectSaveState::Clean => text("Saved").size(13).into(),
+    };
+    #[cfg(not(feature = "action-guide"))]
+    let save_indicator: Element<Message> = Space::new()
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .into();
+
+    #[cfg(feature = "action-guide")]
+    let save_button: Element<Message> = if state.project_session.is_some() {
+        button(text("Save"))
+            .on_press_maybe(
+                (state.save_state == super::ProjectSaveState::Dirty
+                    || state.save_state == super::ProjectSaveState::Unsaved)
+                    .then_some(Message::SaveRequested),
+            )
+            .style(button::primary)
+            .into()
+    } else {
+        Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into()
+    };
+    #[cfg(not(feature = "action-guide"))]
+    let save_button: Element<Message> = Space::new()
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .into();
 
     let export_busy = matches!(
         state.export_state,
@@ -92,8 +202,16 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             | super::GuideExportState::Exporting { .. }
     );
 
+    #[cfg(feature = "action-guide")]
+    let is_project_backed = state
+        .frame_source
+        .as_ref()
+        .is_some_and(|fs| fs.in_memory().is_none());
+    #[cfg(not(feature = "action-guide"))]
+    let is_project_backed = false;
+
     let mut export_controls: Element<Message> = row![button(text("Export Guide"))
-        .on_press_maybe((!export_busy).then_some(Message::ExportRequested))
+        .on_press_maybe((!export_busy && mutation_allowed).then_some(Message::ExportRequested))
         .style(button::primary),]
     .spacing(8)
     .into();
@@ -101,7 +219,9 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
     if let super::GuideExportState::Succeeded = &state.export_state {
         export_controls = row![
             button(text("Export Guide"))
-                .on_press_maybe((!export_busy).then_some(Message::ExportRequested))
+                .on_press_maybe(
+                    (!export_busy && mutation_allowed).then_some(Message::ExportRequested)
+                )
                 .style(button::primary),
             button(text("Open Guide"))
                 .on_press(Message::OpenExportedGuide)
@@ -114,29 +234,81 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         .into();
     }
 
+    let gif_btn: Element<Message> = if is_project_backed {
+        Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into()
+    } else {
+        button(text("Export GIF"))
+            .on_press_maybe((!export_busy).then_some(Message::ExportGifRequested))
+            .style(button::secondary)
+            .into()
+    };
+
+    let storyboard_preview_btn: Element<Message> = if is_project_backed {
+        Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into()
+    } else {
+        button(text("Preview Storyboard"))
+            .on_press_maybe((!export_busy).then_some(Message::PreviewStoryboardRequested))
+            .style(button::secondary)
+            .into()
+    };
+
+    let storyboard_export_btn: Element<Message> = if is_project_backed {
+        Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into()
+    } else {
+        button(text("Export Storyboard"))
+            .on_press_maybe((!export_busy).then_some(Message::ExportStoryboardRequested))
+            .style(button::secondary)
+            .into()
+    };
+
+    let mp4_btn: Element<Message> = if is_project_backed {
+        Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into()
+    } else {
+        button(text("Export MP4"))
+            .on_press_maybe((!export_busy).then_some(Message::ExportMp4Requested))
+            .style(button::secondary)
+            .into()
+    };
+
+    let issue_pack_btn: Element<Message> = if is_project_backed {
+        Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into()
+    } else {
+        button(text("Export Bug Report..."))
+            .on_press_maybe((!export_busy).then_some(Message::ExportBugReport))
+            .style(button::secondary)
+            .into()
+    };
+
     row![
         advisory,
+        save_indicator,
+        save_button,
         guide_title_input,
         Space::new().width(Length::Fill),
         button(text("Discard"))
-            .on_press(Message::DiscardRequested)
+            .on_press_maybe(mutation_allowed.then_some(Message::DiscardRequested))
             .style(button::secondary),
-        button(text("Export GIF"))
-            .on_press_maybe((!export_busy).then_some(Message::ExportGifRequested))
-            .style(button::secondary),
-        button(text("Preview Storyboard"))
-            .on_press_maybe((!export_busy).then_some(Message::PreviewStoryboardRequested))
-            .style(button::secondary),
-        button(text("Export Storyboard"))
-            .on_press_maybe((!export_busy).then_some(Message::ExportStoryboardRequested))
-            .style(button::secondary),
-        button(text("Export MP4"))
-            .on_press_maybe((!export_busy).then_some(Message::ExportMp4Requested))
-            .style(button::secondary),
+        gif_btn,
+        storyboard_preview_btn,
+        storyboard_export_btn,
+        mp4_btn,
         export_controls,
-        button(text("Export Bug Report..."))
-            .on_press_maybe((!export_busy).then_some(Message::ExportBugReport))
-            .style(button::secondary),
+        issue_pack_btn,
     ]
     .spacing(8)
     .align_y(Alignment::Center)
@@ -192,11 +364,27 @@ fn step_list(state: &TimelineWorkspace) -> Element<'_, Message> {
 }
 
 fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
+    #[cfg(feature = "action-guide")]
+    let mutation_allowed = state.can_mutate();
+    #[cfg(not(feature = "action-guide"))]
+    let mutation_allowed = true;
+
     let content: Element<Message> = match state.selected_step() {
         Some(step) => {
             let keyframe: Element<Message> = match &state.keyframe_handle {
                 Some(handle) => image(handle.clone()).into(),
-                None => text("(keyframe unavailable)").into(),
+                None => {
+                    #[cfg(feature = "action-guide")]
+                    if state.frame_source.is_some() {
+                        text("(loading\u{2026})").into()
+                    } else {
+                        text("(keyframe unavailable)").into()
+                    }
+                    #[cfg(not(feature = "action-guide"))]
+                    {
+                        text("(keyframe unavailable)").into()
+                    }
+                }
             };
             let visual_running = matches!(
                 state.visual_annotation_suggestion,
@@ -208,11 +396,19 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                     .height(Length::Fill)
                     .align_x(Alignment::Center)
                     .align_y(Alignment::Center),
-                text_input("Step title", &step.title).on_input(Message::TitleChanged),
+                text_input("Step title", &step.title).on_input_maybe(if mutation_allowed {
+                    Some(Message::TitleChanged)
+                } else {
+                    None
+                }),
                 text("Caption").size(12),
-                text_input("Step caption", &step.caption).on_input(Message::CaptionChanged),
+                text_input("Step caption", &step.caption).on_input_maybe(if mutation_allowed {
+                    Some(Message::CaptionChanged)
+                } else {
+                    None
+                }),
                 button(text("Annotate Step"))
-                    .on_press(Message::AnnotateStepRequested)
+                    .on_press_maybe(mutation_allowed.then_some(Message::AnnotateStepRequested))
                     .style(button::secondary),
                 button(text(if visual_running {
                     "Suggesting annotations..."
@@ -220,7 +416,8 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                     "Suggest annotations"
                 }))
                 .on_press_maybe(
-                    (!visual_running).then_some(Message::SuggestVisualAnnotationsRequested),
+                    (mutation_allowed && !visual_running)
+                        .then_some(Message::SuggestVisualAnnotationsRequested),
                 )
                 .style(button::secondary),
                 button(text(if state.caption_suggestions_running {
@@ -229,12 +426,12 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                     "Suggest Captions"
                 }))
                 .on_press_maybe(
-                    (!state.caption_suggestions_running)
+                    (mutation_allowed && !state.caption_suggestions_running)
                         .then_some(Message::SuggestCaptionsRequested),
                 )
                 .style(button::secondary),
                 button(text("Delete step"))
-                    .on_press(Message::DeleteStep)
+                    .on_press_maybe(mutation_allowed.then_some(Message::DeleteStep))
                     .style(button::danger),
                 caption_proposal_panel(state),
             ]
@@ -255,13 +452,18 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
 }
 
 fn strip_row(state: &TimelineWorkspace) -> Element<'_, Message> {
+    #[cfg(feature = "action-guide")]
+    let mutation_allowed = state.can_mutate();
+    #[cfg(not(feature = "action-guide"))]
+    let mutation_allowed = true;
+
     let current = state.selected_step().map(|s| s.keyframe);
     let mut strip = row![].spacing(6);
     for frame in &state.strip {
         let selected = current == Some(frame.id);
         strip = strip.push(
             button(image(frame.handle.clone()).width(Length::Fixed(96.0)))
-                .on_press(Message::ReplaceKeyframe(frame.id))
+                .on_press_maybe(mutation_allowed.then_some(Message::ReplaceKeyframe(frame.id)))
                 .style(if selected {
                     button::primary
                 } else {
@@ -985,6 +1187,68 @@ fn discard_modal(base: Element<'_, Message>) -> Element<'_, Message> {
         )
         .interaction(mouse::Interaction::Idle)
         .on_press(Message::CancelDiscard),
+    );
+
+    stack![base, scrim].into()
+}
+
+fn close_confirm_modal<'a>(
+    base: Element<'a, Message>,
+    state: &'a TimelineWorkspace,
+) -> Element<'a, Message> {
+    let error_text: Element<Message> = if let Some(err) = &state.last_save_error {
+        text(format!("Save failed: {err}")).size(12).into()
+    } else {
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into()
+    };
+
+    let dialog = container(
+        column![
+            text("Save before closing?").size(18),
+            text("You have unsaved changes.").size(13),
+            error_text,
+            row![
+                button(text("Save and Close"))
+                    .on_press(Message::CloseSaveAndClose)
+                    .style(button::primary),
+                button(text("Discard"))
+                    .on_press(Message::CloseDiscard)
+                    .style(button::danger),
+                button(text("Cancel"))
+                    .on_press(Message::CloseCancel)
+                    .style(button::secondary),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12)
+        .align_x(Alignment::Center),
+    )
+    .padding(20)
+    .style(container::rounded_box);
+
+    let scrim = opaque(
+        mouse_area(
+            container(opaque(dialog))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.8,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }),
+        )
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::CloseCancel),
     );
 
     stack![base, scrim].into()

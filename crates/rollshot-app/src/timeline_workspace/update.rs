@@ -165,10 +165,27 @@ pub enum Message {
     SaveLater,
     SaveRequested,
     SavePickerChosen(Option<PathBuf>),
-    SaveCompleted { success: bool, message: Option<String> },
+    SaveWorkerFinished(SaveWorkerOutcome),
     CloseSaveAndClose,
     CloseDiscard,
     CloseCancel,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SaveWorkerOutcome {
+    ExistingSaved {
+        revision: u64,
+    },
+    NewWritable {
+        root: PathBuf,
+        revision: u64,
+    },
+    NewCommittedReadOnly {
+        root: PathBuf,
+        revision: u64,
+        category: &'static str,
+    },
+    Failed(String),
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
@@ -250,9 +267,30 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             dismiss_stale_visual_annotation_review(state);
             Update::none()
         }
-        Message::DiscardRequested | Message::CloseRequested => {
+        Message::DiscardRequested => {
             state.pending_discard = true;
             Update::none()
+        }
+        Message::CloseRequested => {
+            #[cfg(feature = "action-guide")]
+            {
+                if state.project_session.is_some() {
+                    if state.save_state == super::ProjectSaveState::Dirty {
+                        state.close_intent = super::CloseIntent::Confirming;
+                        state.pending_discard = true;
+                    } else {
+                        return Update::effect(super::Effect::CloseWorkspace);
+                    }
+                } else {
+                    state.pending_discard = true;
+                }
+                Update::none()
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                state.pending_discard = true;
+                Update::none()
+            }
         }
         Message::CancelDiscard => {
             state.pending_discard = false;
@@ -286,12 +324,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     job,
                 },
             };
-            Update::task(Task::perform(pick_export_dir(picker_default_dir()), move |path| {
-                Message::ExportDirChosenWithId {
+            Update::task(Task::perform(
+                pick_export_dir(picker_default_dir()),
+                move |path| Message::ExportDirChosenWithId {
                     operation_id,
                     parent: path,
-                }
-            }))
+                },
+            ))
         }
         Message::GuideTitleChanged(title) => {
             if !state.can_mutate() {
@@ -959,10 +998,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::ExportMp4Requested => {
             state.message = None;
             match crate::managed_ffmpeg::resolve_ffmpeg() {
-                crate::managed_ffmpeg::FfmpegResolution::Available(_) => Update::task(Task::perform(
-                    pick_mp4_save_path(picker_default_dir()),
-                    Message::ExportMp4PathChosen,
-                )),
+                crate::managed_ffmpeg::FfmpegResolution::Available(_) => {
+                    Update::task(Task::perform(
+                        pick_mp4_save_path(picker_default_dir()),
+                        Message::ExportMp4PathChosen,
+                    ))
+                }
                 crate::managed_ffmpeg::FfmpegResolution::NeedsSetup(info) => {
                     state.ffmpeg_setup = Some(super::FfmpegSetupDialog {
                         info,
@@ -1449,13 +1490,59 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             state.save_state = super::ProjectSaveState::Unsaved;
             Update::none()
         }
-        Message::SaveRequested => Update::none(),
-        Message::SavePickerChosen(_) => Update::none(),
-        Message::SaveCompleted { .. } => Update::none(),
+        Message::SaveRequested => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_requested(state)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                Update::none()
+            }
+        }
+        Message::SavePickerChosen(path) => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_picker_chosen(state, path)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                let _ = path;
+                Update::none()
+            }
+        }
+        Message::SaveWorkerFinished(outcome) => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_worker_finished(state, outcome)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                let _ = outcome;
+                Update::none()
+            }
+        }
         Message::CloseSaveAndClose => {
-            state.close_intent = super::CloseIntent::None;
-            state.pending_discard = false;
-            Update::effect(super::Effect::CloseWorkspace)
+            #[cfg(feature = "action-guide")]
+            {
+                if state.project_session.is_some()
+                    && state.save_state == super::ProjectSaveState::Dirty
+                {
+                    state.close_intent = super::CloseIntent::SaveThenClose;
+                    state.pending_discard = false;
+                    handle_save_requested(state)
+                } else {
+                    state.close_intent = super::CloseIntent::None;
+                    state.pending_discard = false;
+                    Update::effect(super::Effect::CloseWorkspace)
+                }
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                state.close_intent = super::CloseIntent::None;
+                state.pending_discard = false;
+                Update::effect(super::Effect::CloseWorkspace)
+            }
         }
         Message::CloseDiscard => {
             state.close_intent = super::CloseIntent::None;
@@ -1629,10 +1716,7 @@ pub(crate) fn timeline_issue_pack_input(
     }
 }
 
-fn begin_issue_pack_export(
-    state: &mut TimelineWorkspace,
-    kind: super::IssuePackKind,
-) -> Update {
+fn begin_issue_pack_export(state: &mut TimelineWorkspace, kind: super::IssuePackKind) -> Update {
     if state.issue_pack.is_none() {
         return Update::none();
     }
@@ -1653,12 +1737,13 @@ fn begin_issue_pack_export(
     dialog.operation_id = operation_id;
     dialog.pending_kind = Some(kind);
     dialog.pending_export = Some(pending);
-    Update::task(Task::perform(pick_export_dir(picker_default_dir()), move |parent| {
-        Message::IssuePackFolderChosen {
+    Update::task(Task::perform(
+        pick_export_dir(picker_default_dir()),
+        move |parent| Message::IssuePackFolderChosen {
             operation_id,
             parent,
-        }
-    }))
+        },
+    ))
 }
 
 fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePoint {
@@ -1787,6 +1872,267 @@ fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
     } else {
         dismiss_stale_visual_annotation_review(state);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Save flow (action-guide feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_save_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::ProjectSession;
+    use super::FirstSavePrompt;
+
+    let is_first_save = matches!(state.project_session, Some(ProjectSession::Unsaved) | None);
+    if is_first_save {
+        state.first_save_prompt = FirstSavePrompt::Picking;
+        let op_id = state.next_export_operation_id.wrapping_add(1);
+        state.next_export_operation_id = op_id;
+        Update::task(Task::perform(
+            pick_save_dir(picker_default_dir()),
+            Message::SavePickerChosen,
+        ))
+    } else {
+        state.save_state = super::ProjectSaveState::Saving;
+        state.last_save_error = None;
+        let Some(snapshot) = build_snapshot_for_save(state) else {
+            state.save_state = super::ProjectSaveState::Dirty;
+            state.message = Some("Cannot save: snapshot build failed.".to_string());
+            return Update::none();
+        };
+        let destination = match &state.project_session {
+            Some(ProjectSession::Saved { root, .. }) => {
+                super::project::SaveDestination::Existing(root.clone())
+            }
+            _ => {
+                state.save_state = super::ProjectSaveState::Dirty;
+                state.message = Some("Cannot save: no project root.".to_string());
+                return Update::none();
+            }
+        };
+        Update::task(Task::perform(
+            super::project::save_project_worker(super::project::SaveProjectRequest {
+                snapshot,
+                destination,
+            }),
+            |result| match result {
+                Ok(super::project::SaveProjectWorkerResult::ExistingSaved(commit)) => {
+                    Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved {
+                        revision: commit.manifest.revision,
+                    })
+                }
+                Ok(super::project::SaveProjectWorkerResult::NewWritable { commit, .. }) => {
+                    Message::SaveWorkerFinished(SaveWorkerOutcome::NewWritable {
+                        root: commit.root.clone(),
+                        revision: commit.manifest.revision,
+                    })
+                }
+                Ok(super::project::SaveProjectWorkerResult::NewCommittedReadOnly {
+                    commit,
+                    category,
+                }) => Message::SaveWorkerFinished(SaveWorkerOutcome::NewCommittedReadOnly {
+                    root: commit.root.clone(),
+                    revision: commit.manifest.revision,
+                    category,
+                }),
+                Err(e) => {
+                    Message::SaveWorkerFinished(SaveWorkerOutcome::Failed(e.message_for_ui()))
+                }
+            },
+        ))
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf>) -> Update {
+    use super::project::ProjectSession;
+    use super::FirstSavePrompt;
+
+    let is_first_save = matches!(state.first_save_prompt, FirstSavePrompt::Picking);
+    if !is_first_save {
+        return Update::none();
+    }
+
+    let Some(parent) = path else {
+        state.first_save_prompt = FirstSavePrompt::Visible;
+        if state.close_intent == super::CloseIntent::SaveThenClose {
+            state.close_intent = super::CloseIntent::None;
+        }
+        return Update::none();
+    };
+
+    state.save_state = super::ProjectSaveState::Saving;
+    state.last_save_error = None;
+    state.first_save_prompt = FirstSavePrompt::Hidden;
+
+    let Some(snapshot) = build_snapshot_for_save(state) else {
+        state.save_state = super::ProjectSaveState::Dirty;
+        state.first_save_prompt = FirstSavePrompt::Visible;
+        state.message = Some("Cannot save: snapshot build failed.".to_string());
+        return Update::none();
+    };
+
+    let destination = match &state.project_session {
+        Some(ProjectSession::Saved { root, .. }) => {
+            super::project::SaveDestination::SaveAs(root.clone())
+        }
+        _ => super::project::SaveDestination::FirstSave(parent),
+    };
+
+    let guard_slot = state.pending_writer_guard.clone();
+    Update::task(Task::perform(
+        super::project::save_project_worker(super::project::SaveProjectRequest {
+            snapshot,
+            destination,
+        }),
+        move |result| match result {
+            Ok(super::project::SaveProjectWorkerResult::ExistingSaved(commit)) => {
+                Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved {
+                    revision: commit.manifest.revision,
+                })
+            }
+            Ok(super::project::SaveProjectWorkerResult::NewWritable { commit, guard }) => {
+                if let Ok(mut slot) = guard_slot.lock() {
+                    *slot = Some(guard);
+                }
+                Message::SaveWorkerFinished(SaveWorkerOutcome::NewWritable {
+                    root: commit.root.clone(),
+                    revision: commit.manifest.revision,
+                })
+            }
+            Ok(super::project::SaveProjectWorkerResult::NewCommittedReadOnly {
+                commit,
+                category,
+            }) => Message::SaveWorkerFinished(SaveWorkerOutcome::NewCommittedReadOnly {
+                root: commit.root.clone(),
+                revision: commit.manifest.revision,
+                category,
+            }),
+            Err(e) => Message::SaveWorkerFinished(SaveWorkerOutcome::Failed(e.message_for_ui())),
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_worker_finished(
+    state: &mut TimelineWorkspace,
+    outcome: super::update::SaveWorkerOutcome,
+) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    let should_close = state.close_intent == super::CloseIntent::SaveThenClose;
+
+    match outcome {
+        super::update::SaveWorkerOutcome::ExistingSaved { revision } => {
+            state.save_state = super::ProjectSaveState::Clean;
+            state.last_save_error = None;
+            if let Some(ProjectSession::Saved { base_revision, .. }) = &mut state.project_session {
+                *base_revision = revision;
+            }
+            state.message = Some("Saved.".to_string());
+            tracing::info!(
+                target: "rollshot::project",
+                revision,
+                "project saved"
+            );
+        }
+        super::update::SaveWorkerOutcome::NewWritable { root, revision } => {
+            state.save_state = super::ProjectSaveState::Clean;
+            state.last_save_error = None;
+            let guard = state
+                .pending_writer_guard
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            state.project_session = Some(ProjectSession::Saved {
+                root,
+                base_revision: revision,
+                access: match guard {
+                    Some(g) => ProjectAccess::Writable(g),
+                    None => ProjectAccess::ReadOnly,
+                },
+            });
+            state.message = Some("Project saved.".to_string());
+            tracing::info!(
+                target: "rollshot::project",
+                revision,
+                "first save committed (writable)"
+            );
+        }
+        super::update::SaveWorkerOutcome::NewCommittedReadOnly {
+            root,
+            revision,
+            category,
+        } => {
+            state.save_state = super::ProjectSaveState::Clean;
+            state.last_save_error = None;
+            state.project_session = Some(ProjectSession::Saved {
+                root,
+                base_revision: revision,
+                access: ProjectAccess::ReadOnly,
+            });
+            state.message = Some(
+                "Project saved, but another process holds the write lock. Editing is disabled."
+                    .to_string(),
+            );
+            tracing::warn!(
+                target: "rollshot::project",
+                revision,
+                category,
+                "first save committed but read-only (lock race)"
+            );
+        }
+        super::update::SaveWorkerOutcome::Failed(error) => {
+            state.save_state = super::ProjectSaveState::Dirty;
+            state.last_save_error = Some(error.clone());
+            state.message = Some(format!("Save failed: {error}"));
+            tracing::error!(
+                target: "rollshot::project",
+                %error,
+                "save failed"
+            );
+            if should_close {
+                state.close_intent = super::CloseIntent::None;
+            }
+            return Update::none();
+        }
+    }
+
+    if should_close {
+        state.close_intent = super::CloseIntent::None;
+        state.pending_discard = false;
+        Update::effect(super::Effect::CloseWorkspace)
+    } else {
+        Update::none()
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn build_snapshot_for_save(
+    state: &mut TimelineWorkspace,
+) -> Option<rollshot_action::project::ProjectSnapshot> {
+    match super::project::build_project_snapshot(state) {
+        Ok(snap) => Some(snap),
+        Err(error) => {
+            tracing::error!(
+                target: "rollshot::project",
+                ?error,
+                "snapshot build failed"
+            );
+            state.message = Some(format!("Cannot save: {error:?}"));
+            None
+        }
+    }
+}
+
+#[cfg(feature = "action-guide")]
+async fn pick_save_dir(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .set_file_name("guide.rollshot-guide")
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
 }
 
 #[cfg(test)]
@@ -3082,7 +3428,10 @@ mod tests {
             state.storyboard_preview.unwrap().copy_state,
             StoryboardCopyState::Copying { operation_id: 6 }
         );
-        assert!(task.task.units() > 0, "should return a render-and-copy task");
+        assert!(
+            task.task.units() > 0,
+            "should return a render-and-copy task"
+        );
     }
 
     #[test]
