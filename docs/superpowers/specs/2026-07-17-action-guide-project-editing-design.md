@@ -1,7 +1,7 @@
 # Action Guide Project Editing Design
 
 **Date:** 2026-07-17  
-**Status:** Approved design — product review (`plan-ceo-review`) applied 2026-07-17  
+**Status:** Approved design — product review (`plan-ceo-review`) and engineering review (`plan-eng-review`, auto mode) applied 2026-07-17  
 **Branch:** `feat/action-guide-projects`  
 **Scope:** Make newly recorded Action Guides persistent, reopenable, fully editable projects with safe derived publish outputs
 
@@ -98,6 +98,9 @@ rollshot-app action-guide --record
 rollshot-app action-guide --open /path/to/example.rollshot-guide
 ```
 
+The existing `--fullscreen` flag remains valid only together with `--record`;
+`action-guide --fullscreen` without `--record` is rejected at parse time.
+
 `--open` without a path opens the project folder picker. A cancelled picker
 returns to Home without changing state.
 
@@ -110,6 +113,20 @@ removal instead of silently dropping them.
 The Home does not decode project images. It uses cached local recent metadata
 and validates the selected project only when opening it.
 
+Recent-project metadata is a small schema-versioned JSON file in the existing
+rollshot config directory (`etcetera` base strategy, as `daemon/config.rs`
+does), holding at most ten entries of project path, display name, and
+last-opened timestamp — no thumbnails, no guide content. It is loaded
+leniently (malformed file → empty list) and its paths never appear in
+diagnostics. Home reloads this file at boot and whenever its window regains
+focus, so a Linux recording child that saves a project appears without
+restarting the Home process.
+
+Old exported Guide folders are recognized by shape: a directory containing
+`session.json` but no `project.json` is a readable export, not a project; the
+Open flow explains this and offers the existing open-in-reader action on its
+`index.html`.
+
 ### New recording and first save
 
 After recording finishes, Rollshot immediately prompts for the first Save.
@@ -117,7 +134,8 @@ Accepting commits the recording as a project before any editing begins.
 Choosing `Save later` enters the existing Timeline Workspace as an
 `Unsaved Project`; the user may review and edit before saving, accepting that
 a crash before the first Save loses the recording. The prompt copy makes this
-plain.
+plain. Cancelling the picker after choosing Save returns to the save-first
+prompt; it never silently acts as `Save later` or discards the recording.
 
 The first `Save Project` action chooses a parent directory and project name,
 then creates:
@@ -201,7 +219,10 @@ the project and its publish state unchanged.
 
 `Share Editable Project` shares the complete `.rollshot-guide/` directory and
 must warn that it may contain original, unflattened, or visually redacted
-pixels. It is visually and textually distinct from `Export Safe Copy`.
+pixels. It first requires the current project revision to be saved, then copies
+that committed project while excluding the ephemeral `.lock` file and any
+temporary transaction files. It is visually and textually distinct from
+`Export Safe Copy`.
 
 ## Project Layout
 
@@ -257,9 +278,13 @@ Each frame entry includes:
 
 - Project-local frame ID
 - Capture-relative timestamp
-- Relative content-addressed asset path
-- SHA-256 digest
+- SHA-256 digest of the encoded PNG bytes
 - Width and height
+
+The asset path is not stored: it is always derived as
+`assets/frames/<sha256>.png` from the digest. Deriving the path removes the
+per-frame path-traversal surface entirely and deduplicates identical frames by
+construction.
 
 Each step entry includes:
 
@@ -270,7 +295,10 @@ Each step entry includes:
 - Current keyframe ID
 - Ordered nearby frame IDs
 - Optional history-free annotation document for the current keyframe
-- Guide-specific annotation explanations keyed by persisted annotation ID
+- Guide-specific annotation explanations keyed by persisted annotation ID.
+  Snapshot construction persists only explanations whose annotation still
+  exists; in-session behavior (explanations surviving temporary annotation
+  deletion) is unchanged.
 
 Step IDs are stable across Save and reopen. A newly recorded Guide initializes
 them from its unique candidate IDs, but the project contract does not expose or
@@ -300,7 +328,8 @@ V1 validation requires:
   step, and all geometry/style data is valid for that source image.
 
 V1 rejects unknown top-level and nested manifest fields instead of guessing
-their meaning. An unknown newer `schema_version` is not opened for editing and
+their meaning (`#[serde(deny_unknown_fields)]` on every project DTO — a
+deliberate contrast to the lenient public `session.json`). An unknown newer `schema_version` is not opened for editing and
 produces a clear “requires a newer Rollshot version” result. Future schema
 versions must define explicit migration rules. V1 does not include a legacy
 export migration.
@@ -328,6 +357,14 @@ Owns a public history-free persisted annotation snapshot and conversions to and
 from a fresh `ImageDocument`. The persisted representation includes the current
 annotation graph and excludes undo/redo state.
 
+Concretely: the `Annotation` enum gains a feature-gated serde derive (its
+geometry, style, and ID field types are already serde-ready), and
+`ImageDocument` gains a rehydrating constructor taking a shared source plus the
+persisted annotation list. Rehydration restores ID allocation as
+`next_id = max(annotation id) + 1` and `next_number = max(callout number) + 1`
+so `AnnotationId` stability (and explanation keys) survive reload, with empty
+undo/redo history.
+
 This is the only new persistence surface in the image-document engine. It is
 introduced because Action Guide project reopening cannot safely serialize the
 private `ImageDocument` runtime structure.
@@ -349,6 +386,14 @@ The Linux and macOS product paths use the same Home and Timeline state. Their
 window handoff and picker integration may differ only where required by the
 active platform runner.
 
+Window hosting model: winit permits only one event loop per process
+(`EventLoopError::RecreationAttempt`), so Home and the Timeline Workspace run
+as phases of one iced daemon on both platforms — macOS extends the existing
+`macos_product` phase enum; Linux gains an equivalent phased daemon. On Linux,
+`Record New` from Home spawns a detached `rollshot-app action-guide --record`
+child process, which owns the layer-shell overlay and its own Timeline exactly
+as the `--record` CLI path does today. macOS records in-loop as today.
+
 ### Existing publish pipeline
 
 `ReviewedGuideExportJob` remains the immutable boundary for safe output.
@@ -362,7 +407,9 @@ New recording:
 
 ```text
 Recording
-  -> unsaved project model
+  -> save-first prompt
+     -> Save -> committed project model
+     -> Save later -> unsaved project model
   -> Timeline Workspace edits
   -> validated project snapshot
   -> atomic project save
@@ -397,8 +444,10 @@ No sharing path copies the private project assets by default.
 
 First Save and Save As build a unique temporary sibling directory, write and
 validate all referenced project assets and manifest, then perform a no-replace
-rename to the final `.rollshot-guide/` path. A collision is recoverable and
-never deletes an existing project.
+rename to the final `.rollshot-guide/` path — the same
+`renameat_with(NOREPLACE)` + RAII temp-cleanup pattern the standalone guide
+export already uses (`guide_export.rs`). A collision is recoverable and never
+deletes an existing project.
 
 Save As leaves the source project unchanged and opens the successfully created
 copy as the active writable project.
@@ -411,10 +460,13 @@ Saving an existing project proceeds in this order:
 2. Encode any missing immutable frame assets to uniquely named temporary files.
 3. Verify each new asset's hash, dimensions, and decode result.
 4. Rename validated assets into their content-addressed locations.
-5. Serialize the next monotonic revision to `project.json.tmp`.
-6. Atomically replace `project.json`.
-7. Mark the workspace clean only after the manifest replacement succeeds.
-8. Schedule publish jobs for the committed revision.
+5. Re-read the committed manifest revision and reject the Save as an external
+   modification conflict if it differs from the workspace's base revision.
+6. Serialize the next monotonic revision to `project.json.tmp` and fsync it.
+7. Atomically replace `project.json` via same-directory rename, then fsync the
+   project directory.
+8. Mark the workspace clean only after the manifest replacement succeeds.
+9. Schedule publish jobs for the committed revision.
 
 The manifest is the commit point. Assets are written before they become
 reachable. A crash may leave unreferenced immutable assets, but it must not
@@ -428,8 +480,23 @@ output. Runtime `Updating` state is not treated as durable success.
 
 A publish completion carries the revision it rendered. If the project has been
 saved again, the old completion cannot mark the newer output current or replace
-newer content. Each output publishes through a temporary path and atomic commit
-appropriate to its file or directory shape.
+newer content. Revision arbitration extends the workspace's existing
+operation-id staleness pattern (`GuideExportState` / `apply_export_finished`).
+
+Each output publishes through a temporary path and atomic commit appropriate
+to its shape: single-file derivatives keep the existing temp-sibling + rename
+pattern already implemented in the storyboard, GIF, and MP4 encoders; the core
+publish output builds a temporary sibling directory, renames the current one
+aside, renames the new one into place, then removes the old directory
+best-effort.
+
+All publish work runs off the iced update thread via `Task::perform` +
+`spawn_blocking` — including paths that today encode synchronously in
+`update()`. MP4 publishing gains a cooperative cancellation token that kills
+the ffmpeg child process; other encoders check cancellation between steps.
+
+A missing or corrupt `publish-state.json` never blocks opening the project: it
+is treated as all enabled outputs stale.
 
 Project Save success and derivative success are deliberately independent.
 
@@ -446,9 +513,20 @@ agent-apply actions, and derivative settings. It may export a safe copy only
 from outputs already current for the committed revision; it does not start a
 new publish job.
 
-Loss of a stale process-level lock must be distinguishable from a live writer.
-The exact OS locking primitive and stale-lock recovery protocol are engineering
-review concerns, but last-writer-wins behavior is forbidden.
+The lock is an advisory exclusive OS file lock (`fs4::FileExt::try_lock`) on a
+`.lock` file inside the project directory, mirroring the existing daemon
+single-instance guard (`daemon/instance.rs`). OS advisory locks release
+automatically when the holding process exits or crashes, so a held lock always
+means a live writer on local filesystems — no stale-lock file or PID recovery
+protocol exists in v1. The revision preflight before commit rejects an edit
+based on an externally changed manifest even if the original lock was lost.
+
+Writable projects on network filesystems are unsupported in v1 because their
+advisory-lock semantics cannot provide the local-filesystem single-writer
+guarantee. Rollshot documents that limitation; the no-silent-overwrite promise
+applies to supported local filesystems. Atomic manifest replacement still
+prevents a torn manifest, but it is not presented as a substitute for reliable
+locking on an unsupported filesystem.
 
 ## Data Safety
 
@@ -487,10 +565,20 @@ Home and Recent Projects never decode frame assets. Background publish processes
 one step image at a time, preserving the existing bounded flatten-and-encode
 goal. MP4 and other derivative work must not block iced update handling.
 
-The exact lazy frame-provider interface is intentionally left for
-`plan-eng-review`, because the current Timeline Workspace consumes an in-memory
-`FrameStore`. The required behavior is fixed: project open cannot require eager
-decode of the entire retained frame set.
+The lazy frame provider is a new step-frame source in `rollshot-action`: an
+enum over the existing in-memory `FrameStore` (fresh recordings) and a
+project-backed source (reopened projects) that decodes content-addressed PNG
+assets on demand into a byte-bounded LRU cache of shared images (default
+exactly 256 MiB, not a frame count). Timeline Workspace, annotation
+presentation, and storyboard paths consume this source instead of touching
+`FrameStore::retained` directly. Project open therefore never eagerly decodes
+the retained frame set.
+
+Publish jobs from a reopened project stay bounded the same way: the reviewed
+export job gains a project-frame image variant carrying the asset digest plus
+the persisted annotation snapshot, resolved (decode, flatten, encode, drop)
+one step at a time inside the existing per-step render loop instead of holding
+every decoded keyframe in memory when the job is frozen.
 
 ## Error Handling
 
@@ -500,9 +588,11 @@ decode of the entire retained frame set.
 | Destination already exists | Keep workspace; request a new path; never replace |
 | Asset encode/write/hash verification fails | Leave prior project revision intact; workspace remains dirty |
 | Manifest validation or atomic replace fails | Leave prior revision openable; workspace remains dirty |
+| Manifest revision changed outside this writer | Reject Save as a conflict; preserve both the external committed revision and local dirty edits |
 | Required project asset missing or corrupt on open | Do not construct a partial writable workspace; identify affected step/asset category |
 | Unknown newer schema | Refuse writable open; explain that a newer Rollshot is required |
 | Writer lock held | Offer read-only open or cancel |
+| `publish-state.json` missing or corrupt | Open normally; treat all enabled outputs as stale |
 | Core publish fails | Project remains saved; core output becomes failed/stale with Retry |
 | Storyboard/GIF/MP4 fails | Project remains saved; only that derivative becomes failed/stale |
 | Older publish job completes late | Drop or retain it as stale; never mark the current revision current |
@@ -529,11 +619,18 @@ decode of the entire retained frame set.
 
 ### Atomicity and fault injection
 
+Fault injection uses real-filesystem manipulation in temp directories
+(truncated files, pre-created destinations, removed permissions, corrupted
+bytes) rather than a filesystem abstraction trait — no injectable FS layer is
+introduced.
+
 - Failure before asset commit leaves the previous manifest and assets usable.
 - Failure after asset commit but before manifest commit leaves only unreachable
   assets; the previous project remains openable.
 - Manifest temporary-write and atomic-replace failures keep the workspace dirty
   and preserve the previous revision.
+- A changed base revision rejects Save without overwriting either the external
+  committed revision or the local dirty workspace state.
 - First Save and Save As collision tests prove no existing directory is
   replaced.
 - A successful save increments revision exactly once.
@@ -557,6 +654,15 @@ decode of the entire retained frame set.
 - Reject a project where a required keyframe or annotation source is missing.
 - Diagnostics tests assert that Guide text, annotation text, image content, and
   title-bearing paths are absent.
+
+### Locking
+
+- Acquiring the writer lock twice in one process fails; dropping the guard
+  releases it (mirrors the existing `daemon/instance.rs` tests).
+- A held lock yields the read-only offer; read-only mode rejects Save and
+  publish mutations.
+- A missing or corrupt `publish-state.json` opens the project with all enabled
+  outputs stale.
 
 ### App state and entry points
 
@@ -633,26 +739,57 @@ entire retained image set.
 - Workflow comparison, regression Storyboards, or automatic Guide version
   alignment
 
-## Engineering Review Hand-off
+## Engineering Decisions (locked by plan-eng-review, 2026-07-17)
 
-`plan-eng-review` must lock the following before implementation planning:
+- **Annotation snapshot boundary:** feature-gated serde derive on the
+  `Annotation` enum plus a rehydrating `ImageDocument` constructor restoring
+  `next_id` / `next_number` from maxima, empty history (see
+  `rollshot-image-document` component section).
+- **Lazy frame provider:** step-frame source enum in `rollshot-action` over
+  in-memory `FrameStore` and a project-backed, byte-bounded LRU decode cache;
+  publish jobs use a lazy project-frame image variant (see Loading section).
+- **Atomicity/durability:** manifest = tmp + fsync + same-dir rename + dir
+  fsync; first Save/Save As = `renameat_with(NOREPLACE)` temp-sibling pattern
+  from `guide_export.rs`; core publish dir = build-aside-swap; single-file
+  derivatives keep their existing tmp+rename.
+- **Locking:** `fs4` advisory exclusive lock on `<project>/.lock`; crash
+  auto-release; no stale-lock protocol; revision-conflict preflight before
+  commit; writable network-filesystem projects unsupported in v1.
+- **Publish orchestration:** operation-id + revision guards extending the
+  existing `GuideExportState` pattern; all encoding on `spawn_blocking`;
+  cooperative cancellation with ffmpeg child kill; corrupt/missing
+  `publish-state.json` → all-stale.
+- **Window hosting:** one iced daemon with Home/Timeline phases per platform
+  (winit forbids event-loop recreation); Linux `Record New` spawns a detached
+  `--record` child process; macOS records in-loop.
+- **Recent projects:** schema-versioned JSON, ≤10 entries, in the `etcetera`
+  config dir; lenient load; paths excluded from diagnostics.
+- **Old-export detection:** `session.json` present without `project.json` →
+  readable export → offer existing open-in-reader action.
+- **Content addressing:** digest of encoded PNG bytes; asset paths derived
+  from digests, not stored.
+- **Strictness:** `deny_unknown_fields` on all project DTOs.
+- **Test seams:** real-filesystem fault injection in temp dirs; no FS
+  abstraction trait.
 
-- The exact v1 DTO and annotation snapshot ownership boundary
-- The lazy frame-provider abstraction replacing eager `FrameStore` assumptions
-  on reopened projects
-- Atomic manifest replacement and filesystem durability expectations
-- Cross-platform writer locking and stale-lock recovery
-- Background publish cancellation and revision arbitration
-- Safe Copy transaction behavior when one or more enabled outputs are stale,
-  including cancellation of share-triggered regeneration
-- Save-first prompt flow: interaction with picker cancellation and the
-  never-saved dirty-close chain (`Save and Close` → picker → cancel returns to
-  the workspace, never discards)
-- Aggregate publish indicator derivation from the per-output revision model
-  (ranking of failed core vs failed optional derivatives)
-- Old-export detection heuristic in Open Project and hand-off into the
-  existing offline HTML reader
-- Recent-project metadata storage and privacy
-- Linux and macOS window/phase transitions for Home, capture, and Timeline
-- Test seams for filesystem fault injection, frame decode bounds, and publish
-  races
+### Aggregate publish indicator derivation
+
+From per-output states over enabled outputs: any `Updating` → `Publishing…`;
+otherwise any `Failed` or `Stale` (core or derivative alike) →
+`Needs attention — Retry`; otherwise `Published`. Core-output failure is
+listed first inside the detail view but does not get a distinct aggregate
+state in v1.
+
+### Recommended plan split
+
+`superpowers:writing-plans` should produce three sequential plans:
+
+1. **Project model and persistence** — `rollshot-action::project` DTOs,
+   validation, atomic save/load, content-addressed assets, and the
+   `rollshot-image-document` snapshot surface.
+2. **App integration** — Home, launch routing, phased daemon hosting, pickers,
+   save-first prompt, dirty/lock/read-only workspace states, lazy frame
+   source wiring.
+3. **Publish orchestration and sharing** — revision-arbitrated background
+   publish, aggregate indicator, Safe Copy / Issue Pack / editable-project
+   sharing flows.
