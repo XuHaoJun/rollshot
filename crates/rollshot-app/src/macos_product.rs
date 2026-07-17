@@ -505,9 +505,8 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                             return Task::none();
                         }
                     };
-                    let recording_tray = Some(crate::macos_recording_tray::Guard::start().ok());
+                    product.recording_tray = crate::macos_recording_tray::Guard::start().ok();
                     product.phase = Phase::Capture(component);
-                    product.recording_tray = recording_tray;
                     open_task
                 }
                 action_guide_home::Effect::OpenProject(path) => {
