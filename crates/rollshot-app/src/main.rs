@@ -1,4 +1,7 @@
 #[cfg(feature = "action-guide")]
+#[allow(dead_code)]
+mod action_guide_home;
+#[cfg(feature = "action-guide")]
 mod action_input;
 pub mod daemon;
 mod diagnostics;
