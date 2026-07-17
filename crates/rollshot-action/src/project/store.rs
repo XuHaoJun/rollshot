@@ -23,7 +23,7 @@ use super::assets::{inspect_png_asset, materialize_asset};
 use super::error::ProjectError;
 use super::model::{
     LoadedProject, ProjectCommit, ProjectFrame, ProjectManifestV1, ProjectSnapshot,
-    SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
+    PROJECT_SCHEMA_VERSION,
 };
 use super::validate::{validate_manifest_structure, validate_snapshot_structure};
 
@@ -182,53 +182,7 @@ pub fn create_project(
         });
     }
 
-    validate_snapshot_structure(snapshot)?;
-
-    let parent = destination.parent().ok_or_else(|| ProjectError::Io {
-        path: destination.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory"),
-    })?;
-
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_name = format!(".tmp-project-{pid}-{counter}", pid = std::process::id());
-    let temp_root = parent.join(&temp_name);
-    std::fs::create_dir_all(&temp_root).map_err(|e| ProjectError::Io {
-        path: temp_root.clone(),
-        source: e,
-    })?;
-    let guard = TempGuard::new(temp_root.clone());
-
-    let frames = materialize_all(&temp_root, snapshot)?;
-
-    let manifest = ProjectManifestV1 {
-        schema_version: PROJECT_SCHEMA_VERSION,
-        revision: 1,
-        title: snapshot.title.clone(),
-        capture_region: snapshot.capture_region,
-        input_source: snapshot.input_source,
-        input_capability: snapshot.input_capability,
-        enabled_outputs: snapshot.enabled_outputs,
-        frames,
-        steps: snapshot.steps.clone(),
-    };
-
-    validate_manifest_structure(&manifest)?;
-    write_manifest_atomic(&temp_root, &manifest)?;
-
-    let publish_dir = temp_root.join("publish");
-    std::fs::create_dir(&publish_dir).map_err(|e| ProjectError::Io {
-        path: publish_dir,
-        source: e,
-    })?;
-
-    commit_noreplace(&temp_root, destination)?;
-    fsync_dir(destination)?;
-    guard.dismiss();
-
-    Ok(ProjectCommit {
-        root: destination.to_path_buf(),
-        manifest,
-    })
+    commit_new_project(snapshot, destination)
 }
 
 /// Save As — writes a copy of the snapshot as a new project at revision 1.
@@ -236,6 +190,13 @@ pub fn create_project(
 /// Always writes revision 1 regardless of `base_revision`. Rejects if
 /// `destination` already exists.
 pub fn save_project_as(
+    snapshot: &ProjectSnapshot,
+    destination: &Path,
+) -> Result<ProjectCommit, ProjectError> {
+    commit_new_project(snapshot, destination)
+}
+
+fn commit_new_project(
     snapshot: &ProjectSnapshot,
     destination: &Path,
 ) -> Result<ProjectCommit, ProjectError> {
@@ -313,31 +274,10 @@ pub fn save_project(
         });
     }
 
+    let mut frames = Vec::with_capacity(snapshot.frames.len());
     for frame in &snapshot.frames {
-        match &frame.payload {
-            SnapshotFramePayload::ExistingAsset {
-                project_root: src_root,
-                sha256,
-                width,
-                height,
-            } => {
-                let _ = materialize_asset(
-                    project_root,
-                    SnapshotFramePayload::ExistingAsset {
-                        project_root: src_root.clone(),
-                        sha256: sha256.clone(),
-                        width: *width,
-                        height: *height,
-                    },
-                    frame.id,
-                    frame.at_ms,
-                )?;
-            }
-            SnapshotFramePayload::Pixels(_) => {
-                let _ =
-                    materialize_asset(project_root, frame.payload.clone(), frame.id, frame.at_ms)?;
-            }
-        }
+        let pf = materialize_asset(project_root, frame.payload.clone(), frame.id, frame.at_ms)?;
+        frames.push(pf);
     }
 
     // Re-read revision immediately before commit
@@ -353,32 +293,6 @@ pub fn save_project(
         path: project_root.to_path_buf(),
         source: std::io::Error::other("revision overflow"),
     })?;
-
-    let frames: Vec<ProjectFrame> = snapshot
-        .frames
-        .iter()
-        .map(|f| {
-            let (sha256, width, height) = match &f.payload {
-                SnapshotFramePayload::Pixels(img) => {
-                    let encoded = super::assets::encode_png_asset(img)?;
-                    Ok((encoded.sha256, encoded.width, encoded.height))
-                }
-                SnapshotFramePayload::ExistingAsset {
-                    sha256,
-                    width,
-                    height,
-                    ..
-                } => Ok((sha256.clone(), *width, *height)),
-            }?;
-            Ok::<ProjectFrame, ProjectError>(ProjectFrame {
-                id: f.id,
-                at_ms: f.at_ms,
-                sha256,
-                width,
-                height,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
 
     let manifest = ProjectManifestV1 {
         schema_version: PROJECT_SCHEMA_VERSION,
