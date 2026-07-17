@@ -100,7 +100,7 @@ fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String>
         #[cfg(feature = "action-guide")]
         LaunchMode::ActionGuideProbe => run_action_guide_probe(),
         #[cfg(feature = "action-guide")]
-        LaunchMode::ActionGuide { fullscreen } => run_action_guide_record(fullscreen),
+        LaunchMode::ActionGuide(launch) => run_action_guide_launch(launch),
     }
 }
 
@@ -202,6 +202,32 @@ fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
         },
         post_capture::CapturePurpose::Present,
     )
+}
+
+#[cfg(all(feature = "action-guide", target_os = "linux"))]
+fn run_action_guide_launch(launch: launch::ActionGuideLaunch) -> Result<(), String> {
+    use crate::action_guide_home::ActionGuideIntent;
+    match launch {
+        launch::ActionGuideLaunch::Home => action_guide_linux_product::run(ActionGuideIntent::Home),
+        launch::ActionGuideLaunch::Record { fullscreen } => run_action_guide_record(fullscreen),
+        launch::ActionGuideLaunch::Open { path } => {
+            action_guide_linux_product::run(ActionGuideIntent::Open { path })
+        }
+    }
+}
+
+#[cfg(all(feature = "action-guide", target_os = "macos"))]
+fn run_action_guide_launch(launch: launch::ActionGuideLaunch) -> Result<(), String> {
+    use crate::action_guide_home::ActionGuideIntent;
+    match launch {
+        launch::ActionGuideLaunch::Home => macos_product::run_action_guide(ActionGuideIntent::Home),
+        launch::ActionGuideLaunch::Record { fullscreen } => {
+            macos_product::run_action_guide(ActionGuideIntent::Record { fullscreen })
+        }
+        launch::ActionGuideLaunch::Open { path } => {
+            macos_product::run_action_guide(ActionGuideIntent::Open { path })
+        }
+    }
 }
 
 fn run_iced_capture(
