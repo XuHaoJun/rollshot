@@ -244,6 +244,18 @@ pub(crate) fn decode_png_asset(
     Ok(rgba)
 }
 
+fn fsync_dir(path: &Path) -> Result<(), ProjectError> {
+    let file = std::fs::File::open(path).map_err(|e| ProjectError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    file.sync_all().map_err(|e| ProjectError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub(crate) fn materialize_asset(
     root: &Path,
@@ -345,7 +357,10 @@ pub(crate) fn materialize_asset(
 
     // Rename atomically; if final exists, verify and discard temp
     match std::fs::rename(&temp_path, &final_path) {
-        Ok(()) => {}
+        Ok(()) => {
+            // Fsync the frames directory to persist the rename on non-journaled filesystems
+            fsync_dir(&frames_dir)?;
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Final path was created between our check and rename; verify and discard temp
             cleanup(&temp_path);

@@ -257,12 +257,13 @@ pub fn save_project(
     snapshot: &ProjectSnapshot,
     project_root: &Path,
 ) -> Result<ProjectCommit, ProjectError> {
-    let expected = snapshot
-        .base_revision
-        .ok_or(ProjectError::RevisionConflict {
+    let Some(expected) = snapshot.base_revision else {
+        let current = read_manifest(project_root)?;
+        return Err(ProjectError::RevisionConflict {
             expected: 0,
-            actual: 0,
-        })?;
+            actual: current.revision,
+        });
+    };
 
     validate_snapshot_structure(snapshot)?;
 

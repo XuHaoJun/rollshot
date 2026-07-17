@@ -60,31 +60,7 @@ impl ProjectErrorCategory {
 
 impl std::fmt::Display for ProjectErrorCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io => write!(f, "io"),
-            Self::InvalidJson => write!(f, "invalid-json"),
-            Self::UnsupportedSchema => write!(f, "unsupported-schema"),
-            Self::InvalidManifest => write!(f, "invalid-manifest"),
-            Self::InvalidAsset => write!(f, "invalid-asset"),
-            Self::Encode => write!(f, "encode"),
-            Self::DestinationExists => write!(f, "destination-exists"),
-            Self::UnsupportedAtomicCommit => write!(f, "unsupported-atomic-commit"),
-            Self::RevisionConflict => write!(f, "revision-conflict"),
-            Self::ZeroRevision => write!(f, "zero-revision"),
-            Self::EmptySteps => write!(f, "empty-steps"),
-            Self::EmptyFrames => write!(f, "empty-frames"),
-            Self::DuplicateFrameId => write!(f, "duplicate-frame-id"),
-            Self::DuplicateStepId => write!(f, "duplicate-step-id"),
-            Self::NonContiguousOrder => write!(f, "non-contiguous-order"),
-            Self::MissingKeyframe => write!(f, "missing-keyframe"),
-            Self::KeyframeNotNearby => write!(f, "keyframe-not-nearby"),
-            Self::DuplicateNearbyId => write!(f, "duplicate-nearby-id"),
-            Self::MissingNearbyFrame => write!(f, "missing-nearby-frame"),
-            Self::FrameDimensionMismatch => write!(f, "frame-dimension-mismatch"),
-            Self::ZeroCaptureRegion => write!(f, "zero-capture-region"),
-            Self::MissingExplanationAnnotation => write!(f, "missing-explanation-annotation"),
-            Self::AnnotationValidationFailed => write!(f, "annotation-validation-failed"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
