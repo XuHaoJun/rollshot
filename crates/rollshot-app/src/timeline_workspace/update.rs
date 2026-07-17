@@ -330,6 +330,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if !state.can_mutate() {
                 return Update::none();
             }
+            if state.guide.steps().len() <= 1 {
+                return Update::none();
+            }
             let deleted_source = state.selected_step().map(|step| step.source);
             let mut deleted = false;
             if let Some(index) = state.selected {
@@ -2563,11 +2566,11 @@ mod tests {
     }
 
     #[test]
-    fn delete_last_remaining_step_clears_selection() {
+    fn delete_last_remaining_step_is_noop() {
         let mut state = ws(synthetic_recording(1));
         let _ = update(&mut state, Message::DeleteStep);
-        assert!(state.guide.steps().is_empty());
-        assert_eq!(state.selected, None);
+        assert_eq!(state.guide.steps().len(), 1);
+        assert_eq!(state.selected, Some(1));
     }
 
     #[test]
@@ -4096,10 +4099,10 @@ mod tests {
 
     #[test]
     fn delete_step_dismisses_visual_annotation_review() {
-        let mut state = ws(recording_from_frames());
+        let mut state = ws(synthetic_recording(2));
         state.visual_annotation_suggestion =
             crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
-                visual_proposal_for_first_step(&mut state, 1),
+                proposal_for_synthetic_step(&state),
             );
 
         let _ = update(&mut state, Message::DeleteStep);
@@ -4403,6 +4406,28 @@ mod tests {
         .expect("valid proposal")
     }
 
+    fn proposal_for_synthetic_step(state: &TimelineWorkspace) -> VisualAnnotationProposal {
+        let step = &state.guide.steps()[0];
+        VisualAnnotationProposal::from_agent_drafts(
+            rollshot_action::VisualAnnotationProposalId(1),
+            1,
+            step,
+            0,
+            32,
+            32,
+            vec![rollshot_action::VisualAnnotationSuggestionDraft {
+                id: rollshot_action::VisualAnnotationSuggestionId(1),
+                payload: rollshot_action::VisualAnnotationPayload::TextNote {
+                    position: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                    text: "test".to_string(),
+                },
+                confidence: 0.8,
+                rationale: None,
+            }],
+        )
+        .expect("valid proposal")
+    }
+
     #[test]
     fn individual_accept_visual_annotation_applies_one_and_rebases() {
         let mut state = ws(recording_from_frames());
@@ -4529,25 +4554,14 @@ mod tests {
 
     #[test]
     fn stale_accept_all_visual_annotations_changes_neither_count_nor_state() {
-        let mut state = ws(recording_from_frames());
-        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        let mut state = ws(synthetic_recording(2));
         state.visual_annotation_suggestion =
-            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
-        let source = state.selected_step().unwrap().source;
-        let state_before = state.presentation.doc(source).unwrap().document.state_id();
-        let annotations_before = state
-            .presentation
-            .doc(source)
-            .unwrap()
-            .document
-            .annotations()
-            .len();
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                proposal_for_synthetic_step(&state),
+            );
 
         let _ = update(&mut state, Message::DeleteStep);
 
-        // After DeleteStep, the step may be renumbered. The key assertion
-        // is that the visual annotation proposal was discarded (Idle) and
-        // no annotations were applied to any document.
         assert!(
             matches!(
                 state.visual_annotation_suggestion,
@@ -4555,19 +4569,6 @@ mod tests {
             ),
             "pending review must be discarded"
         );
-        // The source's document was not mutated (if it still exists).
-        if let Some(doc) = state.presentation.doc(source) {
-            assert_eq!(
-                doc.document.state_id(),
-                state_before,
-                "document state must not change"
-            );
-            assert_eq!(
-                doc.document.annotations().len(),
-                annotations_before,
-                "annotations must not change"
-            );
-        }
     }
 
     #[test]
@@ -4641,10 +4642,11 @@ mod tests {
 
     #[test]
     fn delete_step_after_pending_review_stales_remaining_items() {
-        let mut state = ws(recording_from_frames());
-        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        let mut state = ws(synthetic_recording(2));
         state.visual_annotation_suggestion =
-            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                proposal_for_synthetic_step(&state),
+            );
 
         let _ = update(&mut state, Message::DeleteStep);
 

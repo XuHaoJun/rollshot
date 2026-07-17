@@ -228,10 +228,6 @@ pub(crate) struct FrameLoadCoordinator {
     generation: std::sync::atomic::AtomicU64,
     #[allow(dead_code)]
     semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-    #[allow(dead_code)]
-    required_ids: Vec<rollshot_action::FrameId>,
-    #[allow(dead_code)]
-    loading_ids: std::collections::BTreeSet<rollshot_action::FrameId>,
 }
 
 impl FrameLoadCoordinator {
@@ -239,8 +235,6 @@ impl FrameLoadCoordinator {
         Self {
             generation: std::sync::atomic::AtomicU64::new(0),
             semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
-            required_ids: Vec::new(),
-            loading_ids: std::collections::BTreeSet::new(),
         }
     }
 
@@ -852,18 +846,32 @@ mod tests {
                         height: 32,
                     },
                 ],
-                steps: vec![ProjectStep {
-                    id: ProjectStepId(1),
-                    order: 1,
-                    title: "Step 1".into(),
-                    caption: None,
-                    kind: CandidateKind::Click,
-                    reason: DetectReason::ClickConfirmed,
-                    at_ms: 100,
-                    keyframe: 1,
-                    nearby: vec![1, 2, 3],
-                    annotations: None,
-                }],
+                steps: vec![
+                    ProjectStep {
+                        id: ProjectStepId(1),
+                        order: 1,
+                        title: "Step 1".into(),
+                        caption: None,
+                        kind: CandidateKind::Click,
+                        reason: DetectReason::ClickConfirmed,
+                        at_ms: 100,
+                        keyframe: 1,
+                        nearby: vec![1, 2, 3],
+                        annotations: None,
+                    },
+                    ProjectStep {
+                        id: ProjectStepId(2),
+                        order: 2,
+                        title: "Step 2".into(),
+                        caption: None,
+                        kind: CandidateKind::Click,
+                        reason: DetectReason::ClickConfirmed,
+                        at_ms: 200,
+                        keyframe: 2,
+                        nearby: vec![1, 2, 3],
+                        annotations: None,
+                    },
+                ],
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
@@ -914,18 +922,32 @@ mod tests {
                         height: 32,
                     },
                 ],
-                steps: vec![ProjectStep {
-                    id: ProjectStepId(1),
-                    order: 1,
-                    title: "Step 1".into(),
-                    caption: None,
-                    kind: CandidateKind::Click,
-                    reason: DetectReason::ClickConfirmed,
-                    at_ms: 100,
-                    keyframe: 1,
-                    nearby: vec![1, 2, 3],
-                    annotations: None,
-                }],
+                steps: vec![
+                    ProjectStep {
+                        id: ProjectStepId(1),
+                        order: 1,
+                        title: "Step 1".into(),
+                        caption: None,
+                        kind: CandidateKind::Click,
+                        reason: DetectReason::ClickConfirmed,
+                        at_ms: 100,
+                        keyframe: 1,
+                        nearby: vec![1, 2, 3],
+                        annotations: None,
+                    },
+                    ProjectStep {
+                        id: ProjectStepId(2),
+                        order: 2,
+                        title: "Step 2".into(),
+                        caption: None,
+                        kind: CandidateKind::Click,
+                        reason: DetectReason::ClickConfirmed,
+                        at_ms: 200,
+                        keyframe: 2,
+                        nearby: vec![1, 2, 3],
+                        annotations: None,
+                    },
+                ],
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
@@ -1710,6 +1732,247 @@ mod tests {
                 result.task.units() > 0,
                 "remaining frames should trigger a follow-up decode task"
             );
+        }
+
+        // ---- Finding 1: last step cannot be deleted ----
+
+        #[test]
+        fn delete_step_is_noop_when_only_one_step() {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 1,
+                title: "Single Step Guide".into(),
+                capture_region: super::region_32(),
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Only Step".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 0,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _ = super::super::update::update(&mut ws, Message::DeleteStep);
+
+            assert_eq!(ws.guide.steps().len(), 1, "last step must not be deleted");
+            assert_eq!(ws.selected, Some(1));
+            assert_eq!(
+                ws.save_state,
+                ProjectSaveState::Clean,
+                "save state must not change"
+            );
+        }
+
+        // ---- Finding 2: mutation-dirty tests for 6 arms ----
+
+        #[test]
+        fn annotation_explanation_changed_marks_dirty() {
+            use crate::timeline_workspace::annotation::StepAnnotationSession;
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+            let step = ws.selected_step().cloned().unwrap();
+            ws.annotation_session = Some(StepAnnotationSession::new(
+                step.source,
+                step.keyframe,
+                &RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])),
+            ));
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::AnnotationExplanationChanged(
+                    rollshot_image_document::AnnotationId(999),
+                    "explanation text".to_string(),
+                ),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn accept_caption_suggestion_marks_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+            let proposal = caption_proposal_for_ws(&ws);
+            let _ =
+                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok(proposal)));
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn accept_all_caption_suggestions_marks_dirty() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+            let proposal = caption_proposal_for_ws(&ws);
+            let _ =
+                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok(proposal)));
+
+            let _ = super::super::update::update(&mut ws, Message::AcceptAllCaptionSuggestions);
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn annotation_canvas_released_marks_dirty() {
+            use crate::timeline_workspace::annotation::StepAnnotationSession;
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Clean;
+            let step = ws.selected_step().cloned().unwrap();
+            ws.annotation_session = Some(StepAnnotationSession::new(
+                step.source,
+                step.keyframe,
+                &RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])),
+            ));
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::AnnotationCanvasReleased(rollshot_image_document::ImagePoint::new(
+                    16.0, 16.0,
+                )),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn accept_visual_annotation_marks_dirty() {
+            let (mut ws, suggestion_id) = ws_project_backed_with_visual_proposal();
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::AcceptVisualAnnotation(suggestion_id),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        #[test]
+        fn accept_all_visual_annotations_marks_dirty() {
+            let (mut ws, _) = ws_project_backed_with_visual_proposal();
+
+            let _ = super::super::update::update(&mut ws, Message::AcceptAllVisualAnnotations);
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+        }
+
+        // ---- Finding 3: full SaveThenClose integration test ----
+
+        #[test]
+        fn save_then_close_closes_workspace_after_save_completes() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+            ws.close_intent = CloseIntent::Confirming;
+
+            let _result = super::super::update::update(&mut ws, Message::CloseSaveAndClose);
+            assert_eq!(ws.close_intent, CloseIntent::SaveThenClose);
+            assert_eq!(ws.save_state, ProjectSaveState::Saving);
+
+            let result = super::super::update::update(
+                &mut ws,
+                Message::SaveWorkerFinished(
+                    super::super::update::SaveWorkerOutcome::ExistingSaved { revision: 2 },
+                ),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+            assert_eq!(result.effect, Effect::CloseWorkspace);
+        }
+
+        // ---- Helpers for the new tests ----
+
+        fn caption_proposal_for_ws(state: &TimelineWorkspace) -> rollshot_action::CaptionProposal {
+            rollshot_action::CaptionProposal::from_agent_drafts(
+                rollshot_action::CaptionProposalId(1),
+                42,
+                &state.guide,
+                vec![rollshot_action::CaptionSuggestionDraft {
+                    step_source: state.guide.steps()[0].source,
+                    title: Some("Suggested Title".to_string()),
+                    caption: "Suggested caption.".to_string(),
+                    confidence: 0.9,
+                    rationale: None,
+                }],
+            )
+        }
+
+        fn ws_project_backed_with_visual_proposal() -> (
+            TimelineWorkspace,
+            rollshot_action::VisualAnnotationSuggestionId,
+        ) {
+            let mut ws = workspace(recording_from_frames());
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            ws.project_session = Some(project::ProjectSession::Saved {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                base_revision: 1,
+                access: ProjectAccess::Writable(guard),
+            });
+            ws.save_state = ProjectSaveState::Clean;
+
+            let step = ws.selected_step().cloned().unwrap();
+            let _doc = ws.presentation.document_for_step(&step, &ws.store);
+
+            let doc = ws.presentation.doc(step.source).unwrap();
+            let image = doc.document.source();
+            let suggestion_id = rollshot_action::VisualAnnotationSuggestionId(1);
+            let proposal = rollshot_action::VisualAnnotationProposal::from_agent_drafts(
+                rollshot_action::VisualAnnotationProposalId(1),
+                1,
+                &step,
+                doc.document.state_id(),
+                image.width(),
+                image.height(),
+                vec![rollshot_action::VisualAnnotationSuggestionDraft {
+                    id: suggestion_id,
+                    payload: rollshot_action::VisualAnnotationPayload::TextNote {
+                        position: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                        text: "Test note".to_string(),
+                    },
+                    confidence: 0.9,
+                    rationale: None,
+                }],
+            )
+            .unwrap();
+
+            ws.visual_annotation_suggestion =
+                crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+
+            (ws, suggestion_id)
         }
     }
 }
