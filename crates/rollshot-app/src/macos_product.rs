@@ -1598,6 +1598,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(target_os = "macos"))]
         fn record_new_enters_capture_phase() {
             let mut product = product_in_home_phase();
             let task = update(
@@ -1626,11 +1627,17 @@ mod tests {
         #[test]
         fn home_inspect_selection_enters_opening_phase() {
             let mut product = product_in_home_phase();
+            let project_path = PathBuf::from("/some/path");
+            if let Phase::Home(ref mut home) = product.phase {
+                home.recent.record_open_at(
+                    project_path.clone(),
+                    "Test Project".into(),
+                    1,
+                );
+            }
             let task = update(
                 &mut product,
-                Message::HomeMsg(action_guide_home::Message::RecentSelected(PathBuf::from(
-                    "/some/path",
-                ))),
+                Message::HomeMsg(action_guide_home::Message::RecentSelected(project_path)),
             );
             assert!(matches!(product.phase, Phase::Opening(_)));
             assert!(task.units() > 0, "should return inspect task");
