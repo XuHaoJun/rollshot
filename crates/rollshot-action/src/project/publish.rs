@@ -242,6 +242,10 @@ impl PublishCancellation {
             Ok(())
         }
     }
+
+    pub fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
 }
 
 impl Default for PublishCancellation {

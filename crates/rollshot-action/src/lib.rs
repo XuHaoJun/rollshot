@@ -40,7 +40,7 @@ pub use export::model::{
 };
 pub use export::{model as export_model, render_guide_folder, ManifestStep, SessionManifest};
 pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
-pub use gif::{export_gif, export_gif_images, GifOptions};
+pub use gif::{export_gif, export_gif_images, export_reviewed_gif, GifOptions};
 pub use guide::{Guide, DEFAULT_GUIDE_TITLE};
 pub use input::{SemanticInputSource, StartedSemanticInput, VisualOnlySource};
 pub use metrics::{changed_area_ratio, downsample_luma, masked_luma_diff, LumaPlane, Rect};
@@ -55,10 +55,11 @@ pub use step_frame_source::{
     DEFAULT_PROJECT_FRAME_CACHE_BYTES,
 };
 pub use storyboard::{
-    export_storyboard, render_reviewed_storyboard, render_storyboard, render_storyboard_steps,
+    export_reviewed_storyboard_cancellable, export_storyboard, render_reviewed_storyboard,
+    render_reviewed_storyboard_cancellable, render_storyboard, render_storyboard_steps,
     StoryboardExportResult, StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
-pub use video::{export_video, VideoOptions};
+pub use video::{export_reviewed_video, export_video, VideoOptions};
 pub use visual_annotation_proposal::{
     VisualAnnotationApplyOutcome, VisualAnnotationBase, VisualAnnotationPayload,
     VisualAnnotationProposal, VisualAnnotationProposalError, VisualAnnotationProposalId,

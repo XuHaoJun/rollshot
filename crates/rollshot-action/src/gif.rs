@@ -3,14 +3,20 @@
 //! reviewed/edited keyframes only — never from the raw frame stream. One frame
 //! per step, fixed dwell, downscaled to a max width for predictable size.
 
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame, RgbaImage};
 
 use crate::error::GifError;
+use crate::export::model::ReviewedGuideExportJob;
 use crate::frame_store::FrameStore;
 use crate::guide::Guide;
+use crate::project::PublishCancellation;
+
+pub(crate) const DERIVATIVE_FRAME_PIXEL_CEILING: u64 = 16_777_216;
 
 /// Tunables for summary-GIF assembly. `Default` is the P0.5 "basic" profile.
 #[derive(Debug, Clone)]
@@ -96,6 +102,92 @@ fn encode_images(
         }
     }
     write_atomic(out_path, &buf)
+}
+
+pub fn export_reviewed_gif(
+    job: &ReviewedGuideExportJob,
+    opts: GifOptions,
+    cancel: &PublishCancellation,
+    out_path: &Path,
+) -> Result<(), GifError> {
+    if job.steps.is_empty() {
+        return Err(GifError::Empty);
+    }
+
+    let tmp = out_path.with_extension("gif.tmp");
+    let file = std::fs::File::create(&tmp).map_err(|source| GifError::Io {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+    let mut writer = std::io::BufWriter::new(file);
+    {
+        let mut encoder = GifEncoder::new(&mut writer);
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .map_err(|source| GifError::Encode { source })?;
+
+        let flag = cancel.flag();
+        for step in &job.steps {
+            if flag.load(Ordering::Relaxed) {
+                drop(encoder);
+                drop(writer);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(GifError::Cancelled);
+            }
+
+            let (out_w, out_h) = step.image.dimensions();
+            let out_w = out_w.min(opts.max_width);
+            let out_h =
+                if step.image.dimensions().0 > opts.max_width && step.image.dimensions().0 > 0 {
+                    (step.image.dimensions().1 as u64 * opts.max_width as u64
+                        / step.image.dimensions().0 as u64)
+                        .max(1) as u32
+                } else {
+                    out_h
+                };
+            let pixels = (out_w as u64).checked_mul(out_h as u64);
+            if !matches!(pixels, Some(p) if p <= DERIVATIVE_FRAME_PIXEL_CEILING) {
+                drop(encoder);
+                drop(writer);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(GifError::FrameTooLarge {
+                    pixels: pixels.unwrap_or(u64::MAX),
+                    ceiling: DERIVATIVE_FRAME_PIXEL_CEILING,
+                });
+            }
+
+            step.image
+                .with_flattened_image(flag, |image| {
+                    let scaled = downscale(image, opts.max_width);
+                    let delay = Delay::from_numer_denom_ms(opts.frame_dwell_ms, 1);
+                    encoder
+                        .encode_frame(Frame::from_parts(scaled, 0, 0, delay))
+                        .map_err(|source| crate::error::ExportError::Io {
+                            path: String::new(),
+                            source: std::io::Error::other(GifError::Encode { source }),
+                        })
+                })
+                .map_err(|error| match error {
+                    crate::error::ExportError::Cancelled => GifError::Cancelled,
+                    other => GifError::Io {
+                        path: String::new(),
+                        source: std::io::Error::other(other.to_string()),
+                    },
+                })?;
+        }
+    }
+    writer.flush().map_err(|source| GifError::Io {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+    drop(writer);
+    std::fs::rename(&tmp, out_path).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        GifError::Io {
+            path: out_path.display().to_string(),
+            source,
+        }
+    })
 }
 
 /// Downscale `image` so its width is at most `max_width`, preserving aspect
@@ -319,5 +411,148 @@ mod tests {
             Err(GifError::KeyframeMissing { index: 2 })
         ));
         assert!(!path.exists(), "no partial GIF on error");
+    }
+
+    #[test]
+    fn reviewed_streaming_cancels_before_later_steps() {
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![
+                crate::export::model::ReviewedGuideStep {
+                    index: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 100,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image.clone(),
+                    )),
+                    hotspots: Vec::new(),
+                },
+                crate::export::model::ReviewedGuideStep {
+                    index: 2,
+                    title: "Step 2".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 200,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image,
+                    )),
+                    hotspots: Vec::new(),
+                },
+            ],
+        };
+        let path = temp_path("reviewed-cancel");
+        let result = export_reviewed_gif(&job, GifOptions::default(), &cancel, &path);
+        assert!(matches!(result, Err(GifError::Cancelled)));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn reviewed_streaming_encodes_frames_one_at_a_time() {
+        let cancel = PublishCancellation::new();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![
+                crate::export::model::ReviewedGuideStep {
+                    index: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 100,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image.clone(),
+                    )),
+                    hotspots: Vec::new(),
+                },
+                crate::export::model::ReviewedGuideStep {
+                    index: 2,
+                    title: "Step 2".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 200,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image,
+                    )),
+                    hotspots: Vec::new(),
+                },
+            ],
+        };
+        let path = temp_path("reviewed-stream");
+        export_reviewed_gif(&job, GifOptions::default(), &cancel, &path).expect("export");
+        assert!(path.exists());
+        assert_eq!(decode_frames(&path).len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reviewed_streaming_rejects_oversized_frame() {
+        let cancel = PublishCancellation::new();
+        // 100 * 200_000 = 20_000_000 > DERIVATIVE_FRAME_PIXEL_CEILING (16_777_216)
+        // Image is already at max_width, so downscaling won't reduce it.
+        let big = RgbaImage::from_pixel(100, 200_000, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 200_000,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![crate::export::model::ReviewedGuideStep {
+                index: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: 100,
+                image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(big)),
+                hotspots: Vec::new(),
+            }],
+        };
+        let path = temp_path("reviewed-oversized");
+        let result = export_reviewed_gif(
+            &job,
+            GifOptions {
+                max_width: 100,
+                ..GifOptions::default()
+            },
+            &cancel,
+            &path,
+        );
+        assert!(matches!(result, Err(GifError::FrameTooLarge { .. })));
+        assert!(!path.exists());
     }
 }
