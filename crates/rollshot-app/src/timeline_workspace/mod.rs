@@ -27,6 +27,8 @@ mod visual_annotation_agent;
 
 #[cfg(feature = "action-guide")]
 pub(crate) mod project;
+#[cfg(feature = "action-guide")]
+pub(crate) mod project_publish;
 
 #[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};
