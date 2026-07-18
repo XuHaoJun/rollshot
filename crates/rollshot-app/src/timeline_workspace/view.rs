@@ -737,7 +737,15 @@ fn publish_details_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
     items = items.push(action_row);
 
     let share_section: Element<Message> = {
+        let outputs_all_current = {
+            let enabled = state.publish_enabled_kinds();
+            enabled.iter().all(|kind| {
+                state.publish_freshness.get(kind)
+                    == Some(&rollshot_action::project::PublishFreshness::Current)
+            })
+        };
         let share_safe: Element<Message> = if is_clean
+            && (is_writable || outputs_all_current)
             && !state.share_progress.as_ref().is_some_and(|p| {
                 matches!(
                     p,
