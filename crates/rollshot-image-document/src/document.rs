@@ -79,6 +79,110 @@ fn clamp_freehand_points(
     Ok(clamped)
 }
 
+fn validate_rect_in_bounds(r: &ImageRect, width: u32, height: u32) -> Result<(), EditError> {
+    if r.width <= 0.0 || r.height <= 0.0 {
+        return Err(EditError::ZeroArea);
+    }
+    // All coordinates must be finite
+    if !r.x.is_finite() || !r.y.is_finite() || !r.width.is_finite() || !r.height.is_finite() {
+        return Err(EditError::ZeroArea);
+    }
+    // Rect must intersect [0, source_width) x [0, source_height)
+    let w = width as f32;
+    let h = height as f32;
+    if r.x >= w || r.y >= h || r.x + r.width <= 0.0 || r.y + r.height <= 0.0 {
+        return Err(EditError::ZeroArea);
+    }
+    Ok(())
+}
+
+fn validate_persisted_annotation(
+    annotation: &Annotation,
+    width: u32,
+    height: u32,
+) -> Result<(), EditError> {
+    let w = width as f32;
+    let h = height as f32;
+    match annotation {
+        Annotation::TwoPoint {
+            start, end, style, ..
+        } => {
+            validate_stroke_style(*style)?;
+            ensure_point_finite(start)?;
+            ensure_point_finite(end)?;
+            if start.x < 0.0 || start.x > w || start.y < 0.0 || start.y > h {
+                return Err(EditError::NonFiniteCoordinate);
+            }
+            if end.x < 0.0 || end.x > w || end.y < 0.0 || end.y > h {
+                return Err(EditError::NonFiniteCoordinate);
+            }
+            if start == end {
+                return Err(EditError::CoincidentPoints);
+            }
+        }
+        Annotation::NumberCallout {
+            tip, bubble, style, ..
+        } => {
+            ensure_point_finite(tip)?;
+            ensure_point_finite(bubble)?;
+            if tip.x < 0.0 || tip.x > w || tip.y < 0.0 || tip.y > h {
+                return Err(EditError::NonFiniteCoordinate);
+            }
+            if bubble.x < 0.0 || bubble.x > w || bubble.y < 0.0 || bubble.y > h {
+                return Err(EditError::NonFiniteCoordinate);
+            }
+            let _ = style;
+        }
+        Annotation::TextNote {
+            position,
+            text,
+            style,
+            ..
+        } => {
+            ensure_point_finite(position)?;
+            if position.x < 0.0 || position.x > w || position.y < 0.0 || position.y > h {
+                return Err(EditError::NonFiniteCoordinate);
+            }
+            if text.trim().is_empty() {
+                return Err(EditError::EmptyText);
+            }
+            let _ = style;
+        }
+        Annotation::OpaqueRedaction { bounds, .. } => {
+            validate_rect_in_bounds(bounds, width, height)?;
+        }
+        Annotation::Shape { bounds, stroke, .. } => {
+            validate_stroke_style(*stroke)?;
+            validate_rect_in_bounds(bounds, width, height)?;
+        }
+        Annotation::Freehand { points, style, .. } => {
+            validate_stroke_style(*style)?;
+            if points.len() < 2 {
+                return Err(EditError::InvalidFreehandPath);
+            }
+            for p in points {
+                ensure_point_finite(p)?;
+                if p.x < 0.0 || p.x > w || p.y < 0.0 || p.y > h {
+                    return Err(EditError::NonFiniteCoordinate);
+                }
+            }
+            if points.iter().all(|p| *p == points[0]) {
+                return Err(EditError::InvalidFreehandPath);
+            }
+        }
+        Annotation::Pixelate {
+            bounds, block_size, ..
+        } => {
+            use crate::pixelate::{MAX_PIXELATE_BLOCK_SIZE, MIN_PIXELATE_BLOCK_SIZE};
+            if !(MIN_PIXELATE_BLOCK_SIZE..=MAX_PIXELATE_BLOCK_SIZE).contains(block_size) {
+                return Err(EditError::InvalidPixelateBlockSize(*block_size));
+            }
+            validate_rect_in_bounds(bounds, width, height)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EditError {
     #[error("two-point annotations require distinct endpoints")]
@@ -107,6 +211,14 @@ pub enum EditError {
     InvalidPixelateBounds,
     #[error("pixelate block size {0} is outside the allowed range")]
     InvalidPixelateBlockSize(u32),
+    #[error("annotation ids must be non-zero")]
+    InvalidAnnotationId,
+    #[error("annotation ids must be unique")]
+    DuplicateAnnotationId,
+    #[error("number callout numbers must be non-zero")]
+    InvalidCalloutNumber,
+    #[error("annotation id or number allocation overflowed")]
+    AllocatorOverflow,
 }
 
 /// One restorable history state (mark-shot pattern: graph + counters).
@@ -147,6 +259,61 @@ impl ImageDocument {
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    pub fn validate_persisted_annotations(
+        width: u32,
+        height: u32,
+        annotations: &[Annotation],
+    ) -> Result<(u64, u32), EditError> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut max_id = 0u64;
+        let mut max_number = 0u32;
+
+        for annotation in annotations {
+            let id = annotation.id().0;
+            if id == 0 {
+                return Err(EditError::InvalidAnnotationId);
+            }
+            if !ids.insert(id) {
+                return Err(EditError::DuplicateAnnotationId);
+            }
+            max_id = max_id.max(id);
+            validate_persisted_annotation(annotation, width, height)?;
+            if let Annotation::NumberCallout { number, .. } = annotation {
+                if *number == 0 {
+                    return Err(EditError::InvalidCalloutNumber);
+                }
+                max_number = max_number.max(*number);
+            }
+        }
+
+        let next_id = max_id.checked_add(1).ok_or(EditError::AllocatorOverflow)?;
+        let next_number = max_number
+            .checked_add(1)
+            .ok_or(EditError::AllocatorOverflow)?;
+
+        Ok((next_id.max(1), next_number.max(1)))
+    }
+
+    pub fn from_persisted_annotations(
+        source: Arc<RgbaImage>,
+        annotations: Vec<Annotation>,
+    ) -> Result<Self, EditError> {
+        let (width, height) = source.dimensions();
+        let (next_id, next_number) =
+            Self::validate_persisted_annotations(width, height, &annotations)?;
+
+        Ok(Self {
+            source,
+            annotations,
+            next_number,
+            next_id,
+            state_id: 0,
+            next_state_id: 0,
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
+        })
     }
 
     pub fn source(&self) -> &RgbaImage {
@@ -1037,10 +1204,12 @@ impl ImageDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotation::{ShapeKind, TwoPointKind};
+    use crate::annotation::{FreehandKind, ShapeKind, TwoPointKind};
     use crate::geometry::{ImagePoint, ImageRect, Rgb8};
+    use crate::pixelate::DEFAULT_PIXELATE_BLOCK_SIZE;
     use crate::style::{NumberSize, NumberStyle, StrokeStyle, TextStyle};
     use image::{Rgba, RgbaImage};
+    use std::sync::Arc;
 
     pub(crate) fn doc() -> ImageDocument {
         ImageDocument::new(RgbaImage::from_pixel(100, 200, Rgba([10, 20, 30, 255])))
@@ -2703,5 +2872,75 @@ mod tests {
         assert_eq!(snapshot.flatten(), document.flatten());
         assert!(document.undo());
         assert_eq!(snapshot.annotations().len(), 1);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn persisted_annotations_round_trip_and_resume_allocators() {
+        let source = Arc::new(RgbaImage::new(64, 64));
+        let annotations = vec![
+            Annotation::two_point(
+                AnnotationId(4),
+                TwoPointKind::Arrow,
+                ImagePoint::new(1.0, 2.0),
+                ImagePoint::new(20.0, 22.0),
+            ),
+            Annotation::number_callout(
+                AnnotationId(9),
+                7,
+                ImagePoint::new(8.0, 8.0),
+                ImagePoint::new(18.0, 18.0),
+            ),
+            Annotation::text_note(
+                AnnotationId(12),
+                ImagePoint::new(3.0, 4.0),
+                "Open settings".into(),
+            ),
+            Annotation::opaque_redaction(AnnotationId(13), ImageRect::new(5.0, 5.0, 10.0, 10.0)),
+            Annotation::shape(
+                AnnotationId(14),
+                ShapeKind::Rectangle,
+                ImageRect::new(2.0, 2.0, 8.0, 8.0),
+            ),
+            Annotation::freehand(
+                AnnotationId(15),
+                FreehandKind::Pen,
+                vec![ImagePoint::new(1.0, 1.0), ImagePoint::new(4.0, 5.0)],
+            ),
+            Annotation::pixelate(
+                AnnotationId(16),
+                ImageRect::new(20.0, 20.0, 12.0, 12.0),
+                DEFAULT_PIXELATE_BLOCK_SIZE,
+            ),
+        ];
+        let json = serde_json::to_string(&annotations).unwrap();
+        let restored: Vec<Annotation> = serde_json::from_str(&json).unwrap();
+        let mut document = ImageDocument::from_persisted_annotations(source, restored).unwrap();
+
+        assert_eq!(document.annotations(), annotations.as_slice());
+        assert!(!document.can_undo());
+        assert!(!document.can_redo());
+        assert_eq!(document.state_id(), 0);
+
+        let id =
+            document.add_number_callout(ImagePoint::new(30.0, 30.0), ImagePoint::new(40.0, 40.0));
+        assert_eq!(id, AnnotationId(17));
+        assert!(matches!(
+            document.annotation(id),
+            Some(Annotation::NumberCallout { number: 8, .. })
+        ));
+    }
+
+    #[test]
+    fn persisted_annotations_reject_duplicate_ids() {
+        let source = Arc::new(RgbaImage::new(32, 32));
+        let annotations = vec![
+            Annotation::opaque_redaction(AnnotationId(2), ImageRect::new(1.0, 1.0, 4.0, 4.0)),
+            Annotation::pixelate(AnnotationId(2), ImageRect::new(8.0, 8.0, 4.0, 4.0), 8),
+        ];
+        assert!(matches!(
+            ImageDocument::from_persisted_annotations(source, annotations),
+            Err(EditError::DuplicateAnnotationId)
+        ));
     }
 }

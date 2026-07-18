@@ -33,6 +33,11 @@ pub enum FreehandKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "snake_case", deny_unknown_fields)
+)]
 pub enum Annotation {
     TwoPoint {
         id: AnnotationId,

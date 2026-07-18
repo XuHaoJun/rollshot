@@ -9,6 +9,34 @@ use rollshot_image_document::ImagePoint;
 
 use super::{StoryboardCopyState, TimelineWorkspace};
 
+pub struct Update {
+    pub task: Task<Message>,
+    pub effect: super::Effect,
+}
+
+impl Update {
+    pub fn none() -> Self {
+        Self {
+            task: Task::none(),
+            effect: super::Effect::None,
+        }
+    }
+
+    pub fn task(task: Task<Message>) -> Self {
+        Self {
+            task,
+            effect: super::Effect::None,
+        }
+    }
+
+    pub fn effect(effect: super::Effect) -> Self {
+        Self {
+            task: Task::none(),
+            effect,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectStep(usize),
@@ -134,37 +162,192 @@ pub enum Message {
     AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId),
     /// Reject a single pending visual annotation by its suggestion id.
     RejectSingleVisualAnnotationSuggestion(rollshot_action::VisualAnnotationSuggestionId),
+    SaveLater,
+    SaveRequested,
+    SaveAsRequested,
+    SavePickerChosen(Option<PathBuf>),
+    SaveWorkerFinished(SaveWorkerOutcome),
+    CloseSaveAndClose,
+    CloseDiscard,
+    CloseCancel,
+    FrameLoadCompleted {
+        generation: u64,
+        results: Vec<Result<rollshot_action::LoadedStepFrame, String>>,
+        remaining: Vec<(
+            rollshot_action::FrameId,
+            rollshot_action::StepFrameLoadRequest,
+        )>,
+    },
 }
 
-pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> {
+#[derive(Debug, Clone)]
+pub(crate) enum SaveWorkerOutcome {
+    ExistingSaved {
+        revision: u64,
+    },
+    NewWritable {
+        root: PathBuf,
+        revision: u64,
+    },
+    NewCommittedReadOnly {
+        root: PathBuf,
+        revision: u64,
+        category: &'static str,
+    },
+    Failed(String),
+}
+
+pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
     match message {
         Message::SelectStep(index) => {
             if state.guide.steps().iter().any(|s| s.index == index) {
                 state.selected = Some(index);
-                state.rebuild_selection_handles();
+                #[cfg(feature = "action-guide")]
+                {
+                    // Extract selected step info before borrowing frame_source.
+                    let (keyframe, source_id) = {
+                        let Some(step) = state.selected_step() else {
+                            return Update::none();
+                        };
+                        (step.keyframe, step.source)
+                    };
+                    let nearby = state
+                        .selected_step()
+                        .map(|s| s.nearby.clone())
+                        .unwrap_or_default();
+
+                    if let Some(ref mut source) = state.frame_source {
+                        // Project-backed: clear old handles, use cache, spawn decodes.
+                        state.keyframe_handle = None;
+                        state.strip.clear();
+                        let gen = state.frame_coordinator.advance_generation();
+                        // Try cache for current keyframe first.
+                        if let Some(img) = source.cached(keyframe) {
+                            state.keyframe_handle = Some(super::build_handle(
+                                &::image::ImageBuffer::from_raw(
+                                    img.width(),
+                                    img.height(),
+                                    img.as_raw().to_vec(),
+                                )
+                                .unwrap_or_else(|| {
+                                    ::image::RgbaImage::new(img.width(), img.height())
+                                }),
+                            ));
+                            state
+                                .presentation
+                                .hydrate_for_step(source_id, keyframe, img);
+                        }
+                        // Try cache for nearby strip frames.
+                        for &id in &nearby {
+                            if let Some(img) = source.cached(id) {
+                                state.strip.push(super::StripFrame {
+                                    id,
+                                    handle: super::build_handle(
+                                        &::image::ImageBuffer::from_raw(
+                                            img.width(),
+                                            img.height(),
+                                            img.as_raw().to_vec(),
+                                        )
+                                        .unwrap_or_else(
+                                            || ::image::RgbaImage::new(img.width(), img.height()),
+                                        ),
+                                    ),
+                                });
+                            }
+                        }
+                        // Collect uncached IDs (keyframe first, then nearby).
+                        let mut uncached = Vec::new();
+                        if state.keyframe_handle.is_none() {
+                            uncached.push(keyframe);
+                        }
+                        for &id in &nearby {
+                            if !state.strip.iter().any(|f| f.id == id) {
+                                uncached.push(id);
+                            }
+                        }
+                        if uncached.is_empty() {
+                            return Update::none();
+                        }
+                        // Build load requests for uncached frames.
+                        let requests: Vec<_> = uncached
+                            .iter()
+                            .filter_map(|&id| source.load_request(id).map(|req| (id, req)))
+                            .collect();
+                        if requests.is_empty() {
+                            return Update::none();
+                        }
+                        // Spawn up to 2 concurrent decode tasks.
+                        let semaphore = state.frame_coordinator.semaphore.clone();
+                        let (first_batch, remaining) = if requests.len() > 2 {
+                            (requests[..2].to_vec(), requests[2..].to_vec())
+                        } else {
+                            (requests.clone(), Vec::new())
+                        };
+                        let all_remaining = remaining;
+                        let gen_for_task = gen;
+                        let sem_for_task = semaphore;
+                        let task = iced::Task::perform(
+                            frame_decode_task(
+                                gen_for_task,
+                                sem_for_task,
+                                first_batch,
+                                all_remaining,
+                            ),
+                            move |msg| msg,
+                        );
+                        return Update::task(task);
+                    }
+                }
+                #[cfg(not(feature = "action-guide"))]
+                {
+                    state.rebuild_selection_handles();
+                }
+                #[cfg(feature = "action-guide")]
+                if state.frame_source.is_none() {
+                    state.rebuild_selection_handles();
+                }
             }
-            Task::none()
+            Update::none()
         }
         Message::TitleChanged(title) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             if let Some(index) = state.selected {
                 state.guide.rename(index, title);
+                state.mark_project_dirty();
             }
-            Task::none()
+            Update::none()
         }
         Message::CaptionChanged(caption) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             if let Some(index) = state.selected {
                 state.guide.set_caption(index, caption);
+                state.mark_project_dirty();
             }
-            Task::none()
+            Update::none()
         }
         Message::DeleteStep => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
+            if state.guide.steps().len() <= 1 {
+                return Update::none();
+            }
             let deleted_source = state.selected_step().map(|step| step.source);
+            let mut deleted = false;
             if let Some(index) = state.selected {
                 if state.guide.delete(index) {
+                    deleted = true;
                     let len = state.guide.steps().len();
                     state.selected = if len == 0 { None } else { Some(index.min(len)) };
                     state.rebuild_selection_handles();
                 }
+            }
+            if deleted {
+                state.mark_project_dirty();
             }
             if let Some(source) = deleted_source {
                 state.presentation.clear_for_source(source);
@@ -173,12 +356,16 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 .presentation
                 .retain_sources(state.guide.steps().iter().map(|step| step.source));
             dismiss_stale_visual_annotation_review(state);
-            Task::none()
+            Update::none()
         }
         Message::ReplaceKeyframe(frame) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             if let Some(index) = state.selected {
                 let source = state.selected_step().map(|step| step.source);
                 if state.guide.replace_keyframe(index, frame) {
+                    state.mark_project_dirty();
                     state.rebuild_selection_handles();
                     if let Some(source) = source {
                         if state.presentation.clear_for_source(source) {
@@ -193,31 +380,60 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             // Replacing the keyframe discards any pending visual annotation
             // review: the document is re-built, the keyframe no longer matches.
             dismiss_stale_visual_annotation_review(state);
-            Task::none()
+            Update::none()
         }
-        Message::DiscardRequested | Message::CloseRequested => {
+        Message::DiscardRequested => {
             state.pending_discard = true;
-            Task::none()
+            Update::none()
+        }
+        Message::CloseRequested => {
+            #[cfg(feature = "action-guide")]
+            {
+                if state.project_session.is_some() {
+                    if state.save_state == super::ProjectSaveState::Dirty {
+                        state.close_intent = super::CloseIntent::Confirming;
+                        state.pending_discard = true;
+                    } else {
+                        return Update::effect(super::Effect::CloseWorkspace);
+                    }
+                } else {
+                    state.pending_discard = true;
+                }
+                Update::none()
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                state.pending_discard = true;
+                Update::none()
+            }
         }
         Message::CancelDiscard => {
             state.pending_discard = false;
-            Task::none()
+            Update::none()
         }
         Message::ConfirmDiscard => {
             state.pending_discard = false;
-            iced::exit()
+            Update::effect(super::Effect::CloseWorkspace)
         }
         Message::ExportRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             state.message = None;
             match &state.export_state {
                 super::GuideExportState::Idle | super::GuideExportState::Succeeded => {}
-                _ => return Task::none(),
+                _ => return Update::none(),
             }
             let job = match super::guide_export::build_reviewed_export_job(state) {
                 Ok(job) => job,
                 Err(error) => {
                     state.message = Some(format!("{error}"));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             state.next_export_operation_id = state.next_export_operation_id.saturating_add(1);
@@ -231,22 +447,31 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     job,
                 },
             };
-            Task::perform(pick_export_dir(picker_default_dir()), move |path| {
-                Message::ExportDirChosenWithId {
+            Update::task(Task::perform(
+                pick_export_dir(picker_default_dir()),
+                move |path| Message::ExportDirChosenWithId {
                     operation_id,
                     parent: path,
-                }
-            })
+                },
+            ))
         }
         Message::GuideTitleChanged(title) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             state.guide.set_title(title);
-            Task::none()
+            state.mark_project_dirty();
+            Update::none()
         }
         Message::AnnotationExplanationChanged(id, text) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             if let Some(session) = &state.annotation_session {
                 let _ = state.presentation.set_explanation(session.source, id, text);
+                state.mark_project_dirty();
             }
-            Task::none()
+            Update::none()
         }
         Message::ExportDirChosenWithId {
             operation_id,
@@ -262,17 +487,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                         state.export_state = super::GuideExportState::Idle;
                     }
                 }
-                return Task::none();
+                return Update::none();
             };
             let super::GuideExportState::PickingDestination {
                 operation_id: current,
                 ..
             } = &state.export_state
             else {
-                return Task::none();
+                return Update::none();
             };
             if operation_id != *current {
-                return Task::none();
+                return Update::none();
             }
             let old = std::mem::replace(&mut state.export_state, super::GuideExportState::Idle);
             let super::GuideExportState::PickingDestination {
@@ -289,25 +514,25 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 job: pending.job,
             };
             state.export_state = super::GuideExportState::Exporting { operation_id };
-            Task::perform(
+            Update::task(Task::perform(
                 super::guide_export::run_standalone_export(request),
                 move |result| Message::ExportFinished {
                     operation_id,
                     result,
                 },
-            )
+            ))
         }
         Message::ExportFinished {
             operation_id,
             result,
         } => {
             apply_export_finished(state, operation_id, result);
-            Task::none()
+            Update::none()
         }
         Message::OpenExportedGuide => {
             if let Some(export) = &state.last_export {
                 let path = export.index_html.clone();
-                return Task::perform(
+                return Update::task(Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
                             crate::platform_actions::open_path(&path)
@@ -316,37 +541,37 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                         .map_err(|_| "Open Guide action worker failed".to_string())?
                     },
                     Message::PlatformActionFinished,
-                );
+                ));
             }
-            Task::none()
+            Update::none()
         }
         Message::ShowExportedGuideInFolder => {
             if let Some(export) = &state.last_export {
                 let path = export.directory.clone();
-                return Task::perform(
+                return Update::task(Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || crate::platform_actions::reveal(&path))
                             .await
                             .map_err(|_| "Show in Folder action worker failed".to_string())?
                     },
                     Message::PlatformActionFinished,
-                );
+                ));
             }
-            Task::none()
+            Update::none()
         }
-        Message::PlatformActionFinished(Ok(())) => Task::none(),
+        Message::PlatformActionFinished(Ok(())) => Update::none(),
         Message::PlatformActionFinished(Err(error)) => {
             state.message = Some(error);
-            Task::none()
+            Update::none()
         }
         Message::ExportGifRequested => {
             state.message = None;
-            Task::perform(
+            Update::task(Task::perform(
                 pick_gif_save_path(picker_default_dir()),
                 Message::ExportGifPathChosen,
-            )
+            ))
         }
-        Message::ExportGifPathChosen(None) => Task::none(),
+        Message::ExportGifPathChosen(None) => Update::none(),
         Message::ExportGifPathChosen(Some(path)) => {
             match export_gif(&state.guide, &state.store, GifOptions::default(), &path) {
                 Ok(()) => {
@@ -368,9 +593,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             }
             // Unlike guide export, GIF export does NOT exit — the user can still
             // Export Guide afterwards.
-            Task::none()
+            Update::none()
         }
         Message::PreviewStoryboardRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             state.message = None;
             match render_timeline_storyboard(state, storyboard_preview_options()) {
                 Ok(rendered) => {
@@ -399,18 +632,26 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.message = Some(format!("Storyboard preview failed: {error}"));
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::PreviewStoryboardClosed => {
             state.storyboard_preview = None;
-            Task::none()
+            Update::none()
         }
         Message::CopyStoryboardRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             let Some(preview) = &state.storyboard_preview else {
-                return Task::none();
+                return Update::none();
             };
             if matches!(preview.copy_state, StoryboardCopyState::Copying { .. }) {
-                return Task::none();
+                return Update::none();
             }
             let input = match super::storyboard_copy::snapshot_storyboard(
                 &state.guide,
@@ -432,7 +673,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                             operation_id,
                             message: error.to_string(),
                         };
-                    return Task::none();
+                    return Update::none();
                 }
             };
             state.storyboard_copy_operation_id =
@@ -440,27 +681,27 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             let operation_id = state.storyboard_copy_operation_id;
             state.storyboard_preview.as_mut().unwrap().copy_state =
                 StoryboardCopyState::Copying { operation_id };
-            Task::perform(
+            Update::task(Task::perform(
                 super::storyboard_copy::render_and_copy(input),
                 move |result| Message::CopyStoryboardFinished {
                     operation_id,
                     result,
                 },
-            )
+            ))
         }
         Message::CopyStoryboardFinished {
             operation_id,
             result,
         } => {
             let Some(preview) = &mut state.storyboard_preview else {
-                return Task::none();
+                return Update::none();
             };
             let current_id = match &preview.copy_state {
                 StoryboardCopyState::Copying { operation_id: id } => *id,
-                _ => return Task::none(),
+                _ => return Update::none(),
             };
             if current_id != operation_id {
-                return Task::none();
+                return Update::none();
             }
             match result {
                 Ok(copy_result) => {
@@ -473,40 +714,48 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     );
                     preview.copy_state = StoryboardCopyState::Copied { operation_id };
                     let clear_id = operation_id;
-                    Task::perform(
+                    Update::task(Task::perform(
                         async { tokio::time::sleep(std::time::Duration::from_secs(2)).await },
                         move |_| Message::ClearStoryboardCopyFeedback {
                             operation_id: clear_id,
                         },
-                    )
+                    ))
                 }
                 Err(error) => {
                     preview.copy_state = StoryboardCopyState::Failed {
                         operation_id,
                         message: error,
                     };
-                    Task::none()
+                    Update::none()
                 }
             }
         }
         Message::ClearStoryboardCopyFeedback { operation_id } => {
             let Some(preview) = &mut state.storyboard_preview else {
-                return Task::none();
+                return Update::none();
             };
             if preview.copy_state == (StoryboardCopyState::Copied { operation_id }) {
                 preview.copy_state = StoryboardCopyState::Idle;
             }
-            Task::none()
+            Update::none()
         }
         Message::ExportStoryboardRequested => {
+            #[cfg(feature = "action-guide")]
+            if state
+                .frame_source
+                .as_ref()
+                .is_some_and(|fs| fs.in_memory().is_none())
+            {
+                return Update::none();
+            }
             state.message = None;
             state.storyboard_preview = None;
-            Task::perform(
+            Update::task(Task::perform(
                 pick_storyboard_save_path(picker_default_dir()),
                 Message::ExportStoryboardPathChosen,
-            )
+            ))
         }
-        Message::ExportStoryboardPathChosen(None) => Task::none(),
+        Message::ExportStoryboardPathChosen(None) => Update::none(),
         Message::ExportStoryboardPathChosen(Some(path)) => {
             match write_storyboard_png(state, &path) {
                 Ok(result) => {
@@ -530,24 +779,24 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.message = Some(format!("Storyboard export failed: {error}"));
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::ExportBugReport => {
             state.message = None;
             state.issue_pack = Some(super::IssuePackDialog::new());
-            Task::none()
+            Update::none()
         }
         Message::IssuePackReviewChanged(confirmed) => {
             if let Some(dialog) = &mut state.issue_pack {
                 dialog.review_confirmed = confirmed;
             }
-            Task::none()
+            Update::none()
         }
         Message::IssuePackIncludeGifChanged(include) => {
             if let Some(dialog) = &mut state.issue_pack {
                 dialog.include_gif = include;
             }
-            Task::none()
+            Update::none()
         }
         Message::IssuePackExportFolder => {
             begin_issue_pack_export(state, super::IssuePackKind::Folder)
@@ -558,50 +807,50 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             parent,
         } => {
             let Some(dialog) = state.issue_pack.as_ref() else {
-                return Task::none();
+                return Update::none();
             };
             if dialog.operation_id != operation_id {
-                return Task::none();
+                return Update::none();
             }
             let Some(parent) = parent else {
                 let dialog = state.issue_pack.as_mut().unwrap();
                 dialog.pending_kind = None;
                 dialog.pending_export = None;
                 dialog.exporting = false;
-                return Task::none();
+                return Update::none();
             };
             let (kind, pending, operation_id) = {
                 let Some(dialog) = state.issue_pack.as_mut() else {
-                    return Task::none();
+                    return Update::none();
                 };
                 let kind = dialog
                     .pending_kind
                     .take()
                     .unwrap_or(super::IssuePackKind::Folder);
                 let Some(pending) = dialog.pending_export.take() else {
-                    return Task::none();
+                    return Update::none();
                 };
                 let operation_id = dialog.operation_id;
                 dialog.exporting = true;
                 (kind, pending, operation_id)
             };
-            Task::perform(
+            Update::task(Task::perform(
                 run_issue_pack_export(pending, kind, parent),
                 move |result| Message::IssuePackFinished {
                     operation_id,
                     result,
                 },
-            )
+            ))
         }
         Message::IssuePackFinished {
             operation_id,
             result,
         } => {
             let Some(dialog) = &mut state.issue_pack else {
-                return Task::none();
+                return Update::none();
             };
             if dialog.operation_id != operation_id {
-                return Task::none();
+                return Update::none();
             }
             dialog.exporting = false;
             match result {
@@ -629,27 +878,27 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.message = Some(error);
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::IssuePackCancel => {
             state.issue_pack = None;
-            Task::none()
+            Update::none()
         }
         #[cfg(target_os = "macos")]
         Message::OpenInputMonitoringSettings => {
             rollshot_macos_input::open_input_monitoring_settings();
             state.message = Some("Grant Input Monitoring, then restart Rollshot.".to_string());
-            Task::none()
+            Update::none()
         }
         Message::DismissBanner => {
             state.message = None;
-            Task::none()
+            Update::none()
         }
         Message::AnnotateStepRequested => {
             state.message = None;
             let Some(step) = state.selected_step().cloned() else {
                 state.message = Some("Select a step before annotating.".to_string());
-                return Task::none();
+                return Update::none();
             };
             match state.presentation.document_for_step(&step, &state.store) {
                 Some(doc) => {
@@ -672,20 +921,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     );
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::AnnotationToolChanged(tool) => {
             if let Some(session) = &mut state.annotation_session {
                 session.tool = tool;
                 session.draft = None;
             }
-            Task::none()
+            Update::none()
         }
         Message::AnnotationTextChanged(text) => {
             if let Some(session) = &mut state.annotation_session {
                 session.text_note = text;
             }
-            Task::none()
+            Update::none()
         }
         Message::AnnotationCanvasPressed(point) => {
             if let Some(session) = &mut state.annotation_session {
@@ -706,7 +955,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     super::annotation::AnnotationTool::Text => None,
                 };
             }
-            Task::none()
+            Update::none()
         }
         Message::AnnotationCanvasMoved(point) => {
             if let Some(session) = &mut state.annotation_session {
@@ -721,31 +970,43 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     None => {}
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::AnnotationCanvasReleased(point) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             commit_annotation_release(state, point);
-            Task::none()
+            state.mark_project_dirty();
+            Update::none()
         }
         Message::AnnotationUndo => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             dismiss_stale_visual_annotation_review(state);
             with_annotation_document(state, |doc| {
                 doc.document.undo();
             });
-            Task::none()
+            state.mark_project_dirty();
+            Update::none()
         }
         Message::AnnotationRedo => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             dismiss_stale_visual_annotation_review(state);
             with_annotation_document(state, |doc| {
                 doc.document.redo();
             });
-            Task::none()
+            state.mark_project_dirty();
+            Update::none()
         }
         Message::AnnotationDone => {
             // Closing the annotation session must also clear any pending
             dismiss_stale_visual_annotation_review(state);
             state.annotation_session = None;
-            Task::none()
+            Update::none()
         }
         Message::AnnotationCancel => {
             // The scrim and the explicit "Close" button both arrive here.
@@ -753,25 +1014,29 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             // chose to close the modal.
             dismiss_stale_visual_annotation_review(state);
             state.annotation_session = None;
-            Task::none()
+            Update::none()
         }
         Message::CaptionProposalLoaded(Ok(proposal)) => {
             state.caption_suggestions_running = false;
             state.caption_proposal = Some(proposal);
             state.message = Some("Caption suggestions ready for review.".to_string());
-            Task::none()
+            Update::none()
         }
         Message::CaptionProposalLoaded(Err(error)) => {
             state.caption_suggestions_running = false;
             state.message = Some(format!("Caption suggestions failed: {error}"));
-            Task::none()
+            Update::none()
         }
         Message::AcceptCaptionSuggestion(id) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             let Some(proposal) = &mut state.caption_proposal else {
-                return Task::none();
+                return Update::none();
             };
             match proposal.apply(&mut state.guide, id) {
                 rollshot_action::CaptionApplyOutcome::Applied => {
+                    state.mark_project_dirty();
                     state.message = Some("Caption suggestion accepted.".to_string());
                 }
                 rollshot_action::CaptionApplyOutcome::Stale => {
@@ -781,15 +1046,18 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 rollshot_action::CaptionApplyOutcome::Missing
                 | rollshot_action::CaptionApplyOutcome::NotPending => {}
             }
-            Task::none()
+            Update::none()
         }
         Message::RejectCaptionSuggestion(id) => {
             if let Some(proposal) = &mut state.caption_proposal {
                 proposal.reject(id);
             }
-            Task::none()
+            Update::none()
         }
         Message::AcceptAllCaptionSuggestions => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             if let Some(proposal) = &mut state.caption_proposal {
                 let outcomes = proposal.apply_all(&mut state.guide);
                 let applied = outcomes
@@ -800,6 +1068,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     .iter()
                     .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Stale)
                     .count();
+                if applied > 0 {
+                    state.mark_project_dirty();
+                }
                 state.message = Some(match stale {
                     0 => format!("Accepted {applied} caption suggestions."),
                     _ => format!(
@@ -807,19 +1078,19 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     ),
                 });
             }
-            Task::none()
+            Update::none()
         }
         Message::DismissCaptionProposal => {
             state.caption_proposal = None;
-            Task::none()
+            Update::none()
         }
         Message::SuggestCaptionsRequested => {
             if state.caption_suggestions_running {
-                return Task::none();
+                return Update::none();
             }
             if state.guide.is_empty() {
                 state.message = Some("No reviewed steps to caption.".to_string());
-                return Task::none();
+                return Update::none();
             }
             state.caption_agent_run_id = state.caption_agent_run_id.saturating_add(1);
             let run_id = state.caption_agent_run_id;
@@ -831,20 +1102,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 Ok(cfg) => cfg,
                 Err(error) => {
                     state.message = Some(format!("Caption suggestions failed: {error}"));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             if !crate::result_workspace::workbench::has_key(&cfg) {
                 state.message =
                     Some("Configure an agent provider before suggesting captions.".to_string());
-                return Task::none();
+                return Update::none();
             }
             let model = cfg.model.clone();
             let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
                 Ok(adapter) => adapter,
                 Err(error) => {
                     state.message = Some(format!("Caption suggestions failed: {error}"));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             state.caption_suggestions_running = true;
@@ -855,39 +1126,41 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 step_count = guide.steps().len(),
                 "caption suggestion run started"
             );
-            Task::perform(
+            Update::task(Task::perform(
                 super::caption_agent::suggest_captions_task(run_id, model, adapter, guide),
                 Message::CaptionProposalLoaded,
-            )
+            ))
         }
         Message::FfmpegSetupCancel => {
             state.ffmpeg_setup = None;
-            Task::none()
+            Update::none()
         }
         Message::FfmpegUseSystem => {
             state.ffmpeg_setup = None;
             state.message = Some(
                 "Install FFmpeg or set ROLLSHOT_FFMPEG, then try Export MP4 again.".to_string(),
             );
-            Task::none()
+            Update::none()
         }
         Message::ExportMp4Requested => {
             state.message = None;
             match crate::managed_ffmpeg::resolve_ffmpeg() {
-                crate::managed_ffmpeg::FfmpegResolution::Available(_) => Task::perform(
-                    pick_mp4_save_path(picker_default_dir()),
-                    Message::ExportMp4PathChosen,
-                ),
+                crate::managed_ffmpeg::FfmpegResolution::Available(_) => {
+                    Update::task(Task::perform(
+                        pick_mp4_save_path(picker_default_dir()),
+                        Message::ExportMp4PathChosen,
+                    ))
+                }
                 crate::managed_ffmpeg::FfmpegResolution::NeedsSetup(info) => {
                     state.ffmpeg_setup = Some(super::FfmpegSetupDialog {
                         info,
                         downloading: false,
                     });
-                    Task::none()
+                    Update::none()
                 }
             }
         }
-        Message::ExportMp4PathChosen(None) => Task::none(),
+        Message::ExportMp4PathChosen(None) => Update::none(),
         Message::ExportMp4PathChosen(Some(path)) => {
             let ffmpeg = match crate::managed_ffmpeg::resolve_ffmpeg() {
                 crate::managed_ffmpeg::FfmpegResolution::Available(path) => path,
@@ -896,7 +1169,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                         info,
                         downloading: false,
                     });
-                    return Task::none();
+                    return Update::none();
                 }
             };
             match export_video(
@@ -926,35 +1199,35 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.message = Some(format!("MP4 export failed: {error}"));
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::FfmpegDownloadManaged => {
             let Some(dialog) = &mut state.ffmpeg_setup else {
-                return Task::none();
+                return Update::none();
             };
             if dialog.downloading || dialog.info.managed_download.is_none() {
-                return Task::none();
+                return Update::none();
             }
             dialog.downloading = true;
-            Task::perform(
+            Update::task(Task::perform(
                 download_managed_ffmpeg_task(),
                 Message::FfmpegDownloadFinished,
-            )
+            ))
         }
         Message::FfmpegDownloadFinished(Ok(path)) => {
             state.ffmpeg_setup = None;
             state.message = Some(format!("Managed FFmpeg installed at {}", path.display()));
-            Task::perform(
+            Update::task(Task::perform(
                 pick_mp4_save_path(picker_default_dir()),
                 Message::ExportMp4PathChosen,
-            )
+            ))
         }
         Message::FfmpegDownloadFinished(Err(error)) => {
             if let Some(dialog) = &mut state.ffmpeg_setup {
                 dialog.downloading = false;
             }
             state.message = Some(format!("Managed FFmpeg download failed: {error}"));
-            Task::none()
+            Update::none()
         }
         Message::SuggestVisualAnnotationsRequested => {
             if matches!(
@@ -962,12 +1235,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 super::VisualAnnotationSuggestionState::Running { .. }
                     | super::VisualAnnotationSuggestionState::ConsentPending(_)
             ) {
-                return Task::none();
+                return Update::none();
             }
             let Some(step) = state.selected_step().cloned() else {
                 state.message =
                     Some("Select a step before suggesting visual annotations.".to_string());
-                return Task::none();
+                return Update::none();
             };
             let cfg = match crate::daemon::config::rollshot_config_dir()
                 .map_err(|_| "Rollshot config directory is unavailable.".to_string())
@@ -976,14 +1249,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 Ok(cfg) => cfg,
                 Err(error) => {
                     state.message = Some(format!("Visual annotation suggestion failed: {error}"));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             if !crate::result_workspace::workbench::has_key(&cfg) {
                 state.message = Some(
                     "Configure an agent provider before suggesting visual annotations.".to_string(),
                 );
-                return Task::none();
+                return Update::none();
             }
             let consent = super::visual_annotation_agent::VisualSuggestionConsent {
                 source: step.source,
@@ -994,17 +1267,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
             state.visual_annotation_suggestion =
                 super::VisualAnnotationSuggestionState::ConsentPending(consent);
             state.message = None;
-            Task::none()
+            Update::none()
         }
         Message::VisualSuggestionConsentCancelled => {
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
-            Task::none()
+            Update::none()
         }
         Message::VisualSuggestionConsentConfirmed => {
             let super::VisualAnnotationSuggestionState::ConsentPending(ref consent) =
                 state.visual_annotation_suggestion
             else {
-                return Task::none();
+                return Update::none();
             };
             let consent_provider = consent.provider.clone();
             let consent_model = consent.model.clone();
@@ -1019,7 +1292,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Idle;
                     state.message = Some(format!("Visual annotation suggestion failed: {error}"));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             if !crate::result_workspace::workbench::has_key(&cfg) {
@@ -1035,7 +1308,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 state.message = Some(
                     "Configure an agent provider before suggesting visual annotations.".to_string(),
                 );
-                return Task::none();
+                return Update::none();
             }
             let current_provider = format!("{}", cfg.provider);
             let current_model = cfg.model.clone();
@@ -1051,7 +1324,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     );
                 state.message =
                     Some("Provider configuration changed. Review the consent again.".to_string());
-                return Task::none();
+                return Update::none();
             }
             state.visual_annotation_agent_run_id =
                 state.visual_annotation_agent_run_id.saturating_add(1);
@@ -1060,7 +1333,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
                 state.message =
                     Some("Select a step before suggesting visual annotations.".to_string());
-                return Task::none();
+                return Update::none();
             };
             let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
                 state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
@@ -1068,7 +1341,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     "Cannot suggest visual annotations because the keyframe is unavailable."
                         .to_string(),
                 );
-                return Task::none();
+                return Update::none();
             };
             let document_state_id = doc.document.state_id();
             let image = doc.document.source().clone();
@@ -1078,7 +1351,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Idle;
                     state.message = Some(format!("Visual annotation suggestion failed: {error}"));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             let cancellation = rollshot_agent::runtime::RunCancellation::new();
@@ -1101,7 +1374,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 document_state_id,
                 image,
             };
-            Task::perform(
+            Update::task(Task::perform(
                 super::visual_annotation_agent::suggest_visual_annotation_task(
                     input,
                     format!("{}", cfg.provider),
@@ -1110,7 +1383,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     task_cancellation,
                 ),
                 move |result| Message::VisualAnnotationProposalLoaded { run_id, result },
-            )
+            ))
         }
         Message::VisualAnnotationProposalLoaded { run_id, result } => {
             let expected_id = match &state.visual_annotation_suggestion {
@@ -1124,7 +1397,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     expected_run_id = ?expected_id,
                     "ignoring late visual annotation suggestion result"
                 );
-                return Task::none();
+                return Update::none();
             }
             match result {
                 Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(
@@ -1166,7 +1439,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     );
                 }
             }
-            Task::none()
+            Update::none()
         }
         Message::CancelVisualAnnotationSuggestion => {
             match &state.visual_annotation_suggestion {
@@ -1190,9 +1463,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 }
                 _ => {}
             }
-            Task::none()
+            Update::none()
         }
         Message::AcceptAllVisualAnnotations => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             let step = state.selected_step().cloned();
             let doc = step
                 .as_ref()
@@ -1202,13 +1478,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 _ => {
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Idle;
-                    return Task::none();
+                    return Update::none();
                 }
             };
             let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
                 state.visual_annotation_suggestion
             else {
-                return Task::none();
+                return Update::none();
             };
             let state_id = doc.document.state_id();
             let image = doc.document.source();
@@ -1232,10 +1508,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                     state.message = Some(format!(
                         "Could not apply visual annotation suggestions: {error}"
                     ));
-                    return Task::none();
+                    return Update::none();
                 }
             };
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+            if applied > 0 {
+                state.mark_project_dirty();
+            }
             state.message = Some(match stale {
                 0 if applied > 0 => format!("Accepted {applied} visual annotation suggestions."),
                 0 => "No visual annotations to accept.".to_string(),
@@ -1244,7 +1523,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 ),
                 _ => format!("All {stale} visual annotation suggestions were stale."),
             });
-            Task::none()
+            Update::none()
         }
         Message::RejectVisualAnnotationSuggestion => {
             if let super::VisualAnnotationSuggestionState::PendingReview(mut proposal) =
@@ -1256,13 +1535,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 proposal.reject_all();
             }
             state.message = Some("Visual annotation suggestions rejected.".to_string());
-            Task::none()
+            Update::none()
         }
         Message::RejectSingleVisualAnnotationSuggestion(id) => {
             let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
                 state.visual_annotation_suggestion
             else {
-                return Task::none();
+                return Update::none();
             };
             if let Some(suggestion) = proposal.suggestions.iter_mut().find(|s| s.id == id) {
                 if suggestion.status == rollshot_action::VisualAnnotationSuggestionStatus::Pending {
@@ -1270,25 +1549,28 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                 }
             }
             state.message = Some("Visual annotation rejected.".to_string());
-            Task::none()
+            Update::none()
         }
         Message::DismissVisualAnnotationReview => {
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
-            Task::none()
+            Update::none()
         }
         Message::AcceptVisualAnnotation(id) => {
+            if !state.can_mutate() {
+                return Update::none();
+            }
             let Some(step) = state.selected_step().cloned() else {
                 state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
-                return Task::none();
+                return Update::none();
             };
             let Some(doc) = state.presentation.document_for_step(&step, &state.store) else {
                 state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
-                return Task::none();
+                return Update::none();
             };
             let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
                 state.visual_annotation_suggestion
             else {
-                return Task::none();
+                return Update::none();
             };
             let state_id = doc.document.state_id();
             let w = doc.document.source().width();
@@ -1329,6 +1611,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                             // Rebase remaining pending items to the new state.
                             let new_state_id = doc.document.state_id();
                             proposal.rebase(new_state_id);
+                            state.mark_project_dirty();
                             state.message = Some("Visual annotation accepted.".to_string());
                         }
                         Err(e) => {
@@ -1347,7 +1630,101 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Task<Message> 
                         Some("Visual annotation suggestion is no longer pending.".to_string());
                 }
             }
-            Task::none()
+            Update::none()
+        }
+        Message::SaveLater => {
+            state.first_save_prompt = super::FirstSavePrompt::Hidden;
+            state.save_state = super::ProjectSaveState::Unsaved;
+            Update::none()
+        }
+        Message::SaveRequested => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_requested(state)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                Update::none()
+            }
+        }
+        Message::SaveAsRequested => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_as_requested(state)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                Update::none()
+            }
+        }
+        Message::SavePickerChosen(path) => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_picker_chosen(state, path)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                let _ = path;
+                Update::none()
+            }
+        }
+        Message::SaveWorkerFinished(outcome) => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_worker_finished(state, outcome)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                let _ = outcome;
+                Update::none()
+            }
+        }
+        Message::CloseSaveAndClose => {
+            #[cfg(feature = "action-guide")]
+            {
+                if state.project_session.is_some()
+                    && state.save_state == super::ProjectSaveState::Dirty
+                {
+                    state.close_intent = super::CloseIntent::SaveThenClose;
+                    state.pending_discard = false;
+                    handle_save_requested(state)
+                } else {
+                    state.close_intent = super::CloseIntent::None;
+                    state.pending_discard = false;
+                    Update::effect(super::Effect::CloseWorkspace)
+                }
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                state.close_intent = super::CloseIntent::None;
+                state.pending_discard = false;
+                Update::effect(super::Effect::CloseWorkspace)
+            }
+        }
+        Message::CloseDiscard => {
+            state.close_intent = super::CloseIntent::None;
+            state.pending_discard = false;
+            Update::effect(super::Effect::CloseWorkspace)
+        }
+        Message::CloseCancel => {
+            state.close_intent = super::CloseIntent::None;
+            state.pending_discard = false;
+            Update::none()
+        }
+        Message::FrameLoadCompleted {
+            generation,
+            results,
+            remaining,
+        } => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_frame_load_completed(state, generation, results, remaining)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                let _ = (generation, results, remaining);
+                Update::none()
+            }
         }
     }
 }
@@ -1411,6 +1788,171 @@ fn write_storyboard_png_atomic(
             source,
         }
     })
+}
+
+/// Async frame decode task for project-backed workspaces.
+///
+/// Acquires semaphore permits (max 2 concurrent), decodes each frame,
+/// and returns results along with remaining frames that weren't started.
+/// The generation token is checked by the handler on completion.
+async fn frame_decode_task(
+    generation: u64,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    batch: Vec<(
+        rollshot_action::FrameId,
+        rollshot_action::StepFrameLoadRequest,
+    )>,
+    remaining: Vec<(
+        rollshot_action::FrameId,
+        rollshot_action::StepFrameLoadRequest,
+    )>,
+) -> Message {
+    use rollshot_action::load_step_frame;
+
+    let mut results = Vec::with_capacity(batch.len());
+    for (_id, request) in batch {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            load_step_frame(request)
+        })
+        .await
+        .map_err(|e| format!("decode worker failed: {e}"))
+        .and_then(|r| r.map_err(|e| format!("frame decode failed: {e}")));
+        results.push(result);
+    }
+    Message::FrameLoadCompleted {
+        generation,
+        results,
+        remaining,
+    }
+}
+
+/// Handle the completion of a frame decode batch for project-backed workspaces.
+///
+/// Verifies the generation token matches the current coordinator generation.
+/// Stale results are dropped without cache insertion or handle creation.
+/// Current results are inserted into the byte-bounded cache, renderer handles
+/// are built, and annotations are hydrated for the current keyframe.
+/// If any required frame fails to decode, sets CorruptReadOnly access.
+#[cfg(feature = "action-guide")]
+fn handle_frame_load_completed(
+    state: &mut TimelineWorkspace,
+    generation: u64,
+    results: Vec<Result<rollshot_action::LoadedStepFrame, String>>,
+    remaining: Vec<(
+        rollshot_action::FrameId,
+        rollshot_action::StepFrameLoadRequest,
+    )>,
+) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    let current_gen = state.frame_coordinator.current_generation();
+    if generation != current_gen {
+        // Stale completion from a previous step selection. Drop silently.
+        tracing::debug!(
+            target: "rollshot::frame_load",
+            completed_gen = generation,
+            current_gen,
+            "stale frame load completion dropped"
+        );
+        return Update::none();
+    }
+
+    // Extract selected step info before borrowing frame_source.
+    let (keyframe, source_id) = {
+        let Some(step) = state.selected_step() else {
+            return Update::none();
+        };
+        (step.keyframe, step.source)
+    };
+
+    let Some(ref mut source) = state.frame_source else {
+        return Update::none();
+    };
+
+    let mut any_required_failed = false;
+
+    for result in results {
+        match result {
+            Ok(loaded) => {
+                let loaded_id = loaded.id;
+                let is_keyframe = loaded_id == keyframe;
+                source.insert_loaded(loaded);
+                if is_keyframe {
+                    // Build handle and hydrate annotations for current keyframe.
+                    if let Some(img) = source.cached(keyframe) {
+                        state.keyframe_handle = Some(super::build_handle(
+                            &::image::ImageBuffer::from_raw(
+                                img.width(),
+                                img.height(),
+                                img.as_raw().to_vec(),
+                            )
+                            .unwrap_or_else(|| ::image::RgbaImage::new(img.width(), img.height())),
+                        ));
+                        state
+                            .presentation
+                            .hydrate_for_step(source_id, keyframe, img);
+                    }
+                } else {
+                    // Build strip handle for nearby frame.
+                    if let Some(img) = source.cached(loaded_id) {
+                        state.strip.push(super::StripFrame {
+                            id: loaded_id,
+                            handle: super::build_handle(
+                                &::image::ImageBuffer::from_raw(
+                                    img.width(),
+                                    img.height(),
+                                    img.as_raw().to_vec(),
+                                )
+                                .unwrap_or_else(|| {
+                                    ::image::RgbaImage::new(img.width(), img.height())
+                                }),
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "rollshot::frame_load",
+                    %error,
+                    "frame decode failed"
+                );
+                // Check if this was a required frame (keyframe or nearby).
+                // If so, mark as CorruptReadOnly.
+                any_required_failed = true;
+            }
+        }
+    }
+
+    if any_required_failed {
+        // Set CorruptReadOnly access to prevent further mutations.
+        if let Some(ProjectSession::Saved { access, .. }) = &mut state.project_session {
+            *access = ProjectAccess::CorruptReadOnly;
+            state.save_state = super::ProjectSaveState::Clean;
+        }
+        state.message = Some(
+            "A required frame could not be decoded. The project is now read-only.".to_string(),
+        );
+        return Update::none();
+    }
+
+    // Spawn remaining frames if any.
+    if !remaining.is_empty() {
+        let semaphore = state.frame_coordinator.semaphore.clone();
+        let gen = generation;
+        return Update::task(iced::Task::perform(
+            frame_decode_task(gen, semaphore, remaining, Vec::new()),
+            move |msg| msg,
+        ));
+    }
+
+    Update::none()
 }
 
 async fn pick_export_dir(default_dir: PathBuf) -> Option<PathBuf> {
@@ -1511,22 +2053,27 @@ pub(crate) fn timeline_issue_pack_input(
     }
 }
 
-fn begin_issue_pack_export(
-    state: &mut TimelineWorkspace,
-    kind: super::IssuePackKind,
-) -> Task<Message> {
+fn begin_issue_pack_export(state: &mut TimelineWorkspace, kind: super::IssuePackKind) -> Update {
+    #[cfg(feature = "action-guide")]
+    if state
+        .frame_source
+        .as_ref()
+        .is_some_and(|fs| fs.in_memory().is_none())
+    {
+        return Update::none();
+    }
     if state.issue_pack.is_none() {
-        return Task::none();
+        return Update::none();
     }
     if !state.issue_pack.as_ref().unwrap().review_confirmed {
         state.message = Some("Review every keyframe before sharing.".to_string());
-        return Task::none();
+        return Update::none();
     }
     let pending = match super::guide_export::prepare_issue_pack_export(state) {
         Ok(pending) => pending,
         Err(error) => {
             state.message = Some(error);
-            return Task::none();
+            return Update::none();
         }
     };
     state.next_issue_pack_operation_id = state.next_issue_pack_operation_id.saturating_add(1);
@@ -1535,12 +2082,13 @@ fn begin_issue_pack_export(
     dialog.operation_id = operation_id;
     dialog.pending_kind = Some(kind);
     dialog.pending_export = Some(pending);
-    Task::perform(pick_export_dir(picker_default_dir()), move |parent| {
-        Message::IssuePackFolderChosen {
+    Update::task(Task::perform(
+        pick_export_dir(picker_default_dir()),
+        move |parent| Message::IssuePackFolderChosen {
             operation_id,
             parent,
-        }
-    })
+        },
+    ))
 }
 
 fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePoint {
@@ -1671,11 +2219,337 @@ fn commit_annotation_release(state: &mut TimelineWorkspace, point: ImagePoint) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Save flow (action-guide feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_save_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::ProjectSession;
+    use super::FirstSavePrompt;
+
+    if state.save_state == super::ProjectSaveState::Saving {
+        return Update::none();
+    }
+
+    let is_first_save = matches!(state.project_session, Some(ProjectSession::Unsaved) | None);
+    if is_first_save {
+        state.first_save_prompt = FirstSavePrompt::Picking;
+        let op_id = state.next_export_operation_id.wrapping_add(1);
+        state.next_export_operation_id = op_id;
+        Update::task(Task::perform(
+            pick_save_path(picker_default_dir()),
+            Message::SavePickerChosen,
+        ))
+    } else {
+        state.save_state = super::ProjectSaveState::Saving;
+        state.last_save_error = None;
+        let Some(snapshot) = build_snapshot_for_save(state) else {
+            state.save_state = super::ProjectSaveState::Dirty;
+            state.message = Some("Cannot save: snapshot build failed.".to_string());
+            return Update::none();
+        };
+        let destination = match &state.project_session {
+            Some(ProjectSession::Saved { root, .. }) => {
+                super::project::SaveDestination::Existing(root.clone())
+            }
+            _ => {
+                state.save_state = super::ProjectSaveState::Dirty;
+                state.message = Some("Cannot save: no project root.".to_string());
+                return Update::none();
+            }
+        };
+        Update::task(Task::perform(
+            super::project::save_project_worker(super::project::SaveProjectRequest {
+                snapshot,
+                destination,
+            }),
+            |result| match result {
+                Ok(super::project::SaveProjectWorkerResult::ExistingSaved(commit)) => {
+                    Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved {
+                        revision: commit.manifest.revision,
+                    })
+                }
+                Ok(super::project::SaveProjectWorkerResult::NewWritable { commit, .. }) => {
+                    Message::SaveWorkerFinished(SaveWorkerOutcome::NewWritable {
+                        root: commit.root.clone(),
+                        revision: commit.manifest.revision,
+                    })
+                }
+                Ok(super::project::SaveProjectWorkerResult::NewCommittedReadOnly {
+                    commit,
+                    category,
+                }) => Message::SaveWorkerFinished(SaveWorkerOutcome::NewCommittedReadOnly {
+                    root: commit.root.clone(),
+                    revision: commit.manifest.revision,
+                    category,
+                }),
+                Err(e) => {
+                    Message::SaveWorkerFinished(SaveWorkerOutcome::Failed(e.message_for_ui()))
+                }
+            },
+        ))
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_as_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    if state.save_state == super::ProjectSaveState::Saving
+        || !matches!(
+            state.project_session,
+            Some(ProjectSession::Saved {
+                access: ProjectAccess::Writable(_),
+                ..
+            })
+        )
+    {
+        return Update::none();
+    }
+
+    state.first_save_prompt = super::FirstSavePrompt::Picking;
+    Update::task(Task::perform(
+        pick_save_path(picker_default_dir()),
+        Message::SavePickerChosen,
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf>) -> Update {
+    use super::project::ProjectSession;
+    use super::FirstSavePrompt;
+
+    let is_first_save = matches!(state.first_save_prompt, FirstSavePrompt::Picking);
+    if !is_first_save {
+        return Update::none();
+    }
+
+    let Some(destination_path) = path else {
+        state.first_save_prompt =
+            if matches!(state.project_session, Some(ProjectSession::Saved { .. })) {
+                FirstSavePrompt::Hidden
+            } else {
+                FirstSavePrompt::Visible
+            };
+        if state.close_intent == super::CloseIntent::SaveThenClose {
+            state.close_intent = super::CloseIntent::None;
+        }
+        return Update::none();
+    };
+
+    state.save_state = super::ProjectSaveState::Saving;
+    state.last_save_error = None;
+    state.first_save_prompt = FirstSavePrompt::Hidden;
+
+    let Some(snapshot) = build_snapshot_for_save(state) else {
+        state.save_state = super::ProjectSaveState::Dirty;
+        state.first_save_prompt = FirstSavePrompt::Visible;
+        state.message = Some("Cannot save: snapshot build failed.".to_string());
+        return Update::none();
+    };
+
+    let destination_path = normalize_project_destination(destination_path);
+    let destination = match &state.project_session {
+        Some(ProjectSession::Saved { .. }) => {
+            super::project::SaveDestination::SaveAs(destination_path)
+        }
+        _ => super::project::SaveDestination::FirstSave(destination_path),
+    };
+
+    let guard_slot = state.pending_writer_guard.clone();
+    Update::task(Task::perform(
+        super::project::save_project_worker(super::project::SaveProjectRequest {
+            snapshot,
+            destination,
+        }),
+        move |result| match result {
+            Ok(super::project::SaveProjectWorkerResult::ExistingSaved(commit)) => {
+                Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved {
+                    revision: commit.manifest.revision,
+                })
+            }
+            Ok(super::project::SaveProjectWorkerResult::NewWritable { commit, guard }) => {
+                if let Ok(mut slot) = guard_slot.lock() {
+                    *slot = Some(guard);
+                }
+                Message::SaveWorkerFinished(SaveWorkerOutcome::NewWritable {
+                    root: commit.root.clone(),
+                    revision: commit.manifest.revision,
+                })
+            }
+            Ok(super::project::SaveProjectWorkerResult::NewCommittedReadOnly {
+                commit,
+                category,
+            }) => Message::SaveWorkerFinished(SaveWorkerOutcome::NewCommittedReadOnly {
+                root: commit.root.clone(),
+                revision: commit.manifest.revision,
+                category,
+            }),
+            Err(e) => Message::SaveWorkerFinished(SaveWorkerOutcome::Failed(e.message_for_ui())),
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_worker_finished(
+    state: &mut TimelineWorkspace,
+    outcome: super::update::SaveWorkerOutcome,
+) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    let should_close = state.close_intent == super::CloseIntent::SaveThenClose;
+
+    match outcome {
+        super::update::SaveWorkerOutcome::ExistingSaved { revision } => {
+            state.save_state = super::ProjectSaveState::Clean;
+            state.last_save_error = None;
+            if let Some(ProjectSession::Saved { base_revision, .. }) = &mut state.project_session {
+                *base_revision = revision;
+            }
+            state.message = Some("Saved.".to_string());
+            tracing::info!(
+                target: "rollshot::project",
+                revision,
+                "project saved"
+            );
+        }
+        super::update::SaveWorkerOutcome::NewWritable { root, revision } => {
+            state.save_state = super::ProjectSaveState::Clean;
+            state.last_save_error = None;
+            let guard = state
+                .pending_writer_guard
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            state.project_session = Some(ProjectSession::Saved {
+                root,
+                base_revision: revision,
+                access: match guard {
+                    Some(g) => ProjectAccess::Writable(g),
+                    None => ProjectAccess::ReadOnly,
+                },
+            });
+            state.message = Some("Project saved.".to_string());
+            tracing::info!(
+                target: "rollshot::project",
+                revision,
+                "first save committed (writable)"
+            );
+        }
+        super::update::SaveWorkerOutcome::NewCommittedReadOnly {
+            root,
+            revision,
+            category,
+        } => {
+            state.save_state = super::ProjectSaveState::Clean;
+            state.last_save_error = None;
+            state.project_session = Some(ProjectSession::Saved {
+                root,
+                base_revision: revision,
+                access: ProjectAccess::ReadOnly,
+            });
+            state.message = Some(
+                "Project saved, but another process holds the write lock. Editing is disabled."
+                    .to_string(),
+            );
+            tracing::warn!(
+                target: "rollshot::project",
+                revision,
+                category,
+                "first save committed but read-only (lock race)"
+            );
+        }
+        super::update::SaveWorkerOutcome::Failed(error) => {
+            state.save_state = super::ProjectSaveState::Dirty;
+            state.last_save_error = Some(error.clone());
+            state.message = Some(format!("Save failed: {error}"));
+            tracing::error!(
+                target: "rollshot::project",
+                %error,
+                "save failed"
+            );
+            if should_close {
+                state.close_intent = super::CloseIntent::None;
+            }
+            return Update::none();
+        }
+    }
+
+    if let Some((root, display_name)) = state.project_recent_metadata() {
+        state.close_intent = super::CloseIntent::None;
+        if should_close {
+            state.pending_discard = false;
+        }
+        return Update::effect(super::Effect::ProjectSaved {
+            root,
+            display_name,
+            close_workspace: should_close,
+        });
+    }
+
+    if should_close {
+        state.close_intent = super::CloseIntent::None;
+        state.pending_discard = false;
+        Update::effect(super::Effect::CloseWorkspace)
+    } else {
+        Update::none()
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn build_snapshot_for_save(
+    state: &mut TimelineWorkspace,
+) -> Option<rollshot_action::project::ProjectSnapshot> {
+    match super::project::build_project_snapshot(state) {
+        Ok(snap) => Some(snap),
+        Err(error) => {
+            tracing::error!(
+                target: "rollshot::project",
+                ?error,
+                "snapshot build failed"
+            );
+            state.message = Some(format!("Cannot save: {error:?}"));
+            None
+        }
+    }
+}
+
+#[cfg(feature = "action-guide")]
+async fn pick_save_path(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .set_file_name("guide.rollshot-guide")
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+#[cfg(feature = "action-guide")]
+fn normalize_project_destination(mut path: PathBuf) -> PathBuf {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("rollshot-guide") {
+        path.set_extension("rollshot-guide");
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::timeline_workspace::guide_export;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
+
+    #[test]
+    fn project_destination_adds_required_extension() {
+        assert_eq!(
+            normalize_project_destination(PathBuf::from("/tmp/My Guide")),
+            PathBuf::from("/tmp/My Guide.rollshot-guide")
+        );
+        assert_eq!(
+            normalize_project_destination(PathBuf::from("/tmp/My Guide.rollshot-guide")),
+            PathBuf::from("/tmp/My Guide.rollshot-guide")
+        );
+    }
     use crate::timeline_workspace::visual_annotation_agent::VisualSuggestionConsent;
     use crate::timeline_workspace::{
         annotation::AnnotationTool, FfmpegSetupDialog, StoryboardCopyState, TimelineWorkspace,
@@ -1812,11 +2686,11 @@ mod tests {
     }
 
     #[test]
-    fn delete_last_remaining_step_clears_selection() {
+    fn delete_last_remaining_step_is_noop() {
         let mut state = ws(synthetic_recording(1));
         let _ = update(&mut state, Message::DeleteStep);
-        assert!(state.guide.steps().is_empty());
-        assert_eq!(state.selected, None);
+        assert_eq!(state.guide.steps().len(), 1);
+        assert_eq!(state.selected, Some(1));
     }
 
     #[test]
@@ -1926,8 +2800,8 @@ mod tests {
         let open_task = update(&mut state, Message::OpenExportedGuide);
         let reveal_task = update(&mut state, Message::ShowExportedGuideInFolder);
 
-        assert!(open_task.units() > 0);
-        assert!(reveal_task.units() > 0);
+        assert!(open_task.task.units() > 0);
+        assert!(reveal_task.task.units() > 0);
     }
 
     #[test]
@@ -2046,7 +2920,7 @@ mod tests {
             "exporting should be true after picker returns"
         );
         assert!(
-            task.units() > 0,
+            task.task.units() > 0,
             "picker return should spawn an async export task"
         );
     }
@@ -2085,7 +2959,7 @@ mod tests {
         );
 
         let dialog = state.issue_pack.as_ref().unwrap();
-        assert_eq!(task.units(), 0);
+        assert_eq!(task.task.units(), 0);
         assert_eq!(dialog.operation_id, 2);
         assert!(dialog.pending_export.is_some());
         assert!(!dialog.exporting);
@@ -2212,7 +3086,7 @@ mod tests {
 
         let task = update(&mut state, Message::FfmpegDownloadManaged);
 
-        assert_eq!(task.units(), 0);
+        assert_eq!(task.task.units(), 0);
         assert!(state
             .ffmpeg_setup
             .as_ref()
@@ -2964,7 +3838,10 @@ mod tests {
             state.storyboard_preview.unwrap().copy_state,
             StoryboardCopyState::Copying { operation_id: 6 }
         );
-        assert!(task.units() > 0, "should return a render-and-copy task");
+        assert!(
+            task.task.units() > 0,
+            "should return a render-and-copy task"
+        );
     }
 
     #[test]
@@ -2979,7 +3856,7 @@ mod tests {
 
         let task = update(&mut state, Message::CopyStoryboardRequested);
         assert_eq!(
-            task.units(),
+            task.task.units(),
             0,
             "duplicate request should return a no-op task"
         );
@@ -3156,7 +4033,7 @@ mod tests {
         let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
 
         assert!(
-            task.units() > 0,
+            task.task.units() > 0,
             "consent confirm should return a Task::perform"
         );
         assert!(matches!(
@@ -3342,10 +4219,10 @@ mod tests {
 
     #[test]
     fn delete_step_dismisses_visual_annotation_review() {
-        let mut state = ws(recording_from_frames());
+        let mut state = ws(synthetic_recording(2));
         state.visual_annotation_suggestion =
             crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
-                visual_proposal_for_first_step(&mut state, 1),
+                proposal_for_synthetic_step(&state),
             );
 
         let _ = update(&mut state, Message::DeleteStep);
@@ -3488,7 +4365,7 @@ mod tests {
 
         let task = update(&mut state, Message::SuggestVisualAnnotationsRequested);
 
-        assert_eq!(task.units(), 0);
+        assert_eq!(task.task.units(), 0);
         assert!(matches!(
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::Running { run_id, .. } if run_id == prev_run_id
@@ -3509,7 +4386,7 @@ mod tests {
 
         let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
 
-        assert_eq!(task.units(), 0);
+        assert_eq!(task.task.units(), 0);
         assert!(matches!(
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(_)
@@ -3649,6 +4526,28 @@ mod tests {
         .expect("valid proposal")
     }
 
+    fn proposal_for_synthetic_step(state: &TimelineWorkspace) -> VisualAnnotationProposal {
+        let step = &state.guide.steps()[0];
+        VisualAnnotationProposal::from_agent_drafts(
+            rollshot_action::VisualAnnotationProposalId(1),
+            1,
+            step,
+            0,
+            32,
+            32,
+            vec![rollshot_action::VisualAnnotationSuggestionDraft {
+                id: rollshot_action::VisualAnnotationSuggestionId(1),
+                payload: rollshot_action::VisualAnnotationPayload::TextNote {
+                    position: rollshot_image_document::ImagePoint::new(4.0, 4.0),
+                    text: "test".to_string(),
+                },
+                confidence: 0.8,
+                rationale: None,
+            }],
+        )
+        .expect("valid proposal")
+    }
+
     #[test]
     fn individual_accept_visual_annotation_applies_one_and_rebases() {
         let mut state = ws(recording_from_frames());
@@ -3775,25 +4674,14 @@ mod tests {
 
     #[test]
     fn stale_accept_all_visual_annotations_changes_neither_count_nor_state() {
-        let mut state = ws(recording_from_frames());
-        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        let mut state = ws(synthetic_recording(2));
         state.visual_annotation_suggestion =
-            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
-        let source = state.selected_step().unwrap().source;
-        let state_before = state.presentation.doc(source).unwrap().document.state_id();
-        let annotations_before = state
-            .presentation
-            .doc(source)
-            .unwrap()
-            .document
-            .annotations()
-            .len();
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                proposal_for_synthetic_step(&state),
+            );
 
         let _ = update(&mut state, Message::DeleteStep);
 
-        // After DeleteStep, the step may be renumbered. The key assertion
-        // is that the visual annotation proposal was discarded (Idle) and
-        // no annotations were applied to any document.
         assert!(
             matches!(
                 state.visual_annotation_suggestion,
@@ -3801,19 +4689,6 @@ mod tests {
             ),
             "pending review must be discarded"
         );
-        // The source's document was not mutated (if it still exists).
-        if let Some(doc) = state.presentation.doc(source) {
-            assert_eq!(
-                doc.document.state_id(),
-                state_before,
-                "document state must not change"
-            );
-            assert_eq!(
-                doc.document.annotations().len(),
-                annotations_before,
-                "annotations must not change"
-            );
-        }
     }
 
     #[test]
@@ -3887,10 +4762,11 @@ mod tests {
 
     #[test]
     fn delete_step_after_pending_review_stales_remaining_items() {
-        let mut state = ws(recording_from_frames());
-        let proposal = visual_proposal_three_primitives(&mut state, 1);
+        let mut state = ws(synthetic_recording(2));
         state.visual_annotation_suggestion =
-            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                proposal_for_synthetic_step(&state),
+            );
 
         let _ = update(&mut state, Message::DeleteStep);
 
@@ -3997,7 +4873,7 @@ key_source = { Env = "OPENAI_API_KEY" }
 
         let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
 
-        assert_eq!(task.units(), 0);
+        assert_eq!(task.task.units(), 0);
         assert!(matches!(
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::ConsentPending(_)
@@ -4057,7 +4933,7 @@ key_source = { Env = "OPENAI_API_KEY" }
         // Second confirm: consent snapshot now matches; should start running.
         let task = update(&mut state, Message::VisualSuggestionConsentConfirmed);
         assert!(
-            task.units() > 0,
+            task.task.units() > 0,
             "second confirm after config change should return a Task::perform"
         );
         assert!(matches!(

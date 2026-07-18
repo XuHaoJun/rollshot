@@ -13,9 +13,15 @@ pub enum LaunchMode {
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
     #[cfg(feature = "action-guide")]
-    ActionGuide {
-        fullscreen: bool,
-    },
+    ActionGuide(ActionGuideLaunch),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "action-guide")]
+pub enum ActionGuideLaunch {
+    Home,
+    Record { fullscreen: bool },
+    Open { path: Option<PathBuf> },
 }
 
 /// Top-level launch parser for the interactive capture app. Running with no
@@ -48,17 +54,27 @@ pub enum LaunchCommand {
 
     /// Record a desktop workflow into an Action Guide.
     #[cfg(feature = "action-guide")]
-    ActionGuide {
-        /// Record the whole display instead of selecting a region. The
-        /// recording is stopped by clicking the temporary system-tray icon
-        /// (Linux/KDE only).
-        #[arg(long, default_value_t = false)]
-        fullscreen: bool,
-    },
+    ActionGuide(ActionGuideArgs),
 
     /// Probe Action Guide input capability and exit.
     #[cfg(feature = "action-guide")]
     ActionGuideProbe,
+}
+
+#[derive(Debug, clap::Args)]
+#[cfg(feature = "action-guide")]
+pub struct ActionGuideArgs {
+    /// Record a new Action Guide workflow.
+    #[arg(long, conflicts_with = "open")]
+    pub record: bool,
+
+    /// Record the whole display instead of selecting a region.
+    #[arg(long, requires = "record")]
+    pub fullscreen: bool,
+
+    /// Open an existing Action Guide project.
+    #[arg(long, conflicts_with = "record", num_args = 0..=1, value_name = "PATH")]
+    pub open: Option<Option<PathBuf>>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -177,8 +193,16 @@ pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode,
             graphical_feedback: args.graphical_feedback,
         }),
         #[cfg(feature = "action-guide")]
-        Some(LaunchCommand::ActionGuide { fullscreen }) => {
-            Ok(LaunchMode::ActionGuide { fullscreen })
+        Some(LaunchCommand::ActionGuide(args)) => {
+            if args.record {
+                Ok(LaunchMode::ActionGuide(ActionGuideLaunch::Record {
+                    fullscreen: args.fullscreen,
+                }))
+            } else if let Some(path) = args.open {
+                Ok(LaunchMode::ActionGuide(ActionGuideLaunch::Open { path }))
+            } else {
+                Ok(LaunchMode::ActionGuide(ActionGuideLaunch::Home))
+            }
         }
         #[cfg(feature = "action-guide")]
         Some(LaunchCommand::ActionGuideProbe) => Ok(LaunchMode::ActionGuideProbe),
@@ -190,6 +214,37 @@ mod tests {
     use super::{resolve_launch_mode, LaunchCli, LaunchMode};
     use clap::Parser;
     use rollshot_capture::CaptureRequest;
+
+    #[cfg(feature = "action-guide")]
+    use super::ActionGuideLaunch;
+
+    #[cfg(feature = "action-guide")]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Route {
+        LinuxPhasedHost,
+        LinuxChildOverlay,
+        MacOsProductDaemon,
+    }
+
+    #[cfg(feature = "action-guide")]
+    fn route_action_guide_launch(launch: &ActionGuideLaunch) -> Route {
+        match launch {
+            ActionGuideLaunch::Home | ActionGuideLaunch::Open { .. } => {
+                if cfg!(target_os = "macos") {
+                    Route::MacOsProductDaemon
+                } else {
+                    Route::LinuxPhasedHost
+                }
+            }
+            ActionGuideLaunch::Record { .. } => {
+                if cfg!(target_os = "macos") {
+                    Route::MacOsProductDaemon
+                } else {
+                    Route::LinuxChildOverlay
+                }
+            }
+        }
+    }
 
     fn parse(args: &[&str]) -> Result<LaunchMode, String> {
         let cli = LaunchCli::try_parse_from(args).map_err(|e| e.to_string())?;
@@ -333,19 +388,74 @@ mod tests {
 
     #[cfg(feature = "action-guide")]
     #[test]
-    fn action_guide_without_fullscreen() {
+    fn action_guide_home_default() {
         let mode = parse(&["rollshot-app", "action-guide"]).expect("parse");
-        assert!(matches!(
-            mode,
-            LaunchMode::ActionGuide { fullscreen: false }
-        ));
+        assert_eq!(mode, LaunchMode::ActionGuide(ActionGuideLaunch::Home));
     }
 
     #[cfg(feature = "action-guide")]
     #[test]
-    fn action_guide_with_fullscreen() {
-        let mode = parse(&["rollshot-app", "action-guide", "--fullscreen"]).expect("parse");
-        assert!(matches!(mode, LaunchMode::ActionGuide { fullscreen: true }));
+    fn action_guide_record_no_fullscreen() {
+        let mode = parse(&["rollshot-app", "action-guide", "--record"]).expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record { fullscreen: false })
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_record_with_fullscreen() {
+        let mode =
+            parse(&["rollshot-app", "action-guide", "--record", "--fullscreen"]).expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record { fullscreen: true })
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_fullscreen_requires_record() {
+        let err = parse(&["rollshot-app", "action-guide", "--fullscreen"]).unwrap_err();
+        assert!(
+            err.contains("--record"),
+            "error should mention --record: {err}"
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_record_and_open_conflict() {
+        assert!(parse(&["rollshot-app", "action-guide", "--record", "--open"]).is_err());
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_open_no_path() {
+        let mode = parse(&["rollshot-app", "action-guide", "--open"]).expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Open { path: None })
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_open_with_path() {
+        let mode = parse(&[
+            "rollshot-app",
+            "action-guide",
+            "--open",
+            "/tmp/a.rollshot-guide",
+        ])
+        .expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Open {
+                path: Some(std::path::PathBuf::from("/tmp/a.rollshot-guide"))
+            })
+        );
     }
 
     #[cfg(feature = "action-guide")]
@@ -390,5 +500,70 @@ mod tests {
     fn ocr_rejects_workflow_and_scope_flags() {
         assert!(parse(&["rollshot-app", "ocr", "--scope", "fullscreen"]).is_err());
         assert!(parse(&["rollshot-app", "ocr", "--workflow", "scrolling"]).is_err());
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_route_home() {
+        let route = route_action_guide_launch(&ActionGuideLaunch::Home);
+        if cfg!(target_os = "macos") {
+            assert_eq!(route, Route::MacOsProductDaemon);
+        } else {
+            assert_eq!(route, Route::LinuxPhasedHost);
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_route_open() {
+        let route = route_action_guide_launch(&ActionGuideLaunch::Open { path: None });
+        if cfg!(target_os = "macos") {
+            assert_eq!(route, Route::MacOsProductDaemon);
+        } else {
+            assert_eq!(route, Route::LinuxPhasedHost);
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_route_open_with_path() {
+        let route = route_action_guide_launch(&ActionGuideLaunch::Open {
+            path: Some(std::path::PathBuf::from("/tmp/test")),
+        });
+        if cfg!(target_os = "macos") {
+            assert_eq!(route, Route::MacOsProductDaemon);
+        } else {
+            assert_eq!(route, Route::LinuxPhasedHost);
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_route_record() {
+        let route = route_action_guide_launch(&ActionGuideLaunch::Record { fullscreen: false });
+        if cfg!(target_os = "macos") {
+            assert_eq!(route, Route::MacOsProductDaemon);
+        } else {
+            assert_eq!(route, Route::LinuxChildOverlay);
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_route_record_fullscreen() {
+        let route = route_action_guide_launch(&ActionGuideLaunch::Record { fullscreen: true });
+        if cfg!(target_os = "macos") {
+            assert_eq!(route, Route::MacOsProductDaemon);
+        } else {
+            assert_eq!(route, Route::LinuxChildOverlay);
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn action_guide_probe_is_separate_from_action_guide_launch() {
+        let probe = LaunchMode::ActionGuideProbe;
+        let home = LaunchMode::ActionGuide(ActionGuideLaunch::Home);
+        assert_ne!(probe, home);
     }
 }

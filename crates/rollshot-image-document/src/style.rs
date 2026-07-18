@@ -49,6 +49,7 @@ impl TextSize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct NumberStyle {
     pub accent: Rgb8,
     pub size: NumberSize,
@@ -65,6 +66,7 @@ impl Default for NumberStyle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct TextStyle {
     pub font_size: TextSize,
     pub text_color: Rgb8,
@@ -83,6 +85,7 @@ impl Default for TextStyle {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct StrokeStyle {
     pub color: Rgb8,
     pub width: f32,

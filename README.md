@@ -509,15 +509,76 @@ commands. If `probe` reports missing Screen Recording permission, run a capture
 command once to trigger the permission prompt, grant access, restart the
 terminal, and rerun `probe`.
 
-## Action Guide input access (optional)
+## Action Guide (optional)
 
 Action Guide is gated behind the non-default `action-guide` Cargo feature on
 `rollshot-app`:
 
 ```bash
 cargo build --release -p rollshot-app --features action-guide
-cargo run -p rollshot-app --features action-guide -- action-guide
 ```
+
+Bare `action-guide` opens the **Home** screen — a project browser with recent
+projects, a **Record New** button, and an **Open** picker:
+
+```bash
+rollshot-app action-guide
+```
+
+Use `--record` to start a new recording directly, and `--record --fullscreen`
+to capture the whole display instead of selecting a region:
+
+```bash
+rollshot-app action-guide --record
+rollshot-app action-guide --record --fullscreen
+```
+
+Use `--open` to reopen an existing `.rollshot-guide` project directory, or
+`--open PATH` to open a specific one:
+
+```bash
+rollshot-app action-guide --open
+rollshot-app action-guide --open /path/to/my-guide.rollshot-guide
+```
+
+### Projects and Safe Copy
+
+New recordings are saved into a `.rollshot-guide` directory — the private,
+editable source for your guide. This directory contains the session metadata,
+keyframe images, and annotations. Treat it as your working copy.
+
+When you are ready to share, **Save** (or **Save As**) produces a standalone
+folder with `index.html`, `steps.md`, `session.json`, and `keyframes/` — the
+**Safe Copy** artifact intended for distribution. The Safe Copy folder is
+self-contained and works offline.
+
+New recordings default to **save-first** behavior: the project is committed to
+disk as soon as the recording finishes, before you enter the editor. You can
+also choose **Save later** to defer the first commit until you explicitly save.
+
+### Writer lock and read-only access
+
+Only one process can write to a `.rollshot-guide` project at a time. A second
+process opening the same project gets **read-only** access — editing is
+disabled, but the guide can still be viewed. If a required keyframe fails to
+decode (e.g. a corrupt or truncated image), the workspace downgrades to
+read-only and disables Save.
+
+### Legacy export handoff
+
+Older standalone exports (a folder with `index.html` and `session.json` but
+without the `.rollshot-guide` internal structure) are detected as legacy
+exports. Opening one offers to launch the `index.html` reader in your browser
+rather than entering the editor, since legacy exports are not writable project
+directories.
+
+### Local filesystem limitation
+
+Action Guide projects are stored on the local filesystem. Network shares,
+cloud-synced folders, and other non-local paths are not currently supported for
+project storage.
+
+### Input access
 
 Action Guide works in **visual-only** mode out of the box. Granting temporary
 input-device access upgrades it to **semantic** detection (clicks, scroll,
@@ -582,13 +643,13 @@ denying it is a capture failure, not a visual-only degradation.
 
 ### Fullscreen recording (Linux/KDE)
 
-`rollshot-app action-guide --fullscreen` records the whole display. Click the
-temporary system-tray icon to finish recording. Requires a system tray
+`rollshot-app action-guide --record --fullscreen` records the whole display.
+Click the temporary system-tray icon to finish recording. Requires a system tray
 (StatusNotifierItem host); KDE Plasma provides one.
 
-### Action Guide offline reader
+### Safe Copy structure
 
-When you export a standalone Action Guide, the output is a self-contained folder:
+The Safe Copy produced by Save/Save As is a self-contained folder:
 
 ```text
 <guide-title>-<YYYY-MM-DD-HHMMSS>/
@@ -603,13 +664,11 @@ browser. The reader works entirely offline — no server, CDN, or network access
 is required. The whole folder must be moved or shared together; `index.html`
 reads `session.json` and `keyframes/` relative to its own location.
 
-`steps.md` is a plain Markdown fallback that works without JavaScript. OCR
-search and single-file HTML export are not included in this release.
+`steps.md` is a plain Markdown fallback that works without JavaScript.
 
-After a successful standalone export, the timeline workspace shows **Open
-Guide** (launches `index.html`) and **Show in Folder** (reveals the directory in
-the system file manager). The same folder structure is included inside Issue
-Pack exports.
+After a successful Save, the timeline workspace shows **Open Guide** (launches
+`index.html`) and **Show in Folder** (reveals the directory in the system file
+manager).
 
 ## Manual Self-Hosted Workflow
 
