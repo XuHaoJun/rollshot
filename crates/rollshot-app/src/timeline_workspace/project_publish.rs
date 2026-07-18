@@ -39,6 +39,7 @@ pub struct PublishRequest {
     pub revision: u64,
     pub project_root: PathBuf,
     pub writer_lease: Arc<Mutex<Option<ProjectWriterGuard>>>,
+    pub arbiter: PublishArbiter,
     pub job: ReviewedGuideExportJob,
     pub settings: PublishSettings,
     pub selection: PublishSelection,
@@ -94,6 +95,7 @@ pub enum PublishOutcome {
     Committed,
     Superseded,
     Cancelled,
+    CommitFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -126,13 +128,12 @@ impl PublishArbiter {
         f: F,
     ) -> Result<R, PublishOutcome>
     where
-        F: FnOnce() -> Result<R, String>,
+        F: FnOnce(&Option<(PublishOperationId, u64)>) -> Result<R, String>,
     {
         let guard = self.inner.lock().unwrap();
         match *guard {
             Some((ref id, rev)) if *id == operation_id && rev == revision => {
-                drop(guard);
-                f().map_err(|error| {
+                f(&guard).map_err(|error| {
                     tracing::event!(
                         target: "rollshot::publish",
                         tracing::Level::ERROR,
@@ -141,7 +142,7 @@ impl PublishArbiter {
                         category = "commit_failed",
                         "{error}"
                     );
-                    PublishOutcome::Superseded
+                    PublishOutcome::CommitFailed(error)
                 })
             }
             _ => Err(PublishOutcome::Superseded),
@@ -153,6 +154,10 @@ impl Default for PublishArbiter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+struct ArbiterHeldGuard<'a> {
+    _guard: std::sync::MutexGuard<'a, Option<(PublishOperationId, u64)>>,
 }
 
 fn unique_temp_sibling(parent: &Path, prefix: &str) -> PathBuf {
@@ -230,24 +235,23 @@ fn read_project_revision(root: &Path) -> Result<u64, String> {
         .ok_or_else(|| "missing revision in project.json".to_string())
 }
 
-fn check_arbiter_and_revision(
-    arbiter: &PublishArbiter,
+fn check_arbiter_and_revision<'a>(
+    arbiter: &'a PublishArbiter,
     operation_id: PublishOperationId,
     revision: u64,
     project_root: &Path,
-) -> Result<(), PublishOutcome> {
+) -> Result<ArbiterHeldGuard<'a>, PublishOutcome> {
     let guard = arbiter.inner.lock().unwrap();
     match *guard {
         Some((ref id, rev)) if *id == operation_id && rev == revision => {}
         _ => return Err(PublishOutcome::Superseded),
     }
-    drop(guard);
 
     let current = read_project_revision(project_root).map_err(|_| PublishOutcome::Superseded)?;
     if current != revision {
         return Err(PublishOutcome::Superseded);
     }
-    Ok(())
+    Ok(ArbiterHeldGuard { _guard: guard })
 }
 
 pub fn run_publish(
@@ -260,6 +264,7 @@ pub fn run_publish(
         revision,
         project_root,
         writer_lease: _writer_lease,
+        arbiter,
         job,
         settings,
         selection,
@@ -282,6 +287,7 @@ pub fn run_publish(
         ffmpeg: ffmpeg.as_deref(),
         cancel: &cancel,
         sender,
+        arbiter: &arbiter,
     };
 
     match purpose {
@@ -302,6 +308,7 @@ struct PublishContext<'a> {
     ffmpeg: Option<&'a Path>,
     cancel: &'a PublishCancellation,
     sender: &'a tokio::sync::mpsc::Sender<PublishEvent>,
+    arbiter: &'a PublishArbiter,
 }
 
 fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
@@ -331,6 +338,19 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
                 if ctx.cancel.is_cancelled() {
                     return PublishOutcome::Cancelled;
                 }
+
+                let _held = match check_arbiter_and_revision(
+                    ctx.arbiter,
+                    ctx.operation_id,
+                    ctx.revision,
+                    ctx.project_root,
+                ) {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&tmp);
+                        return e;
+                    }
+                };
 
                 match swap_publish_directory(&tmp, ctx.publish_dir) {
                     Ok(()) => {
@@ -381,6 +401,8 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
     }
 
     let derivatives = derivative_kinds(ctx.selection, ctx.settings);
+    let total_derivatives = derivatives.len();
+    let mut committed_derivatives = 0usize;
     for kind in derivatives {
         if ctx.cancel.is_cancelled() {
             return PublishOutcome::Cancelled;
@@ -388,6 +410,7 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
 
         let state = load_publish_state(ctx.project_root);
         if state.freshness(kind, ctx.revision) == PublishFreshness::Current {
+            committed_derivatives += 1;
             continue;
         }
 
@@ -395,9 +418,23 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
         let result = render_derivative(ctx.job, kind, ctx.settings, ctx.ffmpeg, ctx.cancel, &tmp);
         match result {
             Ok(()) => {
+                let _held = match check_arbiter_and_revision(
+                    ctx.arbiter,
+                    ctx.operation_id,
+                    ctx.revision,
+                    ctx.project_root,
+                ) {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        return e;
+                    }
+                };
+
                 let stable = derivative_stable_path(ctx.publish_dir, kind);
                 match commit_publish_file(&tmp, &stable) {
                     Ok(()) => {
+                        committed_derivatives += 1;
                         let mut state = load_or_default_state(ctx.project_root);
                         state
                             .outputs
@@ -453,7 +490,11 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
         operation_id: ctx.operation_id,
         revision: ctx.revision,
     });
-    PublishOutcome::Committed
+    if total_derivatives > 0 && committed_derivatives == 0 {
+        PublishOutcome::Superseded
+    } else {
+        PublishOutcome::Committed
+    }
 }
 
 fn run_share_gate_publish(ctx: PublishContext<'_>) -> PublishOutcome {
@@ -540,13 +581,28 @@ fn run_share_gate_publish(ctx: PublishContext<'_>) -> PublishOutcome {
         return PublishOutcome::Superseded;
     }
 
-    let commit_result = commit_sharegate(
-        &tmp,
-        ctx.publish_dir,
-        &tmp_state,
-        ctx.state_path,
-        ctx.project_root,
-    );
+    let commit_result = {
+        let _held = match check_arbiter_and_revision(
+            ctx.arbiter,
+            ctx.operation_id,
+            ctx.revision,
+            ctx.project_root,
+        ) {
+            Ok(guard) => guard,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_state);
+                return e;
+            }
+        };
+
+        commit_sharegate(
+            &tmp,
+            ctx.publish_dir,
+            &tmp_state,
+            ctx.state_path,
+            ctx.project_root,
+        )
+    };
 
     match commit_result {
         Ok(()) => {
@@ -683,16 +739,12 @@ fn derivative_kinds(
     }
 }
 
-fn enabled_derivatives(settings: &PublishSettings) -> Vec<PublishOutputKind> {
-    let mut kinds = Vec::new();
-    if settings.storyboard.show_titles || !settings.storyboard.show_titles {
-        kinds.push(PublishOutputKind::Storyboard);
-    }
-    kinds.push(PublishOutputKind::Gif);
-    if settings.mp4.fps > 0 {
-        kinds.push(PublishOutputKind::Mp4);
-    }
-    kinds
+fn enabled_derivatives(_settings: &PublishSettings) -> Vec<PublishOutputKind> {
+    vec![
+        PublishOutputKind::Storyboard,
+        PublishOutputKind::Gif,
+        PublishOutputKind::Mp4,
+    ]
 }
 
 fn derivative_stable_path(publish_dir: &Path, kind: PublishOutputKind) -> PathBuf {
@@ -758,13 +810,12 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
     use rollshot_action::project::{
-        create_project, EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectSnapshot,
-        ProjectStep, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+        create_project, EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
+        SnapshotFramePayload,
     };
     use rollshot_action::{
-        ActionRecorder, CandidateKind, CaptureRegion, DetectorConfig, FrameStore, InputCapability,
-        InputSourceKind, Recording, ReviewedGuideExportJob, ReviewedGuideStep, ReviewedStepImage,
-        StoreConfig,
+        CandidateKind, CaptureRegion, InputCapability, InputSourceKind, ReviewedGuideExportJob,
+        ReviewedGuideStep, ReviewedStepImage,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -853,11 +904,14 @@ mod tests {
         root: PathBuf,
         purpose: PublishPurpose,
     ) -> PublishRequest {
+        let arbiter = PublishArbiter::new();
+        arbiter.begin(operation_id, revision);
         PublishRequest {
             operation_id,
             revision,
             project_root: root,
             writer_lease: dummy_guard(),
+            arbiter,
             job: minimal_job(),
             settings: PublishSettings::default(),
             selection: PublishSelection::AllEnabled,
@@ -927,7 +981,7 @@ mod tests {
 
         arbiter.begin(PublishOperationId(2), 2);
 
-        let result = arbiter.try_commit(PublishOperationId(1), 1, || Ok(()));
+        let result = arbiter.try_commit(PublishOperationId(1), 1, |_| Ok(()));
         assert_eq!(result, Err(PublishOutcome::Superseded));
     }
 
@@ -936,7 +990,7 @@ mod tests {
         let arbiter = PublishArbiter::new();
         arbiter.begin(PublishOperationId(1), 1);
 
-        let result = arbiter.try_commit(PublishOperationId(1), 1, || Ok(42));
+        let result = arbiter.try_commit(PublishOperationId(1), 1, |_| Ok(42));
         assert_eq!(result, Ok(42));
     }
 
@@ -946,11 +1000,11 @@ mod tests {
         arbiter.begin(PublishOperationId(1), 1);
 
         arbiter.clear_if_current(PublishOperationId(2));
-        let result = arbiter.try_commit(PublishOperationId(1), 1, || Ok(()));
+        let result = arbiter.try_commit(PublishOperationId(1), 1, |_| Ok(()));
         assert!(result.is_ok());
 
         arbiter.clear_if_current(PublishOperationId(1));
-        let result = arbiter.try_commit(PublishOperationId(1), 1, || Ok(()));
+        let result = arbiter.try_commit(PublishOperationId(1), 1, |_| Ok(()));
         assert_eq!(result, Err(PublishOutcome::Superseded));
     }
 
@@ -1189,7 +1243,7 @@ mod tests {
         use rollshot_action::project::save_project;
         save_project(&snap, &root).unwrap();
 
-        let result = arbiter.try_commit(PublishOperationId(1), 1, || {
+        let result = arbiter.try_commit(PublishOperationId(1), 1, |_| {
             let current = read_project_revision(&root)?;
             if current != 1 {
                 return Err("revision mismatch".to_string());
@@ -1243,7 +1297,21 @@ mod tests {
 
         let cancel = PublishCancellation::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(32);
-        run_publish(request, cancel, &tx);
+        let logs = crate::diagnostics::capture_test_logs(|| {
+            run_publish(request, cancel, &tx);
+        });
+
+        assert!(
+            !logs.contains("assets/frames"),
+            "logs must not contain assets/frames path: {logs}"
+        );
+        let root_str = root.to_string_lossy();
+        if root_str.len() > 4 {
+            assert!(
+                !logs.contains(root_str.as_ref()),
+                "logs must not contain project root: {logs}"
+            );
+        }
     }
 
     #[test]
@@ -1303,7 +1371,7 @@ mod tests {
         let arbiter = PublishArbiter::new();
         arbiter.begin(PublishOperationId(1), 1);
 
-        let result = arbiter.try_commit(PublishOperationId(1), 2, || Ok(()));
+        let result = arbiter.try_commit(PublishOperationId(1), 2, |_| Ok(()));
         assert_eq!(result, Err(PublishOutcome::Superseded));
     }
 
@@ -1334,18 +1402,130 @@ mod tests {
 
         let cancel = PublishCancellation::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(32);
+
+        use std::os::unix::fs::PermissionsExt;
+        let orig_perms = std::fs::metadata(&root).unwrap().permissions();
+        let mut readonly_perms = orig_perms.clone();
+        readonly_perms.set_mode(0o555);
+        std::fs::set_permissions(&root, readonly_perms).unwrap();
+
         let outcome = run_publish(request, cancel, &tx);
 
-        if outcome == PublishOutcome::Committed {
-            assert!(publish_dir.join("index.html").exists());
-        } else {
-            assert_eq!(
-                std::fs::read_to_string(publish_dir.join("index.html")).unwrap(),
-                old_html
+        std::fs::set_permissions(&root, orig_perms).unwrap();
+
+        assert_eq!(outcome, PublishOutcome::Superseded);
+        assert_eq!(
+            std::fs::read_to_string(publish_dir.join("index.html")).unwrap(),
+            old_html
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("publish-state.json")).unwrap(),
+            old_state
+        );
+    }
+
+    #[test]
+    fn workspace_guard_drop_blocks_worker() {
+        use crate::timeline_workspace::project::acquire_project_writer;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = make_test_project(dir.path());
+
+        let guard = acquire_project_writer(&root).unwrap();
+        let worker_guard = Arc::new(Mutex::new(Some(guard)));
+
+        let lock_path = root.join(".lock");
+        let locked = Arc::new(AtomicBool::new(false));
+        let locked_clone = Arc::clone(&locked);
+        let release = Arc::new(AtomicBool::new(false));
+        let release_clone = Arc::clone(&release);
+        let worker_guard_clone = Arc::clone(&worker_guard);
+
+        let worker = std::thread::spawn(move || {
+            let _g = worker_guard_clone.lock().unwrap();
+            locked_clone.store(true, Ordering::SeqCst);
+            while !release_clone.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+        });
+
+        while !locked.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        drop(worker_guard);
+
+        assert!(
+            !check_lock_available_subprocess(&lock_path),
+            "lock must still be held by worker after workspace drops guard"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        worker.join().unwrap();
+
+        assert!(
+            check_lock_available_subprocess(&lock_path),
+            "lock must be released after worker finishes"
+        );
+    }
+
+    fn check_lock_available_subprocess(lock_path: &std::path::Path) -> bool {
+        let output = std::process::Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import fcntl, sys; f = open('{}', 'r+'); \
+                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB); \
+                     fcntl.flock(f.fileno(), fcntl.LOCK_UN); sys.exit(0)",
+                    lock_path.display()
+                ),
+            ])
+            .output()
+            .expect("failed to run subprocess");
+        output.status.success()
+    }
+
+    #[test]
+    fn redaction_flattening_no_project_root_leakage() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = make_test_project(dir.path());
+
+        let request = make_request(
+            PublishOperationId(1),
+            1,
+            root.clone(),
+            PublishPurpose::Background,
+        );
+
+        let cancel = PublishCancellation::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let outcome = run_publish(request, cancel, &tx);
+        assert_eq!(outcome, PublishOutcome::Committed);
+
+        let publish_dir = root.join("publish");
+        assert!(publish_dir.join("index.html").exists());
+
+        let html = std::fs::read_to_string(publish_dir.join("index.html")).unwrap();
+        let root_str = root.to_string_lossy();
+        assert!(
+            !html.contains(root_str.as_ref()),
+            "HTML must not contain project root path"
+        );
+        assert!(
+            !html.contains("assets/frames"),
+            "HTML must not contain assets/frames reference"
+        );
+
+        let session_path = publish_dir.join("session.json");
+        if session_path.exists() {
+            let session = std::fs::read_to_string(&session_path).unwrap();
+            assert!(
+                !session.contains(root_str.as_ref()),
+                "session.json must not contain project root path"
             );
-            assert_eq!(
-                std::fs::read_to_string(root.join("publish-state.json")).unwrap(),
-                old_state
+            assert!(
+                !session.contains("assets/frames"),
+                "session.json must not contain assets/frames reference"
             );
         }
     }
