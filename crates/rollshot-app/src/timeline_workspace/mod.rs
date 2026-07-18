@@ -29,6 +29,8 @@ mod visual_annotation_agent;
 pub(crate) mod project;
 #[cfg(feature = "action-guide")]
 pub(crate) mod project_publish;
+#[cfg(feature = "action-guide")]
+pub(crate) mod share;
 
 #[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};
@@ -372,6 +374,12 @@ pub struct TimelineWorkspace {
     pub(crate) publish_details_open: bool,
     #[cfg(feature = "action-guide")]
     pub(crate) next_publish_operation_id: u64,
+    #[cfg(feature = "action-guide")]
+    pub(crate) share_progress: Option<share::ShareProgress>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) share_kind: Option<share::ShareKind>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) share_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -440,6 +448,12 @@ impl TimelineWorkspace {
             publish_details_open: false,
             #[cfg(feature = "action-guide")]
             next_publish_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            share_progress: None,
+            #[cfg(feature = "action-guide")]
+            share_kind: None,
+            #[cfg(feature = "action-guide")]
+            share_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws

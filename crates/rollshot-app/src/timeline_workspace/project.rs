@@ -409,6 +409,9 @@ pub(crate) fn from_loaded_project(
         publish_freshness: std::collections::BTreeMap::new(),
         publish_details_open: false,
         next_publish_operation_id: 0,
+        share_progress: None,
+        share_kind: None,
+        share_operation_id: 0,
     };
 
     ws.rebuild_selection_handles();

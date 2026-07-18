@@ -736,6 +736,57 @@ fn publish_details_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
 
     items = items.push(action_row);
 
+    let share_section: Element<Message> = {
+        let share_safe: Element<Message> = if is_clean
+            && !state.share_progress.as_ref().is_some_and(|p| {
+                matches!(
+                    p,
+                    super::share::ShareProgress::Copying
+                        | super::share::ShareProgress::WaitingForPublish
+                )
+            }) {
+            button(text("Share safe viewer copy"))
+                .on_press(Message::ShareSafeCopyRequested)
+                .style(button::secondary)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        let share_editable: Element<Message> = if is_writable
+            && is_clean
+            && !state.share_progress.as_ref().is_some_and(|p| {
+                matches!(
+                    p,
+                    super::share::ShareProgress::Copying
+                        | super::share::ShareProgress::WaitingForPublish
+                )
+            }) {
+            button(text("Share editable project"))
+                .on_press(Message::ShareEditableProjectRequested)
+                .style(button::secondary)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        column![
+            text("Share").size(14),
+            row![share_safe, share_editable].spacing(6),
+            text("Safe copy: read-only viewer files. Editable: full project with assets.").size(11),
+        ]
+        .spacing(4)
+        .into()
+    };
+
+    items = items.push(share_section);
+
     container(items)
         .padding(12)
         .width(Length::Fill)

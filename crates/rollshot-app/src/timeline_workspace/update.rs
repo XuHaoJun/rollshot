@@ -190,6 +190,22 @@ pub enum Message {
     CancelPublish,
     #[cfg(feature = "action-guide")]
     PublishEvent(super::project_publish::PublishEvent),
+    #[cfg(feature = "action-guide")]
+    ShareSafeCopyRequested,
+    #[cfg(feature = "action-guide")]
+    ShareEditableProjectRequested,
+    #[cfg(feature = "action-guide")]
+    ShareDestinationChosen {
+        operation_id: u64,
+        destination: Option<std::path::PathBuf>,
+    },
+    #[cfg(feature = "action-guide")]
+    ShareGateFinished(super::project_publish::PublishEvent),
+    #[cfg(feature = "action-guide")]
+    ShareWorkerFinished {
+        operation_id: u64,
+        result: super::share::ShareOutcome,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1758,6 +1774,22 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::CancelPublish => handle_cancel_publish(state),
         #[cfg(feature = "action-guide")]
         Message::PublishEvent(event) => handle_publish_event(state, event),
+        #[cfg(feature = "action-guide")]
+        Message::ShareSafeCopyRequested => handle_share_safe_copy_requested(state),
+        #[cfg(feature = "action-guide")]
+        Message::ShareEditableProjectRequested => handle_share_editable_project_requested(state),
+        #[cfg(feature = "action-guide")]
+        Message::ShareDestinationChosen {
+            operation_id,
+            destination,
+        } => handle_share_destination_chosen(state, operation_id, destination),
+        #[cfg(feature = "action-guide")]
+        Message::ShareGateFinished(event) => handle_share_gate_finished(state, event),
+        #[cfg(feature = "action-guide")]
+        Message::ShareWorkerFinished {
+            operation_id,
+            result,
+        } => handle_share_worker_finished(state, operation_id, result),
     }
 }
 
@@ -2215,6 +2247,359 @@ fn handle_toggle_publish_output(
     }
     state.message = Some("Save the project to apply output changes.".to_string());
     Update::none()
+}
+
+// ---------------------------------------------------------------------------
+// Share lifecycle (action-guide feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_share_safe_copy_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+    use rollshot_action::project::PublishFreshness;
+
+    let Some(ProjectSession::Saved {
+        root,
+        base_revision,
+        access,
+    }) = &state.project_session
+    else {
+        state.message = Some("Save the project before sharing.".to_string());
+        return Update::none();
+    };
+
+    let revision = *base_revision;
+    let enabled = state.publish_enabled_kinds();
+    let all_current = enabled
+        .iter()
+        .all(|kind| state.publish_freshness.get(kind) == Some(&PublishFreshness::Current));
+
+    if !all_current
+        && matches!(
+            access,
+            ProjectAccess::ReadOnly | ProjectAccess::CorruptReadOnly
+        )
+    {
+        state.message = Some(
+            "Cannot regenerate publish outputs in read-only mode. \
+             Open the project with write access to share."
+                .to_string(),
+        );
+        return Update::none();
+    }
+
+    if !all_current {
+        state.share_kind = Some(super::share::ShareKind::SafeCopy);
+        state.share_progress = Some(super::share::ShareProgress::WaitingForPublish);
+        state.message = Some("Regenerating publish outputs for sharing\u{2026}".to_string());
+
+        let root = root.clone();
+        let job = match super::guide_export::build_reviewed_export_job(state) {
+            Ok(job) => job,
+            Err(error) => {
+                state.share_progress = None;
+                state.share_kind = None;
+                state.message = Some(format!("Cannot share: {error}"));
+                return Update::none();
+            }
+        };
+
+        if let Some(ref op) = state.publish_operation {
+            op.cancel.cancel();
+        }
+
+        state.next_publish_operation_id = state.next_publish_operation_id.saturating_add(1);
+        let operation_id =
+            super::project_publish::PublishOperationId(state.next_publish_operation_id);
+
+        let cancel = rollshot_action::project::PublishCancellation::new();
+        state.publish_operation = Some(super::PublishOperation {
+            id: operation_id,
+            revision,
+            cancel: cancel.clone(),
+            per_output: {
+                let mut m = std::collections::BTreeMap::new();
+                for kind in &enabled {
+                    m.insert(*kind, super::PublishOutputStatus::Updating);
+                }
+                m
+            },
+        });
+        state.publish_arbiter.begin(operation_id, revision);
+
+        let arbiter = state.publish_arbiter.clone();
+        let writer_lease = state.pending_writer_guard.clone();
+        let settings = super::project_publish::PublishSettings::default();
+
+        let task = iced::Task::run(
+            iced::stream::channel(32, async move |mut sender| {
+                use iced::futures::SinkExt;
+                let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+                let request = super::project_publish::PublishRequest {
+                    operation_id,
+                    revision,
+                    project_root: root,
+                    writer_lease,
+                    arbiter,
+                    job,
+                    settings,
+                    selection: super::project_publish::PublishSelection::AllEnabled,
+                    purpose: super::project_publish::PublishPurpose::ShareGate,
+                    ffmpeg: None,
+                };
+
+                let cancel_clone = cancel.clone();
+                let worker = tokio::task::spawn_blocking(move || {
+                    super::project_publish::run_publish(request, cancel_clone, &tx)
+                });
+
+                while let Some(event) = rx.recv().await {
+                    let _ = sender.send(event).await;
+                }
+
+                let _ = worker.await;
+
+                let _ = sender
+                    .send(super::project_publish::PublishEvent::Finished {
+                        operation_id,
+                        revision,
+                    })
+                    .await;
+            }),
+            Message::ShareGateFinished,
+        );
+
+        return Update::task(task);
+    }
+
+    begin_share_picker(state, super::share::ShareKind::SafeCopy)
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_editable_project_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    if state.save_state != super::ProjectSaveState::Clean {
+        state.message =
+            Some("Save or discard changes before sharing an editable project.".to_string());
+        return Update::none();
+    }
+
+    let Some(ProjectSession::Saved {
+        access: ProjectAccess::Writable(_),
+        ..
+    }) = &state.project_session
+    else {
+        state.message = Some("Editable project sharing requires a writable project.".to_string());
+        return Update::none();
+    };
+
+    state.message = Some(
+        "The shared project can be edited by the recipient. \
+         Ensure you trust the recipient with the full project contents."
+            .to_string(),
+    );
+
+    begin_share_picker(state, super::share::ShareKind::EditableProject)
+}
+
+#[cfg(feature = "action-guide")]
+fn begin_share_picker(state: &mut TimelineWorkspace, kind: super::share::ShareKind) -> Update {
+    state.share_operation_id = state.share_operation_id.saturating_add(1);
+    let operation_id = state.share_operation_id;
+    state.share_kind = Some(kind);
+    state.share_progress = Some(super::share::ShareProgress::Copying);
+
+    Update::task(Task::perform(
+        pick_share_destination(picker_default_dir()),
+        move |destination| Message::ShareDestinationChosen {
+            operation_id,
+            destination,
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_destination_chosen(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    destination: Option<PathBuf>,
+) -> Update {
+    if state.share_operation_id != operation_id {
+        return Update::none();
+    }
+
+    let Some(destination) = destination else {
+        state.share_progress = None;
+        state.share_kind = None;
+        state.message = None;
+        return Update::none();
+    };
+
+    let Some(kind) = state.share_kind else {
+        return Update::none();
+    };
+
+    let Some(super::project::ProjectSession::Saved { root, .. }) = &state.project_session else {
+        state.share_progress = None;
+        state.share_kind = None;
+        return Update::none();
+    };
+
+    let request = super::share::ShareRequest {
+        source_root: root.clone(),
+        destination,
+    };
+
+    let op_id = operation_id;
+    Update::task(Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let cancel = rollshot_action::project::PublishCancellation::new();
+                match kind {
+                    super::share::ShareKind::SafeCopy => {
+                        super::share::copy_safe_publish(&request, &cancel)
+                    }
+                    super::share::ShareKind::EditableProject => {
+                        super::share::copy_editable_project(&request, &cancel)
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|e| super::share::ShareOutcome::Failed(format!("worker panic: {e}")))
+        },
+        move |result| Message::ShareWorkerFinished {
+            operation_id: op_id,
+            result,
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_gate_finished(
+    state: &mut TimelineWorkspace,
+    event: super::project_publish::PublishEvent,
+) -> Update {
+    use rollshot_action::project::PublishOutputKind;
+
+    let Some(ref op) = state.publish_operation else {
+        return Update::none();
+    };
+
+    if event.operation_id() != op.id || event.revision() != op.revision {
+        return Update::none();
+    }
+
+    match &event {
+        super::project_publish::PublishEvent::CoreCommitted { .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(PublishOutputKind::Core, super::PublishOutputStatus::Current);
+            }
+            refresh_publish_freshness(state);
+        }
+        super::project_publish::PublishEvent::OutputCommitted { kind, .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(*kind, super::PublishOutputStatus::Current);
+            }
+            refresh_publish_freshness(state);
+        }
+        super::project_publish::PublishEvent::OutputFailed { kind, .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(*kind, super::PublishOutputStatus::Failed);
+            }
+        }
+        super::project_publish::PublishEvent::Finished { operation_id, .. } => {
+            let should_clear = state
+                .publish_operation
+                .as_ref()
+                .is_some_and(|op| op.id == *operation_id);
+            if should_clear {
+                state.publish_operation = None;
+                state.publish_arbiter.clear_if_current(*operation_id);
+                refresh_publish_freshness(state);
+            }
+
+            let enabled = state.publish_enabled_kinds();
+            let all_current = enabled.iter().all(|kind| {
+                state.publish_freshness.get(kind)
+                    == Some(&rollshot_action::project::PublishFreshness::Current)
+            });
+
+            if all_current {
+                state.share_progress = Some(super::share::ShareProgress::Copying);
+                state.message =
+                    Some("Publish outputs ready. Choose destination\u{2026}".to_string());
+                return begin_share_picker(
+                    state,
+                    state
+                        .share_kind
+                        .unwrap_or(super::share::ShareKind::SafeCopy),
+                );
+            } else {
+                state.share_progress = Some(super::share::ShareProgress::Failed);
+                state.share_kind = None;
+                state.message =
+                    Some("Share failed: not all publish outputs could be generated.".to_string());
+            }
+        }
+    }
+
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_worker_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: super::share::ShareOutcome,
+) -> Update {
+    if state.share_operation_id != operation_id {
+        return Update::none();
+    }
+
+    match result {
+        super::share::ShareOutcome::Complete(path) => {
+            state.share_progress = Some(super::share::ShareProgress::Complete);
+            state.message = Some(format!("Shared to {}", path.display()));
+            tracing::info!(
+                target: "rollshot::share",
+                kind = ?state.share_kind,
+                "share completed"
+            );
+        }
+        super::share::ShareOutcome::Cancelled => {
+            state.share_progress = Some(super::share::ShareProgress::Cancelled);
+            state.share_kind = None;
+            state.message = Some("Share cancelled.".to_string());
+        }
+        super::share::ShareOutcome::Failed(error) => {
+            state.share_progress = Some(super::share::ShareProgress::Failed);
+            state.share_kind = None;
+            state.message = Some(format!("Share failed: {error}"));
+            tracing::error!(
+                target: "rollshot::share",
+                %error,
+                "share failed"
+            );
+        }
+    }
+
+    Update::none()
+}
+
+async fn pick_share_destination(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
 }
 
 /// Initial directory for the folder picker: the user's Pictures dir, or temp.
@@ -6076,6 +6461,201 @@ key_source = { Env = "OPENAI_API_KEY" }
             assert!(
                 ws.publish_operation.is_none(),
                 "retry should be rejected when read-only"
+            );
+        }
+
+        // ---- Share tests ----
+
+        #[test]
+        fn share_safe_copy_rejected_when_unsaved() {
+            let mut ws = ws_project_backed_clean();
+            ws.project_session = None;
+            ws.save_state = ProjectSaveState::Unsaved;
+
+            let _result = update(&mut ws, Message::ShareSafeCopyRequested);
+
+            assert!(
+                ws.message.as_ref().is_some_and(|m| m.contains("Save")),
+                "unsaved workspace should reject share, got {:?}",
+                ws.message
+            );
+        }
+
+        #[test]
+        fn share_editable_rejected_when_dirty() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _result = update(&mut ws, Message::ShareEditableProjectRequested);
+
+            assert!(
+                ws.message.as_ref().is_some_and(|m| m.contains("Save")),
+                "dirty workspace should reject editable share, got {:?}",
+                ws.message
+            );
+        }
+
+        #[test]
+        fn share_picker_cancel_returns_to_details() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 5;
+
+            let _result = update(
+                &mut ws,
+                Message::ShareDestinationChosen {
+                    operation_id: 5,
+                    destination: None,
+                },
+            );
+
+            assert!(ws.share_progress.is_none());
+            assert!(ws.share_kind.is_none());
+        }
+
+        #[test]
+        fn share_safe_copy_sets_waiting_for_publish_when_stale() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_freshness
+                .insert(PublishOutputKind::Core, PublishFreshness::Stale);
+
+            let _result = update(&mut ws, Message::ShareSafeCopyRequested);
+
+            assert_eq!(
+                ws.share_kind,
+                Some(crate::timeline_workspace::share::ShareKind::SafeCopy)
+            );
+            assert_eq!(
+                ws.share_progress,
+                Some(crate::timeline_workspace::share::ShareProgress::WaitingForPublish)
+            );
+            assert!(
+                ws.publish_operation.is_some(),
+                "should start ShareGate publish"
+            );
+        }
+
+        #[test]
+        fn share_editable_rejected_when_read_only() {
+            use rollshot_action::project::{
+                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 7,
+                title: "Test Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::ReadOnly,
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _result = update(&mut ws, Message::ShareEditableProjectRequested);
+
+            assert!(
+                ws.message.as_ref().is_some_and(|m| m.contains("writable")),
+                "read-only should reject editable share, got {:?}",
+                ws.message
+            );
+        }
+
+        #[test]
+        fn share_worker_finished_complete_sets_progress() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 3;
+
+            let _result = update(
+                &mut ws,
+                Message::ShareWorkerFinished {
+                    operation_id: 3,
+                    result: crate::timeline_workspace::share::ShareOutcome::Complete(
+                        std::path::PathBuf::from("/tmp/shared"),
+                    ),
+                },
+            );
+
+            assert_eq!(
+                ws.share_progress,
+                Some(crate::timeline_workspace::share::ShareProgress::Complete)
+            );
+        }
+
+        #[test]
+        fn share_worker_finished_failed_clears_kind() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 3;
+            ws.share_kind = Some(crate::timeline_workspace::share::ShareKind::SafeCopy);
+
+            let _result = update(
+                &mut ws,
+                Message::ShareWorkerFinished {
+                    operation_id: 3,
+                    result: crate::timeline_workspace::share::ShareOutcome::Failed(
+                        "disk full".to_string(),
+                    ),
+                },
+            );
+
+            assert_eq!(
+                ws.share_progress,
+                Some(crate::timeline_workspace::share::ShareProgress::Failed)
+            );
+            assert!(ws.share_kind.is_none());
+        }
+
+        #[test]
+        fn stale_share_worker_result_is_ignored() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 5;
+
+            let _result = update(
+                &mut ws,
+                Message::ShareWorkerFinished {
+                    operation_id: 3,
+                    result: crate::timeline_workspace::share::ShareOutcome::Complete(
+                        std::path::PathBuf::from("/tmp/shared"),
+                    ),
+                },
+            );
+
+            assert!(
+                ws.share_progress.is_none(),
+                "stale result should be ignored"
             );
         }
     }
