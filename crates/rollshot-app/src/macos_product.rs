@@ -445,8 +445,26 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     if let Some(id) = product.workspace_window.take() {
                         close_tasks.push(window::close(id));
                     }
-                    product.phase = Phase::Home(ActionGuideHome::new_empty());
+                    product.phase = Phase::Home(load_action_guide_home());
                     Task::batch(close_tasks)
+                }
+                timeline_workspace::Effect::ProjectSaved {
+                    root,
+                    display_name,
+                    close_workspace,
+                } => {
+                    let mut home = load_action_guide_home();
+                    home.record_project_open(root, display_name);
+                    if close_workspace {
+                        let mut close_tasks = Vec::new();
+                        if let Some(id) = product.workspace_window.take() {
+                            close_tasks.push(window::close(id));
+                        }
+                        product.phase = Phase::Home(home);
+                        Task::batch(close_tasks)
+                    } else {
+                        Task::none()
+                    }
                 }
             }
         }
@@ -574,6 +592,15 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                         Ok(ws) => ws,
                         Err(_) => unreachable!("sole ownership"),
                     };
+                    let Phase::Opening(mut home) = std::mem::replace(
+                        &mut product.phase,
+                        Phase::Home(ActionGuideHome::new_empty()),
+                    ) else {
+                        unreachable!();
+                    };
+                    if let Some((root, display_name)) = ws.project_recent_metadata() {
+                        home.record_project_open(root, display_name);
+                    }
                     let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
                     product.phase = Phase::Timeline(ws);
                     let (id, open) = window::open(workspace_window_settings());
@@ -1250,6 +1277,20 @@ async fn pick_project_folder() -> action_guide_home::Message {
 fn open_legacy_reader(path: &std::path::Path) -> Result<(), String> {
     let entrypoint = action_guide_home::legacy_reader_entrypoint(path).map_err(str::to_string)?;
     crate::platform_actions::open_path(&entrypoint)
+}
+
+#[cfg(feature = "action-guide")]
+fn load_action_guide_home() -> ActionGuideHome {
+    match crate::daemon::config::rollshot_config_dir() {
+        Ok(config_dir) => ActionGuideHome::new(
+            crate::action_guide_home::recent::RecentProjects::load(&config_dir),
+        ),
+        Err(error) => {
+            let mut home = ActionGuideHome::new_empty();
+            home.message = Some(format!("Could not load recent projects: {error}"));
+            home
+        }
+    }
 }
 
 #[cfg(test)]

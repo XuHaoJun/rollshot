@@ -59,10 +59,16 @@ pub(crate) enum CloseIntent {
     SaveThenClose,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
     None,
     CloseWorkspace,
+    #[cfg(feature = "action-guide")]
+    ProjectSaved {
+        root: std::path::PathBuf,
+        display_name: String,
+        close_workspace: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,6 +458,16 @@ impl TimelineWorkspace {
             iced::Task::none()
         }
     }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn project_recent_metadata(&self) -> Option<(std::path::PathBuf, String)> {
+        match &self.project_session {
+            Some(project::ProjectSession::Saved { root, .. }) => {
+                Some((root.clone(), self.guide.title().to_string()))
+            }
+            _ => None,
+        }
+    }
     /// Mark the project dirty after a successful persisted mutation.
     #[cfg(feature = "action-guide")]
     pub(crate) fn mark_project_dirty(&mut self) {
@@ -520,6 +536,24 @@ pub fn run(
         match result.effect {
             Effect::CloseWorkspace => iced::exit(),
             Effect::None => result.task,
+            #[cfg(feature = "action-guide")]
+            Effect::ProjectSaved {
+                root,
+                display_name,
+                close_workspace,
+            } => {
+                if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
+                    let recent =
+                        crate::action_guide_home::recent::RecentProjects::load(&config_dir);
+                    let mut home = crate::action_guide_home::ActionGuideHome::new(recent);
+                    home.record_project_open(root, display_name);
+                }
+                if close_workspace {
+                    iced::exit()
+                } else {
+                    result.task
+                }
+            }
         }
     }
 
@@ -1295,6 +1329,29 @@ mod tests {
         }
 
         #[test]
+        fn first_save_emits_recent_project_effect() {
+            let mut ws = workspace(recording_from_frames());
+            let root = std::path::PathBuf::from("/tmp/saved.rollshot-guide");
+
+            let result = super::super::update::update(
+                &mut ws,
+                Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::NewWritable {
+                    root: root.clone(),
+                    revision: 1,
+                }),
+            );
+
+            assert!(matches!(
+                result.effect,
+                Effect::ProjectSaved {
+                    root: effect_root,
+                    close_workspace: false,
+                    ..
+                } if effect_root == root
+            ));
+        }
+
+        #[test]
         fn close_dirty_project_shows_confirm_modal() {
             let mut ws = ws_project_backed();
             ws.save_state = ProjectSaveState::Dirty;
@@ -1962,7 +2019,13 @@ mod tests {
             );
 
             assert_eq!(ws.save_state, ProjectSaveState::Clean);
-            assert_eq!(result.effect, Effect::CloseWorkspace);
+            assert!(matches!(
+                result.effect,
+                Effect::ProjectSaved {
+                    close_workspace: true,
+                    ..
+                }
+            ));
         }
 
         // ---- Helpers for the new tests ----

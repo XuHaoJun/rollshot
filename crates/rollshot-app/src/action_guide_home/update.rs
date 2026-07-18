@@ -81,6 +81,28 @@ impl ActionGuideHome {
         Self::new(RecentProjects::empty())
     }
 
+    pub fn record_project_open(&mut self, path: PathBuf, display_name: String) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.record_project_open_at(path, display_name, now_ms);
+    }
+
+    fn record_project_open_at(&mut self, path: PathBuf, mut display_name: String, now_ms: u64) {
+        if display_name.is_empty() {
+            display_name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Untitled Guide")
+                .to_string();
+        }
+        self.recent.record_open_at(path, display_name, now_ms);
+        self.message = self.recent.save().err();
+    }
+
     pub fn update(&mut self, message: Message) -> Update {
         match message {
             Message::RecordNew => Update {
@@ -102,6 +124,9 @@ impl ActionGuideHome {
             Message::RecentSelected(path) => {
                 if !self.recent_entry_available(&path) {
                     self.recent.remove(&path);
+                    if let Err(error) = self.recent.save() {
+                        self.message = Some(error);
+                    }
                     Update::none()
                 } else {
                     self.opening = true;
@@ -113,6 +138,9 @@ impl ActionGuideHome {
             }
             Message::RemoveRecent(path) => {
                 self.recent.remove(&path);
+                if let Err(error) = self.recent.save() {
+                    self.message = Some(error);
+                }
                 Update::none()
             }
             Message::InspectionResult { path: _, kind } => match kind {
@@ -147,7 +175,7 @@ impl ActionGuideHome {
                             entry.display_name,
                             entry.last_opened_ms,
                         );
-                        self.message = None;
+                        self.message = self.recent.save().err();
                     }
                     Err(err) => {
                         self.message = Some(err);
@@ -157,7 +185,7 @@ impl ActionGuideHome {
                 Update::none()
             }
             Message::WindowFocused => {
-                self.recent.refresh_availability();
+                self.recent.reload();
                 Update::none()
             }
             Message::Clear => {
@@ -284,6 +312,50 @@ mod tests {
         assert!(home.message.is_none());
     }
 
+    #[test]
+    fn window_focus_reloads_recent_projects_from_disk() {
+        let (dir, mut home) = setup_home();
+        let config_dir = dir.path().join("rollshot");
+        let project = dir.path().join("saved.rollshot-guide");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut child_recents = RecentProjects::load(&config_dir);
+        child_recents.record_open_at(project.clone(), "Saved Guide".into(), 7);
+        child_recents.save().unwrap();
+
+        home.update(Message::WindowFocused);
+
+        assert_eq!(home.recent.entries().len(), 1);
+        assert_eq!(home.recent.entries()[0].path, project);
+    }
+
+    #[test]
+    fn removing_recent_project_persists_removal() {
+        let (dir, mut home) = setup_home();
+        let config_dir = dir.path().join("rollshot");
+        let project = dir.path().join("saved.rollshot-guide");
+        home.recent
+            .record_open_at(project.clone(), "Saved Guide".into(), 7);
+        home.recent.save().unwrap();
+
+        home.update(Message::RemoveRecent(project));
+
+        assert!(RecentProjects::load(&config_dir).entries().is_empty());
+    }
+
+    #[test]
+    fn recording_project_open_persists_recent_entry() {
+        let (dir, mut home) = setup_home();
+        let config_dir = dir.path().join("rollshot");
+        let project = dir.path().join("saved.rollshot-guide");
+
+        home.record_project_open_at(project.clone(), String::new(), 9);
+
+        let persisted = RecentProjects::load(&config_dir);
+        assert_eq!(persisted.entries().len(), 1);
+        assert_eq!(persisted.entries()[0].path, project);
+        assert_eq!(persisted.entries()[0].display_name, "saved");
+    }
+
     // ---- Recent selection: available entry ----
 
     #[test]
@@ -347,6 +419,7 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         let mut recent = RecentProjects::load(&config_dir);
         recent.record_open_at(PathBuf::from("/nonexistent"), "Missing".into(), 1);
+        recent.save().unwrap();
         let mut home = ActionGuideHome::new(recent);
 
         assert!(home.recent.entries()[0].available);

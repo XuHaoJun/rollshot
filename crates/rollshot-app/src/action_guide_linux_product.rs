@@ -126,6 +126,18 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     state.phase = Phase::Home;
                     iced::Task::none()
                 }
+                crate::timeline_workspace::Effect::ProjectSaved {
+                    root,
+                    display_name,
+                    close_workspace,
+                } => {
+                    state.home.record_project_open(root, display_name);
+                    if close_workspace {
+                        state.timeline = None;
+                        state.phase = Phase::Home;
+                    }
+                    iced::Task::none()
+                }
             }
         }
         Message::SelectionInspected { path: _, kind } => {
@@ -159,6 +171,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                         Ok(ws) => ws,
                         Err(_) => unreachable!("sole ownership"),
                     };
+                    if let Some((root, display_name)) = ws.project_recent_metadata() {
+                        state.home.record_project_open(root, display_name);
+                    }
                     let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
                     state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
@@ -529,6 +544,26 @@ mod tests {
         assert!(state.timeline.is_some());
         assert!(!state.home.opening);
         assert!(task.units() == 0);
+    }
+
+    #[test]
+    fn project_opened_workspace_records_recent_project() {
+        let mut state = test_state();
+        state.phase = Phase::Opening;
+        let root = PathBuf::from("/tmp/recent-project.rollshot-guide");
+        let mut ws = test_timeline();
+        ws.project_session = Some(crate::timeline_workspace::project::ProjectSession::Saved {
+            root: root.clone(),
+            base_revision: 1,
+            access: crate::timeline_workspace::project::ProjectAccess::ReadOnly,
+        });
+
+        let _ = update(
+            &mut state,
+            Message::ProjectOpened(ProjectOpenResult::Workspace(std::sync::Arc::new(ws))),
+        );
+
+        assert_eq!(state.home.recent.entries()[0].path, root);
     }
 
     #[test]

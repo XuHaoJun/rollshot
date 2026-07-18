@@ -55,6 +55,16 @@ impl RecentProjects {
         &self.entries
     }
 
+    pub fn reload(&mut self) {
+        if self.dir.as_os_str().is_empty() {
+            self.refresh_availability();
+            return;
+        }
+        let dir = self.dir.clone();
+        *self = Self::load(&dir);
+        self.refresh_availability();
+    }
+
     pub fn record_open_at(&mut self, path: PathBuf, display_name: String, now_ms: u64) {
         self.entries.retain(|e| e.path != path);
         self.entries.insert(

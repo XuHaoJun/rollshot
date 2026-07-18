@@ -2476,6 +2476,18 @@ fn handle_save_worker_finished(
         }
     }
 
+    if let Some((root, display_name)) = state.project_recent_metadata() {
+        state.close_intent = super::CloseIntent::None;
+        if should_close {
+            state.pending_discard = false;
+        }
+        return Update::effect(super::Effect::ProjectSaved {
+            root,
+            display_name,
+            close_workspace: should_close,
+        });
+    }
+
     if should_close {
         state.close_intent = super::CloseIntent::None;
         state.pending_discard = false;
