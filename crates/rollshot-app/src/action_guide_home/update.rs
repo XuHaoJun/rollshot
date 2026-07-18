@@ -11,6 +11,20 @@ pub enum ActionGuideIntent {
     Open { path: Option<PathBuf> },
 }
 
+impl ActionGuideIntent {
+    pub fn capture_request(&self) -> Option<rollshot_capture::CaptureRequest> {
+        match self {
+            Self::Record { fullscreen: true } => {
+                Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
+            }
+            Self::Record { fullscreen: false } => {
+                Some(rollshot_capture::CaptureRequest::action_guide_region())
+            }
+            Self::Home | Self::Open { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectedDirectoryKind {
     Project(PathBuf),
@@ -637,5 +651,18 @@ mod tests {
     fn action_guide_intent_open_no_path() {
         let intent = ActionGuideIntent::Open { path: None };
         assert_eq!(intent, ActionGuideIntent::Open { path: None });
+    }
+
+    #[test]
+    fn record_intent_builds_region_or_fullscreen_request() {
+        assert_eq!(
+            ActionGuideIntent::Record { fullscreen: false }.capture_request(),
+            Some(rollshot_capture::CaptureRequest::action_guide_region())
+        );
+        assert_eq!(
+            ActionGuideIntent::Record { fullscreen: true }.capture_request(),
+            Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
+        );
+        assert_eq!(ActionGuideIntent::Home.capture_request(), None);
     }
 }

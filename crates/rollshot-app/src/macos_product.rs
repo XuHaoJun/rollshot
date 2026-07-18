@@ -501,34 +501,7 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     Task::perform(inspect_and_open(path), |msg| msg)
                 }
                 action_guide_home::Effect::RecordNew => {
-                    let config = OverlayConfig {
-                        backend: "auto".to_string(),
-                        fps: 5,
-                        show_cursor: false,
-                        request: rollshot_capture::CaptureRequest::action_guide_fullscreen(),
-                        target_output_name: None,
-                    };
-                    let action_input_source = Some(crate::action_input::create_input_source());
-                    let component = match Component::new(&config, action_input_source)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(Some(c)) => c,
-                        Ok(None) => return Task::none(),
-                        Err(error) => {
-                            tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
-                            return Task::none();
-                        }
-                    };
-                    let (component, open_task) = match open_capture_window(component, &config) {
-                        Ok(pair) => pair,
-                        Err(error) => {
-                            tracing::error!(target: TARGET_APP, %error, "action guide capture window failed");
-                            return Task::none();
-                        }
-                    };
-                    product.recording_tray = crate::macos_recording_tray::Guard::start().ok();
-                    product.phase = Phase::Capture(component);
-                    open_task
+                    start_action_guide_recording(product, false)
                 }
                 action_guide_home::Effect::OpenProject(path) => {
                     let Phase::Home(home) = std::mem::replace(
@@ -1214,9 +1187,8 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen: _ } => {
-                // Record New from the Home phase is handled through the Home
-                // message loop; here we just boot to Home.
+            ActionGuideIntent::Record { fullscreen } => {
+                tasks.push(start_action_guide_recording(&mut product, fullscreen));
             }
             ActionGuideIntent::Open { path: Some(path) } => {
                 let Phase::Home(home) = std::mem::replace(
@@ -1248,6 +1220,49 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
         .style(style)
         .run()
         .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "action-guide")]
+fn action_guide_record_config(fullscreen: bool) -> OverlayConfig {
+    let intent = ActionGuideIntent::Record { fullscreen };
+    OverlayConfig {
+        backend: "auto".to_string(),
+        fps: 5,
+        show_cursor: false,
+        request: intent
+            .capture_request()
+            .expect("record intent always has a capture request"),
+        target_output_name: None,
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn start_action_guide_recording(product: &mut MacosProduct, fullscreen: bool) -> Task<Message> {
+    let config = action_guide_record_config(fullscreen);
+    let action_input_source = Some(crate::action_input::create_input_source());
+    let component =
+        match Component::new(&config, action_input_source).map_err(|error| error.to_string()) {
+            Ok(Some(component)) => component,
+            Ok(None) => return Task::none(),
+            Err(error) => {
+                tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
+                return Task::none();
+            }
+        };
+    let (component, open_task) = match open_capture_window(component, &config) {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::error!(target: TARGET_APP, %error, "action guide capture window failed");
+            return Task::none();
+        }
+    };
+    product.recording_tray = if fullscreen {
+        crate::macos_recording_tray::Guard::start().ok()
+    } else {
+        None
+    };
+    product.phase = Phase::Capture(component);
+    open_task
 }
 
 #[cfg(feature = "action-guide")]
@@ -1643,6 +1658,18 @@ mod tests {
         fn home_launch_starts_in_home_phase() {
             let product = product_in_home_phase();
             assert!(matches!(product.phase, Phase::Home(_)));
+        }
+
+        #[test]
+        fn action_guide_record_config_honors_fullscreen_flag() {
+            assert_eq!(
+                action_guide_record_config(false).request,
+                rollshot_capture::CaptureRequest::action_guide_region()
+            );
+            assert_eq!(
+                action_guide_record_config(true).request,
+                rollshot_capture::CaptureRequest::action_guide_fullscreen()
+            );
         }
 
         #[test]
