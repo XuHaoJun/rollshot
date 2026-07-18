@@ -194,16 +194,9 @@ pub(crate) fn build_reviewed_export_job(
 ) -> Result<ReviewedGuideExportJob, ExportError> {
     let mut steps = Vec::new();
     for (i, step) in state.guide.steps().iter().enumerate() {
-        let is_project = matches!(
-            state.frame_source,
-            Some(rollshot_action::StepFrameSource::Project(_))
-        );
-
-        let (w, h, image) = if is_project {
-            let source = state.frame_source.as_ref().unwrap();
-            let rollshot_action::StepFrameSource::Project(ref src) = source else {
-                unreachable!()
-            };
+        let (w, h, image) = if let Some(rollshot_action::StepFrameSource::Project(ref src)) =
+            state.frame_source
+        {
             let frame = src
                 .frame(step.keyframe)
                 .ok_or(ExportError::MissingKeyframe { index: i + 1 })?;
@@ -710,6 +703,21 @@ mod tests {
         ws.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
         let _ = dir.keep();
         (ws, kf_ids)
+    }
+
+    #[test]
+    fn build_reviewed_export_job_uses_default_title_when_guide_title_is_empty() {
+        let mut ws = real_workspace();
+        ws.guide.set_title("   ".into());
+
+        let job = build_reviewed_export_job(&ws).unwrap();
+
+        assert_eq!(job.title, rollshot_action::DEFAULT_GUIDE_TITLE);
+        assert_eq!(
+            ws.guide.title(),
+            "   ",
+            "original guide title must not be mutated"
+        );
     }
 
     #[test]

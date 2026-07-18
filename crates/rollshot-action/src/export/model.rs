@@ -78,7 +78,24 @@ impl ReviewedStepImage {
                     project.frame.width,
                     project.frame.height,
                 )
-                .map_err(|_| ExportError::AssetMissing { step: project.step })?;
+                .map_err(|error| {
+                    let is_not_found = matches!(
+                        &error,
+                        crate::project::ProjectError::Io { source, .. }
+                            if source.kind() == std::io::ErrorKind::NotFound
+                    );
+                    tracing::warn!(
+                        target: "rollshot::export",
+                        step = project.step,
+                        error_category = error.category(),
+                        "lazy decode failed for project asset"
+                    );
+                    if is_not_found {
+                        ExportError::AssetMissing { step: project.step }
+                    } else {
+                        ExportError::AssetDecodeFailed { step: project.step }
+                    }
+                })?;
                 match &project.annotations {
                     Some(annotations) if !annotations.is_empty() => {
                         let doc = ImageDocument::from_persisted_annotations(
