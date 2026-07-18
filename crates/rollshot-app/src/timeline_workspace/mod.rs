@@ -437,6 +437,21 @@ impl TimelineWorkspace {
                 })
             )
     }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn initial_frame_load_task(&self) -> iced::Task<Message> {
+        if self
+            .frame_source
+            .as_ref()
+            .is_some_and(|source| source.in_memory().is_none())
+        {
+            self.selected.map_or_else(iced::Task::none, |index| {
+                iced::Task::done(Message::SelectStep(index))
+            })
+        } else {
+            iced::Task::none()
+        }
+    }
     /// Mark the project dirty after a successful persisted mutation.
     #[cfg(feature = "action-guide")]
     pub(crate) fn mark_project_dirty(&mut self) {

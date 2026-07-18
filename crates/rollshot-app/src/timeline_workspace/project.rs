@@ -621,6 +621,15 @@ mod tests {
     }
 
     #[test]
+    fn from_loaded_project_provides_initial_frame_load_task() {
+        let manifest = manifest_two_steps_with_annotations();
+        let loaded = loaded_project(manifest);
+        let ws = from_loaded_project(loaded, ProjectAccess::Writable(dummy_guard())).expect("ok");
+
+        assert!(ws.initial_frame_load_task().units() > 0);
+    }
+
+    #[test]
     fn from_loaded_project_installs_pending_annotations() {
         let manifest = manifest_two_steps_with_annotations();
         let loaded = loaded_project(manifest);

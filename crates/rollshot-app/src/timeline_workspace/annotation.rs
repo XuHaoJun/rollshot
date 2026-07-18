@@ -84,9 +84,24 @@ impl ActionGuidePresentation {
     pub(crate) fn hydrate_for_step(
         &mut self,
         source: CandidateId,
+        keyframe: FrameId,
         image: Arc<::image::RgbaImage>,
     ) -> Option<&mut StepAnnotationDocument> {
-        let state = self.docs.remove(&source)?;
+        let Some(state) = self.docs.remove(&source) else {
+            self.docs.insert(
+                source,
+                StepAnnotationState::Loaded(StepAnnotationDocument {
+                    source,
+                    keyframe,
+                    document: ImageDocument::from_shared_source(image),
+                    explanations: BTreeMap::new(),
+                }),
+            );
+            return match self.docs.get_mut(&source) {
+                Some(StepAnnotationState::Loaded(doc)) => Some(doc),
+                _ => None,
+            };
+        };
         let (keyframe, persisted) = match state {
             StepAnnotationState::Loaded(_) => {
                 self.docs.insert(source, state);
@@ -684,6 +699,20 @@ mod tests {
         assert_eq!(doc.keyframe, 0);
         assert_eq!(doc.document.source().dimensions(), (8, 8));
         assert!(!presentation.has_annotations(step.source));
+    }
+
+    #[test]
+    fn hydrate_creates_empty_document_for_unannotated_project_step() {
+        let mut presentation = ActionGuidePresentation::new();
+        let image = Arc::new(::image::RgbaImage::new(8, 8));
+
+        let doc = presentation
+            .hydrate_for_step(42, 7, image)
+            .expect("empty document");
+
+        assert_eq!(doc.source, 42);
+        assert_eq!(doc.keyframe, 7);
+        assert!(doc.document.annotations().is_empty());
     }
 
     #[test]

@@ -571,13 +571,15 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             }
             match result {
                 ProjectOpenResult::Workspace(ws) => {
-                    product.phase = Phase::Timeline(match std::sync::Arc::try_unwrap(ws) {
+                    let ws = match std::sync::Arc::try_unwrap(ws) {
                         Ok(ws) => ws,
                         Err(_) => unreachable!("sole ownership"),
-                    });
+                    };
+                    let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
+                    product.phase = Phase::Timeline(ws);
                     let (id, open) = window::open(workspace_window_settings());
                     product.workspace_window = Some(id);
-                    open.map(Message::WorkspaceWindowReady)
+                    Task::batch([open.map(Message::WorkspaceWindowReady), initial_load])
                 }
                 ProjectOpenResult::WriterLocked { path } => {
                     let Phase::Opening(home) = std::mem::replace(

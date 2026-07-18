@@ -155,13 +155,15 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             }
             match result {
                 ProjectOpenResult::Workspace(ws) => {
-                    state.timeline = Some(match std::sync::Arc::try_unwrap(ws) {
+                    let ws = match std::sync::Arc::try_unwrap(ws) {
                         Ok(ws) => ws,
                         Err(_) => unreachable!("sole ownership"),
-                    });
+                    };
+                    let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
+                    state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
                     state.home.opening = false;
-                    iced::Task::none()
+                    initial_load
                 }
                 ProjectOpenResult::WriterLocked { path } => {
                     state.lock_conflict_path = Some(path);

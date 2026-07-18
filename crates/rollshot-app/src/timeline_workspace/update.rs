@@ -233,7 +233,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                                     ::image::RgbaImage::new(img.width(), img.height())
                                 }),
                             ));
-                            state.presentation.hydrate_for_step(source_id, img);
+                            state
+                                .presentation
+                                .hydrate_for_step(source_id, keyframe, img);
                         }
                         // Try cache for nearby strip frames.
                         for &id in &nearby {
@@ -1892,7 +1894,9 @@ fn handle_frame_load_completed(
                             )
                             .unwrap_or_else(|| ::image::RgbaImage::new(img.width(), img.height())),
                         ));
-                        state.presentation.hydrate_for_step(source_id, img);
+                        state
+                            .presentation
+                            .hydrate_for_step(source_id, keyframe, img);
                     }
                 } else {
                     // Build strip handle for nearby frame.
