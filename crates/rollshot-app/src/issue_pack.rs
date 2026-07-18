@@ -72,6 +72,7 @@ pub(crate) struct ActionGuideIssueAssets {
 #[cfg(feature = "action-guide")]
 #[derive(Clone)]
 pub(crate) struct PublishSource {
+    pub project_root: PathBuf,
     pub directory: PathBuf,
     pub revision: u64,
 }
@@ -543,8 +544,9 @@ fn build_folder(
         let publish_src = action.publish_source.as_ref();
         let ag_dir = tmp_dir.join("action-guide");
 
-        let core_copied = publish_src
-            .is_some_and(|src| try_copy_published_core(&src.directory, src.revision, &ag_dir));
+        let core_copied = publish_src.is_some_and(|src| {
+            try_copy_published_core(&src.project_root, &src.directory, src.revision, &ag_dir)
+        });
         if !core_copied {
             rollshot_action::render_guide_folder(&action.job, &ag_dir)
                 .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
@@ -557,6 +559,7 @@ fn build_folder(
         let storyboard_path = ag_dir.join("storyboard.png");
         let storyboard_copied = publish_src.is_some_and(|src| {
             try_copy_published_file(
+                &src.project_root,
                 &src.directory.join("storyboard.png"),
                 src.revision,
                 PublishOutputKind::Storyboard,
@@ -595,6 +598,7 @@ fn build_folder(
             let gif_path = ag_dir.join("guide.gif");
             let gif_copied = publish_src.is_some_and(|src| {
                 try_copy_published_file(
+                    &src.project_root,
                     &src.directory.join("guide.gif"),
                     src.revision,
                     PublishOutputKind::Gif,
@@ -637,16 +641,14 @@ fn build_folder(
 
 #[cfg(feature = "action-guide")]
 fn try_copy_published_file(
+    project_root: &Path,
     source: &Path,
     current_revision: u64,
     kind: rollshot_action::project::PublishOutputKind,
     destination: &Path,
 ) -> bool {
     use rollshot_action::project::load_publish_state;
-    let Some(parent) = source.parent() else {
-        return false;
-    };
-    let state = load_publish_state(parent);
+    let state = load_publish_state(project_root);
     if state.freshness(kind, current_revision)
         != rollshot_action::project::PublishFreshness::Current
     {
@@ -655,13 +657,18 @@ fn try_copy_published_file(
     if !source.exists() {
         return false;
     }
-    std::fs::copy(source, destination).is_ok()
+    copy_file_if_exists(source, destination)
 }
 
 #[cfg(feature = "action-guide")]
-fn try_copy_published_core(publish_dir: &Path, current_revision: u64, destination: &Path) -> bool {
+fn try_copy_published_core(
+    project_root: &Path,
+    publish_dir: &Path,
+    current_revision: u64,
+    destination: &Path,
+) -> bool {
     use rollshot_action::project::load_publish_state;
-    let state = load_publish_state(publish_dir);
+    let state = load_publish_state(project_root);
     if state.freshness(
         rollshot_action::project::PublishOutputKind::Core,
         current_revision,
@@ -687,7 +694,17 @@ fn try_copy_published_core(publish_dir: &Path, current_revision: u64, destinatio
 
 #[cfg(feature = "action-guide")]
 fn copy_file_if_exists(source: &Path, destination: &Path) -> bool {
-    !source.exists() || std::fs::copy(source, destination).is_ok()
+    if !source.exists() {
+        return true;
+    }
+    let meta = match std::fs::symlink_metadata(source) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if meta.file_type().is_symlink() {
+        return false;
+    }
+    std::fs::copy(source, destination).is_ok()
 }
 
 #[cfg(feature = "action-guide")]
@@ -705,7 +722,14 @@ fn copy_dir_if_exists(source: &Path, destination: &Path) -> bool {
     for entry in entries.flatten() {
         let src = entry.path();
         let dst = destination.join(entry.file_name());
-        if src.is_dir() {
+        let meta = match std::fs::symlink_metadata(&src) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.file_type().is_dir() {
             if !copy_dir_if_exists(&src, &dst) {
                 return false;
             }
@@ -1876,6 +1900,7 @@ mod action_guide_tests {
         let input = reviewed_issue_pack_input();
         let mut source = owned_action_source();
         source.publish_source = Some(PublishSource {
+            project_root: parent.path().to_path_buf(),
             directory: publish_dir.clone(),
             revision: 1,
         });
@@ -1889,6 +1914,52 @@ mod action_guide_tests {
         assert!(
             !html.contains("<stale>"),
             "must not use stale published files"
+        );
+    }
+
+    #[test]
+    fn current_publish_files_are_copied_without_rebuilding() {
+        let parent = tempfile::tempdir().unwrap();
+        let project_root = parent.path();
+        let publish_dir = project_root.join("publish");
+        std::fs::create_dir_all(publish_dir.join("keyframes")).unwrap();
+        let html = "<html>cached</html>";
+        std::fs::write(publish_dir.join("index.html"), html).unwrap();
+        std::fs::write(publish_dir.join("steps.md"), "# Cached Steps").unwrap();
+        std::fs::write(
+            publish_dir.join("session.json"),
+            r#"{"schema_version":1,"title":"Cached","region":{"x":0,"y":0,"width":8,"height":8},"input_source":"visual-only","input_capability":"semantic-events","steps":[{"index":1,"title":"S","kind":"click","reason":"click-confirmed","at_ms":100,"keyframe_file":"keyframes/001.png","hotspots":[]}]}"#,
+        )
+        .unwrap();
+        let png = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        std::fs::write(publish_dir.join("keyframes/001.png"), buf.into_inner()).unwrap();
+
+        let mut state = rollshot_action::project::PublishStateV1::default();
+        state.outputs.insert(
+            rollshot_action::project::PublishOutputKind::Core,
+            rollshot_action::project::PublishedOutputV1::new(1),
+        );
+        rollshot_action::project::write_publish_state(project_root, &state).unwrap();
+
+        let input = reviewed_issue_pack_input();
+        let mut source = owned_action_source();
+        source.publish_source = Some(PublishSource {
+            project_root: project_root.to_path_buf(),
+            directory: publish_dir.clone(),
+            revision: 1,
+        });
+
+        let result =
+            export_folder_with_action_guide(&input, Some(source), &parent.path().join("out"))
+                .unwrap();
+
+        let copied_html =
+            std::fs::read_to_string(result.directory.join("action-guide/index.html")).unwrap();
+        assert!(
+            copied_html.contains("cached"),
+            "must use current published core files, got: {copied_html}"
         );
     }
 

@@ -259,6 +259,7 @@ fn copy_tree_filtered(
     allow_entry: impl Fn(&str, &Path) -> bool + Copy,
     allow_subdir_entry: impl Fn(&str, &str) -> bool + Copy,
 ) -> Result<(), String> {
+    let dest_existed = destination.is_dir();
     std::fs::create_dir_all(destination).map_err(|e| format!("create dest: {e}"))?;
 
     let entries = std::fs::read_dir(source)
@@ -266,7 +267,29 @@ fn copy_tree_filtered(
         .filter_map(|e| e.ok())
         .collect::<Vec<_>>();
 
-    for entry in &entries {
+    let result = copy_tree_filtered_inner(
+        &entries,
+        destination,
+        cancel,
+        allow_entry,
+        allow_subdir_entry,
+    );
+
+    if result.is_err() && !dest_existed {
+        let _ = std::fs::remove_dir_all(destination);
+    }
+
+    result
+}
+
+fn copy_tree_filtered_inner(
+    entries: &[std::fs::DirEntry],
+    destination: &Path,
+    cancel: &PublishCancellation,
+    allow_entry: impl Fn(&str, &Path) -> bool + Copy,
+    allow_subdir_entry: impl Fn(&str, &str) -> bool + Copy,
+) -> Result<(), String> {
+    for entry in entries {
         if cancel.is_cancelled() {
             return Err("cancelled".to_string());
         }

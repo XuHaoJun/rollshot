@@ -1907,13 +1907,6 @@ fn handle_save_completed_schedule_publish(state: &mut TimelineWorkspace) -> Upda
             }
 
             let _ = worker.await;
-
-            let _ = sender
-                .send(super::project_publish::PublishEvent::Finished {
-                    operation_id,
-                    revision,
-                })
-                .await;
         }),
         Message::PublishEvent,
     );
@@ -2011,13 +2004,6 @@ fn handle_retry_publish_output(
             }
 
             let _ = worker.await;
-
-            let _ = sender
-                .send(super::project_publish::PublishEvent::Finished {
-                    operation_id,
-                    revision,
-                })
-                .await;
         }),
         Message::PublishEvent,
     );
@@ -2125,13 +2111,6 @@ fn handle_retry_all_publish_outputs(state: &mut TimelineWorkspace) -> Update {
             }
 
             let _ = worker.await;
-
-            let _ = sender
-                .send(super::project_publish::PublishEvent::Finished {
-                    operation_id,
-                    revision,
-                })
-                .await;
         }),
         Message::PublishEvent,
     );
@@ -2374,13 +2353,6 @@ fn handle_share_safe_copy_requested(state: &mut TimelineWorkspace) -> Update {
                 }
 
                 let _ = worker.await;
-
-                let _ = sender
-                    .send(super::project_publish::PublishEvent::Finished {
-                        operation_id,
-                        revision,
-                    })
-                    .await;
             }),
             Message::ShareGateFinished,
         );

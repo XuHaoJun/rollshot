@@ -304,6 +304,7 @@ pub(crate) fn prepare_issue_pack_export(
             base_revision,
             ..
         }) => Some(crate::issue_pack::PublishSource {
+            project_root: root.clone(),
             directory: root.join("publish"),
             revision: *base_revision,
         }),
@@ -333,6 +334,7 @@ pub(crate) fn prepare_issue_pack_from_reviewed_job(
             base_revision,
             ..
         }) => Some(crate::issue_pack::PublishSource {
+            project_root: root.clone(),
             directory: root.join("publish"),
             revision: *base_revision,
         }),
