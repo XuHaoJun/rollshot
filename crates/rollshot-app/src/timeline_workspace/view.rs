@@ -305,10 +305,38 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
     };
 
     let issue_pack_btn: Element<Message> = if is_project_backed {
-        Space::new()
-            .width(Length::Shrink)
-            .height(Length::Shrink)
-            .into()
+        #[cfg(feature = "action-guide")]
+        {
+            let is_clean = state.save_state == super::ProjectSaveState::Clean;
+            let is_writable = matches!(
+                state.project_session,
+                Some(super::project::ProjectSession::Saved {
+                    access: super::project::ProjectAccess::Writable(_),
+                    ..
+                })
+            );
+            let outputs_all_current = {
+                let enabled = state.publish_enabled_kinds();
+                enabled.iter().all(|kind| {
+                    state.publish_freshness.get(kind)
+                        == Some(&rollshot_action::project::PublishFreshness::Current)
+                })
+            };
+            let issue_pack_exporting = state.issue_pack.as_ref().is_some_and(|d| d.exporting);
+            let can_issue_pack =
+                is_clean && (is_writable || outputs_all_current) && !issue_pack_exporting;
+            button(text("Create Issue Pack"))
+                .on_press_maybe(can_issue_pack.then_some(Message::ExportBugReport))
+                .style(button::secondary)
+                .into()
+        }
+        #[cfg(not(feature = "action-guide"))]
+        {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        }
     } else {
         button(text("Export Bug Report..."))
             .on_press_maybe((!export_busy).then_some(Message::ExportBugReport))
@@ -811,6 +839,29 @@ fn issue_pack_modal<'a>(
         dialog.review_confirmed && dialog.pending_kind.is_none() && !dialog.exporting;
     let steps = state.guide.steps().len();
 
+    let action_buttons: Element<Message> = if dialog.exporting {
+        row![
+            button(text("Exporting\u{2026}")).style(button::secondary),
+            button(text("Cancel Export"))
+                .on_press(Message::IssuePackCancelExport)
+                .style(button::danger),
+        ]
+        .spacing(8)
+        .into()
+    } else {
+        row![
+            button(text("Export Folder"))
+                .on_press_maybe(export_enabled.then_some(Message::IssuePackExportFolder))
+                .style(button::primary),
+            button(text("Export ZIP"))
+                .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
+                .style(button::secondary),
+            button(text("Cancel")).on_press(Message::IssuePackCancel),
+        ]
+        .spacing(8)
+        .into()
+    };
+
     let dialog_view = container(
         column![
             text("Issue Pack Export").size(18),
@@ -829,16 +880,7 @@ fn issue_pack_modal<'a>(
             checkbox(dialog.review_confirmed)
                 .label("I reviewed the images and keyframes included in this bug report.")
                 .on_toggle(Message::IssuePackReviewChanged),
-            row![
-                button(text("Export Folder"))
-                    .on_press_maybe(export_enabled.then_some(Message::IssuePackExportFolder))
-                    .style(button::primary),
-                button(text("Export ZIP"))
-                    .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
-                    .style(button::secondary),
-                button(text("Cancel")).on_press(Message::IssuePackCancel),
-            ]
-            .spacing(8),
+            action_buttons,
         ]
         .spacing(12),
     )

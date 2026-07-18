@@ -70,7 +70,6 @@ pub(crate) struct ActionGuideIssueAssets {
 pub(crate) struct ActionGuideExportSource {
     pub job: rollshot_action::ReviewedGuideExportJob,
     pub include_gif: bool,
-    pub gif_frames: Vec<std::sync::Arc<RgbaImage>>,
 }
 
 #[cfg(feature = "action-guide")]
@@ -243,6 +242,8 @@ pub(crate) struct IssuePackWarning {
 pub(crate) enum IssuePackError {
     EvidenceReviewRequired,
     MissingEvidence,
+    #[allow(dead_code)]
+    Cancelled,
     Io(String),
     Encode(String),
     Json(String),
@@ -256,6 +257,7 @@ impl std::fmt::Display for IssuePackError {
                 f,
                 "nothing to export: add a final image or reviewed Action Guide"
             ),
+            Self::Cancelled => write!(f, "issue pack export cancelled"),
             Self::Io(e) => write!(f, "issue pack file error: {e}"),
             Self::Encode(e) => write!(f, "issue pack image error: {e}"),
             Self::Json(e) => write!(f, "issue pack manifest error: {e}"),
@@ -270,6 +272,7 @@ impl IssuePackError {
         match self {
             Self::EvidenceReviewRequired => "review_required",
             Self::MissingEvidence => "missing_evidence",
+            Self::Cancelled => "cancelled",
             Self::Io(_) => "io",
             Self::Encode(_) => "encode",
             Self::Json(_) => "json",
@@ -384,16 +387,39 @@ pub(crate) fn export_folder(
     input: &IssuePackInput,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
-    export_folder_impl(input, None, destination_parent)
+    #[cfg(feature = "action-guide")]
+    {
+        export_folder_impl(input, None, destination_parent, &PublishCancellation::new())
+    }
+    #[cfg(not(feature = "action-guide"))]
+    {
+        export_folder_impl(input, None, destination_parent)
+    }
 }
 
 #[cfg(feature = "action-guide")]
+#[allow(dead_code)]
 pub(crate) fn export_folder_with_action_guide(
     input: &IssuePackInput,
     action: Option<ActionGuideExportSource>,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
-    export_folder_impl(input, action, destination_parent)
+    export_folder_impl(
+        input,
+        action,
+        destination_parent,
+        &PublishCancellation::new(),
+    )
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) fn export_folder_with_action_guide_cancellable(
+    input: &IssuePackInput,
+    action: Option<ActionGuideExportSource>,
+    destination_parent: &Path,
+    cancel: &PublishCancellation,
+) -> Result<IssuePackExportResult, IssuePackError> {
+    export_folder_impl(input, action, destination_parent, cancel)
 }
 
 #[cfg(not(feature = "action-guide"))]
@@ -404,8 +430,13 @@ fn export_folder_impl(
     #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource>,
     #[cfg(not(feature = "action-guide"))] _action: Option<ActionGuideExportSource>,
     destination_parent: &Path,
+    #[cfg(feature = "action-guide")] cancel: &PublishCancellation,
 ) -> Result<IssuePackExportResult, IssuePackError> {
     validate(input)?;
+    #[cfg(feature = "action-guide")]
+    if cancel.is_cancelled() {
+        return Err(IssuePackError::Cancelled);
+    }
     tracing::info!(
         target: TARGET_ISSUE_PACK_EXPORT,
         mode = "folder",
@@ -427,9 +458,10 @@ fn export_folder_impl(
         &tmp_dir,
         &mut warnings,
         #[cfg(feature = "action-guide")]
+        cancel,
+        #[cfg(feature = "action-guide")]
         action,
-    )
-    .and_then(|()| swap_folder(&tmp_dir, &final_dir));
+    );
 
     if let Err(error) = build_result {
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -441,6 +473,14 @@ fn export_folder_impl(
         );
         return Err(error);
     }
+
+    #[cfg(feature = "action-guide")]
+    if cancel.is_cancelled() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(IssuePackError::Cancelled);
+    }
+
+    commit_noreplace_dir(&tmp_dir, &final_dir)?;
 
     tracing::info!(
         target: TARGET_ISSUE_PACK_EXPORT,
@@ -462,9 +502,15 @@ fn build_folder(
     input: &IssuePackInput,
     tmp_dir: &Path,
     warnings: &mut Vec<IssuePackWarning>,
+    #[cfg(feature = "action-guide")] cancel: &PublishCancellation,
     #[cfg(feature = "action-guide")] action: Option<ActionGuideExportSource>,
 ) -> Result<(), IssuePackError> {
     std::fs::create_dir_all(tmp_dir).map_err(|e| IssuePackError::Io(e.to_string()))?;
+
+    #[cfg(feature = "action-guide")]
+    if cancel.is_cancelled() {
+        return Err(IssuePackError::Cancelled);
+    }
 
     if let Some(image) = &input.final_image {
         let images_dir = tmp_dir.join("images");
@@ -476,14 +522,24 @@ fn build_folder(
     }
 
     #[cfg(feature = "action-guide")]
+    if cancel.is_cancelled() {
+        return Err(IssuePackError::Cancelled);
+    }
+
+    #[cfg(feature = "action-guide")]
     if let Some(action) = action {
         rollshot_action::render_guide_folder(&action.job, &tmp_dir.join("action-guide"))
             .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
 
+        if cancel.is_cancelled() {
+            return Err(IssuePackError::Cancelled);
+        }
+
         let storyboard_path = tmp_dir.join("action-guide/storyboard.png");
-        let storyboard_result = rollshot_action::render_reviewed_storyboard(
+        let storyboard_result = rollshot_action::render_reviewed_storyboard_cancellable(
             &action.job,
             rollshot_action::StoryboardOptions::default(),
+            cancel,
         );
         if let Err(error) = storyboard_result {
             warnings.push(IssuePackWarning {
@@ -502,12 +558,16 @@ fn build_folder(
             }
         }
 
+        if cancel.is_cancelled() {
+            return Err(IssuePackError::Cancelled);
+        }
+
         if action.include_gif {
             let gif_path = tmp_dir.join("action-guide/guide.gif");
-            let frames = action.gif_frames.iter().map(std::sync::Arc::as_ref);
-            if let Err(error) = rollshot_action::export_gif_images(
-                frames,
+            if let Err(error) = rollshot_action::export_reviewed_gif(
+                &action.job,
                 rollshot_action::GifOptions::default(),
+                cancel,
                 &gif_path,
             ) {
                 warnings.push(IssuePackWarning {
@@ -516,6 +576,11 @@ fn build_folder(
                 });
             }
         }
+    }
+
+    #[cfg(feature = "action-guide")]
+    if cancel.is_cancelled() {
+        return Err(IssuePackError::Cancelled);
     }
 
     let include_gif = tmp_dir.join("action-guide/guide.gif").exists();
@@ -531,11 +596,21 @@ fn build_folder(
     Ok(())
 }
 
-fn swap_folder(tmp_dir: &Path, final_dir: &Path) -> Result<(), IssuePackError> {
-    if final_dir.exists() {
-        std::fs::remove_dir_all(final_dir).map_err(|e| IssuePackError::Io(e.to_string()))?;
+fn commit_noreplace_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), IssuePackError> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    match renameat_with(CWD, tmp_dir, CWD, final_dir, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::EXIST) => Err(IssuePackError::Io(format!(
+            "destination already exists: {}",
+            final_dir.display()
+        ))),
+        Err(rustix::io::Errno::NOSYS | rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP) => {
+            Err(IssuePackError::Io(
+                "atomic no-replace commit is unsupported on this filesystem".to_string(),
+            ))
+        }
+        Err(errno) => Err(IssuePackError::Io(format!("commit failed: {errno}"))),
     }
-    std::fs::rename(tmp_dir, final_dir).map_err(|e| IssuePackError::Io(e.to_string()))
 }
 
 pub(crate) fn export_zip(
@@ -550,12 +625,28 @@ pub(crate) fn export_zip(
 }
 
 #[cfg(feature = "action-guide")]
+#[allow(dead_code)]
 pub(crate) fn export_zip_with_action_guide(
     input: &IssuePackInput,
     action: Option<ActionGuideExportSource>,
     destination_parent: &Path,
 ) -> Result<IssuePackExportResult, IssuePackError> {
     let mut result = export_folder_with_action_guide(input, action, destination_parent)?;
+    let zip_path = result.directory.with_extension("zip");
+    zip_directory(&result.directory, &zip_path)?;
+    result.zip_path = Some(zip_path);
+    Ok(result)
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) fn export_zip_with_action_guide_cancellable(
+    input: &IssuePackInput,
+    action: Option<ActionGuideExportSource>,
+    destination_parent: &Path,
+    cancel: &PublishCancellation,
+) -> Result<IssuePackExportResult, IssuePackError> {
+    let mut result =
+        export_folder_with_action_guide_cancellable(input, action, destination_parent, cancel)?;
     let zip_path = result.directory.with_extension("zip");
     zip_directory(&result.directory, &zip_path)?;
     result.zip_path = Some(zip_path);
@@ -866,19 +957,19 @@ mod tests {
     }
 
     #[test]
-    fn export_zip_replaces_stale_zip_atomically() {
+    fn export_zip_does_not_overwrite_existing_destination() {
         let input = base_input();
         let tmp = tempfile::tempdir().unwrap();
         let first = export_zip(&input, tmp.path()).unwrap();
-        let zip_path = first.zip_path.clone().expect("zip path");
-        std::fs::write(&zip_path, b"stale").unwrap();
+        let first_dir = first.directory.clone();
 
-        let second = export_zip(&input, tmp.path()).unwrap();
+        let err = export_zip(&input, tmp.path()).unwrap_err();
 
-        assert_eq!(second.zip_path.as_ref(), Some(&zip_path));
-        let file = std::fs::File::open(zip_path).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        assert!(archive.len() >= 3);
+        assert!(
+            matches!(err, IssuePackError::Io(_)),
+            "expected Io error for existing destination, got: {err:?}"
+        );
+        assert!(first_dir.exists(), "original folder must be preserved");
     }
 
     #[test]
@@ -1201,7 +1292,6 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
-            gif_frames: Vec::new(),
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1271,7 +1361,6 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
-            gif_frames: Vec::new(),
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1325,7 +1414,6 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
-            gif_frames: Vec::new(),
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1369,7 +1457,6 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
-            gif_frames: Vec::new(),
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1405,7 +1492,6 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
-            gif_frames: Vec::new(),
         };
 
         let result = export_zip_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1431,7 +1517,6 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
-            gif_frames: Vec::new(),
         };
 
         let result =
@@ -1490,7 +1575,6 @@ mod action_guide_tests {
         ActionGuideExportSource {
             job: issue_pack_test_job(),
             include_gif: false,
-            gif_frames: vec![Arc::new(RgbaImage::new(8, 8))],
         }
     }
 
@@ -1553,5 +1637,107 @@ mod action_guide_tests {
             names.contains(&"action-guide/index.html".to_string()),
             "names = {names:?}"
         );
+    }
+
+    #[test]
+    fn cancellation_before_export_fails_cleanly() {
+        let parent = tempfile::tempdir().unwrap();
+        let input = reviewed_issue_pack_input();
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let err = export_folder_with_action_guide_cancellable(
+            &input,
+            Some(owned_action_source()),
+            parent.path(),
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(err, IssuePackError::Cancelled);
+        assert!(
+            std::fs::read_dir(parent.path()).unwrap().next().is_none(),
+            "cancelled export must not leave output"
+        );
+    }
+
+    #[test]
+    fn cancellation_during_storyboard_fails_cleanly() {
+        let parent = tempfile::tempdir().unwrap();
+        let mut input = reviewed_issue_pack_input();
+        input.action_guide = Some(ActionGuideIssueAssets::from_job(
+            &issue_pack_test_job(),
+            true,
+        ));
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let err = export_folder_with_action_guide_cancellable(
+            &input,
+            Some(ActionGuideExportSource {
+                job: issue_pack_test_job(),
+                include_gif: true,
+            }),
+            parent.path(),
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(err, IssuePackError::Cancelled);
+        assert!(
+            std::fs::read_dir(parent.path()).unwrap().next().is_none(),
+            "cancelled export must not leave output"
+        );
+    }
+
+    #[test]
+    fn no_replace_does_not_overwrite_existing_issue_pack() {
+        let parent = tempfile::tempdir().unwrap();
+        let input = reviewed_issue_pack_input();
+        let first =
+            export_folder_with_action_guide(&input, Some(owned_action_source()), parent.path())
+                .unwrap();
+        let err =
+            export_folder_with_action_guide(&input, Some(owned_action_source()), parent.path())
+                .unwrap_err();
+        assert!(
+            matches!(err, IssuePackError::Io(_)),
+            "expected Io error for existing destination, got: {err:?}"
+        );
+        assert!(first.directory.exists(), "original must be preserved");
+    }
+
+    #[test]
+    fn issue_pack_never_copies_project_assets_or_manifest() {
+        let parent = tempfile::tempdir().unwrap();
+        let input = reviewed_issue_pack_input();
+        let result =
+            export_folder_with_action_guide(&input, Some(owned_action_source()), parent.path())
+                .unwrap();
+        assert!(!result.directory.join("assets").exists());
+        assert!(!result.directory.join("project.json").exists());
+        assert!(!result.directory.join(".rollshot-guide").exists());
+        let all_entries: Vec<String> = walk_dir(&result.directory);
+        for entry in &all_entries {
+            assert!(
+                !entry.contains(".rollshot-guide"),
+                "must not contain .rollshot-guide: {entry}"
+            );
+            assert!(
+                !entry.ends_with("project.json"),
+                "must not contain project.json: {entry}"
+            );
+        }
+    }
+
+    fn walk_dir(dir: &std::path::Path) -> Vec<String> {
+        let mut result = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let rel = path.strip_prefix(dir).unwrap_or(&path);
+                result.push(rel.to_string_lossy().to_string());
+                if path.is_dir() {
+                    result.extend(walk_dir(&path));
+                }
+            }
+        }
+        result
     }
 }

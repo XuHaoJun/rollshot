@@ -298,26 +298,23 @@ pub(crate) fn prepare_issue_pack_export(
     let job = build_reviewed_export_job(state).map_err(|error| error.to_string())?;
     let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
     let input = super::update::timeline_issue_pack_input(state, assets);
-    let gif_frames = state
-        .guide
-        .steps()
-        .iter()
-        .enumerate()
-        .map(|(offset, step)| {
-            state
-                .store
-                .retained(step.keyframe)
-                .map(|frame| Arc::clone(&frame.image))
-                .ok_or_else(|| format!("step {} keyframe is unavailable", offset + 1))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(PendingIssuePackExport {
         input,
-        source: crate::issue_pack::ActionGuideExportSource {
-            job,
-            include_gif,
-            gif_frames,
-        },
+        source: crate::issue_pack::ActionGuideExportSource { job, include_gif },
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn prepare_issue_pack_from_reviewed_job(
+    state: &TimelineWorkspace,
+    include_gif: bool,
+) -> Result<PendingIssuePackExport, String> {
+    let job = build_reviewed_export_job(state).map_err(|error| error.to_string())?;
+    let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
+    let input = super::update::timeline_issue_pack_input(state, assets);
+    Ok(PendingIssuePackExport {
+        input,
+        source: crate::issue_pack::ActionGuideExportSource { job, include_gif },
     })
 }
 

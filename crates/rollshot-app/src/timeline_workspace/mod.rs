@@ -146,6 +146,7 @@ pub(crate) struct IssuePackDialog {
     pub pending_export: Option<guide_export::PendingIssuePackExport>,
     pub operation_id: u64,
     pub exporting: bool,
+    pub cancel: rollshot_action::project::PublishCancellation,
 }
 
 impl std::fmt::Debug for IssuePackDialog {
@@ -160,6 +161,7 @@ impl std::fmt::Debug for IssuePackDialog {
             )
             .field("operation_id", &self.operation_id)
             .field("exporting", &self.exporting)
+            .field("cancelled", &self.cancel.is_cancelled())
             .finish()
     }
 }
@@ -173,6 +175,7 @@ impl IssuePackDialog {
             pending_export: None,
             operation_id: 0,
             exporting: false,
+            cancel: rollshot_action::project::PublishCancellation::new(),
         }
     }
 }

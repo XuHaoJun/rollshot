@@ -672,4 +672,73 @@ mod tests {
         assert!(dest.join("guide.gif").exists());
         assert!(!dest.join("project.json").exists());
     }
+
+    #[test]
+    fn issue_pack_export_respects_cancellation() {
+        use crate::issue_pack::{
+            ActionGuideExportSource, ActionGuideIssueAssets, EvidenceReviewSummary, IssuePackError,
+            IssuePackInput, PlatformInfo, RedactionSummary,
+        };
+        use rollshot_action::project::PublishCancellation;
+
+        let parent = tempfile::tempdir().unwrap();
+        let job = rollshot_action::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: rollshot_action::InputSourceKind::LinuxEvdev,
+            input_capability: rollshot_action::InputCapability::SemanticEvents,
+            steps: vec![rollshot_action::ReviewedGuideStep {
+                index: 1,
+                title: "Step".into(),
+                caption: None,
+                kind: rollshot_action::CandidateKind::Click,
+                reason: rollshot_action::DetectReason::ClickConfirmed,
+                at_ms: 100,
+                image: rollshot_action::ReviewedStepImage::Retained(std::sync::Arc::new(
+                    image::RgbaImage::new(8, 8),
+                )),
+                hotspots: Vec::new(),
+            }],
+        };
+        let input = IssuePackInput {
+            title: None,
+            created_at: chrono::Local::now(),
+            rollshot_version: "0.1.0".into(),
+            platform: PlatformInfo::current(),
+            final_image: None,
+            action_guide: Some(ActionGuideIssueAssets::from_job(&job, false)),
+            ocr_snippets: Vec::new(),
+            evidence_review: EvidenceReviewSummary {
+                required: true,
+                completed: true,
+                result_workspace_images_reviewed: false,
+                action_guide_keyframes_reviewed: true,
+            },
+            redaction: RedactionSummary {
+                review_required: false,
+                review_completed: true,
+                result_workspace_images_are_flattened: false,
+                original_pixels_included: false,
+                redaction_count: 0,
+            },
+        };
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let err = crate::issue_pack::export_folder_with_action_guide_cancellable(
+            &input,
+            Some(ActionGuideExportSource {
+                job,
+                include_gif: false,
+            }),
+            parent.path(),
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(err, IssuePackError::Cancelled);
+    }
 }

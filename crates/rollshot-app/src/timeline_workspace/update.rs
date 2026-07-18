@@ -109,6 +109,8 @@ pub enum Message {
     },
     /// Close the Issue Pack dialog without exporting.
     IssuePackCancel,
+    /// Cancel an in-progress Issue Pack export.
+    IssuePackCancelExport,
     #[cfg(target_os = "macos")]
     OpenInputMonitoringSettings,
     DismissBanner,
@@ -850,7 +852,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 dialog.exporting = false;
                 return Update::none();
             };
-            let (kind, pending, operation_id) = {
+            let (kind, pending, operation_id, cancel) = {
                 let Some(dialog) = state.issue_pack.as_mut() else {
                     return Update::none();
                 };
@@ -862,11 +864,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     return Update::none();
                 };
                 let operation_id = dialog.operation_id;
+                let cancel = dialog.cancel.clone();
                 dialog.exporting = true;
-                (kind, pending, operation_id)
+                (kind, pending, operation_id, cancel)
             };
             Update::task(Task::perform(
-                run_issue_pack_export(pending, kind, parent),
+                run_issue_pack_export(pending, kind, parent, cancel),
                 move |result| Message::IssuePackFinished {
                     operation_id,
                     result,
@@ -912,7 +915,19 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::none()
         }
         Message::IssuePackCancel => {
+            if let Some(dialog) = &state.issue_pack {
+                dialog.cancel.cancel();
+            }
             state.issue_pack = None;
+            Update::none()
+        }
+        Message::IssuePackCancelExport => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.cancel.cancel();
+                dialog.exporting = false;
+                dialog.pending_kind = None;
+                dialog.pending_export = None;
+            }
             Update::none()
         }
         #[cfg(target_os = "macos")]
@@ -2866,17 +2881,22 @@ async fn run_issue_pack_export(
     pending: super::guide_export::PendingIssuePackExport,
     kind: super::IssuePackKind,
     parent: PathBuf,
+    cancel: rollshot_action::project::PublishCancellation,
 ) -> Result<crate::issue_pack::IssuePackExportResult, String> {
     tokio::task::spawn_blocking(move || match kind {
-        super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
+        super::IssuePackKind::Folder => {
+            crate::issue_pack::export_folder_with_action_guide_cancellable(
+                &pending.input,
+                Some(pending.source),
+                &parent,
+                &cancel,
+            )
+        }
+        super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide_cancellable(
             &pending.input,
             Some(pending.source),
             &parent,
-        ),
-        super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide(
-            &pending.input,
-            Some(pending.source),
-            &parent,
+            &cancel,
         ),
     })
     .await
@@ -4193,6 +4213,7 @@ mod tests {
             pending_export: None,
             operation_id: 0,
             exporting: false,
+            cancel: rollshot_action::project::PublishCancellation::new(),
         });
         let original = state
             .store
