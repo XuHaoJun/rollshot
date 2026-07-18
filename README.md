@@ -670,7 +670,64 @@ After a successful Save, the timeline workspace shows **Open Guide** (launches
 `index.html`) and **Show in Folder** (reveals the directory in the system file
 manager).
 
-## Manual Self-Hosted Workflow
+### Publishing and outputs
+
+When you save a project, Rollshot commits the editable content (project.json,
+keyframe assets, annotations) first, then derives published outputs in the
+background. Save always succeeds independently of publish — if a publish worker
+fails, your editable content is already committed.
+
+Published outputs are split into two tiers:
+
+- **Core** (always on): `index.html`, `steps.md`, `session.json`, and
+  `keyframes/`. This is the self-contained Safe Copy tree. Core is mandatory
+  and cannot be toggled off.
+- **Optional derivatives**: Storyboard (`storyboard.png`), GIF (`guide.gif`),
+  and MP4 (`summary.mp4`). Each has an independent toggle in the timeline
+  workspace. Toggling an output on schedules it for the next publish; toggling
+  it off removes the artifact from future publishes.
+
+Each output tracks its own freshness against the current project revision.
+The per-output states are:
+
+| State | Meaning |
+| --- | --- |
+| Current | Output was built from the current revision. |
+| Stale | Output exists but was built from an older revision (or is missing). |
+| Updating | A publish worker is running for this output. |
+| Failed | The last publish attempt for this output failed. |
+
+The aggregate publish status shows **Published** only when all enabled outputs
+are Current. If any enabled output is Stale or Failed, the aggregate status
+reflects that. You can retry individual failed outputs or all stale/failed
+outputs at once from the timeline workspace.
+
+Closing the project or navigating away cancels any active publish workers.
+Cancelled or superseded workers cannot mutate visible state — only the final
+committed result is persisted.
+
+**MP4 output** requires ffmpeg. If ffmpeg is not found on `PATH` or at the
+`ROLLSHOT_FFMPEG` environment variable, Rollshot offers to download a managed
+copy. You can also point `ROLLSHOT_FFMPEG` at an existing installation.
+
+### Sharing
+
+The timeline workspace offers three sharing options with different content and
+privacy trade-offs:
+
+| Share option | What it copies | Editable | Privacy |
+| --- | --- | --- | --- |
+| **Safe Viewer Copy** | Published outputs only (`publish/` tree: index.html, steps.md, session.json, keyframes, optional derivatives) | No | Recipients see only the rendered guide — no internal project state, annotations, or recording metadata. |
+| **Editable Project** | Full `.rollshot-guide` directory (project.json, assets, publish-state.json, and the publish tree) | Yes | Recipients can open and edit the guide. Includes all internal state. Shows a confirmation warning before copying. |
+| **Issue Pack** | A standalone Markdown report with embedded keyframe images and optional storyboard | No | Designed for filing bug reports or issues. Evidence images are included; internal project state is not. |
+
+Safe Viewer Copy and Editable Project require all enabled outputs to be current
+before sharing — if any output is stale, Rollshot publishes first. Issue Pack
+does not depend on publish state.
+
+All sharing uses atomic copy operations that never silently overwrite an
+existing destination. Temporary artifacts are cleaned up on failure or
+cancel.
 
 `.github/workflows/real-capture.yml` reserves the manual smoke-test path for
 self-hosted runners:
