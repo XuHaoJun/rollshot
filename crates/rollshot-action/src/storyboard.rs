@@ -166,58 +166,139 @@ pub fn render_reviewed_storyboard_cancellable(
         .checked_sub(opts.card_padding.saturating_mul(2))
         .ok_or(StoryboardError::CanvasTooLarge)?;
 
-    let flag = cancel.flag();
-    let mut cards = Vec::with_capacity(job.steps.len());
+    // Pass 1: compute layout metadata from descriptor dimensions and text metrics
+    // without decoding any images.
+    struct CardLayout {
+        label: String,
+        caption: Option<String>,
+        height: u32,
+    }
+
+    let mut layouts = Vec::with_capacity(job.steps.len());
     for step in &job.steps {
-        if flag.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return Err(StoryboardError::Cancelled);
         }
 
-        let mut card_result = None;
+        let label = step_label(step.index, &step.title, opts.show_titles);
+        let label = fit_label(&label, content_width as f32);
+        let (_, label_height) = measure_block(&label, LABEL_FONT_PX, true);
+        let label_height = label_height.ceil() as u32;
+
+        let caption = step
+            .caption
+            .as_deref()
+            .and_then(non_empty_caption)
+            .map(|caption| fit_caption(caption, content_width as f32));
+        let caption_height = caption
+            .as_ref()
+            .map(|caption| measure_block(caption, CAPTION_FONT_PX, false).1.ceil() as u32)
+            .unwrap_or(0);
+        let text_height = if caption.is_some() {
+            label_height
+                .checked_add(CAPTION_GAP)
+                .and_then(|h| h.checked_add(caption_height))
+                .ok_or(StoryboardError::CanvasTooLarge)?
+        } else {
+            label_height
+        };
+
+        let (orig_w, orig_h) = step.image.dimensions();
+        let scaled_height = if orig_w > content_width && orig_w > 0 {
+            (orig_h as u64 * content_width as u64 / orig_w as u64).max(1) as u32
+        } else {
+            orig_h
+        };
+        let card_height = opts
+            .card_padding
+            .checked_mul(2)
+            .and_then(|h| h.checked_add(text_height))
+            .and_then(|h| h.checked_add(LABEL_GAP))
+            .and_then(|h| h.checked_add(scaled_height))
+            .ok_or(StoryboardError::CanvasTooLarge)?;
+
+        layouts.push(CardLayout {
+            label,
+            caption,
+            height: card_height,
+        });
+    }
+
+    if cancel.is_cancelled() {
+        return Err(StoryboardError::Cancelled);
+    }
+
+    // Compute total canvas height and per-card y offsets.
+    let mut canvas_height = opts
+        .outer_padding
+        .checked_mul(2)
+        .ok_or(StoryboardError::CanvasTooLarge)?;
+    for (i, layout) in layouts.iter().enumerate() {
+        if i > 0 {
+            canvas_height = canvas_height
+                .checked_add(opts.card_spacing)
+                .ok_or(StoryboardError::CanvasTooLarge)?;
+        }
+        canvas_height = canvas_height
+            .checked_add(layout.height)
+            .ok_or(StoryboardError::CanvasTooLarge)?;
+    }
+    let canvas_pixels = (canvas_width as u64)
+        .checked_mul(canvas_height as u64)
+        .ok_or(StoryboardError::CanvasTooLarge)?;
+    if canvas_pixels > opts.max_canvas_pixels {
+        return Err(StoryboardError::CanvasTooLarge);
+    }
+
+    // Pass 2: resolve, scale, draw, and release each step's image sequentially.
+    let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, WHITE);
+    let mut y = opts.outer_padding;
+    let flag = cancel.flag();
+    for (i, (step, layout)) in job.steps.iter().zip(layouts.iter()).enumerate() {
+        if flag.load(Ordering::Acquire) {
+            return Err(StoryboardError::Cancelled);
+        }
+
         step.image
             .with_flattened_image(flag, |image| {
                 let scaled = downscale(image, content_width);
-                let label = step_label(step.index, &step.title, opts.show_titles);
-                let label = fit_label(&label, content_width as f32);
-                let (_, label_height) = measure_block(&label, LABEL_FONT_PX, true);
-                let label_height = label_height.ceil() as u32;
-
-                let caption = step
-                    .caption
-                    .as_deref()
-                    .and_then(non_empty_caption)
-                    .map(|caption| fit_caption(caption, content_width as f32));
-                let caption_height = caption
-                    .as_ref()
-                    .map(|caption| measure_block(caption, CAPTION_FONT_PX, false).1.ceil() as u32)
-                    .unwrap_or(0);
-                let text_height = if caption.is_some() {
-                    label_height
-                        .checked_add(CAPTION_GAP)
-                        .and_then(|height| height.checked_add(caption_height))
-                        .ok_or(crate::error::ExportError::Io {
-                            path: String::new(),
-                            source: std::io::Error::other("canvas too large"),
-                        })?
-                } else {
-                    label_height
-                };
-                let card_height = opts
-                    .card_padding
-                    .checked_mul(2)
-                    .and_then(|height| height.checked_add(text_height))
-                    .and_then(|height| height.checked_add(LABEL_GAP))
-                    .and_then(|height| height.checked_add(scaled.height()))
-                    .ok_or(crate::error::ExportError::Io {
-                        path: String::new(),
-                        source: std::io::Error::other("canvas too large"),
-                    })?;
-                card_result = Some(Card {
-                    label,
-                    caption,
-                    image: scaled,
-                    height: card_height,
-                });
+                draw_card(
+                    &mut canvas,
+                    opts.outer_padding,
+                    y,
+                    card_width,
+                    layout.height,
+                );
+                let content_x = opts.outer_padding + opts.card_padding;
+                let mut content_y = y + opts.card_padding;
+                draw_text_block(
+                    &mut canvas,
+                    ImagePoint::new(content_x as f32, content_y as f32),
+                    &layout.label,
+                    LABEL_FONT_PX,
+                    true,
+                    TEXT_COLOR,
+                );
+                content_y += label_height_px(&layout.label);
+                if let Some(caption) = &layout.caption {
+                    content_y += CAPTION_GAP;
+                    draw_text_block(
+                        &mut canvas,
+                        ImagePoint::new(content_x as f32, content_y as f32),
+                        caption,
+                        CAPTION_FONT_PX,
+                        false,
+                        CAPTION_COLOR,
+                    );
+                    content_y += caption_height_px(caption);
+                }
+                content_y += LABEL_GAP;
+                image::imageops::replace(
+                    &mut canvas,
+                    &scaled,
+                    i64::from(content_x),
+                    i64::from(content_y),
+                );
                 Ok(())
             })
             .map_err(|error| match error {
@@ -232,16 +313,22 @@ pub fn render_reviewed_storyboard_cancellable(
                 },
             })?;
 
-        if let Some(card) = card_result {
-            cards.push(card);
+        y += layout.height;
+        if i + 1 < job.steps.len() {
+            y += opts.card_spacing;
         }
     }
 
-    if flag.load(Ordering::Relaxed) {
+    if flag.load(Ordering::Acquire) {
         return Err(StoryboardError::Cancelled);
     }
 
-    render_cards(cards, opts, canvas_width, card_width)
+    Ok(StoryboardRenderResult {
+        image: canvas,
+        width: canvas_width,
+        height: canvas_height,
+        step_count: job.steps.len(),
+    })
 }
 
 pub fn export_reviewed_storyboard_cancellable(
@@ -466,6 +553,14 @@ fn fit_text(text: &str, max_width: f32, px: f32, bold: bool) -> String {
     } else {
         format!("{fitted}{ellipsis}")
     }
+}
+
+fn label_height_px(label: &str) -> u32 {
+    measure_block(label, LABEL_FONT_PX, true).1.ceil() as u32
+}
+
+fn caption_height_px(caption: &str) -> u32 {
+    measure_block(caption, CAPTION_FONT_PX, false).1.ceil() as u32
 }
 
 fn non_empty_caption(caption: &str) -> Option<&str> {

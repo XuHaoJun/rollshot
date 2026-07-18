@@ -215,6 +215,21 @@ fn downscale(image: &RgbaImage, max_width: u32) -> RgbaImage {
     )
 }
 
+fn kill_process(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status();
+    }
+}
+
 fn descriptor_output_dimensions(
     steps: &[crate::export::model::ReviewedGuideStep],
     max_width: u32,
@@ -283,55 +298,37 @@ pub fn export_reviewed_video(
         })
     });
 
-    #[cfg(unix)]
     let child_pid = child.as_inner().id();
     let done = std::sync::Arc::new(AtomicBool::new(false));
     let done_watchdog = done.clone();
     let cancel_watchdog = cancel.clone();
-    let watchdog_handle = {
-        #[cfg(unix)]
-        {
-            let pid = child_pid;
-            std::thread::spawn(move || {
-                while !cancel_watchdog.is_cancelled() && !done_watchdog.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if cancel_watchdog.is_cancelled() {
-                    let _ = std::process::Command::new("kill")
-                        .args(["-9", &pid.to_string()])
-                        .status();
-                }
-            })
+    let watchdog_handle = std::thread::spawn(move || {
+        while !cancel_watchdog.is_cancelled() && !done_watchdog.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        #[cfg(not(unix))]
-        {
-            std::thread::spawn(move || {
-                while !cancel_watchdog.is_cancelled() && !done_watchdog.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            })
+        if cancel_watchdog.is_cancelled() {
+            kill_process(child_pid);
         }
-    };
+    });
 
     let result = {
         let mut stdin = child.take_stdin().ok_or_else(|| VideoError::Stdin {
             source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "missing FFmpeg stdin"),
         })?;
 
-        let flag = cancel.flag();
         let mut write_result = Ok(());
         for step in &job.steps {
-            if flag.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 write_result = Err(VideoError::Cancelled);
                 break;
             }
 
             let step_result = step
                 .image
-                .with_flattened_image(flag, |image| {
+                .with_flattened_image(cancel.flag(), |image| {
                     let frame = normalize_to(&downscale(image, opts.max_width), width, height);
                     for _ in 0..repeat {
-                        if flag.load(Ordering::Relaxed) {
+                        if cancel.is_cancelled() {
                             return Err(crate::error::ExportError::Cancelled);
                         }
                         if let Err(source) = stdin.write_all(frame.as_raw()) {
@@ -359,7 +356,7 @@ pub fn export_reviewed_video(
         }
 
         if write_result.is_ok() {
-            if flag.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 write_result = Err(VideoError::Cancelled);
             } else if let Err(source) = stdin.flush() {
                 write_result = Err(VideoError::Stdin { source });
@@ -837,6 +834,10 @@ mod tests {
         assert!(!path.exists());
     }
 
+    // NOTE: The watchdog-child-kill behavior is tested on unix via shell-script
+    // fakes. Non-unix uses the same cross-platform `child.kill()` path but lacks
+    // test coverage because the fake-ffmpeg infrastructure requires shell scripts.
+    // Verify on Windows/macOS CI when those platforms are added.
     #[cfg(unix)]
     #[test]
     fn reviewed_streaming_cancels_and_terminates_child() {

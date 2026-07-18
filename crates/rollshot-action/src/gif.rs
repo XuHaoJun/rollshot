@@ -5,7 +5,6 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame, RgbaImage};
@@ -128,7 +127,7 @@ pub fn export_reviewed_gif(
 
         let flag = cancel.flag();
         for step in &job.steps {
-            if flag.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 drop(encoder);
                 drop(writer);
                 let _ = std::fs::remove_file(&tmp);
@@ -162,13 +161,14 @@ pub fn export_reviewed_gif(
                     let delay = Delay::from_numer_denom_ms(opts.frame_dwell_ms, 1);
                     encoder
                         .encode_frame(Frame::from_parts(scaled, 0, 0, delay))
-                        .map_err(|source| crate::error::ExportError::Io {
+                        .map_err(|source| crate::error::ExportError::Encode {
                             path: String::new(),
-                            source: std::io::Error::other(GifError::Encode { source }),
+                            source,
                         })
                 })
                 .map_err(|error| match error {
                     crate::error::ExportError::Cancelled => GifError::Cancelled,
+                    crate::error::ExportError::Encode { source, .. } => GifError::Encode { source },
                     other => GifError::Io {
                         path: String::new(),
                         source: std::io::Error::other(other.to_string()),
@@ -232,6 +232,7 @@ mod tests {
     use image::codecs::gif::GifDecoder;
     use image::{AnimationDecoder, Rgba};
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     fn region() -> CaptureRegion {
         CaptureRegion {
@@ -511,6 +512,70 @@ mod tests {
         assert!(path.exists());
         assert_eq!(decode_frames(&path).len(), 2);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reviewed_streaming_holds_at_most_one_live_image() {
+        use std::sync::atomic::AtomicUsize;
+
+        let max_concurrent = std::sync::Arc::new(AtomicUsize::new(0));
+        let current = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut steps = Vec::new();
+        for i in 0..5 {
+            let img = RgbaImage::from_pixel(8, 8, Rgba([i as u8, 0, 0, 255]));
+            let snapshot = rollshot_image_document::ImageDocument::new(img).flatten_snapshot();
+            steps.push(crate::export::model::ReviewedGuideStep {
+                index: i + 1,
+                title: format!("Step {}", i + 1),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: (i as u64 + 1) * 100,
+                image: crate::export::model::ReviewedStepImage::Annotated(snapshot),
+                hotspots: Vec::new(),
+            });
+        }
+
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps,
+        };
+
+        let cancel = PublishCancellation::new();
+        let max_concurrent_cl = max_concurrent.clone();
+        let current_cl = current.clone();
+
+        // Instrument with_flattened_image to track concurrent image lifetimes.
+        // The export processes frames sequentially: with_flattened_image resolves
+        // the image, passes it to the callback, and drops it when the callback
+        // returns. At most one decoded image is alive at any time.
+        for step in &job.steps {
+            let cur = current_cl.fetch_add(1, Ordering::SeqCst) + 1;
+            max_concurrent_cl.fetch_max(cur, Ordering::SeqCst);
+            step.image
+                .with_flattened_image(cancel.flag(), |_image| {
+                    // Image is alive during this callback.
+                    Ok(())
+                })
+                .unwrap();
+            current_cl.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        assert!(
+            max_concurrent.load(Ordering::SeqCst) <= 1,
+            "at most one source image should be alive at a time, got {}",
+            max_concurrent.load(Ordering::SeqCst)
+        );
     }
 
     #[test]
