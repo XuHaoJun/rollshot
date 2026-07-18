@@ -121,8 +121,8 @@ fn reconcile_availability(root: &Path, state: &PublishStateV1) -> PublishStateV1
         let artifact_present = match kind {
             PublishOutputKind::Core => is_core_tree_present(root, output.last_successful_revision),
             PublishOutputKind::Storyboard => is_regular_file(root.join("publish/storyboard.png")),
-            PublishOutputKind::Gif => is_regular_file(root.join("publish/animation.gif")),
-            PublishOutputKind::Mp4 => is_regular_file(root.join("publish/animation.mp4")),
+            PublishOutputKind::Gif => is_regular_file(root.join("publish/guide.gif")),
+            PublishOutputKind::Mp4 => is_regular_file(root.join("publish/summary.mp4")),
         };
         if artifact_present {
             reconciled.outputs.insert(kind, output.clone());
@@ -212,6 +212,8 @@ impl std::fmt::Display for PublishCancelled {
         f.write_str("publish cancelled")
     }
 }
+
+impl std::error::Error for PublishCancelled {}
 
 #[derive(Debug, Clone)]
 pub struct PublishCancellation {
