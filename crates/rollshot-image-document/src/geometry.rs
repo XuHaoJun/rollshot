@@ -4,6 +4,7 @@
 /// A point in full-resolution image coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ImagePoint {
     pub x: f32,
     pub y: f32,
@@ -34,6 +35,7 @@ impl ImagePoint {
 /// An axis-aligned rectangle in full-resolution image coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ImageRect {
     pub x: f32,
     pub y: f32,
@@ -133,6 +135,7 @@ impl Rgba8 {
 /// An 8-bit sRGB color without alpha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct Rgb8 {
     pub r: u8,
     pub g: u8,

@@ -134,6 +134,76 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_unknown_nested_capture_region_field() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "revision": 1,
+            "title": "Guide",
+            "capture_region": {
+                "x": 0,
+                "y": 0,
+                "width": 8,
+                "height": 8,
+                "surprise": true
+            },
+            "input_source": "visual-only",
+            "input_capability": { "visual-only": { "reason": "source-start-failed" } },
+            "enabled_outputs": { "storyboard": false, "gif": false, "mp4": false },
+            "frames": [],
+            "steps": []
+        });
+
+        let error = serde_json::from_value::<ProjectManifestV1>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn manifest_rejects_unknown_input_capability_field() {
+        let mut json = valid_minimal_manifest_json();
+        json["input_capability"]["visual-only"]["surprise"] = serde_json::json!(true);
+
+        let error = serde_json::from_value::<ProjectManifestV1>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn annotations_reject_unknown_variant_and_geometry_fields() {
+        let json = serde_json::json!({
+            "annotations": [{
+                "opaque_redaction": {
+                    "id": 1,
+                    "bounds": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "width": 4.0,
+                        "height": 4.0,
+                        "surprise": true
+                    },
+                    "unexpected_variant_field": true
+                }
+            }],
+            "explanations": {}
+        });
+
+        let error = serde_json::from_value::<PersistedStepAnnotations>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn valid_minimal_manifest_json() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "revision": 1,
+            "title": "Guide",
+            "capture_region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+            "input_source": "visual-only",
+            "input_capability": { "visual-only": { "reason": "source-start-failed" } },
+            "enabled_outputs": { "storyboard": false, "gif": false, "mp4": false },
+            "frames": [],
+            "steps": []
+        })
+    }
+
+    #[test]
     fn manifest_accepts_valid_minimal_fixture() {
         let json = serde_json::json!({
             "schema_version": 1,

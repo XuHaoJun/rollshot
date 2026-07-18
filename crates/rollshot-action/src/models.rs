@@ -10,6 +10,7 @@ pub type FrameId = u64;
 pub type CandidateId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureRegion {
     pub x: i32,
     pub y: i32,
@@ -83,7 +84,7 @@ pub enum DegradedReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum InputCapability {
     SemanticEvents,
     VisualOnly { reason: DegradedReason },

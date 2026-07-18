@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use image::{ImageEncoder, ImageReader, RgbaImage};
@@ -59,29 +59,9 @@ pub(crate) fn asset_relative_path(sha256: &str) -> PathBuf {
 
 #[allow(dead_code)]
 fn open_project_asset(root: &Path, sha256: &str) -> Result<std::fs::File, ProjectError> {
-    use rustix::fs::{fstat, openat, Mode, OFlags, CWD};
+    use rustix::fs::{fstat, openat, Mode, OFlags};
 
-    let assets_dir = openat(
-        CWD,
-        root.join("assets"),
-        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| ProjectError::Io {
-        path: root.join("assets"),
-        source: e.into(),
-    })?;
-
-    let frames_dir = openat(
-        &assets_dir,
-        "frames",
-        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| ProjectError::Io {
-        path: root.join("assets/frames"),
-        source: e.into(),
-    })?;
+    let frames_dir = open_frames_dir(root, false)?;
 
     let filename = format!("{sha256}.png");
     let handle = openat(
@@ -111,15 +91,94 @@ fn open_project_asset(root: &Path, sha256: &str) -> Result<std::fs::File, Projec
     Ok(handle.into())
 }
 
-#[allow(dead_code)]
-fn read_asset_bytes(root: &Path, sha256: &str) -> Result<Vec<u8>, ProjectError> {
+fn read_verified_asset_bytes(
+    root: &Path,
+    sha256: &str,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<Vec<u8>, ProjectError> {
     let mut file = open_project_asset(root, sha256)?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).map_err(|e| ProjectError::Io {
         path: asset_relative_path(sha256),
         source: e,
     })?;
+
+    if hex_sha256(&buf) != sha256 {
+        return Err(ProjectError::InvalidAsset {
+            category: ProjectErrorCategory::InvalidAsset,
+            frame_id: 0,
+        });
+    }
+    let (width, height) = ImageReader::new(Cursor::new(&buf))
+        .with_guessed_format()
+        .map_err(|e| ProjectError::Io {
+            path: asset_relative_path(sha256),
+            source: e,
+        })?
+        .into_dimensions()
+        .map_err(|e| ProjectError::Io {
+            path: asset_relative_path(sha256),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        })?;
+    if width != expected_width || height != expected_height {
+        return Err(ProjectError::InvalidAsset {
+            category: ProjectErrorCategory::InvalidAsset,
+            frame_id: 0,
+        });
+    }
     Ok(buf)
+}
+
+fn open_frames_dir(root: &Path, create: bool) -> Result<rustix::fd::OwnedFd, ProjectError> {
+    use rustix::fs::{mkdirat, openat, Mode, OFlags, CWD};
+
+    let root_dir = openat(
+        CWD,
+        root,
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| ProjectError::Io {
+        path: root.to_path_buf(),
+        source: e.into(),
+    })?;
+    if create {
+        mkdirat(&root_dir, "assets", Mode::RUSR | Mode::WUSR | Mode::XUSR)
+            .or_else(|e| (e == rustix::io::Errno::EXIST).then_some(()).ok_or(e))
+            .map_err(|e| ProjectError::Io {
+                path: root.join("assets"),
+                source: e.into(),
+            })?;
+    }
+    let assets_dir = openat(
+        &root_dir,
+        "assets",
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| ProjectError::Io {
+        path: root.join("assets"),
+        source: e.into(),
+    })?;
+    if create {
+        mkdirat(&assets_dir, "frames", Mode::RUSR | Mode::WUSR | Mode::XUSR)
+            .or_else(|e| (e == rustix::io::Errno::EXIST).then_some(()).ok_or(e))
+            .map_err(|e| ProjectError::Io {
+                path: root.join("assets/frames"),
+                source: e.into(),
+            })?;
+    }
+    openat(
+        &assets_dir,
+        "frames",
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| ProjectError::Io {
+        path: root.join("assets/frames"),
+        source: e.into(),
+    })
 }
 
 #[allow(dead_code)]
@@ -244,18 +303,6 @@ pub(crate) fn decode_png_asset(
     Ok(rgba)
 }
 
-fn fsync_dir(path: &Path) -> Result<(), ProjectError> {
-    let file = std::fs::File::open(path).map_err(|e| ProjectError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    file.sync_all().map_err(|e| ProjectError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    Ok(())
-}
-
 #[allow(dead_code)]
 pub(crate) fn materialize_asset(
     root: &Path,
@@ -263,11 +310,9 @@ pub(crate) fn materialize_asset(
     frame_id: u64,
     at_ms: u64,
 ) -> Result<ProjectFrame, ProjectError> {
-    let frames_dir = root.join("assets").join("frames");
-    std::fs::create_dir_all(&frames_dir).map_err(|e| ProjectError::Io {
-        path: frames_dir.clone(),
-        source: e,
-    })?;
+    use rustix::fs::{openat, renameat_with, unlinkat, AtFlags, Mode, OFlags, RenameFlags};
+
+    let frames_dir = open_frames_dir(root, true)?;
 
     let (encoded_bytes, sha256, width, height) = match payload {
         SnapshotFramePayload::Pixels(image) => {
@@ -294,24 +339,22 @@ pub(crate) fn materialize_asset(
             width,
             height,
         } => {
-            // Stream-verify digest and header, then read bytes from
-            // the same safe openat handle (no path reopening).
-            let inspected = inspect_png_asset(&project_root, &sha256, width, height)?;
-            if inspected.sha256 != sha256 {
-                return Err(ProjectError::InvalidAsset {
-                    category: ProjectErrorCategory::InvalidAsset,
-                    frame_id,
-                });
-            }
-            let bytes = read_asset_bytes(&project_root, &sha256)?;
+            let bytes = read_verified_asset_bytes(&project_root, &sha256, width, height)?;
             (bytes, sha256, width, height)
         }
     };
 
-    let final_path = frames_dir.join(format!("{sha256}.png"));
+    let final_name = format!("{sha256}.png");
+    let final_path = root.join("assets/frames").join(&final_name);
 
-    // If final path exists, verify and return (symlink_metadata to avoid following symlinks)
-    if std::fs::symlink_metadata(&final_path).is_ok() {
+    if openat(
+        &frames_dir,
+        &final_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .is_ok()
+    {
         let _ = inspect_png_asset(root, &sha256, width, height)?;
         return Ok(ProjectFrame {
             id: frame_id,
@@ -325,52 +368,63 @@ pub(crate) fn materialize_asset(
     // Write to unique temp sibling, fsync, rename
     static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp_path = frames_dir.join(format!(".tmp-{}-{}", std::process::id(), counter));
-
-    let cleanup = |path: &Path| {
-        let _ = std::fs::remove_file(path);
+    let temp_name = format!(".tmp-{}-{}", std::process::id(), counter);
+    let temp_path = root.join("assets/frames").join(&temp_name);
+    let cleanup = || {
+        let _ = unlinkat(&frames_dir, &temp_name, AtFlags::empty());
     };
 
-    std::fs::write(&temp_path, &encoded_bytes).map_err(|e| {
-        cleanup(&temp_path);
-        ProjectError::Io {
-            path: temp_path.clone(),
-            source: e,
-        }
+    let temp_handle = openat(
+        &frames_dir,
+        &temp_name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|e| ProjectError::Io {
+        path: temp_path.clone(),
+        source: e.into(),
     })?;
-
-    // Fsync the temp file
-    let temp_file = std::fs::File::open(&temp_path).map_err(|e| {
-        cleanup(&temp_path);
+    let mut temp_file = std::fs::File::from(temp_handle);
+    temp_file.write_all(&encoded_bytes).map_err(|e| {
+        cleanup();
         ProjectError::Io {
             path: temp_path.clone(),
             source: e,
         }
     })?;
     temp_file.sync_all().map_err(|e| {
-        cleanup(&temp_path);
+        cleanup();
         ProjectError::Io {
             path: temp_path.clone(),
             source: e,
         }
     })?;
+    drop(temp_file);
 
-    // Rename atomically; if final exists, verify and discard temp
-    match std::fs::rename(&temp_path, &final_path) {
+    match renameat_with(
+        &frames_dir,
+        &temp_name,
+        &frames_dir,
+        &final_name,
+        RenameFlags::NOREPLACE,
+    ) {
         Ok(()) => {
-            // Fsync the frames directory to persist the rename on non-journaled filesystems
-            fsync_dir(&frames_dir)?;
+            std::fs::File::from(frames_dir)
+                .sync_all()
+                .map_err(|e| ProjectError::Io {
+                    path: root.join("assets/frames"),
+                    source: e,
+                })?;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Final path was created between our check and rename; verify and discard temp
-            cleanup(&temp_path);
+        Err(e) if e == rustix::io::Errno::EXIST => {
+            cleanup();
             let _ = inspect_png_asset(root, &sha256, width, height)?;
         }
         Err(e) => {
-            cleanup(&temp_path);
+            cleanup();
             return Err(ProjectError::Io {
                 path: final_path,
-                source: e,
+                source: e.into(),
             });
         }
     }
@@ -393,6 +447,27 @@ mod tests {
 
     fn setup_project(root: &Path) {
         std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_rejects_symlinked_asset_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        let external = dir.path().join("external-assets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("assets")).unwrap();
+
+        let result = materialize_asset(
+            &root,
+            SnapshotFramePayload::Pixels(Arc::new(RgbaImage::new(8, 8))),
+            1,
+            0,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use rollshot_image_document::ImageDocument;
 /// Hash-free frame view: `Pixels` payloads have no digest until encoding.
 struct FrameMeta {
     id: FrameId,
+    sha256: Option<String>,
     width: u32,
     height: u32,
 }
@@ -19,6 +20,7 @@ impl FrameMeta {
     fn from_project_frame(frame: &ProjectFrame) -> Self {
         Self {
             id: frame.id,
+            sha256: Some(frame.sha256.clone()),
             width: frame.width,
             height: frame.height,
         }
@@ -31,6 +33,10 @@ impl FrameMeta {
         };
         Self {
             id: frame.id,
+            sha256: match &frame.payload {
+                SnapshotFramePayload::ExistingAsset { sha256, .. } => Some(sha256.clone()),
+                SnapshotFramePayload::Pixels(_) => None,
+            },
             width,
             height,
         }
@@ -111,6 +117,16 @@ fn validate_common(
                 Some(frame.id),
             ));
         }
+        if frame
+            .sha256
+            .as_deref()
+            .is_some_and(|digest| !is_canonical_sha256(digest))
+        {
+            return Err(ProjectError::InvalidAsset {
+                category: ProjectErrorCategory::InvalidAsset,
+                frame_id: frame.id,
+            });
+        }
     }
 
     let mut step_ids = BTreeSet::new();
@@ -177,6 +193,14 @@ fn validate_common(
     }
 
     Ok(())
+}
+
+fn is_canonical_sha256(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
 fn validate_annotations(
@@ -251,7 +275,7 @@ mod tests {
             frames: vec![ProjectFrame {
                 id: 1,
                 at_ms: 100,
-                sha256: "abc".into(),
+                sha256: "a".repeat(64),
                 width: 8,
                 height: 8,
             }],
@@ -322,6 +346,21 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_non_canonical_asset_digest() {
+        for digest in [
+            "abc".to_string(),
+            "A".repeat(64),
+            format!("{}../escape", "a".repeat(55)),
+            format!("{}/escape", "a".repeat(63)),
+        ] {
+            let mut manifest = valid_manifest();
+            manifest.frames[0].sha256 = digest;
+            let error = validate_manifest_structure(&manifest).unwrap_err();
+            assert_eq!(error.category(), "invalid-asset");
+        }
+    }
+
+    #[test]
     fn manifest_rejects_no_steps() {
         let mut manifest = valid_manifest();
         manifest.steps = vec![];
@@ -337,14 +376,14 @@ mod tests {
         manifest.frames.push(ProjectFrame {
             id: 1,
             at_ms: 200,
-            sha256: "def".into(),
+            sha256: "b".repeat(64),
             width: 8,
             height: 8,
         });
         manifest.frames.push(ProjectFrame {
             id: 2,
             at_ms: 300,
-            sha256: "ghi".into(),
+            sha256: "c".repeat(64),
             width: 8,
             height: 8,
         });
@@ -396,14 +435,14 @@ mod tests {
         manifest.frames.push(ProjectFrame {
             id: 7,
             at_ms: 200,
-            sha256: "x".into(),
+            sha256: "d".repeat(64),
             width: 8,
             height: 8,
         });
         manifest.frames.push(ProjectFrame {
             id: 8,
             at_ms: 300,
-            sha256: "y".into(),
+            sha256: "e".repeat(64),
             width: 8,
             height: 8,
         });
