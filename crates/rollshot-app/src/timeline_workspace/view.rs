@@ -308,23 +308,8 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         #[cfg(feature = "action-guide")]
         {
             let is_clean = state.save_state == super::ProjectSaveState::Clean;
-            let is_writable = matches!(
-                state.project_session,
-                Some(super::project::ProjectSession::Saved {
-                    access: super::project::ProjectAccess::Writable(_),
-                    ..
-                })
-            );
-            let outputs_all_current = {
-                let enabled = state.publish_enabled_kinds();
-                enabled.iter().all(|kind| {
-                    state.publish_freshness.get(kind)
-                        == Some(&rollshot_action::project::PublishFreshness::Current)
-                })
-            };
             let issue_pack_exporting = state.issue_pack.as_ref().is_some_and(|d| d.exporting);
-            let can_issue_pack =
-                is_clean && (is_writable || outputs_all_current) && !issue_pack_exporting;
+            let can_issue_pack = is_clean && !issue_pack_exporting;
             button(text("Create Issue Pack"))
                 .on_press_maybe(can_issue_pack.then_some(Message::ExportBugReport))
                 .style(button::secondary)

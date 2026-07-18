@@ -1,5 +1,9 @@
 use chrono::{DateTime, Local};
 use image::RgbaImage;
+#[cfg(feature = "action-guide")]
+use rollshot_action::project::PublishCancellation;
+#[cfg(feature = "action-guide")]
+use rollshot_action::project::PublishOutputKind;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -67,9 +71,17 @@ pub(crate) struct ActionGuideIssueAssets {
 
 #[cfg(feature = "action-guide")]
 #[derive(Clone)]
+pub(crate) struct PublishSource {
+    pub directory: PathBuf,
+    pub revision: u64,
+}
+
+#[cfg(feature = "action-guide")]
+#[derive(Clone)]
 pub(crate) struct ActionGuideExportSource {
     pub job: rollshot_action::ReviewedGuideExportJob,
     pub include_gif: bool,
+    pub publish_source: Option<PublishSource>,
 }
 
 #[cfg(feature = "action-guide")]
@@ -528,33 +540,50 @@ fn build_folder(
 
     #[cfg(feature = "action-guide")]
     if let Some(action) = action {
-        rollshot_action::render_guide_folder(&action.job, &tmp_dir.join("action-guide"))
-            .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
+        let publish_src = action.publish_source.as_ref();
+        let ag_dir = tmp_dir.join("action-guide");
+
+        let core_copied = publish_src
+            .is_some_and(|src| try_copy_published_core(&src.directory, src.revision, &ag_dir));
+        if !core_copied {
+            rollshot_action::render_guide_folder(&action.job, &ag_dir)
+                .map_err(|e| IssuePackError::Io(format!("export failed: {e}")))?;
+        }
 
         if cancel.is_cancelled() {
             return Err(IssuePackError::Cancelled);
         }
 
-        let storyboard_path = tmp_dir.join("action-guide/storyboard.png");
-        let storyboard_result = rollshot_action::render_reviewed_storyboard_cancellable(
-            &action.job,
-            rollshot_action::StoryboardOptions::default(),
-            cancel,
-        );
-        if let Err(error) = storyboard_result {
-            warnings.push(IssuePackWarning {
-                code: "storyboard_export_failed".to_string(),
-                message: format!("Storyboard export failed: {error}"),
-            });
-        } else if let Ok(rendered) = storyboard_result {
-            if let Err(error) = rendered
-                .image
-                .save_with_format(&storyboard_path, image::ImageFormat::Png)
-            {
+        let storyboard_path = ag_dir.join("storyboard.png");
+        let storyboard_copied = publish_src.is_some_and(|src| {
+            try_copy_published_file(
+                &src.directory.join("storyboard.png"),
+                src.revision,
+                PublishOutputKind::Storyboard,
+                &storyboard_path,
+            )
+        });
+        if !storyboard_copied {
+            let storyboard_result = rollshot_action::render_reviewed_storyboard_cancellable(
+                &action.job,
+                rollshot_action::StoryboardOptions::default(),
+                cancel,
+            );
+            if let Err(error) = storyboard_result {
                 warnings.push(IssuePackWarning {
                     code: "storyboard_export_failed".to_string(),
                     message: format!("Storyboard export failed: {error}"),
                 });
+            } else if let Ok(rendered) = storyboard_result {
+                if let Err(error) = rendered
+                    .image
+                    .save_with_format(&storyboard_path, image::ImageFormat::Png)
+                {
+                    warnings.push(IssuePackWarning {
+                        code: "storyboard_export_failed".to_string(),
+                        message: format!("Storyboard export failed: {error}"),
+                    });
+                }
             }
         }
 
@@ -563,17 +592,27 @@ fn build_folder(
         }
 
         if action.include_gif {
-            let gif_path = tmp_dir.join("action-guide/guide.gif");
-            if let Err(error) = rollshot_action::export_reviewed_gif(
-                &action.job,
-                rollshot_action::GifOptions::default(),
-                cancel,
-                &gif_path,
-            ) {
-                warnings.push(IssuePackWarning {
-                    code: "gif_export_failed".to_string(),
-                    message: format!("GIF export failed: {error}"),
-                });
+            let gif_path = ag_dir.join("guide.gif");
+            let gif_copied = publish_src.is_some_and(|src| {
+                try_copy_published_file(
+                    &src.directory.join("guide.gif"),
+                    src.revision,
+                    PublishOutputKind::Gif,
+                    &gif_path,
+                )
+            });
+            if !gif_copied {
+                if let Err(error) = rollshot_action::export_reviewed_gif(
+                    &action.job,
+                    rollshot_action::GifOptions::default(),
+                    cancel,
+                    &gif_path,
+                ) {
+                    warnings.push(IssuePackWarning {
+                        code: "gif_export_failed".to_string(),
+                        message: format!("GIF export failed: {error}"),
+                    });
+                }
             }
         }
     }
@@ -594,6 +633,87 @@ fn build_folder(
     std::fs::write(tmp_dir.join("manifest.json"), manifest)
         .map_err(|e| IssuePackError::Io(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(feature = "action-guide")]
+fn try_copy_published_file(
+    source: &Path,
+    current_revision: u64,
+    kind: rollshot_action::project::PublishOutputKind,
+    destination: &Path,
+) -> bool {
+    use rollshot_action::project::load_publish_state;
+    let Some(parent) = source.parent() else {
+        return false;
+    };
+    let state = load_publish_state(parent);
+    if state.freshness(kind, current_revision)
+        != rollshot_action::project::PublishFreshness::Current
+    {
+        return false;
+    }
+    if !source.exists() {
+        return false;
+    }
+    std::fs::copy(source, destination).is_ok()
+}
+
+#[cfg(feature = "action-guide")]
+fn try_copy_published_core(publish_dir: &Path, current_revision: u64, destination: &Path) -> bool {
+    use rollshot_action::project::load_publish_state;
+    let state = load_publish_state(publish_dir);
+    if state.freshness(
+        rollshot_action::project::PublishOutputKind::Core,
+        current_revision,
+    ) != rollshot_action::project::PublishFreshness::Current
+    {
+        return false;
+    }
+    let index_html = publish_dir.join("index.html");
+    let steps_md = publish_dir.join("steps.md");
+    let session_json = publish_dir.join("session.json");
+    if !index_html.exists() || !steps_md.exists() || !session_json.exists() {
+        return false;
+    }
+    std::fs::create_dir_all(destination).is_ok()
+        && copy_file_if_exists(&index_html, &destination.join("index.html"))
+        && copy_file_if_exists(&steps_md, &destination.join("steps.md"))
+        && copy_file_if_exists(&session_json, &destination.join("session.json"))
+        && copy_dir_if_exists(
+            &publish_dir.join("keyframes"),
+            &destination.join("keyframes"),
+        )
+}
+
+#[cfg(feature = "action-guide")]
+fn copy_file_if_exists(source: &Path, destination: &Path) -> bool {
+    !source.exists() || std::fs::copy(source, destination).is_ok()
+}
+
+#[cfg(feature = "action-guide")]
+fn copy_dir_if_exists(source: &Path, destination: &Path) -> bool {
+    if !source.exists() {
+        return true;
+    }
+    if std::fs::create_dir_all(destination).is_err() {
+        return false;
+    }
+    let entries = match std::fs::read_dir(source) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        let dst = destination.join(entry.file_name());
+        if src.is_dir() {
+            if !copy_dir_if_exists(&src, &dst) {
+                return false;
+            }
+        } else if std::fs::copy(&src, &dst).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 fn commit_noreplace_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), IssuePackError> {
@@ -1292,6 +1412,7 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
+            publish_source: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1361,6 +1482,7 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
+            publish_source: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1414,6 +1536,7 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
+            publish_source: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1457,6 +1580,7 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
+            publish_source: None,
         };
 
         let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1492,6 +1616,7 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
+            publish_source: None,
         };
 
         let result = export_zip_with_action_guide(&input, Some(source), tmp.path()).unwrap();
@@ -1517,6 +1642,7 @@ mod action_guide_tests {
         let source = ActionGuideExportSource {
             job,
             include_gif: false,
+            publish_source: None,
         };
 
         let result =
@@ -1575,6 +1701,7 @@ mod action_guide_tests {
         ActionGuideExportSource {
             job: issue_pack_test_job(),
             include_gif: false,
+            publish_source: None,
         }
     }
 
@@ -1674,6 +1801,7 @@ mod action_guide_tests {
             Some(ActionGuideExportSource {
                 job: issue_pack_test_job(),
                 include_gif: true,
+                publish_source: None,
             }),
             parent.path(),
             &cancel,
@@ -1723,6 +1851,110 @@ mod action_guide_tests {
                 !entry.ends_with("project.json"),
                 "must not contain project.json: {entry}"
             );
+        }
+    }
+
+    #[test]
+    fn stale_publish_files_are_not_copied() {
+        let parent = tempfile::tempdir().unwrap();
+        let publish_dir = parent.path().join("publish");
+        std::fs::create_dir_all(publish_dir.join("keyframes")).unwrap();
+        std::fs::write(publish_dir.join("index.html"), "<stale>").unwrap();
+        std::fs::write(publish_dir.join("steps.md"), "stale").unwrap();
+        std::fs::write(
+            publish_dir.join("session.json"),
+            r#"{"schema_version":1,"title":"Stale","region":{"x":0,"y":0,"width":8,"height":8},"input_source":"visual-only","input_capability":"semantic-events","steps":[]}"#,
+        )
+        .unwrap();
+        let mut state = rollshot_action::project::PublishStateV1::default();
+        state.outputs.insert(
+            rollshot_action::project::PublishOutputKind::Core,
+            rollshot_action::project::PublishedOutputV1::new(99),
+        );
+        rollshot_action::project::write_publish_state(parent.path(), &state).unwrap();
+
+        let input = reviewed_issue_pack_input();
+        let mut source = owned_action_source();
+        source.publish_source = Some(PublishSource {
+            directory: publish_dir.clone(),
+            revision: 1,
+        });
+
+        let result =
+            export_folder_with_action_guide(&input, Some(source), &parent.path().join("out"))
+                .unwrap();
+
+        let html =
+            std::fs::read_to_string(result.directory.join("action-guide/index.html")).unwrap();
+        assert!(
+            !html.contains("<stale>"),
+            "must not use stale published files"
+        );
+    }
+
+    #[test]
+    fn only_successful_derivatives_are_included() {
+        let (input, job, _store, _region) = many_step_action_input(260);
+        let tmp = tempfile::tempdir().unwrap();
+        let source = ActionGuideExportSource {
+            job,
+            include_gif: false,
+            publish_source: None,
+        };
+
+        let result = export_folder_with_action_guide(&input, Some(source), tmp.path()).unwrap();
+
+        assert!(result.directory.join("action-guide/steps.md").exists());
+        assert!(result
+            .directory
+            .join("action-guide/keyframes/001.png")
+            .exists());
+        assert!(
+            !result
+                .directory
+                .join("action-guide/storyboard.png")
+                .exists(),
+            "failed storyboard must not be included"
+        );
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code, "storyboard_export_failed");
+
+        let manifest = std::fs::read_to_string(result.directory.join("manifest.json")).unwrap();
+        assert!(
+            !manifest.contains("\"action_storyboard\""),
+            "failed storyboard must not appear in manifest: {manifest}"
+        );
+    }
+
+    #[test]
+    fn render_resolves_one_frame_at_a_time() {
+        let recording = recording();
+        let guide = Guide::from_candidates(recording.candidates);
+        let store = recording.store;
+        let job = build_job(
+            &guide,
+            &store,
+            region(),
+            InputCapability::SemanticEvents,
+            InputSourceKind::LinuxEvdev,
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let ag_dir = tmp.path().join("action-guide");
+        rollshot_action::render_guide_folder(&job, &ag_dir).unwrap();
+
+        let keyframes_dir = ag_dir.join("keyframes");
+        let count = std::fs::read_dir(&keyframes_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "png"))
+            .count();
+        assert_eq!(count, guide.steps().len());
+        for (i, step) in guide.steps().iter().enumerate() {
+            let path = keyframes_dir.join(format!("{:03}.png", i + 1));
+            assert!(path.exists(), "keyframe {} must exist", step.index);
+            let img = image::open(&path).unwrap();
+            assert!(img.width() > 0 && img.height() > 0);
         }
     }
 

@@ -734,6 +734,7 @@ mod tests {
             Some(ActionGuideExportSource {
                 job,
                 include_gif: false,
+                publish_source: None,
             }),
             parent.path(),
             &cancel,

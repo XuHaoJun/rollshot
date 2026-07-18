@@ -298,9 +298,24 @@ pub(crate) fn prepare_issue_pack_export(
     let job = build_reviewed_export_job(state).map_err(|error| error.to_string())?;
     let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
     let input = super::update::timeline_issue_pack_input(state, assets);
+    let publish_source = match &state.project_session {
+        Some(super::project::ProjectSession::Saved {
+            root,
+            base_revision,
+            ..
+        }) => Some(crate::issue_pack::PublishSource {
+            directory: root.join("publish"),
+            revision: *base_revision,
+        }),
+        _ => None,
+    };
     Ok(PendingIssuePackExport {
         input,
-        source: crate::issue_pack::ActionGuideExportSource { job, include_gif },
+        source: crate::issue_pack::ActionGuideExportSource {
+            job,
+            include_gif,
+            publish_source,
+        },
     })
 }
 
@@ -312,9 +327,24 @@ pub(crate) fn prepare_issue_pack_from_reviewed_job(
     let job = build_reviewed_export_job(state).map_err(|error| error.to_string())?;
     let assets = crate::issue_pack::ActionGuideIssueAssets::from_job(&job, include_gif);
     let input = super::update::timeline_issue_pack_input(state, assets);
+    let publish_source = match &state.project_session {
+        Some(super::project::ProjectSession::Saved {
+            root,
+            base_revision,
+            ..
+        }) => Some(crate::issue_pack::PublishSource {
+            directory: root.join("publish"),
+            revision: *base_revision,
+        }),
+        _ => None,
+    };
     Ok(PendingIssuePackExport {
         input,
-        source: crate::issue_pack::ActionGuideExportSource { job, include_gif },
+        source: crate::issue_pack::ActionGuideExportSource {
+            job,
+            include_gif,
+            publish_source,
+        },
     })
 }
 
