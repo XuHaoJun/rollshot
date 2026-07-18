@@ -14,6 +14,7 @@ use super::project::ProjectWriterGuard;
 
 #[derive(Debug, Clone, Default)]
 pub struct PublishSettings {
+    pub enabled_outputs: rollshot_action::project::EnabledOutputs,
     pub storyboard: StoryboardOptions,
     pub gif: rollshot_action::GifOptions,
     pub mp4: VideoOptions,
@@ -290,10 +291,15 @@ pub fn run_publish(
         arbiter: &arbiter,
     };
 
-    match purpose {
+    let outcome = match purpose {
         PublishPurpose::Background => run_background_publish(ctx),
         PublishPurpose::ShareGate => run_share_gate_publish(ctx),
-    }
+    };
+    let _ = sender.try_send(PublishEvent::Finished {
+        operation_id,
+        revision,
+    });
+    outcome
 }
 
 struct PublishContext<'a> {
@@ -386,7 +392,7 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
                     operation = ctx.operation_id.0,
                     revision = ctx.revision,
                     category = "core_render",
-                    error = %e,
+                    error_category = e.category(),
                     "core render failed"
                 );
                 let _ = ctx.sender.try_send(PublishEvent::OutputFailed {
@@ -486,10 +492,6 @@ fn run_background_publish(ctx: PublishContext<'_>) -> PublishOutcome {
         }
     }
 
-    let _ = ctx.sender.try_send(PublishEvent::Finished {
-        operation_id: ctx.operation_id,
-        revision: ctx.revision,
-    });
     if total_derivatives > 0 && committed_derivatives == 0 {
         PublishOutcome::Superseded
     } else {
@@ -513,7 +515,7 @@ fn run_share_gate_publish(ctx: PublishContext<'_>) -> PublishOutcome {
                 operation = ctx.operation_id.0,
                 revision = ctx.revision,
                 category = "core_render",
-                error = %e,
+                error_category = e.category(),
                 "sharegate core render failed"
             );
             return PublishOutcome::Superseded;
@@ -619,10 +621,6 @@ fn run_share_gate_publish(ctx: PublishContext<'_>) -> PublishOutcome {
                     kind: *kind,
                 });
             }
-            let _ = ctx.sender.try_send(PublishEvent::Finished {
-                operation_id: ctx.operation_id,
-                revision: ctx.revision,
-            });
             PublishOutcome::Committed
         }
         Err(e) => {
@@ -739,12 +737,18 @@ fn derivative_kinds(
     }
 }
 
-fn enabled_derivatives(_settings: &PublishSettings) -> Vec<PublishOutputKind> {
-    vec![
-        PublishOutputKind::Storyboard,
-        PublishOutputKind::Gif,
-        PublishOutputKind::Mp4,
-    ]
+fn enabled_derivatives(settings: &PublishSettings) -> Vec<PublishOutputKind> {
+    let mut kinds = Vec::new();
+    if settings.enabled_outputs.storyboard {
+        kinds.push(PublishOutputKind::Storyboard);
+    }
+    if settings.enabled_outputs.gif {
+        kinds.push(PublishOutputKind::Gif);
+    }
+    if settings.enabled_outputs.mp4 {
+        kinds.push(PublishOutputKind::Mp4);
+    }
+    kinds
 }
 
 fn derivative_stable_path(publish_dir: &Path, kind: PublishOutputKind) -> PathBuf {
@@ -941,14 +945,48 @@ mod tests {
         request.job.steps.clear();
 
         let cancel = PublishCancellation::new();
-        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
         let outcome = run_publish(request, cancel, &tx);
+        drop(tx);
 
         assert_eq!(outcome, PublishOutcome::Superseded);
         assert_eq!(
             std::fs::read_to_string(publish_dir.join("index.html")).unwrap(),
             old_content
         );
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|event| matches!(event, PublishEvent::Finished { .. })),
+            "a failed worker must still terminate the UI operation"
+        );
+    }
+
+    #[test]
+    fn all_enabled_with_default_project_toggles_publishes_only_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = make_test_project(dir.path());
+        let request = make_request(
+            PublishOperationId(1),
+            1,
+            root.clone(),
+            PublishPurpose::Background,
+        );
+
+        let cancel = PublishCancellation::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let outcome = run_publish(request, cancel, &tx);
+        drop(tx);
+
+        assert_eq!(outcome, PublishOutcome::Committed);
+        assert!(!root.join("publish/storyboard.png").exists());
+        assert!(!root.join("publish/guide.gif").exists());
+        assert!(!root.join("publish/summary.mp4").exists());
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).all(|event| {
+            !matches!(
+                event,
+                PublishEvent::OutputCommitted { .. } | PublishEvent::OutputFailed { .. }
+            )
+        }));
     }
 
     #[test]
@@ -1050,13 +1088,19 @@ mod tests {
         request.job.steps.clear();
 
         let cancel = PublishCancellation::new();
-        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
         let outcome = run_publish(request, cancel, &tx);
+        drop(tx);
 
         assert_eq!(outcome, PublishOutcome::Superseded);
         assert_eq!(
             std::fs::read_to_string(publish_dir.join("index.html")).unwrap(),
             old_html
+        );
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|event| matches!(event, PublishEvent::Finished { .. })),
+            "a failed share gate must terminate the waiting share"
         );
     }
 
@@ -1135,6 +1179,11 @@ mod tests {
             root.clone(),
             PublishPurpose::Background,
         );
+        request.settings.enabled_outputs = EnabledOutputs {
+            storyboard: true,
+            gif: true,
+            mp4: true,
+        };
         request.ffmpeg = None;
 
         let cancel = PublishCancellation::new();
@@ -1312,6 +1361,43 @@ mod tests {
                 "logs must not contain project root: {logs}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_io_failure_diagnostics_omit_title_bearing_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_root = make_test_project(dir.path());
+        let root = dir.path().join("Private Checkout.rollshot-guide");
+        std::fs::rename(&original_root, &root).unwrap();
+        let original_permissions = std::fs::metadata(&root).unwrap().permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_mode(0o555);
+        std::fs::set_permissions(&root, read_only).unwrap();
+
+        let request = make_request(
+            PublishOperationId(1),
+            1,
+            root.clone(),
+            PublishPurpose::Background,
+        );
+        let cancel = PublishCancellation::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let logs = crate::diagnostics::capture_test_logs(|| {
+            run_publish(request, cancel, &tx);
+        });
+
+        std::fs::set_permissions(&root, original_permissions).unwrap();
+        assert!(
+            !logs.contains("Private Checkout"),
+            "private path leaked: {logs}"
+        );
+        assert!(
+            !logs.contains(root.to_string_lossy().as_ref()),
+            "private path leaked: {logs}"
+        );
     }
 
     #[test]

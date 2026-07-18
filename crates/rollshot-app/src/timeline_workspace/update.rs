@@ -1870,7 +1870,10 @@ fn handle_save_completed_schedule_publish(state: &mut TimelineWorkspace) -> Upda
 
     let arbiter = state.publish_arbiter.clone();
     let writer_lease = state.pending_writer_guard.clone();
-    let settings = super::project_publish::PublishSettings::default();
+    let settings = super::project_publish::PublishSettings {
+        enabled_outputs: state.enabled_outputs,
+        ..Default::default()
+    };
 
     tracing::info!(
         target: "rollshot::publish",
@@ -1971,7 +1974,10 @@ fn handle_retry_publish_output(
 
     let arbiter = state.publish_arbiter.clone();
     let writer_lease = state.pending_writer_guard.clone();
-    let settings = super::project_publish::PublishSettings::default();
+    let settings = super::project_publish::PublishSettings {
+        enabled_outputs: state.enabled_outputs,
+        ..Default::default()
+    };
 
     let mut kinds = std::collections::BTreeSet::new();
     kinds.insert(kind);
@@ -2081,7 +2087,10 @@ fn handle_retry_all_publish_outputs(state: &mut TimelineWorkspace) -> Update {
 
     let arbiter = state.publish_arbiter.clone();
     let writer_lease = state.pending_writer_guard.clone();
-    let settings = super::project_publish::PublishSettings::default();
+    let settings = super::project_publish::PublishSettings {
+        enabled_outputs: state.enabled_outputs,
+        ..Default::default()
+    };
 
     let task = iced::Task::run(
         iced::stream::channel(32, async move |mut sender| {
@@ -2323,7 +2332,10 @@ fn handle_share_safe_copy_requested(state: &mut TimelineWorkspace) -> Update {
 
         let arbiter = state.publish_arbiter.clone();
         let writer_lease = state.pending_writer_guard.clone();
-        let settings = super::project_publish::PublishSettings::default();
+        let settings = super::project_publish::PublishSettings {
+            enabled_outputs: state.enabled_outputs,
+            ..Default::default()
+        };
 
         let task = iced::Task::run(
             iced::stream::channel(32, async move |mut sender| {
@@ -2434,6 +2446,7 @@ fn handle_share_destination_chosen(
         return Update::none();
     };
 
+    let destination = super::share::destination_in(&destination, root, kind);
     let request = super::share::ShareRequest {
         source_root: root.clone(),
         destination,
@@ -2915,14 +2928,6 @@ pub(crate) fn timeline_issue_pack_input(
 }
 
 fn begin_issue_pack_export(state: &mut TimelineWorkspace, kind: super::IssuePackKind) -> Update {
-    #[cfg(feature = "action-guide")]
-    if state
-        .frame_source
-        .as_ref()
-        .is_some_and(|fs| fs.in_memory().is_none())
-    {
-        return Update::none();
-    }
     if state.issue_pack.is_none() {
         return Update::none();
     }
@@ -6458,6 +6463,24 @@ key_source = { Env = "OPENAI_API_KEY" }
         }
 
         // ---- Share tests ----
+
+        #[test]
+        fn reopened_project_can_prepare_issue_pack_export() {
+            let mut ws = ws_project_backed_clean();
+            let mut dialog = crate::timeline_workspace::IssuePackDialog::new();
+            dialog.review_confirmed = true;
+            ws.issue_pack = Some(dialog);
+
+            let _task =
+                begin_issue_pack_export(&mut ws, crate::timeline_workspace::IssuePackKind::Folder);
+
+            let dialog = ws.issue_pack.as_ref().unwrap();
+            assert_eq!(
+                dialog.pending_kind,
+                Some(crate::timeline_workspace::IssuePackKind::Folder)
+            );
+            assert!(dialog.pending_export.is_some());
+        }
 
         #[test]
         fn share_safe_copy_rejected_when_unsaved() {

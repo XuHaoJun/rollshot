@@ -370,6 +370,7 @@ pub fn export_reviewed_video(
     if result.is_err() {
         let _ = child.kill();
     }
+    let status_result = child.wait();
     done.store(true, Ordering::Relaxed);
     let _ = watchdog_handle.join();
     let stderr_text = stderr_handle
@@ -377,7 +378,7 @@ pub fn export_reviewed_video(
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
 
-    let status = child.wait().map_err(|source| VideoError::Io {
+    let status = status_result.map_err(|source| VideoError::Io {
         path: tmp.display().to_string(),
         source,
     })?;
@@ -388,6 +389,10 @@ pub fn export_reviewed_video(
             Err(e)
         }
         Ok(()) => {
+            if cancel.is_cancelled() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(VideoError::Cancelled);
+            }
             if !status.success() {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(VideoError::Exit {
@@ -899,6 +904,76 @@ mod tests {
         let path = dir.join("summary.mp4");
         cancel.cancel();
         let result = export_reviewed_video(&job, VideoOptions::default(), &ffmpeg, &cancel, &path);
+        assert!(matches!(result, Err(VideoError::Cancelled)));
+        assert!(!path.exists());
+        assert!(!temp_mp4_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_streaming_cancels_during_ffmpeg_finalization() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile_dir();
+        let marker = dir.join("stdin-closed");
+        let ffmpeg = dir.join("ffmpeg-finalizing");
+        std::fs::write(
+            &ffmpeg,
+            format!(
+                "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\ncat >/dev/null\ntouch '{}'\nsleep 2\nprintf 'late mp4' > \"$out\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&ffmpeg).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg, perms).unwrap();
+
+        let cancel = PublishCancellation::new();
+        let worker_cancel = cancel.clone();
+        let path = dir.join("finalizing.mp4");
+        let worker_path = path.clone();
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::SemanticEvents,
+            steps: vec![crate::export::model::ReviewedGuideStep {
+                index: 1,
+                title: "Step".into(),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: 100,
+                image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                    RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255])),
+                )),
+                hotspots: Vec::new(),
+            }],
+        };
+        let worker = std::thread::spawn(move || {
+            export_reviewed_video(
+                &job,
+                VideoOptions::default(),
+                &ffmpeg,
+                &worker_cancel,
+                &worker_path,
+            )
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "fake ffmpeg never entered finalization");
+        cancel.cancel();
+
+        let result = worker.join().unwrap();
         assert!(matches!(result, Err(VideoError::Cancelled)));
         assert!(!path.exists());
         assert!(!temp_mp4_path(&path).exists());
