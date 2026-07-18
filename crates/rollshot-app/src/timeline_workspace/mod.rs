@@ -427,19 +427,20 @@ impl TimelineWorkspace {
     /// mutations. Draft selection/tool/modal changes are NOT gated by this.
     #[cfg(feature = "action-guide")]
     pub(crate) fn can_mutate(&self) -> bool {
-        !matches!(
-            &self.project_session,
-            Some(project::ProjectSession::Saved {
-                access: project::ProjectAccess::ReadOnly | project::ProjectAccess::CorruptReadOnly,
-                ..
-            })
-        )
+        self.save_state != ProjectSaveState::Saving
+            && !matches!(
+                &self.project_session,
+                Some(project::ProjectSession::Saved {
+                    access: project::ProjectAccess::ReadOnly
+                        | project::ProjectAccess::CorruptReadOnly,
+                    ..
+                })
+            )
     }
     /// Mark the project dirty after a successful persisted mutation.
     #[cfg(feature = "action-guide")]
     pub(crate) fn mark_project_dirty(&mut self) {
-        if self.save_state == ProjectSaveState::Clean || self.save_state == ProjectSaveState::Saving
-        {
+        if self.save_state == ProjectSaveState::Clean {
             self.save_state = ProjectSaveState::Dirty;
         }
     }
@@ -1179,6 +1180,41 @@ mod tests {
 
             assert_eq!(ws.first_save_prompt, FirstSavePrompt::Picking);
             assert!(result.task.units() > 0, "should return a picker task");
+        }
+
+        #[test]
+        fn save_as_requested_for_saved_project_sets_picking() {
+            let mut ws = ws_project_backed();
+
+            let result = super::super::update::update(&mut ws, Message::SaveAsRequested);
+
+            assert_eq!(ws.first_save_prompt, FirstSavePrompt::Picking);
+            assert!(result.task.units() > 0, "should return a picker task");
+        }
+
+        #[test]
+        fn saving_workspace_rejects_persisted_mutations() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Saving;
+            let title_before = ws.guide.title().to_string();
+
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::GuideTitleChanged("Late edit".into()),
+            );
+
+            assert_eq!(ws.guide.title(), title_before);
+            assert_eq!(ws.save_state, ProjectSaveState::Saving);
+        }
+
+        #[test]
+        fn dirty_marker_does_not_interrupt_inflight_save() {
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Saving;
+
+            ws.mark_project_dirty();
+
+            assert_eq!(ws.save_state, ProjectSaveState::Saving);
         }
 
         #[test]

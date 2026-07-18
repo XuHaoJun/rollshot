@@ -164,6 +164,7 @@ pub enum Message {
     RejectSingleVisualAnnotationSuggestion(rollshot_action::VisualAnnotationSuggestionId),
     SaveLater,
     SaveRequested,
+    SaveAsRequested,
     SavePickerChosen(Option<PathBuf>),
     SaveWorkerFinished(SaveWorkerOutcome),
     CloseSaveAndClose,
@@ -1644,6 +1645,16 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 Update::none()
             }
         }
+        Message::SaveAsRequested => {
+            #[cfg(feature = "action-guide")]
+            {
+                handle_save_as_requested(state)
+            }
+            #[cfg(not(feature = "action-guide"))]
+            {
+                Update::none()
+            }
+        }
         Message::SavePickerChosen(path) => {
             #[cfg(feature = "action-guide")]
             {
@@ -2213,13 +2224,17 @@ fn handle_save_requested(state: &mut TimelineWorkspace) -> Update {
     use super::project::ProjectSession;
     use super::FirstSavePrompt;
 
+    if state.save_state == super::ProjectSaveState::Saving {
+        return Update::none();
+    }
+
     let is_first_save = matches!(state.project_session, Some(ProjectSession::Unsaved) | None);
     if is_first_save {
         state.first_save_prompt = FirstSavePrompt::Picking;
         let op_id = state.next_export_operation_id.wrapping_add(1);
         state.next_export_operation_id = op_id;
         Update::task(Task::perform(
-            pick_save_dir(picker_default_dir()),
+            pick_save_path(picker_default_dir()),
             Message::SavePickerChosen,
         ))
     } else {
@@ -2274,6 +2289,29 @@ fn handle_save_requested(state: &mut TimelineWorkspace) -> Update {
 }
 
 #[cfg(feature = "action-guide")]
+fn handle_save_as_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    if state.save_state == super::ProjectSaveState::Saving
+        || !matches!(
+            state.project_session,
+            Some(ProjectSession::Saved {
+                access: ProjectAccess::Writable(_),
+                ..
+            })
+        )
+    {
+        return Update::none();
+    }
+
+    state.first_save_prompt = super::FirstSavePrompt::Picking;
+    Update::task(Task::perform(
+        pick_save_path(picker_default_dir()),
+        Message::SavePickerChosen,
+    ))
+}
+
+#[cfg(feature = "action-guide")]
 fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf>) -> Update {
     use super::project::ProjectSession;
     use super::FirstSavePrompt;
@@ -2283,8 +2321,13 @@ fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf
         return Update::none();
     }
 
-    let Some(parent) = path else {
-        state.first_save_prompt = FirstSavePrompt::Visible;
+    let Some(destination_path) = path else {
+        state.first_save_prompt =
+            if matches!(state.project_session, Some(ProjectSession::Saved { .. })) {
+                FirstSavePrompt::Hidden
+            } else {
+                FirstSavePrompt::Visible
+            };
         if state.close_intent == super::CloseIntent::SaveThenClose {
             state.close_intent = super::CloseIntent::None;
         }
@@ -2302,9 +2345,12 @@ fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf
         return Update::none();
     };
 
+    let destination_path = normalize_project_destination(destination_path);
     let destination = match &state.project_session {
-        Some(ProjectSession::Saved { .. }) => super::project::SaveDestination::SaveAs(parent),
-        _ => super::project::SaveDestination::FirstSave(parent),
+        Some(ProjectSession::Saved { .. }) => {
+            super::project::SaveDestination::SaveAs(destination_path)
+        }
+        _ => super::project::SaveDestination::FirstSave(destination_path),
     };
 
     let guard_slot = state.pending_writer_guard.clone();
@@ -2454,13 +2500,21 @@ fn build_snapshot_for_save(
 }
 
 #[cfg(feature = "action-guide")]
-async fn pick_save_dir(default_dir: PathBuf) -> Option<PathBuf> {
+async fn pick_save_path(default_dir: PathBuf) -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .set_directory(default_dir)
         .set_file_name("guide.rollshot-guide")
-        .pick_folder()
+        .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
+}
+
+#[cfg(feature = "action-guide")]
+fn normalize_project_destination(mut path: PathBuf) -> PathBuf {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("rollshot-guide") {
+        path.set_extension("rollshot-guide");
+    }
+    path
 }
 
 #[cfg(test)]
@@ -2468,6 +2522,18 @@ mod tests {
     use super::*;
     use crate::timeline_workspace::guide_export;
     use crate::timeline_workspace::tests::{recording_from_frames, synthetic_recording};
+
+    #[test]
+    fn project_destination_adds_required_extension() {
+        assert_eq!(
+            normalize_project_destination(PathBuf::from("/tmp/My Guide")),
+            PathBuf::from("/tmp/My Guide.rollshot-guide")
+        );
+        assert_eq!(
+            normalize_project_destination(PathBuf::from("/tmp/My Guide.rollshot-guide")),
+            PathBuf::from("/tmp/My Guide.rollshot-guide")
+        );
+    }
     use crate::timeline_workspace::visual_annotation_agent::VisualSuggestionConsent;
     use crate::timeline_workspace::{
         annotation::AnnotationTool, FfmpegSetupDialog, StoryboardCopyState, TimelineWorkspace,

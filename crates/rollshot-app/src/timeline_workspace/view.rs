@@ -176,14 +176,27 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
 
     #[cfg(feature = "action-guide")]
     let save_button: Element<Message> = if state.project_session.is_some() {
-        button(text("Save"))
-            .on_press_maybe(
-                (state.save_state == super::ProjectSaveState::Dirty
-                    || state.save_state == super::ProjectSaveState::Unsaved)
-                    .then_some(Message::SaveRequested),
-            )
-            .style(button::primary)
-            .into()
+        let can_save_as = matches!(
+            state.project_session,
+            Some(super::project::ProjectSession::Saved {
+                access: super::project::ProjectAccess::Writable(_),
+                ..
+            })
+        ) && state.save_state != super::ProjectSaveState::Saving;
+        row![
+            button(text("Save"))
+                .on_press_maybe(
+                    (state.save_state == super::ProjectSaveState::Dirty
+                        || state.save_state == super::ProjectSaveState::Unsaved)
+                        .then_some(Message::SaveRequested),
+                )
+                .style(button::primary),
+            button(text("Save As…"))
+                .on_press_maybe(can_save_as.then_some(Message::SaveAsRequested))
+                .style(button::secondary),
+        ]
+        .spacing(6)
+        .into()
     } else {
         Space::new()
             .width(Length::Shrink)
