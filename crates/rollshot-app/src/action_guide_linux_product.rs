@@ -45,6 +45,7 @@ pub(crate) enum Message {
     OpenReadOnly,
     CancelLockedOpen,
     WindowReady,
+    CloseRequested(iced::window::Id),
 }
 
 #[derive(Clone)]
@@ -208,6 +209,16 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             iced::Task::none()
         }
         Message::WindowReady => iced::Task::none(),
+        Message::CloseRequested(id) => {
+            if state.phase == Phase::Timeline {
+                update(
+                    state,
+                    Message::Timeline(crate::timeline_workspace::Message::CloseRequested),
+                )
+            } else {
+                iced::window::close(id)
+            }
+        }
     }
 }
 
@@ -257,9 +268,10 @@ fn lock_conflict_view<'a>() -> iced::Element<'a, Message> {
 
 fn subscription(state: &State) -> iced::Subscription<Message> {
     match state.phase {
-        Phase::Home | Phase::Opening | Phase::LockConflict => {
-            crate::action_guide_home::update::subscription().map(Message::Home)
-        }
+        Phase::Home | Phase::Opening | Phase::LockConflict => iced::Subscription::batch([
+            crate::action_guide_home::update::subscription().map(Message::Home),
+            iced::window::close_requests().map(Message::CloseRequested),
+        ]),
         Phase::Timeline => {
             if let Some(ref ws) = state.timeline {
                 crate::timeline_workspace::subscription(ws).map(Message::Timeline)
@@ -335,14 +347,7 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
         let mut state = State::new(recent);
         let mut tasks = Vec::new();
 
-        let (_window_id, open_task) = iced::window::open(iced::window::Settings {
-            size: iced::Size::new(1100.0, 760.0),
-            min_size: Some(iced::Size::new(640.0, 420.0)),
-            decorations: true,
-            resizable: true,
-            exit_on_close_request: true,
-            ..Default::default()
-        });
+        let (_window_id, open_task) = iced::window::open(product_window_settings());
         tasks.push(open_task.map(|_id| Message::WindowReady));
 
         match boot_initial {
@@ -370,6 +375,17 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
         .subscription(subscription)
         .run()
         .map_err(|e| e.to_string())
+}
+
+fn product_window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(1100.0, 760.0),
+        min_size: Some(iced::Size::new(640.0, 420.0)),
+        decorations: true,
+        resizable: true,
+        exit_on_close_request: false,
+        ..Default::default()
+    }
 }
 
 fn title(state: &State, _window: iced::window::Id) -> String {
@@ -415,6 +431,23 @@ mod tests {
         assert_eq!(state.phase, Phase::Home);
         assert!(state.timeline.is_none());
         assert!(state.lock_conflict_path.is_none());
+    }
+
+    #[test]
+    fn product_window_intercepts_close_requests() {
+        assert!(!product_window_settings().exit_on_close_request);
+    }
+
+    #[test]
+    fn home_close_request_closes_window_explicitly() {
+        let mut state = test_state();
+
+        let task = update(
+            &mut state,
+            Message::CloseRequested(iced::window::Id::unique()),
+        );
+
+        assert!(task.units() > 0);
     }
 
     #[test]
