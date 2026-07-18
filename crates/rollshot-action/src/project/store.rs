@@ -76,16 +76,20 @@ fn read_manifest(root: &Path) -> Result<ProjectManifestV1, ProjectError> {
     Ok(manifest)
 }
 
-fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV1) -> Result<(), ProjectError> {
-    let json = serde_json::to_vec_pretty(manifest).map_err(|e| ProjectError::Encode {
+pub(crate) fn write_json_atomic(
+    root: &Path,
+    file_name: &str,
+    value: &impl serde::Serialize,
+) -> Result<(), ProjectError> {
+    let json = serde_json::to_vec_pretty(value).map_err(|e| ProjectError::Encode {
         message: e.to_string(),
     })?;
 
     let pid = std::process::id();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_name = format!("project.json.tmp-{pid}-{counter}");
+    let temp_name = format!("{file_name}.tmp-{pid}-{counter}");
     let temp_path = root.join(&temp_name);
-    let final_path = root.join("project.json");
+    let final_path = root.join(file_name);
 
     let cleanup = |p: &Path| {
         let _ = std::fs::remove_file(p);
@@ -125,6 +129,10 @@ fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV1) -> Result<()
     fsync_dir(root)?;
 
     Ok(())
+}
+
+fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV1) -> Result<(), ProjectError> {
+    write_json_atomic(root, "project.json", manifest)
 }
 
 fn fsync_dir(path: &Path) -> Result<(), ProjectError> {
