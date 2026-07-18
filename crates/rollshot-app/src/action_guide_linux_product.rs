@@ -93,7 +93,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             let result = state.home.update(home_msg);
             match result.effect {
                 action_guide_home::Effect::None => result.task.map(Message::Home),
-                action_guide_home::Effect::PickProject => result.task.map(Message::Home),
+                action_guide_home::Effect::PickProject => {
+                    iced::Task::perform(pick_project_folder(), Message::Home)
+                }
                 action_guide_home::Effect::InspectSelection(path) => {
                     state.phase = Phase::Opening;
                     iced::Task::perform(inspect_and_open(path), |msg| msg)
@@ -106,9 +108,8 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     state.phase = Phase::Opening;
                     iced::Task::perform(open_project_task(path, true), |msg| msg)
                 }
-                action_guide_home::Effect::OpenLegacyReader(_path) => {
-                    state.home.message =
-                        Some("Legacy readers are not yet supported in the integrated host.".into());
+                action_guide_home::Effect::OpenLegacyReader(path) => {
+                    state.home.message = open_legacy_reader(&path).err();
                     iced::Task::none()
                 }
             }
@@ -135,10 +136,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                 SelectedDirectoryKind::Project(project_path) => {
                     iced::Task::perform(open_project_task(project_path, true), |msg| msg)
                 }
-                SelectedDirectoryKind::LegacyReader(_reader_path) => {
+                SelectedDirectoryKind::LegacyReader(reader_path) => {
                     state.phase = Phase::Home;
-                    state.home.message =
-                        Some("Legacy readers are not yet supported in the integrated host.".into());
+                    state.home.message = open_legacy_reader(&reader_path).err();
                     iced::Task::none()
                 }
                 SelectedDirectoryKind::Invalid => {
@@ -370,9 +370,14 @@ async fn pick_project_folder() -> action_guide_home::Message {
         .pick_folder()
         .await;
     match folder {
-        Some(handle) => action_guide_home::Message::RecentSelected(handle.path().to_path_buf()),
+        Some(handle) => action_guide_home::Message::PickerSelected(handle.path().to_path_buf()),
         None => action_guide_home::Message::PickerCancelled,
     }
+}
+
+fn open_legacy_reader(path: &std::path::Path) -> Result<(), String> {
+    let entrypoint = action_guide_home::legacy_reader_entrypoint(path).map_err(str::to_string)?;
+    crate::platform_actions::open_path(&entrypoint)
 }
 
 #[cfg(test)]
@@ -411,11 +416,12 @@ mod tests {
     #[test]
     fn open_picker_emits_pick_project_effect() {
         let mut state = test_state();
-        let _task = update(
+        let task = update(
             &mut state,
             Message::Home(action_guide_home::Message::OpenPicker),
         );
         assert_eq!(state.phase, Phase::Home);
+        assert!(task.units() > 0, "should launch folder picker");
     }
 
     #[test]

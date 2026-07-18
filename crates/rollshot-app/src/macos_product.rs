@@ -469,7 +469,9 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             let result = home.update(home_msg);
             match result.effect {
                 action_guide_home::Effect::None => result.task.map(Message::HomeMsg),
-                action_guide_home::Effect::PickProject => result.task.map(Message::HomeMsg),
+                action_guide_home::Effect::PickProject => {
+                    Task::perform(pick_project_folder(), Message::HomeMsg)
+                }
                 action_guide_home::Effect::InspectSelection(path) => {
                     let Phase::Home(home) = std::mem::replace(
                         &mut product.phase,
@@ -520,11 +522,9 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     product.phase = Phase::Opening(home);
                     Task::perform(open_project_task(path, true), |msg| msg)
                 }
-                action_guide_home::Effect::OpenLegacyReader(_path) => {
+                action_guide_home::Effect::OpenLegacyReader(path) => {
                     if let Phase::Home(ref mut home) = &mut product.phase {
-                        home.message = Some(
-                            "Legacy readers are not yet supported in the integrated host.".into(),
-                        );
+                        home.message = open_legacy_reader(&path).err();
                     }
                     Task::none()
                 }
@@ -539,9 +539,8 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 SelectedDirectoryKind::Project(project_path) => {
                     Task::perform(open_project_task(project_path, true), |msg| msg)
                 }
-                SelectedDirectoryKind::LegacyReader(_reader_path) => {
-                    home.message =
-                        Some("Legacy readers are not yet supported in the integrated host.".into());
+                SelectedDirectoryKind::LegacyReader(reader_path) => {
+                    home.message = open_legacy_reader(&reader_path).err();
                     let Phase::Opening(home) = std::mem::replace(
                         &mut product.phase,
                         Phase::Home(ActionGuideHome::new_empty()),
@@ -1242,9 +1241,15 @@ async fn pick_project_folder() -> action_guide_home::Message {
         .pick_folder()
         .await;
     match folder {
-        Some(handle) => action_guide_home::Message::RecentSelected(handle.path().to_path_buf()),
+        Some(handle) => action_guide_home::Message::PickerSelected(handle.path().to_path_buf()),
         None => action_guide_home::Message::PickerCancelled,
     }
+}
+
+#[cfg(feature = "action-guide")]
+fn open_legacy_reader(path: &std::path::Path) -> Result<(), String> {
+    let entrypoint = action_guide_home::legacy_reader_entrypoint(path).map_err(str::to_string)?;
+    crate::platform_actions::open_path(&entrypoint)
 }
 
 #[cfg(test)]
@@ -1619,11 +1624,12 @@ mod tests {
         #[test]
         fn open_picker_stays_in_home_phase() {
             let mut product = product_in_home_phase();
-            let _task = update(
+            let task = update(
                 &mut product,
                 Message::HomeMsg(action_guide_home::Message::OpenPicker),
             );
             assert!(matches!(product.phase, Phase::Home(_)));
+            assert!(task.units() > 0, "should launch folder picker");
         }
 
         #[test]

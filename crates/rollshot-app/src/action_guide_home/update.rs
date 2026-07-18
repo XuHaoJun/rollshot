@@ -28,6 +28,7 @@ pub struct ActionGuideHome {
 pub enum Message {
     RecordNew,
     OpenPicker,
+    PickerSelected(PathBuf),
     PickerCancelled,
     RecentSelected(PathBuf),
     RemoveRecent(PathBuf),
@@ -90,6 +91,13 @@ impl ActionGuideHome {
                 task: Task::none(),
                 effect: Effect::PickProject,
             },
+            Message::PickerSelected(path) => {
+                self.opening = true;
+                Update {
+                    task: Task::none(),
+                    effect: Effect::InspectSelection(path),
+                }
+            }
             Message::PickerCancelled => Update::none(),
             Message::RecentSelected(path) => {
                 if !self.recent_entry_available(&path) {
@@ -190,6 +198,15 @@ pub fn inspect_selection_shape(path: &Path) -> SelectedDirectoryKind {
     }
 }
 
+pub fn legacy_reader_entrypoint(path: &Path) -> Result<PathBuf, &'static str> {
+    let index = path.join("index.html");
+    if index.is_file() {
+        Ok(index)
+    } else {
+        Err("Legacy Action Guide is missing index.html")
+    }
+}
+
 /// Blocking inspection with a fake for testing — calls the provided closure
 /// instead of hitting the filesystem.
 #[cfg(test)]
@@ -233,6 +250,29 @@ mod tests {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::OpenPicker);
         assert_eq!(update.effect, Effect::PickProject);
+    }
+
+    #[test]
+    fn picker_selection_inspects_path_not_in_recents() {
+        let (_dir, mut home) = setup_home();
+        let path = PathBuf::from("/new/project");
+
+        let update = home.update(Message::PickerSelected(path.clone()));
+
+        assert_eq!(update.effect, Effect::InspectSelection(path));
+        assert!(home.opening);
+    }
+
+    #[test]
+    fn legacy_reader_entrypoint_requires_index_html() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(legacy_reader_entrypoint(dir.path()).is_err());
+
+        std::fs::write(dir.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            legacy_reader_entrypoint(dir.path()).unwrap(),
+            dir.path().join("index.html")
+        );
     }
 
     #[test]
