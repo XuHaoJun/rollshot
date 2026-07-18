@@ -7,6 +7,7 @@
 pub mod model;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use crate::diagnostics::TARGET_EXPORT;
 use crate::error::ExportError;
@@ -88,7 +89,8 @@ fn build_folder(job: &ReviewedGuideExportJob, destination: &Path) -> Result<(), 
         let file_name = format!("{:03}.png", offset + 1);
         let relative = format!("keyframes/{file_name}");
         let path = destination.join(&relative);
-        step.image.with_flattened_image(|image| {
+        let cancel = AtomicBool::new(false);
+        step.image.with_flattened_image(&cancel, |image| {
             image
                 .save_with_format(&path, image::ImageFormat::Png)
                 .map_err(|source| ExportError::Encode {

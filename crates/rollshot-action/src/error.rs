@@ -42,6 +42,12 @@ pub enum ExportError {
     Serialize { category: &'static str },
     #[error("template error in {category}")]
     Template { category: &'static str },
+    #[error("step {step} asset file is missing")]
+    AssetMissing { step: usize },
+    #[error("step {step} asset decode failed")]
+    AssetDecodeFailed { step: usize },
+    #[error("export cancelled")]
+    Cancelled,
 }
 
 impl ExportError {
@@ -55,6 +61,9 @@ impl ExportError {
             Self::DestinationExists { .. } => "destination_exists",
             Self::Serialize { .. } => "serialize",
             Self::Template { .. } => "template",
+            Self::AssetMissing { .. } => "asset_missing",
+            Self::AssetDecodeFailed { .. } => "asset_decode_failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -78,6 +87,10 @@ pub enum GifError {
         #[source]
         source: std::io::Error,
     },
+    #[error("GIF export cancelled")]
+    Cancelled,
+    #[error("derivative frame too large: {pixels} pixels exceeds ceiling of {ceiling}")]
+    FrameTooLarge { pixels: u64, ceiling: u64 },
 }
 
 /// Summary-MP4 export failure. On any error, no file is left at the target path
@@ -109,6 +122,10 @@ pub enum VideoError {
         #[source]
         source: std::io::Error,
     },
+    #[error("video export cancelled")]
+    Cancelled,
+    #[error("derivative frame too large: {pixels} pixels exceeds ceiling of {ceiling}")]
+    FrameTooLarge { pixels: u64, ceiling: u64 },
 }
 
 /// Storyboard PNG export failure. On any error, no file is left at the target
@@ -133,6 +150,8 @@ pub enum StoryboardError {
         #[source]
         source: std::io::Error,
     },
+    #[error("storyboard export cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]
@@ -168,6 +187,12 @@ mod tests {
         );
         let missing = GifError::KeyframeMissing { index: 2 };
         assert!(missing.to_string().contains("step 2"), "{missing}");
+        assert_eq!(GifError::Cancelled.to_string(), "GIF export cancelled");
+        let too_large = GifError::FrameTooLarge {
+            pixels: 100,
+            ceiling: 50,
+        };
+        assert!(too_large.to_string().contains("100"), "{too_large}");
     }
 
     #[test]
@@ -182,6 +207,12 @@ mod tests {
             path: "/missing/ffmpeg".to_string(),
         };
         assert!(invalid.to_string().contains("/missing/ffmpeg"), "{invalid}");
+        assert_eq!(VideoError::Cancelled.to_string(), "video export cancelled");
+        let too_large = VideoError::FrameTooLarge {
+            pixels: 200,
+            ceiling: 100,
+        };
+        assert!(too_large.to_string().contains("200"), "{too_large}");
     }
 
     #[test]
@@ -198,6 +229,10 @@ mod tests {
                 .to_string()
                 .contains("storyboard canvas is too large"),
             "{too_large}"
+        );
+        assert_eq!(
+            StoryboardError::Cancelled.to_string(),
+            "storyboard export cancelled"
         );
     }
 }

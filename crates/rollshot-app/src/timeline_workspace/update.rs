@@ -109,6 +109,8 @@ pub enum Message {
     },
     /// Close the Issue Pack dialog without exporting.
     IssuePackCancel,
+    /// Cancel an in-progress Issue Pack export.
+    IssuePackCancelExport,
     #[cfg(target_os = "macos")]
     OpenInputMonitoringSettings,
     DismissBanner,
@@ -177,6 +179,34 @@ pub enum Message {
             rollshot_action::FrameId,
             rollshot_action::StepFrameLoadRequest,
         )>,
+    },
+    #[cfg(feature = "action-guide")]
+    TogglePublishOutput(rollshot_action::project::PublishOutputKind),
+    #[cfg(feature = "action-guide")]
+    OpenPublishDetails,
+    #[cfg(feature = "action-guide")]
+    RetryPublishOutput(rollshot_action::project::PublishOutputKind),
+    #[cfg(feature = "action-guide")]
+    RetryAllPublishOutputs,
+    #[cfg(feature = "action-guide")]
+    CancelPublish,
+    #[cfg(feature = "action-guide")]
+    PublishEvent(super::project_publish::PublishEvent),
+    #[cfg(feature = "action-guide")]
+    ShareSafeCopyRequested,
+    #[cfg(feature = "action-guide")]
+    ShareEditableProjectRequested,
+    #[cfg(feature = "action-guide")]
+    ShareDestinationChosen {
+        operation_id: u64,
+        destination: Option<std::path::PathBuf>,
+    },
+    #[cfg(feature = "action-guide")]
+    ShareGateFinished(super::project_publish::PublishEvent),
+    #[cfg(feature = "action-guide")]
+    ShareWorkerFinished {
+        operation_id: u64,
+        result: super::share::ShareOutcome,
     },
 }
 
@@ -394,6 +424,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         state.close_intent = super::CloseIntent::Confirming;
                         state.pending_discard = true;
                     } else {
+                        cancel_active_publish(state);
                         return Update::effect(super::Effect::CloseWorkspace);
                     }
                 } else {
@@ -413,6 +444,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         }
         Message::ConfirmDiscard => {
             state.pending_discard = false;
+            #[cfg(feature = "action-guide")]
+            cancel_active_publish(state);
             Update::effect(super::Effect::CloseWorkspace)
         }
         Message::ExportRequested => {
@@ -819,7 +852,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 dialog.exporting = false;
                 return Update::none();
             };
-            let (kind, pending, operation_id) = {
+            let (kind, pending, operation_id, cancel) = {
                 let Some(dialog) = state.issue_pack.as_mut() else {
                     return Update::none();
                 };
@@ -831,11 +864,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     return Update::none();
                 };
                 let operation_id = dialog.operation_id;
+                let cancel = dialog.cancel.clone();
                 dialog.exporting = true;
-                (kind, pending, operation_id)
+                (kind, pending, operation_id, cancel)
             };
             Update::task(Task::perform(
-                run_issue_pack_export(pending, kind, parent),
+                run_issue_pack_export(pending, kind, parent, cancel),
                 move |result| Message::IssuePackFinished {
                     operation_id,
                     result,
@@ -881,7 +915,19 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::none()
         }
         Message::IssuePackCancel => {
+            if let Some(dialog) = &state.issue_pack {
+                dialog.cancel.cancel();
+            }
             state.issue_pack = None;
+            Update::none()
+        }
+        Message::IssuePackCancelExport => {
+            if let Some(dialog) = &mut state.issue_pack {
+                dialog.cancel.cancel();
+                dialog.exporting = false;
+                dialog.pending_kind = None;
+                dialog.pending_export = None;
+            }
             Update::none()
         }
         #[cfg(target_os = "macos")]
@@ -1704,6 +1750,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::CloseDiscard => {
             state.close_intent = super::CloseIntent::None;
             state.pending_discard = false;
+            #[cfg(feature = "action-guide")]
+            cancel_active_publish(state);
             Update::effect(super::Effect::CloseWorkspace)
         }
         Message::CloseCancel => {
@@ -1726,11 +1774,832 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 Update::none()
             }
         }
+        #[cfg(feature = "action-guide")]
+        Message::TogglePublishOutput(kind) => handle_toggle_publish_output(state, kind),
+        #[cfg(feature = "action-guide")]
+        Message::OpenPublishDetails => {
+            state.publish_details_open = !state.publish_details_open;
+            Update::none()
+        }
+        #[cfg(feature = "action-guide")]
+        Message::RetryPublishOutput(kind) => handle_retry_publish_output(state, kind),
+        #[cfg(feature = "action-guide")]
+        Message::RetryAllPublishOutputs => handle_retry_all_publish_outputs(state),
+        #[cfg(feature = "action-guide")]
+        Message::CancelPublish => handle_cancel_publish(state),
+        #[cfg(feature = "action-guide")]
+        Message::PublishEvent(event) => handle_publish_event(state, event),
+        #[cfg(feature = "action-guide")]
+        Message::ShareSafeCopyRequested => handle_share_safe_copy_requested(state),
+        #[cfg(feature = "action-guide")]
+        Message::ShareEditableProjectRequested => handle_share_editable_project_requested(state),
+        #[cfg(feature = "action-guide")]
+        Message::ShareDestinationChosen {
+            operation_id,
+            destination,
+        } => handle_share_destination_chosen(state, operation_id, destination),
+        #[cfg(feature = "action-guide")]
+        Message::ShareGateFinished(event) => handle_share_gate_finished(state, event),
+        #[cfg(feature = "action-guide")]
+        Message::ShareWorkerFinished {
+            operation_id,
+            result,
+        } => handle_share_worker_finished(state, operation_id, result),
     }
 }
 
 pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
     iced::window::close_requests().map(|_id| Message::CloseRequested)
+}
+
+// ---------------------------------------------------------------------------
+// Publish lifecycle (action-guide feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_save_completed_schedule_publish(state: &mut TimelineWorkspace) -> Update {
+    let Some(super::project::ProjectSession::Saved {
+        root,
+        base_revision,
+        access,
+    }) = &state.project_session
+    else {
+        return Update::none();
+    };
+
+    if matches!(access, super::project::ProjectAccess::CorruptReadOnly) {
+        return Update::none();
+    }
+
+    let revision = *base_revision;
+    let root = root.clone();
+
+    let job = match super::guide_export::build_reviewed_export_job(state) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!(
+                target: "rollshot::publish",
+                %error,
+                "failed to build reviewed export job for publish"
+            );
+            return Update::none();
+        }
+    };
+
+    if let Some(ref op) = state.publish_operation {
+        op.cancel.cancel();
+    }
+
+    state.next_publish_operation_id = state.next_publish_operation_id.saturating_add(1);
+    let operation_id = super::project_publish::PublishOperationId(state.next_publish_operation_id);
+
+    let enabled = state.publish_enabled_kinds();
+    let mut per_output = std::collections::BTreeMap::new();
+    for kind in &enabled {
+        per_output.insert(*kind, super::PublishOutputStatus::Updating);
+    }
+
+    let cancel = rollshot_action::project::PublishCancellation::new();
+    state.publish_operation = Some(super::PublishOperation {
+        id: operation_id,
+        revision,
+        cancel: cancel.clone(),
+        per_output,
+    });
+    state.publish_arbiter.begin(operation_id, revision);
+
+    let arbiter = state.publish_arbiter.clone();
+    let writer_lease = state.pending_writer_guard.clone();
+    let settings = super::project_publish::PublishSettings {
+        enabled_outputs: state.enabled_outputs,
+        ..Default::default()
+    };
+
+    tracing::info!(
+        target: "rollshot::publish",
+        operation = operation_id.0,
+        revision,
+        "publish scheduled after save"
+    );
+
+    let task = iced::Task::run(
+        iced::stream::channel(32, async move |mut sender| {
+            use iced::futures::SinkExt;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+            let request = super::project_publish::PublishRequest {
+                operation_id,
+                revision,
+                project_root: root,
+                writer_lease,
+                arbiter,
+                job,
+                settings,
+                selection: super::project_publish::PublishSelection::AllEnabled,
+                purpose: super::project_publish::PublishPurpose::Background,
+                ffmpeg: None,
+            };
+
+            let cancel_clone = cancel.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                super::project_publish::run_publish(request, cancel_clone, &tx)
+            });
+
+            while let Some(event) = rx.recv().await {
+                let _ = sender.send(event).await;
+            }
+
+            let _ = worker.await;
+        }),
+        Message::PublishEvent,
+    );
+
+    Update::task(task)
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_retry_publish_output(
+    state: &mut TimelineWorkspace,
+    kind: rollshot_action::project::PublishOutputKind,
+) -> Update {
+    let Some(super::project::ProjectSession::Saved {
+        root,
+        base_revision,
+        access,
+    }) = &state.project_session
+    else {
+        return Update::none();
+    };
+
+    if !matches!(access, super::project::ProjectAccess::Writable(_)) {
+        return Update::none();
+    }
+    if state.save_state != super::ProjectSaveState::Clean {
+        return Update::none();
+    }
+
+    let revision = *base_revision;
+    let root = root.clone();
+
+    let job = match super::guide_export::build_reviewed_export_job(state) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!(
+                target: "rollshot::publish",
+                %error,
+                "failed to build reviewed export job for retry"
+            );
+            return Update::none();
+        }
+    };
+
+    if let Some(ref op) = state.publish_operation {
+        op.cancel.cancel();
+    }
+
+    state.next_publish_operation_id = state.next_publish_operation_id.saturating_add(1);
+    let operation_id = super::project_publish::PublishOperationId(state.next_publish_operation_id);
+
+    let mut per_output = std::collections::BTreeMap::new();
+    per_output.insert(kind, super::PublishOutputStatus::Updating);
+
+    let cancel = rollshot_action::project::PublishCancellation::new();
+    state.publish_operation = Some(super::PublishOperation {
+        id: operation_id,
+        revision,
+        cancel: cancel.clone(),
+        per_output,
+    });
+    state.publish_arbiter.begin(operation_id, revision);
+
+    let arbiter = state.publish_arbiter.clone();
+    let writer_lease = state.pending_writer_guard.clone();
+    let settings = super::project_publish::PublishSettings {
+        enabled_outputs: state.enabled_outputs,
+        ..Default::default()
+    };
+
+    let mut kinds = std::collections::BTreeSet::new();
+    kinds.insert(kind);
+
+    let task = iced::Task::run(
+        iced::stream::channel(32, async move |mut sender| {
+            use iced::futures::SinkExt;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+            let request = super::project_publish::PublishRequest {
+                operation_id,
+                revision,
+                project_root: root,
+                writer_lease,
+                arbiter,
+                job,
+                settings,
+                selection: super::project_publish::PublishSelection::Only(kinds),
+                purpose: super::project_publish::PublishPurpose::Background,
+                ffmpeg: None,
+            };
+
+            let cancel_clone = cancel.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                super::project_publish::run_publish(request, cancel_clone, &tx)
+            });
+
+            while let Some(event) = rx.recv().await {
+                let _ = sender.send(event).await;
+            }
+
+            let _ = worker.await;
+        }),
+        Message::PublishEvent,
+    );
+
+    Update::task(task)
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_retry_all_publish_outputs(state: &mut TimelineWorkspace) -> Update {
+    let Some(super::project::ProjectSession::Saved {
+        root,
+        base_revision,
+        access,
+    }) = &state.project_session
+    else {
+        return Update::none();
+    };
+
+    if !matches!(access, super::project::ProjectAccess::Writable(_)) {
+        return Update::none();
+    }
+    if state.save_state != super::ProjectSaveState::Clean {
+        return Update::none();
+    }
+
+    let revision = *base_revision;
+    let root = root.clone();
+
+    let job = match super::guide_export::build_reviewed_export_job(state) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!(
+                target: "rollshot::publish",
+                %error,
+                "failed to build reviewed export job for retry all"
+            );
+            return Update::none();
+        }
+    };
+
+    if let Some(ref op) = state.publish_operation {
+        op.cancel.cancel();
+    }
+
+    state.next_publish_operation_id = state.next_publish_operation_id.saturating_add(1);
+    let operation_id = super::project_publish::PublishOperationId(state.next_publish_operation_id);
+
+    let load = rollshot_action::project::load_publish_state(&root);
+    let enabled = state.publish_enabled_kinds();
+    let mut per_output = std::collections::BTreeMap::new();
+    let mut retry_kinds = std::collections::BTreeSet::new();
+    for kind in &enabled {
+        let status = state.publish_output_status(*kind, &load, revision);
+        if matches!(
+            status,
+            super::PublishOutputStatus::Stale | super::PublishOutputStatus::Failed
+        ) {
+            per_output.insert(*kind, super::PublishOutputStatus::Updating);
+            retry_kinds.insert(*kind);
+        }
+    }
+
+    if retry_kinds.is_empty() {
+        return Update::none();
+    }
+
+    let cancel = rollshot_action::project::PublishCancellation::new();
+    state.publish_operation = Some(super::PublishOperation {
+        id: operation_id,
+        revision,
+        cancel: cancel.clone(),
+        per_output,
+    });
+    state.publish_arbiter.begin(operation_id, revision);
+
+    let arbiter = state.publish_arbiter.clone();
+    let writer_lease = state.pending_writer_guard.clone();
+    let settings = super::project_publish::PublishSettings {
+        enabled_outputs: state.enabled_outputs,
+        ..Default::default()
+    };
+
+    let task = iced::Task::run(
+        iced::stream::channel(32, async move |mut sender| {
+            use iced::futures::SinkExt;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+            let request = super::project_publish::PublishRequest {
+                operation_id,
+                revision,
+                project_root: root,
+                writer_lease,
+                arbiter,
+                job,
+                settings,
+                selection: super::project_publish::PublishSelection::Only(retry_kinds),
+                purpose: super::project_publish::PublishPurpose::Background,
+                ffmpeg: None,
+            };
+
+            let cancel_clone = cancel.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                super::project_publish::run_publish(request, cancel_clone, &tx)
+            });
+
+            while let Some(event) = rx.recv().await {
+                let _ = sender.send(event).await;
+            }
+
+            let _ = worker.await;
+        }),
+        Message::PublishEvent,
+    );
+
+    Update::task(task)
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_cancel_publish(state: &mut TimelineWorkspace) -> Update {
+    cancel_active_publish(state);
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn cancel_active_publish(state: &mut TimelineWorkspace) {
+    if let Some(ref op) = state.publish_operation {
+        op.cancel.cancel();
+    }
+    state.publish_operation = None;
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_publish_event(
+    state: &mut TimelineWorkspace,
+    event: super::project_publish::PublishEvent,
+) -> Update {
+    use rollshot_action::project::PublishOutputKind;
+
+    let Some(ref op) = state.publish_operation else {
+        return Update::none();
+    };
+
+    if event.operation_id() != op.id || event.revision() != op.revision {
+        return Update::none();
+    }
+
+    let Some(super::project::ProjectSession::Saved { base_revision, .. }) = &state.project_session
+    else {
+        return Update::none();
+    };
+
+    if op.revision != *base_revision {
+        return Update::none();
+    }
+
+    match event {
+        super::project_publish::PublishEvent::CoreCommitted { .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(PublishOutputKind::Core, super::PublishOutputStatus::Current);
+            }
+            refresh_publish_freshness(state);
+        }
+        super::project_publish::PublishEvent::OutputCommitted { kind, .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(kind, super::PublishOutputStatus::Current);
+            }
+            refresh_publish_freshness(state);
+        }
+        super::project_publish::PublishEvent::OutputFailed { kind, .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(kind, super::PublishOutputStatus::Failed);
+            }
+        }
+        super::project_publish::PublishEvent::Finished { operation_id, .. } => {
+            let should_clear = state
+                .publish_operation
+                .as_ref()
+                .is_some_and(|op| op.id == operation_id);
+            if should_clear {
+                state.publish_operation = None;
+                state.publish_arbiter.clear_if_current(operation_id);
+                refresh_publish_freshness(state);
+            }
+        }
+    }
+
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn refresh_publish_freshness(state: &mut TimelineWorkspace) {
+    let Some(super::project::ProjectSession::Saved {
+        root,
+        base_revision,
+        ..
+    }) = &state.project_session
+    else {
+        return;
+    };
+    let load = rollshot_action::project::load_publish_state(root);
+    state.publish_freshness.clear();
+    for kind in state.publish_enabled_kinds() {
+        state
+            .publish_freshness
+            .insert(kind, load.freshness(kind, *base_revision));
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_toggle_publish_output(
+    state: &mut TimelineWorkspace,
+    kind: rollshot_action::project::PublishOutputKind,
+) -> Update {
+    use rollshot_action::project::PublishOutputKind;
+    if state.save_state != super::ProjectSaveState::Clean {
+        return Update::none();
+    }
+    match kind {
+        PublishOutputKind::Core => {}
+        PublishOutputKind::Storyboard => {
+            state.enabled_outputs.storyboard = !state.enabled_outputs.storyboard;
+            state.mark_project_dirty();
+        }
+        PublishOutputKind::Gif => {
+            state.enabled_outputs.gif = !state.enabled_outputs.gif;
+            state.mark_project_dirty();
+        }
+        PublishOutputKind::Mp4 => {
+            state.enabled_outputs.mp4 = !state.enabled_outputs.mp4;
+            state.mark_project_dirty();
+        }
+    }
+    state.message = Some("Save the project to apply output changes.".to_string());
+    Update::none()
+}
+
+// ---------------------------------------------------------------------------
+// Share lifecycle (action-guide feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_share_safe_copy_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+    use rollshot_action::project::PublishFreshness;
+
+    let Some(ProjectSession::Saved {
+        root,
+        base_revision,
+        access,
+    }) = &state.project_session
+    else {
+        state.message = Some("Save the project before sharing.".to_string());
+        return Update::none();
+    };
+
+    let revision = *base_revision;
+    let enabled = state.publish_enabled_kinds();
+    let all_current = enabled
+        .iter()
+        .all(|kind| state.publish_freshness.get(kind) == Some(&PublishFreshness::Current));
+
+    if !all_current
+        && matches!(
+            access,
+            ProjectAccess::ReadOnly | ProjectAccess::CorruptReadOnly
+        )
+    {
+        state.message = Some(
+            "Cannot regenerate publish outputs in read-only mode. \
+             Open the project with write access to share."
+                .to_string(),
+        );
+        return Update::none();
+    }
+
+    if !all_current {
+        state.share_kind = Some(super::share::ShareKind::SafeCopy);
+        state.share_progress = Some(super::share::ShareProgress::WaitingForPublish);
+        state.message = Some("Regenerating publish outputs for sharing\u{2026}".to_string());
+
+        let root = root.clone();
+        let job = match super::guide_export::build_reviewed_export_job(state) {
+            Ok(job) => job,
+            Err(error) => {
+                state.share_progress = None;
+                state.share_kind = None;
+                state.message = Some(format!("Cannot share: {error}"));
+                return Update::none();
+            }
+        };
+
+        if let Some(ref op) = state.publish_operation {
+            op.cancel.cancel();
+        }
+
+        state.next_publish_operation_id = state.next_publish_operation_id.saturating_add(1);
+        let operation_id =
+            super::project_publish::PublishOperationId(state.next_publish_operation_id);
+
+        let cancel = rollshot_action::project::PublishCancellation::new();
+        state.publish_operation = Some(super::PublishOperation {
+            id: operation_id,
+            revision,
+            cancel: cancel.clone(),
+            per_output: {
+                let mut m = std::collections::BTreeMap::new();
+                for kind in &enabled {
+                    m.insert(*kind, super::PublishOutputStatus::Updating);
+                }
+                m
+            },
+        });
+        state.publish_arbiter.begin(operation_id, revision);
+
+        let arbiter = state.publish_arbiter.clone();
+        let writer_lease = state.pending_writer_guard.clone();
+        let settings = super::project_publish::PublishSettings {
+            enabled_outputs: state.enabled_outputs,
+            ..Default::default()
+        };
+
+        let task = iced::Task::run(
+            iced::stream::channel(32, async move |mut sender| {
+                use iced::futures::SinkExt;
+                let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+                let request = super::project_publish::PublishRequest {
+                    operation_id,
+                    revision,
+                    project_root: root,
+                    writer_lease,
+                    arbiter,
+                    job,
+                    settings,
+                    selection: super::project_publish::PublishSelection::AllEnabled,
+                    purpose: super::project_publish::PublishPurpose::ShareGate,
+                    ffmpeg: None,
+                };
+
+                let cancel_clone = cancel.clone();
+                let worker = tokio::task::spawn_blocking(move || {
+                    super::project_publish::run_publish(request, cancel_clone, &tx)
+                });
+
+                while let Some(event) = rx.recv().await {
+                    let _ = sender.send(event).await;
+                }
+
+                let _ = worker.await;
+            }),
+            Message::ShareGateFinished,
+        );
+
+        return Update::task(task);
+    }
+
+    begin_share_picker(state, super::share::ShareKind::SafeCopy)
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_editable_project_requested(state: &mut TimelineWorkspace) -> Update {
+    use super::project::{ProjectAccess, ProjectSession};
+
+    if state.save_state != super::ProjectSaveState::Clean {
+        state.message =
+            Some("Save or discard changes before sharing an editable project.".to_string());
+        return Update::none();
+    }
+
+    let Some(ProjectSession::Saved {
+        access: ProjectAccess::Writable(_),
+        ..
+    }) = &state.project_session
+    else {
+        state.message = Some("Editable project sharing requires a writable project.".to_string());
+        return Update::none();
+    };
+
+    state.message = Some(
+        "The shared project can be edited by the recipient. \
+         Ensure you trust the recipient with the full project contents."
+            .to_string(),
+    );
+
+    begin_share_picker(state, super::share::ShareKind::EditableProject)
+}
+
+#[cfg(feature = "action-guide")]
+fn begin_share_picker(state: &mut TimelineWorkspace, kind: super::share::ShareKind) -> Update {
+    state.share_operation_id = state.share_operation_id.saturating_add(1);
+    let operation_id = state.share_operation_id;
+    state.share_kind = Some(kind);
+    state.share_progress = Some(super::share::ShareProgress::Copying);
+
+    Update::task(Task::perform(
+        pick_share_destination(picker_default_dir()),
+        move |destination| Message::ShareDestinationChosen {
+            operation_id,
+            destination,
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_destination_chosen(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    destination: Option<PathBuf>,
+) -> Update {
+    if state.share_operation_id != operation_id {
+        return Update::none();
+    }
+
+    let Some(destination) = destination else {
+        state.share_progress = None;
+        state.share_kind = None;
+        state.message = None;
+        return Update::none();
+    };
+
+    let Some(kind) = state.share_kind else {
+        return Update::none();
+    };
+
+    let Some(super::project::ProjectSession::Saved { root, .. }) = &state.project_session else {
+        state.share_progress = None;
+        state.share_kind = None;
+        return Update::none();
+    };
+
+    let destination = super::share::destination_in(&destination, root, kind);
+    let request = super::share::ShareRequest {
+        source_root: root.clone(),
+        destination,
+    };
+
+    let op_id = operation_id;
+    Update::task(Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let cancel = rollshot_action::project::PublishCancellation::new();
+                match kind {
+                    super::share::ShareKind::SafeCopy => {
+                        super::share::copy_safe_publish(&request, &cancel)
+                    }
+                    super::share::ShareKind::EditableProject => {
+                        super::share::copy_editable_project(&request, &cancel)
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|e| super::share::ShareOutcome::Failed(format!("worker panic: {e}")))
+        },
+        move |result| Message::ShareWorkerFinished {
+            operation_id: op_id,
+            result,
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_gate_finished(
+    state: &mut TimelineWorkspace,
+    event: super::project_publish::PublishEvent,
+) -> Update {
+    use rollshot_action::project::PublishOutputKind;
+
+    let Some(ref op) = state.publish_operation else {
+        return Update::none();
+    };
+
+    if event.operation_id() != op.id || event.revision() != op.revision {
+        return Update::none();
+    }
+
+    match &event {
+        super::project_publish::PublishEvent::CoreCommitted { .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(PublishOutputKind::Core, super::PublishOutputStatus::Current);
+            }
+            refresh_publish_freshness(state);
+        }
+        super::project_publish::PublishEvent::OutputCommitted { kind, .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(*kind, super::PublishOutputStatus::Current);
+            }
+            refresh_publish_freshness(state);
+        }
+        super::project_publish::PublishEvent::OutputFailed { kind, .. } => {
+            if let Some(ref mut operation) = state.publish_operation {
+                operation
+                    .per_output
+                    .insert(*kind, super::PublishOutputStatus::Failed);
+            }
+        }
+        super::project_publish::PublishEvent::Finished { operation_id, .. } => {
+            let should_clear = state
+                .publish_operation
+                .as_ref()
+                .is_some_and(|op| op.id == *operation_id);
+            if should_clear {
+                state.publish_operation = None;
+                state.publish_arbiter.clear_if_current(*operation_id);
+                refresh_publish_freshness(state);
+            }
+
+            let enabled = state.publish_enabled_kinds();
+            let all_current = enabled.iter().all(|kind| {
+                state.publish_freshness.get(kind)
+                    == Some(&rollshot_action::project::PublishFreshness::Current)
+            });
+
+            if all_current {
+                state.share_progress = Some(super::share::ShareProgress::Copying);
+                state.message =
+                    Some("Publish outputs ready. Choose destination\u{2026}".to_string());
+                return begin_share_picker(
+                    state,
+                    state
+                        .share_kind
+                        .unwrap_or(super::share::ShareKind::SafeCopy),
+                );
+            } else {
+                state.share_progress = Some(super::share::ShareProgress::Failed);
+                state.share_kind = None;
+                state.message =
+                    Some("Share failed: not all publish outputs could be generated.".to_string());
+            }
+        }
+    }
+
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_share_worker_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: super::share::ShareOutcome,
+) -> Update {
+    if state.share_operation_id != operation_id {
+        return Update::none();
+    }
+
+    match result {
+        super::share::ShareOutcome::Complete(path) => {
+            state.share_progress = Some(super::share::ShareProgress::Complete);
+            state.message = Some(format!("Shared to {}", path.display()));
+            tracing::info!(
+                target: "rollshot::share",
+                kind = ?state.share_kind,
+                "share completed"
+            );
+        }
+        super::share::ShareOutcome::Cancelled => {
+            state.share_progress = Some(super::share::ShareProgress::Cancelled);
+            state.share_kind = None;
+            state.message = Some("Share cancelled.".to_string());
+        }
+        super::share::ShareOutcome::Failed(error) => {
+            state.share_progress = Some(super::share::ShareProgress::Failed);
+            state.share_kind = None;
+            state.message = Some(format!("Share failed: {error}"));
+            tracing::error!(
+                target: "rollshot::share",
+                %error,
+                "share failed"
+            );
+        }
+    }
+
+    Update::none()
+}
+
+async fn pick_share_destination(default_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_directory(default_dir)
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
 }
 
 /// Initial directory for the folder picker: the user's Pictures dir, or temp.
@@ -1997,17 +2866,22 @@ async fn run_issue_pack_export(
     pending: super::guide_export::PendingIssuePackExport,
     kind: super::IssuePackKind,
     parent: PathBuf,
+    cancel: rollshot_action::project::PublishCancellation,
 ) -> Result<crate::issue_pack::IssuePackExportResult, String> {
     tokio::task::spawn_blocking(move || match kind {
-        super::IssuePackKind::Folder => crate::issue_pack::export_folder_with_action_guide(
+        super::IssuePackKind::Folder => {
+            crate::issue_pack::export_folder_with_action_guide_cancellable(
+                &pending.input,
+                Some(pending.source),
+                &parent,
+                &cancel,
+            )
+        }
+        super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide_cancellable(
             &pending.input,
             Some(pending.source),
             &parent,
-        ),
-        super::IssuePackKind::Zip => crate::issue_pack::export_zip_with_action_guide(
-            &pending.input,
-            Some(pending.source),
-            &parent,
+            &cancel,
         ),
     })
     .await
@@ -2054,14 +2928,6 @@ pub(crate) fn timeline_issue_pack_input(
 }
 
 fn begin_issue_pack_export(state: &mut TimelineWorkspace, kind: super::IssuePackKind) -> Update {
-    #[cfg(feature = "action-guide")]
-    if state
-        .frame_source
-        .as_ref()
-        .is_some_and(|fs| fs.in_memory().is_none())
-    {
-        return Update::none();
-    }
     if state.issue_pack.is_none() {
         return Update::none();
     }
@@ -2481,11 +3347,20 @@ fn handle_save_worker_finished(
         if should_close {
             state.pending_discard = false;
         }
-        return Update::effect(super::Effect::ProjectSaved {
-            root,
-            display_name,
-            close_workspace: should_close,
-        });
+        let publish_task = if !should_close {
+            let result = handle_save_completed_schedule_publish(state);
+            result.task
+        } else {
+            iced::Task::none()
+        };
+        return Update {
+            task: publish_task,
+            effect: super::Effect::ProjectSaved {
+                root,
+                display_name,
+                close_workspace: should_close,
+            },
+        };
     }
 
     if should_close {
@@ -2493,7 +3368,7 @@ fn handle_save_worker_finished(
         state.pending_discard = false;
         Update::effect(super::Effect::CloseWorkspace)
     } else {
-        Update::none()
+        handle_save_completed_schedule_publish(state)
     }
 }
 
@@ -3315,6 +4190,7 @@ mod tests {
             pending_export: None,
             operation_id: 0,
             exporting: false,
+            cancel: rollshot_action::project::PublishCancellation::new(),
         });
         let original = state
             .store
@@ -5038,5 +5914,765 @@ key_source = { Env = "OPENAI_API_KEY" }
                 ..
             }
         ));
+    }
+
+    // ---- Publish lifecycle tests ----
+
+    #[cfg(feature = "action-guide")]
+    mod publish {
+        use super::super::*;
+        use crate::timeline_workspace::project::ProjectAccess;
+        use crate::timeline_workspace::project_publish::{PublishEvent, PublishOperationId};
+        use crate::timeline_workspace::{
+            ProjectSaveState, PublishAggregate, PublishOperation, PublishOutputStatus,
+        };
+        use rollshot_action::project::{
+            EnabledOutputs, PublishCancellation, PublishFreshness, PublishOutputKind,
+            PublishStateV1, PublishedOutputV1,
+        };
+        use rollshot_action::CaptureRegion;
+        use std::collections::BTreeMap;
+
+        fn ws_project_backed_clean() -> TimelineWorkspace {
+            use rollshot_action::project::{
+                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 7,
+                title: "Test Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+            ws
+        }
+
+        #[test]
+        fn save_revision_schedules_publish_operation() {
+            let mut ws = ws_project_backed_clean();
+            assert!(ws.publish_operation.is_none());
+
+            let _result = update(
+                &mut ws,
+                Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved { revision: 7 }),
+            );
+
+            assert!(
+                ws.publish_operation.is_some(),
+                "save should schedule a publish operation"
+            );
+            let op = ws.publish_operation.as_ref().unwrap();
+            assert_eq!(op.revision, 7);
+        }
+
+        #[test]
+        fn publish_event_ignored_when_operation_id_mismatch() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+
+            let _result = update(
+                &mut ws,
+                Message::PublishEvent(PublishEvent::CoreCommitted {
+                    operation_id: PublishOperationId(2),
+                    revision: 7,
+                }),
+            );
+
+            assert!(
+                ws.publish_operation.is_some(),
+                "mismatched operation id should be ignored"
+            );
+            assert_eq!(
+                ws.publish_operation.as_ref().unwrap().per_output[&PublishOutputKind::Core],
+                PublishOutputStatus::Updating,
+                "status should remain Updating"
+            );
+        }
+
+        #[test]
+        fn publish_event_ignored_when_revision_mismatch() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+
+            let _result = update(
+                &mut ws,
+                Message::PublishEvent(PublishEvent::CoreCommitted {
+                    operation_id: PublishOperationId(1),
+                    revision: 8,
+                }),
+            );
+
+            assert_eq!(
+                ws.publish_operation.as_ref().unwrap().per_output[&PublishOutputKind::Core],
+                PublishOutputStatus::Updating,
+                "mismatched revision should be ignored"
+            );
+        }
+
+        #[test]
+        fn publish_event_ignored_when_saved_revision_changed() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+            // Simulate a new save that changed the revision.
+            if let Some(crate::timeline_workspace::project::ProjectSession::Saved {
+                base_revision,
+                ..
+            }) = &mut ws.project_session
+            {
+                *base_revision = 8;
+            }
+
+            let _result = update(
+                &mut ws,
+                Message::PublishEvent(PublishEvent::CoreCommitted {
+                    operation_id: PublishOperationId(1),
+                    revision: 7,
+                }),
+            );
+
+            assert_eq!(
+                ws.publish_operation.as_ref().unwrap().per_output[&PublishOutputKind::Core],
+                PublishOutputStatus::Updating,
+                "event from old revision should be ignored"
+            );
+        }
+
+        #[test]
+        fn finished_clears_operation() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+
+            let _result = update(
+                &mut ws,
+                Message::PublishEvent(PublishEvent::Finished {
+                    operation_id: PublishOperationId(1),
+                    revision: 7,
+                }),
+            );
+
+            assert!(
+                ws.publish_operation.is_none(),
+                "Finished should clear the operation"
+            );
+        }
+
+        #[test]
+        fn close_cancels_active_operation() {
+            let mut ws = ws_project_backed_clean();
+            let cancel = PublishCancellation::new();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: cancel.clone(),
+                per_output: BTreeMap::new(),
+            });
+
+            let _result = update(&mut ws, Message::CloseRequested);
+
+            assert!(
+                ws.publish_operation.is_none(),
+                "close should cancel and clear the operation"
+            );
+            assert!(cancel.is_cancelled(), "cancel flag should be set");
+        }
+
+        #[test]
+        fn toggle_output_marks_dirty() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _result = update(
+                &mut ws,
+                Message::TogglePublishOutput(PublishOutputKind::Gif),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Dirty);
+            assert!(ws.message.as_ref().is_some_and(|m| m.contains("Save")));
+        }
+
+        #[test]
+        fn toggle_core_is_noop() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _result = update(
+                &mut ws,
+                Message::TogglePublishOutput(PublishOutputKind::Core),
+            );
+
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+        }
+
+        #[test]
+        fn retry_schedules_operation_for_single_output() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _result = update(
+                &mut ws,
+                Message::RetryPublishOutput(PublishOutputKind::Storyboard),
+            );
+
+            assert!(ws.publish_operation.is_some());
+            let op = ws.publish_operation.as_ref().unwrap();
+            assert!(op.per_output.contains_key(&PublishOutputKind::Storyboard));
+            assert!(!op.per_output.contains_key(&PublishOutputKind::Core));
+        }
+
+        #[test]
+        fn retry_all_schedules_all_stale_outputs() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Clean;
+            ws.enabled_outputs = EnabledOutputs {
+                storyboard: true,
+                gif: true,
+                mp4: false,
+            };
+
+            let _result = update(&mut ws, Message::RetryAllPublishOutputs);
+
+            assert!(ws.publish_operation.is_some());
+        }
+
+        #[test]
+        fn cancel_publish_clears_operation() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+
+            let _result = update(&mut ws, Message::CancelPublish);
+
+            assert!(ws.publish_operation.is_none());
+        }
+
+        #[test]
+        fn open_publish_details_toggles() {
+            let mut ws = ws_project_backed_clean();
+            assert!(!ws.publish_details_open);
+
+            let _result = update(&mut ws, Message::OpenPublishDetails);
+            assert!(ws.publish_details_open);
+
+            let _result = update(&mut ws, Message::OpenPublishDetails);
+            assert!(!ws.publish_details_open);
+        }
+
+        #[test]
+        fn aggregate_publishing_when_any_updating() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+
+            assert_eq!(ws.publish_aggregate(), Some(PublishAggregate::Publishing));
+        }
+
+        #[test]
+        fn aggregate_published_when_all_current() {
+            use rollshot_action::project::{
+                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("test-project.rollshot-guide");
+            std::fs::create_dir_all(&root).unwrap();
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 7,
+                title: "Test Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: root.clone(),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+
+            let mut state = PublishStateV1::default();
+            state
+                .outputs
+                .insert(PublishOutputKind::Core, PublishedOutputV1::new(7));
+            rollshot_action::project::write_publish_state(&root, &state).unwrap();
+
+            ws.publish_freshness.clear();
+            ws.publish_freshness
+                .insert(PublishOutputKind::Core, PublishFreshness::Current);
+
+            assert_eq!(ws.publish_aggregate(), Some(PublishAggregate::Published));
+        }
+
+        #[test]
+        fn aggregate_needs_attention_when_stale() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_freshness.clear();
+            ws.publish_freshness
+                .insert(PublishOutputKind::Core, PublishFreshness::Stale);
+
+            assert_eq!(
+                ws.publish_aggregate(),
+                Some(PublishAggregate::NeedsAttention)
+            );
+        }
+
+        #[test]
+        fn save_schedules_publish_with_matching_revision() {
+            let mut ws = ws_project_backed_clean();
+
+            let _result = update(
+                &mut ws,
+                Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved { revision: 7 }),
+            );
+
+            let op = ws.publish_operation.as_ref().unwrap();
+            assert_eq!(op.revision, 7);
+        }
+
+        #[test]
+        fn superseding_save_cancels_old_and_schedules_new() {
+            let mut ws = ws_project_backed_clean();
+            ws.next_publish_operation_id = 1;
+            let old_cancel = PublishCancellation::new();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: old_cancel.clone(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+
+            let _result = update(
+                &mut ws,
+                Message::SaveWorkerFinished(SaveWorkerOutcome::ExistingSaved { revision: 8 }),
+            );
+
+            assert!(
+                old_cancel.is_cancelled(),
+                "old operation should be cancelled"
+            );
+            let op = ws.publish_operation.as_ref().unwrap();
+            assert_eq!(op.revision, 8);
+            assert_eq!(op.id, PublishOperationId(2));
+        }
+
+        #[test]
+        fn opening_project_does_not_auto_publish() {
+            let ws = ws_project_backed_clean();
+            assert!(
+                ws.publish_operation.is_none(),
+                "opening a project should not start publishing"
+            );
+        }
+
+        #[test]
+        fn retry_rejects_when_dirty() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _result = update(
+                &mut ws,
+                Message::RetryPublishOutput(PublishOutputKind::Storyboard),
+            );
+
+            assert!(
+                ws.publish_operation.is_none(),
+                "retry should be rejected when project is dirty"
+            );
+        }
+
+        #[test]
+        fn retry_rejects_when_read_only() {
+            use rollshot_action::project::{
+                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 7,
+                title: "Test Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::ReadOnly,
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _result = update(
+                &mut ws,
+                Message::RetryPublishOutput(PublishOutputKind::Storyboard),
+            );
+
+            assert!(
+                ws.publish_operation.is_none(),
+                "retry should be rejected when read-only"
+            );
+        }
+
+        // ---- Share tests ----
+
+        #[test]
+        fn reopened_project_can_prepare_issue_pack_export() {
+            let mut ws = ws_project_backed_clean();
+            let mut dialog = crate::timeline_workspace::IssuePackDialog::new();
+            dialog.review_confirmed = true;
+            ws.issue_pack = Some(dialog);
+
+            let _task =
+                begin_issue_pack_export(&mut ws, crate::timeline_workspace::IssuePackKind::Folder);
+
+            let dialog = ws.issue_pack.as_ref().unwrap();
+            assert_eq!(
+                dialog.pending_kind,
+                Some(crate::timeline_workspace::IssuePackKind::Folder)
+            );
+            assert!(dialog.pending_export.is_some());
+        }
+
+        #[test]
+        fn share_safe_copy_rejected_when_unsaved() {
+            let mut ws = ws_project_backed_clean();
+            ws.project_session = None;
+            ws.save_state = ProjectSaveState::Unsaved;
+
+            let _result = update(&mut ws, Message::ShareSafeCopyRequested);
+
+            assert!(
+                ws.message.as_ref().is_some_and(|m| m.contains("Save")),
+                "unsaved workspace should reject share, got {:?}",
+                ws.message
+            );
+        }
+
+        #[test]
+        fn share_editable_rejected_when_dirty() {
+            let mut ws = ws_project_backed_clean();
+            ws.save_state = ProjectSaveState::Dirty;
+
+            let _result = update(&mut ws, Message::ShareEditableProjectRequested);
+
+            assert!(
+                ws.message.as_ref().is_some_and(|m| m.contains("Save")),
+                "dirty workspace should reject editable share, got {:?}",
+                ws.message
+            );
+        }
+
+        #[test]
+        fn share_picker_cancel_returns_to_details() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 5;
+
+            let _result = update(
+                &mut ws,
+                Message::ShareDestinationChosen {
+                    operation_id: 5,
+                    destination: None,
+                },
+            );
+
+            assert!(ws.share_progress.is_none());
+            assert!(ws.share_kind.is_none());
+        }
+
+        #[test]
+        fn share_safe_copy_sets_waiting_for_publish_when_stale() {
+            let mut ws = ws_project_backed_clean();
+            ws.publish_freshness
+                .insert(PublishOutputKind::Core, PublishFreshness::Stale);
+
+            let _result = update(&mut ws, Message::ShareSafeCopyRequested);
+
+            assert_eq!(
+                ws.share_kind,
+                Some(crate::timeline_workspace::share::ShareKind::SafeCopy)
+            );
+            assert_eq!(
+                ws.share_progress,
+                Some(crate::timeline_workspace::share::ShareProgress::WaitingForPublish)
+            );
+            assert!(
+                ws.publish_operation.is_some(),
+                "should start ShareGate publish"
+            );
+        }
+
+        #[test]
+        fn share_editable_rejected_when_read_only() {
+            use rollshot_action::project::{
+                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 7,
+                title: "Test Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::ReadOnly,
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+
+            let _result = update(&mut ws, Message::ShareEditableProjectRequested);
+
+            assert!(
+                ws.message.as_ref().is_some_and(|m| m.contains("writable")),
+                "read-only should reject editable share, got {:?}",
+                ws.message
+            );
+        }
+
+        #[test]
+        fn share_worker_finished_complete_sets_progress() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 3;
+
+            let _result = update(
+                &mut ws,
+                Message::ShareWorkerFinished {
+                    operation_id: 3,
+                    result: crate::timeline_workspace::share::ShareOutcome::Complete(
+                        std::path::PathBuf::from("/tmp/shared"),
+                    ),
+                },
+            );
+
+            assert_eq!(
+                ws.share_progress,
+                Some(crate::timeline_workspace::share::ShareProgress::Complete)
+            );
+        }
+
+        #[test]
+        fn share_worker_finished_failed_clears_kind() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 3;
+            ws.share_kind = Some(crate::timeline_workspace::share::ShareKind::SafeCopy);
+
+            let _result = update(
+                &mut ws,
+                Message::ShareWorkerFinished {
+                    operation_id: 3,
+                    result: crate::timeline_workspace::share::ShareOutcome::Failed(
+                        "disk full".to_string(),
+                    ),
+                },
+            );
+
+            assert_eq!(
+                ws.share_progress,
+                Some(crate::timeline_workspace::share::ShareProgress::Failed)
+            );
+            assert!(ws.share_kind.is_none());
+        }
+
+        #[test]
+        fn stale_share_worker_result_is_ignored() {
+            let mut ws = ws_project_backed_clean();
+            ws.share_operation_id = 5;
+
+            let _result = update(
+                &mut ws,
+                Message::ShareWorkerFinished {
+                    operation_id: 3,
+                    result: crate::timeline_workspace::share::ShareOutcome::Complete(
+                        std::path::PathBuf::from("/tmp/shared"),
+                    ),
+                },
+            );
+
+            assert!(
+                ws.share_progress.is_none(),
+                "stale result should be ignored"
+            );
+        }
     }
 }

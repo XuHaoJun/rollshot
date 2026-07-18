@@ -3,13 +3,18 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ffmpeg_sidecar::command::FfmpegCommand;
 use image::{imageops, RgbaImage};
 
 use crate::error::VideoError;
+use crate::export::model::ReviewedGuideExportJob;
 use crate::frame_store::FrameStore;
 use crate::guide::Guide;
+use crate::project::PublishCancellation;
+
+use super::gif::DERIVATIVE_FRAME_PIXEL_CEILING;
 
 /// Tunables for summary-MP4 assembly.
 #[derive(Debug, Clone)]
@@ -208,6 +213,202 @@ fn downscale(image: &RgbaImage, max_width: u32) -> RgbaImage {
         height,
         image::imageops::FilterType::Triangle,
     )
+}
+
+fn kill_process(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status();
+    }
+}
+
+fn descriptor_output_dimensions(
+    steps: &[crate::export::model::ReviewedGuideStep],
+    max_width: u32,
+) -> (u32, u32) {
+    let mut out_w: u32 = 2;
+    let mut out_h: u32 = 2;
+    for step in steps {
+        let (w, h) = step.image.dimensions();
+        let scaled_w = w.min(max_width);
+        let scaled_h = if w > max_width && w > 0 {
+            (h as u64 * max_width as u64 / w as u64).max(1) as u32
+        } else {
+            h
+        };
+        out_w = out_w.max(scaled_w);
+        out_h = out_h.max(scaled_h);
+    }
+    (even_dimension(out_w), even_dimension(out_h))
+}
+
+pub fn export_reviewed_video(
+    job: &ReviewedGuideExportJob,
+    opts: VideoOptions,
+    ffmpeg_path: &Path,
+    cancel: &PublishCancellation,
+    out_path: &Path,
+) -> Result<(), VideoError> {
+    if job.steps.is_empty() {
+        return Err(VideoError::Empty);
+    }
+    if !ffmpeg_path.exists() {
+        return Err(VideoError::InvalidFfmpeg {
+            path: ffmpeg_path.display().to_string(),
+        });
+    }
+
+    let (width, height) = descriptor_output_dimensions(&job.steps, opts.max_width);
+    let frame_pixels = (width as u64).checked_mul(height as u64);
+    match frame_pixels {
+        Some(p) if p <= DERIVATIVE_FRAME_PIXEL_CEILING => {}
+        _ => {
+            return Err(VideoError::FrameTooLarge {
+                pixels: frame_pixels.unwrap_or(u64::MAX),
+                ceiling: DERIVATIVE_FRAME_PIXEL_CEILING,
+            });
+        }
+    }
+
+    let repeat = repeat_count(opts.frame_dwell_ms, opts.fps);
+    let tmp = temp_mp4_path(out_path);
+    let _ = std::fs::remove_file(&tmp);
+
+    let args = ffmpeg_args(width, height, opts.fps, &tmp);
+    let mut command = FfmpegCommand::new_with_path(ffmpeg_path);
+    command.args(args.iter().map(String::as_str));
+    let mut child = command.spawn().map_err(|source| VideoError::Spawn {
+        path: ffmpeg_path.display().to_string(),
+        source,
+    })?;
+
+    let mut stderr_handle = child.take_stderr().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        })
+    });
+
+    let child_pid = child.as_inner().id();
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let done_watchdog = done.clone();
+    let cancel_watchdog = cancel.clone();
+    let watchdog_handle = std::thread::spawn(move || {
+        while !cancel_watchdog.is_cancelled() && !done_watchdog.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if cancel_watchdog.is_cancelled() {
+            kill_process(child_pid);
+        }
+    });
+
+    let result = {
+        let mut stdin = child.take_stdin().ok_or_else(|| VideoError::Stdin {
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "missing FFmpeg stdin"),
+        })?;
+
+        let mut write_result = Ok(());
+        for step in &job.steps {
+            if cancel.is_cancelled() {
+                write_result = Err(VideoError::Cancelled);
+                break;
+            }
+
+            let step_result = step
+                .image
+                .with_flattened_image(cancel.flag(), |image| {
+                    let frame = normalize_to(&downscale(image, opts.max_width), width, height);
+                    for _ in 0..repeat {
+                        if cancel.is_cancelled() {
+                            return Err(crate::error::ExportError::Cancelled);
+                        }
+                        if let Err(source) = stdin.write_all(frame.as_raw()) {
+                            return Err(crate::error::ExportError::Io {
+                                path: String::new(),
+                                source,
+                            });
+                        }
+                    }
+                    Ok(())
+                })
+                .map_err(|error| match error {
+                    crate::error::ExportError::Cancelled => VideoError::Cancelled,
+                    crate::error::ExportError::Io { source, .. } => VideoError::Stdin { source },
+                    other => VideoError::Io {
+                        path: String::new(),
+                        source: std::io::Error::other(other.to_string()),
+                    },
+                });
+
+            if let Err(e) = step_result {
+                write_result = Err(e);
+                break;
+            }
+        }
+
+        if write_result.is_ok() {
+            if cancel.is_cancelled() {
+                write_result = Err(VideoError::Cancelled);
+            } else if let Err(source) = stdin.flush() {
+                write_result = Err(VideoError::Stdin { source });
+            }
+        }
+        write_result
+    };
+
+    drop(child.take_stdin());
+
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let status_result = child.wait();
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog_handle.join();
+    let stderr_text = stderr_handle
+        .take()
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+
+    let status = status_result.map_err(|source| VideoError::Io {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+
+    match result {
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+        Ok(()) => {
+            if cancel.is_cancelled() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(VideoError::Cancelled);
+            }
+            if !status.success() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(VideoError::Exit {
+                    status: status.to_string(),
+                    stderr: stderr_text,
+                });
+            }
+            std::fs::rename(&tmp, out_path).map_err(|source| {
+                let _ = std::fs::remove_file(&tmp);
+                VideoError::Io {
+                    path: out_path.display().to_string(),
+                    source,
+                }
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -481,5 +682,300 @@ mod tests {
         assert!(path.exists());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_streaming_cancels_and_leaves_no_file() {
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![
+                crate::export::model::ReviewedGuideStep {
+                    index: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 100,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image.clone(),
+                    )),
+                    hotspots: Vec::new(),
+                },
+                crate::export::model::ReviewedGuideStep {
+                    index: 2,
+                    title: "Step 2".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 200,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image,
+                    )),
+                    hotspots: Vec::new(),
+                },
+            ],
+        };
+        let dir = tempfile_dir();
+        let ffmpeg = dir.join("ffmpeg");
+        fake_ffmpeg(&ffmpeg);
+        let path = dir.join("summary.mp4");
+        let result = export_reviewed_video(&job, VideoOptions::default(), &ffmpeg, &cancel, &path);
+        assert!(matches!(result, Err(VideoError::Cancelled)));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_streaming_encodes_all_frames() {
+        let cancel = PublishCancellation::new();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![
+                crate::export::model::ReviewedGuideStep {
+                    index: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 100,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image.clone(),
+                    )),
+                    hotspots: Vec::new(),
+                },
+                crate::export::model::ReviewedGuideStep {
+                    index: 2,
+                    title: "Step 2".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 200,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image,
+                    )),
+                    hotspots: Vec::new(),
+                },
+            ],
+        };
+        let dir = tempfile_dir();
+        let ffmpeg = dir.join("ffmpeg");
+        fake_ffmpeg(&ffmpeg);
+        let path = dir.join("summary.mp4");
+        export_reviewed_video(&job, VideoOptions::default(), &ffmpeg, &cancel, &path)
+            .expect("export");
+        assert_eq!(std::fs::read(&path).unwrap(), b"fake mp4");
+        assert!(!temp_mp4_path(&path).exists());
+    }
+
+    #[test]
+    fn reviewed_streaming_rejects_oversized_geometry() {
+        let cancel = PublishCancellation::new();
+        // 100 * 200_000 = 20_000_000 > DERIVATIVE_FRAME_PIXEL_CEILING (16_777_216)
+        // Image is already at max_width, so downscaling won't reduce it.
+        let big = RgbaImage::from_pixel(100, 200_000, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 200_000,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![crate::export::model::ReviewedGuideStep {
+                index: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: 100,
+                image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(big)),
+                hotspots: Vec::new(),
+            }],
+        };
+        let dir = tempfile_dir();
+        let ffmpeg = dir.join("ffmpeg");
+        fake_ffmpeg(&ffmpeg);
+        let path = dir.join("summary.mp4");
+        let result = export_reviewed_video(
+            &job,
+            VideoOptions {
+                max_width: 100,
+                ..VideoOptions::default()
+            },
+            &ffmpeg,
+            &cancel,
+            &path,
+        );
+        assert!(matches!(result, Err(VideoError::FrameTooLarge { .. })));
+        assert!(!path.exists());
+    }
+
+    // NOTE: The watchdog-child-kill behavior is tested on unix via shell-script
+    // fakes. Non-unix uses the same cross-platform `child.kill()` path but lacks
+    // test coverage because the fake-ffmpeg infrastructure requires shell scripts.
+    // Verify on Windows/macOS CI when those platforms are added.
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_streaming_cancels_and_terminates_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cancel = PublishCancellation::new();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![
+                crate::export::model::ReviewedGuideStep {
+                    index: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 100,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image.clone(),
+                    )),
+                    hotspots: Vec::new(),
+                },
+                crate::export::model::ReviewedGuideStep {
+                    index: 2,
+                    title: "Step 2".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 200,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image,
+                    )),
+                    hotspots: Vec::new(),
+                },
+            ],
+        };
+
+        let dir = tempfile_dir();
+        let ffmpeg = dir.join("ffmpeg");
+        std::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\ncat >/dev/null\nsleep 10\nprintf 'slow mp4' > \"$out\"\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&ffmpeg).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg, perms).unwrap();
+
+        let path = dir.join("summary.mp4");
+        cancel.cancel();
+        let result = export_reviewed_video(&job, VideoOptions::default(), &ffmpeg, &cancel, &path);
+        assert!(matches!(result, Err(VideoError::Cancelled)));
+        assert!(!path.exists());
+        assert!(!temp_mp4_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_streaming_cancels_during_ffmpeg_finalization() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile_dir();
+        let marker = dir.join("stdin-closed");
+        let ffmpeg = dir.join("ffmpeg-finalizing");
+        std::fs::write(
+            &ffmpeg,
+            format!(
+                "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\ncat >/dev/null\ntouch '{}'\nsleep 2\nprintf 'late mp4' > \"$out\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&ffmpeg).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg, perms).unwrap();
+
+        let cancel = PublishCancellation::new();
+        let worker_cancel = cancel.clone();
+        let path = dir.join("finalizing.mp4");
+        let worker_path = path.clone();
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::SemanticEvents,
+            steps: vec![crate::export::model::ReviewedGuideStep {
+                index: 1,
+                title: "Step".into(),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: 100,
+                image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                    RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255])),
+                )),
+                hotspots: Vec::new(),
+            }],
+        };
+        let worker = std::thread::spawn(move || {
+            export_reviewed_video(
+                &job,
+                VideoOptions::default(),
+                &ffmpeg,
+                &worker_cancel,
+                &worker_path,
+            )
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "fake ffmpeg never entered finalization");
+        cancel.cancel();
+
+        let result = worker.join().unwrap();
+        assert!(matches!(result, Err(VideoError::Cancelled)));
+        assert!(!path.exists());
+        assert!(!temp_mp4_path(&path).exists());
     }
 }

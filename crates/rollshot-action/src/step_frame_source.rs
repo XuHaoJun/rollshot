@@ -78,6 +78,14 @@ impl ProjectFrameSource {
         }
     }
 
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    pub fn frame(&self, id: FrameId) -> Option<&ProjectFrame> {
+        self.catalog.get(&id)
+    }
+
     pub fn cached(&mut self, id: FrameId) -> Option<Arc<RgbaImage>> {
         if let Some(img) = self.cache.get(&id) {
             if let Some(pos) = self.lru.iter().position(|&x| x == id) {

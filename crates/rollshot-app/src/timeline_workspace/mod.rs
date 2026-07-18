@@ -27,6 +27,10 @@ mod visual_annotation_agent;
 
 #[cfg(feature = "action-guide")]
 pub(crate) mod project;
+#[cfg(feature = "action-guide")]
+pub(crate) mod project_publish;
+#[cfg(feature = "action-guide")]
+pub(crate) mod share;
 
 #[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};
@@ -43,6 +47,32 @@ pub(crate) enum ProjectSaveState {
     Clean,
     Dirty,
     Saving,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishAggregate {
+    Publishing,
+    NeedsAttention,
+    Published,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishOutputStatus {
+    Current,
+    Stale,
+    Updating,
+    Failed,
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) struct PublishOperation {
+    pub id: project_publish::PublishOperationId,
+    pub revision: u64,
+    pub cancel: rollshot_action::project::PublishCancellation,
+    pub per_output: std::collections::BTreeMap<
+        rollshot_action::project::PublishOutputKind,
+        PublishOutputStatus,
+    >,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +146,7 @@ pub(crate) struct IssuePackDialog {
     pub pending_export: Option<guide_export::PendingIssuePackExport>,
     pub operation_id: u64,
     pub exporting: bool,
+    pub cancel: rollshot_action::project::PublishCancellation,
 }
 
 impl std::fmt::Debug for IssuePackDialog {
@@ -130,6 +161,7 @@ impl std::fmt::Debug for IssuePackDialog {
             )
             .field("operation_id", &self.operation_id)
             .field("exporting", &self.exporting)
+            .field("cancelled", &self.cancel.is_cancelled())
             .finish()
     }
 }
@@ -143,6 +175,7 @@ impl IssuePackDialog {
             pending_export: None,
             operation_id: 0,
             exporting: false,
+            cancel: rollshot_action::project::PublishCancellation::new(),
         }
     }
 }
@@ -331,6 +364,25 @@ pub struct TimelineWorkspace {
     #[cfg(feature = "action-guide")]
     pub(crate) pending_writer_guard:
         std::sync::Arc<std::sync::Mutex<Option<project::ProjectWriterGuard>>>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) publish_operation: Option<PublishOperation>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) publish_arbiter: project_publish::PublishArbiter,
+    #[cfg(feature = "action-guide")]
+    pub(crate) publish_freshness: std::collections::BTreeMap<
+        rollshot_action::project::PublishOutputKind,
+        rollshot_action::project::PublishFreshness,
+    >,
+    #[cfg(feature = "action-guide")]
+    pub(crate) publish_details_open: bool,
+    #[cfg(feature = "action-guide")]
+    pub(crate) next_publish_operation_id: u64,
+    #[cfg(feature = "action-guide")]
+    pub(crate) share_progress: Option<share::ShareProgress>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) share_kind: Option<share::ShareKind>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) share_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -389,6 +441,22 @@ impl TimelineWorkspace {
             last_save_error: None,
             #[cfg(feature = "action-guide")]
             pending_writer_guard: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "action-guide")]
+            publish_operation: None,
+            #[cfg(feature = "action-guide")]
+            publish_arbiter: project_publish::PublishArbiter::new(),
+            #[cfg(feature = "action-guide")]
+            publish_freshness: std::collections::BTreeMap::new(),
+            #[cfg(feature = "action-guide")]
+            publish_details_open: false,
+            #[cfg(feature = "action-guide")]
+            next_publish_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            share_progress: None,
+            #[cfg(feature = "action-guide")]
+            share_kind: None,
+            #[cfg(feature = "action-guide")]
+            share_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -473,6 +541,126 @@ impl TimelineWorkspace {
     pub(crate) fn mark_project_dirty(&mut self) {
         if self.save_state == ProjectSaveState::Clean {
             self.save_state = ProjectSaveState::Dirty;
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn publish_aggregate(&self) -> Option<PublishAggregate> {
+        let session = self.project_session.as_ref()?;
+        let _revision = match session {
+            project::ProjectSession::Saved { base_revision, .. } => *base_revision,
+            _ => return None,
+        };
+
+        let enabled = self.publish_enabled_kinds();
+        if enabled.is_empty() {
+            return None;
+        }
+
+        let mut any_updating = false;
+        let mut all_current = true;
+
+        for kind in &enabled {
+            let status = self.publish_status_for_aggregate(*kind);
+            match status {
+                PublishOutputStatus::Updating => {
+                    any_updating = true;
+                    all_current = false;
+                }
+                PublishOutputStatus::Failed | PublishOutputStatus::Stale => {
+                    all_current = false;
+                }
+                PublishOutputStatus::Current => {}
+            }
+        }
+
+        if any_updating {
+            Some(PublishAggregate::Publishing)
+        } else if all_current {
+            Some(PublishAggregate::Published)
+        } else {
+            Some(PublishAggregate::NeedsAttention)
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    fn publish_status_for_aggregate(
+        &self,
+        kind: rollshot_action::project::PublishOutputKind,
+    ) -> PublishOutputStatus {
+        if let Some(ref op) = self.publish_operation {
+            if op.per_output.get(&kind) == Some(&PublishOutputStatus::Updating) {
+                return PublishOutputStatus::Updating;
+            }
+            if op.per_output.get(&kind) == Some(&PublishOutputStatus::Failed) {
+                return PublishOutputStatus::Failed;
+            }
+        }
+        match self.publish_freshness.get(&kind) {
+            Some(rollshot_action::project::PublishFreshness::Current) => {
+                PublishOutputStatus::Current
+            }
+            _ => PublishOutputStatus::Stale,
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn publish_output_status(
+        &self,
+        kind: rollshot_action::project::PublishOutputKind,
+        load: &rollshot_action::project::PublishStateLoad,
+        revision: u64,
+    ) -> PublishOutputStatus {
+        if let Some(ref op) = self.publish_operation {
+            if op.per_output.get(&kind) == Some(&PublishOutputStatus::Updating) {
+                return PublishOutputStatus::Updating;
+            }
+            if op.per_output.get(&kind) == Some(&PublishOutputStatus::Failed) {
+                return PublishOutputStatus::Failed;
+            }
+        }
+        match load.freshness(kind, revision) {
+            rollshot_action::project::PublishFreshness::Current => PublishOutputStatus::Current,
+            rollshot_action::project::PublishFreshness::Stale => PublishOutputStatus::Stale,
+        }
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn publish_enabled_kinds(&self) -> Vec<rollshot_action::project::PublishOutputKind> {
+        use rollshot_action::project::PublishOutputKind;
+        let mut kinds = vec![PublishOutputKind::Core];
+        if self.enabled_outputs.storyboard {
+            kinds.push(PublishOutputKind::Storyboard);
+        }
+        if self.enabled_outputs.gif {
+            kinds.push(PublishOutputKind::Gif);
+        }
+        if self.enabled_outputs.mp4 {
+            kinds.push(PublishOutputKind::Mp4);
+        }
+        kinds
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn is_publish_active(&self) -> bool {
+        self.publish_operation.is_some()
+    }
+
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn load_publish_freshness(&mut self) {
+        let Some(project::ProjectSession::Saved {
+            root,
+            base_revision,
+            ..
+        }) = &self.project_session
+        else {
+            return;
+        };
+        let load = rollshot_action::project::load_publish_state(root);
+        self.publish_freshness.clear();
+        for kind in self.publish_enabled_kinds() {
+            self.publish_freshness
+                .insert(kind, load.freshness(kind, *base_revision));
         }
     }
 }

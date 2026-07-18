@@ -3,13 +3,16 @@
 //! a raw frame dump.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use image::{ImageFormat, Rgba, RgbaImage};
 use rollshot_image_document::{draw_text_block, measure_block, ImagePoint, Rgba8};
 
 use crate::error::StoryboardError;
+use crate::export::model::ReviewedGuideExportJob;
 use crate::frame_store::FrameStore;
 use crate::guide::Guide;
+use crate::project::PublishCancellation;
 
 const LABEL_FONT_PX: f32 = 26.0;
 const LABEL_GAP: u32 = 10;
@@ -118,9 +121,10 @@ pub fn render_reviewed_storyboard(
     }
 
     let mut owned = Vec::with_capacity(job.steps.len());
+    let cancel = std::sync::atomic::AtomicBool::new(false);
     for step in &job.steps {
         step.image
-            .with_flattened_image(|image| {
+            .with_flattened_image(&cancel, |image| {
                 owned.push(downscale(image, opts.max_width));
                 Ok(())
             })
@@ -143,6 +147,204 @@ pub fn render_reviewed_storyboard(
         .collect();
 
     render_storyboard_steps(&steps, opts)
+}
+
+pub fn render_reviewed_storyboard_cancellable(
+    job: &ReviewedGuideExportJob,
+    opts: StoryboardOptions,
+    cancel: &PublishCancellation,
+) -> Result<StoryboardRenderResult, StoryboardError> {
+    if job.steps.is_empty() {
+        return Err(StoryboardError::Empty);
+    }
+
+    let canvas_width = opts.max_width;
+    let card_width = canvas_width
+        .checked_sub(opts.outer_padding.saturating_mul(2))
+        .ok_or(StoryboardError::CanvasTooLarge)?;
+    let content_width = card_width
+        .checked_sub(opts.card_padding.saturating_mul(2))
+        .ok_or(StoryboardError::CanvasTooLarge)?;
+
+    // Pass 1: compute layout metadata from descriptor dimensions and text metrics
+    // without decoding any images.
+    struct CardLayout {
+        label: String,
+        caption: Option<String>,
+        height: u32,
+    }
+
+    let mut layouts = Vec::with_capacity(job.steps.len());
+    for step in &job.steps {
+        if cancel.is_cancelled() {
+            return Err(StoryboardError::Cancelled);
+        }
+
+        let label = step_label(step.index, &step.title, opts.show_titles);
+        let label = fit_label(&label, content_width as f32);
+        let (_, label_height) = measure_block(&label, LABEL_FONT_PX, true);
+        let label_height = label_height.ceil() as u32;
+
+        let caption = step
+            .caption
+            .as_deref()
+            .and_then(non_empty_caption)
+            .map(|caption| fit_caption(caption, content_width as f32));
+        let caption_height = caption
+            .as_ref()
+            .map(|caption| measure_block(caption, CAPTION_FONT_PX, false).1.ceil() as u32)
+            .unwrap_or(0);
+        let text_height = if caption.is_some() {
+            label_height
+                .checked_add(CAPTION_GAP)
+                .and_then(|h| h.checked_add(caption_height))
+                .ok_or(StoryboardError::CanvasTooLarge)?
+        } else {
+            label_height
+        };
+
+        let (orig_w, orig_h) = step.image.dimensions();
+        let scaled_height = if orig_w > content_width && orig_w > 0 {
+            (orig_h as u64 * content_width as u64 / orig_w as u64).max(1) as u32
+        } else {
+            orig_h
+        };
+        let card_height = opts
+            .card_padding
+            .checked_mul(2)
+            .and_then(|h| h.checked_add(text_height))
+            .and_then(|h| h.checked_add(LABEL_GAP))
+            .and_then(|h| h.checked_add(scaled_height))
+            .ok_or(StoryboardError::CanvasTooLarge)?;
+
+        layouts.push(CardLayout {
+            label,
+            caption,
+            height: card_height,
+        });
+    }
+
+    if cancel.is_cancelled() {
+        return Err(StoryboardError::Cancelled);
+    }
+
+    // Compute total canvas height and per-card y offsets.
+    let mut canvas_height = opts
+        .outer_padding
+        .checked_mul(2)
+        .ok_or(StoryboardError::CanvasTooLarge)?;
+    for (i, layout) in layouts.iter().enumerate() {
+        if i > 0 {
+            canvas_height = canvas_height
+                .checked_add(opts.card_spacing)
+                .ok_or(StoryboardError::CanvasTooLarge)?;
+        }
+        canvas_height = canvas_height
+            .checked_add(layout.height)
+            .ok_or(StoryboardError::CanvasTooLarge)?;
+    }
+    let canvas_pixels = (canvas_width as u64)
+        .checked_mul(canvas_height as u64)
+        .ok_or(StoryboardError::CanvasTooLarge)?;
+    if canvas_pixels > opts.max_canvas_pixels {
+        return Err(StoryboardError::CanvasTooLarge);
+    }
+
+    // Pass 2: resolve, scale, draw, and release each step's image sequentially.
+    let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, WHITE);
+    let mut y = opts.outer_padding;
+    let flag = cancel.flag();
+    for (i, (step, layout)) in job.steps.iter().zip(layouts.iter()).enumerate() {
+        if flag.load(Ordering::Acquire) {
+            return Err(StoryboardError::Cancelled);
+        }
+
+        step.image
+            .with_flattened_image(flag, |image| {
+                let scaled = downscale(image, content_width);
+                draw_card(
+                    &mut canvas,
+                    opts.outer_padding,
+                    y,
+                    card_width,
+                    layout.height,
+                );
+                let content_x = opts.outer_padding + opts.card_padding;
+                let mut content_y = y + opts.card_padding;
+                draw_text_block(
+                    &mut canvas,
+                    ImagePoint::new(content_x as f32, content_y as f32),
+                    &layout.label,
+                    LABEL_FONT_PX,
+                    true,
+                    TEXT_COLOR,
+                );
+                content_y += label_height_px(&layout.label);
+                if let Some(caption) = &layout.caption {
+                    content_y += CAPTION_GAP;
+                    draw_text_block(
+                        &mut canvas,
+                        ImagePoint::new(content_x as f32, content_y as f32),
+                        caption,
+                        CAPTION_FONT_PX,
+                        false,
+                        CAPTION_COLOR,
+                    );
+                    content_y += caption_height_px(caption);
+                }
+                content_y += LABEL_GAP;
+                image::imageops::replace(
+                    &mut canvas,
+                    &scaled,
+                    i64::from(content_x),
+                    i64::from(content_y),
+                );
+                Ok(())
+            })
+            .map_err(|error| match error {
+                crate::error::ExportError::Cancelled => StoryboardError::Cancelled,
+                crate::error::ExportError::Io { source, .. } => StoryboardError::Io {
+                    path: String::new(),
+                    source,
+                },
+                other => StoryboardError::Io {
+                    path: String::new(),
+                    source: std::io::Error::other(other.to_string()),
+                },
+            })?;
+
+        y += layout.height;
+        if i + 1 < job.steps.len() {
+            y += opts.card_spacing;
+        }
+    }
+
+    if flag.load(Ordering::Acquire) {
+        return Err(StoryboardError::Cancelled);
+    }
+
+    Ok(StoryboardRenderResult {
+        image: canvas,
+        width: canvas_width,
+        height: canvas_height,
+        step_count: job.steps.len(),
+    })
+}
+
+pub fn export_reviewed_storyboard_cancellable(
+    job: &ReviewedGuideExportJob,
+    opts: StoryboardOptions,
+    cancel: &PublishCancellation,
+    out_path: &Path,
+) -> Result<StoryboardExportResult, StoryboardError> {
+    let rendered = render_reviewed_storyboard_cancellable(job, opts, cancel)?;
+    write_png_atomic(out_path, &rendered.image)?;
+    Ok(StoryboardExportResult {
+        path: out_path.to_path_buf(),
+        width: rendered.width,
+        height: rendered.height,
+        step_count: rendered.step_count,
+    })
 }
 
 pub fn render_storyboard_steps(
@@ -351,6 +553,14 @@ fn fit_text(text: &str, max_width: f32, px: f32, bold: bool) -> String {
     } else {
         format!("{fitted}{ellipsis}")
     }
+}
+
+fn label_height_px(label: &str) -> u32 {
+    measure_block(label, LABEL_FONT_PX, true).1.ceil() as u32
+}
+
+fn caption_height_px(caption: &str) -> u32 {
+    measure_block(caption, CAPTION_FONT_PX, false).1.ceil() as u32
 }
 
 fn non_empty_caption(caption: &str) -> Option<&str> {
@@ -758,5 +968,189 @@ mod tests {
             .expect("render with whitespace caption");
 
         assert_eq!(whitespace_caption.height, without_caption.height);
+    }
+
+    #[test]
+    fn cancellable_stops_on_cancel_and_returns_error() {
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![
+                crate::export::model::ReviewedGuideStep {
+                    index: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 100,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image.clone(),
+                    )),
+                    hotspots: Vec::new(),
+                },
+                crate::export::model::ReviewedGuideStep {
+                    index: 2,
+                    title: "Step 2".into(),
+                    caption: None,
+                    kind: crate::models::CandidateKind::Click,
+                    reason: crate::models::DetectReason::VisualChange,
+                    at_ms: 200,
+                    image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                        image,
+                    )),
+                    hotspots: Vec::new(),
+                },
+            ],
+        };
+
+        let result =
+            render_reviewed_storyboard_cancellable(&job, StoryboardOptions::default(), &cancel);
+        assert!(matches!(result, Err(StoryboardError::Cancelled)));
+    }
+
+    #[test]
+    fn cancellable_observes_at_most_one_live_image() {
+        let mut steps = Vec::new();
+        for i in 0..5 {
+            let img = RgbaImage::from_pixel(8, 8, Rgba([i as u8, 0, 0, 255]));
+            let snapshot = rollshot_image_document::ImageDocument::new(img).flatten_snapshot();
+            steps.push(crate::export::model::ReviewedGuideStep {
+                index: i + 1,
+                title: format!("Step {}", i + 1),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: (i as u64 + 1) * 100,
+                image: crate::export::model::ReviewedStepImage::Annotated(snapshot),
+                hotspots: Vec::new(),
+            });
+        }
+
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps,
+        };
+
+        let cancel = PublishCancellation::new();
+        let result = render_reviewed_storyboard_cancellable(
+            &job,
+            StoryboardOptions {
+                max_width: 320,
+                max_canvas_pixels: 10_000_000,
+                outer_padding: 12,
+                card_spacing: 10,
+                card_padding: 8,
+                show_titles: true,
+            },
+            &cancel,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().step_count, 5);
+    }
+
+    #[test]
+    fn cancellable_export_writes_file_on_success() {
+        let cancel = PublishCancellation::new();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![crate::export::model::ReviewedGuideStep {
+                index: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: 100,
+                image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                    image,
+                )),
+                hotspots: Vec::new(),
+            }],
+        };
+
+        let path = temp_path("cancellable-ok");
+        let result = export_reviewed_storyboard_cancellable(
+            &job,
+            StoryboardOptions::default(),
+            &cancel,
+            &path,
+        );
+        assert!(result.is_ok());
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancellable_export_leaves_no_file_on_cancel() {
+        let cancel = PublishCancellation::new();
+        cancel.cancel();
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let job = crate::export::model::ReviewedGuideExportJob {
+            title: "Test".into(),
+            region: crate::models::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: crate::models::InputSourceKind::VisualOnly,
+            input_capability: crate::models::InputCapability::VisualOnly {
+                reason: crate::models::DegradedReason::SourceStartFailed,
+            },
+            steps: vec![crate::export::model::ReviewedGuideStep {
+                index: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: crate::models::CandidateKind::Click,
+                reason: crate::models::DetectReason::VisualChange,
+                at_ms: 100,
+                image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(
+                    image,
+                )),
+                hotspots: Vec::new(),
+            }],
+        };
+
+        let path = temp_path("cancellable-cancel");
+        let result = export_reviewed_storyboard_cancellable(
+            &job,
+            StoryboardOptions::default(),
+            &cancel,
+            &path,
+        );
+        assert!(matches!(result, Err(StoryboardError::Cancelled)));
+        assert!(!path.exists());
     }
 }

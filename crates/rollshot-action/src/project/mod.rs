@@ -1,6 +1,7 @@
 mod assets;
 mod error;
 mod model;
+mod publish;
 mod store;
 mod validate;
 
@@ -9,6 +10,10 @@ pub use model::{
     EnabledOutputs, LoadedProject, PersistedStepAnnotations, ProjectCommit, ProjectFrame,
     ProjectManifestV1, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
     SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
+};
+pub use publish::{
+    load_publish_state, write_publish_state, PublishCancellation, PublishCancelled,
+    PublishFreshness, PublishOutputKind, PublishStateLoad, PublishStateV1, PublishedOutputV1,
 };
 pub use store::{create_project, load_project, save_project, save_project_as};
 pub use validate::{validate_manifest_structure, validate_snapshot_structure};

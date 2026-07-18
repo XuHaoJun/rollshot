@@ -404,9 +404,18 @@ pub(crate) fn from_loaded_project(
         frame_coordinator: super::FrameLoadCoordinator::new(),
         last_save_error: None,
         pending_writer_guard: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        publish_operation: None,
+        publish_arbiter: super::project_publish::PublishArbiter::new(),
+        publish_freshness: std::collections::BTreeMap::new(),
+        publish_details_open: false,
+        next_publish_operation_id: 0,
+        share_progress: None,
+        share_kind: None,
+        share_operation_id: 0,
     };
 
     ws.rebuild_selection_handles();
+    ws.load_publish_freshness();
     Ok(ws)
 }
 

@@ -46,10 +46,19 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
         .height(Length::Fixed(0.0))
         .into();
 
+    #[cfg(feature = "action-guide")]
+    let publish_details: Element<Message> = publish_details_panel(state);
+    #[cfg(not(feature = "action-guide"))]
+    let publish_details: Element<Message> = Space::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(0.0))
+        .into();
+
     let body: Element<Message> = column![
         header(state),
         read_only_banner,
         message_row(state),
+        publish_details,
         main_area(state),
         strip_row(state),
     ]
@@ -296,10 +305,23 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
     };
 
     let issue_pack_btn: Element<Message> = if is_project_backed {
-        Space::new()
-            .width(Length::Shrink)
-            .height(Length::Shrink)
-            .into()
+        #[cfg(feature = "action-guide")]
+        {
+            let is_clean = state.save_state == super::ProjectSaveState::Clean;
+            let issue_pack_exporting = state.issue_pack.as_ref().is_some_and(|d| d.exporting);
+            let can_issue_pack = is_clean && !issue_pack_exporting;
+            button(text("Create Issue Pack"))
+                .on_press_maybe(can_issue_pack.then_some(Message::ExportBugReport))
+                .style(button::secondary)
+                .into()
+        }
+        #[cfg(not(feature = "action-guide"))]
+        {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        }
     } else {
         button(text("Export Bug Report..."))
             .on_press_maybe((!export_busy).then_some(Message::ExportBugReport))
@@ -307,10 +329,19 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
             .into()
     };
 
+    #[cfg(feature = "action-guide")]
+    let publish_status: Element<Message> = publish_status_element(state);
+    #[cfg(not(feature = "action-guide"))]
+    let publish_status: Element<Message> = Space::new()
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .into();
+
     row![
         advisory,
         save_indicator,
         save_button,
+        publish_status,
         guide_title_input,
         Space::new().width(Length::Fill),
         button(text("Discard"))
@@ -559,6 +590,231 @@ fn caption_proposal_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
     container(items).width(Length::Fill).into()
 }
 
+#[cfg(feature = "action-guide")]
+fn publish_status_element(state: &TimelineWorkspace) -> Element<'_, Message> {
+    let Some(aggregate) = state.publish_aggregate() else {
+        return Space::new()
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .into();
+    };
+
+    let label = match aggregate {
+        super::PublishAggregate::Publishing => "Publishing\u{2026}",
+        super::PublishAggregate::NeedsAttention => "Needs attention",
+        super::PublishAggregate::Published => "Published",
+    };
+
+    row![
+        text(label).size(13),
+        button(text("Details"))
+            .on_press(Message::OpenPublishDetails)
+            .style(button::secondary),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+#[cfg(feature = "action-guide")]
+fn publish_details_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
+    use rollshot_action::project::PublishOutputKind;
+
+    if !state.publish_details_open {
+        return Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into();
+    }
+
+    let Some(super::project::ProjectSession::Saved {
+        root,
+        base_revision,
+        access,
+        ..
+    }) = &state.project_session
+    else {
+        return Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into();
+    };
+
+    let revision = *base_revision;
+    let load = rollshot_action::project::load_publish_state(root);
+    let is_writable = matches!(access, super::project::ProjectAccess::Writable(_));
+    let is_clean = state.save_state == super::ProjectSaveState::Clean;
+    let is_active = state.is_publish_active();
+
+    let mut items = column![row![
+        text("Publish Details").size(15),
+        Space::new().width(Length::Fill),
+        button(text("Close"))
+            .on_press(Message::OpenPublishDetails)
+            .style(button::secondary),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)]
+    .spacing(8);
+
+    for kind in PublishOutputKind::ALL {
+        let status = state.publish_output_status(*kind, &load, revision);
+        let status_label = match status {
+            super::PublishOutputStatus::Current => "Current",
+            super::PublishOutputStatus::Stale => "Stale",
+            super::PublishOutputStatus::Updating => "Updating\u{2026}",
+            super::PublishOutputStatus::Failed => "Failed",
+        };
+        let kind_label = match kind {
+            PublishOutputKind::Core => "Core",
+            PublishOutputKind::Storyboard => "Storyboard",
+            PublishOutputKind::Gif => "GIF",
+            PublishOutputKind::Mp4 => "MP4",
+        };
+
+        let toggle: Element<Message> = if *kind == PublishOutputKind::Core {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        } else {
+            let enabled = match kind {
+                PublishOutputKind::Storyboard => state.enabled_outputs.storyboard,
+                PublishOutputKind::Gif => state.enabled_outputs.gif,
+                PublishOutputKind::Mp4 => state.enabled_outputs.mp4,
+                _ => false,
+            };
+            checkbox(enabled)
+                .on_toggle(move |_| Message::TogglePublishOutput(*kind))
+                .into()
+        };
+
+        let retry_btn: Element<Message> = if is_writable
+            && is_clean
+            && matches!(
+                status,
+                super::PublishOutputStatus::Stale | super::PublishOutputStatus::Failed
+            ) {
+            button(text("Retry"))
+                .on_press(Message::RetryPublishOutput(*kind))
+                .style(button::secondary)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        items = items.push(
+            row![
+                text(kind_label).size(13),
+                toggle,
+                text(status_label).size(12),
+                Space::new().width(Length::Fill),
+                retry_btn,
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        );
+    }
+
+    let action_row: Element<Message> = {
+        let retry_all: Element<Message> = if is_writable && is_clean {
+            button(text("Retry All"))
+                .on_press(Message::RetryAllPublishOutputs)
+                .style(button::secondary)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        let cancel: Element<Message> = if is_active {
+            button(text("Cancel"))
+                .on_press(Message::CancelPublish)
+                .style(button::danger)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        row![retry_all, cancel].spacing(6).into()
+    };
+
+    items = items.push(action_row);
+
+    let share_section: Element<Message> = {
+        let outputs_all_current = {
+            let enabled = state.publish_enabled_kinds();
+            enabled.iter().all(|kind| {
+                state.publish_freshness.get(kind)
+                    == Some(&rollshot_action::project::PublishFreshness::Current)
+            })
+        };
+        let share_safe: Element<Message> = if is_clean
+            && (is_writable || outputs_all_current)
+            && !state.share_progress.as_ref().is_some_and(|p| {
+                matches!(
+                    p,
+                    super::share::ShareProgress::Copying
+                        | super::share::ShareProgress::WaitingForPublish
+                )
+            }) {
+            button(text("Share safe viewer copy"))
+                .on_press(Message::ShareSafeCopyRequested)
+                .style(button::secondary)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        let share_editable: Element<Message> = if is_writable
+            && is_clean
+            && !state.share_progress.as_ref().is_some_and(|p| {
+                matches!(
+                    p,
+                    super::share::ShareProgress::Copying
+                        | super::share::ShareProgress::WaitingForPublish
+                )
+            }) {
+            button(text("Share editable project"))
+                .on_press(Message::ShareEditableProjectRequested)
+                .style(button::secondary)
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into()
+        };
+
+        column![
+            text("Share").size(14),
+            row![share_safe, share_editable].spacing(6),
+            text("Safe copy: read-only viewer files. Editable: full project with assets.").size(11),
+        ]
+        .spacing(4)
+        .into()
+    };
+
+    items = items.push(share_section);
+
+    container(items)
+        .padding(12)
+        .width(Length::Fill)
+        .style(container::rounded_box)
+        .into()
+}
+
 fn issue_pack_modal<'a>(
     base: Element<'a, Message>,
     state: &'a TimelineWorkspace,
@@ -567,6 +823,29 @@ fn issue_pack_modal<'a>(
     let export_enabled =
         dialog.review_confirmed && dialog.pending_kind.is_none() && !dialog.exporting;
     let steps = state.guide.steps().len();
+
+    let action_buttons: Element<Message> = if dialog.exporting {
+        row![
+            button(text("Exporting\u{2026}")).style(button::secondary),
+            button(text("Cancel Export"))
+                .on_press(Message::IssuePackCancelExport)
+                .style(button::danger),
+        ]
+        .spacing(8)
+        .into()
+    } else {
+        row![
+            button(text("Export Folder"))
+                .on_press_maybe(export_enabled.then_some(Message::IssuePackExportFolder))
+                .style(button::primary),
+            button(text("Export ZIP"))
+                .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
+                .style(button::secondary),
+            button(text("Cancel")).on_press(Message::IssuePackCancel),
+        ]
+        .spacing(8)
+        .into()
+    };
 
     let dialog_view = container(
         column![
@@ -586,16 +865,7 @@ fn issue_pack_modal<'a>(
             checkbox(dialog.review_confirmed)
                 .label("I reviewed the images and keyframes included in this bug report.")
                 .on_toggle(Message::IssuePackReviewChanged),
-            row![
-                button(text("Export Folder"))
-                    .on_press_maybe(export_enabled.then_some(Message::IssuePackExportFolder))
-                    .style(button::primary),
-                button(text("Export ZIP"))
-                    .on_press_maybe(export_enabled.then_some(Message::IssuePackExportZip))
-                    .style(button::secondary),
-                button(text("Cancel")).on_press(Message::IssuePackCancel),
-            ]
-            .spacing(8),
+            action_buttons,
         ]
         .spacing(12),
     )
@@ -1416,5 +1686,119 @@ mod tests {
         let _element = view(&state);
         // Review modal renders without panic. The button presence is verified
         // by the update-layer accept/reject/dismiss tests.
+    }
+
+    // ---- Publish view tests ----
+
+    #[cfg(feature = "action-guide")]
+    mod publish {
+        use super::*;
+        use crate::timeline_workspace::project::ProjectAccess;
+        use crate::timeline_workspace::project_publish::PublishOperationId;
+        use crate::timeline_workspace::{ProjectSaveState, PublishOperation, PublishOutputStatus};
+        use rollshot_action::project::{EnabledOutputs, PublishCancellation, PublishOutputKind};
+        use std::collections::BTreeMap;
+
+        fn ws_project_backed() -> TimelineWorkspace {
+            use rollshot_action::project::{
+                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
+
+            let manifest = ProjectManifestV1 {
+                schema_version: 1,
+                revision: 7,
+                title: "Test Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 32,
+                    height: 32,
+                },
+                input_source: InputSourceKind::LinuxEvdev,
+                input_capability: InputCapability::SemanticEvents,
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 0,
+                    sha256: "a".into(),
+                    width: 32,
+                    height: 32,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Step 1".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::ClickConfirmed,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-project"),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+            ws.save_state = ProjectSaveState::Clean;
+            ws
+        }
+
+        #[test]
+        fn publish_details_renders_when_open() {
+            let mut ws = ws_project_backed();
+            ws.publish_details_open = true;
+            let _element = view(&ws);
+        }
+
+        #[test]
+        fn publish_details_hidden_when_closed() {
+            let mut ws = ws_project_backed();
+            ws.publish_details_open = false;
+            let _element = view(&ws);
+        }
+
+        #[test]
+        fn publish_header_shows_publishing_when_active() {
+            let mut ws = ws_project_backed();
+            ws.publish_operation = Some(PublishOperation {
+                id: PublishOperationId(1),
+                revision: 7,
+                cancel: PublishCancellation::new(),
+                per_output: BTreeMap::from([(
+                    PublishOutputKind::Core,
+                    PublishOutputStatus::Updating,
+                )]),
+            });
+            ws.publish_freshness.clear();
+            let _element = view(&ws);
+        }
+
+        #[test]
+        fn publish_header_shows_published_when_all_current() {
+            let mut ws = ws_project_backed();
+            ws.publish_freshness.clear();
+            ws.publish_freshness.insert(
+                PublishOutputKind::Core,
+                rollshot_action::project::PublishFreshness::Current,
+            );
+            let _element = view(&ws);
+        }
+
+        #[test]
+        fn toggle_checkbox_changes_enabled_outputs() {
+            let mut ws = ws_project_backed();
+            ws.enabled_outputs.storyboard = false;
+            ws.publish_details_open = true;
+            let _element = view(&ws);
+        }
     }
 }
