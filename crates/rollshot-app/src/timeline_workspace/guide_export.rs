@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Local};
 use rollshot_action::{
-    ExportError, GuideHotspot, NormalizedRect, ReviewedGuideExportJob, ReviewedGuideStep,
-    ReviewedStepImage,
+    ExportError, GuideHotspot, NormalizedRect, ProjectReviewedImage, ReviewedGuideExportJob,
+    ReviewedGuideStep, ReviewedStepImage,
 };
 use rollshot_image_document::Annotation;
 
@@ -194,19 +194,57 @@ pub(crate) fn build_reviewed_export_job(
 ) -> Result<ReviewedGuideExportJob, ExportError> {
     let mut steps = Vec::new();
     for (i, step) in state.guide.steps().iter().enumerate() {
-        let frame = state
-            .store
-            .retained(step.keyframe)
-            .ok_or(ExportError::MissingKeyframe { index: i + 1 })?;
-        let (w, h) = frame.image.dimensions();
+        let is_project = matches!(
+            state.frame_source,
+            Some(rollshot_action::StepFrameSource::Project(_))
+        );
 
-        let image = match state.presentation.doc(step.source) {
-            Some(doc)
-                if doc.keyframe == step.keyframe && !doc.document.annotations().is_empty() =>
-            {
-                ReviewedStepImage::Annotated(doc.document.flatten_snapshot())
-            }
-            _ => ReviewedStepImage::Retained(Arc::clone(&frame.image)),
+        let (w, h, image) = if is_project {
+            let source = state.frame_source.as_ref().unwrap();
+            let rollshot_action::StepFrameSource::Project(ref src) = source else {
+                unreachable!()
+            };
+            let frame = src
+                .frame(step.keyframe)
+                .ok_or(ExportError::MissingKeyframe { index: i + 1 })?;
+            let (w, h) = (frame.width, frame.height);
+
+            let annotations = match state.presentation.doc(step.source) {
+                Some(doc)
+                    if doc.keyframe == step.keyframe && !doc.document.annotations().is_empty() =>
+                {
+                    Some(doc.document.annotations().to_vec())
+                }
+                _ => None,
+            };
+
+            (
+                w,
+                h,
+                ReviewedStepImage::Project(ProjectReviewedImage {
+                    project_root: src.root().to_path_buf(),
+                    frame: frame.clone(),
+                    annotations,
+                    step: i + 1,
+                }),
+            )
+        } else {
+            let frame = state
+                .store
+                .retained(step.keyframe)
+                .ok_or(ExportError::MissingKeyframe { index: i + 1 })?;
+            let (w, h) = frame.image.dimensions();
+
+            let image = match state.presentation.doc(step.source) {
+                Some(doc)
+                    if doc.keyframe == step.keyframe && !doc.document.annotations().is_empty() =>
+                {
+                    ReviewedStepImage::Annotated(doc.document.flatten_snapshot())
+                }
+                _ => ReviewedStepImage::Retained(Arc::clone(&frame.image)),
+            };
+
+            (w, h, image)
         };
 
         let hotspots = match state.presentation.doc(step.source) {
@@ -235,8 +273,19 @@ pub(crate) fn build_reviewed_export_job(
         });
     }
 
+    let title = {
+        let effective = state.guide.effective_title();
+        if effective == rollshot_action::DEFAULT_GUIDE_TITLE
+            && state.guide.title().trim().is_empty()
+        {
+            rollshot_action::DEFAULT_GUIDE_TITLE.to_string()
+        } else {
+            effective.to_string()
+        }
+    };
+
     let job = ReviewedGuideExportJob {
-        title: state.guide.effective_title().to_string(),
+        title,
         region: state.region,
         input_source: state.source_kind,
         input_capability: state.capability,
@@ -550,5 +599,148 @@ mod tests {
             std::fs::read_to_string(first.join("external")).unwrap(),
             "safe"
         );
+    }
+
+    fn project_workspace() -> (TimelineWorkspace, Vec<u64>) {
+        use image::ImageEncoder;
+        use image::RgbaImage;
+        use rollshot_action::project::{
+            EnabledOutputs, LoadedProject, ProjectFrame, ProjectManifestV1,
+        };
+        use rollshot_action::step_frame_source::ProjectFrameSource;
+        use rollshot_action::{
+            ActionRecorder, CaptureRegion, DetectorConfig, InputCapability, InputSourceKind,
+            StoreConfig,
+        };
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+
+        let mut rec = ActionRecorder::new(
+            CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            StoreConfig::default(),
+            DetectorConfig {
+                diff_threshold: 0.01,
+                area_threshold: 0.05,
+                cooldown_ms: 0,
+                ..DetectorConfig::default()
+            },
+        );
+        let img1 = RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]));
+        let img2 = RgbaImage::from_pixel(8, 8, image::Rgba([40, 50, 60, 255]));
+        rec.ingest_frame(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255])), 0);
+        rec.ingest_frame(img1.clone(), 100);
+        rec.ingest_frame(img1.clone(), 200);
+        rec.ingest_frame(img1.clone(), 300);
+        rec.ingest_frame(img2.clone(), 400);
+        rec.ingest_frame(img2.clone(), 500);
+        rec.ingest_frame(img2.clone(), 600);
+        let recording = rec.finish();
+        let guide = rollshot_action::Guide::from_candidates(recording.candidates.clone());
+        let kf_ids: Vec<u64> = guide.steps().iter().map(|s| s.keyframe).collect();
+
+        let mut frames = Vec::new();
+        for (i, img) in [&img1, &img2].iter().enumerate() {
+            let mut buf = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            encoder
+                .write_image(
+                    img.as_raw(),
+                    img.width(),
+                    img.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .unwrap();
+            let sha256 = format!("{:x}", Sha256::digest(&buf));
+            let dest = root.join("assets/frames").join(format!("{sha256}.png"));
+            std::fs::write(&dest, &buf).unwrap();
+            frames.push(ProjectFrame {
+                id: kf_ids[i],
+                at_ms: (i as u64 + 1) * 100,
+                sha256,
+                width: img.width(),
+                height: img.height(),
+            });
+        }
+
+        let manifest = ProjectManifestV1 {
+            schema_version: 1,
+            revision: 1,
+            title: "Test".into(),
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: InputSourceKind::VisualOnly,
+            input_capability: InputCapability::VisualOnly {
+                reason: rollshot_action::DegradedReason::SourceStartFailed,
+            },
+            enabled_outputs: EnabledOutputs::default(),
+            frames,
+            steps: Vec::new(),
+        };
+        let loaded = LoadedProject { root, manifest };
+        let source = ProjectFrameSource::from_loaded(
+            &loaded,
+            rollshot_action::DEFAULT_PROJECT_FRAME_CACHE_BYTES,
+        );
+
+        let mut ws = TimelineWorkspace::new(
+            recording,
+            CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            InputCapability::VisualOnly {
+                reason: rollshot_action::DegradedReason::SourceStartFailed,
+            },
+            InputSourceKind::VisualOnly,
+        );
+        ws.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
+        let _ = dir.keep();
+        (ws, kf_ids)
+    }
+
+    #[test]
+    fn job_from_project_source_creates_lazy_descriptors() {
+        let (ws, _kf_ids) = project_workspace();
+        let job = build_reviewed_export_job(&ws).unwrap();
+
+        assert_eq!(job.steps.len(), 2);
+        assert!(matches!(job.steps[0].image, ReviewedStepImage::Project(_)));
+        assert!(matches!(job.steps[1].image, ReviewedStepImage::Project(_)));
+        assert_eq!(job.steps[0].image.dimensions(), (8, 8));
+    }
+
+    #[test]
+    fn job_from_project_source_succeeds_when_asset_deleted_construction_lazy() {
+        let (ws, kf_ids) = project_workspace();
+        let source = ws.frame_source.as_ref().unwrap();
+        let root = match source {
+            rollshot_action::StepFrameSource::Project(src) => src.root().to_path_buf(),
+            _ => unreachable!(),
+        };
+        let f2 = match source {
+            rollshot_action::StepFrameSource::Project(src) => src.frame(kf_ids[1]).unwrap().clone(),
+            _ => unreachable!(),
+        };
+        let asset2 = root
+            .join("assets/frames")
+            .join(format!("{}.png", f2.sha256));
+        std::fs::remove_file(&asset2).unwrap();
+
+        let job = build_reviewed_export_job(&ws).unwrap();
+        assert_eq!(job.steps.len(), 2);
     }
 }

@@ -42,6 +42,12 @@ pub enum ExportError {
     Serialize { category: &'static str },
     #[error("template error in {category}")]
     Template { category: &'static str },
+    #[error("step {step} asset file is missing")]
+    AssetMissing { step: usize },
+    #[error("step {step} asset decode failed")]
+    AssetDecodeFailed { step: usize },
+    #[error("export cancelled")]
+    Cancelled,
 }
 
 impl ExportError {
@@ -55,6 +61,9 @@ impl ExportError {
             Self::DestinationExists { .. } => "destination_exists",
             Self::Serialize { .. } => "serialize",
             Self::Template { .. } => "template",
+            Self::AssetMissing { .. } => "asset_missing",
+            Self::AssetDecodeFailed { .. } => "asset_decode_failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }

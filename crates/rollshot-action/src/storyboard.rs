@@ -118,9 +118,10 @@ pub fn render_reviewed_storyboard(
     }
 
     let mut owned = Vec::with_capacity(job.steps.len());
+    let cancel = std::sync::atomic::AtomicBool::new(false);
     for step in &job.steps {
         step.image
-            .with_flattened_image(|image| {
+            .with_flattened_image(&cancel, |image| {
                 owned.push(downscale(image, opts.max_width));
                 Ok(())
             })
