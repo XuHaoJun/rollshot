@@ -1,8 +1,12 @@
+pub mod probe;
+pub mod process;
 pub mod selection;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub use probe::{parse_probe_json, probe_args, ProbeMetadata, VideoToolchain};
+pub use process::run_cancellable_child;
 pub use selection::{evidence_sample_indices, CandidateSelector, SelectionResult};
 
 pub const ANALYSIS_FPS: u64 = 2;
@@ -27,6 +31,44 @@ pub struct VideoImportProgress {
     pub processed_ms: u64,
     pub total_ms: u64,
     pub retained_candidates: usize,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum VideoImportError {
+    #[error("Video metadata could not be read.")]
+    ProbeFailed,
+    #[error("The selected file has no readable video stream.")]
+    MissingVideoStream,
+    #[error("The selected video has invalid dimensions or duration.")]
+    InvalidVideoMetadata,
+    #[error("The video decoder is unavailable.")]
+    DecoderUnavailable,
+    #[error("The video could not be decoded.")]
+    DecodeFailed,
+    #[error("Required evidence could not be extracted.")]
+    EvidenceMissing,
+    #[error("Temporary evidence storage failed.")]
+    ScratchIo,
+    #[error("The recording exceeds an internal resource bound.")]
+    ResourceLimit,
+    #[error("Import was cancelled.")]
+    Cancelled,
+}
+
+impl VideoImportError {
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::ProbeFailed => "probe_failed",
+            Self::MissingVideoStream => "missing_video_stream",
+            Self::InvalidVideoMetadata => "invalid_video_metadata",
+            Self::DecoderUnavailable => "decoder_unavailable",
+            Self::DecodeFailed => "decode_failed",
+            Self::EvidenceMissing => "evidence_missing",
+            Self::ScratchIo => "scratch_io",
+            Self::ResourceLimit => "resource_limit",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Clone, Default)]
