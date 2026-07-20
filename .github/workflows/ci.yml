@@ -10,6 +10,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      ICED_TEST_BACKEND: tiny-skia
     strategy:
       fail-fast: false
       matrix:

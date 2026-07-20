@@ -141,6 +141,10 @@ the explicitly allowed baseline paths; in human mode it returns a verdict
 without writes and waits for user approval. After approval, start a new
 clean-context reviewer to perform only the allowed baseline update.
 
+Auto baseline acceptance also requires the skill's behavioral image-capability
+probe to report semantic inspection. Pixel-only or unavailable inspection must
+use a capable clean-context reviewer or explicit human mode.
+
 @RTK.md
 
 ## 9. Project Map
