@@ -1,0 +1,4 @@
+interface:
+  display_name: "Testing iced UI"
+  short_description: "Agent-driven iced UI and visual regression workflow"
+  default_prompt: "Use $testing-iced-ui to verify this iced UI change with deterministic scenarios and visual artifacts."

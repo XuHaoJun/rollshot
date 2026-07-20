@@ -127,6 +127,20 @@ If a change intentionally applies to only one platform, state that explicitly in
 the plan and final response, including the reason, the unchecked counterpart
 path, and any remaining runtime-verification risk.
 
+### Iced UI E2E and visual baselines
+
+For every user-visible iced UI change or UI regression investigation, invoke
+the repo-local `testing-iced-ui` skill before editing. Its auto mode is the
+default; switch to human mode only when the user explicitly requests human
+participation.
+
+The product-changing agent must never write or approve golden visual
+baselines. It must send the raw scenario evidence to an independent subagent
+started with `fork_turns="none"`. In auto mode that reviewer may update only
+the explicitly allowed baseline paths; in human mode it returns a verdict
+without writes and waits for user approval. After approval, start a new
+clean-context reviewer to perform only the allowed baseline update.
+
 @RTK.md
 
 ## 9. Project Map

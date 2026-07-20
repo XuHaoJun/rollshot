@@ -399,6 +399,7 @@ mod tests {
     use super::viewport::ZoomMode;
     use super::*;
     use iced::Size as IcedSize;
+    use iced_test::Simulator;
     use image::Rgba;
     use std::path::Path;
 
@@ -420,6 +421,139 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn simulator_at(state: &ResultWorkspace, size: IcedSize) -> Simulator<'_, Message> {
+        Simulator::with_size(
+            iced::Settings {
+                fonts: vec![
+                    rollshot_image_document::style::FONT_REGULAR_BYTES.into(),
+                    rollshot_image_document::style::FONT_BOLD_BYTES.into(),
+                ],
+                ..iced::Settings::default()
+            },
+            size,
+            view(state),
+        )
+    }
+
+    #[test]
+    fn result_workspace_chrome_is_visible_at_supported_window_sizes() {
+        for size in [IcedSize::new(1100.0, 760.0), IcedSize::new(640.0, 420.0)] {
+            let state = workspace().with_initial_viewport(size);
+            let scrollable_id = state.scrollable_id.clone();
+            let mut ui = simulator_at(&state, size);
+
+            let canvas = ui.find(scrollable_id).expect("canvas scrollable exists");
+            assert!(
+                (80.0..120.0).contains(&canvas.bounds().y),
+                "canvas is not directly below the two-row toolbar at {size:?}: canvas={:?}",
+                canvas.bounds()
+            );
+
+            for label in [
+                "Close",
+                "Copy",
+                "Save As",
+                "Fit Width",
+                "Fit Window",
+                "100%",
+            ] {
+                let target = ui
+                    .find(label)
+                    .unwrap_or_else(|error| panic!("{label:?} missing at {size:?}: {error}"));
+                let bounds = target.bounds();
+                let visible = target
+                    .visible_bounds()
+                    .unwrap_or_else(|| panic!("{label:?} is not visible at {size:?}"));
+                assert!(
+                    (visible.width - bounds.width).abs() < 0.01
+                        && (visible.height - bounds.height).abs() < 0.01,
+                    "{label:?} is clipped at {size:?}: bounds={bounds:?}, visible={visible:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn result_workspace_overflow_menu_expands_toolbar_without_covering_canvas() {
+        let size = IcedSize::new(1100.0, 760.0);
+        let mut state = workspace().with_initial_viewport(IcedSize::new(1084.0, 650.0));
+        state.editor.more_menu_open = true;
+        let scrollable_id = state.scrollable_id.clone();
+        let mut ui = simulator_at(&state, size);
+
+        let menu_item = ui
+            .find("Smart Redaction")
+            .expect("overflow menu is rendered");
+        assert!(
+            menu_item.visible_bounds().is_some(),
+            "overflow menu is clipped"
+        );
+
+        let canvas = ui.find(scrollable_id).expect("canvas scrollable exists");
+        assert!(
+            (115.0..170.0).contains(&canvas.bounds().y),
+            "expanded toolbar does not reserve one menu row: canvas={:?}",
+            canvas.bounds()
+        );
+    }
+
+    #[test]
+    fn result_workspace_color_picker_expands_toolbar_without_covering_canvas() {
+        let size = IcedSize::new(1100.0, 760.0);
+        let mut state = workspace().with_initial_viewport(IcedSize::new(1084.0, 650.0));
+        let color = rollshot_image_document::Rgb8::new(0xE5, 0x48, 0x4D);
+        state.editor.properties.color = Some(super::properties::ColorTransaction {
+            target: super::properties::PropertyTarget::NumberTool,
+            property: super::properties::ColorProperty::NumberAccent,
+            original: color,
+            preview: color,
+            hex: "#E5484D".to_owned(),
+        });
+        let scrollable_id = state.scrollable_id.clone();
+        let mut ui = simulator_at(&state, size);
+
+        let apply = ui.find("Apply").expect("color picker is rendered");
+        assert!(apply.visible_bounds().is_some(), "color picker is clipped");
+
+        let canvas = ui.find(scrollable_id).expect("canvas scrollable exists");
+        assert!(
+            (250.0..380.0).contains(&canvas.bounds().y),
+            "expanded toolbar does not reserve color picker height: canvas={:?}",
+            canvas.bounds()
+        );
+    }
+
+    #[test]
+    #[ignore = "writes visual debugging artifacts"]
+    fn render_result_workspace_visual_scenarios() {
+        let artifact_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/result-workspace");
+
+        for (name, size, viewport) in [
+            (
+                "standard-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                IcedSize::new(1084.0, 650.0),
+            ),
+            (
+                "minimum-640x420",
+                IcedSize::new(640.0, 420.0),
+                IcedSize::new(624.0, 310.0),
+            ),
+        ] {
+            let state = workspace().with_initial_viewport(viewport);
+            let mut ui = simulator_at(&state, size);
+            let snapshot = ui.snapshot(&iced::Theme::Dark).expect("render scenario");
+            let base = artifact_dir.join(name);
+
+            for renderer in ["tiny-skia", "wgpu"] {
+                let _ = std::fs::remove_file(base.with_file_name(format!("{name}-{renderer}.png")));
+            }
+
+            assert!(snapshot.matches_image(base).expect("write scenario PNG"));
+        }
     }
 
     // -- config isolation (with_config_path) ---------------------------------

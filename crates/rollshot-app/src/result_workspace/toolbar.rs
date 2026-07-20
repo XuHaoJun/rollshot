@@ -8,6 +8,9 @@ use rollshot_image_document::Rgb8;
 
 const ICON_UNDO: &str = "\u{21B6}";
 const ICON_REDO: &str = "\u{21B7}";
+const SECOND_ROW_HEIGHT: f32 = 32.0;
+const SECOND_ROW_MENU_HEIGHT: f32 = 64.0;
+const SECOND_ROW_COLOR_PICKER_HEIGHT: f32 = 270.0;
 
 fn shortcut_label(name: &str, key: &str) -> String {
     format!("{name} ({key})")
@@ -775,11 +778,19 @@ fn color_picker(state: &ResultWorkspace) -> Element<'_, Message> {
 /// Top-level toolbar view: first row + responsive second row.
 pub fn view(state: &ResultWorkspace) -> Element<'_, Message> {
     let first = first_row(state);
+    let second_height = if state.editor.properties.color.is_some() {
+        SECOND_ROW_COLOR_PICKER_HEIGHT
+    } else if state.editor.more_menu_open || state.editor.shapes_menu_open {
+        SECOND_ROW_MENU_HEIGHT
+    } else {
+        SECOND_ROW_HEIGHT
+    };
     let second = responsive(move |size| {
         let model = toolbar_model(state, size.width);
         second_row(state, model)
     })
-    .width(Length::Fill);
+    .width(Length::Fill)
+    .height(Length::Fixed(second_height));
 
     column![first, second].into()
 }
