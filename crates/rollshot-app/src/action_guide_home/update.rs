@@ -98,9 +98,13 @@ pub enum Effect {
         toolchain: rollshot_action::VideoToolchain,
         cancellation: rollshot_action::VideoImportCancellation,
     },
-    SetupImportToolchain,
+    SetupImportToolchain {
+        operation_id: ImportOperationId,
+    },
     OpenImportedTimeline(rollshot_action::ImportedWorkspaceSeed),
-    ResolveImportToolchain,
+    ResolveImportToolchain {
+        operation_id: ImportOperationId,
+    },
 }
 
 fn truncate_path(p: &std::path::Path) -> String {
@@ -126,8 +130,14 @@ impl std::fmt::Debug for Effect {
                 .debug_struct("StartImport")
                 .field("operation_id", operation_id)
                 .finish_non_exhaustive(),
-            Self::SetupImportToolchain => write!(f, "SetupImportToolchain"),
-            Self::ResolveImportToolchain => write!(f, "ResolveImportToolchain"),
+            Self::SetupImportToolchain { operation_id } => f
+                .debug_struct("SetupImportToolchain")
+                .field("operation_id", operation_id)
+                .finish(),
+            Self::ResolveImportToolchain { operation_id } => f
+                .debug_struct("ResolveImportToolchain")
+                .field("operation_id", operation_id)
+                .finish(),
             Self::OpenImportedTimeline(_) => write!(f, "OpenImportedTimeline(..)"),
         }
     }
@@ -301,10 +311,10 @@ impl ActionGuideHome {
                     ));
                     return Update::none();
                 }
-                let _id = self.import.begin(path);
+                let id = self.import.begin(path);
                 Update {
                     task: Task::none(),
-                    effect: Effect::ResolveImportToolchain,
+                    effect: Effect::ResolveImportToolchain { operation_id: id },
                 }
             }
             Message::ImportPickerCancelled => {
@@ -338,7 +348,7 @@ impl ActionGuideHome {
                     crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(_) => {
                         Update {
                             task: Task::none(),
-                            effect: Effect::SetupImportToolchain,
+                            effect: Effect::SetupImportToolchain { operation_id },
                         }
                     }
                 }
@@ -355,7 +365,7 @@ impl ActionGuideHome {
                         // Re-resolve after successful setup
                         Update {
                             task: Task::none(),
-                            effect: Effect::ResolveImportToolchain,
+                            effect: Effect::ResolveImportToolchain { operation_id },
                         }
                     }
                     Err(err) => {
@@ -367,9 +377,12 @@ impl ActionGuideHome {
             }
             Message::RetryImportSetup => {
                 // Re-resolve the toolchain after setup
-                Update {
-                    task: Task::none(),
-                    effect: Effect::ResolveImportToolchain,
+                match self.import.operation_id() {
+                    Some(operation_id) => Update {
+                        task: Task::none(),
+                        effect: Effect::ResolveImportToolchain { operation_id },
+                    },
+                    None => Update::none(),
                 }
             }
             Message::ImportProgress {
@@ -897,8 +910,14 @@ mod tests {
     fn picker_selected_emits_resolve_toolchain_effect() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::ImportPickerSelected(PathBuf::from("video.mp4")));
-        assert!(matches!(update.effect, Effect::ResolveImportToolchain));
-        assert_eq!(home.import_coordinator().state(), ImportState::ResolvingToolchain);
+        assert!(matches!(
+            update.effect,
+            Effect::ResolveImportToolchain { .. }
+        ));
+        assert_eq!(
+            home.import_coordinator().state(),
+            ImportState::ResolvingToolchain
+        );
     }
 
     #[test]
@@ -907,7 +926,11 @@ mod tests {
         let update = home.update(Message::ImportPickerSelected(PathBuf::from("clip.avi")));
         assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.import_coordinator().state(), ImportState::Idle);
-        assert!(home.message.as_deref().unwrap().contains("Unsupported video format"));
+        assert!(home
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("Unsupported video format"));
         assert!(home.message.as_deref().unwrap().contains(".avi"));
     }
 
