@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::io::{self, Read};
+use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::{VideoImportCancellation, VideoImportError};
+use crate::metrics::LumaPlane;
+
+use super::probe::{parse_probe_json, probe_args, ProbeMetadata, VideoToolchain};
+use super::{VideoImportCancellation, VideoImportError, ANALYSIS_FPS, ANALYSIS_WIDTH};
 
 const STDERR_RING_CAPACITY: usize = 64 * 1024;
 const PROGRESS_LINE_MAX: usize = 256;
@@ -164,6 +169,269 @@ fn drain_stderr(mut stderr: ChildStderr) -> StderrDiagnostics {
     }
 
     diagnostics
+}
+
+pub fn probe_video(
+    input: &Path,
+    toolchain: &VideoToolchain,
+) -> Result<ProbeMetadata, VideoImportError> {
+    let mut cmd = Command::new(&toolchain.ffprobe);
+    let args = probe_args(input);
+    // Filter out flags that are ffmpeg-specific and not supported by ffprobe.
+    // CancellableChild::spawn already sets stdin to null (-nostdin is redundant).
+    let skip = ["-nostdin", "-an", "-sn", "-dn"];
+    for arg in args {
+        if skip.contains(&arg.as_str()) {
+            continue;
+        }
+        cmd.arg(&arg);
+    }
+
+    let child = CancellableChild::spawn(cmd)?;
+    let cancel = VideoImportCancellation::default();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    run_cancellable_child(child, &cancel, move |mut stdout| {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    })?;
+
+    let output = rx.recv().map_err(|_| VideoImportError::ProbeFailed)?;
+    parse_probe_json(&output)
+}
+
+pub fn run_analysis_pass(
+    input: &Path,
+    toolchain: &VideoToolchain,
+    meta: ProbeMetadata,
+    frame_size: usize,
+    cancel: VideoImportCancellation,
+    mut on_frame: impl FnMut(u64, LumaPlane),
+) -> Result<(), VideoImportError> {
+    let mut cmd = Command::new(&toolchain.ffmpeg);
+    cmd.args(["-nostdin", "-an", "-sn", "-dn"]);
+
+    if meta.rotation_degrees == 90 {
+        cmd.args(["-metadata:s:v", "rotate=0", "-vf", "transpose=1"]);
+    } else if meta.rotation_degrees == 180 {
+        cmd.args(["-vf", "transpose=1,transpose=1"]);
+    } else if meta.rotation_degrees == 270 {
+        cmd.args(["-metadata:s:v", "rotate=0", "-vf", "transpose=2"]);
+    }
+
+    cmd.args([
+        "-i",
+        &input.to_string_lossy(),
+        "-vf",
+        &format!(
+            "fps={},scale={}:-2,format=gray",
+            ANALYSIS_FPS, ANALYSIS_WIDTH
+        ),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "-progress",
+        "pipe:2",
+        "pipe:1",
+    ]);
+
+    let mut child = CancellableChild::spawn(cmd)?;
+    let (stdout, _stderr) = child
+        .take_pipes()
+        .ok_or(VideoImportError::DecoderUnavailable)?;
+
+    let cancel_ref = cancel.clone();
+    let mut stdout = stdout;
+    let mut frame_buf = vec![0u8; frame_size];
+    let mut sample_index: u64 = 0;
+
+    loop {
+        if cancel_ref.is_cancelled() {
+            child.kill_and_wait();
+            return Err(VideoImportError::Cancelled);
+        }
+
+        match read_exact_or_eof(&mut stdout, &mut frame_buf) {
+            Ok(true) => {
+                let width = ANALYSIS_WIDTH;
+                let height = (frame_size / width as usize) as u32;
+                let samples: Vec<f32> = frame_buf.iter().map(|&b| b as f32).collect();
+                let luma = LumaPlane {
+                    width,
+                    height,
+                    samples,
+                };
+                on_frame(sample_index, luma);
+                sample_index += 1;
+            }
+            Ok(false) => break,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::UnexpectedEof && sample_index > 0 {
+                    tracing::event!(
+                        target: "rollshot::action::video_import",
+                        tracing::Level::DEBUG,
+                        category = "truncated_frame",
+                        sample_index,
+                        "truncated analysis frame at EOF; ignoring"
+                    );
+                    break;
+                }
+                child.kill_and_wait();
+                return Err(VideoImportError::DecodeFailed);
+            }
+        }
+    }
+
+    let status = child.wait()?;
+    if !status.success() && sample_index == 0 {
+        return Err(VideoImportError::DecodeFailed);
+    }
+
+    Ok(())
+}
+
+fn read_exact_or_eof(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<bool> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => {
+                if filled == 0 {
+                    return Ok(false);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated frame",
+                ));
+            }
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_evidence_pass(
+    input: &Path,
+    toolchain: &VideoToolchain,
+    meta: ProbeMetadata,
+    requested_indices: &[usize],
+    staging_dir: &Path,
+    cancel: &VideoImportCancellation,
+    _progress: &(impl Fn(super::VideoImportProgress) + Send + Sync),
+    _total_ms: u64,
+) -> Result<HashMap<usize, std::path::PathBuf>, VideoImportError> {
+    if requested_indices.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let select_filter = build_select_filter(requested_indices);
+
+    let mut cmd = Command::new(&toolchain.ffmpeg);
+    cmd.args(["-nostdin", "-an", "-sn", "-dn"]);
+
+    if meta.rotation_degrees == 90 || meta.rotation_degrees == 270 {
+        cmd.args(["-metadata:s:v", "rotate=0"]);
+    }
+
+    let scale_filter = format!(
+        "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
+        super::EVIDENCE_MAX_LONG_EDGE,
+        super::EVIDENCE_MAX_LONG_EDGE,
+    );
+
+    let vf = if meta.rotation_degrees == 90 {
+        format!("transpose=1,{},{},format=rgba", select_filter, scale_filter)
+    } else if meta.rotation_degrees == 180 {
+        format!(
+            "transpose=1,transpose=1,{},{},format=rgba",
+            select_filter, scale_filter
+        )
+    } else if meta.rotation_degrees == 270 {
+        format!("transpose=2,{},{},format=rgba", select_filter, scale_filter)
+    } else {
+        format!("{},{},format=rgba", select_filter, scale_filter)
+    };
+
+    cmd.args([
+        "-i",
+        &input.to_string_lossy(),
+        "-vf",
+        &vf,
+        "-fps_mode",
+        "passthrough",
+        "-pix_fmt",
+        "rgba",
+        staging_dir.join("%05d.png").to_str().unwrap(),
+    ]);
+
+    let cancel_ref = cancel.clone();
+
+    let child = CancellableChild::spawn(cmd)?;
+
+    let cancel_for_monitor = cancel_ref.clone();
+
+    let mut child = child;
+
+    loop {
+        if cancel_for_monitor.is_cancelled() {
+            child.kill_and_wait();
+            return Err(VideoImportError::Cancelled);
+        }
+
+        match child.child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    tracing::event!(
+                        target: "rollshot::action::video_import",
+                        tracing::Level::WARN,
+                        category = "evidence_exit",
+                        success = false,
+                        code = status.code(),
+                    );
+                    return Err(VideoImportError::EvidenceMissing);
+                }
+                break;
+            }
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                child.kill_and_wait();
+                return Err(VideoImportError::EvidenceMissing);
+            }
+        }
+    }
+
+    let output_files: Vec<std::path::PathBuf> = std::fs::read_dir(staging_dir)
+        .map_err(|_| VideoImportError::EvidenceMissing)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "png"))
+        .map(|e| e.path())
+        .collect();
+
+    let mut result = HashMap::new();
+    let mut sorted_outputs = output_files;
+    sorted_outputs.sort();
+
+    for (output_idx, &requested_idx) in requested_indices.iter().enumerate() {
+        if output_idx < sorted_outputs.len() {
+            result.insert(requested_idx, sorted_outputs[output_idx].clone());
+        }
+    }
+
+    Ok(result)
+}
+
+fn build_select_filter(indices: &[usize]) -> String {
+    if indices.is_empty() {
+        return "select=0".to_string();
+    }
+    let conditions: Vec<String> = indices.iter().map(|&i| format!("eq(n\\,{})", i)).collect();
+    format!("select='{}'", conditions.join("+"))
 }
 
 #[cfg(test)]

@@ -1,13 +1,23 @@
 pub mod probe;
 pub mod process;
+pub mod scratch;
 pub mod selection;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use probe::{parse_probe_json, probe_args, ProbeMetadata, VideoToolchain};
 pub use process::run_cancellable_child;
+pub use scratch::{cleanup_stale_import_scratch, ImportedScratch};
 pub use selection::{evidence_sample_indices, CandidateSelector, SelectionResult};
+
+use crate::models::{
+    CandidateKind, CaptureRegion, DegradedReason, DetectReason, ImportWarning, InputCapability,
+    InputSourceKind,
+};
+use crate::project::ProjectFrame;
+use crate::Guide;
 
 pub const ANALYSIS_FPS: u64 = 2;
 pub const ANALYSIS_WIDTH: u32 = 384;
@@ -81,5 +91,805 @@ impl VideoImportCancellation {
 
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+pub struct VideoImportRequest {
+    pub input: PathBuf,
+    pub toolchain: VideoToolchain,
+    pub scratch_parent: PathBuf,
+}
+
+pub struct ImportedWorkspaceSeed {
+    pub guide: Guide,
+    pub capture_region: CaptureRegion,
+    pub input_source: InputSourceKind,
+    pub input_capability: InputCapability,
+    pub frames: Vec<ProjectFrame>,
+    pub import_warnings: Vec<ImportWarning>,
+    pub scratch: ImportedScratch,
+}
+
+impl std::fmt::Debug for ImportedWorkspaceSeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedWorkspaceSeed")
+            .field("guide", &self.guide)
+            .field("capture_region", &self.capture_region)
+            .field("input_source", &self.input_source)
+            .field("frames_count", &self.frames.len())
+            .field("import_warnings", &self.import_warnings)
+            .finish()
+    }
+}
+
+pub fn import_video(
+    request: VideoImportRequest,
+    cancel: VideoImportCancellation,
+    progress: impl Fn(VideoImportProgress) + Send + Sync,
+) -> Result<ImportedWorkspaceSeed, VideoImportError> {
+    use crate::detector::{Detector, DetectorConfig};
+    use crate::frame_store::AnalysisFrame;
+    use crate::models::FrameId;
+
+    progress(VideoImportPass::Preflight.progress(0, 0, 0));
+
+    let meta = process::probe_video(&request.input, &request.toolchain)?;
+
+    if cancel.is_cancelled() {
+        return Err(VideoImportError::Cancelled);
+    }
+
+    progress(VideoImportPass::Analyze.progress(0, meta.duration_ms, 0));
+
+    let _total_samples = (u128::from(meta.duration_ms) * ANALYSIS_FPS as u128 / 1000) as u64 + 1;
+
+    let frame_size = checked_frame_size(ANALYSIS_WIDTH, meta)?;
+
+    let mut selector = CandidateSelector::new(meta.duration_ms);
+    let mut detector = Detector::new(DetectorConfig::default());
+    let mut last_sample_index: u64 = 0;
+    let mut last_progress_ms: u64 = 0;
+
+    let cancel_ref = &cancel;
+    let progress_ref = &progress;
+
+    process::run_analysis_pass(
+        &request.input,
+        &request.toolchain,
+        meta,
+        frame_size,
+        cancel.clone(),
+        |sample_index, luma| {
+            last_sample_index = sample_index;
+            let at_ms = sample_index * 1000 / ANALYSIS_FPS;
+
+            let frame = AnalysisFrame {
+                id: sample_index as FrameId,
+                at_ms,
+                luma,
+            };
+            if let Some(marker) = detector.observe_frame(&frame) {
+                selector.push(marker);
+            }
+
+            let progress_ms = at_ms;
+            if progress_ms.saturating_sub(last_progress_ms) >= 500 {
+                last_progress_ms = progress_ms;
+                progress_ref(VideoImportPass::Analyze.progress(
+                    progress_ms,
+                    meta.duration_ms,
+                    selector.count(),
+                ));
+            }
+        },
+    )?;
+
+    if let Some(marker) = detector.finish() {
+        selector.push(marker);
+    }
+
+    let selection = selector.finish();
+
+    if cancel_ref.is_cancelled() {
+        return Err(VideoImportError::Cancelled);
+    }
+
+    progress(VideoImportPass::Extract.progress(0, meta.duration_ms, selection.candidates.len()));
+
+    let center_indices: Vec<usize> = selection
+        .candidates
+        .iter()
+        .map(|c| c.center_id as usize)
+        .collect();
+
+    let evidence_indices = if center_indices.is_empty() {
+        // Zero candidates: extract the final sample as fallback evidence.
+        vec![last_sample_index as usize]
+    } else {
+        evidence_sample_indices(&center_indices, last_sample_index as usize + 1)
+    };
+
+    assert!(
+        evidence_indices.len() <= MAX_EVIDENCE_FRAMES,
+        "evidence indices {} exceeds MAX_EVIDENCE_FRAMES",
+        evidence_indices.len()
+    );
+
+    let mut scratch = ImportedScratch::create(&request.scratch_parent)
+        .map_err(|_| VideoImportError::ScratchIo)?;
+
+    let staging = scratch.root().join("staging");
+    std::fs::create_dir_all(&staging).map_err(|_| VideoImportError::ScratchIo)?;
+
+    let extracted = process::run_evidence_pass(
+        &request.input,
+        &request.toolchain,
+        meta,
+        &evidence_indices,
+        &staging,
+        cancel_ref,
+        &progress_ref,
+        meta.duration_ms,
+    )?;
+
+    if cancel_ref.is_cancelled() {
+        return Err(VideoImportError::Cancelled);
+    }
+
+    let mut frames = Vec::new();
+    let assets_dir = scratch.root().join("assets/frames");
+    std::fs::create_dir_all(&assets_dir).map_err(|_| VideoImportError::ScratchIo)?;
+
+    let mut evidence_w = 0u32;
+    let mut evidence_h = 0u32;
+
+    for (i, &requested_idx) in evidence_indices.iter().enumerate() {
+        let staged_path = extracted.get(&requested_idx);
+        let Some(path) = staged_path else {
+            if center_indices.contains(&requested_idx) {
+                return Err(VideoImportError::EvidenceMissing);
+            }
+            continue;
+        };
+
+        let img = image::open(path)
+            .map_err(|_| VideoImportError::EvidenceMissing)?
+            .to_rgba8();
+        let (w, h) = img.dimensions();
+
+        if w > EVIDENCE_MAX_LONG_EDGE || h > EVIDENCE_MAX_LONG_EDGE {
+            return Err(VideoImportError::ResourceLimit);
+        }
+
+        if evidence_w == 0 {
+            evidence_w = w;
+            evidence_h = h;
+        }
+
+        let encoded =
+            crate::project::encode_png_asset(&img).map_err(|_| VideoImportError::ScratchIo)?;
+        let dest = assets_dir.join(format!("{}.png", encoded.sha256));
+        std::fs::write(&dest, &encoded.bytes).map_err(|_| VideoImportError::ScratchIo)?;
+
+        let at_ms = (requested_idx as u64) * 1000 / ANALYSIS_FPS;
+        frames.push(ProjectFrame {
+            id: i as FrameId,
+            at_ms,
+            sha256: encoded.sha256,
+            width: w,
+            height: h,
+        });
+
+        scratch.add_bytes(encoded.bytes.len() as u64);
+        if scratch.bytes_used() > MAX_SCRATCH_BYTES {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(VideoImportError::ResourceLimit);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&staging);
+
+    let id_to_frame_idx: std::collections::HashMap<usize, usize> = frames
+        .iter()
+        .enumerate()
+        .map(|(fi, f)| {
+            let sample_idx = (f.at_ms * ANALYSIS_FPS / 1000) as usize;
+            (sample_idx, fi)
+        })
+        .collect();
+
+    let mut candidate_steps = Vec::new();
+    for (step_idx, marker) in selection.candidates.iter().enumerate() {
+        let center_sample = marker.center_id as usize;
+        let Some(&frame_idx) = id_to_frame_idx.get(&center_sample) else {
+            continue;
+        };
+
+        let mut nearby = Vec::new();
+        for offset in [-1i32, 0, 1] {
+            let neighbor = center_sample as i32 + offset;
+            if neighbor < 0 {
+                continue;
+            }
+            if let Some(&ni) = id_to_frame_idx.get(&(neighbor as usize)) {
+                nearby.push(frames[ni].id);
+            }
+        }
+        nearby.sort();
+        nearby.dedup();
+
+        candidate_steps.push(crate::models::CandidateStep {
+            id: step_idx as crate::models::CandidateId,
+            kind: marker.kind,
+            reason: marker.reason,
+            at_ms: marker.at_ms,
+            keyframe: frames[frame_idx].id,
+            nearby,
+        });
+    }
+
+    let mut import_warnings = Vec::new();
+
+    if candidate_steps.is_empty() {
+        let final_sample = last_sample_index as usize;
+        let final_frame_idx = id_to_frame_idx
+            .get(&final_sample)
+            .copied()
+            .or_else(|| frames.last().map(|_| frames.len() - 1));
+
+        if let Some(fi) = final_frame_idx {
+            candidate_steps.push(crate::models::CandidateStep {
+                id: 0,
+                kind: CandidateKind::UiChanged,
+                reason: DetectReason::VisualChange,
+                at_ms: frames[fi].at_ms,
+                keyframe: frames[fi].id,
+                nearby: vec![frames[fi].id],
+            });
+        }
+        import_warnings.push(ImportWarning::NoVisualChangesDetected);
+    }
+
+    if selection.reduced {
+        import_warnings.push(ImportWarning::IntermediateChangesReduced);
+    }
+
+    let mut guide = Guide::from_candidates(candidate_steps);
+
+    // For zero candidates (fallback), override the title to "Imported recording".
+    if selection.candidates.is_empty() && !guide.is_empty() {
+        guide.rename(1, "Imported recording".to_string());
+    }
+
+    let capture_region = CaptureRegion {
+        x: 0,
+        y: 0,
+        width: evidence_w,
+        height: evidence_h,
+    };
+
+    progress(VideoImportPass::Extract.progress(meta.duration_ms, meta.duration_ms, frames.len()));
+
+    Ok(ImportedWorkspaceSeed {
+        guide,
+        capture_region,
+        input_source: InputSourceKind::ImportedVideo,
+        input_capability: InputCapability::VisualOnly {
+            reason: DegradedReason::ImportedRecording,
+        },
+        frames,
+        import_warnings,
+        scratch,
+    })
+}
+
+fn checked_frame_size(width: u32, meta: ProbeMetadata) -> Result<usize, VideoImportError> {
+    let height = (width as u64) * (meta.display_height as u64) / (meta.display_width as u64);
+    // Round up to even (required for yuv420p) using integer arithmetic.
+    let height = (height.div_ceil(2) * 2) as u32;
+    let frame_size = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(VideoImportError::ResourceLimit)?;
+
+    if frame_size > MAX_ANALYSIS_FRAME_BYTES {
+        return Err(VideoImportError::ResourceLimit);
+    }
+    Ok(frame_size)
+}
+
+impl VideoImportPass {
+    fn progress(self, processed_ms: u64, total_ms: u64, retained: usize) -> VideoImportProgress {
+        VideoImportProgress {
+            pass: self,
+            processed_ms,
+            total_ms,
+            retained_candidates: retained,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn ffmpeg_path() -> String {
+        std::env::var("ROLLSHOT_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string())
+    }
+
+    fn ffprobe_path() -> String {
+        std::env::var("ROLLSHOT_FFPROBE").unwrap_or_else(|_| "ffprobe".to_string())
+    }
+
+    fn toolchain() -> VideoToolchain {
+        VideoToolchain {
+            ffmpeg: PathBuf::from(ffmpeg_path()),
+            ffprobe: PathBuf::from(ffprobe_path()),
+        }
+    }
+
+    fn ffmpeg_available() -> bool {
+        Command::new(ffmpeg_path())
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn fixtures_enabled() -> bool {
+        std::env::var("ROLLSHOT_TEST_FFMPEG").ok().as_deref() == Some("1") && ffmpeg_available()
+    }
+
+    fn fixture_video(frame_colors: &[u8], with_audio: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("test.mp4");
+
+        let mut cmd = Command::new(ffmpeg_path());
+        cmd.args([
+            "-y", "-nostdin", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "320x240", "-r", "2",
+            "-i", "pipe:0",
+        ]);
+
+        if with_audio {
+            cmd.args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-shortest"]);
+        }
+
+        cmd.args([
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            output.to_str().unwrap(),
+        ]);
+
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for &color in frame_colors {
+                stdin.write_all(&vec![color; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.wait().unwrap();
+
+        dir
+    }
+
+    fn settle_sequence_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("settle.mp4");
+
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                output.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            // Phase 1: baseline (4 frames = 2s)
+            for _ in 0..4 {
+                stdin.write_all(&vec![100u8; 320 * 240 * 3]).unwrap();
+            }
+            // Phase 2: change (2 frames = 1s)
+            for _ in 0..2 {
+                stdin.write_all(&vec![200u8; 320 * 240 * 3]).unwrap();
+            }
+            // Phase 3: settle (4 frames = 2s)
+            for _ in 0..4 {
+                stdin.write_all(&vec![200u8; 320 * 240 * 3]).unwrap();
+            }
+            // Phase 4: another change (2 frames)
+            for _ in 0..2 {
+                stdin.write_all(&vec![50u8; 320 * 240 * 3]).unwrap();
+            }
+            // Phase 5: settle (4 frames)
+            for _ in 0..4 {
+                stdin.write_all(&vec![50u8; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.wait().unwrap();
+        dir
+    }
+
+    fn audio_bearing_4k_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("4k.mp4");
+
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                output.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for i in 0..10u8 {
+                stdin.write_all(&vec![i * 25; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.wait().unwrap();
+        dir
+    }
+
+    fn run_import(
+        video_path: &Path,
+    ) -> Result<(ImportedWorkspaceSeed, tempfile::TempDir), VideoImportError> {
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let request = VideoImportRequest {
+            input: video_path.to_path_buf(),
+            toolchain: toolchain(),
+            scratch_parent: scratch_parent.path().to_path_buf(),
+        };
+        let seed = import_video(request, VideoImportCancellation::default(), |_p| {})?;
+        Ok((seed, scratch_parent))
+    }
+
+    fn scratch_files(seed: &ImportedWorkspaceSeed) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(seed.scratch.root().join("assets/frames"))
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |ext| ext == "png"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn png_asset_files(seed: &ImportedWorkspaceSeed) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = seed
+            .frames
+            .iter()
+            .map(|f| {
+                seed.scratch
+                    .root()
+                    .join("assets/frames")
+                    .join(format!("{}.png", f.sha256))
+            })
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    #[test]
+    fn static_video_returns_final_frame_fallback() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let fixture = fixture_video(&vec![20u8; 8], true);
+        let output = fixture.path().join("test.mp4");
+        let (seed, _parent) = run_import(&output).unwrap();
+        assert_eq!(seed.guide.steps().len(), 1);
+        assert_eq!(seed.guide.steps()[0].title, "Imported recording");
+        assert_eq!(
+            seed.import_warnings,
+            vec![ImportWarning::NoVisualChangesDetected]
+        );
+        assert_eq!(seed.guide.steps()[0].kind, CandidateKind::UiChanged);
+    }
+
+    #[test]
+    fn visual_settles_produce_only_ui_changed_steps() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let fixture = settle_sequence_fixture();
+        let output = fixture.path().join("settle.mp4");
+        if !output.exists() {
+            return;
+        }
+        let (seed, _parent) = run_import(&output).unwrap();
+        assert!(seed
+            .guide
+            .steps()
+            .iter()
+            .all(|step| step.title == "UI changed"));
+        assert!(seed
+            .guide
+            .steps()
+            .iter()
+            .all(|step| step.kind == CandidateKind::UiChanged
+                && step.reason == DetectReason::VisualChange));
+    }
+
+    #[test]
+    fn evidence_is_scaled_bounded_and_audio_is_ignored() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let fixture = audio_bearing_4k_fixture();
+        let output = fixture.path().join("4k.mp4");
+        if !output.exists() {
+            return;
+        }
+        let (seed, _parent) = run_import(&output).unwrap();
+        assert!(seed.frames.len() <= MAX_EVIDENCE_FRAMES);
+        assert!(seed
+            .frames
+            .iter()
+            .all(|frame| frame.width.max(frame.height) <= EVIDENCE_MAX_LONG_EDGE));
+        assert_eq!(scratch_files(&seed), png_asset_files(&seed));
+    }
+
+    #[test]
+    fn cancelled_import_returns_cancelled_error() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("cancel.mp4");
+
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                output.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for _ in 0..20 {
+                stdin.write_all(&vec![100u8; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.wait().unwrap();
+
+        let cancel = VideoImportCancellation::default();
+        cancel.cancel();
+
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let request = VideoImportRequest {
+            input: output,
+            toolchain: toolchain(),
+            scratch_parent: scratch_parent.path().to_path_buf(),
+        };
+        let err = import_video(request, cancel, |_p| {}).unwrap_err();
+        assert_eq!(err.category(), "cancelled");
+    }
+
+    #[test]
+    fn cancelled_during_extraction_removes_scratch() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("cancel_extract.mp4");
+
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                output.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            // Enough frames to have some candidates
+            for i in 0..40u8 {
+                let color = if i < 10 { 50 } else { 200 };
+                stdin.write_all(&vec![color; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.wait().unwrap();
+
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let cancel = VideoImportCancellation::default();
+        cancel.cancel();
+
+        let request = VideoImportRequest {
+            input: output,
+            toolchain: toolchain(),
+            scratch_parent: scratch_parent.path().to_path_buf(),
+        };
+        let _ = import_video(request, cancel, |_p| {});
+        // No scratch directory should remain
+        let remaining: Vec<_> = std::fs::read_dir(scratch_parent.path())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("import-"))
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "scratch directories should be cleaned up on cancellation"
+        );
+    }
+
+    #[test]
+    fn probe_failure_returns_probe_error() {
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let request = VideoImportRequest {
+            input: PathBuf::from("/nonexistent/video.mp4"),
+            toolchain: toolchain(),
+            scratch_parent: scratch_parent.path().to_path_buf(),
+        };
+        let err = import_video(request, VideoImportCancellation::default(), |_p| {}).unwrap_err();
+        assert_eq!(err.category(), "probe_failed");
+    }
+
+    #[test]
+    fn long_synthetic_video_catalog_is_bounded() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("long.mp4");
+
+        // 601 different frames at 2fps = ~300.5s — more than MAX_EVIDENCE_FRAMES
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                output.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for i in 0..601u16 {
+                stdin
+                    .write_all(&vec![(i % 256) as u8; 320 * 240 * 3])
+                    .unwrap();
+            }
+        }
+        child.wait().unwrap();
+
+        let (seed, _parent) = run_import(&output).unwrap();
+        assert!(
+            seed.frames.len() <= MAX_EVIDENCE_FRAMES,
+            "catalog must be bounded: got {}",
+            seed.frames.len()
+        );
+    }
+
+    #[test]
+    fn rotation_metadata_is_respected() {
+        if !fixtures_enabled() {
+            return;
+        }
+
+        let meta = parse_probe_json(
+            br#"{"streams":[{"width":1920,"height":1080,"duration":"1.0","side_data_list":[{"rotation":90}]}],"format":{"duration":"1.0"}}"#,
+        )
+        .unwrap();
+        let frame_size = checked_frame_size(ANALYSIS_WIDTH, meta);
+        assert!(frame_size.is_ok());
     }
 }

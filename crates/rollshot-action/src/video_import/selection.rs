@@ -30,6 +30,10 @@ impl CandidateSelector {
         }
     }
 
+    pub fn count(&self) -> usize {
+        self.buffer.len()
+    }
+
     pub fn push(&mut self, marker: CandidateMarker) {
         if let Some(ref mut state) = self.reduced {
             Self::push_reduced(state, marker, self.duration_ms);

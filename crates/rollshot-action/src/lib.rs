@@ -61,6 +61,11 @@ pub use storyboard::{
     StoryboardExportResult, StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
 pub use video::{export_reviewed_video, export_video, VideoOptions};
+pub use video_import::{
+    cleanup_stale_import_scratch, import_video, ImportedScratch, ImportedWorkspaceSeed,
+    VideoImportCancellation, VideoImportError, VideoImportPass, VideoImportProgress,
+    VideoImportRequest,
+};
 pub use visual_annotation_proposal::{
     VisualAnnotationApplyOutcome, VisualAnnotationBase, VisualAnnotationPayload,
     VisualAnnotationProposal, VisualAnnotationProposalError, VisualAnnotationProposalId,

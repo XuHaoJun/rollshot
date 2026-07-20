@@ -64,12 +64,29 @@ pub struct ProjectFrameSource {
 
 impl ProjectFrameSource {
     pub fn from_loaded(project: &LoadedProject, byte_limit: usize) -> Self {
-        let mut catalog = BTreeMap::new();
-        for frame in &project.manifest.frames {
-            catalog.insert(frame.id, frame.clone());
-        }
+        Self::new(
+            project.root.clone(),
+            project
+                .manifest
+                .frames
+                .iter()
+                .map(|f| (f.id, f.clone()))
+                .collect(),
+            byte_limit,
+        )
+    }
+
+    pub fn from_catalog(root: PathBuf, frames: Vec<ProjectFrame>, byte_limit: usize) -> Self {
+        Self::new(
+            root,
+            frames.into_iter().map(|f| (f.id, f)).collect(),
+            byte_limit,
+        )
+    }
+
+    fn new(root: PathBuf, catalog: BTreeMap<FrameId, ProjectFrame>, byte_limit: usize) -> Self {
         Self {
-            root: project.root.clone(),
+            root,
             catalog,
             cache: BTreeMap::new(),
             lru: VecDeque::new(),
