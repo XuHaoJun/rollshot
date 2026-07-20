@@ -794,7 +794,7 @@ mod tests {
         .unwrap();
 
         let error = load_project(&root).unwrap_err();
-        assert_eq!(error.category(), "unsupported_version");
+        assert_eq!(error.category(), "unsupported-version");
     }
 
     // ---- Asset handling ----
@@ -1068,7 +1068,7 @@ mod tests {
             load_manifest_fixture(99, "visual-only")
                 .unwrap_err()
                 .category(),
-            "unsupported_version"
+            "unsupported-version"
         );
         assert_eq!(
             load_manifest_fixture(1, "imported-video")

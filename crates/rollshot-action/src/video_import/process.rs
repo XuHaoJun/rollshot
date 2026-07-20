@@ -243,9 +243,11 @@ pub fn run_analysis_pass(
     ]);
 
     let mut child = CancellableChild::spawn(cmd)?;
-    let (stdout, _stderr) = child
+    let (stdout, stderr) = child
         .take_pipes()
         .ok_or(VideoImportError::DecoderUnavailable)?;
+
+    let stderr_handle: JoinHandle<StderrDiagnostics> = thread::spawn(move || drain_stderr(stderr));
 
     let cancel_ref = cancel.clone();
     let mut stdout = stdout;
@@ -290,6 +292,8 @@ pub fn run_analysis_pass(
     }
 
     let status = child.wait()?;
+    let _diagnostics = stderr_handle.join().unwrap_or_default();
+
     if !status.success() && sample_index == 0 {
         return Err(VideoImportError::DecodeFailed);
     }

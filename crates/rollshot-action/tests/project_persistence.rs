@@ -690,7 +690,7 @@ fn load_rejects_unsupported_schema_version() {
     .unwrap();
 
     let err = load_project(&root).unwrap_err();
-    assert_eq!(err.category(), "unsupported_version");
+    assert_eq!(err.category(), "unsupported-version");
 }
 
 #[test]

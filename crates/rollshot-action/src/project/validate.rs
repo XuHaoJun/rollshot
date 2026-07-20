@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use super::error::{ProjectError, ProjectErrorCategory};
 use super::model::{
     PersistedStepAnnotations, ProjectFrame, ProjectManifestV2, ProjectSnapshot, ProjectStep,
-    SnapshotFrame, SnapshotFramePayload,
+    SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
 };
 use crate::models::{CaptureRegion, FrameId, ImportWarning};
 use rollshot_image_document::ImageDocument;
@@ -44,6 +44,12 @@ impl FrameMeta {
 }
 
 pub fn validate_manifest_structure(manifest: &ProjectManifestV2) -> Result<(), ProjectError> {
+    if manifest.schema_version != PROJECT_SCHEMA_VERSION {
+        return Err(ProjectError::UnsupportedSchema {
+            path: None,
+            version: manifest.schema_version,
+        });
+    }
     if manifest.revision == 0 {
         return Err(ProjectError::invalid_manifest(
             ProjectErrorCategory::ZeroRevision,
@@ -350,10 +356,11 @@ mod tests {
     // ---- Manifest validation ----
 
     #[test]
-    fn manifest_accepts_any_schema_version_after_dispatch() {
+    fn manifest_rejects_wrong_schema_version() {
         let mut manifest = valid_manifest();
         manifest.schema_version = 99;
-        validate_manifest_structure(&manifest).unwrap();
+        let error = validate_manifest_structure(&manifest).unwrap_err();
+        assert_eq!(error.category(), "unsupported-schema");
     }
 
     #[test]

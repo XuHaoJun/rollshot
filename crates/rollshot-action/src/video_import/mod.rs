@@ -141,8 +141,6 @@ pub fn import_video(
 
     progress(VideoImportPass::Analyze.progress(0, meta.duration_ms, 0));
 
-    let _total_samples = (u128::from(meta.duration_ms) * ANALYSIS_FPS as u128 / 1000) as u64 + 1;
-
     let frame_size = checked_frame_size(ANALYSIS_WIDTH, meta)?;
 
     let mut selector = CandidateSelector::new(meta.duration_ms);
