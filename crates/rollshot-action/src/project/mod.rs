@@ -8,8 +8,8 @@ mod validate;
 pub use error::{ProjectError, ProjectErrorCategory};
 pub use model::{
     EnabledOutputs, LoadedProject, PersistedStepAnnotations, ProjectCommit, ProjectFrame,
-    ProjectManifestV1, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
-    SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
+    ProjectManifestV1, ProjectManifestV2, ProjectSnapshot, ProjectStep, ProjectStepId,
+    SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
 };
 pub use publish::{
     load_publish_state, write_publish_state, PublishCancellation, PublishCancelled,

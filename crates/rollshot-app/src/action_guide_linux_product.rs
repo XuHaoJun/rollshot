@@ -83,6 +83,11 @@ impl State {
             lock_conflict_path: None,
         }
     }
+
+    #[cfg(test)]
+    fn home_mut(&mut self) -> &mut ActionGuideHome {
+        &mut self.home
+    }
 }
 
 fn update(state: &mut State, message: Message) -> iced::Task<Message> {
@@ -112,6 +117,35 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                 action_guide_home::Effect::OpenLegacyReader(path) => {
                     state.home.message = open_legacy_reader(&path).err();
                     iced::Task::none()
+                }
+                action_guide_home::Effect::PickRecording => {
+                    iced::Task::perform(pick_recording_file(), Message::Home)
+                }
+                action_guide_home::Effect::ResolveImportToolchain { operation_id } => {
+                    iced::Task::perform(resolve_import_toolchain(operation_id), Message::Home)
+                }
+                action_guide_home::Effect::SetupImportToolchain { operation_id } => {
+                    iced::Task::perform(setup_import_toolchain(operation_id), Message::Home)
+                }
+                action_guide_home::Effect::StartImport {
+                    operation_id,
+                    path,
+                    toolchain,
+                    cancellation,
+                } => action_guide_home::update::run_import_task(
+                    operation_id,
+                    path,
+                    toolchain,
+                    cancellation,
+                )
+                .map(Message::Home),
+                action_guide_home::Effect::OpenImportedTimeline(seed) => {
+                    let ws =
+                        crate::timeline_workspace::TimelineWorkspace::from_imported_video(seed);
+                    let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
+                    state.timeline = Some(ws);
+                    state.phase = Phase::Timeline;
+                    initial_load
                 }
             }
         }
@@ -301,6 +335,10 @@ fn kind_path(kind: &SelectedDirectoryKind) -> std::path::PathBuf {
     }
 }
 
+fn cleanup_stale_import_scratch() {
+    crate::action_guide_home::cleanup_stale_import_scratch();
+}
+
 async fn open_project_task(path: std::path::PathBuf, writable: bool) -> Message {
     let result = open_project_inner(path, writable).await;
     Message::ProjectOpened(result)
@@ -336,6 +374,8 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
     let config_dir =
         crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
     let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
+
+    cleanup_stale_import_scratch();
 
     let boot_data = std::sync::Arc::new(std::sync::Mutex::new(Some((initial, recent))));
     let boot = move || {
@@ -409,6 +449,53 @@ async fn pick_project_folder() -> action_guide_home::Message {
 fn open_legacy_reader(path: &std::path::Path) -> Result<(), String> {
     let entrypoint = action_guide_home::legacy_reader_entrypoint(path).map_err(str::to_string)?;
     crate::platform_actions::open_path(&entrypoint)
+}
+
+async fn pick_recording_file() -> action_guide_home::Message {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Select Video Recording")
+        .add_filter("Video", &["mp4", "mov", "mkv", "webm"])
+        .pick_file()
+        .await;
+    match file {
+        Some(handle) => {
+            action_guide_home::Message::ImportPickerSelected(handle.path().to_path_buf())
+        }
+        None => action_guide_home::Message::ImportPickerCancelled,
+    }
+}
+
+async fn resolve_import_toolchain(
+    operation_id: action_guide_home::video_import::ImportOperationId,
+) -> action_guide_home::Message {
+    let resolution =
+        tokio::task::spawn_blocking(crate::managed_ffmpeg::resolve_video_import_toolchain)
+            .await
+            .unwrap_or(
+                crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
+                    crate::managed_ffmpeg::FfmpegSetupInfo {
+                        managed_download: None,
+                        install_location: std::path::PathBuf::new(),
+                    },
+                ),
+            );
+    action_guide_home::Message::ImportToolchainResolved {
+        operation_id,
+        resolution,
+    }
+}
+
+async fn setup_import_toolchain(
+    operation_id: action_guide_home::video_import::ImportOperationId,
+) -> action_guide_home::Message {
+    let result = tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
+        .await
+        .map_err(|e| format!("Setup worker panicked: {e}"))
+        .and_then(|r| r);
+    action_guide_home::Message::ImportSetupFinished {
+        operation_id,
+        result: result.map(|_| ()),
+    }
 }
 
 #[cfg(test)]
@@ -731,5 +818,83 @@ mod tests {
         let task = update(&mut state, Message::WindowReady);
         assert_eq!(state.phase, Phase::Home);
         assert!(task.units() == 0);
+    }
+
+    fn dummy_import_seed(
+        scratch_dir: &tempfile::TempDir,
+    ) -> rollshot_action::ImportedWorkspaceSeed {
+        use rollshot_action::project::ProjectFrame;
+        use rollshot_action::{
+            CandidateKind, CaptureRegion, DetectReason, Guide, GuideStep, ImportWarning,
+            ImportedScratch, InputCapability, InputSourceKind,
+        };
+        let scratch = ImportedScratch::create(scratch_dir.path()).unwrap();
+        let step = GuideStep {
+            index: 1,
+            title: "Click button".into(),
+            caption: String::new(),
+            kind: CandidateKind::Click,
+            reason: DetectReason::VisualChange,
+            at_ms: 100,
+            keyframe: 1,
+            nearby: vec![1],
+            source: 1,
+        };
+        let guide = Guide::from_reviewed_steps("Imported Guide".into(), vec![step]).unwrap();
+        rollshot_action::ImportedWorkspaceSeed {
+            guide,
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            input_source: InputSourceKind::ImportedVideo,
+            input_capability: InputCapability::VisualOnly {
+                reason: rollshot_action::DegradedReason::ImportedRecording,
+            },
+            frames: vec![ProjectFrame {
+                id: 1,
+                at_ms: 100,
+                sha256: "abc123".into(),
+                width: 640,
+                height: 480,
+            }],
+            import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+            scratch,
+        }
+    }
+
+    fn drive_import_success(state: &mut State) {
+        let id = state
+            .home_mut()
+            .import_coordinator_mut()
+            .begin(PathBuf::from("test.mp4"));
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let seed = dummy_import_seed(&scratch_dir);
+        let _task = update(
+            state,
+            Message::Home(action_guide_home::Message::ImportFinished {
+                operation_id: id,
+                result: Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(seed)))),
+            }),
+        );
+    }
+
+    fn linux_home_state() -> State {
+        test_state()
+    }
+
+    #[test]
+    fn linux_home_import_success_enters_timeline() {
+        let mut state = linux_home_state();
+        drive_import_success(&mut state);
+        assert_eq!(state.phase, Phase::Timeline);
+        assert!(state
+            .timeline
+            .as_ref()
+            .unwrap()
+            .project_recent_metadata()
+            .is_none());
     }
 }

@@ -52,6 +52,7 @@ fn committed_project() -> (tempfile::TempDir, std::path::PathBuf) {
             nearby: vec![1],
             annotations: None,
         }],
+        import_warnings: Vec::new(),
     };
     create_project(&snap, &root).unwrap();
     (dir, root)

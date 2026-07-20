@@ -457,6 +457,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
         let path = temp_path("reviewed-cancel");
         let result = export_reviewed_gif(&job, GifOptions::default(), &cancel, &path);
@@ -506,6 +507,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
         let path = temp_path("reviewed-stream");
         export_reviewed_gif(&job, GifOptions::default(), &cancel, &path).expect("export");
@@ -549,6 +551,7 @@ mod tests {
                 reason: crate::models::DegradedReason::SourceStartFailed,
             },
             steps,
+            import_warnings: Vec::new(),
         };
 
         let cancel = PublishCancellation::new();
@@ -606,6 +609,7 @@ mod tests {
                 image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(big)),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
         let path = temp_path("reviewed-oversized");
         let result = export_reviewed_gif(

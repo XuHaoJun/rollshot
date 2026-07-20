@@ -218,10 +218,12 @@ pub(crate) enum SaveWorkerOutcome {
     NewWritable {
         root: PathBuf,
         revision: u64,
+        manifest: rollshot_action::project::ProjectManifestV2,
     },
     NewCommittedReadOnly {
         root: PathBuf,
         revision: u64,
+        manifest: rollshot_action::project::ProjectManifestV2,
         category: &'static str,
     },
     Failed(String),
@@ -2924,6 +2926,10 @@ pub(crate) fn timeline_issue_pack_input(
             original_pixels_included: false,
             redaction_count: 0,
         },
+        #[cfg(feature = "action-guide")]
+        import_warnings: state.import_warnings.clone(),
+        #[cfg(not(feature = "action-guide"))]
+        import_warnings: Vec::new(),
     }
 }
 
@@ -3140,6 +3146,7 @@ fn handle_save_requested(state: &mut TimelineWorkspace) -> Update {
                     Message::SaveWorkerFinished(SaveWorkerOutcome::NewWritable {
                         root: commit.root.clone(),
                         revision: commit.manifest.revision,
+                        manifest: commit.manifest.clone(),
                     })
                 }
                 Ok(super::project::SaveProjectWorkerResult::NewCommittedReadOnly {
@@ -3148,6 +3155,7 @@ fn handle_save_requested(state: &mut TimelineWorkspace) -> Update {
                 }) => Message::SaveWorkerFinished(SaveWorkerOutcome::NewCommittedReadOnly {
                     root: commit.root.clone(),
                     revision: commit.manifest.revision,
+                    manifest: commit.manifest.clone(),
                     category,
                 }),
                 Err(e) => {
@@ -3242,6 +3250,7 @@ fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf
                 Message::SaveWorkerFinished(SaveWorkerOutcome::NewWritable {
                     root: commit.root.clone(),
                     revision: commit.manifest.revision,
+                    manifest: commit.manifest.clone(),
                 })
             }
             Ok(super::project::SaveProjectWorkerResult::NewCommittedReadOnly {
@@ -3250,6 +3259,7 @@ fn handle_save_picker_chosen(state: &mut TimelineWorkspace, path: Option<PathBuf
             }) => Message::SaveWorkerFinished(SaveWorkerOutcome::NewCommittedReadOnly {
                 root: commit.root.clone(),
                 revision: commit.manifest.revision,
+                manifest: commit.manifest.clone(),
                 category,
             }),
             Err(e) => Message::SaveWorkerFinished(SaveWorkerOutcome::Failed(e.message_for_ui())),
@@ -3280,7 +3290,11 @@ fn handle_save_worker_finished(
                 "project saved"
             );
         }
-        super::update::SaveWorkerOutcome::NewWritable { root, revision } => {
+        super::update::SaveWorkerOutcome::NewWritable {
+            root,
+            revision,
+            manifest,
+        } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
             let guard = state
@@ -3288,14 +3302,28 @@ fn handle_save_worker_finished(
                 .lock()
                 .ok()
                 .and_then(|mut slot| slot.take());
+            let access = match guard {
+                Some(g) => ProjectAccess::Writable(g),
+                None => ProjectAccess::ReadOnly,
+            };
+            // Rebuild frame source from saved manifest so frames load from
+            // the project directory, not the import scratch.
+            let loaded = rollshot_action::project::LoadedProject {
+                root: root.clone(),
+                manifest,
+            };
+            let source = rollshot_action::ProjectFrameSource::from_loaded(
+                &loaded,
+                rollshot_action::DEFAULT_PROJECT_FRAME_CACHE_BYTES,
+            );
+            state.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
             state.project_session = Some(ProjectSession::Saved {
                 root,
                 base_revision: revision,
-                access: match guard {
-                    Some(g) => ProjectAccess::Writable(g),
-                    None => ProjectAccess::ReadOnly,
-                },
+                access,
             });
+            // Release scratch after source switch.
+            state.imported_scratch.take();
             state.message = Some("Project saved.".to_string());
             tracing::info!(
                 target: "rollshot::project",
@@ -3306,15 +3334,28 @@ fn handle_save_worker_finished(
         super::update::SaveWorkerOutcome::NewCommittedReadOnly {
             root,
             revision,
+            manifest,
             category,
         } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
+            // Rebuild frame source from saved manifest.
+            let loaded = rollshot_action::project::LoadedProject {
+                root: root.clone(),
+                manifest,
+            };
+            let source = rollshot_action::ProjectFrameSource::from_loaded(
+                &loaded,
+                rollshot_action::DEFAULT_PROJECT_FRAME_CACHE_BYTES,
+            );
+            state.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
             state.project_session = Some(ProjectSession::Saved {
                 root,
                 base_revision: revision,
                 access: ProjectAccess::ReadOnly,
             });
+            // Release scratch after source switch.
+            state.imported_scratch.take();
             state.message = Some(
                 "Project saved, but another process holds the write lock. Editing is disabled."
                     .to_string(),
@@ -5974,7 +6015,7 @@ key_source = { Env = "OPENAI_API_KEY" }
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
-                manifest,
+                manifest: manifest.into(),
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -6297,7 +6338,7 @@ key_source = { Env = "OPENAI_API_KEY" }
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: root.clone(),
-                manifest,
+                manifest: manifest.into(),
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -6442,7 +6483,7 @@ key_source = { Env = "OPENAI_API_KEY" }
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
-                manifest,
+                manifest: manifest.into(),
             };
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
                 loaded,
@@ -6592,7 +6633,7 @@ key_source = { Env = "OPENAI_API_KEY" }
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
-                manifest,
+                manifest: manifest.into(),
             };
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
                 loaded,

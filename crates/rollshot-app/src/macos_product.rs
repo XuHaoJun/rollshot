@@ -322,6 +322,15 @@ impl MacosProduct {
         }
     }
 
+    #[cfg(test)]
+    #[cfg(feature = "action-guide")]
+    fn home_mut(&mut self) -> Option<&mut ActionGuideHome> {
+        match &mut self.phase {
+            Phase::Home(home) | Phase::Opening(home) | Phase::LockConflict(home) => Some(home),
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "action-guide")]
     pub fn new_action_guide(
         recent: crate::action_guide_home::recent::RecentProjects,
@@ -518,6 +527,35 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                         home.message = open_legacy_reader(&path).err();
                     }
                     Task::none()
+                }
+                action_guide_home::Effect::PickRecording => {
+                    Task::perform(pick_recording_file(), Message::HomeMsg)
+                }
+                action_guide_home::Effect::ResolveImportToolchain { operation_id } => {
+                    Task::perform(resolve_import_toolchain(operation_id), Message::HomeMsg)
+                }
+                action_guide_home::Effect::SetupImportToolchain { operation_id } => {
+                    Task::perform(setup_import_toolchain(operation_id), Message::HomeMsg)
+                }
+                action_guide_home::Effect::StartImport {
+                    operation_id,
+                    path,
+                    toolchain,
+                    cancellation,
+                } => action_guide_home::update::run_import_task(
+                    operation_id,
+                    path,
+                    toolchain,
+                    cancellation,
+                )
+                .map(Message::HomeMsg),
+                action_guide_home::Effect::OpenImportedTimeline(seed) => {
+                    let ws = TimelineWorkspace::from_imported_video(seed);
+                    let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
+                    product.phase = Phase::Timeline(ws);
+                    let (id, open) = window::open(workspace_window_settings());
+                    product.workspace_window = Some(id);
+                    Task::batch([open.map(Message::WorkspaceWindowReady), initial_load])
                 }
             }
         }
@@ -1175,6 +1213,8 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
         crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
     let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
 
+    cleanup_stale_import_scratch();
+
     let boot_data = Arc::new(Mutex::new(Some((initial, recent))));
     let boot = move || {
         let (boot_initial, recent) = boot_data
@@ -1289,6 +1329,56 @@ async fn pick_project_folder() -> action_guide_home::Message {
 }
 
 #[cfg(feature = "action-guide")]
+async fn pick_recording_file() -> action_guide_home::Message {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Select Video Recording")
+        .add_filter("Video", &["mp4", "mov", "mkv", "webm"])
+        .pick_file()
+        .await;
+    match file {
+        Some(handle) => {
+            action_guide_home::Message::ImportPickerSelected(handle.path().to_path_buf())
+        }
+        None => action_guide_home::Message::ImportPickerCancelled,
+    }
+}
+
+#[cfg(feature = "action-guide")]
+async fn resolve_import_toolchain(
+    operation_id: action_guide_home::video_import::ImportOperationId,
+) -> action_guide_home::Message {
+    let resolution =
+        tokio::task::spawn_blocking(crate::managed_ffmpeg::resolve_video_import_toolchain)
+            .await
+            .unwrap_or(
+                crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
+                    crate::managed_ffmpeg::FfmpegSetupInfo {
+                        managed_download: None,
+                        install_location: std::path::PathBuf::new(),
+                    },
+                ),
+            );
+    action_guide_home::Message::ImportToolchainResolved {
+        operation_id,
+        resolution,
+    }
+}
+
+#[cfg(feature = "action-guide")]
+async fn setup_import_toolchain(
+    operation_id: action_guide_home::video_import::ImportOperationId,
+) -> action_guide_home::Message {
+    let result = tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
+        .await
+        .map_err(|e| format!("Setup worker panicked: {e}"))
+        .and_then(|r| r);
+    action_guide_home::Message::ImportSetupFinished {
+        operation_id,
+        result: result.map(|_| ()),
+    }
+}
+
+#[cfg(feature = "action-guide")]
 fn open_legacy_reader(path: &std::path::Path) -> Result<(), String> {
     let entrypoint = action_guide_home::legacy_reader_entrypoint(path).map_err(str::to_string)?;
     crate::platform_actions::open_path(&entrypoint)
@@ -1306,6 +1396,11 @@ fn load_action_guide_home() -> ActionGuideHome {
             home
         }
     }
+}
+
+#[cfg(feature = "action-guide")]
+fn cleanup_stale_import_scratch() {
+    crate::action_guide_home::cleanup_stale_import_scratch();
 }
 
 #[cfg(test)]
@@ -1893,6 +1988,79 @@ mod tests {
                 region,
             );
             assert!(matches!(product.phase, Phase::Timeline(_)));
+        }
+
+        fn dummy_import_seed(
+            scratch_dir: &tempfile::TempDir,
+        ) -> rollshot_action::ImportedWorkspaceSeed {
+            use rollshot_action::project::ProjectFrame;
+            use rollshot_action::{
+                CandidateKind, CaptureRegion, DetectReason, Guide, GuideStep, ImportWarning,
+                ImportedScratch, InputCapability, InputSourceKind,
+            };
+            let scratch = ImportedScratch::create(scratch_dir.path()).unwrap();
+            let step = GuideStep {
+                index: 1,
+                title: "Click button".into(),
+                caption: String::new(),
+                kind: CandidateKind::Click,
+                reason: DetectReason::VisualChange,
+                at_ms: 100,
+                keyframe: 1,
+                nearby: vec![1],
+                source: 1,
+            };
+            let guide = Guide::from_reviewed_steps("Imported Guide".into(), vec![step]).unwrap();
+            rollshot_action::ImportedWorkspaceSeed {
+                guide,
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+                input_source: InputSourceKind::ImportedVideo,
+                input_capability: InputCapability::VisualOnly {
+                    reason: rollshot_action::DegradedReason::ImportedRecording,
+                },
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 100,
+                    sha256: "abc123".into(),
+                    width: 640,
+                    height: 480,
+                }],
+                import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+                scratch,
+            }
+        }
+
+        fn drive_import_success(product: &mut MacosProduct) {
+            let home = product.home_mut().expect("should be in home-capable phase");
+            let id = home
+                .import_coordinator_mut()
+                .begin(PathBuf::from("test.mp4"));
+            let scratch_dir = tempfile::tempdir().unwrap();
+            let seed = dummy_import_seed(&scratch_dir);
+            let _task = update(
+                product,
+                Message::HomeMsg(action_guide_home::Message::ImportFinished {
+                    operation_id: id,
+                    result: Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(seed)))),
+                }),
+            );
+        }
+
+        fn macos_home_product() -> MacosProduct {
+            product_in_home_phase()
+        }
+
+        #[test]
+        fn macos_home_import_success_opens_workspace_window() {
+            let mut product = macos_home_product();
+            drive_import_success(&mut product);
+            assert!(matches!(product.phase, Phase::Timeline(_)));
+            assert!(product.workspace_window.is_some());
         }
     }
 }

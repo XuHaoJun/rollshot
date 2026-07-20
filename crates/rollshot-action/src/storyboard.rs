@@ -1013,6 +1013,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
 
         let result =
@@ -1051,6 +1052,7 @@ mod tests {
                 reason: crate::models::DegradedReason::SourceStartFailed,
             },
             steps,
+            import_warnings: Vec::new(),
         };
 
         let cancel = PublishCancellation::new();
@@ -1098,6 +1100,7 @@ mod tests {
                 )),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
 
         let path = temp_path("cancellable-ok");
@@ -1141,6 +1144,7 @@ mod tests {
                 )),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
 
         let path = temp_path("cancellable-cancel");

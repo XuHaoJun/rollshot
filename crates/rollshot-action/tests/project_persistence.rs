@@ -140,6 +140,7 @@ fn build_initial_snapshot(pixel_a: Arc<RgbaImage>, pixel_b: Arc<RgbaImage>) -> P
                 annotations: None,
             },
         ],
+        import_warnings: Vec::new(),
     }
 }
 
@@ -329,6 +330,7 @@ fn round_trip_full_public_api_contract() {
                 annotations: None,
             },
         ],
+        import_warnings: Vec::new(),
     };
 
     // ---- Save (revision 2) ----
@@ -662,6 +664,7 @@ fn save_rejects_changed_base_revision() {
             nearby: vec![1],
             annotations: None,
         }],
+        import_warnings: Vec::new(),
     };
 
     let err = save_project(&snap, &root).unwrap_err();
@@ -687,7 +690,7 @@ fn load_rejects_unsupported_schema_version() {
     .unwrap();
 
     let err = load_project(&root).unwrap_err();
-    assert_eq!(err.category(), "unsupported-schema");
+    assert_eq!(err.category(), "unsupported-version");
 }
 
 #[test]

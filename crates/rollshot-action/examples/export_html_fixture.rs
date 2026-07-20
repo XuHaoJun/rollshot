@@ -76,6 +76,7 @@ fn fixture_job() -> ReviewedGuideExportJob {
         input_source: InputSourceKind::LinuxEvdev,
         input_capability: InputCapability::SemanticEvents,
         steps,
+        import_warnings: Vec::new(),
     }
 }
 

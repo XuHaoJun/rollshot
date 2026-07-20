@@ -728,6 +728,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
         let dir = tempfile_dir();
         let ffmpeg = dir.join("ffmpeg");
@@ -781,6 +782,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
         let dir = tempfile_dir();
         let ffmpeg = dir.join("ffmpeg");
@@ -820,6 +822,7 @@ mod tests {
                 image: crate::export::model::ReviewedStepImage::Retained(std::sync::Arc::new(big)),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
         let dir = tempfile_dir();
         let ffmpeg = dir.join("ffmpeg");
@@ -888,6 +891,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
 
         let dir = tempfile_dir();
@@ -955,6 +959,7 @@ mod tests {
                 )),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
         let worker = std::thread::spawn(move || {
             export_reviewed_video(

@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use super::error::{ProjectError, ProjectErrorCategory};
 use super::model::{
-    PersistedStepAnnotations, ProjectFrame, ProjectManifestV1, ProjectSnapshot, ProjectStep,
+    PersistedStepAnnotations, ProjectFrame, ProjectManifestV2, ProjectSnapshot, ProjectStep,
     SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
 };
-use crate::models::{CaptureRegion, FrameId};
+use crate::models::{CaptureRegion, FrameId, ImportWarning};
 use rollshot_image_document::ImageDocument;
 
 /// Hash-free frame view: `Pixels` payloads have no digest until encoding.
@@ -43,7 +43,7 @@ impl FrameMeta {
     }
 }
 
-pub fn validate_manifest_structure(manifest: &ProjectManifestV1) -> Result<(), ProjectError> {
+pub fn validate_manifest_structure(manifest: &ProjectManifestV2) -> Result<(), ProjectError> {
     if manifest.schema_version != PROJECT_SCHEMA_VERSION {
         return Err(ProjectError::UnsupportedSchema {
             path: None,
@@ -57,6 +57,7 @@ pub fn validate_manifest_structure(manifest: &ProjectManifestV1) -> Result<(), P
             None,
         ));
     }
+    validate_import_warnings(&manifest.import_warnings)?;
     let frames = manifest
         .frames
         .iter()
@@ -66,6 +67,7 @@ pub fn validate_manifest_structure(manifest: &ProjectManifestV1) -> Result<(), P
 }
 
 pub fn validate_snapshot_structure(snapshot: &ProjectSnapshot) -> Result<(), ProjectError> {
+    validate_import_warnings(&snapshot.import_warnings)?;
     let frames = snapshot
         .frames
         .iter()
@@ -203,6 +205,27 @@ fn is_canonical_sha256(digest: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
+fn validate_import_warnings(warnings: &[ImportWarning]) -> Result<(), ProjectError> {
+    if warnings.len() > 2 {
+        return Err(ProjectError::invalid_manifest(
+            ProjectErrorCategory::DuplicateImportWarning,
+            None,
+            None,
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for w in warnings {
+        if !seen.insert(w) {
+            return Err(ProjectError::invalid_manifest(
+                ProjectErrorCategory::DuplicateImportWarning,
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_annotations(
     _capture_region: CaptureRegion,
     frames: &[FrameMeta],
@@ -252,14 +275,15 @@ mod tests {
 
     use super::super::model::{
         EnabledOutputs, ProjectFrame, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+        PROJECT_SCHEMA_VERSION,
     };
     use crate::models::{
         CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
     };
     use rollshot_image_document::AnnotationId;
 
-    fn valid_manifest() -> ProjectManifestV1 {
-        ProjectManifestV1 {
+    fn valid_manifest() -> ProjectManifestV2 {
+        ProjectManifestV2 {
             schema_version: PROJECT_SCHEMA_VERSION,
             revision: 1,
             title: String::new(),
@@ -291,6 +315,7 @@ mod tests {
                 nearby: vec![1],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         }
     }
 
@@ -324,13 +349,14 @@ mod tests {
                 nearby: vec![1],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         }
     }
 
     // ---- Manifest validation ----
 
     #[test]
-    fn manifest_rejects_unsupported_schema() {
+    fn manifest_rejects_wrong_schema_version() {
         let mut manifest = valid_manifest();
         manifest.schema_version = 99;
         let error = validate_manifest_structure(&manifest).unwrap_err();

@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use iced::Task;
 
 use super::recent::RecentProjects;
+use super::video_import::{ImportCoordinator, ImportOperationId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionGuideIntent {
@@ -36,8 +38,11 @@ pub struct ActionGuideHome {
     pub recent: RecentProjects,
     pub opening: bool,
     pub message: Option<String>,
+    pub import: ImportCoordinator,
 }
 
+// NOTE: iced 0.14 requires Message: Clone for widget construction;
+// non-Clone data uses Arc<Mutex<_>> (see ImportFinished variant).
 #[derive(Debug, Clone)]
 pub enum Message {
     RecordNew,
@@ -56,9 +61,29 @@ pub enum Message {
     },
     WindowFocused,
     Clear,
+    ImportRecording,
+    ImportPickerSelected(PathBuf),
+    ImportPickerCancelled,
+    ImportToolchainResolved {
+        operation_id: ImportOperationId,
+        resolution: crate::managed_ffmpeg::VideoImportToolchainResolution,
+    },
+    ImportSetupFinished {
+        operation_id: ImportOperationId,
+        result: Result<(), String>,
+    },
+    RetryImportSetup,
+    ImportProgress {
+        operation_id: ImportOperationId,
+        progress: rollshot_action::VideoImportProgress,
+    },
+    ImportFinished {
+        operation_id: ImportOperationId,
+        result: Result<Arc<Mutex<Option<rollshot_action::ImportedWorkspaceSeed>>>, String>,
+    },
+    CancelImport,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     None,
     PickProject,
@@ -66,6 +91,56 @@ pub enum Effect {
     RecordNew,
     OpenProject(PathBuf),
     OpenLegacyReader(PathBuf),
+    PickRecording,
+    StartImport {
+        operation_id: ImportOperationId,
+        path: PathBuf,
+        toolchain: rollshot_action::VideoToolchain,
+        cancellation: rollshot_action::VideoImportCancellation,
+    },
+    SetupImportToolchain {
+        operation_id: ImportOperationId,
+    },
+    OpenImportedTimeline(rollshot_action::ImportedWorkspaceSeed),
+    ResolveImportToolchain {
+        operation_id: ImportOperationId,
+    },
+}
+
+fn truncate_path(p: &std::path::Path) -> String {
+    match p.file_name().and_then(|f| f.to_str()) {
+        Some(name) => format!("..{SEP}{name}"),
+        None => "..".to_string(),
+    }
+}
+
+const SEP: &str = std::path::MAIN_SEPARATOR_STR;
+
+impl std::fmt::Debug for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::PickProject => write!(f, "PickProject"),
+            Self::InspectSelection(p) => write!(f, "InspectSelection({})", truncate_path(p)),
+            Self::RecordNew => write!(f, "RecordNew"),
+            Self::OpenProject(p) => write!(f, "OpenProject({})", truncate_path(p)),
+            Self::OpenLegacyReader(p) => write!(f, "OpenLegacyReader({})", truncate_path(p)),
+            Self::PickRecording => write!(f, "PickRecording"),
+            Self::StartImport { operation_id, .. } => f
+                .debug_struct("StartImport")
+                .field("operation_id", operation_id)
+                .finish_non_exhaustive(),
+            Self::SetupImportToolchain { operation_id } => f
+                .debug_struct("SetupImportToolchain")
+                .field("operation_id", operation_id)
+                .finish(),
+            Self::ResolveImportToolchain { operation_id } => f
+                .debug_struct("ResolveImportToolchain")
+                .field("operation_id", operation_id)
+                .finish(),
+            Self::OpenImportedTimeline(_) => write!(f, "OpenImportedTimeline(..)"),
+        }
+    }
 }
 
 pub struct Update {
@@ -88,11 +163,20 @@ impl ActionGuideHome {
             recent,
             opening: false,
             message: None,
+            import: ImportCoordinator::default(),
         }
     }
 
     pub fn new_empty() -> Self {
         Self::new(RecentProjects::empty())
+    }
+
+    pub fn import_coordinator(&self) -> &ImportCoordinator {
+        &self.import
+    }
+
+    pub fn import_coordinator_mut(&mut self) -> &mut ImportCoordinator {
+        &mut self.import
     }
 
     pub fn record_project_open(&mut self, path: PathBuf, display_name: String) {
@@ -206,6 +290,144 @@ impl ActionGuideHome {
                 self.message = None;
                 Update::none()
             }
+            Message::ImportRecording => {
+                self.import.set_picking();
+                Update {
+                    task: Task::none(),
+                    effect: Effect::PickRecording,
+                }
+            }
+            Message::ImportPickerSelected(path) => {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "webm") {
+                    self.import.finish_idle();
+                    self.message = Some(format!(
+                        "Unsupported video format (.{}). Supported: mp4, mov, mkv, webm",
+                        ext
+                    ));
+                    return Update::none();
+                }
+                let id = self.import.begin(path);
+                Update {
+                    task: Task::none(),
+                    effect: Effect::ResolveImportToolchain { operation_id: id },
+                }
+            }
+            Message::ImportPickerCancelled => {
+                // Silent — coordinator was in Picking, reset to Idle
+                self.import.finish_idle();
+                Update::none()
+            }
+            Message::ImportToolchainResolved {
+                operation_id,
+                resolution,
+            } => {
+                if self.import.operation_id() != Some(operation_id) {
+                    return Update::none();
+                }
+                match resolution {
+                    crate::managed_ffmpeg::VideoImportToolchainResolution::Available(toolchain) => {
+                        // Ready to start import — emit StartImport effect
+                        let path = self.import.pending_path().cloned().unwrap_or_default();
+                        let cancellation = rollshot_action::VideoImportCancellation::default();
+                        self.import.set_cancellation(cancellation.clone());
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::StartImport {
+                                operation_id,
+                                path,
+                                toolchain,
+                                cancellation,
+                            },
+                        }
+                    }
+                    crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(_) => {
+                        self.import.mark_setting_up(operation_id);
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::SetupImportToolchain { operation_id },
+                        }
+                    }
+                }
+            }
+            Message::ImportSetupFinished {
+                operation_id,
+                result,
+            } => {
+                if self.import.operation_id() != Some(operation_id) {
+                    return Update::none();
+                }
+                match result {
+                    Ok(()) => {
+                        // Re-resolve after successful setup
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::ResolveImportToolchain { operation_id },
+                        }
+                    }
+                    Err(err) => {
+                        self.import.finish_idle();
+                        self.message = Some(err);
+                        Update::none()
+                    }
+                }
+            }
+            Message::RetryImportSetup => {
+                // Re-resolve the toolchain after setup
+                match self.import.operation_id() {
+                    Some(operation_id) => Update {
+                        task: Task::none(),
+                        effect: Effect::ResolveImportToolchain { operation_id },
+                    },
+                    None => Update::none(),
+                }
+            }
+            Message::ImportProgress {
+                operation_id,
+                progress,
+            } => {
+                self.import.record_progress(operation_id, progress);
+                Update::none()
+            }
+            Message::ImportFinished {
+                operation_id,
+                result,
+            } => {
+                if self.import.operation_id() != Some(operation_id) {
+                    // Stale — drop the seed immediately
+                    return Update::none();
+                }
+                self.import.finish_idle();
+                match result {
+                    Ok(seed_arc) => {
+                        let seed = seed_arc.lock().ok().and_then(|mut guard| guard.take());
+                        match seed {
+                            Some(seed) => Update {
+                                task: Task::none(),
+                                effect: Effect::OpenImportedTimeline(seed),
+                            },
+                            None => {
+                                self.message = Some("Import seed already consumed".into());
+                                Update::none()
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                        Update::none()
+                    }
+                }
+            }
+            Message::CancelImport => {
+                if let Some(id) = self.import.operation_id() {
+                    self.import.cancel(id);
+                }
+                Update::none()
+            }
         }
     }
 
@@ -222,6 +444,55 @@ pub fn subscription() -> iced::Subscription<Message> {
         iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
         _ => None,
     })
+}
+
+pub(crate) fn run_import_task(
+    operation_id: ImportOperationId,
+    path: PathBuf,
+    toolchain: rollshot_action::VideoToolchain,
+    cancellation: rollshot_action::VideoImportCancellation,
+) -> Task<Message> {
+    Task::run(
+        iced::stream::channel(32, async move |mut sender| {
+            use iced::futures::SinkExt;
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let worker = tokio::task::spawn_blocking(move || {
+                let request = rollshot_action::VideoImportRequest {
+                    input: path,
+                    toolchain,
+                    scratch_parent: std::env::temp_dir().join("rollshot/import"),
+                };
+                let result = rollshot_action::import_video(request, cancellation, |progress| {
+                    let _ = tx.try_send(Message::ImportProgress {
+                        operation_id,
+                        progress,
+                    });
+                })
+                .map_err(|error| format!("Import failed: {error}"))
+                .map(|seed| Arc::new(Mutex::new(Some(seed))));
+
+                let _ = tx.blocking_send(Message::ImportFinished {
+                    operation_id,
+                    result,
+                });
+            });
+
+            while let Some(message) = rx.recv().await {
+                let _ = sender.send(message).await;
+            }
+
+            if let Err(error) = worker.await {
+                let _ = sender
+                    .send(Message::ImportFinished {
+                        operation_id,
+                        result: Err(format!("Import worker panicked: {error}")),
+                    })
+                    .await;
+            }
+        }),
+        std::convert::identity,
+    )
 }
 
 /// Inspects the shape of a directory to determine its kind.
@@ -266,6 +537,7 @@ fn inspect_selection_with(path: &Path, exists_fn: &dyn Fn(&Path) -> bool) -> Sel
 mod tests {
     use super::*;
     use crate::action_guide_home::recent::RecentEntry;
+    use crate::action_guide_home::video_import::ImportState;
     use tempfile::TempDir;
 
     fn setup_home() -> (TempDir, ActionGuideHome) {
@@ -282,7 +554,7 @@ mod tests {
     fn record_new_emits_record_effect() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::RecordNew);
-        assert_eq!(update.effect, Effect::RecordNew);
+        assert!(matches!(update.effect, Effect::RecordNew));
     }
 
     // ---- Open picker ----
@@ -291,7 +563,7 @@ mod tests {
     fn open_picker_emits_pick_project_effect() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::OpenPicker);
-        assert_eq!(update.effect, Effect::PickProject);
+        assert!(matches!(update.effect, Effect::PickProject));
     }
 
     #[test]
@@ -301,7 +573,7 @@ mod tests {
 
         let update = home.update(Message::PickerSelected(path.clone()));
 
-        assert_eq!(update.effect, Effect::InspectSelection(path));
+        assert!(matches!(update.effect, Effect::InspectSelection(ref p) if p == &path));
         assert!(home.opening);
     }
 
@@ -321,7 +593,7 @@ mod tests {
     fn picker_cancelled_leaves_state_unchanged() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::PickerCancelled);
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert!(!home.opening);
         assert!(home.message.is_none());
     }
@@ -384,7 +656,7 @@ mod tests {
         let mut home = ActionGuideHome::new(recent);
 
         let update = home.update(Message::RecentSelected(project_path.clone()));
-        assert_eq!(update.effect, Effect::InspectSelection(project_path));
+        assert!(matches!(update.effect, Effect::InspectSelection(ref p) if p == &project_path));
         assert!(home.opening);
     }
 
@@ -403,7 +675,7 @@ mod tests {
 
         assert_eq!(home.recent.entries().len(), 1);
         let update = home.update(Message::RecentSelected(project_path));
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.recent.entries().len(), 0);
     }
 
@@ -452,7 +724,7 @@ mod tests {
             path: path.clone(),
             kind: SelectedDirectoryKind::Project(path.clone()),
         });
-        assert_eq!(update.effect, Effect::OpenProject(path));
+        assert!(matches!(update.effect, Effect::OpenProject(ref p) if p == &path));
         assert!(!home.opening);
         assert!(home.message.is_none());
     }
@@ -468,7 +740,7 @@ mod tests {
             path: path.clone(),
             kind: SelectedDirectoryKind::LegacyReader(path.clone()),
         });
-        assert_eq!(update.effect, Effect::OpenLegacyReader(path));
+        assert!(matches!(update.effect, Effect::OpenLegacyReader(ref p) if p == &path));
         assert!(!home.opening);
         assert!(home.message.is_none());
     }
@@ -483,7 +755,7 @@ mod tests {
             path: PathBuf::from("/some/invalid"),
             kind: SelectedDirectoryKind::Invalid,
         });
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert!(!home.opening);
         assert!(home.message.is_some());
     }
@@ -593,7 +865,7 @@ mod tests {
                 available: true,
             }),
         });
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.recent.entries().len(), 1);
         assert_eq!(home.recent.entries()[0].display_name, "My Project");
         assert!(home.message.is_none());
@@ -606,7 +878,7 @@ mod tests {
             path: PathBuf::from("/a"),
             result: Err("lock failed".into()),
         });
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.message.as_deref(), Some("lock failed"));
     }
 
@@ -664,5 +936,128 @@ mod tests {
             Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
         );
         assert_eq!(ActionGuideIntent::Home.capture_request(), None);
+    }
+
+    // ---- Import flow ----
+
+    #[test]
+    fn import_recording_emits_pick_recording_effect() {
+        let (_dir, mut home) = setup_home();
+        let update = home.update(Message::ImportRecording);
+        assert!(matches!(update.effect, Effect::PickRecording));
+    }
+
+    #[test]
+    fn picker_cancel_is_silent() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::ImportRecording);
+        home.update(Message::ImportPickerCancelled);
+        assert_eq!(home.import_coordinator().state(), ImportState::Idle);
+        assert!(home.message.is_none());
+    }
+
+    #[test]
+    fn picker_selected_emits_resolve_toolchain_effect() {
+        let (_dir, mut home) = setup_home();
+        let update = home.update(Message::ImportPickerSelected(PathBuf::from("video.mp4")));
+        assert!(matches!(
+            update.effect,
+            Effect::ResolveImportToolchain { .. }
+        ));
+        assert_eq!(
+            home.import_coordinator().state(),
+            ImportState::ResolvingToolchain
+        );
+    }
+
+    #[test]
+    fn picker_selected_unsupported_extension_sets_message() {
+        let (_dir, mut home) = setup_home();
+        let update = home.update(Message::ImportPickerSelected(PathBuf::from("clip.avi")));
+        assert!(matches!(update.effect, Effect::None));
+        assert_eq!(home.import_coordinator().state(), ImportState::Idle);
+        assert!(home
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("Unsupported video format"));
+        assert!(home.message.as_deref().unwrap().contains(".avi"));
+    }
+
+    #[test]
+    fn cancelled_or_superseded_operation_ignores_late_messages() {
+        let mut coordinator = ImportCoordinator::default();
+        let old = coordinator.begin(PathBuf::from("old.mp4"));
+        coordinator.cancel(old);
+        let new = coordinator.begin(PathBuf::from("new.mp4"));
+        coordinator.record_progress(
+            old,
+            rollshot_action::VideoImportProgress {
+                pass: rollshot_action::VideoImportPass::Extract,
+                processed_ms: 0,
+                total_ms: 1000,
+                retained_candidates: 0,
+            },
+        );
+        assert_eq!(coordinator.operation_id(), Some(new));
+        assert_ne!(coordinator.state(), ImportState::ExtractingPass2);
+    }
+
+    #[test]
+    fn success_produces_unsaved_timeline_effect() {
+        let (_dir, mut home) = setup_home();
+        let id = home
+            .import_coordinator_mut()
+            .begin(PathBuf::from("test.mp4"));
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let seed = dummy_seed(&scratch_dir);
+        let update = home.update(Message::ImportFinished {
+            operation_id: id,
+            result: Ok(Arc::new(Mutex::new(Some(seed)))),
+        });
+        assert!(matches!(update.effect, Effect::OpenImportedTimeline(_)));
+    }
+
+    fn dummy_seed(scratch_dir: &tempfile::TempDir) -> rollshot_action::ImportedWorkspaceSeed {
+        use rollshot_action::project::ProjectFrame;
+        use rollshot_action::{
+            CandidateKind, CaptureRegion, DetectReason, Guide, GuideStep, ImportWarning,
+            ImportedScratch, InputCapability, InputSourceKind,
+        };
+        let scratch = ImportedScratch::create(scratch_dir.path()).unwrap();
+        let step = GuideStep {
+            index: 1,
+            title: "Click button".into(),
+            caption: String::new(),
+            kind: CandidateKind::Click,
+            reason: DetectReason::VisualChange,
+            at_ms: 100,
+            keyframe: 1,
+            nearby: vec![1],
+            source: 1,
+        };
+        let guide = Guide::from_reviewed_steps("Imported Guide".into(), vec![step]).unwrap();
+        rollshot_action::ImportedWorkspaceSeed {
+            guide,
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            input_source: InputSourceKind::ImportedVideo,
+            input_capability: InputCapability::VisualOnly {
+                reason: rollshot_action::DegradedReason::ImportedRecording,
+            },
+            frames: vec![ProjectFrame {
+                id: 1,
+                at_ms: 100,
+                sha256: "abc123".into(),
+                width: 640,
+                height: 480,
+            }],
+            import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+            scratch,
+        }
     }
 }

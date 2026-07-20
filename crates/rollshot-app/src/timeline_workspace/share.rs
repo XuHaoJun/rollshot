@@ -993,6 +993,7 @@ mod tests {
                 )),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
         let input = IssuePackInput {
             title: None,
@@ -1015,6 +1016,8 @@ mod tests {
                 original_pixels_included: false,
                 redaction_count: 0,
             },
+            #[cfg(feature = "action-guide")]
+            import_warnings: Vec::new(),
         };
         let cancel = PublishCancellation::new();
         cancel.cancel();

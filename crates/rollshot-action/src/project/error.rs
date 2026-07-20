@@ -6,6 +6,7 @@ pub enum ProjectErrorCategory {
     Io,
     InvalidJson,
     UnsupportedSchema,
+    UnsupportedVersion,
     InvalidManifest,
     InvalidAsset,
     Encode,
@@ -26,6 +27,7 @@ pub enum ProjectErrorCategory {
     ZeroCaptureRegion,
     MissingExplanationAnnotation,
     AnnotationValidationFailed,
+    DuplicateImportWarning,
 }
 
 impl ProjectErrorCategory {
@@ -34,6 +36,7 @@ impl ProjectErrorCategory {
             Self::Io => "io",
             Self::InvalidJson => "invalid-json",
             Self::UnsupportedSchema => "unsupported-schema",
+            Self::UnsupportedVersion => "unsupported-version",
             Self::InvalidManifest => "invalid-manifest",
             Self::InvalidAsset => "invalid-asset",
             Self::Encode => "encode",
@@ -54,6 +57,7 @@ impl ProjectErrorCategory {
             Self::ZeroCaptureRegion => "zero-capture-region",
             Self::MissingExplanationAnnotation => "missing-explanation-annotation",
             Self::AnnotationValidationFailed => "annotation-validation-failed",
+            Self::DuplicateImportWarning => "duplicate-import-warning",
         }
     }
 }
@@ -82,6 +86,9 @@ pub enum ProjectError {
 
     #[error("unsupported schema version {version}")]
     UnsupportedSchema { path: Option<PathBuf>, version: u32 },
+
+    #[error("unsupported version {version}")]
+    UnsupportedVersion { version: u32 },
 
     #[error("invalid manifest ({category}) step={step_id:?} frame={frame_id:?}")]
     InvalidManifest {
@@ -116,6 +123,7 @@ impl ProjectError {
             Self::Io { .. } => "io",
             Self::InvalidJson { .. } => "invalid-json",
             Self::UnsupportedSchema { .. } => "unsupported-schema",
+            Self::UnsupportedVersion { .. } => "unsupported-version",
             Self::InvalidManifest { category, .. } => category.as_str(),
             Self::InvalidAsset { .. } => "invalid-asset",
             Self::Encode { .. } => "encode",

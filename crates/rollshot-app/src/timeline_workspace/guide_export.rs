@@ -283,6 +283,10 @@ pub(crate) fn build_reviewed_export_job(
         input_source: state.source_kind,
         input_capability: state.capability,
         steps,
+        #[cfg(feature = "action-guide")]
+        import_warnings: state.import_warnings.clone(),
+        #[cfg(not(feature = "action-guide"))]
+        import_warnings: Vec::new(),
     };
     job.validate()?;
     Ok(job)
@@ -710,7 +714,10 @@ mod tests {
             frames,
             steps: Vec::new(),
         };
-        let loaded = LoadedProject { root, manifest };
+        let loaded = LoadedProject {
+            root,
+            manifest: manifest.into(),
+        };
         let source = ProjectFrameSource::from_loaded(
             &loaded,
             rollshot_action::DEFAULT_PROJECT_FRAME_CACHE_BYTES,

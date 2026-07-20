@@ -161,6 +161,10 @@ fn is_core_tree_present(root: &Path, _revision: u64) -> bool {
         Err(_) => return false,
     };
 
+    if manifest.validate().is_err() {
+        return false;
+    }
+
     validate_core_keyframes(root, &manifest.steps)
 }
 
