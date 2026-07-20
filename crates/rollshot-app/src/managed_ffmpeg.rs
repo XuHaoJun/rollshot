@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn managed_root_can_be_overridden_for_tests() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = PathBuf::from("/tmp/rollshot-managed-test-root");
         let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", &root);
         assert_eq!(managed_root().unwrap(), root);
@@ -648,7 +648,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_ignores_manifest_when_pinned_metadata_changed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = tempdir();
         let binary = root.path().join("bin/ffmpeg");
         fake_ffmpeg(&binary);
@@ -732,7 +732,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn import_resolution_honors_both_explicit_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir();
         let ffmpeg = fake_ffmpeg_path(dir.path());
         let ffprobe = fake_ffprobe_path(dir.path());
@@ -749,7 +749,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn missing_ffprobe_does_not_break_ffmpeg_only_exports() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir();
         let ffmpeg = fake_ffmpeg_path(dir.path());
         fake_ffmpeg(&ffmpeg);
@@ -766,7 +766,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mixed_override_and_path_resolve_pair() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir();
         let ffmpeg = fake_ffmpeg_path(dir.path());
         fake_ffmpeg(&ffmpeg);
@@ -784,7 +784,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn managed_v2_manifest_resolves_pair() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = tempdir();
         let bin_dir = root.path().join("bin");
         let ffmpeg = bin_dir.join("ffmpeg");
@@ -820,7 +820,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn managed_v1_manifest_does_not_satisfy_toolchain() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = tempdir();
         let binary = root.path().join("bin/ffmpeg");
         fake_ffmpeg(&binary);
