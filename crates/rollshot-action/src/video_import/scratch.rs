@@ -14,6 +14,14 @@ struct ImportedScratchInner {
 
 pub struct ImportedScratch(ImportedScratchInner);
 
+impl std::fmt::Debug for ImportedScratch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedScratch")
+            .field("bytes_used", &self.0.bytes_used)
+            .finish()
+    }
+}
+
 impl ImportedScratch {
     pub fn create(parent: &Path) -> Result<Self, VideoImportError> {
         fs::create_dir_all(parent).map_err(|_| VideoImportError::ScratchIo)?;

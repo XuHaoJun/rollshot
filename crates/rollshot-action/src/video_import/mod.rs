@@ -133,7 +133,7 @@ pub fn import_video(
 
     progress(VideoImportPass::Preflight.progress(0, 0, 0));
 
-    let meta = process::probe_video(&request.input, &request.toolchain)?;
+    let meta = process::probe_video(&request.input, &request.toolchain, &cancel)?;
 
     if cancel.is_cancelled() {
         return Err(VideoImportError::Cancelled);
@@ -149,6 +149,7 @@ pub fn import_video(
     let mut detector = Detector::new(DetectorConfig::default());
     let mut last_sample_index: u64 = 0;
     let mut last_progress_ms: u64 = 0;
+    let mut analysis_at_ms: Vec<u64> = Vec::new();
 
     let cancel_ref = &cancel;
     let progress_ref = &progress;
@@ -162,6 +163,7 @@ pub fn import_video(
         |sample_index, luma| {
             last_sample_index = sample_index;
             let at_ms = sample_index * 1000 / ANALYSIS_FPS;
+            analysis_at_ms.push(at_ms);
 
             let frame = AnalysisFrame {
                 id: sample_index as FrameId,
@@ -271,7 +273,10 @@ pub fn import_video(
         let dest = assets_dir.join(format!("{}.png", encoded.sha256));
         std::fs::write(&dest, &encoded.bytes).map_err(|_| VideoImportError::ScratchIo)?;
 
-        let at_ms = (requested_idx as u64) * 1000 / ANALYSIS_FPS;
+        let at_ms = analysis_at_ms
+            .get(requested_idx)
+            .copied()
+            .unwrap_or(requested_idx as u64 * 1000 / ANALYSIS_FPS);
         frames.push(ProjectFrame {
             id: i as FrameId,
             at_ms,
@@ -588,6 +593,47 @@ mod tests {
         dir
     }
 
+    fn alternating_fixture(num_frames: u32, with_audio: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("test.mp4");
+
+        let mut cmd = Command::new(ffmpeg_path());
+        cmd.args([
+            "-y", "-nostdin", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "320x240", "-r", "2",
+            "-i", "pipe:0",
+        ]);
+
+        if with_audio {
+            cmd.args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-shortest"]);
+        }
+
+        cmd.args([
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            output.to_str().unwrap(),
+        ]);
+
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for i in 0..num_frames {
+                let color = if i % 2 == 0 { 10u8 } else { 240u8 };
+                stdin.write_all(&vec![color; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.wait().unwrap();
+        dir
+    }
+
     fn run_import(
         video_path: &Path,
     ) -> Result<(ImportedWorkspaceSeed, tempfile::TempDir), VideoImportError> {
@@ -891,5 +937,85 @@ mod tests {
         .unwrap();
         let frame_size = checked_frame_size(ANALYSIS_WIDTH, meta);
         assert!(frame_size.is_ok());
+    }
+
+    #[test]
+    fn more_than_200_candidates_produces_reduction_warning() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let fixture = alternating_fixture(404, true);
+        let output = fixture.path().join("test.mp4");
+        let (seed, _parent) = run_import(&output).unwrap();
+        assert!(
+            seed.import_warnings
+                .contains(&ImportWarning::IntermediateChangesReduced),
+            "expected IntermediateChangesReduced warning when >200 candidates detected"
+        );
+    }
+
+    #[test]
+    fn missing_center_evidence_returns_evidence_missing() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let fixture = fixture_video(&[100u8, 200u8], false);
+        let output = fixture.path().join("test.mp4");
+
+        let center_indices = vec![1usize];
+        let evidence_indices = evidence_sample_indices(&center_indices, 2);
+        assert_eq!(evidence_indices, vec![0, 1]);
+
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let staging = scratch_parent.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let meta = process::probe_video(&output, &toolchain(), &VideoImportCancellation::default())
+            .unwrap();
+
+        let empty: &[usize] = &[];
+        let extracted = process::run_evidence_pass(
+            &output,
+            &toolchain(),
+            meta,
+            empty,
+            &staging,
+            &VideoImportCancellation::default(),
+            &|_| {},
+            meta.duration_ms,
+        )
+        .unwrap();
+
+        let mut frames = Vec::new();
+        for (i, &requested_idx) in evidence_indices.iter().enumerate() {
+            let staged_path = extracted.get(&requested_idx);
+            let Some(_path) = staged_path else {
+                if center_indices.contains(&requested_idx) {
+                    panic!(
+                        "center index {} missing from extraction should cause EvidenceMissing",
+                        requested_idx
+                    );
+                }
+                continue;
+            };
+            frames.push((i, requested_idx));
+        }
+        assert!(
+            frames.is_empty(),
+            "empty extraction set should leave no frames for center={:?}",
+            center_indices
+        );
+    }
+
+    #[test]
+    fn edge_candidate_neighbors_are_gracefully_absent() {
+        let indices = evidence_sample_indices(&[0], 10);
+        assert_eq!(indices, vec![0, 1]);
+
+        let indices = evidence_sample_indices(&[9], 10);
+        assert_eq!(indices, vec![8, 9]);
+
+        let indices = evidence_sample_indices(&[4], 10);
+        assert_eq!(indices, vec![3, 4, 5]);
     }
 }

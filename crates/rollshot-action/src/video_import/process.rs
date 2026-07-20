@@ -174,6 +174,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> StderrDiagnostics {
 pub fn probe_video(
     input: &Path,
     toolchain: &VideoToolchain,
+    cancel: &VideoImportCancellation,
 ) -> Result<ProbeMetadata, VideoImportError> {
     let mut cmd = Command::new(&toolchain.ffprobe);
     let args = probe_args(input);
@@ -188,10 +189,9 @@ pub fn probe_video(
     }
 
     let child = CancellableChild::spawn(cmd)?;
-    let cancel = VideoImportCancellation::default();
 
     let (tx, rx) = std::sync::mpsc::channel();
-    run_cancellable_child(child, &cancel, move |mut stdout| {
+    run_cancellable_child(child, cancel, move |mut stdout| {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
         let _ = tx.send(buf);
@@ -209,25 +209,30 @@ pub fn run_analysis_pass(
     cancel: VideoImportCancellation,
     mut on_frame: impl FnMut(u64, LumaPlane),
 ) -> Result<(), VideoImportError> {
+    let analysis_filter = format!(
+        "fps={},scale={}:-2,format=gray",
+        ANALYSIS_FPS, ANALYSIS_WIDTH
+    );
+
     let mut cmd = Command::new(&toolchain.ffmpeg);
     cmd.args(["-nostdin", "-an", "-sn", "-dn"]);
 
-    if meta.rotation_degrees == 90 {
-        cmd.args(["-metadata:s:v", "rotate=0", "-vf", "transpose=1"]);
-    } else if meta.rotation_degrees == 180 {
-        cmd.args(["-vf", "transpose=1,transpose=1"]);
-    } else if meta.rotation_degrees == 270 {
-        cmd.args(["-metadata:s:v", "rotate=0", "-vf", "transpose=2"]);
+    if meta.rotation_degrees == 90 || meta.rotation_degrees == 270 {
+        cmd.args(["-metadata:s:v", "rotate=0"]);
     }
+
+    let vf = match meta.rotation_degrees {
+        90 => format!("transpose=1,{}", analysis_filter),
+        180 => format!("transpose=1,transpose=1,{}", analysis_filter),
+        270 => format!("transpose=2,{}", analysis_filter),
+        _ => analysis_filter,
+    };
 
     cmd.args([
         "-i",
         &input.to_string_lossy(),
         "-vf",
-        &format!(
-            "fps={},scale={}:-2,format=gray",
-            ANALYSIS_FPS, ANALYSIS_WIDTH
-        ),
+        &vf,
         "-f",
         "rawvideo",
         "-pix_fmt",
