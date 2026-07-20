@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use iced::Task;
 
 use super::recent::RecentProjects;
+use super::video_import::{ImportCoordinator, ImportOperationId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionGuideIntent {
@@ -36,6 +38,7 @@ pub struct ActionGuideHome {
     pub recent: RecentProjects,
     pub opening: bool,
     pub message: Option<String>,
+    pub import: ImportCoordinator,
 }
 
 #[derive(Debug, Clone)]
@@ -56,9 +59,29 @@ pub enum Message {
     },
     WindowFocused,
     Clear,
+    ImportRecording,
+    ImportPickerSelected(PathBuf),
+    ImportPickerCancelled,
+    ImportToolchainResolved {
+        operation_id: ImportOperationId,
+        resolution: crate::managed_ffmpeg::VideoImportToolchainResolution,
+    },
+    ImportSetupFinished {
+        operation_id: ImportOperationId,
+        result: Result<(), String>,
+    },
+    RetryImportSetup,
+    ImportProgress {
+        operation_id: ImportOperationId,
+        progress: rollshot_action::VideoImportProgress,
+    },
+    ImportFinished {
+        operation_id: ImportOperationId,
+        result: Result<Arc<Mutex<Option<rollshot_action::ImportedWorkspaceSeed>>>, String>,
+    },
+    CancelImport,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     None,
     PickProject,
@@ -66,6 +89,35 @@ pub enum Effect {
     RecordNew,
     OpenProject(PathBuf),
     OpenLegacyReader(PathBuf),
+    PickRecording,
+    StartImport {
+        operation_id: ImportOperationId,
+        path: PathBuf,
+        toolchain: rollshot_action::VideoToolchain,
+        cancellation: rollshot_action::VideoImportCancellation,
+    },
+    SetupImportToolchain,
+    OpenImportedTimeline(rollshot_action::ImportedWorkspaceSeed),
+}
+
+impl std::fmt::Debug for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::PickProject => write!(f, "PickProject"),
+            Self::InspectSelection(p) => f.debug_tuple("InspectSelection").field(&p).finish(),
+            Self::RecordNew => write!(f, "RecordNew"),
+            Self::OpenProject(p) => f.debug_tuple("OpenProject").field(&p).finish(),
+            Self::OpenLegacyReader(p) => f.debug_tuple("OpenLegacyReader").field(&p).finish(),
+            Self::PickRecording => write!(f, "PickRecording"),
+            Self::StartImport { operation_id, .. } => f
+                .debug_struct("StartImport")
+                .field("operation_id", operation_id)
+                .finish_non_exhaustive(),
+            Self::SetupImportToolchain => write!(f, "SetupImportToolchain"),
+            Self::OpenImportedTimeline(_) => write!(f, "OpenImportedTimeline(..)"),
+        }
+    }
 }
 
 pub struct Update {
@@ -88,11 +140,20 @@ impl ActionGuideHome {
             recent,
             opening: false,
             message: None,
+            import: ImportCoordinator::default(),
         }
     }
 
     pub fn new_empty() -> Self {
         Self::new(RecentProjects::empty())
+    }
+
+    pub fn import_coordinator(&self) -> &ImportCoordinator {
+        &self.import
+    }
+
+    pub fn import_coordinator_mut(&mut self) -> &mut ImportCoordinator {
+        &mut self.import
     }
 
     pub fn record_project_open(&mut self, path: PathBuf, display_name: String) {
@@ -206,6 +267,127 @@ impl ActionGuideHome {
                 self.message = None;
                 Update::none()
             }
+            Message::ImportRecording => {
+                self.import.set_picking();
+                Update {
+                    task: Task::none(),
+                    effect: Effect::PickRecording,
+                }
+            }
+            Message::ImportPickerSelected(path) => {
+                let _id = self.import.begin(path);
+                Update {
+                    task: Task::none(),
+                    effect: Effect::None,
+                }
+            }
+            Message::ImportPickerCancelled => {
+                // Silent — coordinator was in Picking, reset to Idle
+                self.import.finish_idle();
+                Update::none()
+            }
+            Message::ImportToolchainResolved {
+                operation_id,
+                resolution,
+            } => {
+                if self.import.operation_id() != Some(operation_id) {
+                    return Update::none();
+                }
+                match resolution {
+                    crate::managed_ffmpeg::VideoImportToolchainResolution::Available(toolchain) => {
+                        // Ready to start import — emit StartImport effect
+                        let path = self.import.pending_path().cloned().unwrap_or_default();
+                        let cancellation = rollshot_action::VideoImportCancellation::default();
+                        self.import.set_cancellation(cancellation.clone());
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::StartImport {
+                                operation_id,
+                                path,
+                                toolchain,
+                                cancellation,
+                            },
+                        }
+                    }
+                    crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(_) => {
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::SetupImportToolchain,
+                        }
+                    }
+                }
+            }
+            Message::ImportSetupFinished {
+                operation_id,
+                result,
+            } => {
+                if self.import.operation_id() != Some(operation_id) {
+                    return Update::none();
+                }
+                match result {
+                    Ok(()) => {
+                        // Retry resolution after successful setup
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::None,
+                        }
+                    }
+                    Err(err) => {
+                        self.import.finish_idle();
+                        self.message = Some(err);
+                        Update::none()
+                    }
+                }
+            }
+            Message::RetryImportSetup => {
+                // Re-resolve the toolchain after setup
+                Update {
+                    task: Task::none(),
+                    effect: Effect::None,
+                }
+            }
+            Message::ImportProgress {
+                operation_id,
+                progress,
+            } => {
+                self.import.record_progress(operation_id, progress);
+                Update::none()
+            }
+            Message::ImportFinished {
+                operation_id,
+                result,
+            } => {
+                if self.import.operation_id() != Some(operation_id) {
+                    // Stale — drop the seed immediately
+                    return Update::none();
+                }
+                self.import.finish_idle();
+                match result {
+                    Ok(seed_arc) => {
+                        let seed = seed_arc.lock().ok().and_then(|mut guard| guard.take());
+                        match seed {
+                            Some(seed) => Update {
+                                task: Task::none(),
+                                effect: Effect::OpenImportedTimeline(seed),
+                            },
+                            None => {
+                                self.message = Some("Import seed already consumed".into());
+                                Update::none()
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                        Update::none()
+                    }
+                }
+            }
+            Message::CancelImport => {
+                if let Some(id) = self.import.operation_id() {
+                    self.import.cancel(id);
+                }
+                Update::none()
+            }
         }
     }
 
@@ -266,6 +448,7 @@ fn inspect_selection_with(path: &Path, exists_fn: &dyn Fn(&Path) -> bool) -> Sel
 mod tests {
     use super::*;
     use crate::action_guide_home::recent::RecentEntry;
+    use crate::action_guide_home::video_import::ImportState;
     use tempfile::TempDir;
 
     fn setup_home() -> (TempDir, ActionGuideHome) {
@@ -282,7 +465,7 @@ mod tests {
     fn record_new_emits_record_effect() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::RecordNew);
-        assert_eq!(update.effect, Effect::RecordNew);
+        assert!(matches!(update.effect, Effect::RecordNew));
     }
 
     // ---- Open picker ----
@@ -291,7 +474,7 @@ mod tests {
     fn open_picker_emits_pick_project_effect() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::OpenPicker);
-        assert_eq!(update.effect, Effect::PickProject);
+        assert!(matches!(update.effect, Effect::PickProject));
     }
 
     #[test]
@@ -301,7 +484,7 @@ mod tests {
 
         let update = home.update(Message::PickerSelected(path.clone()));
 
-        assert_eq!(update.effect, Effect::InspectSelection(path));
+        assert!(matches!(update.effect, Effect::InspectSelection(ref p) if p == &path));
         assert!(home.opening);
     }
 
@@ -321,7 +504,7 @@ mod tests {
     fn picker_cancelled_leaves_state_unchanged() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::PickerCancelled);
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert!(!home.opening);
         assert!(home.message.is_none());
     }
@@ -384,7 +567,7 @@ mod tests {
         let mut home = ActionGuideHome::new(recent);
 
         let update = home.update(Message::RecentSelected(project_path.clone()));
-        assert_eq!(update.effect, Effect::InspectSelection(project_path));
+        assert!(matches!(update.effect, Effect::InspectSelection(ref p) if p == &project_path));
         assert!(home.opening);
     }
 
@@ -403,7 +586,7 @@ mod tests {
 
         assert_eq!(home.recent.entries().len(), 1);
         let update = home.update(Message::RecentSelected(project_path));
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.recent.entries().len(), 0);
     }
 
@@ -452,7 +635,7 @@ mod tests {
             path: path.clone(),
             kind: SelectedDirectoryKind::Project(path.clone()),
         });
-        assert_eq!(update.effect, Effect::OpenProject(path));
+        assert!(matches!(update.effect, Effect::OpenProject(ref p) if p == &path));
         assert!(!home.opening);
         assert!(home.message.is_none());
     }
@@ -468,7 +651,7 @@ mod tests {
             path: path.clone(),
             kind: SelectedDirectoryKind::LegacyReader(path.clone()),
         });
-        assert_eq!(update.effect, Effect::OpenLegacyReader(path));
+        assert!(matches!(update.effect, Effect::OpenLegacyReader(ref p) if p == &path));
         assert!(!home.opening);
         assert!(home.message.is_none());
     }
@@ -483,7 +666,7 @@ mod tests {
             path: PathBuf::from("/some/invalid"),
             kind: SelectedDirectoryKind::Invalid,
         });
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert!(!home.opening);
         assert!(home.message.is_some());
     }
@@ -593,7 +776,7 @@ mod tests {
                 available: true,
             }),
         });
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.recent.entries().len(), 1);
         assert_eq!(home.recent.entries()[0].display_name, "My Project");
         assert!(home.message.is_none());
@@ -606,7 +789,7 @@ mod tests {
             path: PathBuf::from("/a"),
             result: Err("lock failed".into()),
         });
-        assert_eq!(update.effect, Effect::None);
+        assert!(matches!(update.effect, Effect::None));
         assert_eq!(home.message.as_deref(), Some("lock failed"));
     }
 
@@ -664,5 +847,100 @@ mod tests {
             Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
         );
         assert_eq!(ActionGuideIntent::Home.capture_request(), None);
+    }
+
+    // ---- Import flow ----
+
+    #[test]
+    fn import_recording_emits_pick_recording_effect() {
+        let (_dir, mut home) = setup_home();
+        let update = home.update(Message::ImportRecording);
+        assert!(matches!(update.effect, Effect::PickRecording));
+    }
+
+    #[test]
+    fn picker_cancel_is_silent() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::ImportRecording);
+        home.update(Message::ImportPickerCancelled);
+        assert_eq!(home.import_coordinator().state(), ImportState::Idle);
+        assert!(home.message.is_none());
+    }
+
+    #[test]
+    fn cancelled_or_superseded_operation_ignores_late_messages() {
+        let mut coordinator = ImportCoordinator::default();
+        let old = coordinator.begin(PathBuf::from("old.mp4"));
+        coordinator.cancel(old);
+        let new = coordinator.begin(PathBuf::from("new.mp4"));
+        coordinator.record_progress(
+            old,
+            rollshot_action::VideoImportProgress {
+                pass: rollshot_action::VideoImportPass::Extract,
+                processed_ms: 0,
+                total_ms: 1000,
+                retained_candidates: 0,
+            },
+        );
+        assert_eq!(coordinator.operation_id(), Some(new));
+        assert_ne!(coordinator.state(), ImportState::ExtractingPass2);
+    }
+
+    #[test]
+    fn success_produces_unsaved_timeline_effect() {
+        let (_dir, mut home) = setup_home();
+        let id = home
+            .import_coordinator_mut()
+            .begin(PathBuf::from("test.mp4"));
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let seed = dummy_seed(&scratch_dir);
+        let update = home.update(Message::ImportFinished {
+            operation_id: id,
+            result: Ok(Arc::new(Mutex::new(Some(seed)))),
+        });
+        assert!(matches!(update.effect, Effect::OpenImportedTimeline(_)));
+    }
+
+    fn dummy_seed(scratch_dir: &tempfile::TempDir) -> rollshot_action::ImportedWorkspaceSeed {
+        use rollshot_action::project::ProjectFrame;
+        use rollshot_action::{
+            CandidateKind, CaptureRegion, DetectReason, Guide, GuideStep, ImportWarning,
+            ImportedScratch, InputCapability, InputSourceKind,
+        };
+        let scratch = ImportedScratch::create(scratch_dir.path()).unwrap();
+        let step = GuideStep {
+            index: 1,
+            title: "Click button".into(),
+            caption: String::new(),
+            kind: CandidateKind::Click,
+            reason: DetectReason::VisualChange,
+            at_ms: 100,
+            keyframe: 1,
+            nearby: vec![1],
+            source: 1,
+        };
+        let guide = Guide::from_reviewed_steps("Imported Guide".into(), vec![step]).unwrap();
+        rollshot_action::ImportedWorkspaceSeed {
+            guide,
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            input_source: InputSourceKind::ImportedVideo,
+            input_capability: InputCapability::VisualOnly {
+                reason: rollshot_action::DegradedReason::ImportedRecording,
+            },
+            frames: vec![ProjectFrame {
+                id: 1,
+                at_ms: 100,
+                sha256: "abc123".into(),
+                width: 640,
+                height: 480,
+            }],
+            import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+            scratch,
+        }
     }
 }

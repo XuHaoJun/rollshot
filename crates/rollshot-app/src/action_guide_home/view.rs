@@ -3,19 +3,31 @@ use iced::{Element, Length};
 
 use super::recent::RecentEntry;
 use super::update::{ActionGuideHome, Message};
+use super::video_import::ImportState;
 
 pub fn view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
+    match state.import_coordinator().state() {
+        ImportState::Idle => home_view(state),
+        _ => import_processing_view(state),
+    }
+}
+
+fn home_view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
     let title = text("Action Guide").size(24);
 
     let record_btn = button(text("Record New").size(16))
         .on_press(Message::RecordNew)
         .padding([10, 20]);
 
+    let import_btn = button(text("Import Recording...").size(16))
+        .on_press(Message::ImportRecording)
+        .padding([10, 20]);
+
     let open_btn = button(text("Open Project...").size(16))
         .on_press(Message::OpenPicker)
         .padding([10, 20]);
 
-    let actions = row![record_btn, open_btn].spacing(12);
+    let actions = row![record_btn, import_btn, open_btn].spacing(12);
 
     let message_row = if let Some(ref msg) = state.message {
         row![
@@ -33,6 +45,70 @@ pub fn view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
         .spacing(16)
         .padding(20)
         .width(Length::Fill);
+
+    container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+}
+
+fn import_processing_view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
+    let coordinator = state.import_coordinator();
+    let import_state = coordinator.state();
+
+    let title = text("Importing Recording").size(24);
+
+    let pass_copy = match import_state {
+        ImportState::Picking => "Selecting file...".to_string(),
+        ImportState::ResolvingToolchain => "Checking tools...".to_string(),
+        ImportState::SettingUp => "Setting up tools...".to_string(),
+        ImportState::Preflight => "Preparing video...".to_string(),
+        ImportState::AnalyzingPass1 => "Analyzing video (pass 1 of 2)...".to_string(),
+        ImportState::ExtractingPass2 => "Extracting frames (pass 2 of 2)...".to_string(),
+        ImportState::Idle => unreachable!(),
+    };
+
+    let pass_text = text(pass_copy).size(16);
+
+    let progress_row = if let Some(progress) = coordinator.last_progress() {
+        let processed_s = progress.processed_ms / 1000;
+        let total_s = progress.total_ms / 1000;
+        let time_str = format!("{processed_s}s / {total_s}s");
+        let retained_str = format!("{} frames retained", progress.retained_candidates);
+        column![text(time_str).size(14), text(retained_str).size(14),].spacing(4)
+    } else {
+        column![]
+    };
+
+    let notice = text("Processing stays on this device. Audio is ignored.").size(12);
+
+    let cancel_btn = button(text("Cancel").size(16))
+        .on_press(Message::CancelImport)
+        .padding([10, 20]);
+
+    let message_row = if let Some(ref msg) = state.message {
+        row![
+            text(msg.as_str()).size(14),
+            button(text("Dismiss").size(12)).on_press(Message::Clear)
+        ]
+        .spacing(8)
+    } else {
+        row![]
+    };
+
+    let body = column![
+        title,
+        pass_text,
+        progress_row,
+        notice,
+        cancel_btn,
+        message_row
+    ]
+    .spacing(16)
+    .padding(20)
+    .width(Length::Fill);
 
     container(scrollable(body))
         .width(Length::Fill)

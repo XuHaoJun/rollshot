@@ -113,6 +113,7 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     state.home.message = open_legacy_reader(&path).err();
                     iced::Task::none()
                 }
+                _ => iced::Task::none(),
             }
         }
         Message::Timeline(tl_msg) => {

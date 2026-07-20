@@ -1,5 +1,6 @@
 pub(crate) mod recent;
 pub(crate) mod update;
+pub(crate) mod video_import;
 pub(crate) mod view;
 
 #[allow(unused_imports)]

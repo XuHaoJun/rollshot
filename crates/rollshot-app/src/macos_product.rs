@@ -519,6 +519,7 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     }
                     Task::none()
                 }
+                _ => Task::none(),
             }
         }
         #[cfg(feature = "action-guide")]
