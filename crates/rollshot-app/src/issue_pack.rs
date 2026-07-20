@@ -117,6 +117,7 @@ pub(crate) struct IssuePackInput {
     pub ocr_snippets: Vec<OcrSnippet>,
     pub evidence_review: EvidenceReviewSummary,
     pub redaction: RedactionSummary,
+    #[cfg(feature = "action-guide")]
     pub import_warnings: Vec<rollshot_action::ImportWarning>,
 }
 
@@ -149,13 +150,16 @@ pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: 
     } else {
         md.push_str("[Write the steps to reproduce]\n\n");
     }
-    let notices = rollshot_action::render_import_notices(&input.import_warnings);
-    if !notices.is_empty() {
-        md.push_str("## Import limitations\n\n");
-        for line in notices.lines() {
-            md.push_str(&format!("- {line}\n"));
+    #[cfg(feature = "action-guide")]
+    {
+        let notices = rollshot_action::render_import_notices(&input.import_warnings);
+        if !notices.is_empty() {
+            md.push_str("## Import limitations\n\n");
+            for line in notices.lines() {
+                md.push_str(&format!("- {line}\n"));
+            }
+            md.push('\n');
         }
-        md.push('\n');
     }
     md.push_str("## Actual result\n\n");
     if let Some(image) = &input.final_image {
@@ -637,6 +641,7 @@ fn build_folder(
 
     let include_gif = tmp_dir.join("action-guide/guide.gif").exists();
     let include_storyboard = tmp_dir.join("action-guide/storyboard.png").exists();
+    #[cfg(feature = "action-guide")]
     for warning in &input.import_warnings {
         let (code, message) = match warning {
             rollshot_action::ImportWarning::NoVisualChangesDetected => (
@@ -939,6 +944,7 @@ mod tests {
                 original_pixels_included: false,
                 redaction_count: 0,
             },
+            #[cfg(feature = "action-guide")]
             import_warnings: Vec::new(),
         }
     }
@@ -1178,6 +1184,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "action-guide")]
     fn build_imported_issue_pack() -> (IssuePackExportResult, tempfile::TempDir) {
         let mut input = base_input();
         input.final_image = None;
@@ -1200,6 +1207,7 @@ mod tests {
         (result, tmp)
     }
 
+    #[cfg(feature = "action-guide")]
     fn walk_dir(dir: &std::path::Path) -> Vec<String> {
         let mut result = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1215,6 +1223,7 @@ mod tests {
         result
     }
 
+    #[cfg(feature = "action-guide")]
     fn is_video_path(path: &std::path::Path) -> bool {
         path.extension().is_some_and(|ext| {
             matches!(
@@ -1224,6 +1233,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "action-guide")]
     #[test]
     fn issue_pack_discloses_import_limits_without_attaching_video() {
         let (pack, _tmp) = build_imported_issue_pack();
