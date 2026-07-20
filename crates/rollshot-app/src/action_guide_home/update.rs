@@ -41,6 +41,8 @@ pub struct ActionGuideHome {
     pub import: ImportCoordinator,
 }
 
+// NOTE: iced 0.14 requires Message: Clone for widget construction;
+// non-Clone data uses Arc<Mutex<_>> (see ImportFinished variant).
 #[derive(Debug, Clone)]
 pub enum Message {
     RecordNew,
@@ -98,23 +100,34 @@ pub enum Effect {
     },
     SetupImportToolchain,
     OpenImportedTimeline(rollshot_action::ImportedWorkspaceSeed),
+    ResolveImportToolchain,
 }
+
+fn truncate_path(p: &std::path::Path) -> String {
+    match p.file_name().and_then(|f| f.to_str()) {
+        Some(name) => format!("..{SEP}{name}"),
+        None => "..".to_string(),
+    }
+}
+
+const SEP: &str = std::path::MAIN_SEPARATOR_STR;
 
 impl std::fmt::Debug for Effect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => write!(f, "None"),
             Self::PickProject => write!(f, "PickProject"),
-            Self::InspectSelection(p) => f.debug_tuple("InspectSelection").field(&p).finish(),
+            Self::InspectSelection(p) => write!(f, "InspectSelection({})", truncate_path(p)),
             Self::RecordNew => write!(f, "RecordNew"),
-            Self::OpenProject(p) => f.debug_tuple("OpenProject").field(&p).finish(),
-            Self::OpenLegacyReader(p) => f.debug_tuple("OpenLegacyReader").field(&p).finish(),
+            Self::OpenProject(p) => write!(f, "OpenProject({})", truncate_path(p)),
+            Self::OpenLegacyReader(p) => write!(f, "OpenLegacyReader({})", truncate_path(p)),
             Self::PickRecording => write!(f, "PickRecording"),
             Self::StartImport { operation_id, .. } => f
                 .debug_struct("StartImport")
                 .field("operation_id", operation_id)
                 .finish_non_exhaustive(),
             Self::SetupImportToolchain => write!(f, "SetupImportToolchain"),
+            Self::ResolveImportToolchain => write!(f, "ResolveImportToolchain"),
             Self::OpenImportedTimeline(_) => write!(f, "OpenImportedTimeline(..)"),
         }
     }
@@ -326,10 +339,10 @@ impl ActionGuideHome {
                 }
                 match result {
                     Ok(()) => {
-                        // Retry resolution after successful setup
+                        // Re-resolve after successful setup
                         Update {
                             task: Task::none(),
-                            effect: Effect::None,
+                            effect: Effect::ResolveImportToolchain,
                         }
                     }
                     Err(err) => {
@@ -343,7 +356,7 @@ impl ActionGuideHome {
                 // Re-resolve the toolchain after setup
                 Update {
                     task: Task::none(),
-                    effect: Effect::None,
+                    effect: Effect::ResolveImportToolchain,
                 }
             }
             Message::ImportProgress {
