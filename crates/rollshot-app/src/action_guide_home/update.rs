@@ -288,10 +288,23 @@ impl ActionGuideHome {
                 }
             }
             Message::ImportPickerSelected(path) => {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "webm") {
+                    self.import.finish_idle();
+                    self.message = Some(format!(
+                        "Unsupported video format (.{}). Supported: mp4, mov, mkv, webm",
+                        ext
+                    ));
+                    return Update::none();
+                }
                 let _id = self.import.begin(path);
                 Update {
                     task: Task::none(),
-                    effect: Effect::None,
+                    effect: Effect::ResolveImportToolchain,
                 }
             }
             Message::ImportPickerCancelled => {
@@ -878,6 +891,24 @@ mod tests {
         home.update(Message::ImportPickerCancelled);
         assert_eq!(home.import_coordinator().state(), ImportState::Idle);
         assert!(home.message.is_none());
+    }
+
+    #[test]
+    fn picker_selected_emits_resolve_toolchain_effect() {
+        let (_dir, mut home) = setup_home();
+        let update = home.update(Message::ImportPickerSelected(PathBuf::from("video.mp4")));
+        assert!(matches!(update.effect, Effect::ResolveImportToolchain));
+        assert_eq!(home.import_coordinator().state(), ImportState::ResolvingToolchain);
+    }
+
+    #[test]
+    fn picker_selected_unsupported_extension_sets_message() {
+        let (_dir, mut home) = setup_home();
+        let update = home.update(Message::ImportPickerSelected(PathBuf::from("clip.avi")));
+        assert!(matches!(update.effect, Effect::None));
+        assert_eq!(home.import_coordinator().state(), ImportState::Idle);
+        assert!(home.message.as_deref().unwrap().contains("Unsupported video format"));
+        assert!(home.message.as_deref().unwrap().contains(".avi"));
     }
 
     #[test]

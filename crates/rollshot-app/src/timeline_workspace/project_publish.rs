@@ -896,6 +896,7 @@ mod tests {
                 ))),
                 hotspots: vec![],
             }],
+            import_warnings: Vec::new(),
         }
     }
 
