@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::project::ProjectFrame;
 
-pub const GUIDE_SCHEMA_VERSION: u32 = 1;
+pub const GUIDE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone)]
 pub struct ReviewedGuideExportJob {
@@ -19,6 +19,7 @@ pub struct ReviewedGuideExportJob {
     pub input_source: InputSourceKind,
     pub input_capability: InputCapability,
     pub steps: Vec<ReviewedGuideStep>,
+    pub import_warnings: Vec<crate::models::ImportWarning>,
 }
 
 #[derive(Clone)]
@@ -230,6 +231,7 @@ mod tests {
                     explanation: "Open settings".into(),
                 }],
             }],
+            import_warnings: Vec::new(),
         }
     }
 
@@ -369,6 +371,7 @@ mod tests {
                     hotspots: Vec::new(),
                 },
             ],
+            import_warnings: Vec::new(),
         };
         (job, f1, f2)
     }
@@ -497,6 +500,7 @@ mod tests {
                 }),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
         assert_eq!(job.title, "   ", "job stores raw editable title");
         assert!(

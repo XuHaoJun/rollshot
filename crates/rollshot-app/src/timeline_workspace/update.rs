@@ -2926,6 +2926,10 @@ pub(crate) fn timeline_issue_pack_input(
             original_pixels_included: false,
             redaction_count: 0,
         },
+        #[cfg(feature = "action-guide")]
+        import_warnings: state.import_warnings.clone(),
+        #[cfg(not(feature = "action-guide"))]
+        import_warnings: Vec::new(),
     }
 }
 

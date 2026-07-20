@@ -117,6 +117,7 @@ pub(crate) struct IssuePackInput {
     pub ocr_snippets: Vec<OcrSnippet>,
     pub evidence_review: EvidenceReviewSummary,
     pub redaction: RedactionSummary,
+    pub import_warnings: Vec<rollshot_action::ImportWarning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -147,6 +148,14 @@ pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: 
         }
     } else {
         md.push_str("[Write the steps to reproduce]\n\n");
+    }
+    let notices = rollshot_action::render_import_notices(&input.import_warnings);
+    if !notices.is_empty() {
+        md.push_str("## Import limitations\n\n");
+        for line in notices.lines() {
+            md.push_str(&format!("- {line}\n"));
+        }
+        md.push('\n');
     }
     md.push_str("## Actual result\n\n");
     if let Some(image) = &input.final_image {
@@ -628,6 +637,22 @@ fn build_folder(
 
     let include_gif = tmp_dir.join("action-guide/guide.gif").exists();
     let include_storyboard = tmp_dir.join("action-guide/storyboard.png").exists();
+    for warning in &input.import_warnings {
+        let (code, message) = match warning {
+            rollshot_action::ImportWarning::NoVisualChangesDetected => (
+                "no-visual-changes-detected",
+                "No visual changes detected; the final sampled frame was used.",
+            ),
+            rollshot_action::ImportWarning::IntermediateChangesReduced => (
+                "intermediate-changes-reduced",
+                "Intermediate visual changes were omitted to keep this draft reviewable.",
+            ),
+        };
+        warnings.push(IssuePackWarning {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
+    }
     std::fs::write(
         tmp_dir.join("issue.md"),
         render_issue_markdown(input, include_storyboard),
@@ -914,6 +939,7 @@ mod tests {
                 original_pixels_included: false,
                 redaction_count: 0,
             },
+            import_warnings: Vec::new(),
         }
     }
 
@@ -1152,6 +1178,70 @@ mod tests {
         );
     }
 
+    fn build_imported_issue_pack() -> (IssuePackExportResult, tempfile::TempDir) {
+        let mut input = base_input();
+        input.final_image = None;
+        input.action_guide = Some(ActionGuideIssueAssets {
+            include_gif: false,
+            steps: vec![IssuePackStep {
+                index: 1,
+                title: "Open Settings".to_string(),
+                caption: None,
+                keyframe_path: "action-guide/keyframes/001.png".to_string(),
+            }],
+        });
+        input.evidence_review.result_workspace_images_reviewed = false;
+        input.evidence_review.action_guide_keyframes_reviewed = true;
+        input.redaction.result_workspace_images_are_flattened = false;
+        input.import_warnings = vec![rollshot_action::ImportWarning::IntermediateChangesReduced];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = export_folder(&input, tmp.path()).unwrap();
+        (result, tmp)
+    }
+
+    fn walk_dir(dir: &std::path::Path) -> Vec<String> {
+        let mut result = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let rel = path.strip_prefix(dir).unwrap_or(&path);
+                result.push(rel.to_string_lossy().to_string());
+                if path.is_dir() {
+                    result.extend(walk_dir(&path));
+                }
+            }
+        }
+        result
+    }
+
+    fn is_video_path(path: &std::path::Path) -> bool {
+        path.extension().is_some_and(|ext| {
+            matches!(
+                ext.to_str(),
+                Some("mp4" | "webm" | "avi" | "mov" | "mkv" | "gif")
+            )
+        })
+    }
+
+    #[test]
+    fn issue_pack_discloses_import_limits_without_attaching_video() {
+        let (pack, _tmp) = build_imported_issue_pack();
+        let issue_md = std::fs::read_to_string(pack.directory.join("issue.md")).unwrap();
+        assert!(issue_md.contains("visual changes"), "issue.md = {issue_md}");
+        assert!(pack
+            .warnings
+            .iter()
+            .any(|w| w.code == "intermediate-changes-reduced"));
+        let all_entries = walk_dir(&pack.directory);
+        for entry in &all_entries {
+            assert!(
+                !is_video_path(std::path::Path::new(entry)),
+                "no video files should be attached: {entry}"
+            );
+        }
+    }
+
     fn action_guide_input_with_one_step(include_gif: bool) -> IssuePackInput {
         let mut input = base_input();
         input.final_image = None;
@@ -1370,6 +1460,7 @@ mod action_guide_tests {
             input_source: source_kind,
             input_capability: capability,
             steps,
+            import_warnings: Vec::new(),
         })
     }
 
@@ -1718,6 +1809,7 @@ mod action_guide_tests {
                     explanation: "Open Settings".into(),
                 }],
             }],
+            import_warnings: Vec::new(),
         }
     }
 

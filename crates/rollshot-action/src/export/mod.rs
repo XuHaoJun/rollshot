@@ -28,6 +28,8 @@ pub struct SessionManifest {
     pub input_source: InputSourceKind,
     pub input_capability: InputCapability,
     pub steps: Vec<ManifestStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub import_warnings: Vec<crate::models::ImportWarning>,
 }
 
 fn legacy_schema_version() -> u32 {
@@ -36,6 +38,24 @@ fn legacy_schema_version() -> u32 {
 
 fn default_manifest_title() -> String {
     crate::guide::DEFAULT_GUIDE_TITLE.to_string()
+}
+
+impl SessionManifest {
+    pub fn validate(&self) -> Result<(), ExportError> {
+        if self.schema_version > GUIDE_SCHEMA_VERSION {
+            return Err(ExportError::InvalidHotspot {
+                step: 0,
+                category: "unsupported_schema_version",
+            });
+        }
+        if self.schema_version < GUIDE_SCHEMA_VERSION && !self.import_warnings.is_empty() {
+            return Err(ExportError::InvalidHotspot {
+                step: 0,
+                category: "v2_only_field_in_legacy_version",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -84,6 +104,10 @@ pub fn render_guide_folder(
 
 fn build_folder(job: &ReviewedGuideExportJob, destination: &Path) -> Result<(), ExportError> {
     let mut markdown = format!("# {}\n\n", job.title);
+    let notices = render_import_notices(&job.import_warnings);
+    if !notices.is_empty() {
+        markdown.push_str(&format!("{notices}\n\n"));
+    }
     let mut manifest_steps = Vec::with_capacity(job.steps.len());
     for (offset, step) in job.steps.iter().enumerate() {
         let file_name = format!("{:03}.png", offset + 1);
@@ -122,6 +146,7 @@ fn build_folder(job: &ReviewedGuideExportJob, destination: &Path) -> Result<(), 
         input_source: job.input_source,
         input_capability: job.input_capability,
         steps: manifest_steps,
+        import_warnings: job.import_warnings.clone(),
     };
     let json = serde_json::to_string_pretty(&manifest).map_err(|_| ExportError::Serialize {
         category: "session_manifest",
@@ -136,6 +161,28 @@ fn write_text(path: PathBuf, contents: &str) -> Result<(), ExportError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+pub fn render_import_notices(warnings: &[crate::models::ImportWarning]) -> String {
+    use crate::models::ImportWarning;
+
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for warning in warnings {
+        match warning {
+            ImportWarning::NoVisualChangesDetected => {
+                parts.push("No visual changes detected; the final sampled frame was used.");
+            }
+            ImportWarning::IntermediateChangesReduced => {
+                parts.push(
+                    "Intermediate visual changes were omitted to keep this draft reviewable.",
+                );
+            }
+        }
+    }
+    parts.join("\n")
 }
 
 #[cfg(test)]
@@ -271,6 +318,7 @@ mod tests {
             input_source: source,
             input_capability: capability,
             steps,
+            import_warnings: Vec::new(),
         }
     }
 
@@ -561,7 +609,88 @@ mod tests {
                     explanation: "Open Settings".into(),
                 }],
             }],
+            import_warnings: Vec::new(),
         }
+    }
+
+    fn imported_job(warnings: Vec<crate::models::ImportWarning>) -> ReviewedGuideExportJob {
+        let mut job = annotated_job();
+        job.input_source = InputSourceKind::ImportedVideo;
+        job.input_capability = InputCapability::VisualOnly {
+            reason: crate::models::DegradedReason::ImportedRecording,
+        };
+        job.import_warnings = warnings;
+        job
+    }
+
+    fn render_fixture(job: ReviewedGuideExportJob) -> PathBuf {
+        let parent = temp_dir("imported-export");
+        let destination = parent.join("action-guide");
+        render_guide_folder(&job, &destination).unwrap();
+        destination
+    }
+
+    #[test]
+    fn v1_session_defaults_to_empty_import_warnings() {
+        let json = r#"{
+          "schema_version": 1,
+          "title": "Old Guide",
+          "region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+          "input_source": "visual-only",
+          "input_capability": "semantic-events",
+          "steps": [
+            {
+              "index": 1,
+              "title": "Click",
+              "kind": "click",
+              "reason": "click-confirmed",
+              "at_ms": 0,
+              "keyframe_file": "keyframes/001.png"
+            }
+          ]
+        }"#;
+        let parsed: SessionManifest = serde_json::from_str(json).unwrap();
+        assert!(parsed.import_warnings.is_empty());
+    }
+
+    #[test]
+    fn session_loader_rejects_unknown_versions_and_v2_values_in_v1() {
+        let future_json = r#"{
+          "schema_version": 99,
+          "title": "Future Guide",
+          "region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+          "input_source": "visual-only",
+          "input_capability": "semantic-events",
+          "steps": []
+        }"#;
+        let future: SessionManifest = serde_json::from_str(future_json).unwrap();
+        assert!(future.validate().is_err());
+
+        let legacy_json = r#"{
+          "schema_version": 1,
+          "title": "Legacy with warnings",
+          "region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+          "input_source": "visual-only",
+          "input_capability": "semantic-events",
+          "steps": [],
+          "import_warnings": ["intermediate-changes-reduced"]
+        }"#;
+        let legacy: SessionManifest = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy.validate().is_err());
+    }
+
+    #[test]
+    fn imported_session_and_reader_disclose_reduction() {
+        let job = imported_job(vec![
+            crate::models::ImportWarning::IntermediateChangesReduced,
+        ]);
+        let root = render_fixture(job);
+        let session = std::fs::read_to_string(root.join("session.json")).unwrap();
+        let markdown = std::fs::read_to_string(root.join("steps.md")).unwrap();
+        let html = std::fs::read_to_string(root.join("index.html")).unwrap();
+        assert!(session.contains("intermediate-changes-reduced"));
+        assert!(markdown.contains("Intermediate visual changes were omitted"));
+        assert!(html.contains("Intermediate visual changes were omitted"));
     }
 
     #[test]
@@ -593,6 +722,7 @@ mod tests {
                 image: ReviewedStepImage::Annotated(snapshot),
                 hotspots: Vec::new(),
             }],
+            import_warnings: Vec::new(),
         };
         let parent = temp_dir("redaction-payload");
         let destination = parent.join("guide");

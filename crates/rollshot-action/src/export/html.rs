@@ -7,6 +7,8 @@ struct ViewerGuide {
     schema_version: u32,
     title: String,
     steps: Vec<ViewerStep>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notices: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -42,6 +44,10 @@ impl From<&ReviewedGuideExportJob> for ViewerGuide {
                         hotspots: step.hotspots.clone(),
                     }
                 })
+                .collect(),
+            notices: crate::export::render_import_notices(&job.import_warnings)
+                .lines()
+                .map(String::from)
                 .collect(),
         }
     }
@@ -117,6 +123,7 @@ mod tests {
                     explanation: "Open Settings".into(),
                 }],
             }],
+            import_warnings: Vec::new(),
         }
     }
 

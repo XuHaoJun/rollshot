@@ -3012,6 +3012,7 @@ fn result_issue_pack_input(state: &super::ResultWorkspace) -> crate::issue_pack:
             original_pixels_included: false,
             redaction_count,
         },
+        import_warnings: Vec::new(),
     }
 }
 
