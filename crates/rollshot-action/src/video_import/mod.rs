@@ -1406,5 +1406,21 @@ mod tests {
             !logs.contains(input.to_string_lossy().as_ref()),
             "tracing must not contain full input path"
         );
+        assert!(
+            !logs.contains("Input #0"),
+            "tracing must not contain FFmpeg input header (echoes file path)"
+        );
+        assert!(
+            !logs.contains("libx264"),
+            "tracing must not contain FFmpeg codec output"
+        );
+        assert!(
+            !logs.contains("frame= "),
+            "tracing must not contain FFmpeg progress output (may echo input path)"
+        );
+        assert!(
+            !logs.contains("decoded pixels"),
+            "tracing must not mention decoded pixel data"
+        );
     }
 }
