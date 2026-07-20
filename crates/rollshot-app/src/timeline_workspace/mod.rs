@@ -542,6 +542,7 @@ impl TimelineWorkspace {
     /// when no notices apply. For imported workspaces, includes a visual-only
     /// disclosure and specific copy for each import warning.
     #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
     pub fn persistent_notice(&self) -> String {
         use rollshot_action::{ImportWarning, InputSourceKind};
 
@@ -581,6 +582,7 @@ impl TimelineWorkspace {
 
     /// The root directory of the current frame source, if project-backed.
     #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
     pub(crate) fn frame_source_root(&self) -> Option<&std::path::Path> {
         match self.frame_source.as_ref()? {
             rollshot_action::StepFrameSource::Project(src) => Some(src.root()),
@@ -590,6 +592,7 @@ impl TimelineWorkspace {
 
     /// The saved project root, if the workspace has been saved.
     #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
     pub(crate) fn project_root(&self) -> Option<std::path::PathBuf> {
         match &self.project_session {
             Some(project::ProjectSession::Saved { root, .. }) => Some(root.clone()),

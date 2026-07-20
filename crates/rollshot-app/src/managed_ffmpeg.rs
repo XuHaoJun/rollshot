@@ -302,6 +302,7 @@ pub(crate) fn verify_archive_sha(path: &Path, expected: &str) -> Result<(), Stri
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn build_manifest(
     metadata: ManagedFfmpegMetadata,
     binary_path: PathBuf,
