@@ -27,11 +27,21 @@ pub(crate) struct ManagedFfmpegManifest {
     pub binary_path: PathBuf,
     pub ffmpeg_version_line: String,
     pub installed_at: String,
+    #[serde(default)]
+    pub ffprobe_binary_path: Option<PathBuf>,
+    #[serde(default)]
+    pub ffprobe_version_line: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FfmpegResolution {
     Available(PathBuf),
+    NeedsSetup(FfmpegSetupInfo),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VideoImportToolchainResolution {
+    Available(rollshot_action::VideoToolchain),
     NeedsSetup(FfmpegSetupInfo),
 }
 
@@ -94,7 +104,7 @@ fn manifest_matches_current_metadata(manifest: &ManagedFfmpegManifest) -> bool {
     let Some(metadata) = pinned_metadata_for_current_platform() else {
         return false;
     };
-    manifest.schema_version == 1
+    (manifest.schema_version == 1 || manifest.schema_version == 2)
         && manifest.platform == metadata.platform
         && manifest.version == metadata.version
         && manifest.source_url == metadata.source_url
@@ -123,6 +133,14 @@ pub(crate) fn managed_binary_path(root: &Path) -> PathBuf {
     path
 }
 
+pub(crate) fn managed_ffprobe_binary_path(root: &Path) -> PathBuf {
+    let mut path = root.join("bin").join("ffprobe");
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
+    path
+}
+
 pub(crate) fn validate_ffmpeg(path: &Path) -> Result<String, String> {
     if !path.exists() {
         return Err(format!("FFmpeg does not exist at {}", path.display()));
@@ -140,6 +158,100 @@ pub(crate) fn validate_ffmpeg(path: &Path) -> Result<String, String> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.lines().next().unwrap_or("ffmpeg").to_string())
+}
+
+pub(crate) fn validate_ffprobe(path: &Path) -> Result<String, String> {
+    if !path.exists() {
+        return Err(format!("FFprobe does not exist at {}", path.display()));
+    }
+    let output = Command::new(path)
+        .arg("-version")
+        .output()
+        .map_err(|error| format!("failed to run FFprobe at {}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "FFprobe at {} exited with {}",
+            path.display(),
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().next().unwrap_or("ffprobe").to_string())
+}
+
+pub(crate) fn resolve_video_import_toolchain() -> VideoImportToolchainResolution {
+    let ffmpeg = resolve_single_executable("ffmpeg", "ROLLSHOT_FFMPEG", validate_ffmpeg);
+    let ffprobe = resolve_single_executable("ffprobe", "ROLLSHOT_FFPROBE", validate_ffprobe);
+
+    match (ffmpeg, ffprobe) {
+        (Some(ffmpeg), Some(ffprobe)) => {
+            VideoImportToolchainResolution::Available(rollshot_action::VideoToolchain {
+                ffmpeg,
+                ffprobe,
+            })
+        }
+        _ => {
+            let root =
+                managed_root().unwrap_or_else(|_| std::env::temp_dir().join("rollshot/ffmpeg"));
+            if let Ok(manifest) = load_manifest(&root) {
+                if manifest.schema_version >= 2 && manifest_matches_current_metadata(&manifest) {
+                    if let Some(ffprobe_path) = manifest.ffprobe_binary_path.as_ref() {
+                        if validate_ffprobe(ffprobe_path).is_ok()
+                            && validate_ffmpeg(&manifest.binary_path).is_ok()
+                        {
+                            return VideoImportToolchainResolution::Available(
+                                rollshot_action::VideoToolchain {
+                                    ffmpeg: manifest.binary_path,
+                                    ffprobe: ffprobe_path.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            VideoImportToolchainResolution::NeedsSetup(FfmpegSetupInfo {
+                managed_download: pinned_metadata_for_current_platform(),
+                install_location: root,
+            })
+        }
+    }
+}
+
+fn resolve_single_executable(
+    binary_name: &str,
+    env_var: &str,
+    validate: fn(&Path) -> Result<String, String>,
+) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(env_var).map(PathBuf::from) {
+        if validate(&path).is_ok() {
+            return Some(path);
+        }
+    }
+
+    let binary = if cfg!(windows) {
+        format!("{binary_name}.exe")
+    } else {
+        binary_name.to_string()
+    };
+    if let Some(path) = find_on_path_with(&binary, validate) {
+        return Some(path);
+    }
+
+    None
+}
+
+fn find_on_path_with(
+    binary: &str,
+    validate: fn(&Path) -> Result<String, String>,
+) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(binary);
+        if validate(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn find_on_path(binary: &str) -> Option<PathBuf> {
@@ -207,6 +319,32 @@ pub(crate) fn build_manifest(
         binary_path,
         ffmpeg_version_line,
         installed_at: chrono::Utc::now().to_rfc3339(),
+        ffprobe_binary_path: None,
+        ffprobe_version_line: None,
+    }
+}
+
+fn build_manifest_v2(
+    metadata: ManagedFfmpegMetadata,
+    binary_path: PathBuf,
+    ffmpeg_version_line: String,
+    ffprobe_binary_path: PathBuf,
+    ffprobe_version_line: String,
+) -> ManagedFfmpegManifest {
+    ManagedFfmpegManifest {
+        schema_version: 2,
+        platform: metadata.platform.to_string(),
+        version: metadata.version.to_string(),
+        source_url: metadata.source_url.to_string(),
+        license: metadata.license.to_string(),
+        license_url: metadata.license_url.to_string(),
+        archive_sha256: metadata.archive_sha256.to_string(),
+        archive_size: metadata.archive_size,
+        binary_path,
+        ffmpeg_version_line,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        ffprobe_binary_path: Some(ffprobe_binary_path),
+        ffprobe_version_line: Some(ffprobe_version_line),
     }
 }
 
@@ -319,27 +457,31 @@ pub(crate) fn download_managed_ffmpeg() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&bin_dir)
         .map_err(|error| format!("failed to create FFmpeg bin directory: {error}"))?;
     let binary = managed_binary_path(&root);
-    ffmpeg_sidecar::download::unpack_ffmpeg_without_extras(&archive, &bin_dir).map_err(
-        |error| {
-            let _ = std::fs::remove_file(&binary);
-            format!("failed to unpack managed FFmpeg: {error}")
-        },
-    )?;
+    let ffprobe_binary = managed_ffprobe_binary_path(&root);
+    ffmpeg_sidecar::download::unpack_ffmpeg(&archive, &bin_dir).map_err(|error| {
+        let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&ffprobe_binary);
+        format!("failed to unpack managed FFmpeg: {error}")
+    })?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = match std::fs::metadata(&binary) {
-            Ok(metadata) => metadata.permissions(),
-            Err(error) => {
+        for bin in [&binary, &ffprobe_binary] {
+            let mut perms = match std::fs::metadata(bin) {
+                Ok(metadata) => metadata.permissions(),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&binary);
+                    let _ = std::fs::remove_file(&ffprobe_binary);
+                    return Err(format!("failed to inspect managed binary: {error}"));
+                }
+            };
+            perms.set_mode(0o755);
+            if let Err(error) = std::fs::set_permissions(bin, perms) {
                 let _ = std::fs::remove_file(&binary);
-                return Err(format!("failed to inspect managed FFmpeg: {error}"));
+                let _ = std::fs::remove_file(&ffprobe_binary);
+                return Err(format!("failed to set executable bit: {error}"));
             }
-        };
-        perms.set_mode(0o755);
-        if let Err(error) = std::fs::set_permissions(&binary, perms) {
-            let _ = std::fs::remove_file(&binary);
-            return Err(format!("failed to set FFmpeg executable bit: {error}"));
         }
     }
 
@@ -347,13 +489,30 @@ pub(crate) fn download_managed_ffmpeg() -> Result<PathBuf, String> {
         Ok(line) => line,
         Err(error) => {
             let _ = std::fs::remove_file(&binary);
+            let _ = std::fs::remove_file(&ffprobe_binary);
             return Err(error);
         }
     };
 
-    let manifest = build_manifest(metadata, binary.clone(), version_line);
+    let ffprobe_version_line = match validate_ffprobe(&ffprobe_binary) {
+        Ok(line) => line,
+        Err(error) => {
+            let _ = std::fs::remove_file(&binary);
+            let _ = std::fs::remove_file(&ffprobe_binary);
+            return Err(error);
+        }
+    };
+
+    let manifest = build_manifest_v2(
+        metadata,
+        binary.clone(),
+        version_line,
+        ffprobe_binary.clone(),
+        ffprobe_version_line,
+    );
     if let Err(error) = write_manifest(&root, &manifest) {
         let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&ffprobe_binary);
         return Err(error);
     }
 
@@ -413,6 +572,8 @@ mod tests {
             binary_path: PathBuf::from("/tmp/ffmpeg"),
             ffmpeg_version_line: "ffmpeg version 6.0.1-static".to_string(),
             installed_at: "2026-07-05T00:00:00+00:00".to_string(),
+            ffprobe_binary_path: None,
+            ffprobe_version_line: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let restored: ManagedFfmpegManifest = serde_json::from_str(&json).unwrap();
@@ -506,6 +667,8 @@ mod tests {
             binary_path: binary,
             ffmpeg_version_line: "ffmpeg version 5.1.0-static".to_string(),
             installed_at: "2026-07-05T00:00:00+00:00".to_string(),
+            ffprobe_binary_path: None,
+            ffprobe_version_line: None,
         };
         write_manifest(root.path(), &manifest).unwrap();
 
@@ -541,6 +704,211 @@ mod tests {
         let mut perms = std::fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn fake_ffprobe(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffprobe fake'; exit 0; fi\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn fake_ffmpeg_path(dir: &Path) -> PathBuf {
+        dir.join("fake-ffmpeg")
+    }
+
+    fn fake_ffprobe_path(dir: &Path) -> PathBuf {
+        dir.join("fake-ffprobe")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_resolution_honors_both_explicit_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let ffmpeg = fake_ffmpeg_path(dir.path());
+        let ffprobe = fake_ffprobe_path(dir.path());
+        fake_ffmpeg(&ffmpeg);
+        fake_ffprobe(&ffprobe);
+        let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", &ffmpeg);
+        let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", &ffprobe);
+        assert!(matches!(
+            resolve_video_import_toolchain(),
+            VideoImportToolchainResolution::Available(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_ffprobe_does_not_break_ffmpeg_only_exports() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let ffmpeg = fake_ffmpeg_path(dir.path());
+        fake_ffmpeg(&ffmpeg);
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", &ffmpeg);
+        let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", "/definitely/missing/ffprobe");
+        assert!(matches!(resolve_ffmpeg(), FfmpegResolution::Available(_)));
+        assert!(matches!(
+            resolve_video_import_toolchain(),
+            VideoImportToolchainResolution::NeedsSetup(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mixed_override_and_path_resolve_pair() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let ffmpeg = fake_ffmpeg_path(dir.path());
+        fake_ffmpeg(&ffmpeg);
+        // Create ffprobe at the PATH-matching name so find_on_path_with discovers it.
+        fake_ffprobe(&dir.path().join("ffprobe"));
+        let _path_guard = EnvVarGuard::set("PATH", dir.path());
+        let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", &ffmpeg);
+        let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", "/definitely/missing/ffprobe");
+        assert!(matches!(
+            resolve_video_import_toolchain(),
+            VideoImportToolchainResolution::Available(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_v2_manifest_resolves_pair() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = tempdir();
+        let bin_dir = root.path().join("bin");
+        let ffmpeg = bin_dir.join("ffmpeg");
+        let ffprobe = bin_dir.join("ffprobe");
+        fake_ffmpeg(&ffmpeg);
+        fake_ffprobe(&ffprobe);
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", "/definitely/missing/ffprobe");
+        let manifest = ManagedFfmpegManifest {
+            schema_version: 2,
+            platform: LINUX_X86_64_METADATA.platform.to_string(),
+            version: LINUX_X86_64_METADATA.version.to_string(),
+            source_url: LINUX_X86_64_METADATA.source_url.to_string(),
+            license: LINUX_X86_64_METADATA.license.to_string(),
+            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
+            archive_sha256: LINUX_X86_64_METADATA.archive_sha256.to_string(),
+            archive_size: LINUX_X86_64_METADATA.archive_size,
+            binary_path: ffmpeg,
+            ffmpeg_version_line: "ffmpeg fake".to_string(),
+            installed_at: "2026-07-05T00:00:00+00:00".to_string(),
+            ffprobe_binary_path: Some(ffprobe),
+            ffprobe_version_line: Some("ffprobe fake".to_string()),
+        };
+        write_manifest(root.path(), &manifest).unwrap();
+        assert!(matches!(
+            resolve_video_import_toolchain(),
+            VideoImportToolchainResolution::Available(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_v1_manifest_does_not_satisfy_toolchain() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = tempdir();
+        let binary = root.path().join("bin/ffmpeg");
+        fake_ffmpeg(&binary);
+        let _path_guard = EnvVarGuard::set("PATH", "");
+        let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
+        let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", "/definitely/missing/ffprobe");
+        let manifest = ManagedFfmpegManifest {
+            schema_version: 1,
+            platform: LINUX_X86_64_METADATA.platform.to_string(),
+            version: LINUX_X86_64_METADATA.version.to_string(),
+            source_url: LINUX_X86_64_METADATA.source_url.to_string(),
+            license: LINUX_X86_64_METADATA.license.to_string(),
+            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
+            archive_sha256: LINUX_X86_64_METADATA.archive_sha256.to_string(),
+            archive_size: LINUX_X86_64_METADATA.archive_size,
+            binary_path: binary,
+            ffmpeg_version_line: "ffmpeg fake".to_string(),
+            installed_at: "2026-07-05T00:00:00+00:00".to_string(),
+            ffprobe_binary_path: None,
+            ffprobe_version_line: None,
+        };
+        write_manifest(root.path(), &manifest).unwrap();
+
+        assert!(matches!(resolve_ffmpeg(), FfmpegResolution::Available(_)));
+        assert!(matches!(
+            resolve_video_import_toolchain(),
+            VideoImportToolchainResolution::NeedsSetup(_)
+        ));
+    }
+
+    #[test]
+    fn manifest_v2_round_trips_json() {
+        let manifest = ManagedFfmpegManifest {
+            schema_version: 2,
+            platform: "linux-x86_64".to_string(),
+            version: "6.0.1".to_string(),
+            source_url: LINUX_X86_64_METADATA.source_url.to_string(),
+            license: "GPLv3".to_string(),
+            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
+            archive_sha256: LINUX_X86_64_METADATA.archive_sha256.to_string(),
+            archive_size: LINUX_X86_64_METADATA.archive_size,
+            binary_path: PathBuf::from("/tmp/ffmpeg"),
+            ffmpeg_version_line: "ffmpeg version 6.0.1-static".to_string(),
+            installed_at: "2026-07-05T00:00:00+00:00".to_string(),
+            ffprobe_binary_path: Some(PathBuf::from("/tmp/ffprobe")),
+            ffprobe_version_line: Some("ffprobe version 6.0.1-static".to_string()),
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let restored: ManagedFfmpegManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, manifest);
+    }
+
+    #[test]
+    fn manifest_v1_deserializes_without_ffprobe_fields() {
+        let json = r#"{
+            "schema_version": 1,
+            "platform": "linux-x86_64",
+            "version": "6.0.1",
+            "source_url": "https://example.invalid/ffmpeg.tar.xz",
+            "license": "GPLv3",
+            "license_url": "https://www.gnu.org/licenses/gpl-3.0.html",
+            "archive_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "archive_size": 1,
+            "binary_path": "/tmp/ffmpeg",
+            "ffmpeg_version_line": "ffmpeg version 6.0.1-static",
+            "installed_at": "2026-07-05T00:00:00+00:00"
+        }"#;
+        let manifest: ManagedFfmpegManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.schema_version, 1);
+        assert!(manifest.ffprobe_binary_path.is_none());
+        assert!(manifest.ffprobe_version_line.is_none());
+    }
+
+    #[test]
+    fn validate_ffprobe_rejects_missing_path() {
+        let result = validate_ffprobe(Path::new("/definitely/missing/ffprobe"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn managed_ffprobe_paths_are_stable_under_root() {
+        let root = PathBuf::from("/tmp/rollshot-ffmpeg");
+        let binary = managed_ffprobe_binary_path(&root);
+        assert!(binary.ends_with(if cfg!(windows) {
+            Path::new("bin/ffprobe.exe")
+        } else {
+            Path::new("bin/ffprobe")
+        }));
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

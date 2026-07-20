@@ -483,6 +483,7 @@ pub(crate) fn build_project_snapshot(
         enabled_outputs: ws.enabled_outputs,
         frames,
         steps: project_steps,
+        import_warnings: Vec::new(),
     })
 }
 
@@ -581,7 +582,7 @@ mod tests {
     fn loaded_project(manifest: ProjectManifestV1) -> LoadedProject {
         LoadedProject {
             root: std::path::PathBuf::from("/tmp/test-project"),
-            manifest,
+            manifest: manifest.into(),
         }
     }
 
@@ -1132,6 +1133,7 @@ mod tests {
                 nearby: vec![1],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         }
     }
 }

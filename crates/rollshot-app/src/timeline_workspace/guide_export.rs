@@ -710,7 +710,10 @@ mod tests {
             frames,
             steps: Vec::new(),
         };
-        let loaded = LoadedProject { root, manifest };
+        let loaded = LoadedProject {
+            root,
+            manifest: manifest.into(),
+        };
         let source = ProjectFrameSource::from_loaded(
             &loaded,
             rollshot_action::DEFAULT_PROJECT_FRAME_CACHE_BYTES,

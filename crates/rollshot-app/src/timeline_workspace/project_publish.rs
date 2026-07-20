@@ -872,6 +872,7 @@ mod tests {
                 nearby: vec![1],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         }
     }
 
