@@ -383,6 +383,10 @@ pub struct TimelineWorkspace {
     pub(crate) share_kind: Option<share::ShareKind>,
     #[cfg(feature = "action-guide")]
     pub(crate) share_operation_id: u64,
+    #[cfg(feature = "action-guide")]
+    pub(crate) import_warnings: Vec<rollshot_action::ImportWarning>,
+    #[cfg(feature = "action-guide")]
+    pub(crate) imported_scratch: Option<rollshot_action::ImportedScratch>,
 }
 
 impl TimelineWorkspace {
@@ -457,12 +461,141 @@ impl TimelineWorkspace {
             share_kind: None,
             #[cfg(feature = "action-guide")]
             share_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            import_warnings: Vec::new(),
+            #[cfg(feature = "action-guide")]
+            imported_scratch: None,
         };
         ws.rebuild_selection_handles();
         ws
     }
 
-    /// The currently selected step, if any.
+    /// Build the workspace from an imported video seed. Sets the workspace to
+    /// Unsaved/Dirty, creates a `ProjectFrameSource` from the scratch directory,
+    /// and retains the scratch guard until first save completes.
+    #[cfg(feature = "action-guide")]
+    pub fn from_imported_video(seed: rollshot_action::ImportedWorkspaceSeed) -> Self {
+        use rollshot_action::{
+            ProjectFrameSource, StepFrameSource, DEFAULT_PROJECT_FRAME_CACHE_BYTES,
+        };
+
+        let selected = (!seed.guide.is_empty()).then_some(1);
+        let presentation = annotation::ActionGuidePresentation::new();
+
+        let source = ProjectFrameSource::from_catalog(
+            seed.scratch.root().to_owned(),
+            seed.frames,
+            DEFAULT_PROJECT_FRAME_CACHE_BYTES,
+        );
+
+        let mut ws = Self {
+            guide: seed.guide,
+            store: FrameStore::new(Default::default()),
+            region: seed.capture_region,
+            capability: seed.input_capability,
+            source_kind: seed.input_source,
+            selected,
+            message: None,
+            issue_pack: None,
+            ffmpeg_setup: None,
+            pending_discard: false,
+            keyframe_handle: None,
+            strip: Vec::new(),
+            storyboard_preview: None,
+            presentation,
+            annotation_session: None,
+            caption_proposal: None,
+            caption_suggestions_running: false,
+            caption_agent_run_id: 0,
+            visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
+            visual_annotation_agent_run_id: 0,
+            storyboard_copy_operation_id: 0,
+            export_state: GuideExportState::Idle,
+            last_export: None,
+            next_export_operation_id: 0,
+            next_issue_pack_operation_id: 0,
+            frame_source: Some(StepFrameSource::Project(source)),
+            project_session: Some(project::ProjectSession::Unsaved),
+            enabled_outputs: Default::default(),
+            save_state: ProjectSaveState::Dirty,
+            first_save_prompt: FirstSavePrompt::Visible,
+            close_intent: CloseIntent::None,
+            frame_coordinator: FrameLoadCoordinator::new(),
+            last_save_error: None,
+            pending_writer_guard: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            publish_operation: None,
+            publish_arbiter: project_publish::PublishArbiter::new(),
+            publish_freshness: std::collections::BTreeMap::new(),
+            publish_details_open: false,
+            next_publish_operation_id: 0,
+            share_progress: None,
+            share_kind: None,
+            share_operation_id: 0,
+            import_warnings: seed.import_warnings,
+            imported_scratch: Some(seed.scratch),
+        };
+        ws.rebuild_selection_handles();
+        ws
+    }
+
+    /// Persistent notice text for the current workspace. Returns an empty string
+    /// when no notices apply. For imported workspaces, includes a visual-only
+    /// disclosure and specific copy for each import warning.
+    #[cfg(feature = "action-guide")]
+    pub fn persistent_notice(&self) -> String {
+        use rollshot_action::{ImportWarning, InputSourceKind};
+
+        let is_imported = matches!(self.source_kind, InputSourceKind::ImportedVideo);
+        if !is_imported && self.import_warnings.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+
+        if is_imported {
+            parts.push(
+                "Visual-only draft. Steps were inferred from visual changes \
+                 because mouse and keyboard events were unavailable. Review before export."
+                    .to_string(),
+            );
+        }
+
+        for warning in &self.import_warnings {
+            match warning {
+                ImportWarning::NoVisualChangesDetected => {
+                    parts.push(
+                        "No visual changes detected; the final sampled frame was used.".to_string(),
+                    );
+                }
+                ImportWarning::IntermediateChangesReduced => {
+                    parts.push(
+                        "Intermediate visual changes were omitted to keep this draft reviewable."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        parts.join("\n")
+    }
+
+    /// The root directory of the current frame source, if project-backed.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn frame_source_root(&self) -> Option<&std::path::Path> {
+        match self.frame_source.as_ref()? {
+            rollshot_action::StepFrameSource::Project(src) => Some(src.root()),
+            rollshot_action::StepFrameSource::InMemory(_) => None,
+        }
+    }
+
+    /// The saved project root, if the workspace has been saved.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn project_root(&self) -> Option<std::path::PathBuf> {
+        match &self.project_session {
+            Some(project::ProjectSession::Saved { root, .. }) => Some(root.clone()),
+            _ => None,
+        }
+    }
     pub(crate) fn selected_step(&self) -> Option<&GuideStep> {
         let index = self.selected?;
         self.guide.steps().iter().find(|s| s.index == index)
@@ -529,6 +662,10 @@ impl TimelineWorkspace {
 
     #[cfg(feature = "action-guide")]
     pub(crate) fn project_recent_metadata(&self) -> Option<(std::path::PathBuf, String)> {
+        // Imported workspaces must not record recent-project entries.
+        if matches!(self.source_kind, InputSourceKind::ImportedVideo) {
+            return None;
+        }
         match &self.project_session {
             Some(project::ProjectSession::Saved { root, .. }) => {
                 Some((root.clone(), self.guide.title().to_string()))
@@ -1507,6 +1644,18 @@ mod tests {
                     super::super::update::SaveWorkerOutcome::NewCommittedReadOnly {
                         root: std::path::PathBuf::from("/tmp/test"),
                         revision: 1,
+                        manifest: rollshot_action::project::ProjectManifestV2 {
+                            schema_version: 2,
+                            revision: 1,
+                            title: "Test Guide".into(),
+                            capture_region: super::region_32(),
+                            input_source: InputSourceKind::LinuxEvdev,
+                            input_capability: InputCapability::SemanticEvents,
+                            enabled_outputs: Default::default(),
+                            frames: Vec::new(),
+                            steps: Vec::new(),
+                            import_warnings: Vec::new(),
+                        },
                         category: "post_commit_lock_race",
                     },
                 ),
@@ -1526,6 +1675,18 @@ mod tests {
                 Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::NewWritable {
                     root: root.clone(),
                     revision: 1,
+                    manifest: rollshot_action::project::ProjectManifestV2 {
+                        schema_version: 2,
+                        revision: 1,
+                        title: "Test Guide".into(),
+                        capture_region: super::region_32(),
+                        input_source: InputSourceKind::LinuxEvdev,
+                        input_capability: InputCapability::SemanticEvents,
+                        enabled_outputs: Default::default(),
+                        frames: Vec::new(),
+                        steps: Vec::new(),
+                        import_warnings: Vec::new(),
+                    },
                 }),
             );
 
@@ -2240,6 +2401,348 @@ mod tests {
                     rationale: None,
                 }],
             )
+        }
+
+        // ---- Imported video workspace tests (Task 6) ----
+
+        fn imported_seed_fixture() -> (rollshot_action::ImportedWorkspaceSeed, tempfile::TempDir) {
+            use rollshot_action::project::ProjectFrame;
+            use rollshot_action::{
+                CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
+                InputSourceKind,
+            };
+            use rollshot_action::{Guide, ImportedScratch};
+
+            let parent = tempfile::tempdir().unwrap();
+            let scratch = ImportedScratch::create(parent.path()).unwrap();
+
+            let step = rollshot_action::GuideStep {
+                index: 1,
+                title: "Click button".into(),
+                caption: String::new(),
+                kind: CandidateKind::Click,
+                reason: DetectReason::VisualChange,
+                at_ms: 100,
+                keyframe: 1,
+                nearby: vec![1],
+                source: 1,
+            };
+            let guide = Guide::from_reviewed_steps("Imported Guide".into(), vec![step]).unwrap();
+
+            let seed = rollshot_action::ImportedWorkspaceSeed {
+                guide,
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+                input_source: InputSourceKind::ImportedVideo,
+                input_capability: InputCapability::VisualOnly {
+                    reason: rollshot_action::DegradedReason::ImportedRecording,
+                },
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 100,
+                    sha256: "abc123".into(),
+                    width: 640,
+                    height: 480,
+                }],
+                import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+                scratch,
+            };
+
+            (seed, parent)
+        }
+
+        fn imported_workspace_fixture() -> (TimelineWorkspace, std::path::PathBuf, tempfile::TempDir)
+        {
+            let (seed, parent) = imported_seed_fixture();
+            let scratch_path = seed.scratch.root().to_path_buf();
+            let workspace = TimelineWorkspace::from_imported_video(seed);
+            (workspace, scratch_path, parent)
+        }
+
+        fn complete_first_save(ws: &mut TimelineWorkspace) {
+            let manifest = rollshot_action::project::ProjectManifestV2 {
+                schema_version: 2,
+                revision: 1,
+                title: ws.guide.title().to_string(),
+                capture_region: ws.region,
+                input_source: ws.source_kind,
+                input_capability: ws.capability,
+                enabled_outputs: ws.enabled_outputs,
+                frames: vec![rollshot_action::project::ProjectFrame {
+                    id: 1,
+                    at_ms: 100,
+                    sha256: "abc123".into(),
+                    width: 640,
+                    height: 480,
+                }],
+                steps: ws
+                    .guide
+                    .steps()
+                    .iter()
+                    .map(|s| rollshot_action::project::ProjectStep {
+                        id: rollshot_action::project::ProjectStepId(s.source),
+                        order: s.index as u32,
+                        title: s.title.clone(),
+                        caption: if s.caption.is_empty() {
+                            None
+                        } else {
+                            Some(s.caption.clone())
+                        },
+                        kind: s.kind,
+                        reason: s.reason,
+                        at_ms: s.at_ms,
+                        keyframe: s.keyframe,
+                        nearby: s.nearby.clone(),
+                        annotations: None,
+                    })
+                    .collect(),
+                import_warnings: ws.import_warnings.clone(),
+            };
+            super::super::update::update(
+                ws,
+                Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::NewWritable {
+                    root: std::path::PathBuf::from("/tmp/saved-import.rollshot-guide"),
+                    revision: 1,
+                    manifest,
+                }),
+            );
+        }
+
+        #[test]
+        fn imported_seed_opens_dirty_unsaved_workspace() {
+            let (seed, parent) = imported_seed_fixture();
+            let scratch_path = seed.scratch.root().to_path_buf();
+            let workspace = TimelineWorkspace::from_imported_video(seed);
+            assert!(matches!(
+                workspace.project_session,
+                Some(project::ProjectSession::Unsaved)
+            ));
+            assert_eq!(workspace.save_state, ProjectSaveState::Dirty);
+            assert!(
+                workspace.persistent_notice().contains("Visual-only draft"),
+                "notice should contain 'Visual-only draft', got: {:?}",
+                workspace.persistent_notice()
+            );
+            assert!(
+                scratch_path.exists(),
+                "scratch directory should still exist"
+            );
+            drop(workspace);
+            let _ = parent;
+        }
+
+        #[test]
+        fn imported_workspace_has_warning_copies() {
+            let (ws, _scratch, _parent) = imported_workspace_fixture();
+            let notice = ws.persistent_notice();
+            assert!(
+                notice.contains("No visual changes detected"),
+                "should contain NoVisualChangesDetected copy, got: {notice}"
+            );
+        }
+
+        #[test]
+        fn first_save_switches_frame_source_then_releases_scratch() {
+            let (mut workspace, scratch_path, _parent) = imported_workspace_fixture();
+            assert!(scratch_path.exists(), "scratch exists before save");
+            complete_first_save(&mut workspace);
+            assert!(
+                !scratch_path.exists(),
+                "scratch should be released after first save"
+            );
+            assert_eq!(
+                workspace.frame_source_root(),
+                workspace.project_root().as_deref(),
+                "frame source root should match project root after save"
+            );
+        }
+
+        #[test]
+        fn failed_first_save_keeps_scratch_retryable() {
+            let (mut workspace, scratch_path, _parent) = imported_workspace_fixture();
+            assert!(scratch_path.exists());
+
+            let _ = super::super::update::update(
+                &mut workspace,
+                Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::Failed(
+                    "disk full".to_string(),
+                )),
+            );
+
+            assert!(
+                scratch_path.exists(),
+                "scratch must remain after failed save"
+            );
+            assert_eq!(workspace.save_state, ProjectSaveState::Dirty);
+            assert!(workspace.imported_scratch.is_some());
+        }
+
+        #[test]
+        fn closing_unsaved_import_releases_scratch() {
+            let (workspace, scratch_path, _parent) = imported_workspace_fixture();
+            assert!(scratch_path.exists());
+            drop(workspace);
+            assert!(
+                !scratch_path.exists(),
+                "scratch directory should be cleaned up on drop"
+            );
+        }
+
+        #[test]
+        fn imported_workspace_does_not_emit_recent_project_effect() {
+            let (mut ws, _scratch, _parent) = imported_workspace_fixture();
+            complete_first_save(&mut ws);
+            assert!(ws.imported_scratch.is_none(), "scratch should be taken");
+        }
+
+        #[test]
+        fn build_snapshot_carries_import_warnings() {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{
+                CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
+                InputSourceKind,
+            };
+
+            let manifest = ProjectManifestV2 {
+                schema_version: 2,
+                revision: 1,
+                title: "Imported Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+                input_source: InputSourceKind::ImportedVideo,
+                input_capability: InputCapability::VisualOnly {
+                    reason: rollshot_action::DegradedReason::ImportedRecording,
+                },
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 100,
+                    sha256: "abc123".into(),
+                    width: 640,
+                    height: 480,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Click button".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::VisualChange,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+                import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-imported"),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let mut ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+
+            let snap = super::project::build_project_snapshot(&mut ws).expect("snapshot");
+            assert_eq!(snap.import_warnings.len(), 1);
+            assert!(snap
+                .import_warnings
+                .contains(&ImportWarning::NoVisualChangesDetected));
+        }
+
+        #[test]
+        fn reopen_preserves_import_warnings() {
+            use rollshot_action::project::{
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
+            };
+            use rollshot_action::{
+                CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
+                InputSourceKind,
+            };
+
+            let manifest = ProjectManifestV2 {
+                schema_version: 2,
+                revision: 1,
+                title: "Imported Guide".into(),
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+                input_source: InputSourceKind::ImportedVideo,
+                input_capability: InputCapability::VisualOnly {
+                    reason: rollshot_action::DegradedReason::ImportedRecording,
+                },
+                enabled_outputs: EnabledOutputs::default(),
+                frames: vec![ProjectFrame {
+                    id: 1,
+                    at_ms: 100,
+                    sha256: "abc123".into(),
+                    width: 640,
+                    height: 480,
+                }],
+                steps: vec![ProjectStep {
+                    id: ProjectStepId(1),
+                    order: 1,
+                    title: "Click button".into(),
+                    caption: None,
+                    kind: CandidateKind::Click,
+                    reason: DetectReason::VisualChange,
+                    at_ms: 100,
+                    keyframe: 1,
+                    nearby: vec![1],
+                    annotations: None,
+                }],
+                import_warnings: vec![
+                    ImportWarning::NoVisualChangesDetected,
+                    ImportWarning::IntermediateChangesReduced,
+                ],
+            };
+            let loaded = rollshot_action::project::LoadedProject {
+                root: std::path::PathBuf::from("/tmp/test-imported"),
+                manifest,
+            };
+            let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
+            let ws = crate::timeline_workspace::project::from_loaded_project(
+                loaded,
+                ProjectAccess::Writable(guard),
+            )
+            .expect("ok");
+
+            assert_eq!(ws.import_warnings.len(), 2);
+            assert!(ws
+                .import_warnings
+                .contains(&ImportWarning::NoVisualChangesDetected));
+            assert!(ws
+                .import_warnings
+                .contains(&ImportWarning::IntermediateChangesReduced));
+            let notice = ws.persistent_notice();
+            assert!(
+                notice.contains("Visual-only draft"),
+                "should show visual-only disclosure, got: {notice}"
+            );
+            assert!(
+                notice.contains("No visual changes detected"),
+                "should show NoVisualChangesDetected, got: {notice}"
+            );
+            assert!(
+                notice.contains("Intermediate visual changes were omitted"),
+                "should show IntermediateChangesReduced, got: {notice}"
+            );
         }
 
         fn ws_project_backed_with_visual_proposal() -> (
