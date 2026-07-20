@@ -5,11 +5,12 @@ use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    CandidateKind, CaptureRegion, DetectReason, FrameId, InputCapability, InputSourceKind, Millis,
+    CandidateKind, CaptureRegion, DetectReason, FrameId, ImportWarning, InputCapability,
+    InputSourceKind, Millis,
 };
 use rollshot_image_document::{Annotation, AnnotationId};
 
-pub const PROJECT_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -69,6 +70,38 @@ pub struct ProjectManifestV1 {
     pub steps: Vec<ProjectStep>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectManifestV2 {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub title: String,
+    pub capture_region: CaptureRegion,
+    pub input_source: InputSourceKind,
+    pub input_capability: InputCapability,
+    pub enabled_outputs: EnabledOutputs,
+    pub frames: Vec<ProjectFrame>,
+    pub steps: Vec<ProjectStep>,
+    pub import_warnings: Vec<ImportWarning>,
+}
+
+impl From<ProjectManifestV1> for ProjectManifestV2 {
+    fn from(v1: ProjectManifestV1) -> Self {
+        Self {
+            schema_version: PROJECT_SCHEMA_VERSION,
+            revision: v1.revision,
+            title: v1.title,
+            capture_region: v1.capture_region,
+            input_source: v1.input_source,
+            input_capability: v1.input_capability,
+            enabled_outputs: v1.enabled_outputs,
+            frames: v1.frames,
+            steps: v1.steps,
+            import_warnings: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum SnapshotFramePayload {
     Pixels(Arc<RgbaImage>),
@@ -97,18 +130,19 @@ pub struct ProjectSnapshot {
     pub enabled_outputs: EnabledOutputs,
     pub frames: Vec<SnapshotFrame>,
     pub steps: Vec<ProjectStep>,
+    pub import_warnings: Vec<ImportWarning>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedProject {
     pub root: std::path::PathBuf,
-    pub manifest: ProjectManifestV1,
+    pub manifest: ProjectManifestV2,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProjectCommit {
     pub root: std::path::PathBuf,
-    pub manifest: ProjectManifestV1,
+    pub manifest: ProjectManifestV2,
 }
 
 #[cfg(test)]
@@ -217,7 +251,7 @@ mod tests {
             "steps": []
         });
         let manifest = serde_json::from_value::<ProjectManifestV1>(json).unwrap();
-        assert_eq!(manifest.schema_version, PROJECT_SCHEMA_VERSION);
+        assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.revision, 1);
         assert_eq!(manifest.title, "Guide");
     }

@@ -67,6 +67,7 @@ pub enum InputSourceKind {
     LinuxEvdev,
     MacosCgEvent,
     VisualOnly,
+    ImportedVideo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,6 +82,17 @@ pub enum DegradedReason {
     SourceStartFailed,
     /// Source started but failed mid-session (null tap, all readers died).
     RuntimeFailure,
+    /// Recording was imported from an external video file.
+    ImportedRecording,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportWarning {
+    NoVisualChangesDetected,
+    IntermediateChangesReduced,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +168,26 @@ pub fn default_title(kind: CandidateKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_provenance_has_stable_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&InputSourceKind::ImportedVideo).unwrap(),
+            "\"imported-video\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DegradedReason::ImportedRecording).unwrap(),
+            "\"imported-recording\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImportWarning::NoVisualChangesDetected).unwrap(),
+            "\"no-visual-changes-detected\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImportWarning::IntermediateChangesReduced).unwrap(),
+            "\"intermediate-changes-reduced\""
+        );
+    }
 
     #[test]
     fn semantic_action_serde_round_trips_kebab_case() {

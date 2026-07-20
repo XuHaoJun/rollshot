@@ -22,10 +22,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::assets::{inspect_png_asset, materialize_asset};
 use super::error::ProjectError;
 use super::model::{
-    LoadedProject, ProjectCommit, ProjectFrame, ProjectManifestV1, ProjectSnapshot,
-    PROJECT_SCHEMA_VERSION,
+    LoadedProject, ProjectCommit, ProjectFrame, ProjectManifestV1, ProjectManifestV2,
+    ProjectSnapshot, PROJECT_SCHEMA_VERSION,
 };
 use super::validate::{validate_manifest_structure, validate_snapshot_structure};
+use crate::models::{DegradedReason, InputSourceKind};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -54,18 +55,58 @@ impl Drop for TempGuard {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn read_manifest(root: &Path) -> Result<ProjectManifestV1, ProjectError> {
+fn read_manifest(root: &Path) -> Result<ProjectManifestV2, ProjectError> {
     let manifest_path = root.join("project.json");
     let bytes = std::fs::read(&manifest_path).map_err(|e| ProjectError::Io {
         path: manifest_path.clone(),
         source: e,
     })?;
 
-    let manifest: ProjectManifestV1 =
+    let raw: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| ProjectError::InvalidJson {
-            path: manifest_path,
+            path: manifest_path.clone(),
             source: e,
         })?;
+
+    let schema_version = raw
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .ok_or_else(|| {
+            ProjectError::invalid_manifest(
+                super::error::ProjectErrorCategory::InvalidManifest,
+                None,
+                None,
+            )
+        })?;
+
+    let manifest: ProjectManifestV2 = match schema_version {
+        1 => {
+            let v1: ProjectManifestV1 =
+                serde_json::from_value(raw).map_err(|e| ProjectError::InvalidJson {
+                    path: manifest_path,
+                    source: e,
+                })?;
+            validate_v1_no_v2_values(&v1)?;
+            v1.into()
+        }
+        2 => {
+            let v2: ProjectManifestV2 =
+                serde_json::from_value(raw).map_err(|e| ProjectError::InvalidJson {
+                    path: manifest_path,
+                    source: e,
+                })?;
+            if v2.schema_version != 2 {
+                return Err(ProjectError::UnsupportedVersion {
+                    version: v2.schema_version,
+                });
+            }
+            v2
+        }
+        other => {
+            return Err(ProjectError::UnsupportedVersion { version: other });
+        }
+    };
 
     validate_manifest_structure(&manifest)?;
 
@@ -74,6 +115,26 @@ fn read_manifest(root: &Path) -> Result<ProjectManifestV1, ProjectError> {
     }
 
     Ok(manifest)
+}
+
+fn validate_v1_no_v2_values(manifest: &ProjectManifestV1) -> Result<(), ProjectError> {
+    if matches!(manifest.input_source, InputSourceKind::ImportedVideo) {
+        return Err(ProjectError::invalid_manifest(
+            super::error::ProjectErrorCategory::InvalidManifest,
+            None,
+            None,
+        ));
+    }
+    if let crate::models::InputCapability::VisualOnly { reason } = &manifest.input_capability {
+        if matches!(reason, DegradedReason::ImportedRecording) {
+            return Err(ProjectError::invalid_manifest(
+                super::error::ProjectErrorCategory::InvalidManifest,
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn write_json_atomic(
@@ -131,7 +192,7 @@ pub(crate) fn write_json_atomic(
     Ok(())
 }
 
-fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV1) -> Result<(), ProjectError> {
+fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV2) -> Result<(), ProjectError> {
     write_json_atomic(root, "project.json", manifest)
 }
 
@@ -226,7 +287,7 @@ fn commit_new_project(
 
     let frames = materialize_all(&temp_root, snapshot)?;
 
-    let manifest = ProjectManifestV1 {
+    let manifest = ProjectManifestV2 {
         schema_version: PROJECT_SCHEMA_VERSION,
         revision: 1,
         title: snapshot.title.clone(),
@@ -236,6 +297,7 @@ fn commit_new_project(
         enabled_outputs: snapshot.enabled_outputs,
         frames,
         steps: snapshot.steps.clone(),
+        import_warnings: snapshot.import_warnings.clone(),
     };
 
     validate_manifest_structure(&manifest)?;
@@ -303,7 +365,7 @@ pub fn save_project(
         source: std::io::Error::other("revision overflow"),
     })?;
 
-    let manifest = ProjectManifestV1 {
+    let manifest = ProjectManifestV2 {
         schema_version: PROJECT_SCHEMA_VERSION,
         revision: new_revision,
         title: snapshot.title.clone(),
@@ -313,6 +375,7 @@ pub fn save_project(
         enabled_outputs: snapshot.enabled_outputs,
         frames,
         steps: snapshot.steps.clone(),
+        import_warnings: snapshot.import_warnings.clone(),
     };
 
     validate_manifest_structure(&manifest)?;
@@ -401,6 +464,7 @@ mod tests {
                 nearby: vec![1],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         }
     }
 
@@ -558,7 +622,7 @@ mod tests {
         ));
 
         // Disk should still have revision 2 (untouched)
-        let disk: ProjectManifestV1 =
+        let disk: ProjectManifestV2 =
             serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
         assert_eq!(disk.revision, 2);
     }
@@ -730,7 +794,7 @@ mod tests {
         .unwrap();
 
         let error = load_project(&root).unwrap_err();
-        assert_eq!(error.category(), "unsupported-schema");
+        assert_eq!(error.category(), "unsupported_version");
     }
 
     // ---- Asset handling ----
@@ -802,6 +866,7 @@ mod tests {
                 nearby: vec![1],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         };
 
         let second = create_project(&snap, &root2).unwrap();
@@ -837,5 +902,191 @@ mod tests {
         let loaded = load_project(&root).unwrap();
         assert_eq!(loaded.manifest.revision, 3);
         assert_eq!(loaded.manifest.title, "Test Guide");
+    }
+
+    // ---- Import provenance & v2 migration ----
+
+    use super::super::model::ProjectManifestV1;
+    use crate::models::ImportWarning;
+
+    fn imported_snapshot(warnings: Vec<ImportWarning>) -> ProjectSnapshot {
+        ProjectSnapshot {
+            base_revision: None,
+            title: "Imported Guide".into(),
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: InputSourceKind::ImportedVideo,
+            input_capability: InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames: vec![SnapshotFrame {
+                id: 1,
+                at_ms: 100,
+                payload: SnapshotFramePayload::Pixels(pixel_image(8, 8)),
+            }],
+            steps: vec![ProjectStep {
+                id: ProjectStepId(1),
+                order: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: 150,
+                keyframe: 1,
+                nearby: vec![1],
+                annotations: None,
+            }],
+            import_warnings: warnings,
+        }
+    }
+
+    fn write_v1_project_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+        std::fs::create_dir_all(root.join("publish")).unwrap();
+
+        let image = RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 255]));
+        let encoded = super::super::assets::encode_png_asset(&image).unwrap();
+        std::fs::write(
+            root.join("assets/frames")
+                .join(format!("{}.png", encoded.sha256)),
+            &encoded.bytes,
+        )
+        .unwrap();
+
+        let manifest = ProjectManifestV1 {
+            schema_version: 1,
+            revision: 1,
+            title: "V1 Guide".into(),
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: InputSourceKind::VisualOnly,
+            input_capability: InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames: vec![ProjectFrame {
+                id: 1,
+                at_ms: 100,
+                sha256: encoded.sha256,
+                width: 8,
+                height: 8,
+            }],
+            steps: vec![ProjectStep {
+                id: ProjectStepId(1),
+                order: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: 150,
+                keyframe: 1,
+                nearby: vec![1],
+                annotations: None,
+            }],
+        };
+
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        dir
+    }
+
+    fn load_manifest_fixture(
+        schema_version: u32,
+        input_source: &str,
+    ) -> Result<LoadedProject, ProjectError> {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+        std::fs::create_dir_all(root.join("publish")).unwrap();
+
+        let image = RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 255]));
+        let encoded = super::super::assets::encode_png_asset(&image).unwrap();
+        std::fs::write(
+            root.join("assets/frames")
+                .join(format!("{}.png", encoded.sha256)),
+            &encoded.bytes,
+        )
+        .unwrap();
+
+        let manifest = serde_json::json!({
+            "schema_version": schema_version,
+            "revision": 1,
+            "title": "Test",
+            "capture_region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+            "input_source": input_source,
+            "input_capability": "semantic-events",
+            "enabled_outputs": { "storyboard": false, "gif": false, "mp4": false },
+            "frames": [{ "id": 1, "at_ms": 100, "sha256": encoded.sha256, "width": 8, "height": 8 }],
+            "steps": [{ "id": 1, "order": 1, "title": "Step 1", "caption": null, "kind": "click", "reason": "click-confirmed", "at_ms": 150, "keyframe": 1, "nearby": [1], "annotations": null }]
+        });
+
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        load_project(&root)
+    }
+
+    #[test]
+    fn version_one_manifest_loads_as_version_two_without_warnings() {
+        let guard = write_v1_project_fixture();
+        let root = guard.path().join("guide.rollshot-guide");
+        let loaded = load_project(&root).unwrap();
+        assert_eq!(loaded.manifest.schema_version, 2);
+        assert!(loaded.manifest.import_warnings.is_empty());
+    }
+
+    #[test]
+    fn version_two_manifest_round_trips_import_metadata() {
+        let snapshot = imported_snapshot(vec![ImportWarning::IntermediateChangesReduced]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        let commit = create_project(&snapshot, &root).unwrap();
+        assert_eq!(commit.manifest.input_source, InputSourceKind::ImportedVideo);
+        assert_eq!(
+            commit.manifest.import_warnings,
+            vec![ImportWarning::IntermediateChangesReduced]
+        );
+    }
+
+    #[test]
+    fn project_loader_rejects_unknown_versions_and_v2_values_in_v1() {
+        assert_eq!(
+            load_manifest_fixture(99, "visual-only")
+                .unwrap_err()
+                .category(),
+            "unsupported_version"
+        );
+        assert_eq!(
+            load_manifest_fixture(1, "imported-video")
+                .unwrap_err()
+                .category(),
+            "invalid-manifest"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_unbounded_or_duplicate_import_warnings() {
+        let snapshot = imported_snapshot(vec![
+            ImportWarning::NoVisualChangesDetected,
+            ImportWarning::NoVisualChangesDetected,
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        let error = create_project(&snapshot, &root).unwrap_err();
+        assert_eq!(error.category(), "duplicate-import-warning");
     }
 }

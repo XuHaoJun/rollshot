@@ -46,8 +46,8 @@ pub use input::{SemanticInputSource, StartedSemanticInput, VisualOnlySource};
 pub use metrics::{changed_area_ratio, downsample_luma, masked_luma_diff, LumaPlane, Rect};
 pub use models::{
     default_title, CandidateId, CandidateKind, CandidateStep, CaptureRegion, DegradedReason,
-    DetectReason, FrameId, FrameRef, GuideStep, InputCapability, InputSourceKind, Millis,
-    MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
+    DetectReason, FrameId, FrameRef, GuideStep, ImportWarning, InputCapability, InputSourceKind,
+    Millis, MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
 };
 pub use recorder::{ActionRecorder, Recording};
 pub use step_frame_source::{
