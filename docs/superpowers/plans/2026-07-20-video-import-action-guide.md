@@ -61,6 +61,7 @@ Keep test-only helpers beside the tests that consume them. These names in the ta
 ```rust
 fn write_v1_project_fixture() -> tempfile::TempDir;
 fn imported_snapshot(warnings: Vec<ImportWarning>) -> ProjectSnapshot;
+fn load_manifest_fixture(schema_version: u32, input_source: &str) -> Result<LoadedProject, ProjectError>;
 fn marker(center_id: u64, at_ms: u64) -> CandidateMarker;
 fn invalid_dimensions_json() -> &'static [u8];
 fn long_running_fixture_process() -> TestChildFixture;
@@ -231,6 +232,100 @@ B) 8B — Bound only candidates and evidence count (human: no extra time / AI: n
   ❌ Does not bound bytes or allocation safety.
 Net: byte bounds are the minimum complete definition of bounded media processing.
 
+### Second-pass review (auto mode, 2026-07-20) — 6 issues resolved
+
+Verified D1–D8 against the task bodies and the codebase. D2's ownership decision had not been applied to Task 8, and several executable details had drifted. Scope, complexity, and architecture were otherwise confirmed: every referenced type, function, fixture convention, and dependency exists as the plan claims.
+
+#### Auto decision D9 — Task 8 Step 3 still specified the cloneable seed that D2 rejected
+Context: D2 and Global Constraint 25 mandate unique non-`Clone` seed/scratch ownership and Task 4 Step 3 implements it, but Task 8 Step 3 described a reference-counted cloneable seed and `#[derive(Clone)]` on `Effect`.
+ELI10: The plan decided exactly one owner controls gigabytes of scratch, but the UI task still described the old many-keys design. An executor reading Task 8 would have implemented the thing D2 forbade.
+Stakes if we pick wrong: Saved imports retain scratch until an arbitrary last clone drops; Task 6's deterministic first-save release becomes unverifiable.
+Recommendation: D9-A because it applies the already-approved D2 to Task 8 and names the exact derive ripple (11 existing `assert_eq!(update.effect, ...)` tests; no call site clones `Message`; iced does not require it).
+Completeness: A=10/10, B=5/10.
+Pros / cons:
+A) D9-A — Move the seed by value; drop `Clone` from home `Message`, drop `Clone`/`PartialEq`/`Eq` from `Effect`, manual privacy-safe `Debug`, convert effect assertions to `matches!`, drop `Clone` from both product `Message` enums (recommended; human: ~3 hours / AI: ~30 min; low risk; low maintenance)
+  ✅ Restores one owner, deterministic stale-message drop, and a compilable plan.
+  ❌ Mechanical derive churn across home and both product message enums.
+B) D9-B — Keep the cloneable reference-counted seed (human: ~2 hours / AI: ~20 min; medium risk; medium maintenance)
+  ✅ No derive churn.
+  ❌ Reverts approved D2; cleanup timing depends on invisible message lifetimes again.
+Net: D2 was already approved — this applies it; explicit ownership beats convenient derives.
+
+#### Auto decision D10 — Task 8 omitted the setup-resolution messages and pending state D3 requires
+Context: D3 approved explicit resolve → setup/install → retry messages and phases, and Task 8 Step 5 expects "setup retry works", but Step 3 named no toolchain-resolved/setup-finished/retry message, no setup phase, and no field remembering the selected path across resolve → install → retry.
+ELI10: The user picks a video, then the app may need to install FFmpeg+FFprobe first. Without a variable holding "which file" and messages for "setup finished / retry", each implementer invents them — the improvisation D3 outlawed.
+Stakes if we pick wrong: Platform adapters diverge; the selected file can be lost across a setup retry, or import starts with FFprobe missing.
+Recommendation: D10-A because naming the messages, phases, and pending field keeps platform code mechanical and preserves DRY.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) D10-A — Add `ImportToolchainResolved`, `ImportSetupFinished`, `RetryImportSetup`, `ResolvingToolchain`/`SettingUp` phases, and `pending: Option<(ImportOperationId, PathBuf)>` (recommended; human: ~2 hours / AI: ~15 min; low risk; low maintenance)
+  ✅ Setup lifecycle is explicit, testable, and identical on both platforms.
+  ❌ Slightly longer message enum and one more coordinator field.
+B) D10-B — Leave setup messages to executor discretion (human: no extra time / AI: no extra time; high risk; medium maintenance)
+  ✅ Shorter plan text.
+  ❌ Guaranteed divergence from D3; "setup retry works" has no defined mechanics to test.
+Net: D3 decided the what; this names the how so two platforms cannot drift.
+
+#### Auto decision D11 — Three snippets did not compile (or failed clippy), plus one dead command flag
+Context: Task 4 Step 1 used array-repeat `[solid_frame(20); 8]` on non-`Copy` `RgbaImage`; Task 3 Step 1 escaped quotes inside a raw byte string, making the "JSON" invalid and the asserted category unreachable; Task 2 Step 1 used `index as u64` on an inferred-`u64` index, tripping `clippy::unnecessary_cast` under `-D warnings`; three commands used `--no-default-features` on a crate with no features.
+ELI10: Agents execute snippets and commands literally. Three would fail on first run for reasons unrelated to the intended RED signal, and the fourth pretends a feature boundary exists where there is none.
+Stakes if we pick wrong: Executors silently fix the plan locally, plan and code drift, and red-step signals become ambiguous.
+Recommendation: D11-A because an agent-executed plan must be literally true (explicit > clever).
+Completeness: A=10/10, B=7/10.
+Pros / cons:
+A) D11-A — Fix all four in the plan text (recommended; human: ~30 min / AI: ~5 min; no risk)
+  ✅ Every snippet compiles and every RED step fails for the intended reason.
+  ❌ No cons — near hard-stop choice.
+B) D11-B — Leave snippets as illustrative pseudocode (human: no extra time; medium risk)
+  ✅ Zero edits now.
+  ❌ Shifts ambiguity onto executors; violates the plan's own D6.
+Net: the plan's own D6 says agents execute literally — these four lines were where that broke.
+
+#### Auto decision D12 — `load_manifest_fixture` was used in Task 1 but missing from the Test Fixture Contracts
+Context: Task 1 Step 1 calls `load_manifest_fixture(version, input_source)`, but the contract section that exists to prevent incompatible fixture inventions did not list it.
+ELI10: The contract list stops people inventing clashing helpers. A snippet name missing from the list is exactly the drift it was created to prevent.
+Stakes if we pick wrong: An executor invents a signature with the wrong return type or error category and Task 1's red step fails unexpectedly.
+Recommendation: D12-A — one contract line; trivially cheap consistency.
+Completeness: A=10/10, B=7/10.
+Pros / cons:
+A) D12-A — Add `fn load_manifest_fixture(schema_version: u32, input_source: &str) -> Result<LoadedProject, ProjectError>;` (recommended; human: ~5 min / AI: ~1 min)
+  ✅ Contract list matches snippet usage exactly.
+  ❌ One more line in an already long file.
+B) D12-B — Treat it as a task-local helper (human: no extra time)
+  ✅ No edit.
+  ❌ Sets a precedent that the contract list is advisory.
+Net: one line buys contract-list integrity.
+
+#### Auto decision D13 — Task 1 specified warning-bounds validation with no red-first test
+Context: Task 1 Step 3 mandates rejecting more than two warnings and duplicate variants, but Step 1 wrote no failing test for that rule.
+ELI10: The plan's own rule is test-first for every new behavior. A validation rule with no test can be implemented wrong or forgotten, and no later step catches it.
+Stakes if we pick wrong: A malformed v2 manifest with three or duplicate warnings persists and surfaces later as export/publish inconsistency.
+Recommendation: D13-A — add one red-first test to Task 1 Step 1 using the existing `invalid_manifest` category.
+Completeness: A=10/10, B=7/10.
+Pros / cons:
+A) D13-A — Add `manifest_rejects_unbounded_or_duplicate_import_warnings` (recommended; human: ~30 min / AI: ~5 min; low risk)
+  ✅ Every Step 3 validation rule has a prior RED signal.
+  ❌ One more test in an already covered task.
+B) D13-B — Rely on Step 4's broad crate run (human: no extra time)
+  ✅ No plan edit.
+  ❌ Broad runs do not prove this rule; under-tests the boundary D4 hardened.
+Net: one small test closes the only TDD hole in the schema task.
+
+#### Auto decision D14 — Session schema had no version-boundary test symmetric to the project side
+Context: D4 approved explicit version dispatch for both project and session schemas, and `project/publish.rs` parses `session.json` in Rust, but Task 7 tested only that v1 sessions default to empty warnings and named no unknown-version rejection.
+ELI10: The project file got a bouncer checking IDs; the session file got a welcome mat. A future v3 session would be silently accepted by v2 code, dropping fields it does not know.
+Stakes if we pick wrong: Publishing a newer-format guide silently loses data instead of failing loudly; D4's invariant holds for projects but not sessions.
+Recommendation: D14-A — add a red-first session boundary test to Task 7 Step 1 and a `SessionManifest::validate` mandate to Step 3.
+Completeness: A=10/10, B=6/10.
+Pros / cons:
+A) D14-A — Add the test plus validate-after-parse rule (recommended; human: ~1 hour / AI: ~10 min; low risk)
+  ✅ Both persistence boundaries enforce the same explicit-version contract.
+  ❌ A small validation helper where serde currently does everything implicitly.
+B) D14-B — Accept serde-default leniency for sessions (human: no extra time; medium risk)
+  ✅ Less code.
+  ❌ Contradicts approved D4; silent acceptance at the publish boundary.
+Net: D4 named sessions explicitly; Task 7 now honors it.
+
 ---
 
 ### Task 1: Provenance, Warning Types, and Project Schema v2
@@ -283,6 +378,17 @@ fn version_two_manifest_round_trips_import_metadata() {
 fn project_loader_rejects_unknown_versions_and_v2_values_in_v1() {
     assert_eq!(load_manifest_fixture(99, "visual-only").unwrap_err().category(), "unsupported_version");
     assert_eq!(load_manifest_fixture(1, "imported-video").unwrap_err().category(), "invalid_manifest");
+}
+
+#[test]
+fn manifest_rejects_unbounded_or_duplicate_import_warnings() {
+    let snapshot = imported_snapshot(vec![
+        ImportWarning::NoVisualChangesDetected,
+        ImportWarning::NoVisualChangesDetected,
+    ]);
+    let root = tempdir().unwrap();
+    let error = create_project(&snapshot, root.path()).unwrap_err();
+    assert_eq!(error.category(), "invalid_manifest");
 }
 ```
 
@@ -388,7 +494,7 @@ rtk git commit -m "feat(action-guide): add imported video provenance"
 #[test]
 fn two_hundred_candidates_are_not_reduced() {
     let mut selector = CandidateSelector::new(100_000);
-    for index in 0..200 { selector.push(marker(index, index as u64 * 500)); }
+    for index in 0..200 { selector.push(marker(index, index * 500)); }
     let result = selector.finish();
     assert_eq!(result.candidates.len(), 200);
     assert!(!result.reduced);
@@ -397,7 +503,7 @@ fn two_hundred_candidates_are_not_reduced() {
 #[test]
 fn candidate_201_switches_to_full_duration_reduction() {
     let mut selector = CandidateSelector::new(200_000);
-    for index in 0..401 { selector.push(marker(index, index as u64 * 500)); }
+    for index in 0..401 { selector.push(marker(index, index * 500)); }
     let result = selector.finish();
     assert!(result.candidates.len() <= MAX_GENERATED_STEPS);
     assert_eq!(result.candidates.first().unwrap().at_ms, 0);
@@ -500,7 +606,7 @@ fn probe_command_requests_only_required_video_metadata() {
 
 #[test]
 fn metadata_rejects_missing_stream_and_invalid_dimensions() {
-    assert_eq!(parse_probe_json(br#"{\"streams\":[],\"format\":{\"duration\":\"2.0\"}}"#).unwrap_err().category(), "missing_video_stream");
+    assert_eq!(parse_probe_json(br#"{"streams":[],"format":{"duration":"2.0"}}"#).unwrap_err().category(), "missing_video_stream");
     assert_eq!(parse_probe_json(invalid_dimensions_json()).unwrap_err().category(), "invalid_video_metadata");
 }
 
@@ -598,7 +704,7 @@ Create tests guarded by the existing `ROLLSHOT_TEST_FFMPEG=1` convention:
 ```rust
 #[test]
 fn static_video_returns_final_frame_fallback() {
-    let fixture = fixture_video(&[solid_frame(20); 8], true);
+    let fixture = fixture_video(&vec![solid_frame(20); 8], true);
     let seed = run_import(fixture.path()).unwrap();
     assert_eq!(seed.guide.steps().len(), 1);
     assert_eq!(seed.guide.steps()[0].title, "Imported recording");
@@ -627,7 +733,7 @@ Also add cancellation tests for probe/pass 1/pass 2, mandatory center-frame fail
 
 - [ ] **Step 2: Run pure tests, then opt-in fixtures, and confirm failures**
 
-Run: `rtk cargo test -p rollshot-action video_import:: --no-default-features`
+Run: `rtk cargo test -p rollshot-action video_import::`
 
 Expected: compilation fails because the importer result and scratch types do not exist.
 
@@ -691,7 +797,7 @@ Factor `from_loaded` through the same private `new` constructor. Do not add an i
 
 - [ ] **Step 7: Run importer and full crate tests**
 
-Run: `rtk cargo test -p rollshot-action video_import:: --no-default-features`
+Run: `rtk cargo test -p rollshot-action video_import::`
 
 Expected: all pure command/parser/selector/scratch tests pass.
 
@@ -890,6 +996,14 @@ fn v1_session_defaults_to_empty_import_warnings() {
 }
 
 #[test]
+fn session_loader_rejects_unknown_versions_and_v2_values_in_v1() {
+    let future: SessionManifest = serde_json::from_str(SESSION_V99_JSON).unwrap();
+    assert!(future.validate().is_err());
+    let legacy_with_warnings: SessionManifest = serde_json::from_str(V1_SESSION_WITH_WARNINGS_JSON).unwrap();
+    assert!(legacy_with_warnings.validate().is_err());
+}
+
+#[test]
 fn imported_session_and_reader_disclose_reduction() {
     let job = imported_job(vec![ImportWarning::IntermediateChangesReduced]);
     let root = render_fixture(job);
@@ -923,6 +1037,8 @@ Expected: compilation or assertions fail because warning fields and disclosure t
 Set `GUIDE_SCHEMA_VERSION` to `2`. Add `pub import_warnings: Vec<ImportWarning>` to `ReviewedGuideExportJob` and to `SessionManifest`, with `#[serde(default, skip_serializing_if = "Vec::is_empty")]` on the manifest field. Update every existing job fixture with an empty vector. `build_reviewed_export_job` clones warnings from the timeline.
 
 Add a single `render_import_notices(&[ImportWarning]) -> String` helper in `export/mod.rs`; use equivalent structured data in `html.rs`/`viewer.html` so the offline reader shows notices before steps. Keep the v1 loader path accepting absent warnings as empty.
+
+Add `SessionManifest::validate` mirroring the project-side dispatch (D4): reject any declared `schema_version` newer than `GUIDE_SCHEMA_VERSION`, and reject v2-only fields (a non-empty `import_warnings`) under an effective legacy version. Call it after every Rust-side session parse, including the publish path in `project/publish.rs`.
 
 - [ ] **Step 4: Map the same warnings into Issue Pack**
 
@@ -1001,7 +1117,7 @@ Expected: compilation fails because the coordinator and import messages do not e
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportState { Idle, Picking, Preflight, AnalyzingPass1, ExtractingPass2 }
+pub enum ImportState { Idle, Picking, ResolvingToolchain, SettingUp, Preflight, AnalyzingPass1, ExtractingPass2 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImportOperationId(u64);
@@ -1012,12 +1128,13 @@ pub struct ImportCoordinator {
     next_operation_id: u64,
     cancellation: Option<VideoImportCancellation>,
     progress: Option<VideoImportProgress>,
+    pending: Option<(ImportOperationId, PathBuf)>,
 }
 ```
 
-Add home messages `ImportRecording`, `ImportPickerSelected(PathBuf)`, `ImportPickerCancelled`, `ImportProgress { operation_id, progress }`, `ImportFinished { operation_id, result }`, and `CancelImport`. Add effects `PickRecording`, `StartImport { operation_id, path, cancellation }`, `SetupImportToolchain`, and `OpenImportedTimeline(ImportedWorkspaceSeed)`. Carry the cloneable seed directly; its scratch owner is reference-counted and cleanup happens when the final seed/workspace reference is dropped.
+Add home messages `ImportRecording`, `ImportPickerSelected(PathBuf)`, `ImportPickerCancelled`, `ImportToolchainResolved { operation_id, resolution }`, `ImportSetupFinished { operation_id, result }`, `RetryImportSetup`, `ImportProgress { operation_id, progress }`, `ImportFinished { operation_id, result }`, and `CancelImport`. Add effects `PickRecording`, `StartImport { operation_id, path, cancellation }`, `SetupImportToolchain`, and `OpenImportedTimeline(ImportedWorkspaceSeed)`. The `pending` field keeps the selected recording across the resolve → setup/install → retry/cancel sequence (D3): `resolve_video_import_toolchain()` runs first, `NeedsSetup` drives `SetupImportToolchain` plus `RetryImportSetup`, and only an `Available` pair leads to `StartImport`.
 
-Change `Effect` from `#[derive(Debug, Clone, PartialEq, Eq)]` to `#[derive(Clone)]` and provide a manual privacy-safe `Debug` implementation that prints only variant names and operation IDs. `ImportedWorkspaceSeed` remains cloneable because scratch ownership is reference-counted; its `Debug` implementation must omit scratch and source paths.
+The seed moves by value exactly once through `ImportFinished` → `OpenImportedTimeline` → `TimelineWorkspace::from_imported_video`; it is never cloned (D2). Stale or superseded `ImportFinished` messages drop their seed immediately at the handler. Because the seed is non-`Clone`, remove `Clone` from the home `Message` enum and remove `Clone`/`PartialEq`/`Eq` from `Effect`; provide a manual privacy-safe `Debug` for `Effect` (variant names and operation IDs only) and for `ImportedWorkspaceSeed` (no scratch or source paths). Convert the eleven existing `assert_eq!(update.effect, ...)` assertions in this module to `matches!`. Task 9 drops the then-uncompilable `Clone` derive from the Linux and macOS product `Message` enums — no call site clones messages, and iced does not require it.
 
 The worker is launched with `Task::run`/a bounded channel so progress messages arrive during `spawn_blocking(import_video)` rather than only at completion. Every progress/completion handler checks the operation ID first. Cancel calls the token; it does not merely drop the iced task.
 
@@ -1082,11 +1199,11 @@ Expected: exhaustive effect matches fail or tests fail because import effects ar
 
 - [ ] **Step 3: Wire Linux effects and completion**
 
-In `action_guide_linux_product.rs`, map `PickRecording` to the native async file dialog, resolve/setup the paired toolchain before `StartImport`, forward worker messages to `Message::Home`, and convert `OpenImportedTimeline(seed)` via `TimelineWorkspace::from_imported_video`. Set `Phase::Timeline`, store the workspace, and start its initial frame-load task. Do not record it in Recents.
+In `action_guide_linux_product.rs`, map `PickRecording` to the native async file dialog, resolve/setup the paired toolchain before `StartImport`, forward worker messages to `Message::Home`, and convert `OpenImportedTimeline(seed)` via `TimelineWorkspace::from_imported_video`. Set `Phase::Timeline`, store the workspace, and start its initial frame-load task. Do not record it in Recents. Drop the `Clone` derive from this file's `Message` enum; the wrapped home message is no longer `Clone` (D9).
 
 - [ ] **Step 4: Wire macOS effects and completion**
 
-In `macos_product.rs`, apply the same shared effects. On success, preserve the existing Home→Timeline window transition: create the imported workspace, open `workspace_window_settings()`, set `workspace_window`, and batch the window-open and initial-frame-load tasks. Keep macOS recording and ScreenCaptureKit paths untouched.
+In `macos_product.rs`, apply the same shared effects. On success, preserve the existing Home→Timeline window transition: create the imported workspace, open `workspace_window_settings()`, set `workspace_window`, and batch the window-open and initial-frame-load tasks. Keep macOS recording and ScreenCaptureKit paths untouched. Drop the `Clone` derive from this file's `Message` enum; the wrapped home message is no longer `Clone` (D9).
 
 - [ ] **Step 5: Run both platform-path test suites**
 
@@ -1144,7 +1261,7 @@ Capture tracing output with a test subscriber and assert the sentinel path, file
 
 - [ ] **Step 2: Run privacy and cleanup tests**
 
-Run: `rtk cargo test -p rollshot-action video_import --no-default-features`
+Run: `rtk cargo test -p rollshot-action video_import`
 
 Run: `rtk cargo test -p rollshot-app --features action-guide`
 
