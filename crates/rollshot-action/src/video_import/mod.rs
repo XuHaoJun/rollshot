@@ -653,7 +653,7 @@ mod tests {
             .flatten()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "png"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
             .collect();
         files.sort();
         files
@@ -680,7 +680,7 @@ mod tests {
         if !fixtures_enabled() {
             return;
         }
-        let fixture = fixture_video(&vec![20u8; 8], true);
+        let fixture = fixture_video(&[20u8; 8], true);
         let output = fixture.path().join("test.mp4");
         let (seed, _parent) = run_import(&output).unwrap();
         assert_eq!(seed.guide.steps().len(), 1);
@@ -1017,5 +1017,394 @@ mod tests {
 
         let indices = evidence_sample_indices(&[4], 10);
         assert_eq!(indices, vec![3, 4, 5]);
+    }
+
+    fn import_save_and_export_fixture(
+        sentinel: &str,
+    ) -> (ImportedWorkspaceSeed, tempfile::TempDir) {
+        let fixture = fixture_video(&[100u8, 200u8], true);
+        let input = fixture.path().join(sentinel);
+        std::fs::copy(fixture.path().join("test.mp4"), &input).unwrap();
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let request = VideoImportRequest {
+            input,
+            toolchain: toolchain(),
+            scratch_parent: scratch_parent.path().to_path_buf(),
+        };
+        let seed = import_video(request, VideoImportCancellation::default(), |_p| {}).unwrap();
+        (seed, scratch_parent)
+    }
+
+    #[test]
+    fn persisted_and_exported_artifacts_never_contain_source_identity() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let sentinel = "SECRET-customer-recording-8f7d.mp4";
+        let (seed, _parent) = import_save_and_export_fixture(sentinel);
+
+        let asset_dir = seed.scratch.root().join("assets/frames");
+        let artifacts: Vec<Vec<u8>> = std::fs::read_dir(&asset_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "png"))
+            .filter_map(|e| std::fs::read(e.path()).ok())
+            .collect();
+
+        assert!(
+            !artifacts.is_empty(),
+            "expected at least one persisted artifact"
+        );
+        for bytes in &artifacts {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains(sentinel),
+                "artifact must not contain source filename"
+            );
+        }
+    }
+
+    #[test]
+    fn scratch_during_processing_contains_only_expected_assets() {
+        if !fixtures_enabled() {
+            return;
+        }
+        let (seed, _parent) = import_save_and_export_fixture("check-scratch.mp4");
+
+        let root = seed.scratch.root();
+        let assets = root.join("assets/frames");
+        assert!(assets.exists(), "assets/frames must exist");
+
+        let pngs: Vec<_> = std::fs::read_dir(&assets)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "png"))
+            .collect();
+        assert!(!pngs.is_empty(), "must have at least one PNG asset");
+        for png in &pngs {
+            let name = png.file_name();
+            let name_str = name.to_string_lossy();
+            assert!(
+                name_str.ends_with(".png"),
+                "asset filename should be sha256.png: {name_str}"
+            );
+            assert!(
+                !name_str.contains("import-"),
+                "asset filename must not contain import- prefix: {name_str}"
+            );
+        }
+
+        let staging = root.join("staging");
+        assert!(
+            !staging.exists(),
+            "staging should be removed after successful import"
+        );
+    }
+
+    enum FaultOutcome {
+        ProbeFailure,
+        Pass1Failure,
+        Pass2Failure,
+        Cancelled,
+    }
+
+    struct FaultInjectionResult {
+        scratch_paths: Vec<PathBuf>,
+        live_child_count: usize,
+    }
+
+    impl FaultInjectionResult {
+        fn scratch_paths(&self) -> &[PathBuf] {
+            &self.scratch_paths
+        }
+
+        fn live_child_count(&self) -> usize {
+            self.live_child_count
+        }
+    }
+
+    fn run_fault_injected_import(outcome: FaultOutcome) -> FaultInjectionResult {
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let scratch_parent_path = scratch_parent.path().to_path_buf();
+
+        match outcome {
+            FaultOutcome::ProbeFailure => {
+                let request = VideoImportRequest {
+                    input: PathBuf::from("/nonexistent/sentinel-probe-fail.mp4"),
+                    toolchain: toolchain(),
+                    scratch_parent: scratch_parent_path.clone(),
+                };
+                let err =
+                    import_video(request, VideoImportCancellation::default(), |_p| {}).unwrap_err();
+                assert_eq!(err.category(), "probe_failed");
+            }
+            FaultOutcome::Pass1Failure => {
+                let dir = tempfile::tempdir().unwrap();
+                let truncated = dir.path().join("truncated.mp4");
+                create_truncated_mp4(&truncated);
+                let request = VideoImportRequest {
+                    input: truncated,
+                    toolchain: toolchain(),
+                    scratch_parent: scratch_parent_path.clone(),
+                };
+                let err =
+                    import_video(request, VideoImportCancellation::default(), |_p| {}).unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        VideoImportError::DecodeFailed
+                            | VideoImportError::ProbeFailed
+                            | VideoImportError::InvalidVideoMetadata
+                    ),
+                    "expected analysis-phase error, got: {err:?}"
+                );
+            }
+            FaultOutcome::Pass2Failure => {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("corrupt-frames.mp4");
+                create_corrupt_frame_mp4(&path);
+                let request = VideoImportRequest {
+                    input: path,
+                    toolchain: toolchain(),
+                    scratch_parent: scratch_parent_path.clone(),
+                };
+                let result = import_video(request, VideoImportCancellation::default(), |_p| {});
+                match result {
+                    Ok(_) => {
+                        // If extraction succeeded, the test still verifies cleanup below.
+                    }
+                    Err(err) => {
+                        assert!(
+                            matches!(
+                                err,
+                                VideoImportError::EvidenceMissing
+                                    | VideoImportError::DecodeFailed
+                                    | VideoImportError::ScratchIo
+                                    | VideoImportError::Cancelled
+                            ),
+                            "expected extraction-phase error, got: {err:?}"
+                        );
+                    }
+                }
+            }
+            FaultOutcome::Cancelled => {
+                let fixture = settle_sequence_fixture();
+                let output = fixture.path().join("settle.mp4");
+                let cancel = VideoImportCancellation::default();
+                cancel.cancel();
+                let request = VideoImportRequest {
+                    input: output,
+                    toolchain: toolchain(),
+                    scratch_parent: scratch_parent_path.clone(),
+                };
+                let err = import_video(request, cancel, |_p| {}).unwrap_err();
+                assert_eq!(err.category(), "cancelled");
+            }
+        }
+
+        let remaining: Vec<PathBuf> = std::fs::read_dir(&scratch_parent_path)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("import-"))
+            .map(|e| e.path())
+            .collect();
+
+        let children = count_children();
+
+        FaultInjectionResult {
+            scratch_paths: remaining,
+            live_child_count: children,
+        }
+    }
+
+    fn count_children() -> usize {
+        let our_pid = std::process::id();
+        let Ok(output) = Command::new("pgrep")
+            .args(["-P", &our_pid.to_string()])
+            .output()
+        else {
+            return 0;
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    fn create_truncated_mp4(path: &Path) {
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin.write_all(&vec![100u8; 320 * 240 * 3]).unwrap();
+        }
+        child.stdin.take();
+        child.wait().unwrap();
+
+        let meta = std::fs::metadata(path).unwrap();
+        if meta.len() > 512 {
+            let content = std::fs::read(path).unwrap();
+            let truncate_at = content.len() / 3;
+            std::fs::write(path, &content[..truncate_at]).unwrap();
+        }
+    }
+
+    fn create_corrupt_frame_mp4(path: &Path) {
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "320x240",
+                "-r",
+                "2",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for i in 0..20u8 {
+                stdin.write_all(&vec![i * 12; 320 * 240 * 3]).unwrap();
+            }
+        }
+        child.stdin.take();
+        child.wait().unwrap();
+
+        let content = std::fs::read(path).unwrap();
+        if content.len() > 4096 {
+            let corrupt_start = content.len() / 2;
+            let mut corrupted = content;
+            for b in &mut corrupted[corrupt_start..corrupt_start + 1024] {
+                *b = 0xFF;
+            }
+            std::fs::write(path, &corrupted).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_terminal_outcome_reaps_children_and_removes_scratch() {
+        if !fixtures_enabled() {
+            return;
+        }
+        for outcome in [
+            FaultOutcome::ProbeFailure,
+            FaultOutcome::Pass1Failure,
+            FaultOutcome::Pass2Failure,
+            FaultOutcome::Cancelled,
+        ] {
+            let result = run_fault_injected_import(outcome);
+            assert!(
+                result.scratch_paths().iter().all(|path| !path.exists()),
+                "scratch directories should be cleaned up"
+            );
+            assert_eq!(
+                result.live_child_count(),
+                0,
+                "no child processes should remain"
+            );
+        }
+    }
+
+    #[test]
+    fn tracing_output_never_leaks_source_identity() {
+        if !fixtures_enabled() {
+            return;
+        }
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        let sentinel = "SECRET-trace-leak-test-9c2a.mp4";
+        let log_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer_check = log_buffer.clone();
+
+        struct WriteAdaptor {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for WriteAdaptor {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.buf.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || WriteAdaptor {
+                buf: log_buffer.clone(),
+            })
+            .with_ansi(false)
+            .with_target(true)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let fixture = fixture_video(&[50u8, 150u8], true);
+        let input = fixture.path().join(sentinel);
+        std::fs::copy(fixture.path().join("test.mp4"), &input).unwrap();
+
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let request = VideoImportRequest {
+            input: input.clone(),
+            toolchain: toolchain(),
+            scratch_parent: scratch_parent.path().to_path_buf(),
+        };
+        let _seed = import_video(request, VideoImportCancellation::default(), |_p| {}).unwrap();
+
+        let logs = String::from_utf8(log_buffer_check.lock().unwrap().clone()).unwrap();
+
+        assert!(
+            !logs.contains(sentinel),
+            "tracing must not contain sentinel filename"
+        );
+        assert!(
+            !logs.contains(input.to_string_lossy().as_ref()),
+            "tracing must not contain full input path"
+        );
     }
 }

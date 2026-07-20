@@ -1210,6 +1210,8 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
         crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
     let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
 
+    cleanup_stale_import_scratch();
+
     let boot_data = Arc::new(Mutex::new(Some((initial, recent))));
     let boot = move || {
         let (boot_initial, recent) = boot_data
@@ -1415,6 +1417,38 @@ fn load_action_guide_home() -> ActionGuideHome {
             home.message = Some(format!("Could not load recent projects: {error}"));
             home
         }
+    }
+}
+
+#[cfg(feature = "action-guide")]
+fn cleanup_stale_import_scratch() {
+    let scratch_parent = std::env::temp_dir().join("rollshot/import");
+    let before = std::fs::read_dir(&scratch_parent)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("import-"))
+                .count()
+        })
+        .unwrap_or(0);
+    rollshot_action::cleanup_stale_import_scratch(&scratch_parent);
+    let after = std::fs::read_dir(&scratch_parent)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("import-"))
+                .count()
+        })
+        .unwrap_or(0);
+    let removed = before.saturating_sub(after);
+    if removed > 0 {
+        tracing::info!(
+            target: "rollshot::app",
+            removed_count = removed,
+            "stale import scratch cleaned up at startup"
+        );
     }
 }
 

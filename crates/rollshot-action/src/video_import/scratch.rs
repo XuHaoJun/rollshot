@@ -218,6 +218,7 @@ mod tests {
         let lock_file = fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .unwrap();
         flock(&lock_file, FlockOperation::LockExclusive).unwrap();
@@ -255,6 +256,7 @@ mod tests {
         let lock_file = fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .unwrap();
         flock(&lock_file, FlockOperation::LockExclusive).unwrap();

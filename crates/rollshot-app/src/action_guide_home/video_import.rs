@@ -202,4 +202,31 @@ mod tests {
         assert!(coordinator.operation_id().is_none());
         assert!(coordinator.pending_path().is_none());
     }
+
+    #[test]
+    fn coordinator_does_not_retain_source_path_after_completion() {
+        let mut coordinator = ImportCoordinator::default();
+        let sentinel = "SECRET-user-recording-a1b2.mp4";
+        let id = coordinator.begin(PathBuf::from(sentinel));
+        coordinator.record_progress(id, progress(VideoImportPass::Preflight));
+        coordinator.record_progress(id, progress(VideoImportPass::Analyze));
+        coordinator.record_progress(id, progress(VideoImportPass::Extract));
+        coordinator.finish_idle();
+
+        assert!(coordinator.pending_path().is_none());
+        assert!(coordinator.operation_id().is_none());
+        assert!(coordinator.last_progress().is_none());
+    }
+
+    #[test]
+    fn coordinator_does_not_retain_source_path_after_cancel() {
+        let mut coordinator = ImportCoordinator::default();
+        let sentinel = "SECRET-user-recording-c3d4.mp4";
+        let id = coordinator.begin(PathBuf::from(sentinel));
+        coordinator.record_progress(id, progress(VideoImportPass::Analyze));
+        coordinator.cancel(id);
+
+        assert!(coordinator.pending_path().is_none());
+        assert!(coordinator.operation_id().is_none());
+    }
 }

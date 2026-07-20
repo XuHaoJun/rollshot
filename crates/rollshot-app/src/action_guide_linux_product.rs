@@ -332,6 +332,37 @@ fn kind_path(kind: &SelectedDirectoryKind) -> std::path::PathBuf {
     }
 }
 
+fn cleanup_stale_import_scratch() {
+    let scratch_parent = std::env::temp_dir().join("rollshot/import");
+    let before = std::fs::read_dir(&scratch_parent)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("import-"))
+                .count()
+        })
+        .unwrap_or(0);
+    rollshot_action::cleanup_stale_import_scratch(&scratch_parent);
+    let after = std::fs::read_dir(&scratch_parent)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("import-"))
+                .count()
+        })
+        .unwrap_or(0);
+    let removed = before.saturating_sub(after);
+    if removed > 0 {
+        tracing::info!(
+            target: "rollshot::app",
+            removed_count = removed,
+            "stale import scratch cleaned up at startup"
+        );
+    }
+}
+
 async fn open_project_task(path: std::path::PathBuf, writable: bool) -> Message {
     let result = open_project_inner(path, writable).await;
     Message::ProjectOpened(result)
@@ -367,6 +398,8 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
     let config_dir =
         crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
     let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
+
+    cleanup_stale_import_scratch();
 
     let boot_data = std::sync::Arc::new(std::sync::Mutex::new(Some((initial, recent))));
     let boot = move || {
