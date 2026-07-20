@@ -168,8 +168,9 @@ mod tests {
     fn create_makes_directory_and_acquires_lock() {
         let parent = tempfile::tempdir().unwrap();
         let scratch = ImportedScratch::create(parent.path()).unwrap();
+        let canonical_parent = fs::canonicalize(parent.path()).unwrap();
         assert!(scratch.root().exists());
-        assert!(scratch.root().starts_with(parent.path()));
+        assert!(scratch.root().starts_with(&canonical_parent));
         assert!(scratch.root().to_string_lossy().contains("import-"));
     }
 

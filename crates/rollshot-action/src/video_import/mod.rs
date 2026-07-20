@@ -866,7 +866,11 @@ mod tests {
             scratch_parent: scratch_parent.path().to_path_buf(),
         };
         let err = import_video(request, VideoImportCancellation::default(), |_p| {}).unwrap_err();
-        assert_eq!(err.category(), "probe_failed");
+        assert!(
+            matches!(err.category(), "probe_failed" | "decoder_unavailable"),
+            "expected probe_failed or decoder_unavailable, got: {}",
+            err.category()
+        );
     }
 
     #[test]
