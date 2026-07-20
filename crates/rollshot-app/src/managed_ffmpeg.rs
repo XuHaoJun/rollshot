@@ -655,13 +655,16 @@ mod tests {
         let _path_guard = EnvVarGuard::set("PATH", "");
         let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
         let _ffmpeg_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
+        let Some(meta) = pinned_metadata_for_current_platform() else {
+            return;
+        };
         let manifest = ManagedFfmpegManifest {
             schema_version: 1,
-            platform: LINUX_X86_64_METADATA.platform.to_string(),
+            platform: meta.platform.to_string(),
             version: "5.1.0".to_string(),
             source_url: "https://example.invalid/old-ffmpeg.tar.xz".to_string(),
-            license: LINUX_X86_64_METADATA.license.to_string(),
-            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
+            license: meta.license.to_string(),
+            license_url: meta.license_url.to_string(),
             archive_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
                 .to_string(),
             archive_size: 1,
@@ -795,15 +798,18 @@ mod tests {
         let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
         let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
         let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", "/definitely/missing/ffprobe");
+        let Some(meta) = pinned_metadata_for_current_platform() else {
+            return;
+        };
         let manifest = ManagedFfmpegManifest {
             schema_version: 2,
-            platform: LINUX_X86_64_METADATA.platform.to_string(),
-            version: LINUX_X86_64_METADATA.version.to_string(),
-            source_url: LINUX_X86_64_METADATA.source_url.to_string(),
-            license: LINUX_X86_64_METADATA.license.to_string(),
-            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
-            archive_sha256: LINUX_X86_64_METADATA.archive_sha256.to_string(),
-            archive_size: LINUX_X86_64_METADATA.archive_size,
+            platform: meta.platform.to_string(),
+            version: meta.version.to_string(),
+            source_url: meta.source_url.to_string(),
+            license: meta.license.to_string(),
+            license_url: meta.license_url.to_string(),
+            archive_sha256: meta.archive_sha256.to_string(),
+            archive_size: meta.archive_size,
             binary_path: ffmpeg,
             ffmpeg_version_line: "ffmpeg fake".to_string(),
             installed_at: "2026-07-05T00:00:00+00:00".to_string(),
@@ -828,15 +834,18 @@ mod tests {
         let _root_guard = EnvVarGuard::set("ROLLSHOT_FFMPEG_ROOT", root.path());
         let _f = EnvVarGuard::set("ROLLSHOT_FFMPEG", "/definitely/missing/ffmpeg");
         let _p = EnvVarGuard::set("ROLLSHOT_FFPROBE", "/definitely/missing/ffprobe");
+        let Some(meta) = pinned_metadata_for_current_platform() else {
+            return;
+        };
         let manifest = ManagedFfmpegManifest {
             schema_version: 1,
-            platform: LINUX_X86_64_METADATA.platform.to_string(),
-            version: LINUX_X86_64_METADATA.version.to_string(),
-            source_url: LINUX_X86_64_METADATA.source_url.to_string(),
-            license: LINUX_X86_64_METADATA.license.to_string(),
-            license_url: LINUX_X86_64_METADATA.license_url.to_string(),
-            archive_sha256: LINUX_X86_64_METADATA.archive_sha256.to_string(),
-            archive_size: LINUX_X86_64_METADATA.archive_size,
+            platform: meta.platform.to_string(),
+            version: meta.version.to_string(),
+            source_url: meta.source_url.to_string(),
+            license: meta.license.to_string(),
+            license_url: meta.license_url.to_string(),
+            archive_sha256: meta.archive_sha256.to_string(),
+            archive_size: meta.archive_size,
             binary_path: binary,
             ffmpeg_version_line: "ffmpeg fake".to_string(),
             installed_at: "2026-07-05T00:00:00+00:00".to_string(),
