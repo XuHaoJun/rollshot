@@ -88,7 +88,16 @@ impl ImportCoordinator {
     }
 
     pub fn set_cancellation(&mut self, cancellation: VideoImportCancellation) {
-        self.cancellation = Some(cancellation);
+        if self.operation_id.is_some() {
+            self.state = ImportState::Preflight;
+            self.cancellation = Some(cancellation);
+        }
+    }
+
+    pub fn mark_setting_up(&mut self, id: ImportOperationId) {
+        if self.operation_id == Some(id) {
+            self.state = ImportState::SettingUp;
+        }
     }
 
     pub fn record_progress(&mut self, id: ImportOperationId, progress: VideoImportProgress) {
@@ -173,6 +182,18 @@ mod tests {
 
         coordinator.record_progress(id, progress(VideoImportPass::Extract));
         assert_eq!(coordinator.state(), ImportState::ExtractingPass2);
+    }
+
+    #[test]
+    fn setup_and_worker_start_have_explicit_states() {
+        let mut coordinator = ImportCoordinator::default();
+        let id = coordinator.begin(PathBuf::from("test.mp4"));
+
+        coordinator.mark_setting_up(id);
+        assert_eq!(coordinator.state(), ImportState::SettingUp);
+
+        coordinator.set_cancellation(VideoImportCancellation::default());
+        assert_eq!(coordinator.state(), ImportState::Preflight);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::VideoImportError;
 
-const MAX_PROBE_JSON_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_PROBE_JSON_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoToolchain {

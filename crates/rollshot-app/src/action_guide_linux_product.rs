@@ -132,10 +132,13 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     path,
                     toolchain,
                     cancellation,
-                } => iced::Task::perform(
-                    run_import_worker(operation_id, path, toolchain, cancellation),
-                    |msg| msg,
-                ),
+                } => action_guide_home::update::run_import_task(
+                    operation_id,
+                    path,
+                    toolchain,
+                    cancellation,
+                )
+                .map(Message::Home),
                 action_guide_home::Effect::OpenImportedTimeline(seed) => {
                     let ws =
                         crate::timeline_workspace::TimelineWorkspace::from_imported_video(seed);
@@ -493,30 +496,6 @@ async fn setup_import_toolchain(
         operation_id,
         result: result.map(|_| ()),
     }
-}
-
-async fn run_import_worker(
-    operation_id: action_guide_home::video_import::ImportOperationId,
-    path: std::path::PathBuf,
-    toolchain: rollshot_action::VideoToolchain,
-    cancellation: rollshot_action::VideoImportCancellation,
-) -> Message {
-    let result = tokio::task::spawn_blocking(move || {
-        let scratch_parent = std::env::temp_dir().join("rollshot/import");
-        let request = rollshot_action::VideoImportRequest {
-            input: path,
-            toolchain,
-            scratch_parent,
-        };
-        rollshot_action::import_video(request, cancellation, |_progress| {})
-    })
-    .await
-    .map_err(|e| format!("Import worker panicked: {e}"))
-    .and_then(|r| r.map_err(|e| format!("Import failed: {e}")));
-    Message::Home(action_guide_home::Message::ImportFinished {
-        operation_id,
-        result: result.map(|seed| std::sync::Arc::new(std::sync::Mutex::new(Some(seed)))),
-    })
 }
 
 #[cfg(test)]

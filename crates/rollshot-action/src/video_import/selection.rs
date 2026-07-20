@@ -31,7 +31,18 @@ impl CandidateSelector {
     }
 
     pub fn count(&self) -> usize {
-        self.buffer.len()
+        match &self.reduced {
+            Some(state) => {
+                let mut candidates = Vec::with_capacity(MAX_GENERATED_STEPS);
+                candidates.extend(state.first);
+                candidates.extend(state.buckets.iter().flatten().copied());
+                candidates.extend(state.latest);
+                candidates.sort_by_key(|candidate| (candidate.at_ms, candidate.center_id));
+                candidates.dedup_by(|a, b| a.at_ms == b.at_ms);
+                candidates.len()
+            }
+            None => self.buffer.len(),
+        }
     }
 
     pub fn push(&mut self, marker: CandidateMarker) {
@@ -310,5 +321,14 @@ mod tests {
             assert_eq!(ca.at_ms, cb.at_ms);
             assert_eq!(ca.center_id, cb.center_id);
         }
+    }
+
+    #[test]
+    fn reduced_count_reports_retained_candidates() {
+        let mut selector = CandidateSelector::new(200_000);
+        for i in 0..250 {
+            selector.push(marker(i, i * 500));
+        }
+        assert!((1..=MAX_GENERATED_STEPS).contains(&selector.count()));
     }
 }

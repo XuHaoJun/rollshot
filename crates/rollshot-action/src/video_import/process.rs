@@ -51,8 +51,12 @@ impl CancellableChild {
     }
 
     pub fn wait(&mut self) -> Result<ExitStatus, VideoImportError> {
+        let status = self
+            .child
+            .wait()
+            .map_err(|_| VideoImportError::ProbeFailed)?;
         self.finished = true;
-        self.child.wait().map_err(|_| VideoImportError::ProbeFailed)
+        Ok(status)
     }
 
     pub fn kill_and_wait(&mut self) {
@@ -192,8 +196,14 @@ pub fn probe_video(
 
     let (tx, rx) = std::sync::mpsc::channel();
     run_cancellable_child(child, cancel, move |mut stdout| {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
+        let mut buf = Vec::with_capacity(super::probe::MAX_PROBE_JSON_BYTES.min(64 * 1024));
+        {
+            let mut limited = stdout
+                .by_ref()
+                .take((super::probe::MAX_PROBE_JSON_BYTES + 1) as u64);
+            let _ = limited.read_to_end(&mut buf);
+        }
+        let _ = io::copy(&mut stdout, &mut io::sink());
         let _ = tx.send(buf);
     })?;
 
@@ -217,10 +227,6 @@ pub fn run_analysis_pass(
     let mut cmd = Command::new(&toolchain.ffmpeg);
     cmd.args(["-nostdin", "-an", "-sn", "-dn"]);
 
-    if meta.rotation_degrees == 90 || meta.rotation_degrees == 270 {
-        cmd.args(["-metadata:s:v", "rotate=0"]);
-    }
-
     let vf = match meta.rotation_degrees {
         90 => format!("transpose=1,{}", analysis_filter),
         180 => format!("transpose=1,transpose=1,{}", analysis_filter),
@@ -229,6 +235,7 @@ pub fn run_analysis_pass(
     };
 
     cmd.args([
+        "-noautorotate",
         "-i",
         &input.to_string_lossy(),
         "-vf",
@@ -249,19 +256,44 @@ pub fn run_analysis_pass(
 
     let stderr_handle: JoinHandle<StderrDiagnostics> = thread::spawn(move || drain_stderr(stderr));
 
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(1);
+    let reader_handle = thread::spawn(move || {
+        let mut stdout = stdout;
+        loop {
+            let mut frame = vec![0u8; frame_size];
+            match read_exact_or_eof(&mut stdout, &mut frame) {
+                Ok(true) => {
+                    if frame_tx.send(AnalysisRead::Frame(frame)).is_err() {
+                        break;
+                    }
+                }
+                Ok(false) => {
+                    let _ = frame_tx.send(AnalysisRead::Eof);
+                    break;
+                }
+                Err(error) => {
+                    let _ = frame_tx.send(AnalysisRead::Error(error.kind()));
+                    break;
+                }
+            }
+        }
+    });
+
     let cancel_ref = cancel.clone();
-    let mut stdout = stdout;
-    let mut frame_buf = vec![0u8; frame_size];
     let mut sample_index: u64 = 0;
+    let mut observed_status = None;
 
     loop {
         if cancel_ref.is_cancelled() {
             child.kill_and_wait();
+            drop(frame_rx);
+            let _ = reader_handle.join();
+            let _ = stderr_handle.join();
             return Err(VideoImportError::Cancelled);
         }
 
-        match read_exact_or_eof(&mut stdout, &mut frame_buf) {
-            Ok(true) => {
+        match frame_rx.recv_timeout(POLL_INTERVAL) {
+            Ok(AnalysisRead::Frame(frame_buf)) => {
                 let width = ANALYSIS_WIDTH;
                 let height = (frame_size / width as usize) as u32;
                 let samples: Vec<f32> = frame_buf.iter().map(|&b| b as f32).collect();
@@ -273,32 +305,64 @@ pub fn run_analysis_pass(
                 on_frame(sample_index, luma);
                 sample_index += 1;
             }
-            Ok(false) => break,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof && sample_index > 0 {
-                    tracing::event!(
-                        target: "rollshot::action::video_import",
-                        tracing::Level::DEBUG,
-                        category = "truncated_frame",
-                        sample_index,
-                        "truncated analysis frame at EOF; ignoring"
-                    );
-                    break;
-                }
+            Ok(AnalysisRead::Eof) => break,
+            Ok(AnalysisRead::Error(error_kind)) => {
                 child.kill_and_wait();
+                drop(frame_rx);
+                let _ = reader_handle.join();
+                let _ = stderr_handle.join();
+                tracing::event!(
+                    target: "rollshot::action::video_import",
+                    tracing::Level::WARN,
+                    category = "analysis_read",
+                    ?error_kind,
+                    sample_index,
+                    "analysis frame read failed"
+                );
                 return Err(VideoImportError::DecodeFailed);
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => match child.child.try_wait() {
+                Ok(Some(status)) => observed_status = Some(status),
+                Ok(None) => {}
+                Err(_) => {
+                    child.kill_and_wait();
+                    drop(frame_rx);
+                    let _ = reader_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(VideoImportError::DecodeFailed);
+                }
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    let status = child.wait()?;
+    let status = match observed_status {
+        Some(status) => {
+            child.finished = true;
+            status
+        }
+        None => child.wait()?,
+    };
+    let _ = reader_handle.join();
     let _diagnostics = stderr_handle.join().unwrap_or_default();
+    validate_analysis_completion(status.success(), false)
+}
 
-    if !status.success() && sample_index == 0 {
-        return Err(VideoImportError::DecodeFailed);
+enum AnalysisRead {
+    Frame(Vec<u8>),
+    Eof,
+    Error(io::ErrorKind),
+}
+
+fn validate_analysis_completion(
+    status_success: bool,
+    truncated_frame: bool,
+) -> Result<(), VideoImportError> {
+    if status_success && !truncated_frame {
+        Ok(())
+    } else {
+        Err(VideoImportError::DecodeFailed)
     }
-
-    Ok(())
 }
 
 fn read_exact_or_eof(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<bool> {
@@ -330,8 +394,8 @@ pub fn run_evidence_pass(
     requested_indices: &[usize],
     staging_dir: &Path,
     cancel: &VideoImportCancellation,
-    _progress: &(impl Fn(super::VideoImportProgress) + Send + Sync),
-    _total_ms: u64,
+    progress: &(impl Fn(super::VideoImportProgress) + Send + Sync),
+    total_ms: u64,
 ) -> Result<HashMap<usize, std::path::PathBuf>, VideoImportError> {
     if requested_indices.is_empty() {
         return Ok(HashMap::new());
@@ -341,10 +405,6 @@ pub fn run_evidence_pass(
 
     let mut cmd = Command::new(&toolchain.ffmpeg);
     cmd.args(["-nostdin", "-an", "-sn", "-dn"]);
-
-    if meta.rotation_degrees == 90 || meta.rotation_degrees == 270 {
-        cmd.args(["-metadata:s:v", "rotate=0"]);
-    }
 
     let scale_filter = format!(
         "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
@@ -366,6 +426,7 @@ pub fn run_evidence_pass(
     };
 
     cmd.args([
+        "-noautorotate",
         "-i",
         &input.to_string_lossy(),
         "-vf",
@@ -379,20 +440,42 @@ pub fn run_evidence_pass(
 
     let cancel_ref = cancel.clone();
 
-    let child = CancellableChild::spawn(cmd)?;
-
+    let mut child = CancellableChild::spawn(cmd)?;
+    let (stdout, stderr) = child
+        .take_pipes()
+        .ok_or(VideoImportError::DecoderUnavailable)?;
+    let stdout_handle = thread::spawn(move || drain_stdout(stdout));
+    let stderr_handle = thread::spawn(move || drain_stderr(stderr));
     let cancel_for_monitor = cancel_ref.clone();
-
-    let mut child = child;
+    let mut emitted_count = 0usize;
 
     loop {
         if cancel_for_monitor.is_cancelled() {
             child.kill_and_wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
             return Err(VideoImportError::Cancelled);
+        }
+
+        let current_count = count_png_files(staging_dir);
+        if current_count > emitted_count {
+            emitted_count = current_count;
+            let processed_ms = requested_indices
+                .get(current_count.saturating_sub(1))
+                .map_or(0, |index| (*index as u64) * 1000 / ANALYSIS_FPS);
+            progress(super::VideoImportProgress {
+                pass: super::VideoImportPass::Extract,
+                processed_ms: processed_ms.min(total_ms),
+                total_ms,
+                retained_candidates: requested_indices.len(),
+            });
         }
 
         match child.child.try_wait() {
             Ok(Some(status)) => {
+                child.finished = true;
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
                 if !status.success() {
                     tracing::event!(
                         target: "rollshot::action::video_import",
@@ -410,6 +493,8 @@ pub fn run_evidence_pass(
             }
             Err(_) => {
                 child.kill_and_wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
                 return Err(VideoImportError::EvidenceMissing);
             }
         }
@@ -422,25 +507,70 @@ pub fn run_evidence_pass(
         .map(|e| e.path())
         .collect();
 
-    let mut result = HashMap::new();
     let mut sorted_outputs = output_files;
     sorted_outputs.sort();
-
-    for (output_idx, &requested_idx) in requested_indices.iter().enumerate() {
-        if output_idx < sorted_outputs.len() {
-            result.insert(requested_idx, sorted_outputs[output_idx].clone());
-        }
-    }
-
-    Ok(result)
+    map_extracted_outputs(requested_indices, sorted_outputs)
 }
 
 fn build_select_filter(indices: &[usize]) -> String {
     if indices.is_empty() {
-        return "select=0".to_string();
+        return format!("fps={ANALYSIS_FPS},select=0");
     }
-    let conditions: Vec<String> = indices.iter().map(|&i| format!("eq(n\\,{})", i)).collect();
-    format!("select='{}'", conditions.join("+"))
+    let mut conditions = Vec::new();
+    let mut start = indices[0];
+    let mut end = start;
+    for &index in &indices[1..] {
+        if index == end.saturating_add(1) {
+            end = index;
+            continue;
+        }
+        conditions.push(select_range(start, end));
+        start = index;
+        end = index;
+    }
+    conditions.push(select_range(start, end));
+    format!("fps={ANALYSIS_FPS},select='{}'", conditions.join("+"))
+}
+
+fn select_range(start: usize, end: usize) -> String {
+    if start == end {
+        format!("eq(n\\,{start})")
+    } else {
+        format!("between(n\\,{start}\\,{end})")
+    }
+}
+
+fn drain_stdout(mut stdout: ChildStdout) {
+    let _ = io::copy(&mut stdout, &mut io::sink());
+}
+
+fn count_png_files(staging_dir: &Path) -> usize {
+    std::fs::read_dir(staging_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+        .count()
+}
+
+pub(crate) fn map_extracted_outputs(
+    requested_indices: &[usize],
+    sorted_outputs: Vec<std::path::PathBuf>,
+) -> Result<HashMap<usize, std::path::PathBuf>, VideoImportError> {
+    if sorted_outputs.len() != requested_indices.len() {
+        tracing::warn!(
+            target: "rollshot::action::video_import",
+            requested_count = requested_indices.len(),
+            output_count = sorted_outputs.len(),
+            "evidence extraction returned an unexpected frame count"
+        );
+        return Err(VideoImportError::EvidenceMissing);
+    }
+    Ok(requested_indices
+        .iter()
+        .copied()
+        .zip(sorted_outputs)
+        .collect())
 }
 
 #[cfg(test)]
@@ -453,10 +583,9 @@ mod tests {
         CancellableChild::spawn(cmd).expect("failed to spawn sleep")
     }
 
-    fn fixture_process_is_alive() -> bool {
-        Command::new("pgrep")
-            .arg("-f")
-            .arg("sleep 300")
+    fn fixture_process_is_alive(pid: u32) -> bool {
+        Command::new("ps")
+            .args(["-p", &pid.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -467,11 +596,12 @@ mod tests {
     #[test]
     fn cancellation_kills_and_waits_for_child() {
         let fixture = long_running_fixture_process();
+        let pid = fixture.child.id();
         let cancel = VideoImportCancellation::default();
         cancel.cancel();
         let error = run_cancellable_child(fixture, &cancel, |_| {}).unwrap_err();
         assert_eq!(error.category(), "cancelled");
-        assert!(!fixture_process_is_alive());
+        assert!(!fixture_process_is_alive(pid));
     }
 
     #[test]
@@ -521,10 +651,74 @@ mod tests {
 
     #[test]
     fn drop_reaps_child_on_early_return() {
-        {
-            let _fixture = long_running_fixture_process();
-        }
+        let fixture = long_running_fixture_process();
+        let pid = fixture.child.id();
+        drop(fixture);
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!fixture_process_is_alive());
+        assert!(!fixture_process_is_alive(pid));
+    }
+
+    #[test]
+    fn evidence_filter_uses_the_analysis_sample_domain() {
+        let filter = build_select_filter(&[0, 1, 4, 8, 9]);
+        assert!(filter.starts_with("fps=2,"), "filter = {filter}");
+        assert!(filter.contains("eq(n\\,4)"), "filter = {filter}");
+        assert!(filter.contains("between(n\\,0\\,1)"), "filter = {filter}");
+        assert!(filter.contains("between(n\\,8\\,9)"), "filter = {filter}");
+    }
+
+    #[test]
+    fn analysis_rejects_partial_output_when_decoder_exits_non_zero() {
+        assert!(validate_analysis_completion(false, false).is_err());
+    }
+
+    #[test]
+    fn analysis_rejects_a_truncated_final_frame() {
+        assert!(validate_analysis_completion(true, true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analysis_cancel_interrupts_a_stalled_decoder() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let decoder = dir.path().join("stalled-decoder");
+        let mut file = std::fs::File::create(&decoder).unwrap();
+        file.write_all(b"#!/bin/sh\nexec sleep 300\n").unwrap();
+        let mut permissions = file.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        drop(file);
+        std::fs::set_permissions(&decoder, permissions).unwrap();
+
+        let cancel = VideoImportCancellation::default();
+        let trigger = cancel.clone();
+        let cancel_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger.cancel();
+        });
+        let started = Instant::now();
+        let result = run_analysis_pass(
+            Path::new("ignored.mp4"),
+            &VideoToolchain {
+                ffmpeg: decoder,
+                ffprobe: Path::new("ignored-ffprobe").to_path_buf(),
+            },
+            ProbeMetadata {
+                duration_ms: 1_000,
+                display_width: 384,
+                display_height: 2,
+                rotation_degrees: 0,
+            },
+            384 * 2,
+            cancel,
+            |_, _| {},
+        );
+        cancel_thread.join().unwrap();
+
+        assert_eq!(result.unwrap_err().category(), "cancelled");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

@@ -542,10 +542,13 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     path,
                     toolchain,
                     cancellation,
-                } => Task::perform(
-                    run_import_worker(operation_id, path, toolchain, cancellation),
-                    |msg| msg,
-                ),
+                } => action_guide_home::update::run_import_task(
+                    operation_id,
+                    path,
+                    toolchain,
+                    cancellation,
+                )
+                .map(Message::HomeMsg),
                 action_guide_home::Effect::OpenImportedTimeline(seed) => {
                     let ws = TimelineWorkspace::from_imported_video(seed);
                     let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
@@ -1373,31 +1376,6 @@ async fn setup_import_toolchain(
         operation_id,
         result: result.map(|_| ()),
     }
-}
-
-#[cfg(feature = "action-guide")]
-async fn run_import_worker(
-    operation_id: action_guide_home::video_import::ImportOperationId,
-    path: std::path::PathBuf,
-    toolchain: rollshot_action::VideoToolchain,
-    cancellation: rollshot_action::VideoImportCancellation,
-) -> Message {
-    let result = tokio::task::spawn_blocking(move || {
-        let scratch_parent = std::env::temp_dir().join("rollshot/import");
-        let request = rollshot_action::VideoImportRequest {
-            input: path,
-            toolchain,
-            scratch_parent,
-        };
-        rollshot_action::import_video(request, cancellation, |_progress| {})
-    })
-    .await
-    .map_err(|e| format!("Import worker panicked: {e}"))
-    .and_then(|r| r.map_err(|e| format!("Import failed: {e}")));
-    Message::HomeMsg(action_guide_home::Message::ImportFinished {
-        operation_id,
-        result: result.map(|seed| std::sync::Arc::new(std::sync::Mutex::new(Some(seed)))),
-    })
 }
 
 #[cfg(feature = "action-guide")]

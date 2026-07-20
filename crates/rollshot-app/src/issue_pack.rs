@@ -134,6 +134,17 @@ pub(crate) fn issue_pack_folder_name(created_at: DateTime<Local>) -> String {
 pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: bool) -> String {
     let mut md = String::from("# Bug Report\n\n");
     md.push_str("## Summary\n\n[Write a short summary]\n\n");
+    #[cfg(feature = "action-guide")]
+    {
+        let notices = rollshot_action::render_import_notices(&input.import_warnings);
+        if !notices.is_empty() {
+            md.push_str("## Import limitations\n\n");
+            for line in notices.lines() {
+                md.push_str(&format!("- {line}\n"));
+            }
+            md.push('\n');
+        }
+    }
     md.push_str("## Steps to reproduce\n\n");
     if let Some(action) = &input.action_guide {
         if include_storyboard {
@@ -149,17 +160,6 @@ pub(crate) fn render_issue_markdown(input: &IssuePackInput, include_storyboard: 
         }
     } else {
         md.push_str("[Write the steps to reproduce]\n\n");
-    }
-    #[cfg(feature = "action-guide")]
-    {
-        let notices = rollshot_action::render_import_notices(&input.import_warnings);
-        if !notices.is_empty() {
-            md.push_str("## Import limitations\n\n");
-            for line in notices.lines() {
-                md.push_str(&format!("- {line}\n"));
-            }
-            md.push('\n');
-        }
     }
     md.push_str("## Actual result\n\n");
     if let Some(image) = &input.final_image {
@@ -1239,6 +1239,10 @@ mod tests {
         let (pack, _tmp) = build_imported_issue_pack();
         let issue_md = std::fs::read_to_string(pack.directory.join("issue.md")).unwrap();
         assert!(issue_md.contains("visual changes"), "issue.md = {issue_md}");
+        assert!(
+            issue_md.find("## Import limitations") < issue_md.find("## Steps to reproduce"),
+            "import limitations must precede reproduction steps: {issue_md}"
+        );
         assert!(pack
             .warnings
             .iter()

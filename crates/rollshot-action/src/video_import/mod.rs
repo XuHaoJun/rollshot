@@ -591,7 +591,7 @@ mod tests {
         dir
     }
 
-    fn alternating_fixture(num_frames: u32, with_audio: bool) -> tempfile::TempDir {
+    fn settling_changes_fixture(change_count: u32, with_audio: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("test.mp4");
 
@@ -623,9 +623,11 @@ mod tests {
         {
             use std::io::Write;
             let stdin = child.stdin.as_mut().unwrap();
-            for i in 0..num_frames {
-                let color = if i % 2 == 0 { 10u8 } else { 240u8 };
-                stdin.write_all(&vec![color; 320 * 240 * 3]).unwrap();
+            for state in 0..=change_count {
+                let color = if state % 2 == 0 { 10u8 } else { 240u8 };
+                for _ in 0..3 {
+                    stdin.write_all(&vec![color; 320 * 240 * 3]).unwrap();
+                }
             }
         }
         child.wait().unwrap();
@@ -946,7 +948,7 @@ mod tests {
         if !fixtures_enabled() {
             return;
         }
-        let fixture = alternating_fixture(404, true);
+        let fixture = settling_changes_fixture(201, true);
         let output = fixture.path().join("test.mp4");
         let (seed, _parent) = run_import(&output).unwrap();
         assert!(
@@ -957,56 +959,82 @@ mod tests {
     }
 
     #[test]
-    fn missing_center_evidence_returns_evidence_missing() {
+    fn evidence_indices_refer_to_two_fps_samples() {
         if !fixtures_enabled() {
             return;
         }
-        let fixture = fixture_video(&[100u8, 200u8], false);
-        let output = fixture.path().join("test.mp4");
-
-        let center_indices = vec![1usize];
-        let evidence_indices = evidence_sample_indices(&center_indices, 2);
-        assert_eq!(evidence_indices, vec![0, 1]);
-
-        let scratch_parent = tempfile::tempdir().unwrap();
-        let staging = scratch_parent.path().join("staging");
-        std::fs::create_dir_all(&staging).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("ten-fps.mp4");
+        let mut child = Command::new(ffmpeg_path())
+            .args([
+                "-y",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "64x64",
+                "-r",
+                "10",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "ffv1",
+                output.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            for value in [20u8, 110, 230] {
+                for _ in 0..5 {
+                    stdin.write_all(&vec![value; 64 * 64 * 3]).unwrap();
+                }
+            }
+        }
+        child.wait().unwrap();
 
         let meta = process::probe_video(&output, &toolchain(), &VideoImportCancellation::default())
             .unwrap();
-
-        let empty: &[usize] = &[];
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
         let extracted = process::run_evidence_pass(
             &output,
             &toolchain(),
             meta,
-            empty,
+            &[2],
             &staging,
             &VideoImportCancellation::default(),
             &|_| {},
             meta.duration_ms,
         )
         .unwrap();
-
-        let mut frames = Vec::new();
-        for (i, &requested_idx) in evidence_indices.iter().enumerate() {
-            let staged_path = extracted.get(&requested_idx);
-            let Some(_path) = staged_path else {
-                if center_indices.contains(&requested_idx) {
-                    panic!(
-                        "center index {} missing from extraction should cause EvidenceMissing",
-                        requested_idx
-                    );
-                }
-                continue;
-            };
-            frames.push((i, requested_idx));
-        }
+        let image = image::open(extracted.get(&2).unwrap()).unwrap().to_rgb8();
+        let mean = image
+            .as_raw()
+            .iter()
+            .map(|value| u64::from(*value))
+            .sum::<u64>()
+            / image.as_raw().len() as u64;
         assert!(
-            frames.is_empty(),
-            "empty extraction set should leave no frames for center={:?}",
-            center_indices
+            mean > 180,
+            "sample 2 should come from about 1s, mean={mean}"
         );
+    }
+
+    #[test]
+    fn missing_center_evidence_returns_evidence_missing() {
+        let center_indices = vec![1usize];
+        let evidence_indices = evidence_sample_indices(&center_indices, 2);
+        assert_eq!(evidence_indices, vec![0, 1]);
+
+        let error = process::map_extracted_outputs(&evidence_indices, Vec::new()).unwrap_err();
+        assert_eq!(error.category(), "evidence_missing");
     }
 
     #[test]

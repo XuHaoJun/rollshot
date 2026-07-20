@@ -346,6 +346,7 @@ impl ActionGuideHome {
                         }
                     }
                     crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(_) => {
+                        self.import.mark_setting_up(operation_id);
                         Update {
                             task: Task::none(),
                             effect: Effect::SetupImportToolchain { operation_id },
@@ -443,6 +444,55 @@ pub fn subscription() -> iced::Subscription<Message> {
         iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
         _ => None,
     })
+}
+
+pub(crate) fn run_import_task(
+    operation_id: ImportOperationId,
+    path: PathBuf,
+    toolchain: rollshot_action::VideoToolchain,
+    cancellation: rollshot_action::VideoImportCancellation,
+) -> Task<Message> {
+    Task::run(
+        iced::stream::channel(32, async move |mut sender| {
+            use iced::futures::SinkExt;
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let worker = tokio::task::spawn_blocking(move || {
+                let request = rollshot_action::VideoImportRequest {
+                    input: path,
+                    toolchain,
+                    scratch_parent: std::env::temp_dir().join("rollshot/import"),
+                };
+                let result = rollshot_action::import_video(request, cancellation, |progress| {
+                    let _ = tx.try_send(Message::ImportProgress {
+                        operation_id,
+                        progress,
+                    });
+                })
+                .map_err(|error| format!("Import failed: {error}"))
+                .map(|seed| Arc::new(Mutex::new(Some(seed))));
+
+                let _ = tx.blocking_send(Message::ImportFinished {
+                    operation_id,
+                    result,
+                });
+            });
+
+            while let Some(message) = rx.recv().await {
+                let _ = sender.send(message).await;
+            }
+
+            if let Err(error) = worker.await {
+                let _ = sender
+                    .send(Message::ImportFinished {
+                        operation_id,
+                        result: Err(format!("Import worker panicked: {error}")),
+                    })
+                    .await;
+            }
+        }),
+        std::convert::identity,
+    )
 }
 
 /// Inspects the shape of a directory to determine its kind.
