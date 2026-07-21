@@ -1142,6 +1142,36 @@ mod tests {
     }
 
     #[test]
+    fn imported_document_uses_standard_annotation_toolbar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image()
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&path).unwrap();
+        let state = ResultWorkspace::with_config_path(
+            ResultDocument::imported(imported.pixels, imported.source),
+            None,
+            None,
+        );
+        let model = toolbar_model(&state, 1100.0);
+
+        for tool in [
+            Tool::Select,
+            Tool::Text,
+            Tool::Arrow,
+            Tool::Pen,
+            Tool::Redact,
+        ] {
+            assert!(model.visible_tools.contains(&tool), "missing {tool:?}");
+        }
+        #[cfg(feature = "ocr")]
+        assert!(model.more.iter().any(|item| item.label == "OCR Text"));
+        #[cfg(not(feature = "ocr"))]
+        assert!(!model.more.iter().any(|item| item.label == "OCR Text"));
+    }
+
+    #[test]
     fn active_highlighter_in_more_at_narrow() {
         let mut s = state();
         s.editor.tool = Tool::Highlighter;

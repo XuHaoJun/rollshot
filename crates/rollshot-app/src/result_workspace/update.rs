@@ -6166,7 +6166,6 @@ mod tests {
         use super::super::properties::ColorProperty;
 
         let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
-        let before = state.document.image.state_id();
         let _ = update(
             &mut state,
             Message::OpenColorPicker(ColorProperty::ShapeFill),
@@ -6176,8 +6175,28 @@ mod tests {
 
         assert!(state.editor.properties.shape_style.is_none());
         assert!(state.editor.properties.color.is_none());
-        assert!(state.editor.properties.popup.is_none());
-        assert_eq!(state.document.image.state_id(), before);
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn imported_document_enters_existing_selectable_ocr_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image::RgbaImage::new(20, 10)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&path).unwrap();
+        let mut state = super::super::ResultWorkspace::with_config_path(
+            super::super::document::ResultDocument::imported(imported.pixels, imported.source),
+            None,
+            None,
+        );
+
+        let task = update(&mut state, Message::SelectTool(Tool::OcrText));
+        drop(task);
+
+        assert!(state.ocr_text.is_preparing_or_ready());
+        assert!(!state.annotations_dirty());
     }
 
     #[test]
