@@ -17,12 +17,14 @@ pub(crate) enum ImageImportErrorKind {
 
 #[derive(Debug)]
 pub(crate) struct ImageImportError {
+    #[expect(dead_code)]
     kind: ImageImportErrorKind,
     path: PathBuf,
     detail: String,
 }
 
 impl ImageImportError {
+    #[expect(dead_code)]
     pub(crate) fn kind(&self) -> ImageImportErrorKind {
         self.kind
     }
@@ -68,13 +70,13 @@ impl ImportedSource {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::MetadataExt as _;
-                    return Ok(metadata.dev() == self.device && metadata.ino() == self.inode);
+                    Ok(metadata.dev() == self.device && metadata.ino() == self.inode)
                 }
                 #[cfg(not(unix))]
                 {
-                    return fs::canonicalize(destination)
+                    fs::canonicalize(destination)
                         .map(|path| path == self.canonical_path)
-                        .map_err(|error| format!("could not verify export destination: {error}"));
+                        .map_err(|error| format!("could not verify export destination: {error}"))
                 }
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
