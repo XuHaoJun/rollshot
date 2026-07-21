@@ -289,7 +289,9 @@ fn status_bar(state: &ResultWorkspace, image_size: Size) -> Element<'_, Message>
         status
     };
 
-    status.spacing(8).align_y(Alignment::Center).into()
+    container(status.spacing(8).align_y(Alignment::Center))
+        .width(Length::Fill)
+        .into()
 }
 
 fn zoom_label(state: &ResultWorkspace) -> String {

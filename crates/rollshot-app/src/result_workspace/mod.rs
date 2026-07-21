@@ -800,4 +800,52 @@ mod tests {
         let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
         assert!(ui.find("Imported • Unsaved edits").is_ok());
     }
+
+    #[test]
+    #[ignore = "writes visual debugging artifacts"]
+    fn render_imported_workspace_visual_scenarios() {
+        let artifact_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/result-workspace");
+
+        for (label, size, dirty) in [
+            (
+                "imported-clean-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                false,
+            ),
+            ("imported-clean-640x420", IcedSize::new(640.0, 420.0), false),
+            (
+                "imported-dirty-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                true,
+            ),
+            ("imported-dirty-640x420", IcedSize::new(640.0, 420.0), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("source.png");
+            image()
+                .save_with_format(&path, image::ImageFormat::Png)
+                .unwrap();
+            let imported = crate::image_import::load(&path).unwrap();
+            let mut state = ResultWorkspace::with_config_path(
+                ResultDocument::imported(imported.pixels, imported.source),
+                None,
+                None,
+            );
+            if dirty {
+                state
+                    .document
+                    .image
+                    .add_text_note(
+                        rollshot_image_document::ImagePoint::new(1.0, 1.0),
+                        "note".to_string(),
+                    )
+                    .unwrap();
+            }
+            let mut ui = simulator_at(&state, size);
+            let snapshot = ui.snapshot(&iced::Theme::Dark).expect(label);
+            let base = artifact_dir.join(label);
+            assert!(snapshot.matches_image(base).expect("write scenario PNG"));
+        }
+    }
 }
