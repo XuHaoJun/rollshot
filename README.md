@@ -446,6 +446,28 @@ logs a warning and keeps working through the menu. Starting a second daemon
 exits immediately without a second menu item. The shortcut uses Carbon hotkey
 registration and does not require Accessibility permission.
 
+### Open an Existing Image
+
+Open one static PNG or JPEG directly in the Result Workspace:
+
+```bash
+cargo run -p rollshot-app -- open ./screenshot.png
+```
+
+The source image is read-only. Annotation exports use **Save As**, default to
+`<source-stem>-annotated.png` beside the source, and are flattened PNG files.
+Rollshot refuses destinations that resolve to the imported source.
+
+Opening and annotation work in the default build. Selectable **OCR Text** is
+available when `rollshot-app` is built with the `ocr` feature:
+
+```bash
+cargo run -p rollshot-app --features ocr -- open ./screenshot.png
+```
+
+The first release accepts one local static PNG or JPEG. It does not add a GUI
+file picker, drag-and-drop, multi-image tabs, or other image formats.
+
 ### Region Text Capture (OCR)
 
 Rollshot can recognize text in a selected screen region and copy it to the
