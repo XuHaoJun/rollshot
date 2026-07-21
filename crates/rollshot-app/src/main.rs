@@ -90,6 +90,7 @@ fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String>
             run_iced_capture(options, post_capture::CapturePurpose::Present)
         }
         LaunchMode::Daemon => daemon::run(),
+        LaunchMode::Open { .. } => todo!("open image path — wired in a later task"),
         LaunchMode::Ocr {
             options,
             graphical_feedback,

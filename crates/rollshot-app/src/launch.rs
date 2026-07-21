@@ -5,6 +5,9 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Capture(InteractiveLaunchOptions),
+    Open {
+        path: PathBuf,
+    },
     Ocr {
         options: InteractiveLaunchOptions,
         graphical_feedback: bool,
@@ -45,6 +48,9 @@ pub struct LaunchCli {
 pub enum LaunchCommand {
     /// Capture a screenshot or scrolling capture (default when no subcommand).
     Capture(CaptureArgs),
+
+    /// Open an existing PNG or JPEG for annotation and optional OCR.
+    Open(OpenArgs),
 
     /// Recognize text in a selected region and copy it to the clipboard.
     Ocr(OcrArgs),
@@ -123,6 +129,13 @@ pub struct CaptureArgs {
     pub scope: ScopeArg,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct OpenArgs {
+    /// Existing static PNG or JPEG to open in the Result Workspace.
+    #[arg(value_name = "IMAGE")]
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum WorkflowArg {
@@ -192,6 +205,7 @@ pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode,
             },
             graphical_feedback: args.graphical_feedback,
         }),
+        Some(LaunchCommand::Open(args)) => Ok(LaunchMode::Open { path: args.path }),
         #[cfg(feature = "action-guide")]
         Some(LaunchCommand::ActionGuide(args)) => {
             if args.record {
@@ -214,6 +228,7 @@ mod tests {
     use super::{resolve_launch_mode, LaunchCli, LaunchMode};
     use clap::Parser;
     use rollshot_capture::CaptureRequest;
+    use std::path::PathBuf;
 
     #[cfg(feature = "action-guide")]
     use super::ActionGuideLaunch;
@@ -565,5 +580,31 @@ mod tests {
         let probe = LaunchMode::ActionGuideProbe;
         let home = LaunchMode::ActionGuide(ActionGuideLaunch::Home);
         assert_ne!(probe, home);
+    }
+
+    #[test]
+    fn open_requires_exactly_one_image_path() {
+        let mode =
+            parse(&["rollshot-app", "open", "fixtures/sample.png"]).expect("open path parses");
+        assert_eq!(
+            mode,
+            LaunchMode::Open {
+                path: PathBuf::from("fixtures/sample.png"),
+            }
+        );
+
+        assert!(LaunchCli::try_parse_from(["rollshot-app", "open"]).is_err());
+        assert!(LaunchCli::try_parse_from(["rollshot-app", "open", "a.png", "b.png"]).is_err());
+    }
+
+    #[test]
+    fn open_rejects_capture_only_flags() {
+        assert!(
+            LaunchCli::try_parse_from(["rollshot-app", "open", "a.png", "--backend", "auto"])
+                .is_err()
+        );
+        assert!(
+            LaunchCli::try_parse_from(["rollshot-app", "open", "a.png", "--show-cursor"]).is_err()
+        );
     }
 }
