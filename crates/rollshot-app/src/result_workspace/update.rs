@@ -1200,9 +1200,11 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 }
             }
             commit_text_draft(state);
-            let default_dir = crate::storage::Platform::current()
-                .and_then(crate::storage::default_output_dir)
-                .unwrap_or_else(|_| PathBuf::from("."));
+            let default_dir = state.document.default_save_dir().unwrap_or_else(|| {
+                crate::storage::Platform::current()
+                    .and_then(crate::storage::default_output_dir)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+            });
             let default_name = super::secure_sharing::default_save_name(&state.document);
             Task::perform(
                 super::actions::prompt_save_as(default_dir, default_name),
@@ -1210,13 +1212,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             )
         }
         Message::SavePathChosen(Some(path)) => {
-            let safe_output = state.has_secure_redactions();
-            if super::secure_sharing::safe_export_overwrites_source(&state.document, &path) {
-                state.message = Some(InlineMessage::Error(
-                    super::secure_sharing::SAFE_EXPORT_OVERWRITE_ERROR.to_string(),
-                ));
+            let path = match super::actions::normalize_png_destination(path) {
+                Ok(path) => path,
+                Err(error) => {
+                    state.message = Some(InlineMessage::Error(error));
+                    return Task::none();
+                }
+            };
+            if let Err(error) =
+                super::secure_sharing::validate_export_destination(&state.document, &path)
+            {
+                state.message = Some(InlineMessage::Error(error.message().to_string()));
                 return Task::none();
             }
+            let safe_output = state.has_secure_redactions();
             let image = save_payload(state);
             let saved_state_id = state.document.image.state_id();
             Task::perform(
@@ -1533,7 +1542,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 })
             }
             Some(super::secure_sharing::UnredactedAction::RevealOriginal) => {
-                let Some(path) = state.document.source_path.as_deref() else {
+                let Some(path) = state.document.source_path() else {
                     return Task::none();
                 };
                 Task::done(Message::RevealFinished(super::actions::reveal(path)))
@@ -6165,10 +6174,32 @@ mod tests {
         let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
         let _ = update(&mut state, Message::CancelShapeStyle);
 
+        assert!(state.editor.properties.popup.is_none());
         assert!(state.editor.properties.shape_style.is_none());
         assert!(state.editor.properties.color.is_none());
-        assert!(state.editor.properties.popup.is_none());
         assert_eq!(state.document.image.state_id(), before);
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn imported_document_enters_existing_selectable_ocr_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image::RgbaImage::new(20, 10)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&path).unwrap();
+        let mut state = super::super::ResultWorkspace::with_config_path(
+            super::super::document::ResultDocument::imported(imported.pixels, imported.source),
+            None,
+            None,
+        );
+
+        let task = update(&mut state, Message::SelectTool(Tool::OcrText));
+        drop(task);
+
+        assert!(state.ocr_text.is_preparing_or_ready());
+        assert!(!state.annotations_dirty());
     }
 
     #[test]
@@ -7740,6 +7771,56 @@ mod tests {
         assert_eq!(
             source_before, source_after,
             "repeated flatten must not mutate source bytes"
+        );
+    }
+
+    // -- imported source protection (Task 4) ----------------------------------
+
+    fn imported_workspace_for_save() -> (tempfile::TempDir, super::super::ResultWorkspace, PathBuf)
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.png");
+        image::RgbaImage::new(4, 4)
+            .save_with_format(&source_path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&source_path).unwrap();
+        let state = super::super::ResultWorkspace::with_config_path(
+            super::super::document::ResultDocument::imported(imported.pixels, imported.source),
+            None,
+            None,
+        );
+        (dir, state, source_path)
+    }
+
+    #[test]
+    fn rejected_imported_destinations_preserve_document_and_export_state() {
+        let (dir, mut state, source_path) = imported_workspace_for_save();
+        for rejected_path in [source_path, dir.path().join("wrong-extension.jpg")] {
+            let before_state_id = state.document.image.state_id();
+            let before_export = state.document.last_export_path.clone();
+            let task = update(&mut state, Message::SavePathChosen(Some(rejected_path)));
+            drop(task);
+            assert_eq!(state.document.image.state_id(), before_state_id);
+            assert_eq!(state.document.last_export_path, before_export);
+            assert!(state.message.as_ref().unwrap().is_error());
+        }
+    }
+
+    #[test]
+    fn save_to_unverifiable_destination_is_rejected_before_write() {
+        let (dir, mut state, _source_path) = imported_workspace_for_save();
+        let unverifiable = dir.path().join("missing-parent").join("export.png");
+        let before_state_id = state.document.image.state_id();
+        let before_export = state.document.last_export_path.clone();
+
+        let task = update(&mut state, Message::SavePathChosen(Some(unverifiable)));
+        drop(task);
+
+        assert_eq!(state.document.image.state_id(), before_state_id);
+        assert_eq!(state.document.last_export_path, before_export);
+        assert_eq!(
+            state.message.as_ref().map(|message| message.text()),
+            Some(super::super::secure_sharing::DESTINATION_VERIFICATION_ERROR)
         );
     }
 }

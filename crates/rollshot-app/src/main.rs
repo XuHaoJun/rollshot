@@ -8,6 +8,7 @@ mod action_input;
 pub mod daemon;
 mod diagnostics;
 mod image_clipboard;
+mod image_import;
 mod launch;
 #[cfg(feature = "action-guide")]
 mod managed_ffmpeg;
@@ -62,6 +63,7 @@ fn main() -> ExitCode {
             tracing::error!(
                 target: diagnostics::TARGET_APP,
                 error_category = diagnostics::classify_app_error(&error),
+                error = %error,
                 "application failed"
             );
             ExitCode::FAILURE
@@ -90,6 +92,19 @@ fn run(command: Option<LaunchCommand>, file_logging: bool) -> Result<(), String>
             run_iced_capture(options, post_capture::CapturePurpose::Present)
         }
         LaunchMode::Daemon => daemon::run(),
+        LaunchMode::Open { path } => {
+            tracing::info!(
+                target: diagnostics::TARGET_IMAGE_IMPORT,
+                "image import started"
+            );
+            let document = prepare_open_document(&path)?;
+            run_open_image(document).map_err(|error| {
+                format!(
+                    "could not open image {}: workspace launch failed: {error}",
+                    path.display()
+                )
+            })
+        }
         LaunchMode::Ocr {
             options,
             graphical_feedback,
@@ -209,6 +224,37 @@ fn run_action_guide_launch(launch: launch::ActionGuideLaunch) -> Result<(), Stri
     }
 }
 
+fn prepare_open_document(
+    path: &std::path::Path,
+) -> Result<result_workspace::ResultDocument, String> {
+    let imported = image_import::load(path).map_err(|error| error.to_string())?;
+    tracing::info!(
+        target: diagnostics::TARGET_IMAGE_IMPORT,
+        width = imported.pixels.width(),
+        height = imported.pixels.height(),
+        "image import complete"
+    );
+    Ok(result_workspace::ResultDocument::imported(
+        imported.pixels,
+        imported.source,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn run_open_image(document: result_workspace::ResultDocument) -> Result<(), String> {
+    result_workspace::run(document, None)
+}
+
+#[cfg(target_os = "macos")]
+fn run_open_image(document: result_workspace::ResultDocument) -> Result<(), String> {
+    macos_product::run_imported(document)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn run_open_image(_document: result_workspace::ResultDocument) -> Result<(), String> {
+    Err("image workspace is unsupported on this platform".to_string())
+}
+
 fn run_iced_capture(
     options: rollshot_capture::InteractiveLaunchOptions,
     purpose: post_capture::CapturePurpose,
@@ -292,5 +338,19 @@ mod tests {
             super::launch::LaunchCli::try_parse_from(["rollshot-app", "ocr"]).expect("parse ocr");
         let err = super::run(cli.command, false).unwrap_err();
         assert_eq!(err, "OCR is not available in this build");
+    }
+
+    #[test]
+    fn open_preparation_builds_imported_document_without_ocr_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.png");
+        image::RgbaImage::new(3, 4)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+
+        let document = super::prepare_open_document(&path).unwrap();
+
+        assert!(document.is_imported());
+        assert_eq!(document.image.source().dimensions(), (3, 4));
     }
 }

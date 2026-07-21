@@ -1119,8 +1119,6 @@ fn style(product: &MacosProduct, theme: &iced::Theme) -> iced::theme::Style {
 
 /// Start exactly ONE `iced::daemon`, owning the whole post-capture flow.
 pub fn run(config: OverlayConfig, purpose: CapturePurpose) -> Result<(), String> {
-    use std::sync::Mutex;
-
     // The daemon `boot` closure is `Fn`, so it cannot own the non-`Clone`
     // `MacosProduct` directly. Acquire the capture component (which starts the
     // screen capture before the overlay surface exists) here and stash the built
@@ -1130,8 +1128,32 @@ pub fn run(config: OverlayConfig, purpose: CapturePurpose) -> Result<(), String>
         Some(pair) => pair,
         None => return Ok(()),
     };
-    let slot: Mutex<Option<(MacosProduct, Task<Message>)>> = Mutex::new(Some((product, boot_task)));
+    run_product(product, boot_task)
+}
 
+fn from_imported_document(document: ResultDocument) -> (MacosProduct, Task<Message>) {
+    let workspace =
+        ResultWorkspace::new(document, None).with_initial_viewport(INITIAL_WORKSPACE_VIEWPORT);
+    let mut product = MacosProduct {
+        phase: Phase::Workspace(workspace),
+        purpose: CapturePurpose::Present,
+        document: None,
+        thumbnail_window: None,
+        workspace_window: None,
+        thumbnail_cursor: Point::ORIGIN,
+        #[cfg(feature = "action-guide")]
+        recording_tray: None,
+        #[cfg(feature = "action-guide")]
+        lock_conflict_path: None,
+    };
+    let open_task = open_presentation_window(&mut product);
+    (product, open_task)
+}
+
+fn run_product(product: MacosProduct, boot_task: Task<Message>) -> Result<(), String> {
+    use std::sync::Mutex;
+
+    let slot = Mutex::new(Some((product, boot_task)));
     iced::daemon(
         move || {
             slot.lock()
@@ -1148,7 +1170,12 @@ pub fn run(config: OverlayConfig, purpose: CapturePurpose) -> Result<(), String>
     .theme(theme)
     .style(style)
     .run()
-    .map_err(|e| e.to_string())
+    .map_err(|error| error.to_string())
+}
+
+pub fn run_imported(document: ResultDocument) -> Result<(), String> {
+    let (product, boot_task) = from_imported_document(document);
+    run_product(product, boot_task)
 }
 
 #[cfg(feature = "action-guide")]
@@ -1524,7 +1551,7 @@ mod tests {
             Phase::Workspace(ws) => {
                 // Same pixels reused from the in-memory document; not reloaded.
                 assert_eq!(ws.document.image.source().as_raw(), &raw);
-                assert!(ws.document.source_path.is_some());
+                assert!(ws.document.source_path().is_some());
             }
             _ => panic!("expected saved workspace phase"),
         }
@@ -1583,6 +1610,24 @@ mod tests {
             CapturePurpose::Present,
         );
         assert!(matches!(product.phase, Phase::Workspace(_)));
+    }
+
+    #[test]
+    fn imported_document_boots_workspace_without_capture_or_thumbnail_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image()
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&path).unwrap();
+        let document = ResultDocument::imported(imported.pixels, imported.source);
+
+        let (product, _open_task) = from_imported_document(document);
+
+        assert!(matches!(product.phase, Phase::Workspace(_)));
+        assert!(product.document.is_none());
+        assert!(product.thumbnail_window.is_none());
+        assert!(product.workspace_window.is_some());
     }
 
     #[cfg(feature = "action-guide")]

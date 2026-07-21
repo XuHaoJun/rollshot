@@ -2,6 +2,7 @@
 pub(crate) const TARGET_APP: &str = "rollshot::app";
 #[allow(dead_code)]
 pub(crate) const TARGET_FILTER: &str = "rollshot::app::filter";
+pub(crate) const TARGET_IMAGE_IMPORT: &str = "rollshot::app::image_import";
 #[allow(dead_code)]
 pub(crate) const TARGET_OCR_TEXT: &str = "rollshot::app::ocr_text";
 #[allow(dead_code)]
@@ -135,7 +136,9 @@ pub(crate) fn select_filter(raw: Option<&str>) -> SelectedFilter {
 
 pub(crate) fn classify_app_error(error: &str) -> &'static str {
     let lower = error.to_lowercase();
-    if lower.contains("launch") || lower.contains("argument") || lower.contains("payload") {
+    if lower.contains("could not open image") || lower.contains("image import") {
+        "image_import"
+    } else if lower.contains("launch") || lower.contains("argument") || lower.contains("payload") {
         "launch"
     } else if lower.contains("capture")
         || lower.contains("backend")
@@ -285,5 +288,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing").join("rollshot.jsonl");
         assert!(open_log_file(&path).is_err());
+    }
+
+    #[test]
+    fn image_import_failures_have_their_own_category() {
+        assert_eq!(
+            classify_app_error("could not open image /tmp/a.png: unsupported image format"),
+            "image_import"
+        );
     }
 }

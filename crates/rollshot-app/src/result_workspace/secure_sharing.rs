@@ -104,7 +104,7 @@ pub(crate) fn copy_original_label(document: &ResultDocument) -> &'static str {
 }
 
 pub(crate) fn retained_original_disclosure(document: &ResultDocument) -> Option<&'static str> {
-    (has_secure_redactions(document) && document.source_path.is_some())
+    (has_secure_redactions(document) && document.source_path().is_some())
         .then_some(RETAINED_ORIGINAL_DISCLOSURE)
 }
 
@@ -119,8 +119,7 @@ pub(crate) fn reveal_action(document: &ResultDocument) -> RevealAction<'_> {
             }
         }
         return document
-            .source_path
-            .as_deref()
+            .source_path()
             .map(RevealAction::ConfirmUnredacted)
             .unwrap_or(RevealAction::Disabled);
     }
@@ -135,16 +134,19 @@ pub(crate) fn reveal_action(document: &ResultDocument) -> RevealAction<'_> {
 }
 
 pub(crate) fn default_save_name(document: &ResultDocument) -> String {
-    let base = super::document::default_save_name(document);
-    if !has_secure_redactions(document) {
+    let base = document.default_save_name();
+    if !has_secure_redactions(document) || document.is_imported() {
         return base;
     }
+    add_redacted_suffix(&base)
+}
 
-    let path = Path::new(&base);
+fn add_redacted_suffix(base: &str) -> String {
+    let path = Path::new(base);
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy())
-        .unwrap_or_else(|| base.as_str().into());
+        .unwrap_or_else(|| base.into());
     match path
         .extension()
         .map(|extension| extension.to_string_lossy())
@@ -154,13 +156,29 @@ pub(crate) fn default_save_name(document: &ResultDocument) -> String {
     }
 }
 
-pub(crate) fn safe_export_overwrites_source(document: &ResultDocument, destination: &Path) -> bool {
-    if !has_secure_redactions(document) {
-        return false;
+pub(crate) const IMPORTED_SOURCE_READ_ONLY_ERROR: &str =
+    "Imported source is read-only. Choose another export location.";
+pub(crate) const DESTINATION_VERIFICATION_ERROR: &str =
+    "Rollshot could not verify the export destination. Choose another location.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExportDestinationError {
+    ImportedSourceReadOnly,
+    UnsafeRedactionSource,
+    VerificationFailed,
+}
+
+impl ExportDestinationError {
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            Self::ImportedSourceReadOnly => IMPORTED_SOURCE_READ_ONLY_ERROR,
+            Self::UnsafeRedactionSource => SAFE_EXPORT_OVERWRITE_ERROR,
+            Self::VerificationFailed => DESTINATION_VERIFICATION_ERROR,
+        }
     }
-    let Some(source) = document.source_path.as_deref() else {
-        return false;
-    };
+}
+
+fn paths_resolve_equal(source: &Path, destination: &Path) -> bool {
     if source == destination {
         return true;
     }
@@ -171,6 +189,28 @@ pub(crate) fn safe_export_overwrites_source(document: &ResultDocument, destinati
         (Ok(source), Ok(destination)) => source == destination,
         _ => false,
     }
+}
+
+pub(crate) fn validate_export_destination(
+    document: &ResultDocument,
+    destination: &Path,
+) -> Result<(), ExportDestinationError> {
+    if let Some(source) = document.imported_source() {
+        return match source.destination_matches(destination) {
+            Ok(true) => Err(ExportDestinationError::ImportedSourceReadOnly),
+            Ok(false) => Ok(()),
+            Err(_) => Err(ExportDestinationError::VerificationFailed),
+        };
+    }
+
+    if has_secure_redactions(document)
+        && document
+            .source_path()
+            .is_some_and(|source| paths_resolve_equal(source, destination))
+    {
+        return Err(ExportDestinationError::UnsafeRedactionSource);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,32 +305,6 @@ mod tests {
 
         let document = ResultDocument::unsaved(image());
         assert!(!default_save_name(&document).contains("-redacted"));
-    }
-
-    #[test]
-    fn source_path_is_rejected_only_for_safe_exports() {
-        let mut document = saved();
-        let source = Path::new("/tmp/original.png");
-        assert!(!safe_export_overwrites_source(&document, source));
-        add_redaction(&mut document);
-        assert!(safe_export_overwrites_source(&document, source));
-        assert!(!safe_export_overwrites_source(
-            &document,
-            Path::new("/tmp/other.png")
-        ));
-    }
-
-    #[test]
-    fn canonical_source_alias_is_rejected_for_safe_export() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("original.png");
-        std::fs::write(&source, b"source").unwrap();
-        let mut document = ResultDocument::saved(image(), source.clone());
-        add_redaction(&mut document);
-
-        let alias = dir.path().join(".").join("original.png");
-        assert_ne!(source.to_string_lossy(), alias.to_string_lossy());
-        assert!(safe_export_overwrites_source(&document, &alias));
     }
 
     #[test]
@@ -455,5 +469,52 @@ mod tests {
             !has_secure_redactions(&document),
             "removing OpaqueRedaction clears secure classification even with Pixelate present"
         );
+    }
+
+    #[test]
+    fn imported_redaction_keeps_annotated_export_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("screen.jpg");
+        image()
+            .save_with_format(&source_path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&source_path).unwrap();
+        let mut document = ResultDocument::imported(imported.pixels, imported.source);
+        assert_eq!(default_save_name(&document), "screen-annotated.png");
+        add_redaction(&mut document);
+        assert_eq!(default_save_name(&document), "screen-annotated.png");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn imported_source_is_rejected_with_or_without_redactions() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.png");
+        image()
+            .save_with_format(&source_path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&source_path).unwrap();
+        let mut document = ResultDocument::imported(imported.pixels, imported.source);
+
+        assert_eq!(
+            validate_export_destination(&document, &source_path).unwrap_err(),
+            ExportDestinationError::ImportedSourceReadOnly
+        );
+
+        let alias = dir.path().join("alias.png");
+        symlink(&source_path, &alias).unwrap();
+        assert_eq!(
+            validate_export_destination(&document, &alias).unwrap_err(),
+            ExportDestinationError::ImportedSourceReadOnly
+        );
+
+        add_redaction(&mut document);
+        assert_eq!(
+            validate_export_destination(&document, &source_path).unwrap_err(),
+            ExportDestinationError::ImportedSourceReadOnly
+        );
+        assert!(validate_export_destination(&document, &dir.path().join("safe.png")).is_ok());
     }
 }

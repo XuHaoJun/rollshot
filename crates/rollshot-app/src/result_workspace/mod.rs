@@ -218,11 +218,13 @@ impl ResultWorkspace {
 
         let message = if let Some(err) = initial_error {
             Some(InlineMessage::Error(err))
+        } else if let document::DocumentOrigin::SavedCapture(ref path) = document.origin {
+            Some(InlineMessage::success(format!(
+                "Saved to {}",
+                path.display()
+            )))
         } else {
-            document
-                .source_path
-                .as_deref()
-                .map(|path| InlineMessage::success(format!("Saved to {}", path.display())))
+            None
         };
 
         let zoom = viewport::default_zoom(source_size);
@@ -284,6 +286,10 @@ impl ResultWorkspace {
 
     pub fn annotations_dirty(&self) -> bool {
         self.document.image.state_id() != self.editor.saved_state_id
+    }
+
+    pub(crate) fn document_status_text(&self) -> Option<&'static str> {
+        self.document.origin_status(self.annotations_dirty())
     }
 
     pub(crate) fn has_secure_redactions(&self) -> bool {
@@ -753,5 +759,103 @@ mod tests {
             state.pending_discard.is_none(),
             "a successful save should close the discard prompt"
         );
+    }
+
+    // -- imported workspace status (Task 5) ----------------------------------
+
+    fn imported_workspace() -> (tempfile::TempDir, ResultWorkspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image()
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&path).unwrap();
+        let state = ResultWorkspace::with_config_path(
+            ResultDocument::imported(imported.pixels, imported.source),
+            None,
+            None,
+        );
+        (dir, state)
+    }
+
+    #[test]
+    fn imported_workspace_status_is_visible_and_tracks_dirty_state() {
+        let (_dir, mut state) = imported_workspace();
+        assert_eq!(state.document_status_text(), Some("Imported"));
+
+        {
+            let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+            assert!(ui.find("Imported").is_ok());
+        }
+
+        state
+            .document
+            .image
+            .add_text_note(
+                rollshot_image_document::ImagePoint::new(1.0, 1.0),
+                "note".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.document_status_text(),
+            Some("Imported • Unsaved edits")
+        );
+        let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+        assert!(ui.find("Imported • Unsaved edits").is_ok());
+    }
+
+    #[test]
+    fn imported_workspace_has_no_saved_to_message() {
+        let (_dir, state) = imported_workspace();
+        // Imported documents must not show "Saved to ..." — nothing was saved.
+        assert!(state.message.is_none(), "message = {:?}", state.message);
+    }
+
+    #[test]
+    #[ignore = "writes visual debugging artifacts"]
+    fn render_imported_workspace_visual_scenarios() {
+        let artifact_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/result-workspace");
+
+        for (label, size, dirty) in [
+            (
+                "imported-clean-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                false,
+            ),
+            ("imported-clean-640x420", IcedSize::new(640.0, 420.0), false),
+            (
+                "imported-dirty-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                true,
+            ),
+            ("imported-dirty-640x420", IcedSize::new(640.0, 420.0), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("source.png");
+            image()
+                .save_with_format(&path, image::ImageFormat::Png)
+                .unwrap();
+            let imported = crate::image_import::load(&path).unwrap();
+            let mut state = ResultWorkspace::with_config_path(
+                ResultDocument::imported(imported.pixels, imported.source),
+                None,
+                None,
+            );
+            if dirty {
+                state
+                    .document
+                    .image
+                    .add_text_note(
+                        rollshot_image_document::ImagePoint::new(1.0, 1.0),
+                        "note".to_string(),
+                    )
+                    .unwrap();
+            }
+            let mut ui = simulator_at(&state, size);
+            let snapshot = ui.snapshot(&iced::Theme::Dark).expect(label);
+            let base = artifact_dir.join(label);
+            assert!(snapshot.matches_image(base).expect("write scenario PNG"));
+        }
     }
 }

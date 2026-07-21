@@ -45,7 +45,7 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm git cargo rust clang pkgconf dbus libpipewire libxkbcommon mesa wayland
+          pacman -S --noconfirm git cargo rust clang pkgconf curl dbus libpipewire libxkbcommon mesa wayland
       - name: Build package
         env:
           ROLLSHOT_PKGVER: ${{ needs.metadata.outputs.package_version }}
@@ -76,11 +76,30 @@ jobs:
     name: macOS Apple Silicon artifacts
     runs-on: macos-14
     needs: metadata
+    env:
+      ROLLSHOT_OCR_MODELS_DIR: ${{ github.workspace }}/.ocr-models
+      ORT_LIB_LOCATION: ${{ github.workspace }}/.ort/lib
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Cache OCR models
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ocr-models
+          key: ocr-models-ppocrv4-${{ hashFiles('crates/rollshot-ocr/build.rs') }}
+      - name: Cache ONNX Runtime lib
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ort
+          key: ort-static-macOS-14-2.0.0-rc.10
+      - name: Provision ONNX Runtime static lib
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${{ github.workspace }}/.ort"
+          ./scripts/ci/provision-onnxruntime.sh "${{ runner.os }}" "${{ github.workspace }}/.ort"
       - name: Build rollshot-app
-        run: cargo build --release -p rollshot-app
+        run: cargo build --release -p rollshot-app --features ocr
       - name: Build macOS artifacts
         run: |
           python3 scripts/release/macos_bundle.py \
