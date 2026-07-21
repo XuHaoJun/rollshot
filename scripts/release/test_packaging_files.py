@@ -17,3 +17,15 @@ def test_rolling_release_workflow_moves_internal_latest_tag():
 
     assert "git tag -f internal-latest" in workflow
     assert "git push --force origin refs/tags/internal-latest" in workflow
+
+
+def test_official_packages_build_rollshot_app_with_ocr():
+    pkgbuild = (ROOT / "packaging/arch/PKGBUILD").read_text()
+    workflow = (ROOT / ".github/workflows/internal-release.yml").read_text()
+
+    assert "cargo build --release -p rollshot-app --features ocr" in pkgbuild
+    assert "cargo build --release -p rollshot-app --features ocr" in workflow
+    assert "provision-onnxruntime.sh Linux" in pkgbuild
+    assert 'provision-onnxruntime.sh "${{ runner.os }}"' in workflow
+    assert "ORT_LIB_LOCATION" in pkgbuild
+    assert "ORT_LIB_LOCATION" in workflow
