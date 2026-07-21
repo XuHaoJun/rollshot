@@ -268,16 +268,19 @@ fn status_bar(state: &ResultWorkspace, image_size: Size) -> Element<'_, Message>
     let dims = format!("{} × {}", image_size.width as u32, image_size.height as u32);
     let zoom_label = zoom_label(state);
 
-    let status = row![
-        text(dims),
-        text(zoom_label).width(Length::Fill),
-        button(text("Fit Width")).on_press(Message::SetZoom(ZoomMode::FitWidth)),
-        button(text("Fit Window")).on_press(Message::SetZoom(ZoomMode::FitWindow)),
-        button(text("Fit Height")).on_press(Message::SetZoom(ZoomMode::FitHeight)),
-        button(text("100%")).on_press(Message::SetZoom(ZoomMode::ActualSize)),
-        button(text("-")).on_press(Message::ZoomStep(ZoomDirection::Out)),
-        button(text("+")).on_press(Message::ZoomStep(ZoomDirection::In)),
-    ];
+    let mut status = row![].spacing(8).align_y(Alignment::Center);
+    if let Some(document_status) = state.document_status_text() {
+        status = status.push(text(document_status));
+    }
+    let status = status
+        .push(text(dims))
+        .push(text(zoom_label).width(Length::Fill))
+        .push(button(text("Fit Width")).on_press(Message::SetZoom(ZoomMode::FitWidth)))
+        .push(button(text("Fit Window")).on_press(Message::SetZoom(ZoomMode::FitWindow)))
+        .push(button(text("Fit Height")).on_press(Message::SetZoom(ZoomMode::FitHeight)))
+        .push(button(text("100%")).on_press(Message::SetZoom(ZoomMode::ActualSize)))
+        .push(button(text("-")).on_press(Message::ZoomStep(ZoomDirection::Out)))
+        .push(button(text("+")).on_press(Message::ZoomStep(ZoomDirection::In)));
 
     #[cfg(feature = "ocr")]
     let status = if state.editor.tool == super::canvas::Tool::OcrText {

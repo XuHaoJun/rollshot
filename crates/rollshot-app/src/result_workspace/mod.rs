@@ -285,6 +285,10 @@ impl ResultWorkspace {
         self.document.image.state_id() != self.editor.saved_state_id
     }
 
+    pub(crate) fn document_status_text(&self) -> Option<&'static str> {
+        self.document.origin_status(self.annotations_dirty())
+    }
+
     pub(crate) fn has_secure_redactions(&self) -> bool {
         secure_sharing::has_secure_redactions(&self.document)
     }
@@ -752,5 +756,48 @@ mod tests {
             state.pending_discard.is_none(),
             "a successful save should close the discard prompt"
         );
+    }
+
+    // -- imported workspace status (Task 5) ----------------------------------
+
+    fn imported_workspace() -> (tempfile::TempDir, ResultWorkspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image()
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&path).unwrap();
+        let state = ResultWorkspace::with_config_path(
+            ResultDocument::imported(imported.pixels, imported.source),
+            None,
+            None,
+        );
+        (dir, state)
+    }
+
+    #[test]
+    fn imported_workspace_status_is_visible_and_tracks_dirty_state() {
+        let (_dir, mut state) = imported_workspace();
+        assert_eq!(state.document_status_text(), Some("Imported"));
+
+        {
+            let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+            assert!(ui.find("Imported").is_ok());
+        }
+
+        state
+            .document
+            .image
+            .add_text_note(
+                rollshot_image_document::ImagePoint::new(1.0, 1.0),
+                "note".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.document_status_text(),
+            Some("Imported • Unsaved edits")
+        );
+        let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+        assert!(ui.find("Imported • Unsaved edits").is_ok());
     }
 }
