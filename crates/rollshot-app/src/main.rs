@@ -8,6 +8,7 @@ mod action_input;
 pub mod daemon;
 mod diagnostics;
 mod image_clipboard;
+mod image_import;
 mod launch;
 #[cfg(feature = "action-guide")]
 mod managed_ffmpeg;
