@@ -156,25 +156,6 @@ fn add_redacted_suffix(base: &str) -> String {
     }
 }
 
-pub(crate) fn safe_export_overwrites_source(document: &ResultDocument, destination: &Path) -> bool {
-    if !has_secure_redactions(document) {
-        return false;
-    }
-    let Some(source) = document.source_path() else {
-        return false;
-    };
-    if source == destination {
-        return true;
-    }
-    match (
-        std::fs::canonicalize(source),
-        std::fs::canonicalize(destination),
-    ) {
-        (Ok(source), Ok(destination)) => source == destination,
-        _ => false,
-    }
-}
-
 pub(crate) const IMPORTED_SOURCE_READ_ONLY_ERROR: &str =
     "Imported source is read-only. Choose another export location.";
 pub(crate) const DESTINATION_VERIFICATION_ERROR: &str =
@@ -324,32 +305,6 @@ mod tests {
 
         let document = ResultDocument::unsaved(image());
         assert!(!default_save_name(&document).contains("-redacted"));
-    }
-
-    #[test]
-    fn source_path_is_rejected_only_for_safe_exports() {
-        let mut document = saved();
-        let source = Path::new("/tmp/original.png");
-        assert!(!safe_export_overwrites_source(&document, source));
-        add_redaction(&mut document);
-        assert!(safe_export_overwrites_source(&document, source));
-        assert!(!safe_export_overwrites_source(
-            &document,
-            Path::new("/tmp/other.png")
-        ));
-    }
-
-    #[test]
-    fn canonical_source_alias_is_rejected_for_safe_export() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("original.png");
-        std::fs::write(&source, b"source").unwrap();
-        let mut document = ResultDocument::saved(image(), source.clone());
-        add_redaction(&mut document);
-
-        let alias = dir.path().join(".").join("original.png");
-        assert_ne!(source.to_string_lossy(), alias.to_string_lossy());
-        assert!(safe_export_overwrites_source(&document, &alias));
     }
 
     #[test]
