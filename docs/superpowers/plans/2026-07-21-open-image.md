@@ -799,6 +799,18 @@ fn imported_reveal_prefers_latest_export() {
 }
 ```
 
+Also pin the display names of the existing origins so the refactor cannot regress capture-flow naming:
+
+```rust
+#[test]
+fn existing_origins_keep_their_display_names() {
+    let saved = ResultDocument::saved(image(), PathBuf::from("/tmp/result.png"));
+    assert_eq!(saved.display_name(), "result.png");
+    let unsaved = ResultDocument::unsaved(image());
+    assert_eq!(unsaved.display_name(), UNSAVED_LABEL);
+}
+```
+
 Keep the `TempDir` alive in the helper by returning it with the document:
 
 ```rust
@@ -841,6 +853,16 @@ pub struct ResultDocument {
     pub last_export_path: Option<PathBuf>,
     pub last_export_is_safe: bool,
 }
+```
+
+Replace the existing `ResultDocument` doc comment with a short origin-semantics table so the invariants stay legible:
+
+```text
+Origin          | Save policy                    | Default export name        | Close can lose source
+----------------+--------------------------------+----------------------------+----------------------
+UnsavedCapture  | Save As; no durable source yet | Rollshot <timestamp>.png   | yes, until exported
+SavedCapture    | Save As; source is auto-save   | <source file name>         | no
+Imported        | Save As only; source read-only | <stem>-annotated.png       | no
 ```
 
 Preserve existing constructor names and add imported construction:
@@ -969,6 +991,24 @@ pub(crate) fn default_save_name(document: &ResultDocument) -> String {
 ```
 
 Extract the existing suffix code unchanged into `add_redacted_suffix`.
+
+Add a naming regression test in `secure_sharing.rs` covering the new imported branch with and without redactions:
+
+```rust
+#[test]
+fn imported_redaction_keeps_annotated_export_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("screen.jpg");
+    image()
+        .save_with_format(&source_path, image::ImageFormat::Png)
+        .unwrap();
+    let imported = crate::image_import::load(&source_path).unwrap();
+    let mut document = ResultDocument::imported(imported.pixels, imported.source);
+    assert_eq!(default_save_name(&document), "screen-annotated.png");
+    add_redaction(&mut document);
+    assert_eq!(default_save_name(&document), "screen-annotated.png");
+}
+```
 
 - [ ] **Step 7: Run document, secure-sharing, and workspace state tests**
 
@@ -1234,6 +1274,28 @@ fn rejected_imported_destinations_preserve_document_and_export_state() {
 }
 ```
 
+Also add the spec §11.2 conservative-verification test: a destination whose parent cannot be canonicalized must be rejected with the distinct verification error before any write:
+
+```rust
+#[test]
+fn save_to_unverifiable_destination_is_rejected_before_write() {
+    let (dir, mut state, _source_path) = imported_workspace_for_save();
+    let unverifiable = dir.path().join("missing-parent").join("export.png");
+    let before_state_id = state.document.image.state_id();
+    let before_export = state.document.last_export_path.clone();
+
+    let task = update(&mut state, Message::SavePathChosen(Some(unverifiable)));
+    drop(task);
+
+    assert_eq!(state.document.image.state_id(), before_state_id);
+    assert_eq!(state.document.last_export_path, before_export);
+    assert_eq!(
+        state.message.as_ref().map(|message| message.text()),
+        Some(super::super::secure_sharing::DESTINATION_VERIFICATION_ERROR)
+    );
+}
+```
+
 Also keep the successful Save As test proving `apply_save_as` sets `editor.saved_state_id`, clears pending discard state, and records the normalized `.png` path.
 
 - [ ] **Step 8: Run focused save and secure-sharing suites**
@@ -1243,7 +1305,7 @@ Run:
 ```bash
 rtk cargo test -p rollshot-app result_workspace::actions -- --nocapture
 rtk cargo test -p rollshot-app result_workspace::secure_sharing -- --nocapture
-rtk cargo test -p rollshot-app result_workspace::update::tests::save -- --nocapture
+rtk cargo test -p rollshot-app result_workspace::update::tests -- --nocapture
 ```
 
 Expected: all focused tests pass, including pre-existing secure-redaction behavior.
@@ -1909,8 +1971,12 @@ Resolve any uncovered changed behavior with a focused test before completion.
 - [ ] **Step 12: Commit documentation, release packaging, and final test adjustments**
 
 ```bash
-rtk git add README.md .github/workflows/internal-release.yml packaging/arch/PKGBUILD scripts/release/test_packaging_files.py crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/toolbar.rs
-rtk git commit -m "feat(release): ship open image OCR support"
+rtk git add crates/rollshot-app/src/result_workspace/update.rs crates/rollshot-app/src/result_workspace/toolbar.rs
+rtk git commit -m "test(app): cover imported document OCR matrix"
+rtk git add README.md
+rtk git commit -m "docs(app): document the open image command"
+rtk git add .github/workflows/internal-release.yml packaging/arch/PKGBUILD scripts/release/test_packaging_files.py
+rtk git commit -m "feat(release): enable OCR in official artifacts"
 ```
 
 - [ ] **Step 13: Verify the branch is clean and summarize evidence**
