@@ -104,7 +104,7 @@ pub(crate) fn copy_original_label(document: &ResultDocument) -> &'static str {
 }
 
 pub(crate) fn retained_original_disclosure(document: &ResultDocument) -> Option<&'static str> {
-    (has_secure_redactions(document) && document.source_path.is_some())
+    (has_secure_redactions(document) && document.source_path().is_some())
         .then_some(RETAINED_ORIGINAL_DISCLOSURE)
 }
 
@@ -119,8 +119,7 @@ pub(crate) fn reveal_action(document: &ResultDocument) -> RevealAction<'_> {
             }
         }
         return document
-            .source_path
-            .as_deref()
+            .source_path()
             .map(RevealAction::ConfirmUnredacted)
             .unwrap_or(RevealAction::Disabled);
     }
@@ -135,16 +134,19 @@ pub(crate) fn reveal_action(document: &ResultDocument) -> RevealAction<'_> {
 }
 
 pub(crate) fn default_save_name(document: &ResultDocument) -> String {
-    let base = super::document::default_save_name(document);
-    if !has_secure_redactions(document) {
+    let base = document.default_save_name();
+    if !has_secure_redactions(document) || document.is_imported() {
         return base;
     }
+    add_redacted_suffix(&base)
+}
 
-    let path = Path::new(&base);
+fn add_redacted_suffix(base: &str) -> String {
+    let path = Path::new(base);
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy())
-        .unwrap_or_else(|| base.as_str().into());
+        .unwrap_or_else(|| base.into());
     match path
         .extension()
         .map(|extension| extension.to_string_lossy())
@@ -158,7 +160,7 @@ pub(crate) fn safe_export_overwrites_source(document: &ResultDocument, destinati
     if !has_secure_redactions(document) {
         return false;
     }
-    let Some(source) = document.source_path.as_deref() else {
+    let Some(source) = document.source_path() else {
         return false;
     };
     if source == destination {
@@ -455,5 +457,19 @@ mod tests {
             !has_secure_redactions(&document),
             "removing OpaqueRedaction clears secure classification even with Pixelate present"
         );
+    }
+
+    #[test]
+    fn imported_redaction_keeps_annotated_export_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("screen.jpg");
+        image()
+            .save_with_format(&source_path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&source_path).unwrap();
+        let mut document = ResultDocument::imported(imported.pixels, imported.source);
+        assert_eq!(default_save_name(&document), "screen-annotated.png");
+        add_redaction(&mut document);
+        assert_eq!(default_save_name(&document), "screen-annotated.png");
     }
 }

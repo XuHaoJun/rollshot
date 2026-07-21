@@ -220,8 +220,7 @@ impl ResultWorkspace {
             Some(InlineMessage::Error(err))
         } else {
             document
-                .source_path
-                .as_deref()
+                .source_path()
                 .map(|path| InlineMessage::success(format!("Saved to {}", path.display())))
         };
 

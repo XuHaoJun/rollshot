@@ -1524,7 +1524,7 @@ mod tests {
             Phase::Workspace(ws) => {
                 // Same pixels reused from the in-memory document; not reloaded.
                 assert_eq!(ws.document.image.source().as_raw(), &raw);
-                assert!(ws.document.source_path.is_some());
+                assert!(ws.document.source_path().is_some());
             }
             _ => panic!("expected saved workspace phase"),
         }

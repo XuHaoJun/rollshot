@@ -1533,7 +1533,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 })
             }
             Some(super::secure_sharing::UnredactedAction::RevealOriginal) => {
-                let Some(path) = state.document.source_path.as_deref() else {
+                let Some(path) = state.document.source_path() else {
                     return Task::none();
                 };
                 Task::done(Message::RevealFinished(super::actions::reveal(path)))
