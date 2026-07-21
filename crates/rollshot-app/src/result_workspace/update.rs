@@ -6166,6 +6166,7 @@ mod tests {
         use super::super::properties::ColorProperty;
 
         let mut state = workspace_with_shape(rollshot_image_document::ShapeKind::Rectangle);
+        let before = state.document.image.state_id();
         let _ = update(
             &mut state,
             Message::OpenColorPicker(ColorProperty::ShapeFill),
@@ -6173,8 +6174,10 @@ mod tests {
         let _ = update(&mut state, Message::PreviewColor(Rgb8::new(10, 20, 30)));
         let _ = update(&mut state, Message::CancelShapeStyle);
 
+        assert!(state.editor.properties.popup.is_none());
         assert!(state.editor.properties.shape_style.is_none());
         assert!(state.editor.properties.color.is_none());
+        assert_eq!(state.document.image.state_id(), before);
     }
 
     #[cfg(feature = "ocr")]
