@@ -1119,8 +1119,6 @@ fn style(product: &MacosProduct, theme: &iced::Theme) -> iced::theme::Style {
 
 /// Start exactly ONE `iced::daemon`, owning the whole post-capture flow.
 pub fn run(config: OverlayConfig, purpose: CapturePurpose) -> Result<(), String> {
-    use std::sync::Mutex;
-
     // The daemon `boot` closure is `Fn`, so it cannot own the non-`Clone`
     // `MacosProduct` directly. Acquire the capture component (which starts the
     // screen capture before the overlay surface exists) here and stash the built

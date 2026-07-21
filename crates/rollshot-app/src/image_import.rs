@@ -16,15 +16,15 @@ pub(crate) enum ImageImportErrorKind {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ImageImportError {
-    #[expect(dead_code)]
     kind: ImageImportErrorKind,
     path: PathBuf,
     detail: String,
 }
 
+#[allow(dead_code)]
 impl ImageImportError {
-    #[expect(dead_code)]
     pub(crate) fn kind(&self) -> ImageImportErrorKind {
         self.kind
     }
