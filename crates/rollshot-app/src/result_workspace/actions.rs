@@ -139,6 +139,23 @@ mod diagnostic_tests {
     }
 }
 
+pub(crate) fn normalize_png_destination(mut path: PathBuf) -> Result<PathBuf, String> {
+    match path.extension() {
+        None => {
+            path.set_extension("png");
+            Ok(path)
+        }
+        Some(extension)
+            if extension
+                .to_str()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("png")) =>
+        {
+            Ok(path)
+        }
+        Some(_) => Err("Rollshot exports PNG files. Choose a .png filename.".to_string()),
+    }
+}
+
 /// Open the directory containing `path` in the platform file manager.
 ///
 /// Delegates to [`crate::platform_actions::reveal`].
@@ -158,5 +175,21 @@ mod tests {
         // reveal delegates to platform_actions; on CI it may fail
         // due to no file manager, but it must not panic.
         let _ = reveal(&path);
+    }
+
+    #[test]
+    fn png_destination_normalizes_missing_extension_and_rejects_other_extensions() {
+        assert_eq!(
+            normalize_png_destination(PathBuf::from("/tmp/result")).unwrap(),
+            PathBuf::from("/tmp/result.png")
+        );
+        assert_eq!(
+            normalize_png_destination(PathBuf::from("/tmp/result.PNG")).unwrap(),
+            PathBuf::from("/tmp/result.PNG")
+        );
+        assert_eq!(
+            normalize_png_destination(PathBuf::from("/tmp/result.jpg")).unwrap_err(),
+            "Rollshot exports PNG files. Choose a .png filename."
+        );
     }
 }

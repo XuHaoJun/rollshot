@@ -175,6 +175,63 @@ pub(crate) fn safe_export_overwrites_source(document: &ResultDocument, destinati
     }
 }
 
+pub(crate) const IMPORTED_SOURCE_READ_ONLY_ERROR: &str =
+    "Imported source is read-only. Choose another export location.";
+pub(crate) const DESTINATION_VERIFICATION_ERROR: &str =
+    "Rollshot could not verify the export destination. Choose another location.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExportDestinationError {
+    ImportedSourceReadOnly,
+    UnsafeRedactionSource,
+    VerificationFailed,
+}
+
+impl ExportDestinationError {
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            Self::ImportedSourceReadOnly => IMPORTED_SOURCE_READ_ONLY_ERROR,
+            Self::UnsafeRedactionSource => SAFE_EXPORT_OVERWRITE_ERROR,
+            Self::VerificationFailed => DESTINATION_VERIFICATION_ERROR,
+        }
+    }
+}
+
+fn paths_resolve_equal(source: &Path, destination: &Path) -> bool {
+    if source == destination {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(source),
+        std::fs::canonicalize(destination),
+    ) {
+        (Ok(source), Ok(destination)) => source == destination,
+        _ => false,
+    }
+}
+
+pub(crate) fn validate_export_destination(
+    document: &ResultDocument,
+    destination: &Path,
+) -> Result<(), ExportDestinationError> {
+    if let Some(source) = document.imported_source() {
+        return match source.destination_matches(destination) {
+            Ok(true) => Err(ExportDestinationError::ImportedSourceReadOnly),
+            Ok(false) => Ok(()),
+            Err(_) => Err(ExportDestinationError::VerificationFailed),
+        };
+    }
+
+    if has_secure_redactions(document)
+        && document
+            .source_path()
+            .is_some_and(|source| paths_resolve_equal(source, destination))
+    {
+        return Err(ExportDestinationError::UnsafeRedactionSource);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +528,38 @@ mod tests {
         assert_eq!(default_save_name(&document), "screen-annotated.png");
         add_redaction(&mut document);
         assert_eq!(default_save_name(&document), "screen-annotated.png");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn imported_source_is_rejected_with_or_without_redactions() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.png");
+        image()
+            .save_with_format(&source_path, image::ImageFormat::Png)
+            .unwrap();
+        let imported = crate::image_import::load(&source_path).unwrap();
+        let mut document = ResultDocument::imported(imported.pixels, imported.source);
+
+        assert_eq!(
+            validate_export_destination(&document, &source_path).unwrap_err(),
+            ExportDestinationError::ImportedSourceReadOnly
+        );
+
+        let alias = dir.path().join("alias.png");
+        symlink(&source_path, &alias).unwrap();
+        assert_eq!(
+            validate_export_destination(&document, &alias).unwrap_err(),
+            ExportDestinationError::ImportedSourceReadOnly
+        );
+
+        add_redaction(&mut document);
+        assert_eq!(
+            validate_export_destination(&document, &source_path).unwrap_err(),
+            ExportDestinationError::ImportedSourceReadOnly
+        );
+        assert!(validate_export_destination(&document, &dir.path().join("safe.png")).is_ok());
     }
 }
