@@ -218,10 +218,13 @@ impl ResultWorkspace {
 
         let message = if let Some(err) = initial_error {
             Some(InlineMessage::Error(err))
+        } else if let document::DocumentOrigin::SavedCapture(ref path) = document.origin {
+            Some(InlineMessage::success(format!(
+                "Saved to {}",
+                path.display()
+            )))
         } else {
-            document
-                .source_path()
-                .map(|path| InlineMessage::success(format!("Saved to {}", path.display())))
+            None
         };
 
         let zoom = viewport::default_zoom(source_size);
@@ -799,6 +802,13 @@ mod tests {
         );
         let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
         assert!(ui.find("Imported • Unsaved edits").is_ok());
+    }
+
+    #[test]
+    fn imported_workspace_has_no_saved_to_message() {
+        let (_dir, state) = imported_workspace();
+        // Imported documents must not show "Saved to ..." — nothing was saved.
+        assert!(state.message.is_none(), "message = {:?}", state.message);
     }
 
     #[test]

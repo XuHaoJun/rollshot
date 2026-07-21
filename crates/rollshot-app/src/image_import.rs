@@ -103,13 +103,10 @@ pub(crate) struct ImportedImage {
 }
 
 pub(crate) fn load(path: &Path) -> Result<ImportedImage, ImageImportError> {
-    let file = File::open(path).map_err(|error| ImageImportError {
+    // Stat before open: `File::open` on a FIFO (named pipe) blocks until a
+    // writer appears, so reject non-regular files first.
+    let metadata = fs::metadata(path).map_err(|error| ImageImportError {
         kind: open_error_kind(&error),
-        path: path.to_path_buf(),
-        detail: error.to_string(),
-    })?;
-    let metadata = file.metadata().map_err(|error| ImageImportError {
-        kind: ImageImportErrorKind::Read,
         path: path.to_path_buf(),
         detail: error.to_string(),
     })?;
@@ -120,6 +117,12 @@ pub(crate) fn load(path: &Path) -> Result<ImportedImage, ImageImportError> {
             detail: "path is not a regular file".to_string(),
         });
     }
+
+    let file = File::open(path).map_err(|error| ImageImportError {
+        kind: open_error_kind(&error),
+        path: path.to_path_buf(),
+        detail: error.to_string(),
+    })?;
 
     let canonical_path = fs::canonicalize(path).map_err(|error| ImageImportError {
         kind: ImageImportErrorKind::Read,
