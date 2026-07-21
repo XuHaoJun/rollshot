@@ -205,7 +205,7 @@ An imported source may never be selected as the destination. Source equivalence 
 - symlinks that resolve to the source; and
 - an existing hard link or other filesystem identity that denotes the same file.
 
-For an existing destination, compare resolved filesystem identity. For a destination that does not yet exist, resolve the existing parent directory and compare the resulting destination path to the resolved source path. If identity cannot be established safely, fail closed only when the candidate can plausibly denote the source; do not block unrelated export destinations merely because optional canonicalization failed.
+For an existing destination, compare resolved filesystem identity. For a destination that does not yet exist, canonicalize its existing parent directory, append the proposed filename, and compare that resolved path to the canonical source path. If either check cannot establish a trustworthy answer, reject the export before writing and report that Rollshot could not verify the destination. This conservative error is distinct from the confirmed source-overwrite error below.
 
 Rejected source overwrite leaves the Workspace and all edits intact and shows:
 
@@ -270,7 +270,7 @@ Once the Workspace is open, import has completed. Later OCR, copy, Reveal, and e
 - Reject GIF, WebP, SVG, PDF, corrupt data, directories, missing files, and unreadable files.
 - Apply all relevant JPEG EXIF orientation variants and verify final dimensions/pixels.
 - Preserve a usable source display path and resolved source identity.
-- Verify import creates no files and does not modify source bytes or metadata.
+- Verify import creates no files, leaves source contents byte-for-byte unchanged, and performs no application-initiated metadata writes. Filesystem-managed access-time changes are outside this guarantee.
 
 ### 14.3 Document lifecycle and source protection
 
@@ -314,7 +314,7 @@ The feature is complete when:
 2. No capture, overlay, auto-save, or thumbnail step occurs.
 3. Existing annotation tools, copy, secure redaction, viewport, and Save As work on the imported image.
 4. OCR-enabled builds expose selectable OCR; non-OCR builds retain a fully working annotation flow.
-5. The imported source remains byte-for-byte unchanged through annotation, OCR, copy, export, Reveal, and close flows.
+5. The imported source contents remain byte-for-byte unchanged through annotation, OCR, copy, export, Reveal, and close flows; Rollshot performs no source metadata writes.
 6. Save As defaults to `<stem>-annotated.png` and never overwrites any filesystem-equivalent form of the source.
 7. Dirty, exported, Reveal, and close-confirmation behavior matches the rules above.
 8. Unsupported, corrupt, missing, unreadable, or unsafe-to-decode inputs fail before Workspace launch with a non-zero status and actionable error.
