@@ -32,9 +32,9 @@ behavioral equivalence. This profile therefore separates:
   says these exist in the fork but not upstream: `StatusLineComponent`,
   multi-credential auth with session affinity, Capability-based discovery,
   MCP/Exa/SSH integrations, LSP writethrough for format-on-save, Bash
-  interception. This exact six-entry list is the only fork-added classification
-  made here; it is documentation evidence, not an independently reproduced
-  upstream diff. [D4];
+  interception, and fuzzy path suggestions in the read tool. This exact
+  seven-entry list is the only fork-added classification made here; it is
+  documentation evidence, not an independently reproduced upstream diff. [D4];
 - **example only**: repository examples that are not loaded by default;
 - **feature-gated or experimental**: source exists, but activation requires a
   setting, optional backend, explicit hook/extension, or experimental flag;
@@ -751,9 +751,8 @@ X1]
   `docs/extension-loading.md`.
 - **D3:** `docs/providers.md`, `docs/adding-a-provider.md`.
 - **D4 — bounded fork-added classification:**
-  `docs/porting-from-pi-mono.md:377-386`, which labels exactly six preserved
-  features as existing in the fork but not upstream. No other feature receives
-  fork-origin attribution in this profile without a direct upstream comparison.
+  `docs/porting-from-pi-mono.md:377-387`, which labels exactly seven preserved
+  features as existing in the fork but not upstream.
 
 ### Examples, inferences, and bounded absence searches
 
