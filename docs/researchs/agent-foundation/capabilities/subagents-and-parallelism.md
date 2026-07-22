@@ -168,9 +168,11 @@ model/tool list and cwd. It does not copy parent messages. [E:P1]
 Parallel mode accepts at most eight items and runs four subprocesses at once
 through a source-order worker pool. It returns results in input order, caps
 model-visible output to 50 KB per item, and retains detailed results in tool
-details. One shared abort signal sends SIGTERM, then attempts SIGKILL after five
-seconds. Chain mode stops at the first failed child and injects the preceding
-final text through `{previous}`. [E:P1]
+details. One shared abort signal calls `proc.kill("SIGTERM")` for each active
+subprocess, then after five seconds conditionally calls
+`proc.kill("SIGKILL")` only when `!proc.killed`. Runtime signal delivery and
+process-cleanup reliability were not exercised. Chain mode stops at the first
+failed child and injects the preceding final text through `{previous}`. [E:P1]
 
 This is useful subprocess evidence, but its model/tools/caps/cancellation are
 extension-local. The one tool-call `AbortSignal` is passed to every active
@@ -339,7 +341,7 @@ Every negative or unknown cell cites an exact audit in Section 13.
 | Design | Admission, queue, fairness and backpressure | Cancellation | Completion and retry |
 |---|---|---|---|
 | **Rollshot** | One Run and serial tool batch; child admission does not exist [A:R]. | One cancellation source reaches provider and automation. | Typed Run terminal/proposal; no child completion [A:R]. |
-| **Pi example** | Max 8 per call, 4 active; source-order local pool. Cross-call/global fairness or backpressure was **not found** [A:P1]. | One tool-call signal sends TERM then KILL to every active subprocess; no exposed child ID/controller or addressed single-child cancel was found [A:P2]. | Process/assistant result; chain stops on failure. Expected Artifact validation/selective retry was **not found** [A:P1]. |
+| **Pi example** | Max 8 per call, 4 active; source-order local pool. Cross-call/global fairness or backpressure was **not found** [A:P1]. | One tool-call signal calls `proc.kill("SIGTERM")` for every active subprocess, then after five seconds conditionally calls `proc.kill("SIGKILL")` only when `!proc.killed`; runtime termination reliability is unverified. No exposed child ID/controller or addressed single-child cancel was found [A:P2]. | Process/assistant result; chain stops on failure. Expected Artifact validation/selective retry was **not found** [A:P1]. |
 | **OMP Task + Job** | FIFO only inside one per-session semaphore; default 32 and dynamically resized. Job active cap defaults to 15; parked items are excluded and direct over-cap registration errors. Durable/cross-session fairness is a source-bound gap [A:OQ]. | Abortable semaphore waits, child run and owner-scoped Job cancellation. Process death loses controllers [A:O]. | Yield/schema/raw fallback; delivery retry is in memory. Expected Artifact gate and durable attempt ledger were **not found** [A:O]. |
 | **Codex V1** | Shared registry cap 6, depth 1; hard error, no spawn queue [E:C2, A:C1]. | Explicit interrupt; separate legacy tree shutdown. | Completion watcher notification/status. Typed Artifact validation/retry was **not found** [A:C3]. |
 | **Codex V2** | 4 total including root; LRU idle unload then hard error. Mailbox queue is not admission queue; fairness unknown [A:C1]. | Explicit per-path interrupt; persistent topology is not cancellation intent. | Parent mailbox/status; no expected Artifact contract [A:C3]. |
@@ -554,8 +556,10 @@ All negative claims are limited to these exact audits:
 - **[A:P2] Pi addressed-cancellation gap.** The same three literal files were
   searched with
   `cancel|abort|signal|kill|terminate|child.?id|task.?id|agent.?id|address|interrupt`.
-  Hits were the tool-call `AbortSignal`, `wasAborted`, TERM/KILL calls, README
-  abort prose, result agent labels and a UI “Canceled” string. Direct source
+  Hits were the tool-call `AbortSignal`, `wasAborted`, the direct
+  `proc.kill("SIGTERM")` call, the five-second conditional
+  `if (!proc.killed) proc.kill("SIGKILL")` call, README abort prose, result
+  agent labels and a UI “Canceled” string. Direct source
   inspection showed the same `signal` passed to every parallel
   `runSingleAgent`; each process closure owns only its local `proc`. No child
   process/controller ID is returned or accepted by a cancel/interrupt API.
@@ -677,7 +681,8 @@ Required spikes before synthesis can select a pattern:
 - **[E:P1] Example source, not installed default:**
   `packages/coding-agent/examples/extensions/subagent/{index,agents}.ts` and
   `README.md`: subprocess invocation, prompt/model/Tool scope, chain, 8/4 caps,
-  output accounting and TERM/KILL behavior. No runtime execution.
+  output accounting, the source-level SIGTERM call and conditional SIGKILL
+  call. Runtime signal delivery and cleanup were not executed.
 
 ### oh-my-pi
 
