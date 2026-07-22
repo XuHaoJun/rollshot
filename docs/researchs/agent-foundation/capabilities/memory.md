@@ -1,6 +1,6 @@
 # Agent memory boundaries
 
-Status: Round 2 capability comparison; candidate space only
+Status: In Progress (Round 2 capability comparison)
 
 Research date: 2026-07-22 (Asia/Taipei)
 
@@ -66,11 +66,11 @@ bounded by the audits in Section 14.
 
 | System | Run memory | Session / transcript | Project memory | User memory | Team memory | Consolidation | Evidence character |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Rollshot** | Default, in-memory `AgentRun` plus current `AgentSession`. | In-memory `AgentSession` exchanges; no serialization or product return path observed. | Missing — **not found in the investigated scope**. [A:R0] | Missing — **not found in the investigated scope**. [A:R0] | Missing — **not found in the investigated scope**. [A:R0] | Missing — **not found in the investigated scope**. [A:R0] | Source plus runner/workbench callsites and tests. [E:R1, E:R2] |
+| **Rollshot** | Default, in-memory `AgentRun` plus current `AgentSession`. | In-memory `AgentSession` exchanges; a serialization/persistence hook is **not found in the investigated scope**. [A:R1] | Missing — **not found in the investigated scope**. [A:R0] | Missing — **not found in the investigated scope**. [A:R0] | Missing — **not found in the investigated scope**. [A:R0] | Missing — **not found in the investigated scope**. [A:R0] | Source plus runner/workbench callsites and tests. [E:R1, E:R2] |
 | **Pi coding-agent** | Default in-memory agent state. | Default JSONL session tree; `--no-session` disables persistence; picker can resume and delete. | Built-in semantic project memory is **not found in the investigated scope**. [A:P0] | **Not found in the investigated scope**. [A:P0] | **Not found in the investigated scope**. [A:P0] | **Not found in the investigated scope**. [A:P0] | Source/docs plus session tests in the reviewed profile. [E:P1, E:P2] |
 | **oh-my-pi** | Default Pi-lineage in-memory run state. | Default persisted JSONL session; unpersisted sessions are excluded from memory extraction. | Optional local backend, default off; path is encoded from `cwd`. | A typed user scope is **not found in the investigated scope**. [A:O0] | A typed team/shared scope is **not found in the investigated scope**. [A:O0] | Optional local two-phase extraction/consolidation, default off with memory. | Source, configuration, commands, and focused storage/consolidation tests. [E:O1, E:O2, E:O3, E:O4] |
-| **Codex** | Default thread/turn runtime state. | Default canonical rollout JSONL plus SQLite metadata where available. | Memory feature is stable but default off; the inspected store is Codex-home/global with `cwd`-aware inputs, not a declared typed project store. | Typed user memory is **not found in the investigated scope**. [A:C0] | Typed team memory is **not found in the investigated scope**. [A:C0] | Default-off two-phase global consolidation; read/use and generation can be separately gated. | Source, app-server wiring, state queries, prompts, and focused tests. [E:C1, E:C2, E:C3, E:C4, E:C5] |
-| **Claude Code** | Default live query/app state. | Persistent session history is separate from auto memory. | Auto memory is implemented and default on for eligible ordinary sessions; project/git-root keyed. | Implemented typed `user` memory inside the project memory corpus; this is a semantic category, not proven cross-project user scope. [E:L1] | Implemented but feature/server/OAuth gated team memory and sync. [E:L4] | Direct main-agent memory writes are default; background extraction and nightly/dream-style consolidation are separately gated. | Source and visible callsites; server-controlled gates and missing internal modules limit runtime certainty. [E:L1, E:L2, E:L3, E:L4] |
+| **Codex** | Default thread/turn runtime state. | Default canonical rollout JSONL plus SQLite metadata where available. | Memory feature is stable but default off; the inspected store is Codex-home/global with `cwd`-aware inputs; a declared typed project store is **not found in the investigated scope**. [A:C0] | Typed user memory is **not found in the investigated scope**. [A:C0] | Typed team memory is **not found in the investigated scope**. [A:C0] | Default-off two-phase global consolidation; read/use and generation can be separately gated. | Source, app-server wiring, state queries, prompts, and focused tests. [E:C1, E:C2, E:C3, E:C4, E:C5] |
+| **Claude Code** | Default live query/app state. | Persistent session history is separate from auto memory. | Auto memory is implemented and default on for eligible ordinary sessions; project/git-root keyed. | Implemented typed `user` memory inside the project memory corpus; the visible path establishes a semantic category and project-keyed storage, while cross-project user-store behavior is outside the inspected boundary. [G:L0] | Implemented but feature/server/OAuth gated team memory and sync. [E:L4, E:L5] | Direct main-agent memory writes are default; background extraction and nightly/dream-style consolidation are separately gated. | Source and visible callsites; server-controlled execution and external modules beyond the visible client source are runtime-unverified gaps. [G:L1] |
 
 Two status nuances matter. First, Codex’s `MemoriesConfig` defaults inside the
 feature do not make the feature default-on: the `memories` feature registry is
@@ -197,24 +197,32 @@ file headers, selects up to five relevant memories, avoids already surfaced
 items, and tells the model to verify stale facts against current sources. A
 one-day freshness warning does not delete or expire content. [E:L2, E:L3]
 
-The user can explicitly ask to remember, ignore, update, or forget. Automatic
-expiry/retention declarations are **not found in the investigated scope**.
-[A:L0] Team memory has traversal/symlink containment and a high-confidence
-secret guard before sync, but requires a compile/feature path, server gate, and
-OAuth-backed synchronization. The equivalent team secret guard was not found
-on the private auto-memory write path; that is a bounded code observation, not
-proof that no upstream guard exists. [E:L4]
+The user can explicitly ask to remember, ignore, update, or forget; the private
+auto-memory prompt tells the agent to find and remove the relevant local entry
+when asked to forget. [E:L1] Automatic expiry/retention declarations are **not
+found in the investigated scope**. [A:L0]
+
+Team memory has traversal/symlink containment and a high-confidence secret
+guard before sync, but requires a compile/feature path, server gate, and
+OAuth-backed synchronization. Its client sync contract is asymmetric: GET
+pulls server content into local files, while PUT upserts only changed keys and
+preserves omitted keys. Deleting a local team-memory file therefore does not
+delete the server entry, and a later pull can restore it. [E:L4, E:L5] A
+remote selective-delete/all-copy deletion mechanism is **not found in the
+investigated scope**. [A:L1] The equivalent secret-guard symbols are **not
+found in the investigated private auto-memory/extractor scope**; this narrow
+client-source result does not prove that no guard exists elsewhere. [A:L2]
 
 ## 6. Owner, writer, reader, retention, deletion, retrieval, provenance
 
 | System / store | Owner and writers | Readers / retrieval | Persistence and retention | Deletion / user control | Provenance |
 | --- | --- | --- | --- | --- | --- |
-| Rollshot run/session | `AgentRunner` and workbench task write; model/tool loop reads current run. | Direct in-memory access; no relevance retrieval. | Process/task lifetime only in inspected path. | Terminal drop; no surfaced session control. | Session/run IDs and exchanges, but no durable source lineage. [E:R1] |
+| Rollshot run/session | `AgentRunner` and workbench task write; model/tool loop reads current run. | Direct in-memory access; a relevance-retrieval boundary is **not found in the investigated scope**. [A:R0] | Process/task lifetime in the inspected call path; a persistence hook is **not found in the investigated scope**. [A:R1] | Workbench ownership ends at the spawned task; surfaced list/delete session controls are **not found in the investigated scope**. [A:R2] | Session/run IDs and exchanges exist; durable `AgentSession` source-lineage fields are **not found in the investigated scope**. [A:R2] |
 | Pi JSONL session | Coding-agent `AgentSession` / `SessionManager`; extensions may add custom entries. | Resume, branch reconstruction, active-context projection. | Default append-only JSONL; optional `--no-session`. | Picker delete/trash; user can avoid persistence. | Entry IDs/parents and typed records preserve conversation-tree lineage. [E:P1, E:P2] |
 | oh-my-pi local memory | Phase 1 extractor, Phase 2 consolidator, and explicit `learn` writer. | Bounded index/files plus startup guidance; local backend reports non-searchable. | Project root; age/idle eligibility and derivative pruning, but full derivative expiry is **not found in the investigated scope**. [A:O1] | `/memory clear`; enqueue/rebuild; backend can remain off. | Raw/summary artifacts name thread/update; consolidated claim-level lineage may be lossy. [E:O1, E:O2, E:O3, E:O4] |
 | Codex memories | Phase 1/2 internal agents; explicit ad-hoc note tool. | Prompt-guided index/search/read; optional dedicated tools; citations feed usage. | Codex-home roots plus state DB; selection by source age/idle/use and stale derivative pruning. | Feature generation/use can be disabled; clear empties roots; selective fact delete is **not found in the investigated scope**. [A:C0] | Rollout summaries, citations, source paths, usage counts. [E:C2, E:C3, E:C4, E:C5] |
-| Claude project auto memory | Main agent by default; gated extractor; user instructions guide edits. | Bounded scan + model selection of up to five; stale/current-source rules. | Project/git-root files; no automatic expiry declaration: **not found in the investigated scope**. [A:L0] | Explicit remember/ignore/update/forget; settings/env can disable. | File/topic descriptions; no uniform source-transcript citation contract found in inspected auto-memory path. [E:L1, E:L2, E:L3] |
-| Claude team memory | Gated team writer/sync service and authorized members. | Team-memory attachment/sync path when gates and OAuth permit. | Shared synchronized project/team store; server behavior not runtime-tested. | Forget/delete can flow through files/sync; complete deletion SLA is **not found in the investigated scope**. [A:L1] | Repo/team path and sync metadata; exact remote lineage semantics remain gated/partially external. [E:L4] |
+| Claude project auto memory | Main agent by default; gated extractor; user instructions guide edits. | Bounded scan + model selection of up to five; stale/current-source rules. | Project/git-root files; an automatic expiry declaration is **not found in the investigated scope**. [A:L0] | Prompts direct explicit remember and removal of the relevant local entry on forget; settings/env can disable. [E:L1] | File/topic descriptions exist; a uniform source-transcript citation field/contract is **not found in the investigated scope**. [A:L3] |
+| Claude team memory | Gated team writer/sync service and authorized members. | Team-memory attachment/sync path when gates and OAuth permit. | The client implements repo-scoped synchronized files; server execution and remote retention are runtime-unverified gaps. [G:L1] | Local deletion does not propagate: PUT is upsert, omitted keys remain server-side, and the next pull can restore the file. [E:L5] A remote selective-delete or all-copy deletion mechanism is **not found in the investigated scope**. [A:L1] | Repo/team path plus local checksum/ETag metadata are visible; server-side lineage and all-copy behavior are runtime-unverified gaps. [G:L1] |
 
 ## 7. Privacy, poisoning, expiry, and redaction
 
@@ -225,8 +233,9 @@ Memory extractors in oh-my-pi and Codex consume transcript-derived content.
 Secret regexes reduce credential leakage but do not identify faces, health or
 financial information, arbitrary PII, confidential UI text, or the intent
 behind a screenshot. Claude Code’s team path adds a high-confidence secret
-scanner, but its private auto-memory path does not establish a screenshot-safe
-policy. [E:P2, E:O2, E:C2, E:L4]
+scanner, but the inspected private auto-memory/extractor path does not expose
+the equivalent secret-guard symbols and does not establish a screenshot-safe
+policy. [E:P2, E:O2, E:C2, E:L4, A:L2]
 
 For Rollshot, the safe baseline is therefore:
 
@@ -447,6 +456,29 @@ output means zero matches.
 Result: **0 hits**. Project/user/team/consolidation memory is **not found in the
 investigated scope**.
 
+**[A:R1] Rollshot session serialization/persistence hook.** Literal roots:
+`crates/rollshot-agent/src/domain.rs`,
+`crates/rollshot-agent/src/driver.rs`, and
+`crates/rollshot-app/src/result_workspace/workbench/run.rs`. Regex:
+`#\[derive\([^]]*(Serialize|Deserialize)|impl (Serialize|Deserialize) for AgentSession|serde[^\n]*AgentSession|session[^\n]*(save|persist)|(?:save|persist)[^\n]*session`.
+Result: **0 hits**. A serialization/persistence hook for `AgentSession` is
+**not found in the investigated scope**. This narrow negative is paired with
+the positive symbol inspection in [E:R1]: `AgentSession` derives `Debug,
+Clone`, stores exchanges, and is consumed by the workbench run callsite.
+
+**[A:R2] Rollshot surfaced session control and lineage fields.** Literal roots:
+`crates/rollshot-agent/src/domain.rs`,
+`crates/rollshot-agent/src/driver.rs`, and
+`crates/rollshot-app/src/result_workspace/workbench/run.rs`. Regex:
+`session[^\n]*(list|delete|remove|clear|archive)|(?:list|delete|remove|clear|archive)[^\n]*session|Session(Control|Store|Repository|Storage)|source_(ref|reference)|provenance`.
+Result: **19 matching lines**, all in the workbench and all concerning edit
+proposal/revision `Provenance`; there were zero session-control/store symbols
+and zero `AgentSession` lineage-field hits. Exact symbol inspection of
+`AgentSession` found only `session_id`, `exchanges`, and `pending_user`.
+Surfaced list/delete controls and durable `AgentSession` source-lineage
+fields are **not found in the investigated scope**. Proposal provenance is a
+separate positive artifact/workflow boundary and is not reclassified here.
+
 **[A:P0] Pi semantic-memory boundary.** Literal roots:
 `learn-projects/pi/packages/agent/src`,
 `learn-projects/pi/packages/coding-agent/src/core`, and coding-agent docs
@@ -491,12 +523,56 @@ Result: **0 hits**. Automatic expiry/retention is **not found in the investigate
 scope**; `memoryAge.ts` freshness warning and explicit forget are positive but
 not automatic deletion.
 
-**[A:L1] Claude Code team deletion completeness.** Literal positive scope:
-`src/memdir/teamMemPaths.ts`, team-memory prompt/tool files, and
-`src/services/teamMemorySync`. The visible source establishes gated sync and
-file operations, but a remote deletion SLA, backup semantics, and all-copy
-receipt are **not found in the investigated scope**. This is an evidence gap,
-not a zero-hit regex claim.
+**[A:L1] Claude Code team remote deletion mechanism.** Literal files:
+`learn-projects/claude-code-source-code/src/services/teamMemorySync/index.ts`,
+`watcher.ts`, and `types.ts`. Regex:
+`axios\.delete|method.?[:=].?delete|\bDELETE\b|soft_delete|delete_keys|removed_keys|tombstone|upsert|keys not in the PUT are preserved|File deletions do NOT propagate|next pull will restore`.
+Result: **9 matching lines**. The hits are the documented PUT/upsert contract,
+non-propagating local deletion/restore behavior, batching comments, one watcher
+comment about local deletion, and two comments saying recovery would require
+`soft_delete_keys`; there is no implemented delete request, tombstone, removed
+key payload, or all-copy receipt among the hits. A remote selective-delete and
+all-copy deletion mechanism is therefore **not found in the investigated
+scope**. This conclusion is narrower than an expiry/SLA claim and does not
+infer server internals.
+
+**[A:L2] Claude Code private auto-memory secret-guard symbols.** Literal roots:
+`learn-projects/claude-code-source-code/src/memdir` and
+`src/services/extractMemories`. Regex:
+`scanForSecrets|teamMemSecretGuard|secretScanner|validateTeamMem.*secret|secret.*guard`.
+Result: **0 hits**. The team path's named secret-guard/scanner integration is
+**not found in the investigated private auto-memory/extractor scope**. This
+does not claim that no generic guard exists elsewhere or that a live provider
+cannot apply additional policy.
+
+**[A:L3] Claude Code source-transcript citation contract.** Same literal roots
+as [A:L2]. Regex:
+`source.?transcript|transcript.?citation|source.?message|message.?uuid|citation|provenance|source.?ref|thread.?id|session.?id`.
+Result: **10 matching lines**: seven `message.uuid`/cursor occurrences in
+`extractMemories.ts` and three citation-staleness prose lines in
+`memoryAge.ts`. The cursor chooses the recent extraction range and is not
+stored as a memory-record source field; the age text warns about potentially
+stale code citations. A uniform source-transcript citation field/contract is
+**not found in the investigated scope**.
+
+### Runtime and visible-source boundary gaps
+
+These labels are limitations, not static absence conclusions.
+
+**[G:L0] Claude user-scope boundary.** Visible files are
+`src/memdir/memoryTypes.ts`, which defines semantic type `user`, and
+`src/memdir/paths.ts`, which resolves the private auto-memory root from the
+canonical project/git root. They establish category plus project-keyed storage;
+cross-project user-store behavior was outside this source boundary. No absence
+claim is made.
+
+**[G:L1] Claude team server/runtime boundary.** Visible client files are
+`src/services/teamMemorySync/{index,types,watcher}.ts` plus
+`src/memdir/teamMemPaths.ts`. They construct GET/PUT requests, local file
+updates, checksums/ETags, OAuth and repo-scope gates. The server implementation,
+deployed gate state, remote retention/backups, and runtime all-copy lineage were
+not executed or inspected. These remain runtime-unverified evidence gaps, not
+claims that the server lacks them.
 
 ## 15. Evidence index
 
@@ -569,8 +645,9 @@ not a zero-hit regex claim.
 
 - **[E:L1]**
   `learn-projects/claude-code-source-code/src/memdir/{memdir,paths,memoryTypes}.ts`
-  — default eligibility, project-root path, trusted-setting rules, memory
-  categories, direct writer and explicit remember/forget guidance.
+  and `src/services/extractMemories/prompts.ts` — default eligibility,
+  project-root path, trusted-setting rules, memory categories, direct writer,
+  and explicit remember/forget-by-removing-local-entry guidance.
 - **[E:L2]** `src/memdir/{memoryScan,findRelevantMemories,memoryAge}.ts` —
   bounded scan/selection, already-surfaced filtering, staleness warning.
 - **[E:L3]** `src/services/extractMemories/extractMemories.ts` and extraction
@@ -578,6 +655,10 @@ not a zero-hit regex claim.
 - **[E:L4]** `src/memdir/teamMemPaths.ts`, team-memory tools/prompts, secret
   guard/scanner, and `src/services/teamMemorySync` — gated team path,
   containment, credential/OAuth sync boundary.
+- **[E:L5]** `src/services/teamMemorySync/index.ts:7-19`,
+  `uploadTeamMemory`, `pullTeamMemory`, and `pushTeamMemory`, plus
+  `watcher.ts` — GET/PUT-only visible client contract, delta upsert, omitted-key
+  preservation, non-propagating local deletion, and later pull restoration.
 
 The reviewed Round 1 profiles remain the cross-capability context for these
 source references; this document re-checked the focused memory/session claims
