@@ -230,7 +230,7 @@ The remaining mechanisms are not one feature:
 
 | Mechanism | Evidence and semantics | Status |
 |---|---|---|
-| Session-memory compact | Uses a persistent session-memory summary plus a recent tail (10k minimum, five text-bearing messages, 40k maximum defaults), adjusts the boundary for tool-use/result and shared-thinking-message invariants, and falls back to traditional compact when invalid. | Implemented, GrowthBook/default-false gated; **L2/L3**. It uses Memory as input but still emits a compact boundary. |
+| Session-memory compact | Uses a persistent session-memory summary plus a recent tail (10k minimum, five text-bearing messages, 40k maximum defaults), adjusts the boundary for tool-use/result and shared-thinking-message invariants, and falls back to traditional compact when invalid. | Implemented, GrowthBook/default-false gated; **L2**. It uses Memory as input but still emits a compact boundary. |
 | Time-based microcompact | After a main-thread cache gap (default 60 minutes), replaces all but five recent compactable tool results with `[Old tool result content cleared]`; keeps blocks/IDs and resets cached-MC state because the prefix is cold. | Implemented but default `enabled: false`; **L2**. No compact boundary or disk rewrite is evidenced in this path. |
 | Cached microcompact | Visible path queues provider `cache_edits`, leaves local messages unchanged, pins edits by user-message position, then emits a boundary after actual deleted-token usage is observed. | `CACHED_MICROCOMPACT`; **hidden/missing implementation, L1** because `cachedMicrocompact.ts` is absent. Selection/deletion algorithm is not established. |
 | Reactive compact | Visible loop withholds prompt-too-long/media errors, permits one recovery transition and uses the returned full-compaction shape. | `REACTIVE_COMPACT`; **hidden/missing implementation, L1** because `reactiveCompact.ts` is absent. Trigger callsites are evidence; compact algorithm is not. |
@@ -261,16 +261,16 @@ claim that the post-compact model sees a fact.
 
 | Continuity item | Rollshot | Pi | oh-my-pi | Codex | Claude Code |
 |---|---|---|---|---|---|
-| Invoked skills | No compact boundary. Skill continuity across fresh runs is not established. | A dedicated invoked-skill compaction attachment was **not found in the investigated scope** [A:P-CONT]; continuity is summary/retained messages only. | Skill results and `skill://` reads are protected from prune/shake; a dedicated invoked-skill full-compaction attachment was **not found in the investigated scope** [A:O-CONT]. Skill files remain external resources. | A dedicated invoked-skill compact attachment was **not found in the investigated scope** [A:C-CONT]; canonical initial context is re-injected mid-turn or next turn. | Explicit agent-scoped `invoked_skills` attachment, recent-first, capped; invoked-skill map intentionally survives cleanup. |
-| Tasks / Todos / Workflow state | Run-local draft/evidence; no Product Task/Workflow compact state. | A dedicated task/Todo/job compact attachment was **not found in the investigated scope** [A:P-CONT]. Example Todo can reconstruct from full JSONL branch, separately from model projection. | Todo phases reconstruct/synchronize from session entries; child transcript may persist; live Task/Job controller remains separate [E:O2]. No Workflow. | A dedicated task/Todo/plan compact attachment was **not found in the investigated scope** [A:C-CONT]; `update_plan` is an event/checklist and Goal is separate DB state. | Summary prompt asks for pending tasks; async local-agent status/output path is attached. Work-ledger JSON and legacy Todo persist separately; no generic Workflow. |
-| User constraints / decisions | Live run messages only. | Explicit summary sections for constraints and key decisions. | Structured summary/handoff prompts; snapcompact preserves bounded source rather than interpreting it. | Summary prompt explicitly asks for decisions, constraints and preferences. | Detailed summary prompt explicitly requests decisions, user requests and pending/current work. |
-| Permissions / approvals | App-owned consent and tool availability are live, not compacted. | Built-in grant/cache was **not found in the investigated scope** [A:P]. | Live approval cache/policy is outside compact entry; ACP “allow always” does not survive process resume [E:O2]. | A dedicated permission/approval compact attachment was **not found in the investigated scope** [A:C-CONT]; session grants can remain live. | Plan mode is explicitly attached; general permission context remains live. Classifier approvals/speculative checks are cleared after full compaction. |
-| Product artifacts / proposals | Typed proposal and Action Guide project live outside model history; this is the desired current separation. | A dedicated artifact compact attachment was **not found in the investigated scope** [A:P-CONT]; files/tool details remain stored history or ambient files. | Artifact spill is separate; shake explicitly writes recovery artifact when possible [E:O2]. Full summary does not promote files into typed artifacts. | A dedicated artifact compact attachment was **not found in the investigated scope** [A:C-CONT]; original rollout and Goal/image extensions remain separate. | Async task output paths may be attached; no generic typed Artifact. Compact summary is not artifact provenance. |
-| Pending gates / checkpoints | `NeedsUserInput` ends one run; review belongs to app. | A dedicated gate compact attachment was **not found in the investigated scope** [A:P-CONT]; “Blocked” is summary prose. | Todo/checkpoint state can reconstruct separately; handoff/summary may mention it [E:O2]. Render/review authority is not implied. | Pending user-input/approval futures are not reconstructed by Thread resume [E:C3]. | Plan file/mode are explicit; other user approval prompts are live state and not a durable compact gate. |
-| Tool-call/result pairing | Rig requires a complete result set before advancing. | Cut never begins at tool result; split-turn logic retains the paired assistant side. | Cut never begins at tool result; prune/shake retain the tool-result block and call ID; useless serialization may omit the whole pair from discarded summary input. | Local replacement retains selected user text + summary, dropping old call/result structures together; remote replacement is provider-owned. No unmatched local pair is deliberately retained. | Session-memory adjusts tail start for pairs; PTL retry groups API rounds and normalizes orphans; time micro clears result content but keeps the paired block/ID. Hidden algorithms remain unknown. |
-| Recent files / plan | Tool context has current source/evidence, but no compact restoration. | Summary appends cumulative read/modified file lists; a dedicated plan/recent-file attachment was **not found in the investigated scope** [A:P-CONT]. | Summary appends cumulative file tree; active plan reads are protected from prune/shake. | Summary may mention files; a dedicated recent-file/plan compact attachment was **not found in the investigated scope** [A:C-CONT]. | Explicit recent file re-read (up to five plus caps), plan file, plan-mode and discovered-tool attachments. |
-| Child/background status | No child/job registry. | A dedicated job compact attachment was **not found in the investigated scope** [A:P-CONT]. | Live Task/Job state remains outside compaction; child transcript/artifacts may persist [E:O2]. | Child topology is Thread persistence, not compact payload; background terminals remain live process state [E:C3]. | Explicit local async-agent status/error/output attachment; Work-ledger/runtime state remains separately owned. |
-| Provider-specific continuation | Private adapters/Rig history only inside current run. | Assistant messages retain provider IDs/signatures in kept history; summary is provider-neutral prose. | Remote compaction may persist opaque provider replacement state; history rewrites close provider sessions. | Remote compaction item is provider-native; local path is Responses-shaped and persists replacement history. | Cached/API edits are Anthropic-specific; full summary reconstructs Claude message context and resets cache baselines. |
+| Invoked skills | No compact boundary exists, so skill continuity across a compact boundary is not established [A:R, A:R-CONT]. | A dedicated invoked-skill compaction attachment was **not found in the investigated scope** [A:P-CONT]; continuity is summary/retained messages only. | Skill results and `skill://` reads are protected from prune/shake; a dedicated invoked-skill full-compaction attachment was **not found in the investigated scope** [A:O-CONT]. Skill files remain external resources. | A dedicated invoked-skill compact attachment was **not found in the investigated scope** [A:C-CONT]; canonical initial context is re-injected mid-turn or next turn. | Explicit agent-scoped `invoked_skills` attachment, recent-first, capped; invoked-skill map intentionally survives cleanup. |
+| Tasks / Todos / Workflow state | Run-local draft/evidence exists, but no Product Task/Workflow compact attachment is established [E:R1, A:R-CONT]. | A dedicated task/Todo/job compact attachment was **not found in the investigated scope** [A:P-CONT]. Example Todo can reconstruct from full JSONL branch, separately from model projection. | Todo phases reconstruct from session entries; child transcript may persist; live Task/Job controller remains separate [E:O2]. A host-owned Workflow/DAG contract was **not found in the investigated scope** [A:O-WORK]. | A dedicated task/Todo/plan compact attachment was **not found in the investigated scope** [A:C-CONT]; `update_plan` is an event/checklist and Goal is separate DB state. | Summary prompt asks for pending tasks; async local-agent status/output path is attached. Work-ledger JSON and legacy Todo persist separately; a general `Workflow` declaration was **not found in the investigated scope** [A:L-DOM]. |
+| User constraints / decisions | They exist only in the live run messages; no compact restoration is established [E:R1, A:R-CONT]. | Explicit summary sections for constraints and key decisions. | Structured summary/handoff prompts; snapcompact preserves bounded source rather than interpreting it. | Summary prompt explicitly asks for decisions, constraints and preferences. | Detailed summary prompt explicitly requests decisions, user requests and pending/current work. |
+| Permissions / approvals | App-owned consent and tool availability are live; no permission/approval compact attachment is established [E:R1, A:R-CONT]. | Built-in grant/cache was **not found in the investigated scope** [A:P]. | Live approval cache/policy is outside compact entries, and ACP “allow always” is process-local [E:O2]. | A dedicated permission/approval compact attachment was **not found in the investigated scope** [A:C-CONT]; session grants can remain live. | A dedicated permission/approval compact attachment was **not found in the investigated scope** [A:L-CONT]; classifier approvals and speculative checks are cleared after full compaction [E:L3]. |
+| Product artifacts / proposals | Typed proposals and Action Guide projects remain app-owned; no artifact/proposal compact attachment is established [W1, W2, A:R-CONT]. | A dedicated artifact compact attachment was **not found in the investigated scope** [A:P-CONT]; files/tool details remain stored history or ambient files. | Artifact spill is separate; shake explicitly writes recovery artifacts when possible [E:O2]. | A dedicated artifact compact attachment was **not found in the investigated scope** [A:C-CONT]; original rollout and Goal/image extensions remain separate. | Async task output paths may be attached; a general typed `Artifact` declaration was **not found in the investigated scope** [A:L-DOM]. |
+| Pending gates / checkpoints | `NeedsUserInput` ends a run and review remains app-owned; no gate/checkpoint compact attachment is established [E:R1, A:R-CONT]. | A dedicated gate compact attachment was **not found in the investigated scope** [A:P-CONT]; “Blocked” is summary prose. | Todo/checkpoint state reconstructs separately [E:O2]; handoff/summary may mention it [E:O1]. | Pending user-input/approval futures are not reconstructed by Thread resume [E:C3]. | Plan file/mode are explicit; a general permission/approval/gate compact attachment was **not found in the investigated scope** [A:L-CONT]. |
+| Tool-call/result pairing | Rig requires a complete result set before advancing [E:R1]. | Cut never begins at tool result; split-turn logic retains the paired assistant side [E:P2]. | Cut never begins at tool result; prune/shake retain the tool-result block and call ID; useless serialization may omit the whole pair from discarded summary input [E:O1]. | Local replacement selects recent user text plus summary, so prior call/result structures are omitted as part of that replacement [E:C1]; remote replacement is provider-owned [E:C2]. | Session-memory adjusts tail start for pairs; PTL retry groups API rounds and normalizes orphans; time micro clears result content but keeps the paired block/ID [E:L2, E:L3, E:L4]. Selection algorithms in the missing reducers remain unknown [A:L]. |
+| Recent files / plan | Tool context has current source/evidence, but no recent-file/plan compact restoration is established [E:R1, A:R-CONT]. | Summary appends cumulative read/modified file lists; a dedicated plan/recent-file attachment was **not found in the investigated scope** [A:P-CONT]. | Summary appends cumulative file tree; active plan reads are protected from prune/shake. | Summary may mention files; a dedicated recent-file/plan compact attachment was **not found in the investigated scope** [A:C-CONT]. | Explicit recent file re-read (up to five plus caps), plan file, plan-mode and discovered-tool attachments. |
+| Child/background status | No child/job compact restoration is established [A:R-CONT]. | A dedicated job compact attachment was **not found in the investigated scope** [A:P-CONT]. | Live Task/Job state remains outside compaction; child transcript/artifacts may persist [E:O2]. | Child topology is Thread persistence, not compact payload; background terminals remain live process state [E:C3]. | Explicit local async-agent status/error/output attachment; Work-ledger/runtime state remains separately owned. |
+| Provider-specific continuation | Private adapters and Rig history exist only inside the current run; no provider-continuation compact attachment is established [E:R1, A:R-CONT]. | Assistant messages retain provider IDs/signatures in kept history; summary is provider-neutral prose. | Remote compaction may persist opaque provider replacement state; history rewrites close provider sessions. | Remote compaction item is provider-native; local path is Responses-shaped and persists replacement history. | Cached/API edits are Anthropic-specific; full summary reconstructs Claude message context and resets cache baselines. |
 
 No summary provides a cryptographic or schema-level guarantee that a model
 mentioned every required item. Explicit attachments improve visibility but
@@ -498,6 +498,13 @@ nodes, zero edges and zero files, so bounded source inspection followed.
   `compaction|compact|microcompact|snip|prun|projection|context.?collapse|context.?management|memory`.
   It returned no matches. Therefore a compaction, projection or Memory
   mechanism was **not found in the investigated scope**.
+- **[A:R-CONT] Rollshot compact continuity attachments.** Exact literal files:
+  `crates/rollshot-agent/src/{domain,driver,model,provider,runtime,tools}.rs`.
+  Exact case-insensitive regex:
+  `compact.{0,60}(skill|task|todo|workflow|decision|constraint|permission|approval|artifact|proposal|gate|checkpoint|job|child|provider|recent.?file|plan)|(skill|task|todo|workflow|decision|constraint|permission|approval|artifact|proposal|gate|checkpoint|job|child|provider|recent.?file|plan).{0,60}compact`.
+  It returned no matches. A compact attachment for those continuity categories
+  was **not found in the investigated scope**; this does not deny their live-run
+  or app-owned forms.
 - **[A:P] Pi variants, grants and Memory.** Exact roots:
   `learn-projects/pi/packages/agent/src`,
   `learn-projects/pi/packages/coding-agent/src/core`, and
@@ -559,6 +566,15 @@ nodes, zero edges and zero files, so bounded source inspection followed.
   dedicated invoked-skill or recent-file full-compaction attachment was **not
   found in the investigated scope**. This does not negate the positively
   evidenced skill protections in prune and shake.
+- **[A:O-WORK] oh-my-pi Workflow/DAG contract.** Exact roots/files:
+  repository root `learn-projects/oh-my-pi`; literal paths relative to it:
+  `packages/coding-agent/src/task`, `packages/coding-agent/src/async`,
+  `packages/coding-agent/src/tools/todo.ts`, and
+  `packages/coding-agent/src/goals`. Exact case-insensitive regex:
+  `\bdependsOn\b|\bdepends_on\b|\bdependency\b|\bDAG\b|\bworkflowId\b|\bworkflow_id\b`.
+  The only hits were comments about TypeScript/runtime dependency graphs in
+  `task/yield-assembly.ts` and `task/renderer.ts`. A host-owned Workflow/DAG
+  contract was **not found in the investigated scope**.
 - **[A:C] Codex variants.** Exact roots:
   `learn-projects/codex/codex-rs/core/src`, `protocol/src`, and
   `thread-store/src`. Exact case-insensitive regexes:
@@ -589,6 +605,28 @@ nodes, zero edges and zero files, so bounded source inspection followed.
   `src/QueryEngine.ts`, `src/services/compact/microCompact.ts`,
   `src/utils/sessionStorage.ts` and `src/utils/sessionRestore.ts` justify only
   L1 gate/order/record-shape claims.
+- **[A:L-CONT] Claude compact permission/gate attachments.** Exact repository
+  root `learn-projects/claude-code-source-code`; literal files relative to it:
+  `src/services/compact/{compact,sessionMemoryCompact,postCompactCleanup,prompt}.ts`.
+  Exact case-insensitive regex:
+  `create(?:Permission|Approval|Workflow|Artifact|Gate|Checkpoint)Attachment|(?:permission|approval|workflow|artifact|gate|checkpoint).?attachment|attachment.{0,40}(?:permission|approval|workflow|artifact|gate|checkpoint)`.
+  It returned no matches. A dedicated permission, approval, Workflow, Artifact,
+  gate or checkpoint compact attachment was **not found in the investigated
+  scope**; other explicitly generated file, plan, skill, async-agent and tool
+  attachments remain positively evidenced in `compact.ts`.
+- **[A:L-DOM] Claude generic Workflow/Artifact declarations.** Exact repository
+  root `learn-projects/claude-code-source-code`; literal paths relative to it:
+  `src/Task.ts`, `src/tasks`, `src/QueryEngine.ts`,
+  `src/services/{compact,tools}`, `src/skills`,
+  `src/bootstrap/state.ts`, `src/bridge`, `src/memdir`, `src/Tool.ts`,
+  `src/utils/tasks.ts`, `src/hooks/useTasksV2.ts`,
+  `src/tools/{TaskCreateTool,TaskGetTool,TaskListTool,TaskUpdateTool,TodoWriteTool,AgentTool}`,
+  `src/utils/swarm`, `src/utils/{sessionStorage,sessionRestore}.ts`, and
+  `src/query.ts`. Exact regex:
+  `^(?:export\s+(?:default\s+)?|export\s+declare\s+|declare\s+)?(?:abstract\s+)?(?:type|interface|class)\s+(?:Workflow|Job|AgentRun|Artifact)\b`.
+  It returned no matches. Declarations with those four exact names were **not
+  found in the investigated scope**; differently named equivalents remain
+  possible.
 
 Open questions:
 
@@ -647,9 +685,20 @@ Open questions:
   `{remote-compaction,snapcompact-frames,shake,supersede-prune,compaction-error-status}.test.ts`
   and coding-agent tests
   `{agent-session-compaction,agent-session-auto-compaction-queue,agent-session-prune-persistence,agent-session-plan-reference-compaction,agent-session-manual-snapcompact-fallback,agent-session-manual-retry}.test.ts`.
-- **[E:O2] Source:** Todo, checkpoint, Task, async Job, artifacts, approval and
-  Memory roots cited by the Reviewed oh-my-pi profile. Supports separation of
-  compact projection from durable/live state.
+- **[E:O2] Exact source paths** under repository root
+  `learn-projects/oh-my-pi`: Todo and checkpoint state in
+  `packages/coding-agent/src/tools/{todo,checkpoint}.ts` plus rewind handling in
+  `src/session/agent-session.ts`; Task/child state in
+  `src/task/{index,types,persisted-revive}.ts`; live detached jobs in
+  `src/async/job-manager.ts`; artifact spill in `src/session/artifacts.ts` and
+  `src/internal-urls/artifact-protocol.ts`; approval state in
+  `src/tools/approval.ts`, `src/session/client-bridge.ts`, and
+  `src/modes/acp/acp-client-bridge.ts`; separate Memory backends under
+  `src/{memories,memory-backend}`. These paths support the separation of compact
+  projection from durable or process-live state. Representative symbols are
+  `TodoPhase`, `CheckpointState`, `TaskTool`,
+  `createPersistedSubagentReviverFactory`, `AsyncJobManager`, `ArtifactManager`,
+  and `AgentSession.#acpPermissionDecisions`.
 
 ### Codex
 
