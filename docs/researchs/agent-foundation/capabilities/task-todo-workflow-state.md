@@ -32,7 +32,7 @@ one requirement:
 |---|---|---|
 | Smart Redaction | **Evidence [W1]:** the app owns consent, one session value, a finite budget, cancellation, the spawned run, live activity, and the resulting review proposal; `AgentRunner` owns one serial bounded run. | **Inference [I:W1]:** a durable Task/DAG is not established as necessary. A small Product Task identity could improve review/provenance/retry accounting without changing serial execution. |
 | Action Guide | **Evidence [W2]:** `ProjectManifestV2` durably stores a revision, frames, ordered steps, captions and annotations; save rejects revision conflicts. Visual-annotation input binds `run_id`, a reviewed step and `document_state_id`; caption work creates a typed `CaptionProposal`. | **Inference [I:W2]:** if future orchestration owns several suggestions, it needs stable project-revision and step/artifact references plus stale-result rejection. Current independent bounded tasks do not prove a DAG or parallel requirement. |
-| Deferred brag + Hyperframes | **Evidence [W3-W6]:** brag gates inspect → plan artifact → Hyperframes check → MP4/poster/share-copy. Hyperframes describes stages by dependencies; audio may overlap frame work, install precedes parallel work, verification precedes render, review gates pause progress, and worker completion is an expected file artifact with one clean re-dispatch. | **Inference [I:W3-W6]:** if Rollshot adopts this deferred workload, it pressures durable dependency readiness, checkpoint decisions, external Job handles, artifact-gated completion, bounded fan-out and selective retry. It does not mandate video generation or that these records live in `rollshot-agent`. |
+| Deferred brag + Hyperframes | **Evidence [W3-W6]:** brag gates inspect → plan artifact → Hyperframes check → MP4/poster/share-copy. Hyperframes describes stages by dependencies; audio may overlap frame work, install precedes parallel work, and worker completion is an expected file artifact with one clean re-dispatch. Collaborative mode pauses at plan/sketch checkpoints; autonomous mode posts summaries and continues. Every mode still requires explicit approval before render. | **Inference [I:W3-W6]:** if Rollshot adopts this deferred workload, it pressures durable dependency readiness, checkpoint decisions, external Job handles, artifact-gated completion, bounded fan-out and selective retry. It does not mandate video generation or that these records live in `rollshot-agent`. |
 
 ## 2. Terminology and non-equivalent concepts
 
@@ -79,14 +79,27 @@ Rollshot neither serializes it nor exposes it as a durable contract:
 stateDiagram-v2
     [*] --> PreparingRequest
     PreparingRequest --> AwaitingModel: next_step / CallModel
+    PreparingRequest --> Failed: max turns or lost pending prompt
     AwaitingModel --> ResolvingToolCalls: model or streamed response
+    AwaitingModel --> Failed: fatal streamed invalid call
     ResolvingToolCalls --> AwaitingAdvance: accepted/repaired/skipped
     ResolvingToolCalls --> PreparingRequest: bounded invalid-call retry
+    ResolvingToolCalls --> Failed: fatal or exhausted invalid-call resolution
     AwaitingAdvance --> ExecutingTools: next_step / CallTools
     ExecutingTools --> PreparingRequest: complete correlated result batch
+    ExecutingTools --> Failed: empty tool-result batch
     AwaitingAdvance --> Done: no tool calls
-    Done --> [*]
+    AwaitingAdvance --> Failed: lost assistant content
+    Done --> Done: next_step is idempotent
+    Failed --> Failed: next_step returns protocol error
 ```
+
+`Failed` is Rig's terminal/poison state for fatal paths: `next_step` first
+replaces the current state with `Failed`, and explicit fatal streamed-call and
+empty-result paths also assign it. Not every protocol misuse transitions to
+`Failed`; out-of-order calls such as `next_step` while awaiting a model or
+invalid-call decision return a protocol error while restoring or retaining the
+expected state. [E:R3]
 
 **Ownership:** Rig owns protocol phase, turn counting, conversation threading
 and pending-call correlation. Rollshot's `AgentRunner` owns the driver,
@@ -129,16 +142,33 @@ not a scheduler. [E:P1]
 oh-my-pi implements three relevant but deliberately separate machines. [E:O1-O3]
 
 ```mermaid
+flowchart LR
+    subgraph TodoCommand[Todo command over an existing item]
+        S["any status: pending / in_progress / completed / abandoned"]
+        S -->|start| IP[in_progress]
+        S -->|done| C[completed]
+        S -->|drop| A[abandoned]
+        S -->|rm| X[removed]
+        N[init / append] --> P[pending]
+    end
+    IP --> Z[normalize whole list]
+    C --> Z
+    A --> Z
+    X --> Z
+    P --> Z
+    Z -->|more than one in_progress| D["keep first; demote rest to pending"]
+    Z -->|none in_progress and pending exists| F[promote first pending]
+    Z -->|otherwise| K[keep normalized list]
+```
+
+The Todo status values do not form a restricted legal-transition graph.
+`start`, `done`, and `drop` overwrite any prior status, including completed or
+abandoned; `rm` deletes an item of any status. Before the updated list is
+returned, normalization keeps at most the first `in_progress` item and demotes
+the rest, or promotes the first pending item when none is in progress. [E:O1]
+
+```mermaid
 stateDiagram-v2
-    state Todo {
-        [*] --> pending: init / append
-        pending --> in_progress: start or normalization
-        in_progress --> pending: another item starts
-        pending --> completed: done
-        in_progress --> completed: done
-        pending --> abandoned: drop
-        in_progress --> abandoned: drop
-    }
     state ChildProgress {
         [*] --> child_pending
         child_pending --> child_running: semaphore acquired
@@ -276,9 +306,9 @@ Every cell is explicitly classified:
 | System | IDs / owner | Dependencies | Parallel readiness | Attempts |
 |---|---|---|---|---|
 | Rollshot | **Evidence [E:R1]:** Session/Run IDs and proposal generation exist inside bounded product paths.<br>**Bounded absence [A:R]:** a durable Product Task/Workflow ID and owner were **not found in the investigated scope**. | **Bounded absence [A:R]:** dependency fields/readiness were **not found in the investigated scope**. | **Evidence [E:R1,R2]:** one Agent Run, one serial tool batch at a time.<br>**Inference [I:W1]:** this sequential-only shape satisfies current Smart Redaction. | **Evidence [E:R1]:** validation and dry-run attempt counts are run-budget dimensions.<br>**Bounded absence [A:R]:** durable Product Task attempt records were **not found in the investigated scope**. |
-| Pi | **Evidence [E:P1]:** example Todo uses extension-local integer IDs; no owner.<br>**Bounded absence [A:P]:** built-in Task/Workflow identity was **not found in the investigated scope**. | **Bounded absence [A:P]:** Todo dependency/owner fields were **not found in the investigated scope**. | **Evidence [E:P1]:** Todo has no readiness/executor; Pi tool batches can parallelize separately.<br>**Bounded absence [A:P]:** a parallel task scheduler was **not found in the investigated scope**. | **Bounded absence [A:P]:** Todo/task attempt state was **not found in the investigated scope**. |
-| oh-my-pi | **Evidence [E:O1-O3]:** Todo items use content identity; Task children and Jobs have IDs/owners; no shared Workflow ID. | **Bounded absence [A:O]:** `dependsOn`/`blockedBy`/Workflow dependency fields were **not found in the investigated scope**. | **Evidence [E:O2,O3]:** every Task batch item independently waits on a semaphore; queued Jobs do not consume a running slot. This is fan-out/capacity readiness, not dependency readiness. | **Evidence [E:O2,O3]:** transient provider retry attempt and completion-delivery attempt counters exist.<br>**Bounded absence [A:O]:** a durable unified work-attempt ledger was **not found in the investigated scope**. |
-| Codex | **Evidence [E:C1,C2]:** checklist items have no IDs/owners; Goal has durable `goal_id`, scoped to a Thread. | **Bounded absence [A:C]:** plan/Goal dependency edges were **not found in the investigated scope**. | **Evidence [E:C1]:** `PlanUpdate` only publishes a flat snapshot.<br>**Bounded absence [A:C]:** task readiness/executor ownership was **not found in the investigated scope**. | **Bounded absence [A:C]:** plan/Goal attempt records were **not found in the investigated scope**; provider retries are separate Turn mechanics. |
+| Pi | **Evidence [E:P1]:** example Todo uses extension-local integer IDs and its record contains only ID/text/done.<br>**Bounded absence [A:P]:** built-in Task/Workflow identity and a Task owner were **not found in the investigated scope**. | **Evidence [E:P1]:** the example record has no dependency/owner fields.<br>**Bounded absence [A:P]:** built-in Task/Workflow dependencies and ownership were **not found in the investigated scope**. | **Evidence [E:P1]:** the example tool only mutates advisory state; Pi tool batches can parallelize separately.<br>**Bounded absence [A:P]:** a built-in parallel task scheduler/readiness record was **not found in the investigated scope**. | **Evidence [E:P1]:** the example record has no attempt field.<br>**Bounded absence [A:P]:** a built-in durable Product Task attempt record was **not found in the investigated scope**. |
+| oh-my-pi | **Evidence [E:O1-O3]:** Todo items use content identity; Task children and Jobs have IDs/owners.<br>**Bounded absence [A:O]:** a shared Workflow ID was **not found in the investigated scope**. | **Bounded absence [A:O]:** `dependsOn`/`blockedBy`/Workflow dependency fields were **not found in the investigated scope**. | **Evidence [E:O2,O3]:** every Task batch item independently waits on a semaphore; queued Jobs do not consume a running slot. This is fan-out/capacity readiness, not dependency readiness. | **Evidence [E:O2,O3]:** transient provider retry attempt and completion-delivery attempt counters exist.<br>**Bounded absence [A:O]:** a durable unified work-attempt ledger was **not found in the investigated scope**. |
+| Codex | **Evidence [E:C2]:** Goal has durable `goal_id`, scoped to a Thread.<br>**Bounded absence [A:C]:** plan-item IDs/owners and standalone Task/Workflow identity were **not found in the investigated scope**. | **Bounded absence [A:C]:** plan/Goal dependency edges were **not found in the investigated scope**. | **Evidence [E:C1]:** `PlanUpdate` only publishes a flat snapshot.<br>**Bounded absence [A:C]:** task readiness/executor ownership was **not found in the investigated scope**. | **Bounded absence [A:C]:** plan/Goal attempt records were **not found in the investigated scope**; provider retries are separate Turn mechanics. |
 | Claude Code | **Evidence [E:L1,L3]:** Runtime Task has random prefixed ID; Work-ledger Task has monotonic ID and optional owner. | **Evidence [E:L3]:** reciprocal `blocks`/`blockedBy`; unresolved blockers reject claim.<br>**Bounded absence [A:L]:** cycle detection was **not found in the investigated scope**. | **Evidence [E:L3]:** independent unblocked items may be claimed by different teammates; readiness is evaluated on list/claim.<br>**Inference [I:L3]:** this is parallel-ready coordination, not automatic scheduling. | **Bounded absence [A:L]:** per-ledger-item attempt records were **not found in the investigated scope**. Runtime output write retry is not a work attempt. |
 
 ### Outputs, errors, visibility and recovery
@@ -286,10 +316,10 @@ Every cell is explicitly classified:
 | System | Outputs | Errors / terminal state | Visibility | Recovery |
 |---|---|---|---|---|
 | Rollshot | **Evidence [E:R1,W1,W2]:** typed `ReadyForReview`, automation/proposal/evidence and Action Guide proposals/artifacts. | **Evidence [E:R1]:** cancelled, budget, validation, runtime, protocol and provider terminals are typed. | **Evidence [E:R1]:** transient workbench events may drop; terminal reconciliation is authoritative. | **Bounded absence [A:R]:** Product Task/workflow/agent-run recovery was **not found in the investigated scope**.<br>**Evidence [E:W2]:** Action Guide product project save/load is separate recovery. |
-| Pi | **Evidence [E:P1]:** Todo snapshots/tool text only.<br>**Bounded absence [A:P]:** a typed completion Artifact contract was **not found in the investigated scope**. | **Evidence [E:P1]:** operation errors are returned in example tool details; no Product Task terminal. | **Evidence [E:P1]:** tool output and `/todos` render current branch snapshot. | **Evidence [E:P1]:** reconstruct Todo from the active session branch.<br>**Bounded absence [A:P]:** interrupted Task/Workflow recovery was **not found in the investigated scope**. |
+| Pi | **Evidence [E:P1]:** Todo snapshots/tool text only.<br>**Bounded absence [A:P]:** a typed completion Artifact contract was **not found in the investigated scope**. | **Evidence [E:P1]:** operation errors are returned in example tool details.<br>**Bounded absence [A:P]:** a Product Task terminal contract was **not found in the investigated scope**. | **Evidence [E:P1]:** tool output and `/todos` render current branch snapshot. | **Evidence [E:P1]:** reconstruct Todo from the active session branch.<br>**Bounded absence [A:P]:** interrupted Task/Workflow recovery was **not found in the investigated scope**. |
 | oh-my-pi | **Evidence [E:O2,O3]:** `SingleResult` includes output, usage, paths, patches and validation; Job retains result/error text. | **Evidence [E:O2,O3]:** child completed/failed/aborted and Job completed/failed/cancelled; retry failure is visible.<br>**Bounded absence [A:O]:** a common durable workflow terminal was **not found in the investigated scope**. | **Evidence [E:O1-O3]:** session Todo, Task progress/event bus, Hub list/poll/watch and Job delivery. | **Evidence [E:O1,O2]:** Todo reconstructs and child transcripts may revive.<br>**Bounded absence [A:O]:** Job serialization/reattachment was **not found in the investigated scope**. |
-| Codex | **Evidence [E:C1,C2]:** plan event and Goal objective/usage; neither is an Artifact output.<br>**Bounded absence [A:C]:** task output contract was **not found in the investigated scope**. | **Evidence [E:C2]:** Goal includes blocked/limit/complete; plan item statuses have no error state. | **Evidence [E:C1,C2]:** `PlanUpdate` event; goal get/update events and state DB. | **Evidence [E:C2]:** Goal survives through state DB.<br>**Bounded absence [A:C]:** Workflow recovery was **not found in the investigated scope**; Thread/process/transport resume are separate layers. |
-| Claude Code | **Evidence [E:L1-L4]:** Runtime Task output file/deltas; Work ledger stores description/status/metadata but no output reference. | **Evidence [E:L1]:** Runtime Task failed/killed terminals.<br>**Bounded absence [A:L]:** durable ledger error/result fields were **not found in the investigated scope**. | **Evidence [E:L2,L3]:** runtime SDK/UI events and output deltas; ledger tools, filesystem watch, signal and poll. | **Evidence [E:L3]:** ledger JSON survives restart.<br>**Bounded absence [A:L]:** generic Runtime Task resurrection was **not found in the investigated scope**; explicit local-agent/remote paths are narrower. |
+| Codex | **Evidence [E:C1,C2]:** plan event and Goal objective/usage.<br>**Bounded absence [A:C]:** a Product Task/Artifact output contract was **not found in the investigated scope**. | **Evidence [E:C2]:** Goal includes blocked/limit/complete.<br>**Bounded absence [A:C]:** a plan-item error state and Product Task terminal contract were **not found in the investigated scope**. | **Evidence [E:C1,C2]:** `PlanUpdate` event; goal get/update events and state DB. | **Evidence [E:C2]:** Goal survives through state DB.<br>**Bounded absence [A:C]:** Workflow recovery was **not found in the investigated scope**; Thread/process/transport resume are separate layers. |
+| Claude Code | **Evidence [E:L1-L4]:** Runtime Task has output files/deltas; Work ledger stores description/status/metadata.<br>**Bounded absence [A:L]:** a durable ledger output/artifact reference was **not found in the investigated scope**. | **Evidence [E:L1]:** Runtime Task failed/killed terminals.<br>**Bounded absence [A:L]:** durable ledger error/result fields were **not found in the investigated scope**. | **Evidence [E:L2,L3]:** runtime SDK/UI events and output deltas; ledger tools, filesystem watch, signal and poll. | **Evidence [E:L3]:** ledger JSON survives restart.<br>**Bounded absence [A:L]:** generic Runtime Task resurrection was **not found in the investigated scope**; explicit local-agent/remote paths are narrower. |
 
 ## 7. Persistence and recovery consequences
 
@@ -458,42 +488,83 @@ a shared product service, or `rollshot-agent`.
   concepts were **not found in the investigated scope**.
 - **[A:P] Pi built-in boundary.** Roots: `packages/agent/src`,
   `packages/coding-agent/src/core`, and coding-agent `sessions.md`,
-  `session-format.md`, `extensions.md`, excluding vendored HTML renderer code.
-  Regex:
-  `^(export\s+)?(type|interface|class|enum)\s+(Task|Workflow|Job)\b|task(Id|Status)|workflow(Id|Status)|dependsOn|blockedBy`.
-  No built-in Task/Workflow/Job identity, dependency, owner, attempt, readiness
-  or completion-artifact record was found; these were **not found in the
-  investigated scope**. The separately inspected `examples/extensions/todo.ts`
-  is positive example evidence, not part of the absence claim.
+  `session-format.md`, `extensions.md`, all under `learn-projects/pi`, excluding
+  vendored HTML renderer code. Four case-insensitive regex groups were rerun:
+  (1) declarations/identity/dependencies
+  `^(export\s+)?(type|interface|class|enum)\s+(Task|Workflow|Job)\b|task(Id|Status|Owner)|workflow(Id|Status)|dependsOn|blockedBy`;
+  (2) ownership/readiness/scheduling/attempts
+  `task.?owner|owner.?task|ready|readiness|scheduler|scheduleTask|task.?queue|attempt(Id|s)?|retryCount|execution.?lease`;
+  (3) completion contracts
+  `typed.?artifact|artifact.?contract|expected.?artifact|task.?output|task.?result|task.?error|task.?terminal|terminal.?state`; and
+  (4) Task/Workflow/Job-qualified recovery, matching either unit name within 40
+  characters of
+  `restore|resume|recover|rehydrate|reattach|resurrect`. Groups 1, 3, and 4
+  returned no matches. Group 2 returned provider/session retry, message-queue,
+  file-refresh, and unrelated “already/ready” hits, not a Task owner, scheduler,
+  readiness, attempt, or lease record. Thus the matrix's built-in identity,
+  owner/dependency, scheduler/readiness, attempts, typed completion Artifact,
+  terminal, and interrupted-work recovery concepts were **not found in the
+  investigated scope**. The broader Round 1 Pi profile audits [A1, A3, A4,
+  A5, A9] cover the same boundary; separately inspected
+  `examples/extensions/todo.ts` is positive example evidence, not part of this
+  absence claim.
 - **[A:O] oh-my-pi dependency/durability boundary.** Roots:
-  `packages/coding-agent/src/task`, `src/async`, `src/tools/todo.ts`, and
-  `src/goals`. Regexes:
-  `dependsOn|depends_on|blockedBy|workflowId|workflow_id|\bDAG\b` and
-  `serialize|deserialize|recover|rehydrate|persist|reattach` in async/Job
-  sources. A Task/Goal/Todo dependency graph, Workflow ID, deterministic
-  next-ready-node contract and Job rehydration were **not found in the
-  investigated scope**. `attempt` hits were provider retry progress,
-  completion-delivery retries or unrelated implementation loops, not a durable
-  unified work-attempt record.
+  `learn-projects/oh-my-pi/packages/coding-agent/src/{task,async,goals}` and
+  `src/tools/todo.ts`. Focused case-insensitive regex groups were
+  `dependsOn|depends_on|blockedBy|blocked_by|workflowId|workflow_id|\bDAG\b|next.?ready|readiness|scheduler`,
+  `attempt(Id|s)?|retryCount|execution.?lease|leaseId|idempotenc`, and
+  `workflow.?terminal|terminal.?workflow|WorkflowTerminal|TaskTerminal|terminalState|terminalStatus|typed.?artifact|artifact.?contract|expected.?artifact`.
+  The dependency/readiness and common-terminal groups returned no matches.
+  Attempt hits were provider retry progress, Job completion-delivery retries,
+  or implementation loops, not durable unified work attempts. A fourth search
+  for `serialize|deserialize|recover|rehydrate|persist|resume|reattach|resurrect`
+  in `src/async` and `src/task` found child-session/artifact revival and the
+  live manager's `resumeDeliveries`, but no serialized `AsyncJob` manager state
+  or restart reattachment. Therefore a Task/Goal/Todo dependency graph,
+  Workflow identity/next-ready contract, durable unified attempt ledger,
+  common durable Workflow terminal, and Job restart reattachment were **not
+  found in the investigated scope**. Round 1 oh-my-pi profile audits [A1, A2,
+  A4, A7] provide the wider semantic boundary.
 - **[A:C] Codex task/workflow boundary.** Roots: `codex-rs/core/src`,
-  `protocol/src`, `app-server/src`, and `ext`, Rust files only. Regexes:
-  `^(pub\s+)?(struct|enum|trait|type)\s+(Task|Todo|Workflow|Job)\b|depends_on|blocked_by|workflow_id`,
-  plus direct inspection of `plan_tool.rs`, `handlers/plan.rs`, Goal state/tool
-  and internal `SessionTask`. A standalone Product Task/Workflow/Job record,
-  dependency readiness, task attempts and task output contract were **not found
-  in the investigated scope**. Internal task machinery and skill/package
-  dependency hits were excluded by meaning, not silently promoted.
+  `protocol/src`, `app-server/src`, and `ext`, under
+  `learn-projects/codex`, Rust files only. Exact case-insensitive groups were:
+  (1)
+  `^(pub\s+)?(struct|enum|trait|type)\s+(Task|Todo|Workflow|Job)\b|depends_on|blocked_by|workflow_id`;
+  (2)
+  `task.?owner|owner.?task|task.?ready|readiness|task.?scheduler|workflow.?scheduler|task.?attempt|attempt.?task|retry_count|execution.?lease`;
+  (3)
+  `expected.?artifact|artifact.?contract|task.?output|task.?result|task.?error|task.?terminal|workflow.?terminal`; and
+  (4) the same bidirectional Task/Workflow/Job-qualified recovery expression as
+  [A:P]. Groups 1 and 4 returned no matches. Group 2 returned Windows sandbox
+  and environment readiness plus provider retry counts; group 3 returned
+  internal `SessionTaskResult`, not a Product Task output contract. Direct
+  inspection of `plan_tool.rs`, `handlers/plan.rs`, Goal state/tool, and
+  internal `SessionTask` confirmed the distinction. Thus a standalone Product
+  Task/Workflow/Job record, owner/dependencies/readiness scheduler, plan/Goal
+  attempts, Product Task output/terminal contract, and Workflow recovery were
+  **not found in the investigated scope**. Round 1 Codex profile audits [A1,
+  A4, A6] provide the wider boundary.
 - **[A:L] Claude Work-ledger/Runtime Task boundary.** Roots: `src/Task.ts`,
-  `src/utils/tasks.ts`, `src/utils/task/{framework,diskOutput}.ts`,
-  `src/tasks`, and Task Create/Get/List/Update tool directories. Regexes:
-  `\b(attempt|attempts|retryCount|error|output|artifact)\b` against the ledger
-  schema/tools; `cycle|acyclic|topolog|strongly connected` against ledger
-  utilities/tools; and the profile declaration regex for
-  `Workflow|Job|AgentRun|Artifact`. Per-ledger-item attempt/output/error/artifact
-  fields, blocker cycle detection, a general Workflow/Job entity, and generic
-  Runtime Task restart resurrection were **not found in the investigated
-  scope**. Tool-call errors and runtime output-file retry are separate positive
-  evidence, not ledger fields.
+  `src/utils/tasks.ts`, `src/utils/task/{framework,diskOutput}.ts`, `src/tasks`,
+  and Task Create/Get/List/Update tool directories, all under
+  `learn-projects/claude-code-source-code`; recovery also covered
+  `src/tools/AgentTool` and `src/utils/{sessionRestore,sessionStorage}.ts`.
+  The ledger-field regex was
+  `attempt(Id|s)?|retryCount|executionLease|leaseId|output(Path|Id|Ref)?|result(Field|Text|Ref)?|error(Field|Text|Ref)?|artifact(Id|Ref|Path)?|terminal(State|Status)?`;
+  the cycle regex was `cycle|acyclic|topolog|strongly.?connected`; the
+  declaration regex targeted `Workflow|Job|AgentRun|Artifact`; and recovery
+  used
+  `(restore|resume)[A-Za-z]*(Task|Agent)|(Task|Agent)[A-Za-z]*(restore|resume)|reattach|resurrect|sidecar`.
+  Exact `TaskSchema` inspection limits durable ledger fields to ID, subject,
+  description, optional active form/owner, status, reciprocal edges, and
+  optional metadata. Ledger-search `error`, `result`, and `outputSchema` hits
+  belong to tool-call responses; no cycle hits or named domain declarations
+  occurred. Recovery hits establish explicit local-agent resume and remote
+  sidecar restoration, not generic Runtime Task resurrection. Therefore
+  per-ledger attempts/output/error/artifact/terminal fields, blocker cycle
+  detection, a general Workflow/Job entity, and generic Runtime Task restart
+  resurrection were **not found in the investigated scope**. Round 1 Claude
+  profile audits [A1, A3, A4] provide the wider boundary.
 
 ## 14. Evidence index
 
@@ -506,7 +577,7 @@ Guide paths and was used before direct source inspection.
 |---|---|---|---|---|
 | R1 | source + test source | current Rollshot | `crates/rollshot-agent/src/driver.rs`: `AgentTaskProfile`, `AgentRunner`, `RunTerminalState`; `runtime.rs`: budgets/events/cancellation; `tools.rs`: registry/context | Bounded serial run, attempts as budget counters, typed terminal. Static; no live provider/UI. |
 | R2 | source + graph | current Rollshot | `domain.rs::AgentSession`; graph file summaries and callers; six-file bounded audit [A:R] | In-memory session and absence boundary. |
-| R3 | source | Rig 0.39 consumed source | `/home/noah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rig-core-0.39.0/src/agent/run/mod.rs`: `RunState`, `AgentRunStep`, serialization warning | Exact private state machine; local registry path is machine-specific and Rollshot does not persist it. |
+| R3 | source | Rig 0.39 consumed source | `/home/noah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rig-core-0.39.0/src/agent/run/mod.rs`: `RunState`, `next_step`, invalid-call resolution, `tool_results`, serialization warning | Exact private phases including terminal `Failed`, fatal/error paths, and state-preserving protocol errors; local registry path is machine-specific and Rollshot does not persist it. |
 | P1 | example source + bounded audit | example only | Pi `packages/coding-agent/examples/extensions/todo.ts`; built-in roots in [A:P] | Branch-reconstructed Todo and built-in absence. Tests/runtime not executed. |
 | O1 | source | built-in | oh-my-pi `packages/coding-agent/src/tools/todo.ts`: `TodoStatus`, `applyEntry`, normalization, session reconstruction | Flat/phased Todo transitions and persistence. |
 | O2 | source | built-in; async/isolation setting-dependent | oh-my-pi `src/task/{types,index,executor}.ts`: `AgentProgress`, `SingleResult`, semaphore/background registration | Child lifecycle, fan-out, outputs/errors/retry visibility. |
@@ -523,7 +594,7 @@ Guide paths and was used before direct source inspection.
 | W3 | source | deferred workload reference | brag `skills/brag/SKILL.md` steps 1-4/gates at `357a805e...` | Plan, check, render/poster/share-copy artifact gates; not Rollshot behavior. |
 | W4 | source | deferred workload reference | Hyperframes `production-loop.md` at `807078c7...` | Dependency stages, background overlap and verify-before-deliver. |
 | W5 | source | deferred workload reference | Hyperframes `subagent-dispatch.md` | Expected-artifact completion, cap/waves, one re-dispatch, serial fallback. |
-| W6 | source | deferred workload reference | Hyperframes `review-loop.md` §§1-4 | Plan/sketch/final approval checkpoints and background preview. |
+| W6 | source | deferred workload reference | Hyperframes `review-loop.md` §§1-4 | Collaborative plan/sketch gates wait; autonomous summaries continue; all modes require explicit render approval. |
 
 **Confidence:** high for visible source-defined state fields, owner boundaries,
 positive transitions and pinned revisions; medium for bounded absences and
