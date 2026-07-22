@@ -397,7 +397,6 @@ workload, not a general platform wish list.
 | Current gap (static evidence) | Workload pressure | Why it matters |
 |---|---|---|
 | No Rollshot-owned durable run/checkpoint/resume record was found in the investigated agent files; a fresh Rig run is created per invocation. [R3, G1] | Hyperframes | Artifact/checkpoint continuation cannot be reconstructed from current run memory. Action Guide persistence is presently a separate product record; future run/checkpoint ownership is undecided. |
-| `AgentSession` exchanges are neither fed into a new Rig run nor returned by the inspected workbench task. [R2, R3, R8] | Hyperframes | If conversational continuity is desired, it needs an explicit policy; durable workflow state must still remain separate. |
 | Not found in the investigated scope: a task/workflow/dependency state model in `domain.rs`, `driver.rs`, `model.rs`, `provider.rs`, `runtime.rs`, or `tools.rs`. [R2, R3, R4, R5, R6] | Hyperframes | Its stages have prerequisites, conditional stages, checkpoints, and artifact-scoped rework that cannot be represented by a single serial run terminal. |
 | Not found in the same six-file scope: a managed external job/process lifecycle. [R2, R3, R4, R5, R6] | Hyperframes | Preview servers, audio/generation, and renders overlap model work and may outlive a turn. A blocking tool result is not the cited lifecycle. |
 | Not found in the same six-file scope: a child-agent/worker registry, scoped child context, concurrency cap, wave scheduler, or artifact-based child completion. [R2, R3, R4, R5, R6] | Optional Hyperframes frame fan-out | The cited dispatch contract requires isolation, bounded fan-out, expected-artifact completion, and selective re-dispatch. This gap exists only if Rollshot adopts that optional execution mode. |
@@ -437,15 +436,20 @@ workload, not a general platform wish list.
    orchestration beyond its current independent caption/annotation tasks.
 3. It is not yet decided whether the deferred brag/Hyperframes workflow should
    run inside Rollshot, through an external skill host, or remain deferred.
-4. Conversation retention, artifact retention, checkpoint privacy, deletion,
+4. Static inspection shows that `AgentSession` exchanges are neither fed into
+   a new Rig run nor returned by the inspected workbench task. Whether any
+   cited workload needs cross-run conversational or session-transcript
+   continuity remains unproven; Hyperframes is artifact-driven and does not
+   supply that requirement. [R2, R3, R8, H1, H2, H3]
+5. Conversation retention, artifact retention, checkpoint privacy, deletion,
    and cross-version resume compatibility need explicit product policy before
    choosing a persistence design.
-5. The Rig reference checkout is v0.40.0 while Rollshot pins 0.39.0. Later Rig
+6. The Rig reference checkout is v0.40.0 while Rollshot pins 0.39.0. Later Rig
    decisions must use the pinned source for current behavior and treat newer
    checkout behavior as a candidate, not as proof of Rollshot behavior.
-6. The exact code/test/security maintenance cost of retaining, vendoring,
+7. The exact code/test/security maintenance cost of retaining, vendoring,
    replacing, or removing Rig remains a later capability/synthesis question.
-7. No task graph, background job manager, child-agent system, compact/memory
+8. No task graph, background job manager, child-agent system, compact/memory
    layer, durable run store, or resume router was found in the six
    task-scoped `rollshot-agent` files. The search boundary does not prove those
    concepts cannot exist elsewhere or be supplied externally.
