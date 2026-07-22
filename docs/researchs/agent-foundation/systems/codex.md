@@ -1,6 +1,6 @@
 # Codex system profile
 
-Status: Complete (Round 1 system profile)
+Status: In Progress (Round 1 system profile)
 
 Research date: 2026-07-22 (Asia/Taipei)
 
@@ -30,11 +30,13 @@ Status labels in this profile mean:
   found in the bounded source searches recorded in Section 17.
 
 The highest-confidence claims below come from Rust source plus tests. Repository
-README files are used for platform and wire-contract descriptions and are
-identified as documentation evidence. No model request, crash/restart test,
-remote exec-server connection, or platform sandbox runtime test was performed.
-The revision is a fast-moving same-day snapshot; feature stage and default
-values must not be generalized to later versions. [C1, D1]
+README files are secondary evidence: the exec-server README's statement that a
+closed websocket immediately terminates managed processes conflicts with the
+pinned `SessionRegistry` source and recovery tests, so source wins and the
+conflict is recorded in Section 17. No model request, crash/restart test, remote
+exec-server connection, or platform sandbox runtime test was performed. The
+revision is a fast-moving same-day snapshot; feature stage and default values
+must not be generalized to later versions. [C1, C9, D1, D4]
 
 ## 2. Architecture and ownership boundaries
 
@@ -123,12 +125,14 @@ continuation state. [C2, C11]
 
 ## 4. Task, todo, workflow, and background-job model
 
-`update_plan` is **built-in** and intentionally described in source as a
-todo/checklist tool. Its model is a flat list of `Pending`, `InProgress`, or
-`Completed` items plus optional explanation. The handler emits
-`EventMsg::PlanUpdate`; no owner, dependency edge, lease, retry policy, or
-executor is attached. Plan mode is a different concept: a model-authored Plan
-turn item, and the tool is prohibited there. [C4]
+`update_plan` is a **core built-in, unconditionally registered tool**: the core
+utility tool plan adds `PlanHandler` without a feature check. It is
+intentionally described in source as a todo/checklist tool. Its model is a flat
+list of `Pending`, `InProgress`, or `Completed` items plus optional explanation.
+The handler emits `EventMsg::PlanUpdate`; no owner, dependency edge, lease,
+retry policy, or executor is attached. Plan mode is a different concept: a
+model-authored Plan turn item, and the handler rejects `update_plan` there.
+[C4]
 
 Thread goals are a distinct **built-in, default-on stable** feature. The
 app-server installs goal tools when a state database is available. A Thread may
@@ -163,8 +167,10 @@ In v1, `spawn_agent` creates a separate child Thread/Session, optionally forks
 filtered parent history, applies role/model/reasoning overrides, inherits the
 live approval policy, permission profile, environment snapshot, cwd, and
 conditional exec policy, and watches completion so the parent receives a
-notification. The default global agent thread limit is six and the default v1
-maximum depth is one. [C5]
+notification. The default v1 limit is six spawned agent threads per user
+Session/agent tree, not a process-global limit: the `AgentRegistry` that counts
+them is shared by all agents in that Session. The default v1 maximum depth is
+one. [C5, C12]
 
 In v2, the collaboration surface is path/mailbox based: `spawn_agent`,
 `send_message`, `followup_task`, `interrupt_agent`, `list_agents`, and
@@ -172,9 +178,11 @@ In v2, the collaboration surface is path/mailbox based: `spawn_agent`,
 filters a full fork to system/developer/user content plus final assistant
 answers rather than copying every tool result. Spawn edges are persisted in an
 agent graph store; the root can restore metadata, cold-load persisted children,
-and evict/reload idle residents. Per-session concurrent residency/execution is
-bounded. A v2 maximum-depth check was **not found in the investigated scope**
-of the v2 spawn handler, common spawn helpers, and spawn control path. [C5, A2]
+and evict/reload idle residents. The pinned v2 default is four concurrent
+threads per Session **including the root**, so
+`effective_agent_max_threads(V2)` subtracts the root and exposes capacity for
+three spawned threads. A v2 maximum-depth check was **not found in the
+investigated scope** defined in [A2]. [C5, C12, A2]
 
 Interruption is explicit per child. Legacy control also has a separate
 `shutdown_agent_tree` operation; parent Turn interruption is not equivalent to
@@ -192,13 +200,17 @@ subagent scheduling. [C3]
 
 ## 6. Compaction, context continuity, and memory
 
-Local compaction is **built-in**. It sends the current history and a summary
-prompt through the Responses path, retries stream failures, and on context
-overflow removes the oldest history item until the request fits. The resulting
-model context retains bounded user messages and appends a summary as a user
-message. Mid-turn compaction reinjects canonical context before the last user
-input; standalone/pre-turn compaction resets the reference point for the next
-Turn. [C6]
+Local compaction is a **core built-in, non-feature-gated implementation**. With
+the default-off `token_budget` feature disabled, manual and automatic
+compaction select it by default for providers that are not eligible for remote
+compaction; recognized OpenAI/Azure Responses providers instead take the remote
+route. Local compaction sends the current history and a summary prompt through
+the Responses path, retries stream failures, and on context overflow removes
+the oldest history item until the request fits. The resulting model context
+retains bounded user messages and appends a summary as a user message. Mid-turn
+compaction reinjects canonical context before the last user input;
+standalone/pre-turn compaction resets the reference point for the next Turn.
+[C6, C12]
 
 The replacement is persisted as `RolloutItem::Compacted` with replacement
 history and context-window lineage. Original rollout history remains available;
@@ -243,19 +255,38 @@ turns are recognized as mid-turn for fork/interrupt boundaries. V2 agent graph
 metadata supports restoring child topology and cold-loading persisted child
 Threads. [C5, C8]
 
-Resume is not transparent process continuation. Pending approval/user-input
-oneshots, active tool futures, cancellation tokens, provider streams, and live
-background terminals are newly created or process-local; restoration of those
-in-flight objects was **not found in the investigated scope**. The bounded
-audit covered `Session::record_initial_history`, rollout reconstruction,
-`ThreadManager` resume/fork logic, `TurnState`, unified-exec process management,
-and `thread-store/src`. [A4]
+Codex has three distinct recovery layers that must not be collapsed:
 
-Exec-server relay `resume` frames recover relay segment delivery, not Codex
-Thread/Turn execution. Its remote client can reconnect, but a websocket close
-causes the server to terminate managed processes belonging to that connection.
-These transport recovery semantics must not be presented as workflow resume.
-[C9, D4]
+1. **Relay-frame resume** reconnects a rendezvous/Noise relay stream and its
+   transport sequencing. It is below exec-server JSON-RPC session identity and
+   does not reconstruct a Codex Thread or Turn. [C9]
+2. **Exec-server session and recoverable-process recovery** is a live execution
+   capability. `initialize` accepts `resume_session_id` and returns a stable
+   `session_id`. On connection shutdown, `SessionRegistry` detaches the session
+   but retains the same `ProcessHandler` for 30 seconds (200 ms in tests), with
+   notifications temporarily disabled. Reattach within that TTL installs the
+   new notification sender and preserves managed processes. The client retries
+   recoverable connection/registry errors for at most 25 seconds, leaving
+   margin inside the server TTL. After reattach it calls
+   `process/read(after_seq = last_published_seq)` for each acknowledged,
+   recoverable process to replay missed output/exit/close events. [C9, T5]
+3. **Codex Thread/Turn resume** loads persisted rollout history and reconstructs
+   model-visible context as described above. Pending approval/user-input
+   oneshots, active tool futures, cancellation tokens, provider streams, and
+   process handles are not recreated by `ThreadStore` reconstruction;
+   restoration of those objects was **not found in the investigated scope**
+   defined in [A4]. [C8, A4]
+
+Exec-server recovery is bounded rather than transparent continuation. Only
+processes whose start response completed are marked recoverable; a transport
+failure during an unacknowledged start takes the cleanup path. HTTP body streams
+are failed before reconnect. Replay depends on retained process events/output
+(bounded to 1 MiB or 50,000 chunks per process); an unrecoverable sequence gap
+fails and terminates that client process session. Missing reconnect strategy,
+stdio transport, TTL expiry, or server shutdown cannot reattach; TTL expiry
+shuts down the retained `ProcessHandler` and its processes. These conclusions
+are source- and test-backed but were not runtime-tested in this research. [C9,
+T5]
 
 ## 8. Tools and scheduling
 
@@ -285,10 +316,14 @@ model, or artifact-gated executor was **not found in the investigated scope**.
 
 ## 9. Skills and extensions
 
-Host skill discovery is **built-in**. `SkillsService` scans configured roots,
-builds an immutable `HostSkillsSnapshot`, caches by cwd/effective config, and
-exposes metadata before selected main-resource content. Main prompt injection
-and descriptions have explicit byte/token caps. Explicit mentions can select
+Host skill discovery is a **core built-in, unconditionally initialized and
+warmed service**, not a feature-gated subsystem. Session initialization creates
+or reuses `SkillsService` and snapshots configured roots. Skill instruction
+inclusion is separately configurable and defaults to true; bundled-skill root
+availability is also separately configurable. `SkillsService` builds an
+immutable `HostSkillsSnapshot`, caches by cwd/effective config, and exposes
+metadata before selected main-resource content. Main prompt injection and
+descriptions have explicit byte/token caps. Explicit mentions can select
 enabled skills; `disable-model-invocation` removes prompt visibility without
 turning the package into a nonexistent resource. [C10]
 
@@ -447,8 +482,8 @@ erase the wire-level coupling. [C13]
   Goal, and background terminal are implemented as distinct concepts rather
   than a single overloaded run record.
 - Append-only rollout history plus compaction checkpoints and reconstruction
-  provide strong conversational continuity without pretending to resume live
-  futures or processes.
+  provide strong conversational continuity while keeping Codex Thread resume
+  separate from the bounded live-process recovery owned by exec-server.
 - Approval policy, permission profile, platform sandboxing, exec policy,
   additional grants, environment authority, and skill authority form explicit
   trust boundaries.
@@ -464,13 +499,15 @@ erase the wire-level coupling. [C13]
 
 ## 15. Mismatches and risks
 
-- There is no durable Task/Workflow/Job/Artifact foundation matching the
-  umbrella vocabulary. Plan checklist, Goal, internal task, Agent Run, and
-  background terminal cannot substitute for one another.
+- A durable Task/Workflow/Job/Artifact foundation was **not found in the
+  investigated scope** defined in [A1] and [A6]. Plan checklist, Goal, internal
+  task, Agent Run, and background terminal cannot substitute for one another.
 - Provider configuration breadth can be mistaken for provider neutrality;
   the wire contract is Responses-only.
-- Resume is transcript reconstruction, not continuation of approvals, tool
-  futures, provider streams, or background processes.
+- Codex Thread resume is transcript reconstruction, not continuation of
+  approvals, tool futures, provider streams, or process handles. Exec-server
+  separately provides TTL-bounded live-session/process recovery; treating one
+  as the other would overstate durability.
 - Default-on v1 and default-off v2 have materially different addressing,
   mailbox, fork, persistence, and residency semantics; “Codex multi-agent” is
   not one stable shape.
@@ -498,8 +535,10 @@ erase the wire-level coupling. [C13]
    enforced elsewhere operationally, or temporary?
 4. What guarantees do non-local `ThreadStore` implementations make for
    atomicity, ordering, leases, and concurrent resume?
-5. How are exec-server reconnect and relay resume expected to interact with
-   process termination on connection close in deployed rendezvous services?
+5. In deployed rendezvous services, which disconnect and registry-delay
+   distributions fit inside the exec-server's 25-second client retry and
+   30-second detached-session TTL, and how often do bounded output retention or
+   sequence gaps make a nominally recoverable process unrecoverable?
 6. Will skill provider search become a model-facing retrieval tool or alter
    prompt selection rather than remaining shadow metrics?
 7. Is the default-off Memory pipeline intended to become a cross-surface
@@ -534,7 +573,11 @@ Primary source evidence:
 - **[C8] Persistence:** `codex-rs/thread-store/src`,
   `thread-store/README.md`, `core/src/session/rollout_reconstruction.rs`, and
   `core/src/thread_manager.rs`.
-- **[C9] Execution:** `codex-rs/exec-server/src`, `exec-server/README.md`,
+- **[C9] Execution and recovery:**
+  `codex-rs/exec-server-protocol/src/protocol.rs`,
+  `exec-server/src/server/session_registry.rs`, `server/handler.rs`,
+  `client_recovery.rs`, `client_transport.rs`, `client.rs`,
+  `local_process.rs`, `relay.rs`, and `noise_relay`; plus
   `core/src/environment_selection.rs`, `session/turn_context.rs`, and
   `tools/sandboxing.rs`.
 - **[C10] Skills:** `codex-rs/core-skills/src`, `ext/skills/src`, and
@@ -562,8 +605,14 @@ Test evidence inspected but not executed:
 - Compaction suites under `codex-rs/core/tests/suite/compact*.rs`.
 - Permission, sandbox, guardian, and request-permissions tests under
   `codex-rs/core/src` and `core/tests`.
-- Exec-server process, filesystem, transport, recovery, relay, environment,
-  and capability tests under `codex-rs/exec-server/tests` and `src/*_tests.rs`.
+- **[T5] Exec-server recovery:**
+  `codex-rs/exec-server/tests/process.rs` (including
+  `exec_server_resumes_detached_session_without_killing_processes`),
+  `src/server/handler/tests.rs`, `server/processor.rs` tests,
+  `src/client_recovery_tests.rs`, and relay/noise-relay tests. These tests were
+  inspected, not executed by this research.
+- Other exec-server filesystem, transport, environment, and capability tests
+  under `codex-rs/exec-server/tests` and `src/*_tests.rs`.
 - Provider-info and model-provider tests under their respective crates.
 
 Repository documentation evidence:
@@ -571,7 +620,11 @@ Repository documentation evidence:
 - **[D1]** `codex-rs/core/README.md` platform sandbox matrix.
 - **[D2]** `codex-rs/thread-store/README.md` persistence boundary.
 - **[D3]** `codex-rs/memories/README.md` pipeline overview.
-- **[D4]** `codex-rs/exec-server/README.md` wire and lifecycle contract.
+- **[D4] Documentation conflict:** `codex-rs/exec-server/README.md` describes
+  the wire API, but its statement that websocket close terminates remaining
+  managed processes is stale at the pinned revision. `SessionRegistry` source
+  and [T5] instead retain detached process state for the bounded TTL; source is
+  authoritative for this profile.
 
 Bounded negative/limitation audits:
 
@@ -582,26 +635,49 @@ Bounded negative/limitation audits:
   `app-server/src`, and `ext` for declarations/names of Task, Todo, Workflow,
   Job, AgentRun, agent run, workflow, DAG, and background job. Hits were the
   internal `TaskKind`, plan checklist, `AgentRun`, comments/tests, and
-  background terminals; no durable Workflow/Job model was found.
-- **[A2] V2 depth:** searched the v2 spawn handler, common multi-agent helpers,
-  and agent spawn control for maximum-depth enforcement. Depth is recorded;
-  an enforcement check was not found in that bounded path.
-- **[A3] Compaction variants:** exact case-insensitive searches of `core/src`,
-  `protocol/src`, and `thread-store/src` for mini/micro/cached compaction and
-  compact/cache combinations returned no matches.
-- **[A4] In-flight resume:** inspected initial-history recording, rollout
-  reconstruction, ThreadManager resume/fork, TurnState, process manager, and
-  ThreadStore sources. Durable restoration of pending channels/futures/streams
-  or terminal processes was not found.
+  background terminals; a durable Workflow/Job domain model was **not found in
+  the investigated scope**.
+- **[A2] V2 depth:** exact roots were
+  `codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs`,
+  `codex-rs/core/src/tools/handlers/multi_agents_common.rs`,
+  `codex-rs/core/src/agent/control/spawn.rs`, and
+  `codex-rs/core/src/agent/registry.rs`. Searched symbols/literals were
+  `next_thread_spawn_depth`, `thread_spawn_source`,
+  `spawn_agent_with_communication`, `agent_max_depth`, `max_depth`, and
+  `exceeds_thread_spawn_depth_limit`. V2 records depth, but a v2 enforcement
+  call was **not found in the investigated scope**; config source explicitly
+  says the v1 depth setting is ignored by v2.
+- **[A3] Compaction variants:** exact roots were `codex-rs/core/src`,
+  `codex-rs/protocol/src`, and `codex-rs/thread-store/src`; the case-insensitive
+  literal patterns were `mini.?compact`, `micro.?compact`, `cached.?compact`,
+  `compaction cache`, and `cache.*compact`. The search returned no matches, so
+  those named variants were **not found in the investigated scope**.
+- **[A4] Codex Thread/Turn in-flight resume:** inspected exact symbols/roots
+  `Session::record_initial_history`, `session/rollout_reconstruction.rs`,
+  `ThreadManager` resume/fork functions, `state/turn.rs`,
+  `unified_exec/process_manager.rs`, and `thread-store/src`. Durable recreation
+  by Thread resume of pending channels/futures/provider streams/process handles
+  was **not found in the investigated scope**. This audit intentionally excludes
+  the separate live exec-server session-recovery layer in [C9].
 - **[A5] Skill search:** searched `core-skills/src` and `ext/skills/src` for
   `SkillSearch`, provider search implementations, and search tool registration;
   providers return empty results and only list/read model tools were found.
-- **[A6] Artifacts:** searched core, protocol, app-server, exec-server, and
-  extensions for Artifact declarations/IDs/stores. Only narrow uses such as
-  image-generation files and ordinary build/test wording were found.
+- **[A6] Artifacts:** exact roots were `codex-rs/core/src`,
+  `codex-rs/protocol/src`, `codex-rs/app-server/src`,
+  `codex-rs/exec-server/src`, and `codex-rs/ext`; searched
+  declaration/literal terms were `(struct|enum|trait|type) Artifact`,
+  `ArtifactId`, `artifact_id`, and the word `artifacts`. The only exact hit was
+  unrelated test prose; a
+  general Artifact type/ID/store was **not found in the investigated scope**.
+  A broader singular `artifact` inspection separately found the narrow
+  image-generation path recorded in [C15].
 - **[A7] Provider wires:** inspected `WireApi`, provider creation, and the core
   model client; only Responses is accepted, and chat is explicitly rejected.
 
-Confidence: high for the static architecture, status/default values, and
-bounded absences at the pinned revision; medium for cross-surface production
-wiring and remote/platform runtime behavior because those were not executed.
+Confidence: high for source-defined architecture, feature defaults, the
+exec-server recovery state machine, and the exact bounded searches at the
+pinned revision; medium for behavior inferred jointly from source and tests;
+low-to-medium for deployed relay timing, remote registry behavior,
+cross-surface wiring, and platform sandbox behavior because none was executed.
+The discovered exec-server README/source conflict lowers confidence in
+repository prose unless independently matched to pinned source.
