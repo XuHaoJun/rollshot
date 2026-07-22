@@ -31,9 +31,11 @@ README prose, and third-party reverse-engineering commentary were not used as
 proof. No provider request, crash/restart exercise, remote CCR session, tmux or
 iTerm team, permission dialog, or context-overflow run was executed. Defaults
 controlled by GrowthBook can change server-side, and this external source tree
-does not contain every ant/internal or bundle-gated module. Those limitations
-make feature availability and hidden algorithms lower confidence than the
-visible ownership and data-model claims. [C1, A2]
+does not contain every ant/internal or bundle-gated module. In particular, the
+context-collapse, reactive-compact, cached-microcompact, history-snip, and MCP
+skill implementations referenced by visible callsites are absent. Those
+limitations make feature availability and hidden algorithms lower confidence
+than the visible ownership and data-model claims. [C1, A2]
 
 ## 2. Architecture and ownership boundaries
 
@@ -226,7 +228,9 @@ Several context mechanisms must not be conflated:
 | Cached microcompact | **Hidden/unavailable source** behind `CACHED_MICROCOMPACT`; callsites and types exist, but `cachedMicrocompact.ts` is absent. It edits API cache context while leaving local messages intact and later emits a boundary with observed deleted tokens. |
 | Reactive compact | **Hidden/unavailable source** behind `REACTIVE_COMPACT`; visible callsites withhold context/media errors and request one reactive retry, but the algorithm module is absent. |
 | History snip | **Hidden/unavailable source** behind `HISTORY_SNIP`; visible callsites project a shortened model view and preserve fuller REPL scrollback, but both snip implementation modules are absent. |
-| API context management | Implemented provider-specific request strategy for clearing thinking/tool results; separate from transcript compaction. |
+| Context collapse | **Hidden/unavailable source** behind `CONTEXT_COLLAPSE`; `query.ts` visibly calls `applyCollapsesIfNeeded` before autocompact to project a model view and possibly commit more collapses, and calls `recoverFromOverflow` on a withheld 413. `src/services/contextCollapse/{index,persist}.ts` are absent, so the projection, commit, staging, and overflow algorithms are not established. |
+| API thinking management | Implemented call-level strategy, emitted only when the request has thinking and redact-thinking is inactive. It preserves all thinking by default for that call, or retains one thinking turn when `clearAllThinking` is requested. This is conditional request configuration, not a general external/default clearing capability. |
+| API tool-result/use clearing | **Implemented, feature-gated/internal-only**: it returns early for non-ant users and requires explicit `USE_API_CLEAR_TOOL_RESULTS` and/or `USE_API_CLEAR_TOOL_USES` opt-in. The visible defaults are a 180,000-token trigger and 40,000-token target when enabled. |
 
 Auto Memory is also separate. It is persistent Markdown under a validated
 memory directory, default-enabled unless bare/remote/config conditions disable
@@ -248,6 +252,14 @@ loading is bounded at 50 MB. Resume restores message history, file history,
 attribution/feature state, applicable Todo state, main agent selection, model,
 working directory/worktree, and permission mode when available. [C10]
 
+When `CONTEXT_COLLAPSE` is compiled in, session storage appends ordered
+collapse-commit records and last-wins staged-queue snapshots. Both interactive
+and CLI resume call the missing `persist.restoreFromEntries` before the first
+query so the visible callsite can reconstruct the commit log and staged
+snapshot used by projection. This persistence contract is visible, but the
+reconstruction and projection algorithms remain **hidden/unavailable source**.
+[C2, C10, A2]
+
 Persistence is selective:
 
 - local agent transcripts can be explicitly resumed through the Agent path;
@@ -264,14 +276,17 @@ resume. Task output directories are memoized so `/clear` in the same process
 does not orphan currently running output, but that behavior is not evidence of
 post-crash process reattachment. [C3, C4, C9]
 
-Remote-control resume is another boundary. A project `bridge-pointer.json`
-stores session/environment IDs and source for four hours. Perpetual REPL bridge
-mode can re-register the environment and reconnect a matching server session;
-failure clears the pointer and creates a fresh session. A clean single-session
-KAIROS shutdown can intentionally leave the backend environment resumable;
-fatal or ordinary multi-session shutdown follows different archive/deregister
-paths. This is CCR transport reattachment, not generic local Task recovery.
-[C11]
+Remote-control resume is another boundary and is **implemented,
+feature-gated**. Availability requires the `BRIDGE_MODE` build feature, a
+Claude.ai subscriber OAuth context, and GrowthBook gate `tengu_ccr_bridge`,
+whose cached default is false. When entitled, a project
+`bridge-pointer.json` stores session/environment IDs and source for four hours.
+Perpetual REPL bridge mode can re-register the environment and reconnect a
+matching server session; failure clears the pointer and creates a fresh
+session. A clean single-session KAIROS shutdown can intentionally leave the
+backend environment resumable; fatal or ordinary multi-session shutdown
+follows different archive/deregister paths. This is CCR transport reattachment,
+not generic local Task recovery. [C11]
 
 ## 8. Tools and scheduling
 
@@ -299,9 +314,10 @@ an execution scheduler, not a durable Job scheduler. [C12]
 
 ## 9. Skills and extensions
 
-Skills are **implemented, default** and progressively disclosed. Discovery
-loads metadata from managed, user, project, additional, plugin, bundled, and
-MCP sources; `SKILL.md` directories and legacy commands are supported.
+Local/file, plugin, and bundled skills are **implemented, default** and
+progressively disclosed. Discovery loads metadata from managed, user, project,
+additional, plugin, and bundled sources; `SKILL.md` directories and legacy
+commands are supported.
 Frontmatter can constrain tools, model, effort, agent, forked context, hooks,
 shell expansion, paths, and user/model invocation. Conditional path skills are
 held until relevant files activate them. Bundled skills are lazily extracted
@@ -309,9 +325,18 @@ to an owner-only per-process directory. [C13]
 
 Invoking an inline skill injects its content and optional context modifier.
 Forked-context skills run through an isolated agent. Skill permission rules can
-deny, allow, or ask; untrusted MCP skill markdown never executes inline shell
-commands. MCP skills and tools are extensions, while plugins may add skills,
-commands, hooks, agents, and MCP definitions. [C13]
+deny, allow, or ask. Plugins may add skills, commands, hooks, agents, and MCP
+definitions. [C13]
+
+MCP-provided skills are **hidden/unavailable source** behind the `MCP_SKILLS`
+build feature. The gated MCP client callsite checks resource support, calls
+`fetchMcpSkillsForClient`, merges returned commands into MCP commands, and the
+Skill tool filters entries marked `loadedFrom === 'mcp'`; security callsites
+also specify that remote MCP skill Markdown must not execute inline shell.
+However, `src/skills/mcpSkills.ts` is absent, so discovery, resource decoding,
+and exact availability semantics cannot be verified. MCP tools and ordinary
+MCP prompts are separate and remain visible outside this missing module. [C13,
+A2]
 
 Invoked-skill state is an in-memory, agent-scoped map. It is retained and
 re-injected across full compaction, but general durable persistence of that map
@@ -425,8 +450,11 @@ C15]
 - Agent teams depend on experimental opt-in and server-side gates; remote-agent
   isolation is unavailable in this external build flavor. Neither is a stable
   portability contract for Rollshot.
-- Hidden compact/snip modules prevent independent verification of thresholds,
-  invariants, and defaults at the pinned revision.
+- Hidden context-collapse, compact/snip, and MCP-skill modules prevent
+  independent verification of algorithms, thresholds, invariants, and defaults
+  at the pinned revision.
+- Bridge resume is not a baseline external capability: it requires a build
+  feature, subscriber authentication, and a default-false server entitlement.
 - Permission behavior is distributed across tool checks, rules, hooks, modes,
   UI/SDK handlers, trust checks, and platform mechanisms. A shallow port would
   likely omit a boundary.
@@ -437,8 +465,8 @@ C15]
 
 ## 16. Unresolved questions
 
-1. What are the exact algorithms and rollout defaults inside the absent
-   reactive compact, cached microcompact, and history-snip modules?
+1. What are the exact projection, commit, staging, recovery, and rollout
+   semantics inside the absent context-collapse implementation?
 2. Which runtime/build gate supplies `local_workflow` and `monitor_mcp`, and
    what persistence semantics do those implementations have?
 3. Are local shell or in-process teammate Tasks intentionally nonrecoverable
@@ -452,6 +480,10 @@ C15]
    Windows, and what guarantees are tested end to end?
 7. Does internal/ant source expose a provider abstraction or typed artifact
    system absent from the external tree?
+8. How does the absent MCP-skill loader authenticate, enumerate, validate, and
+   cache remote skill resources, and which MCP capability versions qualify?
+9. What are the exact algorithms and rollout defaults inside the absent
+   reactive compact, cached microcompact, and history-snip modules?
 
 ## 17. Evidence index
 
@@ -487,12 +519,14 @@ Code evidence at revision
   `src/services/compact/postCompactCleanup.ts`,
   `src/services/compact/microCompact.ts`,
   `src/services/compact/apiMicrocompact.ts`,
-  `src/services/compact/timeBasedMCConfig.ts`.
+  `src/services/compact/timeBasedMCConfig.ts`, `src/query.ts`.
 - **[C9] Memory:** `src/memdir/paths.ts`, `src/memdir/memdir.ts`,
   `src/memdir/findRelevantMemories.ts`, `src/memdir/teamMemPaths.ts`.
 - **[C10] Session persistence:** `src/utils/sessionStorage.ts`,
-  `src/utils/sessionRestore.ts`, `src/bootstrap/state.ts`.
-- **[C11] Bridge:** `src/bridge/bridgePointer.ts`,
+  `src/utils/sessionRestore.ts`, `src/bootstrap/state.ts`; visible
+  context-collapse commit/snapshot record and restore callsites are included.
+- **[C11] Bridge:** `src/bridge/bridgeEnabled.ts`,
+  `src/bridge/bridgePointer.ts`,
   `src/bridge/bridgeApi.ts`, `src/bridge/replBridge.ts`,
   `src/bridge/bridgeMain.ts`, `src/bridge/createSession.ts`.
 - **[C12] Tools:** `src/Tool.ts`,
@@ -501,8 +535,9 @@ Code evidence at revision
   `src/services/tools/toolExecution.ts`, `src/services/tools/toolHooks.ts`,
   `src/utils/permissions`.
 - **[C13] Skills:** `src/skills/loadSkillsDir.ts`,
-  `src/skills/bundledSkills.ts`, `src/tools/SkillTool/SkillTool.ts`,
-  `src/bootstrap/state.ts`.
+  `src/skills/bundledSkills.ts`, `src/skills/mcpSkillBuilders.ts`,
+  `src/services/mcp/client.ts`, `src/services/mcp/useManageMCPConnections.ts`,
+  `src/tools/SkillTool/SkillTool.ts`, `src/bootstrap/state.ts`.
 - **[C14] Permissions:** `src/Tool.ts`, `src/utils/permissions`,
   `src/hooks/toolPermission`, `src/utils/forkedAgent.ts`.
 - **[C15] Provider boundary:** `src/query.ts`, `src/QueryEngine.ts`,
@@ -513,34 +548,50 @@ Bounded audit evidence:
 - **[A0] Graph coverage:** `get_minimal_context` against
   `/home/noah/rollshot/learn-projects/claude-code-source-code` returned `0`
   nodes, `0` edges, and `0` files, so direct inspection was required.
-- **[A1] Domain absence audit:** exact declaration regex
-  `^(export )?(type|interface|class) (Workflow|Job|AgentRun|Artifact)\b`
-  returned no matches across `src/Task.ts`, `src/tasks`, `src/QueryEngine.ts`,
-  `src/services/{compact,tools}`, `src/skills`, `src/bootstrap/state.ts`,
-  `src/bridge`, `src/memdir`, `src/Tool.ts`, and the directly supporting Task,
-  Todo, Agent, swarm, session, and query files. Therefore those general domain
-  abstractions were **not found in the investigated scope**; ordinary uses of
-  the words were not treated as types.
+- **[A1] Domain declaration absence audit:** `rg` used the exact regex
+  `^(?:export\s+(?:default\s+)?|export\s+declare\s+|declare\s+)?(?:abstract\s+)?(?:type|interface|class)\s+(?:Workflow|Job|AgentRun|Artifact)\b`.
+  This includes unexported, exported, default-exported, declared, and abstract
+  TypeScript type/interface/class forms. The exact roots/files were
+  `src/Task.ts`, `src/tasks`, `src/QueryEngine.ts`,
+  `src/services/compact`, `src/services/tools`, `src/skills`,
+  `src/bootstrap/state.ts`, `src/bridge`, `src/memdir`, `src/Tool.ts`,
+  `src/utils/tasks.ts`, `src/hooks/useTasksV2.ts`,
+  `src/tools/TaskCreateTool`, `src/tools/TaskGetTool`,
+  `src/tools/TaskListTool`, `src/tools/TaskUpdateTool`,
+  `src/tools/TodoWriteTool`, `src/tools/AgentTool`,
+  `src/utils/swarm`, `src/utils/sessionStorage.ts`,
+  `src/utils/sessionRestore.ts`, and `src/query.ts`. It returned no matches.
+  The narrow conclusion is that declarations with those four names were **not
+  found in the investigated scope**; differently named equivalents remain
+  possible, and ordinary word occurrences were not treated as declarations.
 - **[A2] Missing implementation audit:** `git ls-tree -r --name-only` at the
-  pinned revision plus the exact basename regex for `reactiveCompact`,
-  `snipCompact`, `snipProjection`, `cachedMicrocompact`, `LocalWorkflowTask`,
-  and `MonitorMcpTask` returned no implementation file. Visible imports/types
-  and enum/UI labels were separately confirmed in `src/query.ts`,
-  `src/QueryEngine.ts`, `src/services/compact/microCompact.ts`, `src/Task.ts`,
-  and `src/tasks/pillLabel.ts`.
-- **[A3] Restart recovery audit:** exact searches for
-  `restore*Task`, `restore*Agent`, `resume*Task`, `resume*Agent`, `reattach`,
-  `resurrect`, and `sidecar` across runtime Task, task utility, Agent resume,
-  session restore, and session storage roots found explicit local-agent resume
-  and remote-agent sidecar restoration, but no generic local Task resurrection.
-  Such a routine was **not found in the investigated scope**.
-- **[A4] Budget/retry audit:** bounded searches of query parameters, Task and
-  Agent execution, compact, tool orchestration, and remote polling found local
-  turn/cost/task budgets and component retry/timeout rules, but a hierarchical
-  child budget and general durable workflow retry policy were **not found in
-  the investigated scope**.
+  pinned revision was restricted to the literal roots
+  `src/services/compact`, `src/services/contextCollapse`, `src/tasks`, and
+  `src/skills`. Its exact path regex was
+  `^src/services/contextCollapse/(index|persist)\.ts$|^src/services/compact/(reactiveCompact|snipCompact|snipProjection|cachedMicrocompact)\.ts$|^src/tasks/(LocalWorkflowTask|MonitorMcpTask)(\.tsx?|/)|^src/skills/mcpSkills\.ts$`.
+  It returned no matches. Visible gated imports, types, and labels were
+  separately confirmed in `src/query.ts`, `src/QueryEngine.ts`,
+  `src/services/compact/microCompact.ts`, `src/utils/sessionRestore.ts`,
+  `src/services/mcp/client.ts`, `src/Task.ts`, and
+  `src/tasks/pillLabel.ts`.
+- **[A3] Restart recovery audit:** `rg` used the exact regex
+  `(?:restore|resume)[A-Za-z]*(?:Task|Agent)|reattach|resurrect|sidecar` over
+  the literal roots/files `src/tasks`, `src/utils/task`,
+  `src/tools/AgentTool`, `src/utils/sessionRestore.ts`, and
+  `src/utils/sessionStorage.ts`. Matches showed explicit local-agent resume and
+  remote-agent sidecar restoration, but a generic local Task resurrection
+  routine was **not found in the investigated scope**.
+- **[A4] Budget/retry audit:** `rg` used the literal-alternation regex
+  `maxTurns|maxBudgetUsd|taskBudget|TOKEN_BUDGET|retry|Retry|timeout|Timeout|consecutiveFailures|AbortController|\bkill\b`
+  over `src/query.ts`, `src/QueryEngine.ts`, `src/Task.ts`, `src/tasks`,
+  `src/tools/AgentTool`, `src/services/compact`, `src/services/tools`, and
+  `src/utils/background/remote`. Matches established local turn/cost/task
+  budgets and component retry/timeout/cancellation rules, but a named
+  hierarchical child-budget policy and general durable workflow-retry policy
+  were **not found in the investigated scope**.
 
 Confidence is **high** for visible type distinctions, ownership, persistence
-paths, and call graphs; **medium** for default availability affected by runtime
-configuration; and **low** for absent bundle-gated algorithms and internal/ant
+record shapes, and callsites; **medium** for default availability affected by
+runtime configuration; and **low** for context-collapse, MCP-skill, compact,
+and snip algorithms whose referenced modules are absent, as well as internal/ant
 behavior. The evidence is static and revision-bounded.
