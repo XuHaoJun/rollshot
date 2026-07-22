@@ -1,6 +1,6 @@
 # oh-my-pi system profile
 
-Status: Complete (Round 1 system profile)
+Status: In Progress (Round 1 system profile)
 
 Research date: 2026-07-22 (Asia/Taipei)
 
@@ -23,10 +23,18 @@ behavioral equivalence. This profile therefore separates:
   `Agent`, JSONL conversation tree, and extension/skill form recognizable in
   both systems; this label does not claim that a particular implementation was
   introduced before or after the fork;
-- **oh-my-pi built-in**: behavior implemented and wired by this revision,
-  including capability aggregation, Task/subagent infrastructure,
-  background jobs, multiple compaction modes, memory backends, managed
-  skills, ACP integration, and broader provider routing;
+- **oh-my-pi built-in, origin unverified**: behavior implemented and wired by
+  this revision whose fork provenance was not established by a direct upstream
+  comparison in this pass, including Task/subagent infrastructure, background
+  jobs, multiple compaction modes, memory backends, managed skills, ACP
+  integration, and broader provider routing;
+- **repository-documented fork-added (bounded)**: the porting guide explicitly
+  says these exist in the fork but not upstream: `StatusLineComponent`,
+  multi-credential auth with session affinity, Capability-based discovery,
+  MCP/Exa/SSH integrations, LSP writethrough for format-on-save, Bash
+  interception. This exact six-entry list is the only fork-added classification
+  made here; it is documentation evidence, not an independently reproduced
+  upstream diff. [D4];
 - **example only**: repository examples that are not loaded by default;
 - **feature-gated or experimental**: source exists, but activation requires a
   setting, optional backend, explicit hook/extension, or experimental flag;
@@ -54,8 +62,7 @@ fell back to bounded source, test, and repository-document searches.
 
 ## 2. Architecture and ownership boundaries
 
-oh-my-pi retains Pi's layered shape and, at the pinned revision, implements
-substantial product orchestration:
+At the pinned revision, oh-my-pi implements this layered product architecture:
 
 ```text
 CLI / TUI / print / RPC / ACP host
@@ -148,10 +155,10 @@ oh-my-pi has three distinct host-owned concepts:
    paths, patches, validation metadata, and extracted tool data. [O12]
 
 Batch Task is fan-out, not dependency scheduling: every item receives common
-context and independently acquires a per-parent-session semaphore. No
-`dependsOn`, dependency edge, DAG node, workflow identifier, or deterministic
-next-ready-node abstraction was not found in the investigated scope; the
-bounded Task/async/todo/goal search is recorded in [A1].
+context and independently acquires a per-parent-session semaphore. A
+`dependsOn` field, dependency-edge or DAG-node contract, workflow identifier,
+or deterministic next-ready-node abstraction was not found in the investigated
+scope; the bounded Task/async/todo/goal search is recorded in [A1].
 
 `AsyncJobManager` supplies process-local background records for bash and Task:
 ID, kind, label, owner, optional child-agent ID, running/completed/failed/
@@ -743,6 +750,10 @@ X1]
 - **D2:** `docs/approval-mode.md`, `docs/extensions.md`, `docs/hooks.md`,
   `docs/extension-loading.md`.
 - **D3:** `docs/providers.md`, `docs/adding-a-provider.md`.
+- **D4 — bounded fork-added classification:**
+  `docs/porting-from-pi-mono.md:377-386`, which labels exactly six preserved
+  features as existing in the fork but not upstream. No other feature receives
+  fork-origin attribution in this profile without a direct upstream comparison.
 
 ### Examples, inferences, and bounded absence searches
 
