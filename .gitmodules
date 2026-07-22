@@ -34,3 +34,21 @@
 [submodule "learn-projects/iced"]
 	path = learn-projects/iced
 	url = https://github.com/iced-rs/iced.git
+[submodule "learn-projects/brag"]
+	path = learn-projects/brag
+	url = https://github.com/latent-spaces/brag.git
+[submodule "learn-projects/hyperframes"]
+	path = learn-projects/hyperframes
+	url = https://github.com/heygen-com/hyperframes.git
+[submodule "learn-projects/pi"]
+	path = learn-projects/pi
+	url = https://github.com/earendil-works/pi.git
+[submodule "learn-projects/oh-my-pi"]
+	path = learn-projects/oh-my-pi
+	url = https://github.com/can1357/oh-my-pi.git
+[submodule "learn-projects/codex"]
+	path = learn-projects/codex
+	url = https://github.com/openai/codex.git
+[submodule "learn-projects/claude-code-source-code"]
+	path = learn-projects/claude-code-source-code
+	url = https://github.com/XuHaoJun/claude-code-source-code.git
