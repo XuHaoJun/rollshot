@@ -93,7 +93,7 @@ Pi's terms at this revision are:
 | Run | One `Agent.prompt()` or `Agent.continue()` lifecycle from `agent_start` to `agent_end`. Only one may be active per `Agent`. |
 | Turn | One assistant response plus its complete tool batch and tool-result messages, from `turn_start` to `turn_end`. |
 | Settled | Coding-agent state after the run and any automatic retry, compaction/retry, or queued continuation have ended. |
-| Workflow | No built-in record identified; a session, run, or compaction summary is not itself a workflow. |
+| Workflow | No built-in record identified in the investigated scope; a session, run, or compaction summary is not itself a workflow. [A1] |
 
 For a normal prompt, `runAgentLoop` copies prior context plus prompt messages,
 emits start/message events, requests a streamed assistant message, appends it to
@@ -134,7 +134,7 @@ The repository's `todo.ts` example demonstrates an **extension-provided**
 conversational todo tool. It stores list snapshots in tool-result `details` and
 reconstructs state by scanning the active session branch. This gives branch-
 correct reminders but no built-in workflow ownership, dependency graph,
-execution lease, retry record, or artifact completion contract. [X1]
+execution lease, retry record, or artifact completion contract. [X1, A1, A4]
 
 **Managed background-job state: not found in the investigated scope.** The
 exact bounded search for job/process-handle terms found only a comment about
@@ -171,9 +171,9 @@ coding-agent session manager. [X2]
 ## 6. Compaction, context continuity, and memory
 
 The low-level loop offers only an optional `transformContext(messages)` hook
-before every provider call. The core test proves that transformed messages are
-then passed to `convertToLlm`; the loop itself does not choose a threshold or
-summary strategy. [P2, T1]
+before every provider call. The source passes transformed messages to
+`convertToLlm`, and the inspected core test asserts that behavior; the loop
+itself does not choose a threshold or summary strategy. [P2, T1]
 
 Coding-agent implements manual and automatic compaction. It triggers when
 estimated context exceeds `contextWindow - reserveTokens`, or when a provider
@@ -196,7 +196,7 @@ application projector maps them; custom messages do enter context. **A built-in
 cross-session user/project semantic-memory service, retrieval policy, expiry,
 or deletion API was not found in the same source/docs boundary.** This is a
 bounded static conclusion, not a claim that extensions cannot build one. [P6,
-A1]
+A6]
 
 ## 7. Persistence, checkpoints, and resume
 
@@ -207,6 +207,12 @@ active branch is reconstructed from the current leaf. `/resume`, `pi -r`, and
 `--session` reopen a saved conversation, while `/tree`, `/fork`, and `/clone`
 create or select alternate conversation branches. Session format versions 1–3
 are migrated on load. [P6, D1]
+
+Those JSONL transcripts can persist user prompts, assistant content, tool
+results/details, usage metadata, and extension-authored entries. Consequently,
+session continuity also carries local privacy and retention implications for
+captured content and tool output; Pi's session persistence is not merely an
+ephemeral context cache. [P6, D1]
 
 This is **conversation/session resume**, not interrupted-run resume. No durable
 active model request, in-flight tool call, steering/follow-up queue, retry
@@ -293,7 +299,14 @@ prompts. Those are optional extension policies. **A core approval cache,
 capability grant, filesystem/network authority object, or fail-closed reconnect
 policy was not found in the investigated scope.** This observation is not a
 recommendation that Rollshot should copy Pi's trust model; it is input to the
-later permissions comparison. [P9, X2, A3]
+later permissions comparison. [P9, X2, A8]
+
+Because extensions execute with the process's full authority, trusted
+extension code may also access persisted transcripts, workspace content, or
+credentials available to that process. This is a privacy implication of the
+documented execution model, not evidence that a particular extension performs
+such access; project trust controls loading but does not sandbox loaded code.
+[D3, P9]
 
 ## 11. Budgets, cancellation, retry, and failures
 
@@ -301,7 +314,7 @@ Pi records provider and nested-tool token usage and cost and can report session
 statistics, but **a finite run budget for tokens, cost, turns, tool calls, wall
 time, child agents, jobs, or artifacts was not found in the investigated
 core/coding-agent boundary**. The core loop has no maximum-turn parameter; it
-continues while tool calls or queued input require another turn. [P2, P5, A1]
+continues while tool calls or queued input require another turn. [P2, P5, A7]
 
 Cancellation is an `AbortSignal` shared with provider streaming and tool
 execution. `Agent.abort()` signals the active run. Coding-agent separately
@@ -319,8 +332,10 @@ model calls have their own observable retry callbacks. [P3, P5, D4]
 
 Failure is represented mainly through assistant `stopReason`/`errorMessage`,
 error tool results, thrown high-level mutation errors, and lifecycle events.
-There is no common typed terminal taxonomy comparable to Rollshot's current
-run terminal states. [P2, P3, P8]
+**A common typed product run-terminal taxonomy comparable to Rollshot's current
+run terminal states was not found in the investigated scope.** The inspected
+implementation instead exposes provider stop reasons, error messages, tool
+errors, and agent lifecycle/settlement events. [P2, P3, P5, P8, A9]
 
 ## 12. Artifacts, events, and observability
 
@@ -334,11 +349,10 @@ its listeners. [P2, P5, P9]
 Session entries and tool-result `details` provide an extensible event/state
 record, and session statistics aggregate messages, tool calls, usage, and cost.
 Extensions can add renderers and custom entries; separate extension/resource
-metadata can carry source information. The system does not provide a built-in
-typed artifact registry, expected-artifact completion contract, review
-decision, revision graph, or artifact provenance record in the investigated
-scope. Ordinary files produced by tools remain ambient filesystem outputs.
-[P5, P6, P9, A4]
+metadata can carry source information. **A built-in typed artifact registry,
+expected-artifact completion contract, review decision, revision graph, or
+artifact provenance record was not found in the investigated scope.** Ordinary
+files produced by tools remain ambient filesystem outputs. [P5, P6, P9, A4]
 
 The subagent and todo examples show how extensions can place structured results
 inside tool details, but those shapes and completion rules belong to the
@@ -357,7 +371,8 @@ messages. [P3, P4]
 Provider factories can use one API implementation or dispatch by `model.api`.
 Pi ships many provider factories while keeping the agent loop dependent only on
 a `StreamFn`. Coding-agent extensions can register additional providers and
-intercept the final headers/payload/response. [P4, P9]
+intercept final headers/payload and observe response status/header metadata.
+[P4, P9]
 
 The boundary is unified and application-owned, but not fully provider-erased:
 message history retains provider/API identifiers and opaque thinking/response
@@ -394,9 +409,9 @@ These are preliminary fit/risk inferences from the cited evidence:
 - Pi's trust boundary does not supply the product-owned authority and approval
   model a privacy-sensitive screenshot application would require. This is an
   observed mismatch, not yet a Rollshot design recommendation. [D3]
-- The core loop has no finite multidimensional run budget or typed terminal
-  outcome, and the session schema does not durably represent active work. [P2,
-  P6]
+- In the investigated boundary, the core loop has no finite multidimensional
+  run budget or separate typed product terminal outcome, and the session schema
+  does not durably represent active work. [P2, P6, A7, A9]
 - Conversation resume can be mistaken for workflow recovery; provider streams,
   in-flight tools, queues, and external processes are not reconstructed. [P8,
   A3]
@@ -442,7 +457,7 @@ These are preliminary fit/risk inferences from the cited evidence:
 |---|---|---|---|
 | P1 | Source/metadata | Implemented | `learn-projects/pi/packages/{ai,agent,coding-agent}/package.json`; Pi Git revision and package boundaries. |
 | P2 | Source | Core built-in | `packages/agent/src/agent-loop.ts` (`runLoop`, `streamAssistantResponse`, `executeToolCalls*`), `agent.ts` (`Agent`, queues/lifecycle), `types.ts` (`AgentLoopConfig`, `AgentTool`, events), `stream-fn.ts`. |
-| T1 | Tests | Core built-in | `packages/agent/test/agent-loop.test.ts`: context transform, tool-call continuity, truncated arguments, parallel completion/source ordering, steering timing, sequential override, next-turn refresh, termination, continuation. |
+| T1 | Tests | Inspected; not executed | `packages/agent/test/agent-loop.test.ts`: assertions for context transform, tool-call continuity, truncated arguments, parallel completion/source ordering, steering timing, sequential override, next-turn refresh, termination, and continuation. |
 | P3 | Source | Core built-in | `packages/ai/src/types.ts`: message/content/tool/result/usage/stream contracts and provider-bearing assistant state. |
 | P4 | Source | Core built-in | `packages/ai/src/models.ts`: `Provider`, `Models`, `ModelsImpl`, `createProvider`, auth application, lazy streaming and dynamic model refresh. |
 | P5 | Source | Coding-agent built-in | `packages/coding-agent/src/core/agent-session.ts`: `AgentSession`, persistence event handling, prompt/queue routing, settled lifecycle, compaction, retry, cancellation and statistics. |
@@ -450,7 +465,7 @@ These are preliminary fit/risk inferences from the cited evidence:
 | D1 | Official repository docs | Coding-agent built-in | `packages/coding-agent/docs/sessions.md` and `session-format.md`: user-facing storage, tree, resume, format versions and entry semantics. |
 | P7 | Source/docs | Coding-agent built-in | `packages/coding-agent/src/core/compaction/{compaction.ts,branch-summarization.ts,utils.ts}` and `docs/compaction.md`: triggers, cut points, summaries, branch continuity and overflow recovery. |
 | P8 | Source/docs | Harness implemented plus planned items | `packages/agent/src/harness/agent-harness.ts`, `harness/session/{session.ts,jsonl-storage.ts,jsonl-repo.ts}`, and `packages/agent/docs/agent-harness.md`. The document explicitly separates implemented behavior from planned recovery/hooks/lifecycle work. |
-| T2 | Tests | Harness implemented | `packages/agent/test/harness/agent-harness.test.ts`, `session.test.ts`, `compaction.test.ts`, `storage.test.ts`, and `repo.test.ts`: queues, abort, save points, persistence ordering, compaction, branching and reopen behavior. |
+| T2 | Tests | Inspected; not executed | `packages/agent/test/harness/agent-harness.test.ts`, `session.test.ts`, `compaction.test.ts`, `storage.test.ts`, and `repo.test.ts`: assertions for queues, abort, save points, persistence ordering, compaction, branching, and reopen behavior. |
 | P9 | Source/docs | Coding-agent built-in extension surface | `packages/coding-agent/docs/extensions.md`, `src/core/extensions/{types.ts,runner.ts,loader.ts}`: registration, hooks, session entries, trust, resource lifecycle and error behavior. |
 | P10 | Source | Coding-agent built-in | `packages/coding-agent/src/core/tools/{index.ts,file-mutation-queue.ts,read.ts,bash.ts,edit.ts,write.ts,grep.ts,find.ts,ls.ts}`: built-in tools and file-mutation scheduling. |
 | P11 | Source | Coding-agent built-in | `packages/coding-agent/src/core/skills.ts`: discovery, validation, collision handling and XML prompt formatting. |
@@ -463,14 +478,30 @@ These are preliminary fit/risk inferences from the cited evidence:
 
 ### Bounded absence searches
 
+Unless a row says otherwise, A1–A9 used this explicit built-in boundary:
+`packages/agent/src`, `packages/agent/test/agent-loop.test.ts`,
+`packages/agent/docs/agent-harness.md`, `packages/coding-agent/src/core`, and
+coding-agent docs `sessions.md`, `session-format.md`, `skills.md`,
+`extensions.md`, `compaction.md`, `security.md`, and `settings.md`. Searches
+were case-insensitive, included ignored files with `--no-ignore`, and excluded
+`**/export-html/vendor/**`.
+
 | ID | Search boundary and terms | Result and interpretation |
 |---|---|---|
-| A1 | Case-insensitive `task|tasks|todo|todos` across `packages/agent/src`, required loop test/harness doc, `packages/coding-agent/src/core` (excluding vendored renderer code), and named session/skill/extension/compaction docs. | Hits were natural-language task references, compaction-summary checkboxes, Promise variable names, or extension examples. No built-in task/todo/workflow domain record was found in this scope. |
-| A2 | `sub.?agent|child.?agent|spawn.?agent|fork.?agent|agent.?spawn|delegate` across the same built-in boundary, then separately under coding-agent extension examples. | No built-in child-agent lifecycle was found. The separate extension-example search found `examples/extensions/subagent`, which is reported only as extension-provided behavior. |
-| A3 | `job|jobs|background job|background process|process handle|job id|job_id`, plus `checkpoint|approval|resume|recovery|reopen|reattach`, across the same boundary with vendored renderers excluded. | No managed-job abstraction was found. Resume hits were session switching; checkpoint hits were compaction reconstruction, labels, or extension examples; unfinished-operation recovery appears only in the harness's planned work. |
-| A4 | `artifact|artifacts|provenance|review decision|approval checkpoint` across the same boundary. | Hits were generic message “artifacts,” harness hook/source provenance notes, or extension source metadata. No built-in typed product artifact/review contract was found. |
-| A5 | `parallel|parallelism|concurrent|concurrency|Promise.all|worker|queue|queued` across the same boundary. | Implemented hits cover parallel tool calls, per-file mutation queues, model/package refresh, and user-message queues. No built-in parallel task or agent scheduler was found; the separate subagent example supplies its own scheduler. |
+| A1 | `task\|tasks\|todo\|todos\|workflow\|workflows\|task[_ -]?id\|workflow[_ -]?id\|task[_ -]?status\|depends[_ -]?on\|dependency graph\|dag` across the shared boundary. | Hits were natural-language task references, compaction-summary checkboxes, Promise variable names, package-manager work variables, or extension documentation/examples. No built-in task/workflow ID, status, or dependency-graph domain record was found in this scope. |
+| A2 | `sub.?agent\|child.?agent\|spawn.?agent\|fork.?agent\|agent.?spawn\|delegate` across the same built-in boundary, then separately under coding-agent extension examples. | No built-in child-agent lifecycle was found. The separate extension-example search found `examples/extensions/subagent`, which is reported only as extension-provided behavior. |
+| A3 | `job\|jobs\|background job\|background process\|process handle\|job id\|job_id`, plus `checkpoint\|approval\|resume\|recovery\|reopen\|reattach`, across the same boundary with vendored renderers excluded. | No managed-job abstraction was found. Resume hits were session switching; checkpoint hits were compaction reconstruction, labels, or extension examples; unfinished-operation recovery appears only in the harness's planned work. |
+| A4 | `typed.?artifact\|artifact.?registry\|expected.?artifact\|artifact.?completion\|completion.?contract\|review.?decision\|revision.?graph\|artifact.?provenance\|artifact.?record\|artifact.?revision` across the shared boundary. | No matches. A built-in typed product artifact registry, completion/review contract, revision graph, or provenance record was not found in this scope. |
+| A5 | `parallel\|parallelism\|concurrent\|concurrency\|Promise.all\|worker\|queue\|queued` across the same boundary. | Implemented hits cover parallel tool calls, per-file mutation queues, model/package refresh, and user-message queues. No built-in parallel task or agent scheduler was found; the separate subagent example supplies its own scheduler. |
+| A6 | `semantic.?memory\|memory.?service\|memory.?store\|memory.?record\|memory.?retriev\|retrieval.?policy\|memory.?expir\|memory.?delet\|project.?memory\|user.?memory\|cross.?session.?memory` across the shared boundary. | No matches. A built-in cross-session semantic-memory store, retrieval policy, expiry, or deletion API was not found in this scope. |
+| A7 | `run.?budget\|token.?budget\|cost.?budget\|turn.?budget\|tool.?budget\|wall.?time.?budget\|child.?agent.?budget\|job.?budget\|artifact.?budget\|max.?turns\|max.?tool.?calls\|budget.?exhaust\|budget.?limit` across the shared boundary. | Matches were thinking-level token settings and compaction/summarization context budgets. No finite product run-governance budget or exhaustion state was found in this scope. |
+| A8 | `approval.?cache\|cached.?approval\|capability.?grant\|permission.?grant\|authority.?object\|filesystem.?authority\|network.?authority\|reconnect.?policy\|fail.?closed\|permission.?cache\|approval.?policy` across the shared boundary. | No matches. A built-in approval cache, capability grant, authority object, or reconnect policy was not found in this scope. |
+| A9 | `terminal.?state\|terminal.?status\|terminal.?outcome\|terminal.?taxonomy\|run.?terminal\|RunTerminal\|stopReason\|errorMessage\|agent_end\|agent_settled` across the shared boundary. | Matches expose provider stop/error fields and agent lifecycle/settlement events. No separate typed product run-terminal taxonomy was found in this scope. |
 
 All absence statements are limited to these paths and terms. They do not prove
 that another Pi package, an uninspected extension, or future revision cannot
 provide the capability.
+
+T1 and T2 were inspected as test-source evidence but were not executed because
+the checkout does not contain `node_modules/.bin/vitest`. Accordingly, this
+profile does not use those tests as runtime proof.
