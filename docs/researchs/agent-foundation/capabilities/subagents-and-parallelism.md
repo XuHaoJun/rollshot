@@ -32,7 +32,7 @@ The three workload traces create different pressure:
 |---|---|---|
 | **Smart Redaction** | One provider/tool loop progresses source generation → validation → dry run → typed proposal. The app owns consent, budget, cancellation and review. [W1] | It establishes bounded specialist work and deterministic validation. It does **not** establish a need for a child, fan-out, or DAG. Inline serial execution avoids context duplication and keeps one authority/budget owner. |
 | **Action Guide** | Durable project revisions surround independent caption and visual-annotation proposal calls. Visual annotation binds a `run_id`, reviewed step, `document_state_id`, image, fresh cancellation and finite turn configuration. [W2] | Future per-step fan-out is plausible only when several independent suggestions are product-approved. Current code proves revision-bound bounded proposals and stale-result rejection, not a parallel requirement. |
-| **Deferred brag + Hyperframes** | Plan/check, scene build, assembly, render, poster and share-copy stages have explicit prerequisites. Optional scene workers consume packets; audio or generation may overlap independent work. [W3-W5] | If adopted, this trace establishes bounded fan-out/fan-in, artifact validation, checkpoints and selective retry. It does not require Rollshot to ship video, use a general Workflow engine, or keep one long coordinator context. |
+| **Deferred brag + Hyperframes** | Plan/check, scene build, assembly, render, poster and share-copy stages have explicit prerequisites. Optional scene workers consume packets; audio or generation may overlap independent work. [W3-W5] | If adopted, this trace establishes bounded fan-out/fan-in, Artifact validation and checkpoints. H1 supplies missing-Artifact re-dispatch; broader selective retry would be a Rollshot policy. It does not require Rollshot to ship video, use a general Workflow engine, or keep one long coordinator context. |
 
 ## 2. Terms and non-equivalent execution forms
 
@@ -84,33 +84,51 @@ must not be flattened into one “supports subagents” cell.
 Hyperframes supplies the clearest artifact-worker requirements, but only for
 the deferred workload. [E:H1, E:H2]
 
-### 3.1 Dispatch and isolation requirements
+### 3.1 Two source layers, precedence and dispatch requirements
 
-- The child's prompt is the full worker role plus exact dispatch context. The
-  packet and files on disk are its entire world; it must not rely on seeing the
-  parent's conversation, Memory or Skills.
-- General-video's packet builder inlines each scene's storyboard block,
-  blueprint and cited rules. Workers read only their assigned packets and the
-  design truth file, not the shared storyboard or skill documents.
-- One worker receives two to three scenes only when dispatch pays for itself.
-  The expected outputs are each scene's
-  `compositions/<frame-id>.html` and `.motion.json`.
-- Workers are independent except for the project filesystem. Independence is
-  a design precondition: shared-file mutation, implicit ordering and hidden
-  predecessor reads invalidate parallel fan-out.
-- A harness cap reduces active parallelism, never scope. If the harness queues,
-  submit all items; if it hard-caps, dispatch cap-sized waves until every
-  artifact exists. Do not drop or merge work merely to fit the cap.
-- Native delegation is optional. The fallback ladder is headless CLI workers,
-  then serial inline execution from the same packet.
+Hyperframes has two related but non-identical instruction layers:
 
-### 3.2 Completion and selective retry
+- **H1 core generic contract:** one scene per dispatch. The child's prompt is
+  the full role plus verbatim dispatch context; files and prompt are its entire
+  world. Submit all scenes when the harness queues internally. With a hard cap,
+  dispatch cap-sized waves until every scene has been attempted. The cap never
+  changes scope and must not cause scenes to be dropped or merged. [E:H1]
+- **H2 `general-video` specialization:** dispatch only past its measured
+  threshold, give each worker **two to three scene packets**, and start **all
+  workers in one wave**. Each scene packet inlines its storyboard block,
+  blueprint and cited rules; workers read only their packets and design truth.
+  Expected outputs are each scene's HTML and motion sidecar. [E:H2]
 
-`WAIT` completes on expected Artifacts existing and passing their applicable
-validation, never on the harness notification. A notification can be lost,
-duplicated, early, or detached from a failed publication. A missing Artifact
-means that item failed; Hyperframes allows one fresh re-dispatch with the same
-packet plus the concrete gate failure. Successful siblings are retained. [E:H1]
+H2 is the more specific rule for `general-video` worker granularity, so its
+two-to-three-scene grouping supersedes H1's generic one-scene grouping in that
+workflow. H2's single-wave instruction and H1's mandatory hard-cap waves
+conflict when the planned worker count exceeds a harness hard cap; neither
+source defines a precedence rule for that case. That is an execution-planning
+gap, not permission to merge more scenes, omit work, or claim a single wave.
+
+Both layers require workers to be independent except for the project
+filesystem. Shared-file mutation, implicit ordering and hidden predecessor
+reads invalidate parallel fan-out. Native delegation is optional; the fallback
+ladder is headless CLI workers, then serial inline execution from the same
+packet. [E:H1, E:H2]
+
+### 3.2 Completion, missing-Artifact re-dispatch and retry gaps
+
+H1 defines `WAIT` by the expected Artifact existing on disk, never merely by
+the harness completion notification. If the one expected scene Artifact is
+missing, it re-dispatches one fresh child once with the same prompt plus the
+gate failure. H1 says nothing about retrying an Artifact that exists but fails
+content/schema validation. The stronger statement that a notification may be
+lost, duplicated or early is a general distributed failure-model inference,
+not a quoted Hyperframes guarantee. [E:H1]
+
+H2 waits for every grouped scene's HTML and motion sidecar and later runs its
+validation gates, but it does not define retry granularity when one worker's
+two-to-three scenes are partially published or one published sibling is
+invalid. In particular, the sources do **not** guarantee that successful
+siblings can be retained while only one missing/invalid scene is retried. A
+Rollshot design may adopt that as an explicit idempotent candidate policy, but
+must not attribute it to the current Hyperframes contract. [E:H2, A:H]
 
 This yields a two-channel model:
 
@@ -118,21 +136,23 @@ This yields a two-channel model:
 transient channel: child started / progress / notification / exit
                          |
                          v
-durable gate: expected artifact published -> validate schema/content/hash
+H1 WAIT gate: expected artifact exists on disk
                          |
-               valid ----+---- invalid or missing
+              exists ------+------ missing
                  |                    |
                  v                    v
-          item complete       selective retry once
-                 |                    |
-                 +------ fan-in ------+
-                            |
-                  successors become ready
+       workflow validation     same prompt once (H1)
+                 |
+        valid ---+--- invalid
+          |               |
+          v               v
+       fan-in       source retry rule absent
 ```
 
 The contract does not specify hierarchical budgets, durable cancellation or
 fair scheduling. Those remain foundation questions rather than inferred
-Hyperframes behavior [A:H].
+Hyperframes behavior. Grouped-worker partial retry, invalid-Artifact retry and
+hard-cap/single-wave reconciliation are also source-bound gaps [A:H].
 
 ## 4. Per-system behavior
 
@@ -153,9 +173,14 @@ seconds. Chain mode stops at the first failed child and injects the preceding
 final text through `{previous}`. [E:P1]
 
 This is useful subprocess evidence, but its model/tools/caps/cancellation are
-extension-local. A finite token/cost/wall-time budget, Skill/provider
-inheritance, permission profile, spawn fairness/backpressure, expected Artifact
-contract and selective retry were **not found in the example scope** [A:P1].
+extension-local. The one tool-call `AbortSignal` is passed to every active
+`runSingleAgent`; each subprocess closure reacts to that shared signal. The
+result array has agent labels and task indices, but the extension exposes no
+child process ID/controller or cancel-by-child address, so addressed
+single-child cancellation was **not found in the exact cancellation audit**
+[A:P2]. A finite token/cost/wall-time budget, Skill/provider inheritance,
+permission profile, spawn fairness/backpressure, expected Artifact contract
+and selective retry were **not found in the example scope** [A:P1].
 
 ### 4.2 oh-my-pi: Task fan-out and process-local Jobs
 
@@ -173,7 +198,10 @@ non-blocking agents become process-local `AsyncJobManager` Jobs; blocking agents
 and hosts without a manager wait inline. The Job manager defaults to 15 running
 Jobs and five-minute retention. Caller-gated queued Jobs consume no running
 slot until `markRunning`; direct registration at capacity fails. This is local
-backpressure, not a durable or cross-session fair scheduler. [E:O1, E:O2]
+backpressure. FIFO is established only for one `TaskTool`/session semaphore;
+the Job `queued` flag is not a manager-owned admission queue, and the exact
+roots do not establish shared cross-session or durable fairness [E:O1, E:O2,
+A:OQ].
 
 Task prefers explicit `yield`: after the initial run it sends at most three
 reminders and can force a final named-tool choice. A clean no-yield child may
@@ -195,20 +223,38 @@ Codex `multi_agent` V1 is Stable/default-on; `multi_agent_v2` is
 Stable/default-off at the pinned revision. A recorded/resumed session can keep
 its chosen version. [E:C1]
 
-V1 `spawn_agent` creates a child Thread/Session and can fork filtered parent
-history. Spawn configuration inherits the live model provider/model,
-reasoning, approval policy, permission profile, cwd, environment snapshot and
-conditional exec policy; a role or model/reasoning override can then narrow or
-replace selected values. The default V1 cap is six spawned threads across the
-Session's shared registry and maximum depth is one. Admission is atomic and
-returns `AgentLimitReached`; it is not a queued spawn scheduler. [E:C2]
+V1 `spawn_agent` creates a child Thread/Session: `fork_context=false` is fresh,
+while `true` uses a full filtered fork and rejects an agent-type override. V1
+and V2 both build the child from the live turn's effective config:
+provider/model, reasoning, approval policy, permission profile, cwd,
+environment snapshot and conditional exec policy. A requested model or role
+layer is then resolved at spawn time; role config can also change the child's
+available Skill configuration. These are config/resolution semantics, not a
+copy of the parent's already-built Tool registry or invoked-Skill state
+[E:C2, A:C4]. The default V1 cap is six spawned threads across the Session's
+shared registry and maximum depth is one. Admission is atomic and returns
+`AgentLimitReached`; it is not a queued spawn scheduler. [E:C2]
 
 V2 is path/mailbox based: spawn, send/follow-up, interrupt, list and wait.
-`fork_turns` defaults to `all` and accepts `none`, `all`, or a positive last-N
-turn count. Full history is filtered to suitable rollout content rather than
-blindly cloning every transient result; selected capability roots are carried
-through the fork boundary. Spawn edges persist, and idle children may be
-cold-loaded or LRU-unloaded for residency. [E:C2]
+`fork_turns=none` starts without parent history or selected capability-root
+extension state. `all` (the default) and positive last-N both use the fork
+path: selected capability roots are copied explicitly from parent SessionMeta
+before truncation, while rollout filtering keeps suitable
+system/developer/user/final-assistant context and drops prior Tool calls and
+outputs. Full history alone preserves the reference-context/cache item and
+parent agent type; last-N rebuilds context and may apply a new role. Thus
+available Skills from role/config, selected capability roots, historical Tool
+invocations, and durable invoked-Skill state are four different things. The
+focused roots do not establish a durable invoked-Skill ledger/version snapshot
+[E:C2, A:C4]. Spawn edges persist, and idle children may be cold-loaded or
+LRU-unloaded for residency.
+
+Each child builds a fresh per-turn Tool router/registry from its own
+`TurnContext`, config and shared runtime services. Both fresh and forked thread
+constructors pass an empty `dynamic_tools` vector, so parent dynamic Tool specs
+are not propagated by these spawn paths. Core/configured Tool availability may
+be re-resolved in the child; it must not be described as inheritance of the
+parent's current model-visible Tool set [A:C4].
 
 V2 defaults to four concurrent Threads per Session **including the root**, so
 effective child capacity is three. It first unloads an eligible idle resident;
@@ -280,11 +326,11 @@ agent cap.
 | **Rollshot inline** | One fresh Rig run; one run-local ToolContext. | App/product owns screenshot, proposal and Action Guide artifacts. | Registered Rollshot tools; Rollshot provider facade/model config. | App consent + explicit Tool registry, finite budget and one cancellation owner. |
 | **Pi example spawn** | Fresh no-session subprocess, only task + agent system prompt. | Selected cwd is shared; result is JSON stream/final text. | Frontmatter can select Tool list and model. Skill/provider transfer was **not found** [A:P1]. | Project-agent confirmation is optional UI policy; a child permission/sandbox profile was **not found** [A:P1]. |
 | **OMP Task** | Fresh child AgentSession with shared context + assignment; optional transcript revival. | Shared workspace/artifact IDs or optional worktree/patch. | Agent definition/scoped policy selects model, Tools, Skills and fallback. | Parent Task is exec-tier approval boundary; headless child/per-tool policy applies. Isolation is workspace isolation, not credential/network sandboxing. |
-| **Codex V1/V2** | Fresh or full/last-N filtered fork; V2 separate mailbox/path. | Same selected environment/workspace unless environment policy differs; files are ambient coordination. | Provider/model/reasoning inherited; role/model overrides; full fork carries selected capability roots. General invoked-Skill inheritance for fresh children was **not found in the focused compact/persistence evidence** [A:C4]. | Approval policy, permission profile, environment and exec policy inherited as snapshots and then enforced in separate child Thread. |
+| **Codex V1/V2** | V1 is fresh or full filtered fork; V2 `none` is fresh and `all`/last-N are filtered forks with mailbox/path. | Same selected environment/workspace unless environment policy differs; files are ambient coordination. | Live config seeds provider/model and configured Tool/Skill availability; role/model layers resolve per spawn. Child Tool routers rebuild per turn; spawn paths pass no parent dynamic Tool specs. Full/last-N forks explicitly copy selected capability roots, but filtered history drops Tool calls; durable invoked-Skill state is a documented gap [A:C4]. | Approval policy, permission profile, environment and exec policy are inherited as snapshots and then enforced in a separate child Thread. |
 | **Claude local/fork** | Regular prompt-only child or explicit context; fork keeps byte-exact parent prefix. Mutable state isolated; root Runtime Task registry shared. | Shared cwd, optional worktree; sidechain transcript/output path. | Regular agent resolves tools/Skills/MCP/model; fork uses exact tools/model/thinking. Provider remains Claude-specific. | Async normally avoids prompts; scoped rules/agent mode apply. Fork uses parent-bubbling permission mode. |
 | **Claude teammate** | Independent persistent loop and mailbox; capped UI mirror. | Shared/team-selected workspace plus transcript/mailbox files. | Own scoped Tool/model context; configured agent Skills preload through the shared `runAgent` path; can spawn only allowed synchronous children [E:L1, E:L3]. | Independent permission mode; permission can be mediated through leader/mailbox. External feature gates apply. |
 | **Claude remote** | Remote service owns live context; local identity/status sidecar. | Remote environment/session URL and logs. | Claude remote stack; general provider choice was **not found** [A:L]. | Remote eligibility/account/build gates; kill archives remote session. External launch is unavailable at the pinned external build [E:L4]. |
-| **Hyperframes worker** | Complete role + packet; no inherited conversation/Memory/Skills. | Shared project but disjoint expected scene paths. | Harness-selected worker; packet inlines required recipes. Provider/model/permission policy is unspecified [A:H]. | Harness grants must be explicit; artifact contract is not a sandbox. |
+| **Hyperframes worker** | Complete role + packet; no inherited conversation/Memory/Skills. H1 dispatches one scene; H2 groups two to three for `general-video`. | Shared project but disjoint expected scene paths. | Harness-selected worker; packet inlines required recipes. Provider/model/permission policy is unspecified [A:H]. | Harness grants must be explicit; Artifact completion is not a sandbox. |
 
 ## 6. Scheduling, cancellation and completion matrix
 
@@ -293,18 +339,20 @@ Every negative or unknown cell cites an exact audit in Section 13.
 | Design | Admission, queue, fairness and backpressure | Cancellation | Completion and retry |
 |---|---|---|---|
 | **Rollshot** | One Run and serial tool batch; child admission does not exist [A:R]. | One cancellation source reaches provider and automation. | Typed Run terminal/proposal; no child completion [A:R]. |
-| **Pi example** | Max 8 per call, 4 active; source-order local pool. Cross-call/global fairness or backpressure was **not found** [A:P1]. | Shared signal sends TERM then KILL to each subprocess. No addressed single-child cancel was found [A:P1]. | Process/assistant result; chain stops on failure. Expected Artifact validation/selective retry was **not found** [A:P1]. |
-| **OMP Task + Job** | FIFO session semaphore default 32, dynamically resized; Job active cap default 15, parked items excluded, direct over-cap registration errors. No durable/cross-session fairness policy [A:O]. | Abortable semaphore waits, child run and owner-scoped Job cancellation. Process death loses controllers [A:O]. | Yield/schema/raw fallback; delivery retry is in memory. Expected Artifact gate and durable attempt ledger were **not found** [A:O]. |
+| **Pi example** | Max 8 per call, 4 active; source-order local pool. Cross-call/global fairness or backpressure was **not found** [A:P1]. | One tool-call signal sends TERM then KILL to every active subprocess; no exposed child ID/controller or addressed single-child cancel was found [A:P2]. | Process/assistant result; chain stops on failure. Expected Artifact validation/selective retry was **not found** [A:P1]. |
+| **OMP Task + Job** | FIFO only inside one per-session semaphore; default 32 and dynamically resized. Job active cap defaults to 15; parked items are excluded and direct over-cap registration errors. Durable/cross-session fairness is a source-bound gap [A:OQ]. | Abortable semaphore waits, child run and owner-scoped Job cancellation. Process death loses controllers [A:O]. | Yield/schema/raw fallback; delivery retry is in memory. Expected Artifact gate and durable attempt ledger were **not found** [A:O]. |
 | **Codex V1** | Shared registry cap 6, depth 1; hard error, no spawn queue [E:C2, A:C1]. | Explicit interrupt; separate legacy tree shutdown. | Completion watcher notification/status. Typed Artifact validation/retry was **not found** [A:C3]. |
 | **Codex V2** | 4 total including root; LRU idle unload then hard error. Mailbox queue is not admission queue; fairness unknown [A:C1]. | Explicit per-path interrupt; persistent topology is not cancellation intent. | Parent mailbox/status; no expected Artifact contract [A:C3]. |
 | **Claude local/fork** | Global child cap/queue/fairness was **not found** [A:L]. Fork shares cache prefix; regular child is colder. | Sync linked to parent; async Task-owned and intentionally unlinked from spawning turn. | Runtime notification/final text; no generic expected Artifact/selective retry [A:L]. |
 | **Claude teammate** | Ready ledger items may be claimed, but visible global/per-team concurrency/fairness cap was **not found** [A:L]. | Cooperative shutdown, then forced kill; independent current-work controller. | Mailbox/task status. Ledger completion does not validate a product Artifact [A:L]. |
 | **Claude remote** | Remote service scheduling/cap is unknown in the external tree [A:L]. | Kill archives remote session. | Authoritative remote status can restore polling; generic Artifact completion was **not found** [A:L]. |
-| **Hyperframes** | Harness queues all or coordinator dispatches cap-sized waves; fairness is unspecified [A:H]. Cap never changes scope. | A portable cancellation contract is unspecified [A:H]. | Validate expected files; re-dispatch only missing/invalid items once with gate failure [E:H1]. |
+| **Hyperframes H1/H2** | H1 submits all to an internal queue or uses hard-cap waves, one scene/dispatch. H2 groups two-to-three scenes and asks for one worker wave; hard-cap reconciliation is unspecified [E:H1, E:H2, A:H]. | A portable cancellation contract is unspecified [A:H]. | H1 re-dispatches a missing one-scene Artifact once. H2 validates grouped outputs, but partial-sibling and invalid-Artifact retry semantics are unspecified [E:H1, E:H2, A:H]. |
 
 ## 7. Fan-out, fan-in and dependency readiness
 
-Parallelism is safe only after readiness is decided outside the child:
+Parallelism is safe only after readiness is decided outside the child. The
+following is a candidate Rollshot coordination policy, deliberately stronger
+than the portable Hyperframes source contract:
 
 1. **Project readiness:** freeze the relevant input/artifact/document revision,
    required approvals and predecessor set.
@@ -327,8 +375,10 @@ Parallelism is safe only after readiness is decided outside the child:
 
 oh-my-pi Task demonstrates capacity fan-out without predecessor edges. Claude's
 work ledger demonstrates dependency-aware claiming without automatic Runtime
-Task launch. Hyperframes demonstrates artifact-gated fan-in. None alone is a
-complete durable Workflow scheduler.
+Task launch. Hyperframes demonstrates Artifact-existence-gated fan-in. Its
+source-backed retry guarantee stops at H1's missing one-scene Artifact; the
+broader missing/invalid selective-retry rule above is Rollshot design guidance.
+None alone is a complete durable Workflow scheduler.
 
 ## 8. When sequential inline execution is preferable
 
@@ -395,10 +445,12 @@ the same specialists should run inline.
 ### Pattern C — Hyperframes-style artifact workers
 
 A product-owned coordinator writes immutable, versioned packets for ready
-scene/work items. Workers receive disjoint packets and output paths. The
-coordinator validates expected Artifacts, selectively retries once, then
-unlocks assembly. A coordinator restart rebuilds readiness from durable packets,
-checkpoint decisions and artifacts rather than child transcripts.
+scene/work items. Workers receive disjoint packets and output paths. As an
+explicit Rollshot candidate policy—not a claim about H1/H2—the coordinator
+validates expected Artifacts, retains valid siblings and selectively retries
+one missing/invalid retry-safe item once, then unlocks assembly. A coordinator
+restart rebuilds readiness from durable packets, checkpoint decisions and
+Artifacts rather than child transcripts.
 
 **Potential benefit:** strongest match to deferred multi-stage creative work;
 provider-neutral artifact recovery and partial success retention. **Risks:**
@@ -493,17 +545,39 @@ All negative claims are limited to these exact audits:
   The only hit was the extension-guide row linking to `examples/extensions/subagent`.
   A built-in child lifecycle was **not found in the investigated scope**.
 - **[A:P1] Pi example governance/completion.** Literal files:
-  `examples/extensions/subagent/{index,agents}.ts` and `README.md`. Regex:
+  `packages/coding-agent/examples/extensions/subagent/{index,agents}.ts` and
+  `packages/coding-agent/examples/extensions/subagent/README.md`. Regex:
   `token.?budget|cost.?budget|wall.?time|max.?turn|max.?token|permission.?profile|sandbox|skill|provider|expected.?artifact|artifact.?completion|retry|fair|backpressure|queue`.
   Hits were README prose mentioning providers and a temporary-file mutation
   queue; none defined the named child budget, provider/Skill inheritance,
   permission profile, spawn fairness/backpressure or Artifact/retry contract.
+- **[A:P2] Pi addressed-cancellation gap.** The same three literal files were
+  searched with
+  `cancel|abort|signal|kill|terminate|child.?id|task.?id|agent.?id|address|interrupt`.
+  Hits were the tool-call `AbortSignal`, `wasAborted`, TERM/KILL calls, README
+  abort prose, result agent labels and a UI “Canceled” string. Direct source
+  inspection showed the same `signal` passed to every parallel
+  `runSingleAgent`; each process closure owns only its local `proc`. No child
+  process/controller ID is returned or accepted by a cancel/interrupt API.
+  Addressed single-child cancellation was therefore **not found in these exact
+  roots**; this does not claim the host lacks whole-tool cancellation.
 - **[A:O] oh-my-pi Workflow, budget, Artifact and Job durability.** Roots:
-  `packages/coding-agent/src/task` and `src/async/job-manager.ts`. Regex:
+  `packages/coding-agent/src/task` and
+  `packages/coding-agent/src/async/job-manager.ts`. Regex:
   `dependsOn|depends_on|blockedBy|blocked_by|workflowId|workflow_id|next.?ready|readiness|expected.?artifact|artifact.?completion|parent.?budget|child.?budget|hierarch.{0,20}budget|serialize|deserialize|rehydrate|reattach`.
   Hits were JSON/schema serialization and an in-process git mutation comment;
   the named Workflow readiness, Artifact completion, hierarchical budget and
   Job restart contract were **not found in the investigated scope**.
+- **[A:OQ] oh-my-pi admission/fairness scope.** Literal roots:
+  `packages/coding-agent/src/task/{index,parallel}.ts` and
+  `packages/coding-agent/src/async/job-manager.ts`. Regex:
+  `cross.?session|global.?fair|durable.?fair|persist|rehydrate|reattach|restart|fair|admission|queue|waiter|session`.
+  Hits establish one `#spawnSemaphore` per `TaskTool`/session, an in-memory
+  waiter array admitted with `shift()` (FIFO), and Job `queued` flags that hold
+  no execution slot; direct Job registration at capacity errors. They do not
+  construct a shared cross-session admission queue or durable fairness state.
+  Consequently FIFO fairness is supported only inside one live TaskTool
+  semaphore; durable/cross-session fairness remains a source-bound gap.
 - **[A:C1] Codex admission/fairness.** Roots: `core/src/agent`, V1
   `multi_agents.rs`, V2 handler directory and `core/src/config/mod.rs`. Search
   terms `queue|queued|fair|backpressure` found mailbox/input/persistence/resume
@@ -520,11 +594,29 @@ All negative claims are limited to these exact audits:
   `expected.?artifact|artifact.?completion|artifact.?contract`; **0 hits**.
   Typed child Artifact validation/retry was **not found in the investigated
   scope**.
-- **[A:C4] Codex invoked-Skill inheritance gap.** Prior focused persistence
-  audit searched ThreadStore, rollout reconstruction and compact/fork sources
-  for `invoked.?skill|skill.?version|skill.?snapshot|skill.?authority|skill.?package.?id|skill.?revision`.
-  Durable general invoked-Skill inheritance was **not found**; positive full
-  fork evidence is limited to `selected_capability_roots`.
+- **[A:C4] Codex Tool/Skill spawn boundary.** Exact implementation roots:
+  `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`,
+  `codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs`,
+  `codex-rs/core/src/tools/handlers/multi_agents_common.rs`,
+  `codex-rs/core/src/agent/{control.rs,control/spawn.rs,role.rs}`,
+  `codex-rs/core/src/thread_manager.rs`, and
+  `codex-rs/core/src/tools/{router,spec_plan}.rs`; focused tests:
+  `codex-rs/core/src/agent/{control,role}_tests.rs` and
+  `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`. Symbol/term audit:
+  `build_agent_spawn_config|apply_spawn_agent_role|apply_role_to_config|build_tool_router|dynamic_tools|selected_capability_roots|UserInput::Skill|skills.config|FullHistory|LastNTurns|fork_turns`.
+  Hits establish: live config is cloned then role/model/runtime layers resolve
+  per spawn; role config can alter available Skill configuration; each child
+  builds a Tool router from its own turn/config/runtime services; fresh and
+  forked thread constructors both pass `Vec::new()` for dynamic Tools; the
+  fork filter drops prior Tool calls/outputs; and `all`/last-N copy
+  `selected_capability_roots` explicitly before truncation while `none` uses a
+  fresh thread/extension state. A second exact-root regex,
+  `invoked.?skill|skill.?version|skill.?snapshot|skill.?authority|skill.?package.?id|skill.?revision`,
+  returned **0 hits**. Thus configured/available Skills and selected capability
+  roots have positive source paths, but durable inheritance of an invoked-Skill
+  ledger/version is **not established**. The audit does not claim every Tool
+  service is absent: core/MCP/extension availability is re-resolved rather than
+  copied from the parent's current model-visible registry.
 - **[A:L] Claude agent economics/completion.** Roots:
   `src/tools/AgentTool`, `src/tasks/{LocalAgentTask,InProcessTeammateTask,RemoteAgentTask}`,
   `src/utils/swarm`, and `src/utils/agentSwarmsEnabled.ts`. Regex:
@@ -534,13 +626,17 @@ All negative claims are limited to these exact audits:
   provider override or expected Artifact contract. Those concepts were **not
   found in the investigated external-source scope**; hidden service policy may
   exist.
-- **[A:H] Hyperframes unspecified governance.** Literal sources:
+- **[A:H] Hyperframes layer conflicts and unspecified governance.** Literal sources:
   `hyperframes-core/references/subagent-dispatch.md` and
-  `general-video/SKILL.md`. Search/complete reading established dispatch,
-  cap/wave, packet, completion and retry rules. A portable child token/cost
-  budget, provider/model/permission policy, cancellation tree or fairness
-  algorithm is not specified in those sources; this is a source-bound gap, not
-  an assertion about every supported harness.
+  `general-video/SKILL.md`. Complete reading establishes H1's one-scene
+  dispatch, hard-cap waves, Artifact-existence WAIT and one missing-Artifact
+  re-dispatch; H2 separately establishes two-to-three scene packets per worker,
+  all workers in one wave, workload economics and validation gates. Neither
+  source resolves hard-cap waves versus H2's single wave, grouped-worker
+  partial publication/sibling retention, or retry of an existing but invalid
+  Artifact. A portable child token/cost budget, provider/model/permission
+  policy, cancellation tree or fairness algorithm is also unspecified. These
+  are source-bound gaps, not assertions about every supported harness.
 
 Required spikes before synthesis can select a pattern:
 
@@ -603,9 +699,11 @@ Required spikes before synthesis can select a pattern:
   V1/V2 stage/defaults and version resolution at the pinned revision.
 - **[E:C2] Source + inspected tests:**
   `core/src/agent/{control,control/spawn,control/residency,registry}.rs`,
-  V1/V2 handlers and their control/spawn/residency tests: inheritance,
-  forks/mailbox, caps, LRU residency, interrupt and completion watcher. Tests
-  were inspected, not executed.
+  V1/V2 handlers, role/config application, Tool router/spec planning,
+  ThreadManager spawn paths and their focused tests: config inheritance,
+  fork modes/capability roots, per-child Tool/Skill resolution, caps, LRU
+  residency, interrupt and completion watcher. Tests were inspected, not
+  executed. See [A:C4] for the exact Tool/Skill audit and bounded gap.
 
 ### Claude Code source
 
@@ -627,11 +725,13 @@ Required spikes before synthesis can select a pattern:
 
 - **[E:H1] Workflow source:**
   `skills/hyperframes-core/references/subagent-dispatch.md`: complete dispatch
-  prompt, filesystem-only assumption, cap/waves, Artifact WAIT, one fresh
-  re-dispatch and fallback ladder.
+  prompt, filesystem-only assumption, one scene per dispatch, hard-cap waves,
+  Artifact-existence WAIT, one fresh re-dispatch for a missing Artifact and the
+  fallback ladder.
 - **[E:H2] Workflow source:** `skills/general-video/SKILL.md` §5: measured
-  inline/packet economics, two-to-three scenes per worker, one-wave fan-out,
-  packet builder, expected HTML/motion sidecars and validation gates.
+  inline/packet economics, two-to-three scenes per worker, all workers in one
+  wave, packet builder, expected HTML/motion sidecars and validation gates. It
+  does not define grouped partial-success or invalid-Artifact retry.
 
 **Limitations:** Confidence is high for visible pinned source fields, gates,
 caps, context construction and exact negative audits; medium for behavior
