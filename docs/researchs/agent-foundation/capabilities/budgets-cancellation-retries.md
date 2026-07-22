@@ -82,8 +82,8 @@ Rollshot-owned envelope [E:R1]:
 | Requested control area | Current dimension / behavior | Enforcement character |
 |---|---|---|
 | Token | `InputTokens`, `OutputTokens` | Usage becomes known during/after the provider stream; an overage returns dimensioned `BudgetExhausted`, but already-consumed tokens cannot be undone. |
-| Cost | `Cost` field and comparison | The driver never charges provider prices, so production usage remains zero and the configured ceiling is ineffective. Token/model-call ceilings are the current spend proxy. [E:R1] |
-| Wall time | `WallTime` | Checked before and between model/Tool work; stream polling receives a deadline. Equality is exhausted. Initial concrete provider stream establishment has a cancellation/deadline gap [A:R-CANCEL]. |
+| Cost | `Cost` field and comparison | The driver never charges provider prices, so production usage remains zero and the configured ceiling is ineffective. Token/model-call ceilings are the current spend proxy [E:R1, A:R-COST]. |
+| Wall time | `WallTime` | Checked before and between model/Tool work. Stream conversion selects between `stream.next()` and the deadline, but observes cancellation only before starting each item poll. Initial establishment and an established stream with one permanently pending item therefore have distinct cancellation gaps [A:R-CANCEL]. |
 | Tool calls | `ToolCalls`, `PerToolCalls` | Batch counts are charged before Tool execution; the registry separately enforces per-Tool counts. |
 | Tool bytes | `ArgumentBytes`, `ResultBytes`, `SourceBytes`, `Attachments` | Argument deltas and assistant/source bytes are bounded while streaming; results and attachments are bounded at their boundaries. `SourceBytes` also backs the aggregate assistant-text cap in the driver. |
 | Validation/evaluation | `ValidationAttempts`, `DryRunAttempts`, `CapabilityCalls`, `CandidateCount`, `AffectedArea` | Attempt counts are precharged where known; result-derived capability/candidate/area usage is charged after execution. |
@@ -118,24 +118,31 @@ investigated agent scope [A:R-HIER]:
 Cost is the important false-hard edge: the type looks enforceable, and unit
 tests can charge synthetic cost, but the production driver documents that no
 pricing function supplies charges. It must be reported as **declared but not
-operationally enforced**, not as a functioning spend cap [E:R1].
+operationally enforced**, not as a functioning spend cap [E:R1, A:R-COST].
 
 ### 3.3 Cancellation propagation and cleanup
 
 One `RunCancellation::cancel()` fans into a Tokio `CancellationToken` and the
 automation executor's `CancellationFlag`. The driver checks the token before
 and between model/Tool phases; `ToolRegistry` checks before each serial call;
-dry-run automation receives the paired flag; and provider stream iteration
-checks cancellation and deadline [E:R1, E:R2].
+and dry-run automation receives the paired flag [E:R1, E:R2]. Provider stream
+cancellation is weaker: `stream_to_model_events` checks cancellation before
+starting each item poll, then its `select!` waits only for the absolute deadline
+or `stream.next()` [A:R-CANCEL].
 
 The concrete Anthropic/OpenAI adapters await
 `model.stream(completion_request)` before wrapping the returned stream in
 `stream_to_model_events(bounds)`, while the driver also awaits
 `provider.stream(request, bounds)` directly. No `select!` around this initial
 stream-establishment future was found. Static inspection therefore does not
-establish that cancellation/deadline interrupts a concrete provider request
-that stalls before yielding the stream [A:R-CANCEL]. Once a stream exists,
-deadline and cancellation are explicit.
+establish that cancellation or the Rollshot deadline interrupts a concrete
+provider request that stalls before yielding the stream [A:R-CANCEL]. After
+establishment, the deadline is selected concurrently with `stream.next()`, but
+cancellation is not. If one item poll remains pending indefinitely, cancellation
+does not wake that poll; observation may be delayed until the item resolves or
+the deadline fires. Establishment-stall, established-item-stall, and
+cancel/deadline-race behavior remain runtime gaps, including which terminal is
+reported and at what latency [A:R-CANCEL].
 
 A Child Agent, Job/process registry, hook lifecycle, cancellation-intent store,
 or generic cleanup/compensation protocol was not found in the six-file agent
@@ -172,21 +179,50 @@ provider/prompt/attachment content [E:R2].
 
 ## 4. Cross-system budget comparison
 
-Every negative or unknown cell cites an exact audit in Section 13.
+Every negative or unknown cell cites an exact audit in Section 13. Similar
+names in this first inventory are not treated as equivalent enforcement; the
+companion matrix in Section 4.1 makes owner/scope, charge timing, force,
+outcome, and retry/Resume accounting explicit.
 
 | Control | Rollshot | Pi | oh-my-pi | Codex | Claude Code source |
 |---|---|---|---|---|---|
-| **Token** | Hard input/output Run dimensions; post-observation terminal [E:R1]. | Usage/statistics exist, but a finite product Run token budget was not found [A:P-BUD]. | Goal has optional token budget and persisted used amount; Task has request/output controls. No unified parent tree budget was found [E:O1, A:O-HIER]. | Context `token_budget` and tree-shared weighted `rollout_budget` are under-development/default-off [E:C1]. | Query has `maxTurns`, `maxBudgetUsd`, and feature-gated task/token budget paths; no unified hierarchy was found [E:L1, A:L-HIER]. |
-| **Cost** | Field exists, but production driver does not charge it [E:R1]. | Provider/session cost is recorded; finite cost governance was not found [A:P-BUD]. | Provider usage/fallback accounting exists; unified hard cost ceiling was not found [A:O-HIER]. | Rate/usage telemetry exists; mandatory hard cost budget was not found [A:C-HIER]. | `maxBudgetUsd` is positive query control; parent/child reservation/reconciliation was not found [E:L1, A:L-HIER]. |
-| **Wall time** | Hard Run deadline; stream establishment caveat [A:R-CANCEL]. | Provider timeout is configurable; finite whole-Run wall budget was not found [A:P-BUD]. | Core deadline plus Task maximum runtime and Job lifetime policy; controls are local [E:O1]. | Stream idle timeout defaults 300 s; Turn/tool/process timeouts are component-owned. Unified Run/Workflow wall budget was not found [A:C-HIER]. | Task/tool/remote-component timeouts exist; one hierarchical wall budget was not found [A:L-HIER]. |
-| **Tool calls / bytes** | Tool/per-Tool calls and argument/result/source/attachment bytes are explicit [E:R1]. | Tool/session usage exists; finite Tool-call/byte governance was not found [A:P-BUD]. | Task output bytes/lines and Tool-result spill limits exist; one run-wide Tool-call/byte budget was not found [A:O-HIER]. | Tool counters/output truncation exist; hard tree Tool-call/byte budget was not found [A:C-HIER]. | Result spilling/size thresholds exist; unified Tool-call/byte budget was not found [A:L-HIER]. |
+| **Token** | Hard input/output Run dimensions; post-observation terminal [E:R1]. | Usage/statistics exist, but a finite product Run token budget was not found [A:P-BUD]. | Goal has an optional post-usage token budget and persisted used amount; Task request/yield controls are separate. No unified parent tree budget was found [E:O1, A:O-HIER]. | Default-off `token_budget` provides context guidance; default-off tree-shared `rollout_budget` gives reminders and, after recorded usage reaches its limit, `SessionBudgetExceeded` [E:C1]. | Query has `maxTurns`, `maxBudgetUsd`, and feature-gated task/token budget paths; no unified hierarchy was found [E:L1, A:L-HIER]. |
+| **Cost** | Field exists, but production driver does not charge it [E:R1, A:R-COST]. | Provider/session cost is recorded; finite cost governance was not found [A:P-BUD]. | Provider usage/fallback accounting exists; unified hard cost ceiling was not found [A:O-HIER]. | Rate/usage telemetry exists; mandatory hard cost budget was not found [A:C-HIER]. | Query `maxBudgetUsd` checks already accumulated cost after a yielded message and returns `error_max_budget_usd`; it is a post-consumption stop, not pre-admission reservation [A:L-HIER]. Parent/child reconciliation was not found [E:L1, A:L-HIER]. |
+| **Wall time** | Hard Run deadline at observed boundaries; establishment and established-item cancellation gaps remain [A:R-CANCEL]. | Provider timeout is configurable; finite whole-Run wall budget was not found [A:P-BUD]. | Core deadline and Task `maxRuntimeMs` are hard local aborts; the request/yield budget instead begins as soft steering [E:O1]. | Stream idle timeout defaults 300 s; Turn/tool/process timeouts are component-owned. Unified Run/Workflow wall budget was not found [A:C-HIER]. | Task/tool/remote-component timeouts exist; one hierarchical wall budget was not found [A:L-HIER]. |
+| **Tool calls / bytes** | Tool/per-Tool calls and argument/result/source/attachment bytes are explicit [E:R1]. | Tool/session usage exists; finite Tool-call/byte governance was not found [A:P-BUD]. | Task request/yield first steers, while returned-output byte/line caps hard-truncate after capture; one run-wide Tool-call/byte budget was not found [E:O1, A:O-HIER]. | Tool counters/output truncation exist; hard tree Tool-call/byte budget was not found [A:C-HIER]. | Result spilling/size thresholds exist; unified Tool-call/byte budget was not found [A:L-HIER]. |
 | **Child** | Child budget/allocation not found [A:R-HIER]. | Built-in child lifecycle and child budget not found; subprocess example policy is extension-local [A:P-BUD]. | Task request/runtime/output/recursion limits are configured per child; allocation/reclaim from a parent vector was not found [E:O1, A:O-HIER]. | Tree-shared rollout usage/reminders exist, but per-child allocation/reserve/reclaim was not found [E:C1, A:C-HIER]. | `maxTurns`/agent settings can cap children; a visible hierarchical child-budget policy was not found [A:L-HIER]. |
 | **Job** | Foundation Job budget not found [A:R-HIER]. | Built-in Job budget/lifecycle not found [A:P-BUD]. | Job running cap/retention are positive; token/cost/resource allocation from parent was not found [E:O2, A:O-HIER]. | Background terminal/exec limits exist; a durable Job resource budget was not found [A:C-HIER]. | Runtime Task limits exist; a common Job budget was not found [A:L-HIER]. |
 | **Artifact** | Generic Artifact count/bytes/retention budget not found [A:R-HIER]. | Generic Artifact budget was not found [A:P-BUD]. | Spill files have size controls, but Product Artifact budget was not found [A:O-HIER]. | Generic Artifact budget/type was not found [A:C-HIER]. | Heterogeneous output paths exist; a common Artifact budget was not found [A:L-HIER]. |
 | **Retry** | Ordinary dimensions charge correction, but retry budget/attempt ledger not found [A:R-RETRY]. | Agent retry count is a local retry policy, not a total resource reservation [E:P1, A:P-HIER]. | Provider/Task/schema/Job delivery layers have local retry budgets; no shared durable attempt ledger was found [E:O2, A:O-HIER]. | Request/stream retry maxima exist; tree resource reservation for retries was not found [E:C2, A:C-HIER]. | Component retry limits/circuit breakers exist; a durable workflow retry budget was not found [E:L2, A:L-HIER]. |
 | **Parallelism** | Serial Tool loop; no parallelism budget [A:R-HIER]. | Core Tool parallelism exists; no child/Job budget in built-in scope [A:P-BUD]. | Task semaphore and Job running cap are positive local admission controls [E:O1, E:O2]. | V1/V2 agent caps and Tool read/write gate are positive; a spend allocation tied to those slots was not found [A:C-HIER]. | Tool safe-call cap is path-specific and agent/team cap is not visible in the external roots [A:L-HIER]. |
 
-### 4.1 Parent-to-child allocation, reservation, reclaim, and Resume
+### 4.1 Enforcement companion matrix
+
+| System / control | Owner and scope | Admission / accounting point | Enforcement character | Exhaustion / limit outcome | Retry and Resume accounting |
+|---|---|---|---|---|---|
+| **Rollshot — model/Tool/validation calls and request bytes** | One live `AgentRunner` Run; per-Tool count is also registry-local [E:R1]. | Known call counts, arguments, attachments, and attempt counts are charged or rejected before their governed effect; accumulated checks also occur at Turn commit [E:R1]. | Hard pre-admission or pre-effect ceiling. | Dimensioned `BudgetExhausted` or boundary rejection; the named dimension owns the stop [E:R1]. | Model correction is a new ordinarily charged call. Tracker/attempt reconstruction on Resume was not found [A:R-RETRY, A:R-DURABLE]. |
+| **Rollshot — provider tokens and result-derived usage** | One live Run; input/output tokens, result/source bytes, capability calls, candidates, and affected area [E:R1]. | Observed while streaming or after Tool/result completion; consumption can precede the check [E:R1]. | Hard **post-observation** terminal, not admission reservation [A:R-HIER]. | Dimensioned `BudgetExhausted`; already consumed provider/Tool resources are not undone [A:R-HIER]. | Corrections charge the same Run. Retry reservation and durable usage reconstruction were not found [A:R-RETRY, A:R-DURABLE]. |
+| **Rollshot — declared cost** | `RunBudget.cost` / `UsageSnapshot.cost` in one live Run [E:R1]. | Synthetic charge paths exist, but the production driver supplies no provider-price charge [A:R-COST]. | Declared but inactive: neither enforceable nor meaningful cost telemetry in the current product path. | No production cost exhaustion can be relied upon while usage remains zero [A:R-COST]. | No retry cost allocation or durable cost reconciliation was found [A:R-HIER, A:R-DURABLE]. |
+| **Rollshot — wall time / stream** | One live Run deadline plus provider adapter boundaries [E:R1, E:R2]. | Tracker checks happen between phases; established stream conversion selects deadline versus next item, while cancellation is checked only before the item poll [A:R-CANCEL]. | Hard when a boundary/deadline is observed; neither establishment nor a pending item poll selects cancellation. | Tracker boundary can name `WallTime`; in-stream deadline follows the provider-stream error path. Exact cancel/deadline race terminal and latency are runtime gaps [A:R-CANCEL]. | Backoff is absent [A:R-RETRY]; live elapsed time is not reconstructed on Resume [A:R-DURABLE]. |
+| **Pi — token/cost/Tool usage** | Coding-agent Session/usage statistics [E:P1]. | Recorded after provider/Tool activity. | Telemetry; a finite product Run ceiling was not found [A:P-BUD]. | A product budget-exhaustion terminal was not found [A:P-BUD, A:P-TERMINAL]. | Transient retries consume real usage, but no shared retry allocation or durable budget ledger was found [A:P-HIER]. |
+| **Pi — timeout and transient retry** | Provider request / current agent turn, configured locally [E:P1]. | Timeout races live work; agent transient retry occurs after classified failure. No parent reservation was found [A:P-HIER]. | Timeout is hard for that request; retry count is a local hard maximum, not a spend budget [A:P-BUD, A:P-HIER]. | Request error after timeout/retry exhaustion; no common typed Product terminal was found [A:P-TERMINAL]. | Agent retry defaults to three with 2/4/8 s exponential delays; provider retry defaults to zero. Attempt/usage Resume ledger was not found [E:P1, A:P-HIER]. |
+| **oh-my-pi — Goal token budget** | One Goal owns `tokenBudget`, `tokensUsed`, and elapsed usage [E:O1]. | Usage is accumulated after provider responses and compared to the optional Goal budget [E:O1]. | Hard Goal-state boundary after observed use, not child pre-allocation [A:O-HIER]. | Goal becomes `budget-limited` [E:O1]. | Budget/used/time persist; Thread Resume pauses active Goal by default and resets the live timing baseline. Child-tree accounting remains absent [E:O1, A:O-HIER]. |
+| **oh-my-pi — Task request/yield budget** | One child Task run [E:O1]. | Request count is observed after calls: first a wrap-up notice, then forced final `yield`, then abort after a non-cooperative grace overrun [E:O1]. | Soft steering followed by a hard forced-yield/grace boundary; not equivalent to a token budget [A:O-HIER]. | Graceful yielded result when cooperative; otherwise abort/error identifying the exceeded soft request budget [E:O1]. | Scoped schema/provider correction may retry, but no durable parent attempt/charge ledger was found [A:O-HIER]. |
+| **oh-my-pi — Task runtime and returned output** | One child Task; `maxRuntimeMs` and byte/line output caps [E:O1]. | Runtime timer races live execution; output is captured and then hard-truncated to byte/line maxima [E:O1]. | Hard runtime abort; hard post-capture returned-output cap. The latter limits the returned payload, not upstream generation spend [A:O-HIER]. | Timeout abort/error for runtime; truncated result plus metadata for output cap [E:O1]. | Child controls are configured, not reserved/reconciled from the parent; live promises/controllers are not a durable Resume ledger [A:O-HIER]. |
+| **oh-my-pi — Task/Job concurrency and retention** | Task semaphore and process-local `AsyncJobManager` [E:O1, E:O2]. | Admission waits for a slot; completed Job notifications/records expire after retention [E:O2]. | Hard local concurrency cap; retention is lifecycle policy, not spend exhaustion [A:O-HIER]. | Work queues until admitted; retained completion later expires. A common Product exhaustion terminal was not found [A:O-TERMINAL]. | Completion delivery retries locally with backoff/jitter; Job state and delivery queue are not reconstructed after process death [E:O2, A:O-HIER]. |
+| **Codex — default-off `token_budget`** | Current Session/Thread context policy [E:C1]. | Context usage drives reminder/compaction guidance [E:C1]. | Soft guidance/reminder; under-development and default-off. | Guidance/compaction rather than a mandatory spend terminal [E:C1]. | It is not a durable tree-spend allocation; Resume reconstruction was not found [A:C-HIER]. |
+| **Codex — default-off tree `rollout_budget`** | One weighted counter shared through `AgentControl` across the root Session tree [E:C1]. | Usage is recorded post-response; pending per-Thread/window reminders are injected before later work [E:C1]. | Soft reminders before a hard post-observation shared limit. | `SessionBudgetExceeded`, mapped to the client protocol error of the same name [E:C1]. | Retries spend shared usage, but per-child reservations/reclaim and persisted usage reconstruction were not found [A:C-HIER]. |
+| **Codex — provider retry/idle controls** | Provider request or response stream [E:C2]. | Retry occurs after request/stream failure; idle timer races the stream. | Hard local maxima/timeouts, not aggregate Run/Workflow spend allocation [A:C-HIER]. | Request/stream error after configured attempts; no shared retry-budget exhaustion dimension was found [A:C-HIER]. | Defaults are four request retries, five stream reconnects, and 300 s idle; attempts are not a durable effect ledger [E:C2, A:C-HIER]. |
+| **Claude — Query `maxTurns`** | One Query [E:L1]. | Turn count is checked in the Query loop after progress has occurred [E:L1]. | Hard Query-local count, not hierarchical allocation [A:L-HIER]. | Query returns its local maximum-turn error/result path [E:L1]. | Component retries can add work inside a turn; common durable attempt/Resume accounting was not found [A:L-HIER, A:L-RETRY]. |
+| **Claude — Query `maxBudgetUsd`** | One Query's accumulated API cost [E:L1]. | `getTotalCost() >= maxBudgetUsd` is checked after yielding each processed message [E:L1]. | Hard **post-consumption** stop; not preflight price reservation [A:L-HIER]. | SDK result `subtype: error_max_budget_usd` includes accumulated cost/usage [E:L1]. | Already incurred cost is retained. Parent/child reservation and durable retry/Resume cost reconciliation were not found [A:L-HIER, A:L-RETRY]. |
+| **Claude — feature-gated task/token budget** | Task/agent-local configuration path [E:L1]. | Exact admission versus post-observation behavior is not established in the visible external roots [A:L-HIER]. | Feature-gated; a portable hard/soft classification was not established [A:L-HIER]. | A common provider-neutral exhaustion outcome was not found [A:L-TERMINAL]. | Durable hierarchical retry/Resume accounting was not found [A:L-HIER, A:L-RETRY]. |
+
+This companion table prevents five misleading equivalences: telemetry is not a
+budget; post-consumption cost/token stops are not admission control; soft
+steering is not a hard ceiling; output truncation is not upstream spend
+control; and a shared counter/reminder is not parent-to-child reservation.
+
+### 4.2 Parent-to-child allocation, reservation, reclaim, and Resume
 
 | System | Parent/child accounting semantics | Resume accounting |
 |---|---|---|
@@ -206,7 +242,7 @@ estimation and stranded-capacity trade-offs.
 
 | System | Provider / Tool | Child / Job / process | Hooks / cleanup / durable intent |
 |---|---|---|---|
-| **Rollshot** | Driver/provider stream/Tool checks plus automation flag are positive. Concrete initial stream establishment is not proven interruptible [A:R-CANCEL]. | Child/Job/process propagation is not present in agent scope [A:R-HIER]. | Generic hooks, cleanup graph, and durable cancel intent were not found [A:R-DURABLE]. |
+| **Rollshot** | Driver/Tool checks plus the automation flag are positive. Provider cancellation is boundary-observed: neither initial stream establishment nor an established pending item poll selects cancellation; the latter can wait until item or deadline [A:R-CANCEL]. | Child/Job/process propagation is not present in agent scope [A:R-HIER]. | Generic hooks, cleanup graph, and durable cancel intent were not found [A:R-DURABLE]. |
 | **Pi** | One `AbortSignal` reaches provider and Tools; retry, compaction, summary, and user Bash controllers are separate [E:P1]. | Built-in Child/Job propagation not found [A:P-BUD]. The example sends `SIGTERM`, then conditionally `SIGKILL`; runtime cleanup reliability is unverified [G:P-CANCEL]. | Extensions own idempotent `session_shutdown`; a hard crash cannot run it. Durable cancel intent was not found [A:P-HIER]. |
 | **oh-my-pi** | Agent abort reaches provider/Tool signals; core deadline can abort a run [E:O1]. | Parent Task abort reaches semaphore wait/child; owner-scoped Job cancel aborts its runner; dispose attempts bounded drain [E:O1, E:O2]. | Controllers/delivery queue are process-local, so cancellation confirmation after process death is not reconstructed [A:O-HIER]. |
 | **Codex** | Hierarchical Tokio tokens cancel model/Tool work; Tool runtime aborts or awaits teardown [E:C2]. | Children are interrupted explicitly; legacy tree shutdown is separate. Exec process terminate and TTL cleanup are positive [E:C2]. Parent Turn cancel is not automatic durable tree cancel [A:C-HIER]. | Turn abort flushes rollout/events, but durable cancellation intent for arbitrary children/Jobs was not found [A:C-HIER]. |
@@ -232,11 +268,11 @@ terminal or publish partial output.
 | Retry layer | Rollshot | Pi | oh-my-pi | Codex | Claude Code source |
 |---|---|---|---|---|---|
 | **Provider request** | Automatic request retry/backoff not found [A:R-RETRY]. | Coding-agent provider retry defaults to 0; timeout and max server delay are configurable [E:P1]. | Provider/model fallback and retry are local policy; no common attempt ledger [A:O-HIER]. | Request retries default 4, hard-config cap 100 [E:C2]. | Provider errors use local classification/retry paths, but a common durable attempt record was not found [A:L-HIER]. |
-| **Stream/protocol** | Stream/protocol error terminates; no reconnect loop found [A:R-RETRY]. | Agent-level transient retry defaults to 3 with 2/4/8 s exponential delay; no jitter is documented in the cited default [E:P1]. | Provider protocol paths have local retry/fallback, including bounded Harmony recovery; ownership remains component-local [E:O1]. | Stream reconnect defaults 5, hard cap 100; idle timeout defaults 300 s [E:C2]. | Compact/context paths have their own bounded recovery; general stream retry limits are not normalized in the external profile [A:L-RETRY]. |
+| **Stream/protocol** | Stream/protocol error terminates; no reconnect loop found [A:R-RETRY]. | Agent-level transient retry defaults to 3 with 2/4/8 s exponential delay; no jitter is documented in the cited default [E:P1, A:P-RETRY]. | Provider protocol paths have local retry/fallback, including bounded Harmony recovery; ownership remains component-local [E:O1]. | Stream reconnect defaults 5, hard cap 100; idle timeout defaults 300 s [E:C2]. | Compact/context paths have their own bounded recovery; general stream retry limits are not normalized in the external profile [A:L-RETRY]. |
 | **Validation/model correction** | Recoverable argument/validation/dry-run feedback returns to model; each correction spends ordinary dimensions [E:R2]. | Validation failures become Tool results; a later model call may correct them [E:P1]. | Structured child schema/yield retry is bounded locally; strict mode can terminally reject [E:O1]. | Tool validation errors are model-visible; no generic automatic effect retry was found [A:C-HIER]. | Tool validation/permission/hook failures have local result paths; no general durable validation-attempt ledger [A:L-HIER]. |
 | **Tool effect** | No automatic Tool retry/idempotency key [A:R-RETRY]. | Generic Tool idempotency/attempt policy not found [A:P-HIER]. | Generic Tool effect idempotency ledger not found [A:O-HIER]. | Generic Tool effect idempotency/attempt ledger not found [A:C-HIER]. | Generic Tool effect idempotency/attempt ledger not found [A:L-HIER]. |
 | **Child** | Child layer absent [A:R-HIER]. | Built-in child layer absent; example chain stops on failure [A:P-BUD]. | Scoped model fallback/schema retries exist; no parent attempt journal [E:O1, A:O-HIER]. | Child completion/interruption exist; generic child retry policy was not found [A:C-HIER]. | Local/remote child restart/resume paths differ; a universal retry policy was not found [A:L-HIER]. |
-| **Job delivery/execution** | Foundation Job layer absent [A:R-HIER]. | Built-in Job layer absent [A:P-BUD]. | Completion delivery uses exponential backoff capped at 30 s with up to 200 ms jitter; it retries notification delivery, not Job execution [E:O2]. | Exec reconnect/replay is bounded recovery, not effect restart; generic Job retry policy not found [A:C-HIER]. | Remote polling tolerates transient failures; generic local/remote Job retry policy not found [A:L-HIER]. |
+| **Job delivery/execution** | Foundation Job layer absent [A:R-HIER]. | Built-in Job layer absent [A:P-BUD]. | Completion delivery uses exponential backoff capped at 30 s with up to 200 ms jitter; retry ownership ends at notification delivery [E:O2]. | Exec reconnect/replay is bounded recovery, not effect restart; generic Job retry policy not found [A:C-HIER]. | Remote polling tolerates transient failures; generic local/remote Job retry policy not found [A:L-HIER]. |
 | **Workflow** | Workflow retry owner absent [A:R-DURABLE]. | Durable Workflow retry absent [A:P-HIER]. | Durable Workflow retry/attempt ledger absent [A:O-HIER]. | Durable Workflow retry owner absent [A:C-HIER]. | General durable Workflow retry policy absent [A:L-RETRY]. |
 
 ### 6.2 Safe retry rules
@@ -365,7 +401,7 @@ or mandate to ship the deferred media workload.
 | **Ownership** | Product supplies input/registry/budget/review; `AgentRunner` owns live accounting and serial execution. | Parent Task/scheduler owns limits/reservations; child owns its allocation and attempt; product owns review Artifact. | Product Workflow owns readiness/checkpoints/retries; Run and Job adapters own live execution; product store owns Artifact acceptance. |
 | **Concurrency** | One Tool call at a time; terminal Tool is an exclusive first-success barrier [E:R2]. | Atomic reservation plus declared child cap; queued children hold either no reservation or an explicitly expiring reservation. No aggregate overcommit. | Per-class caps: Agent, provider request, local process/CPU/disk, remote Job/cost, and Artifact storage. Ready nodes run in bounded waves. |
 | **Completion** | One typed Run terminal; `ReadyForReview` requires existing validation/dry-run handoff. | Child terminal plus typed result validation; notification/final prose alone is not parent completion. Parent completes only after required child results validate. | Job/provider terminal is insufficient; expected Artifact validates/publishes and durable node terminal commits before successors open [E:J1, E:PERSIST]. |
-| **Cancellation** | Shared live token reaches driver/Tool/automation; later serial calls never start. Provider establishment gap must be measured [A:R-CANCEL]. | Parent stops admission, marks intent, propagates child tokens, awaits confirmed/unknown terminals, reclaims only known unused reservations, and records cleanup. | Persist intent; propagate to Runs/Jobs/processes; query remote confirmation; quarantine partial outputs; cleanup has its own observable result. |
+| **Cancellation** | Shared live token reaches driver/Tool/automation; later serial calls never start. Provider establishment stall, established pending-item stall, cancel/deadline race, terminal, and latency must be measured [A:R-CANCEL]. | Parent stops admission, marks intent, propagates child tokens, awaits confirmed/unknown terminals, reclaims only known unused reservations, and records cleanup. | Persist intent; propagate to Runs/Jobs/processes; query remote confirmation; quarantine partial outputs; cleanup has its own observable result. |
 | **Failure** | Existing provider/protocol/validation/runtime/cancel/exhausted terminals; no durable unknown-effect state [A:R-DURABLE, A:R-TERMINAL]. | Child failures preserve scope/dimension/attempt and effect-known flag; parent can retain independent successes. Unknown spend/effect blocks reclaim [E:PERSIST]. | Durable provider/protocol/validation/runtime/blocked/cancelled/exhausted/lost/reconciliation states; downstream nodes remain blocked without discarding independent Artifacts. |
 | **Retry** | No automatic effect retry; model correction is a new call consuming current budget [A:R-RETRY]. | Parent policy retries only retry-safe child attempts under a new reservation/attempt; backoff/jitter and max attempts are explicit; ambiguous effects reconcile first. | Workflow owns selective retry; provider idempotency key protects external start; cost/attempt history survives Resume; user checkpoint may be required. |
 | **Artifact** | Ordinary results remain bounded in memory; one validated proposal handoff is task-specific. | Each child returns a revision-bound typed proposal/observation; product validates and accepts; partial output never counts. | Expected ID/schema/hash/source revision/provenance/retention are the fan-in contract; unique staging, atomic publish, quarantine/delete partial attempts. |
@@ -378,7 +414,7 @@ defer both.
 
 | Pattern | Smart Redaction | Action Guide | Deferred brag + Hyperframes |
 |---|---|---|---|
-| **A: single Run** | Exact current fit; cost enforcement and provider-cancel gap remain explicit. | Fits each independent bounded proposal. | Valid inline fallback, but cannot govern long Jobs or dependency recovery [A:R-HIER, A:R-DURABLE]. |
+| **A: single Run** | Exact current fit; cost enforcement and both provider-cancel gaps remain explicit [A:R-CANCEL]. | Fits each independent bounded proposal. | Valid inline fallback, but cannot govern long Jobs or dependency recovery [A:R-HIER, A:R-DURABLE]. |
 | **B: child reservations** | More machinery than the current trace proves [W1, A:R-HIER]. | Candidate only if measured batches of independent revision-bound proposals justify fan-out. | Useful for worker Runs, but insufficient for Jobs/checkpoints/Artifact recovery by itself [E:J1, E:PERSIST]. |
 | **C: separate envelopes** | Unjustified for the current bounded loop [W1, A:R-DURABLE]. | Candidate for product-owned media operations only if restart/remote value is proven. | Strong semantic match if the deferred workload becomes real; highest state and testing cost. |
 
@@ -392,7 +428,7 @@ defer both.
 | **Resume accounting** | Crash before/after reserve, external acknowledgement, charge, terminal and reclaim. Reconstruction produces the same committed usage; unknown work remains reserved until authoritative reconciliation [E:PERSIST]. |
 | **Cost/tokens** | Compare inline and concurrency 1/2/4. Record parent/child provider input/output/cache tokens, actual currency, packet/schema duplication, retry charges and stranded reservations. |
 | **Wall time** | Report Agent Run wall time separately from Job lifetime and queue delay; p50/p95 cancellation, cleanup, reservation wait and critical-path completion. |
-| **Cancellation** | Inject cancel at provider establishment/stream, scheduler wait, Tool pre/post effect, child, Job/process, hook and Artifact publish. Every attempt reaches one confirmed/unknown terminal; no leaked process/resource [E:S1, E:J1]. |
+| **Cancellation** | Inject cancel during provider establishment, an established pending item, and the cancel/deadline race, plus scheduler wait, Tool pre/post effect, child, Job/process, hook and Artifact publish. Record terminal and p50/p95 latency; every attempt reaches one confirmed/unknown terminal with no leaked process/resource [A:R-CANCEL, E:S1, E:J1]. |
 | **Retry/idempotency** | Duplicate every request/event; inject lost acknowledgements. Zero duplicate document apply, external Job charge, accepted Artifact, completion notification, or budget charge. |
 | **Backoff/fairness** | Test bounded exponential backoff with jitter under synchronized failures; retries cannot starve first attempts or exceed provider/global concurrency. Queue and retry wait are observable. |
 | **Failure normalization** | Provider, protocol, validation, runtime, blocked, needs-input, cancel, every exhaustion dimension, unknown effect, lost/expired and corrupt Resume each map to one stable code and at least one safe user action [E:J1, E:PERSIST]. |
@@ -402,8 +438,12 @@ defer both.
 
 Required bounded spikes before synthesis selects beyond Pattern A:
 
-1. Wrap a fake provider whose initial `stream()` future never resolves; cancel
-   and expire wall time to measure [A:R-CANCEL] and define the correct bound.
+1. Use fake providers for (a) an initial `stream()` future that never resolves
+   and (b) a returned stream whose next item never resolves. For each, inject
+   cancellation before, after, and concurrently with deadline expiry; record
+   the exact terminal plus p50/p95 cancellation latency. This defines rather
+   than assumes establishment, established-item, and cancel/deadline-race
+   behavior [A:R-CANCEL].
 2. Property-test a vector reservation ledger with concurrent spawn, partial
    usage, cancellation, unknown cost, retry, crash, and reclaim.
 3. Run the same revision-bound proposal inline and with child concurrency 1/2/4;
@@ -437,9 +477,9 @@ This comparison does not:
 
 Open questions for synthesis are:
 
-1. Is fixing current cost accounting and provider-establishment cancellation
-   sufficient for Smart Redaction, or does durable handoff value justify a Task
-   envelope?
+1. Is fixing current cost accounting and both provider-stream cancellation
+   gaps sufficient for Smart Redaction, or does durable handoff value justify
+   a Task envelope?
 2. Does any Action Guide batch save enough latency to justify parent/child
    reservations after duplicated image/token/privacy cost?
 3. Which dimensions are safely reservable estimates, and which must use
@@ -474,15 +514,27 @@ Open questions for synthesis are:
   reservation/reclaim/overcommit, Resume accounting, idempotency, backoff and
   jitter were not found in this exact scope. Positive 16-dimensional source is
   [E:R1].
-- **[A:R-CANCEL] Provider-establishment cancellation audit.** Literal files:
+- **[A:R-COST] Production cost-charge audit.** Literal files `runtime.rs` and
+  `driver.rs` were searched for `\bcost\b|Cost`; all matches were read. Runtime
+  declares/checks/accumulates `cost` and has a synthetic unit test, but its
+  field documentation explicitly says no provider/model pricing is wired and
+  cost stays zero. No driver-side cost assignment was found. The comparison is
+  therefore present but not operationally fed in the current product path.
+- **[A:R-CANCEL] Provider-stream cancellation audit.** Literal files:
   `provider.rs` and `driver.rs`; direct control-flow reading of
   `ProviderAdapter::{stream}`, both concrete adapters,
-  `stream_to_model_events`, and `AgentRunner::drive_streamed_turn`. Positive
-  source checks cancellation/deadline inside the returned event stream. Both
+  `stream_to_model_events`, and `AgentRunner::drive_streamed_turn`. Both
   concrete adapters first await `model.stream(completion_request)`, and the
   driver awaits `provider.stream(request, bounds)`, without a cancellation/
   deadline `select!` around those initial futures. Interruptibility before the
-  stream is returned was therefore not established. No live stall was run.
+  stream is returned was therefore not established. For an established stream,
+  source checks cancellation immediately before each item poll, but the
+  following `tokio::select!` has branches only for `sleep_until(deadline)` and
+  `stream.next()`. It has no cancellation branch. A cancellation request cannot
+  by itself wake an indefinitely pending item poll; source only establishes
+  observation when the item resolves or the deadline branch wins. No live
+  establishment stall, established-item stall, or cancel/deadline race was run,
+  so the resulting terminal and latency remain unverified.
 - **[A:R-RETRY] Retry/effect audit.** The six [A:R-HIER] files were searched
   for `retry|backoff|jitter|idempotenc|attempt.?id|replay|dedup`. Relevant hits
   were prompt/test prose and cumulative usage deduplication; no facade-owned
@@ -513,6 +565,13 @@ Open questions for synthesis are:
   `run.?budget|token.?budget|cost.?budget|turn.?budget|tool.?budget|wall.?time.?budget|child.?agent.?budget|job.?budget|artifact.?budget|max.?turns|max.?tool.?calls|budget.?exhaust|budget.?limit`.
   Hits were thinking/context/compaction budgets. A finite product Run or
   child/Job/Artifact governance budget was not found in this scope.
+- **[A:P-RETRY] Retry-delay/jitter audit.** Literal files
+  `packages/coding-agent/src/core/{agent-session,settings-manager,sdk}.ts` and
+  `packages/coding-agent/docs/settings.md`; regex
+  `maxRetries|baseDelay|retryDelay|maxRetryDelay|jitter`. The agent-session
+  calculation is exactly `baseDelayMs * 2 ** (attempt - 1)` and the settings
+  document lists the 2/4/8 s default; no jitter term was found in that cited
+  agent-level retry path. Provider defaults remain a distinct SDK policy.
 - **[A:P-HIER] Hierarchy/Resume/idempotency audit.** Same boundary; regex:
   `parent.?budget|child.?budget|job.?budget|artifact.?budget|retry.?budget|parallelism.?budget|budget.{0,24}(reserv|reclaim|overcommit)|(?:reserv|reclaim|overcommit).{0,24}budget|resume.{0,30}(budget|usage)|(?:budget|usage).{0,30}resume|durable.{0,20}(attempt|retry)|idempotenc`.
   Only branch-summary/compaction context-token reservation matched. A resource
@@ -639,17 +698,20 @@ or later revision lacks a capability.
 - **[E:O0] Reviewed profile:** `systems/oh-my-pi.md`.
 - **[E:O1] Source/test source:** OMP core Agent deadline/cancellation;
   `coding-agent/src/goals/{state,runtime}.ts`; `src/task/{types,index,executor}.ts`.
-  Supports Goal accounting/Resume behavior and Task local controls; tests were
-  not run.
+  Supports Goal accounting/Resume behavior, Task soft request steering,
+  forced-yield/grace abort, hard runtime timer, and post-capture byte/line
+  truncation; tests were not run.
 - **[E:O2] Source:** OMP `src/async/job-manager.ts`: default 15 running Jobs,
   five-minute retention, owner-scoped abort, completion-delivery retry base
   500 ms, max 30 s, jitter 200 ms, and process-local state.
 - **[E:C0] Reviewed profile:** `systems/codex.md`; feature status remains
   authoritative.
 - **[E:C1] Source/test source:** Codex `core/src/rollout_budget.rs`,
+  `core/src/session/rollout_budget.rs`, protocol error declarations,
   `agent/control.rs`, agent registry/residency, `features/src/lib.rs`, and config
   tests. Supports default-off token/rollout features, tree-shared weighted usage
-  reminders, and separate spawn-slot reservation/release.
+  reminders, hard post-recording `SessionBudgetExceeded`, and separate
+  spawn-slot reservation/release.
 - **[E:C2] Source/test source:** Codex model-provider-info defaults (four
   request retries, five stream reconnects, 300-second idle timeout), core
   cancellation/Tool/agent paths, and exec-server recovery cited by the Reviewed
@@ -657,8 +719,10 @@ or later revision lacks a capability.
 - **[E:L0] Reviewed external-source profile:** `systems/claude-code.md`; build/
   feature gates and hidden modules remain limitations.
 - **[E:L1] Source:** Claude `QueryEngine.ts`, `query.ts`, Runtime Task/Agent and
-  Tool executor roots. Supports query-local limits, AbortController trees,
-  linked/unlinked child behavior, Task kill and hook/tool cancellation.
+  Tool executor roots. Supports query-local limits, the post-message
+  `maxBudgetUsd` accumulated-cost check and `error_max_budget_usd` result,
+  AbortController trees, linked/unlinked child behavior, Task kill and
+  hook/tool cancellation.
 - **[E:L2] Source:** Claude compact paths: bounded prompt-too-long recovery and
   `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3`; remote polling/tool paths are
   component-local. No provider/service runtime was exercised.
@@ -668,7 +732,8 @@ or later revision lacks a capability.
 Confidence is **high** for visible pinned types, constants, status labels,
 charging/terminal control flow, and exact bounded audits; **medium** for source
 plus tests that were inspected but not run; and **low-to-medium** for actual
-provider retry behavior, pricing, cancellation before stream establishment,
+provider retry behavior, pricing, cancellation during stream establishment or
+an established pending item, cancel/deadline races and their terminal/latency,
 process trees, remote services, server-controlled feature gates, crash/Resume,
 and cleanup races because they were not exercised.
 
