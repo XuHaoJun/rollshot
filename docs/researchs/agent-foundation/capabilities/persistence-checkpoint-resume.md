@@ -177,11 +177,11 @@ claimed failure path.
 
 | System | Durable decisions / checkpoints | Reconstruction and next-step routing | Partial writes, corruption and migration | Live state not reconstructed / Stale risk |
 |---|---|---|---|---|
-| **Rollshot** | Action Guide manifest revisions and typed product artifacts are durable [E:R2]. A durable agent decision/checkpoint/run record was **not found**: [A:R0], 0 hits. | Guide load validates current manifest/assets. Agent Run/workflow routing after restart was **not found**: [A:R0] and Task 9 audit [A:R-WORK]. | Action manifest uses temp + file sync + rename + directory sync, V1→V2 read migration and revision CAS. Power-loss semantics were not runtime-tested [G:R1]. | Entire agent run, approval/review handoff, provider stream and tool future are live. Persisted skill revision/authority was **not found** in scoped run/session roots [A:SKILL], 0 hits. |
-| **Pi coding-agent** | Append-only JSONL messages, model/thinking changes, compaction, custom state and labels; “checkpoint” label/compaction is conversational, not a product gate [E:P1]. | Load active parent-linked branch; restore model/thinking/context; the model continues from conversation. Durable pending tool/provider/approval/Job fields were **not found** [A:P-LIVE], 0 hits, so there is no Agent Run/Workflow next-step reducer. | Active loader skips malformed lines; V1→V3 migration mutates then rewrites. Rewrite opens the target with `"w"`; append/rewrite sync/atomic primitives were **not found** [A:P-ATOM]: one hit, only a field-name “rename” comment. Crash consistency remains a runtime gap [G:P1]. | Provider stream, in-flight tool, queues/retry timers and extension resources are live. Harness recovery is explicitly Planned and warns unfinished tools need idempotency declarations [E:P2]. Durable invoked-skill revision was **not found** [A:SKILL], 0 hits. |
-| **oh-my-pi** | JSONL branch, model/mode, Todo, Goal and checkpoint/rewind tool results persist. Checkpoint/rewind rehydrates a context save point/report, not filesystem rollback or Workflow approval [E:O1, E:O2]. | Conversation builds from branch; Todo/Goal/checkpoint state reduce from entries. Persisted child `session_init` can rebuild a child contract and transcript; Workflow dependency/next-ready routing was **not found** in Task 9 [A:O-WORK]. | Synchronous appends are documented software-crash safe but never fsync; full rewrites use a fenced temp/rename path and disk failures latch. Migration tests include idempotency; crash/power-loss and alternate storage backends remain runtime gaps [E:O1, G:O1]. | ACP allow-always cache, provider stream, Task promise/controllers and `AsyncJobManager` are live. Job serialization/rehydration/reattachment was **not found** [A:O-JOB], 0 hits. Cold child revival uses current auth/model/settings and therefore must handle stale capability sources [E:O3]. |
-| **Codex** | Canonical rollout JSONL stores selected response/event/context/world-state/compaction/goal/inter-agent records; SQLite is a rebuildable projection [E:C1]. | Thread Resume replays history/settings/window/world state and can restore child topology. Pending Turn objects are absent from ThreadStore reconstruction [A:C-LIVE], 0 hits. Next model turn is fresh. | Every local append flushes canonical JSONL before best-effort SQLite projection. Exact corrupt-tail/schema-upgrade behavior was not runtime-tested in this research [G:C1]; serde defaults and compatibility paths are not a general Workflow migration contract. | Pending approvals/permissions/user input/tool futures/provider stream/background handles are live. Resuming under a different model emits a warning. Host skill snapshots exist live, but durable invoked-skill version/authority was **not found** in ThreadStore/reconstruction [A:SKILL], 0 hits. |
-| **Claude Code** | Main/subagent JSONL, Task ledger JSON, output files, sidecars, Memory and bridge pointers are separate stores. Local agent and remote identity have explicit narrow resume paths [E:L1, E:L2, E:L3]. | Conversation loader builds a branch and skips/repairs certain orphan fragments. Local agent Resume rebuilds tool/model/permission context; remote sidecar fetches current CCR status; bridge reconnect is gated Transport Resume. Generic Runtime Task recovery was **not found** [A:L-RUNTIME]. | Transcript writes are delayed, batched append calls. Parser skips malformed lines. `fsync`/atomic transcript publish primitives were **not found** [A:L-ATOM], 0 hits; generic transcript schema migration was **not found** [A:L-MIG], 0 hits. Corrupt/stale bridge pointers are deleted. | Local shell/in-process teammate handles are live. Agent metadata may be missing/stale and falls back; current definitions/tools are rebuilt. Relevant focused test files were **not found** in the pinned external tree [A:L-TEST], 0 hits, so crash behavior is a runtime/source gap. |
+| **Rollshot** | Action Guide manifest revisions and typed product artifacts are durable [E:R2]. A durable agent decision/checkpoint/run record was **not found**: [A:R0], 0 hits. | Guide load validates current manifest/assets. Agent Run/workflow routing after restart was **not found**: [A:R0] and Task 7 audit [A:R-WORK]. | Action manifest uses temp + file sync + rename + directory sync, V1→V2 read migration and revision CAS. Power-loss semantics were not runtime-tested [G:R1]. | Entire agent run, approval/review handoff, provider stream and tool future are live rather than reconstructed [E:R1, A:R0]. Persisted skill revision/authority was **not found** in scoped run/session roots [A:SKILL], 0 hits. |
+| **Pi coding-agent** | Append-only JSONL messages, model/thinking changes, compaction, custom state and labels; “checkpoint” label/compaction is conversational, not a product gate [E:P1]. | Load active parent-linked branch; restore model/thinking/context; the model continues from conversation. Durable pending tool/provider/approval/Job fields were **not found** [A:P-LIVE], 0 hits, so there is no Agent Run/Workflow next-step reducer. | Active loader skips malformed lines; V1→V3 migration mutates then rewrites. Rewrite opens the target with `"w"`; append/rewrite sync/atomic primitives were **not found** [A:P-ATOM]: one hit, only a field-name “rename” comment. Crash consistency remains a runtime gap [G:P1]. | Provider stream, in-flight tool, queues/retry timers and extension resources are live rather than reconstructed [A:P-LIVE], 0 hits. Harness recovery is explicitly Planned and warns unfinished tools need idempotency declarations [E:P2]. Durable invoked-skill revision was **not found** [A:SKILL], 0 hits. |
+| **oh-my-pi** | JSONL branch, model/mode, Todo, Goal and checkpoint/rewind tool results persist. Checkpoint/rewind rehydrates a context save point/report, not filesystem rollback or Workflow approval [E:O1, E:O2]. | Conversation builds from branch; Todo/Goal/checkpoint state reduce from entries. Persisted child `session_init` can rebuild a child contract and transcript; Workflow dependency/next-ready routing was **not found** in Task 7 [A:O-WORK]. | Synchronous appends are documented software-crash safe but never fsync; full rewrites use a fenced temp/rename path and disk failures latch. Migration tests include idempotency; crash/power-loss and alternate storage backends remain runtime gaps [E:O1, G:O1]. | ACP allow-always cache, provider stream, Task promises/controllers and `AsyncJobManager` are live rather than reconstructed [E:O4, A:O-LIVE], 0 hits. Job serialization/rehydration/reattachment was **not found** [A:O-JOB], 0 hits. Cold child revival uses current auth/model/settings and therefore must handle stale capability sources [E:O3]. |
+| **Codex** | Canonical rollout JSONL stores selected response/event/context/world-state/compaction/goal/inter-agent records; SQLite is a rebuildable projection [E:C1]. | Three owners remain separate: relay transport claims a fresh stream and keeps sequencing live [E:C4, A:C-RELAY]; exec-server can reattach a retained session/process within its TTL [E:C3]; Thread Resume replays history/settings/window/world state and can restore child topology [E:C1]. Pending Turn objects are absent from ThreadStore reconstruction [A:C-LIVE], 0 hits; the next model turn is fresh. | Every local append flushes canonical JSONL before best-effort SQLite projection. Exact corrupt-tail/schema-upgrade behavior was not runtime-tested in this research [G:C1]; serde defaults and compatibility paths are not a general Workflow migration contract. | Pending approvals/permissions/user input/tool futures/provider stream/background handles are live rather than ThreadStore-reconstructed [A:C-LIVE], 0 hits. Relay sequence/reorder state and detached exec sessions are also live, bounded transport/process mechanisms [E:C3, E:C4, A:C-RELAY]. Resuming under a different model emits a warning [E:C1]. Durable invoked-skill version/authority was **not found** in ThreadStore/reconstruction [A:SKILL], 0 hits. |
+| **Claude Code** | Main/subagent JSONL, Task ledger JSON, output files, sidecars, Memory and bridge pointers are separate stores. Local agent and remote identity have explicit narrow resume paths [E:L1, E:L2, E:L3]. | Conversation loader builds a branch and skips/repairs certain orphan fragments. Local agent Resume rebuilds tool/model/permission context; remote sidecar fetches current CCR status; bridge reconnect is gated Transport Resume. Generic Runtime Task recovery was **not found** [A:L-RUNTIME]. | Transcript writes are delayed, batched append calls. Parser skips malformed lines. `fsync`/atomic transcript publish primitives were **not found** [A:L-ATOM], 0 hits; generic transcript schema migration was **not found** [A:L-MIG], 0 hits. Corrupt/stale bridge pointers are deleted. | Local shell/in-process teammate handles are live and generic reconstruction was **not found** [A:L-RUNTIME]. Agent metadata may be missing/stale and falls back; current definitions/tools are rebuilt [E:L2]. Relevant focused test files were **not found** in the pinned external tree [A:L-TEST], 0 hits, so crash behavior remains a source/runtime gap. |
 
 ### 5.2 Pi: Transcript continuity, lenient tail parsing
 
@@ -234,7 +234,7 @@ controllers, delivery queues and results. Its `resumeDeliveries` only lifts
 suppression inside the same live manager; it is not restart reattachment
 [A:O-JOB].
 
-### 5.4 Codex: rollout reconstruction plus separate process recovery
+### 5.4 Codex: three-layer transport, process and Thread recovery
 
 `LocalThreadStore` treats JSONL as the durable replay format and SQLite as a
 queryable, rebuildable view. Local writes flush the recorder before metadata
@@ -244,13 +244,22 @@ history, previous settings, compaction window lineage, world state and token
 information. A different current model produces a warning rather than
 pretending perfect compatibility [E:C1].
 
+Codex has three recovery identities with different sequence owners and failure
+ranges. They cannot be substituted for one another:
+
+| Layer | Identity and sequence owner | Persisted/live state, Resume and failure range |
+|---|---|---|
+| **Relay-frame transport** | A harness creates a UUID `stream_id`. `RelayMessageFrame::resume` claims that route at rendezvous with `RelayResume.next_seq = 0`; inspected constructors also set `ack = 0` and `ack_bits = 0. Plain/Noise send counters begin at zero, while Noise's in-memory receiver releases ciphertext by its own contiguous sequence. [E:C4] | The inspected relay/noise roots expose no store/checkpoint/restore primitive [A:C-RELAY], 0 hits. Reordering is live and bounded to a 64-record distance and 1 MiB pending buffer; duplicates are ignored and exhaustion/oversized gaps fail the stream. Deferred reconnect fetches a fresh connection bundle and creates a fresh authenticated stream; it does not replay prior JSON-RPC frames from a durable relay cursor. This layer ends at websocket/Noise/virtual-stream failure and sits below exec-server JSON-RPC session identity. [E:C4] |
+| **Exec-server session/process** | `session_id` identifies a live server registry entry; each acknowledged process owns its retained output/event sequence and the client tracks `last_published_seq`. [E:C3] | `resume_session_id` can reattach the retained `ProcessHandler` within 30 seconds and `process/read(after_seq)` replays retained process events. Missing strategy, unacknowledged start, TTL expiry, unrecoverable gap or exec-server death defeats this layer; it is not durable Thread reconstruction. [E:C3, G:C1] |
+| **Thread reconstruction** | `ThreadId` and canonical rollout order belong to `ThreadStore`; compaction/window lineage controls the projected model history. [E:C1] | JSONL/metadata reconstruct conversation, settings, world state, tokens and child topology. Live Turn channels/futures, relay state and process handles are outside that projection [A:C-LIVE, A:C-RELAY]. This is Conversation Resume, not transport replay or Job/process reattachment. |
+
 Turn state shows the missing boundary directly: approvals, permission requests,
 user input, elicitations, dynamic tool responses and tool counters are held in
 maps/channels under a live `TurnState`; those symbols do not occur in
 ThreadStore or rollout reconstruction [E:C2, A:C-LIVE]. Thread Resume is
 therefore Conversation Resume, not Agent Run recovery.
 
-Exec-server recovery is a separate live Job/process layer. A session detaches
+Exec-server recovery is therefore the middle live Job/process layer. A session detaches
 but retains its `ProcessHandler` for 30 seconds (200 ms in tests); reattachment
 uses `resume_session_id`, then reads recoverable acknowledged processes after
 the last published sequence. Starts become recoverable only after acknowledgement.
@@ -525,7 +534,7 @@ Production `AuditEvent` construction/emission was **not found in the
 investigated scope**. This is source classification, not a runtime event-loss
 test.
 
-**[A:R-WORK] Rollshot Task/Workflow recovery.** Task 9's exact roots were
+**[A:R-WORK] Rollshot Task/Workflow recovery.** Task 7's exact roots were
 `crates/rollshot-agent/src/{domain,driver,model,provider,runtime,tools}.rs`;
 regexes targeted Task/Todo/Workflow/Job declarations and
 `depends[_ -]?on|dependency|workflow[_ -]?id|job[_ -]?id|attempts?|retry|resume|checkpoint`.
@@ -556,7 +565,16 @@ Result: **0 hits**. Job serialization/rehydration/reattachment was **not found
 in the investigated scope**. `resumeDeliveries` is positively inspected as a
 same-manager delivery operation [E:O3].
 
-**[A:O-WORK] oh-my-pi Workflow routing.** Task 8/9 exact roots were
+**[A:O-LIVE] oh-my-pi live Session/Task state in persistence/revival.** Literal
+roots: `packages/coding-agent/src/session/{session-manager,session-entries}.ts`
+and `src/task/persisted-revive.ts`. Regex:
+`acpPermissionDecisions|allow_always|reject_always|AbortController|retryPromise|pendingNextTurnMessages|provider.?stream|tool.?promise|task.?controller|activeEvalExecutions`.
+Result: **0 hits**. Persistence/revival of the named live permission, stream,
+promise/controller and execution fields was **not found in the investigated
+scope**. Their live owners are positive source evidence [E:O4]; Job-specific
+restart persistence remains the narrower [A:O-JOB] audit.
+
+**[A:O-WORK] oh-my-pi Workflow routing.** Task 7's exact roots were
 `packages/coding-agent/src/{task,async,goals}` plus `src/tools/todo.ts`; regex
 targeted `dependsOn|depends_on|blockedBy|blocked_by|workflowId|workflow_id|DAG|next.?ready|readiness|scheduler`.
 Only ordinary implementation-dependency prose appeared; a host-owned
@@ -570,6 +588,16 @@ scope**.
 Result: **0 hits**. Reconstruction of those Turn/process/provider live objects
 by ThreadStore was **not found in the investigated scope**; separate positive
 exec-server recovery is [E:C3].
+
+**[A:C-RELAY] Codex relay durable recovery cursor.** Literal roots:
+`learn-projects/codex/codex-rs/exec-server/src/relay.rs` and
+`exec-server/src/noise_relay`. Regex:
+`std::fs|tokio::fs|OpenOptions|File::|ThreadStore|SessionRegistry|checkpoint|snapshot|sqlite|database|persist|restore|rehydrate`.
+Result: **0 hits**. A durable relay sequence/replay/checkpoint store was **not
+found in the investigated scope**. Positive source inspection [E:C4] shows
+fresh UUID stream IDs, zeroed Resume/ack cursor fields, live send counters and
+the bounded in-memory Noise reorder buffer; this audit does not cover the
+separate `SessionRegistry` process-recovery layer [E:C3].
 
 **[A:L-ATOM] Claude Transcript atomicity.** Literal roots:
 `learn-projects/claude-code-source-code/src/utils/{sessionStorage,json}.ts` and
@@ -622,14 +650,21 @@ Runtime/source gaps:
 - **[G:O1]** oh-my-pi's file/SQL/Redis/memory storage, rewrite-race, checkpoint
   and child-revival tests were inspected selectively, not executed; multi-
   process, power-loss and backend schema-upgrade behavior remains unverified.
-- **[G:C1]** Codex rollout/compaction reconstruction and exec-server tests were
-  not executed. The focused audit did not establish corrupt-tail repair,
-  non-local ThreadStore transactions, cross-version Workflow migration or
-  exec-server-process restart recovery.
+- **[G:C1]** Codex rollout/compaction reconstruction, relay/noise-relay and
+  exec-server recovery tests were not executed. The focused audits did not
+  establish corrupt-tail repair, non-local ThreadStore transactions,
+  cross-version Workflow migration, durable relay replay or exec-server-process
+  restart recovery.
 - **[G:L1]** Claude server-side CCR/bridge behavior, GrowthBook/build gates and
   internal modules are unavailable or unexecuted in the pinned external tree.
 
 ## 13. Evidence index
+
+Cross-capability provenance is fixed as follows: Task 7 is the Task/Todo/
+Workflow comparison, Task 8 is context compaction, and Task 9 is memory. This
+document reuses Task 7's Workflow audits [A:R-WORK, A:O-WORK] and Task 8's
+compact-resume source route [E:C1]; it does not attribute Workflow evidence to
+Task 9.
 
 ### Rollshot, Rig and workloads
 
@@ -690,6 +725,12 @@ Runtime/source gaps:
 - **[E:O3] Source:** `src/task/persisted-revive.ts`,
   `src/async/job-manager.ts`, and child registry/session-init contracts.
   Supports narrow child cold revival and process-local Job boundary.
+- **[E:O4] Source:** `packages/coding-agent/src/session/agent-session.ts`,
+  `packages/agent/src/{agent,agent-loop}.ts`, `src/task/index.ts`, and
+  `src/async/job-manager.ts` — live ACP decision map, provider event stream,
+  promises, abort controllers, queues and Job manager. The Reviewed profile's
+  resume section explicitly excludes those live objects from Conversation
+  Resume; [A:O-LIVE] bounds the persistence/revival absence.
 
 ### Codex
 
@@ -704,6 +745,13 @@ Runtime/source gaps:
   `client.rs`, protocol `resume_session_id`/`after_seq`, and
   `exec-server/tests/process.rs::exec_server_resumes_detached_session_without_killing_processes`.
   Supports TTL-bounded acknowledged-process recovery, not server restart.
+- **[E:C4] Source + test source:** `exec-server/src/relay.rs`,
+  `src/noise_relay/{harness,executor_stream,ordered_ciphertext}.rs`, their
+  focused tests, and
+  `exec-server/tests/relay.rs::deferred_noise_environment_connects_and_reconnects_with_fresh_bundle`.
+  Supports stream-ID route claim, zero-based live sequencing, bounded
+  duplicate/gap handling and fresh authenticated reconnect. It does not
+  establish durable relay replay or exec-session/Thread reconstruction.
 
 ### Claude Code source
 
