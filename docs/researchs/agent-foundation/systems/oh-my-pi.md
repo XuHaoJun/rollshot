@@ -19,20 +19,22 @@ revision above. The repository identifies itself as a Pi fork; its porting
 document records the upstream sync marker above. That establishes lineage, not
 behavioral equivalence. This profile therefore separates:
 
-- **Pi-lineage core**: the provider-neutral message/tool loop, stateful
-  `Agent`, JSONL conversation tree, and extension/skill shape inherited from
-  Pi and still recognizable here;
-- **oh-my-pi built-in**: behavior implemented and wired by this revision of
-  the fork, including capability aggregation, Task/subagent infrastructure,
-  background jobs, additional compaction modes, memory backends, managed
+- **Pi-lineage shape**: the provider-neutral message/tool loop, stateful
+  `Agent`, JSONL conversation tree, and extension/skill form recognizable in
+  both systems; this label does not claim that a particular implementation was
+  introduced before or after the fork;
+- **oh-my-pi built-in**: behavior implemented and wired by this revision,
+  including capability aggregation, Task/subagent infrastructure,
+  background jobs, multiple compaction modes, memory backends, managed
   skills, ACP integration, and broader provider routing;
 - **example only**: repository examples that are not loaded by default;
 - **feature-gated or experimental**: source exists, but activation requires a
   setting, optional backend, explicit hook/extension, or experimental flag;
 - **roadmap/documentation claim**: described by repository prose but not
   promoted to built-in behavior without source support; and
-- **not found in investigated scope**: the exact bounded searches are recorded
-  in Section 17. Absence means only that the concept was not found there.
+- **not found in the investigated scope**: the exact bounded searches are
+  recorded in Section 17. Every bounded-absence conclusion uses the exact
+  phrase “not found in the investigated scope.”
 
 The strongest claims below use source plus focused tests. Official repository
 documentation is used for user-visible policy and cross-checked against code.
@@ -40,13 +42,20 @@ Tests were inspected but **not executed**; no provider call, terminal UI run,
 ACP editor session, process restart, crash, or filesystem race was performed.
 Static inspection is not runtime observation. [O1, O2, T1-T8]
 
+**Overall confidence:** high for positive source claims cross-checked by focused
+tests, medium for documentation-backed product policy and bounded absence
+claims, and low for source-derived security inferences or behavior that needs a
+live provider, client, restart, or race experiment. Each inference and absence
+is labeled at its use site and bounded in Section 17.
+
 The repository knowledge graph contained zero nodes for this checkout, so the
 required graph-first exploration yielded no structural evidence and the audit
 fell back to bounded source, test, and repository-document searches.
 
 ## 2. Architecture and ownership boundaries
 
-oh-my-pi retains Pi's layered shape but adds substantial product orchestration:
+oh-my-pi retains Pi's layered shape and, at the pinned revision, implements
+substantial product orchestration:
 
 ```text
 CLI / TUI / print / RPC / ACP host
@@ -80,7 +89,10 @@ an authority boundary. It loads registered providers concurrently, keeps them
 in priority order, attaches source metadata, filters disabled providers and
 extensions, validates results, and deduplicates by capability-specific key with
 first/highest-priority wins. It does not grant filesystem, network, process, or
-tool authority. Approval and client permission are separate layers. [O9, A3]
+tool authority. A Capability-level permission, authorization, grant, sandbox,
+or approval contract was not found in the investigated scope; the exact terms
+and capability roots are recorded in [A3]. Approval and client permission are
+separate layers. [O9]
 
 ## 3. Conversation, session, and run lifecycle
 
@@ -92,11 +104,12 @@ tool authority. Approval and client permission are separate layers. [O9, A3]
 | Turn | One streamed assistant response and the tool calls/results that follow it, bounded by `turn_start`/`turn_end`. |
 | Task | A `TaskTool` invocation that creates one or a batch of child agent runs; not a general workflow record. |
 | Job | An in-process `AsyncJobManager` record for detached bash or Task execution. |
-| Workflow | No durable dependency-graph workflow abstraction was found in the bounded Task/async/todo/goal search. [A1] |
+| Workflow | A durable dependency-graph workflow abstraction was not found in the investigated scope; the bounded Task/async/todo/goal search is recorded in [A1]. |
 
 The Pi-lineage loop appends prompt messages, streams an assistant message,
 executes tool calls, appends correlated tool results, and continues until the
-assistant stops and queued follow-up work is exhausted. oh-my-pi adds an
+assistant stops and queued follow-up work is exhausted. The pinned oh-my-pi
+implementation includes an
 absolute deadline, a pause gate, interruptible signals and polling, asynchronous
 asides, soft tool requirements, dialect/provider transforms, and optional
 OpenTelemetry/run coverage around that loop. Steering enters after a completed
@@ -137,8 +150,8 @@ oh-my-pi has three distinct host-owned concepts:
 Batch Task is fan-out, not dependency scheduling: every item receives common
 context and independently acquires a per-parent-session semaphore. No
 `dependsOn`, dependency edge, DAG node, workflow identifier, or deterministic
-next-ready-node abstraction was found in the bounded Task/async/todo/goal
-search. [A1]
+next-ready-node abstraction was not found in the investigated scope; the
+bounded Task/async/todo/goal search is recorded in [A1].
 
 `AsyncJobManager` supplies process-local background records for bash and Task:
 ID, kind, label, owner, optional child-agent ID, running/completed/failed/
@@ -150,18 +163,21 @@ listed, polled, watched, or cancelled through the hub tooling. [O13]
 
 This is managed background work across model turns, but not across application
 processes. The manager, delivery queue, abort controllers, timers, and results
-are maps in one process; no serialization or rehydration path was found in
-`src/async`. Child session transcripts may be cold-revived separately, but that
-does not restore the detached job that originally drove them. [O13, A2]
+are maps in one process. Durable job serialization or rehydration
+was not found in the investigated scope; the `src/async` terms and roots are recorded
+in [A2]. Child session transcripts may be cold-revived separately, but that
+does not restore the detached job that originally drove them. [O13]
 
 ## 5. Subagents and parallel execution
 
-Task is an oh-my-pi addition over the small Pi-lineage loop. Agent definitions
-are discovered from bundled, user, and project sources and can constrain model,
-tools, spawn policy, thinking level, skills, output schema, and whether the
-parent blocks. Each child gets its own `AgentSession` and transcript. It
-reconstructs a scoped system prompt and selected capabilities rather than
-sharing the parent's mutable message array. [O12, O14]
+Task is implemented in oh-my-pi above the small Pi-lineage loop; this profile
+does not assign its historical origin without a direct upstream comparison.
+Agent definitions are discovered from bundled, user, and project sources and
+can constrain model, tools, spawn policy, thinking level, skills, output
+schema, and whether the parent blocks. Each child gets its own `AgentSession`
+and transcript. It reconstructs a scoped system prompt and selected
+capabilities rather than sharing the parent's mutable message array. [O12,
+O14]
 
 Parallelism has two caps:
 
@@ -185,12 +201,17 @@ up, later forces a final `yield`, and finally aborts after a grace allowance.
 Wall-time and MCP-call timeout guards also exist. These are child-run controls,
 not hierarchical allocation from a global multidimensional budget. [O12, O14]
 
-Subagent completion is mediated by a required `yield` tool. Up to three
-reminders can drive a reluctant child to yield. Caller-, agent-, or
-session-provided output schemas can validate the final payload; strict mode can
-turn an invalid result into `schema_violation`. This is stronger than plain
-notification, but it still does not require an expected product artifact or a
-separate reviewer decision. [O12, T4]
+Subagent completion uses `yield` as its enforced/preferred protocol. The driver
+sends up to three reminders and, where the model supports a named tool choice,
+requests `yield` on the final reminder.
+Compatibility fallback still permits success without `yield`: a cleanly
+settled child with an output schema may return JSON that validates against that
+schema, while a cleanly settled child without a schema may return nonempty raw
+output. Missing/invalid fallback remains a failure where the finalizer requires
+structured or nonempty output. Strict schema mode can turn an invalid result
+into `schema_violation`. This is stronger than plain notification, but it does
+not require an expected product artifact or a separate reviewer decision.
+[O14, T4]
 
 Finished non-isolated children may be adopted by `AgentLifecycleManager`:
 `idle` children park after a TTL, dispose their live session, retain registry
@@ -227,10 +248,10 @@ idle maintenance. Source names the following strategies:
 | `shake` | Surgical context reduction of selected text regions, distinct from full summary compaction. |
 | pruning/elision | Removes superseded or uneventful tool-result material from the provider projection while preserving protected results such as skill reads and active plan references. |
 
-No source mechanism named `mini-compact`, `microcompact`, or cached
-microcompaction was found in the compaction source/docs boundary. `shake`,
-pruning, and snapcompact should not be renamed to force cross-system
-equivalence. [O16, A5]
+A mechanism named `mini-compact`, `microcompact`, or cached microcompaction was
+not found in the investigated scope; the compaction roots and exact terms are
+recorded in [A5]. `shake`, pruning, and snapcompact should not be renamed to
+force cross-system equivalence. [O16]
 
 `session_before_compact` hooks may cancel or supply a custom compaction,
 including `preserveData`; failures fall back to normal compaction. A
@@ -344,8 +365,9 @@ Metadata is injected into the prompt for progressive disclosure; the model
 reads instructions/resources on demand. A hidden or
 `disable-model-invocation` skill is omitted from the model listing but remains
 explicitly reachable by its slash command or `skill://` if active. Child Task
-sessions receive discovered skills, but the task call has no opaque per-run
-skill-package snapshot/version field. [O22, A6]
+sessions receive discovered skills. An opaque per-run skill-package authority/
+version pin was not found in the investigated scope; the relevant skill roots
+and exact terms are recorded in [A6]. [O22]
 
 `skill://<name>/<path>` resolves the name against the caller's active skill list
 or a process-global active snapshot, then maps to a local base directory. It
@@ -368,7 +390,7 @@ loading; the official loading document states that extensions are not
 sandboxed. Approval applies when wrapped tools execute, not to arbitrary code
 already running inside a trusted extension. [D2, O20]
 
-## 10. Managed and auto-learned skills
+### Managed and auto-learned skills
 
 Managed skills are an **experimental, off-by-default authoring path**. The
 provider root is `~/.omp/agent/managed-skills`; its priority is deliberately
@@ -389,7 +411,7 @@ Same-name mutations are serialized within one process; cross-process races are
 not covered by that lock. The `manage_skill` tool requires autolearn; `learn`
 also depends on a supported memory backend. [O25]
 
-## 11. Permissions, sandboxing, and trust
+## 10. Permissions, sandboxing, and trust
 
 General tool policy uses three declared tiers (`read`, `write`, `exec`) and
 three modes (`always-ask`, `write`, `yolo`). Per-tool `allow`, `deny`, or
@@ -427,7 +449,7 @@ and `skill://` is a local path mapping rather than a grant token. Rollshot would
 need a stronger separation of discovered, enabled, authorized, and invoked
 capabilities. [O9, O20, O23]
 
-## 12. Budgets, cancellation, retry, and failure
+## 11. Budgets, cancellation, retry, and failures
 
 oh-my-pi exposes several local controls rather than one hierarchical budget:
 
@@ -442,8 +464,10 @@ oh-my-pi exposes several local controls rather than one hierarchical budget:
 Cancellation is strongest inside one live process: parent tool abort reaches
 semaphore waits and child sessions; job cancel aborts its registered runner;
 agent abort reaches provider and tool signals; lifecycle dispose cancels owned
-resources. Process death makes these controllers unavailable, and no durable
-cancellation intent is re-applied on resume. [O3, O13-O15, A2]
+resources. Process death makes these controllers unavailable. Durable
+cancellation-intent reapplication after resume
+was not found in the investigated scope; the related async persistence roots and terms are
+recorded in [A2]. [O3, O13-O15]
 
 Retry is similarly layered. Provider/model fallback chains can retry model
 requests; subagent runs install scoped fallback roles; tool failures return to
@@ -452,12 +476,13 @@ remote/local fallback; invalid structured child output can be retried before
 strict failure. These mechanisms do not share a durable attempt ledger or one
 idempotency policy. [O13, O14, O16]
 
-No single run-owned budget object covering tokens, cost, turns, tools, children,
-jobs, artifacts, wall time, and cancellation was found. Consequently, a child
-budget is configured rather than explicitly allocated from and reconciled to a
-parent budget. [A7]
+A single run-owned budget object covering tokens, cost, turns, tools, children,
+jobs, artifacts, wall time, and cancellation
+was not found in the investigated scope; the searched roots and terms are recorded in [A7].
+Consequently, a child budget is configured rather than explicitly allocated
+from and reconciled to a parent budget.
 
-## 13. Artifacts, events, and observability
+## 12. Artifacts, events, and observability
 
 The core loop emits typed agent, turn, message, and tool lifecycle events.
 `AgentSession` adds persistence, compaction, approval, Task progress/lifecycle,
@@ -473,13 +498,13 @@ no SDK the OpenTelemetry API is a no-op. This is operational observability, not
 durable workflow event sourcing. [O28]
 
 JSONL entries form a durable conversation audit trail, while tool-output
-artifacts retain overflow bytes and Task outputs retain reports/patches. They do
-not form a typed product artifact registry: no built-in artifact revision,
-lineage/provenance record, expected-artifact contract, review decision, or
-transaction linking an approval to a particular immutable artifact was found
-in the bounded session/artifact/Task search. [O6, O12, O21, A4]
+artifacts retain overflow bytes and Task outputs retain reports/patches. A
+generic typed product-artifact revision, lineage/provenance record,
+expected-artifact contract, review decision, or approval-to-immutable-artifact
+transaction was not found in the investigated scope; the bounded
+session/artifact/Task roots and terms are recorded in [A4]. [O6, O12, O21]
 
-## 14. Provider boundary and breadth
+## 13. Provider boundary
 
 `pi-ai` remains provider-neutral at the loop boundary: a `Model<Api>`, context,
 options, and stream function produce normalized assistant stream events. The
@@ -492,10 +517,10 @@ The API registry reserves 14 built-in adapter identifiers at this revision:
 OpenAI completions/responses/Codex responses, OpenRouter, Azure responses,
 Anthropic, Bedrock, Google Generative AI/Gemini CLI/Vertex, Ollama, Cursor,
 GitLab Duo Agent, and Devin Agent. Extensions can register additional streaming
-functions under non-reserved API names. The bundled provider descriptor file
-contains 28 top-level provider IDs in the pinned source; actual availability
-still depends on disablement, credentials, keyless-local rules, and dynamic
-discovery. [O29, O30]
+functions under non-reserved API names. `CATALOG_PROVIDERS` contains 61
+top-level provider IDs in the pinned source, and `KnownProvider` is derived from
+that array; actual availability still depends on disablement, credentials,
+keyless-local rules, and dynamic discovery. [O29, O30]
 
 The coding-agent model registry merges bundled models, `models.yml` custom
 providers/models, runtime-discovered local engines, and extension
@@ -504,17 +529,18 @@ Credentials and OAuth are provider-scoped. This breadth is an integration
 strength but also expands compatibility, retry, privacy, and test surface.
 [D3, O30]
 
-## 15. Strengths relevant to Rollshot
+## 14. Strengths for Rollshot
 
-- The Pi-lineage loop stays understandable while adding explicit
+- The Pi-lineage loop stays understandable while exposing explicit
   shared/exclusive tool scheduling, cancellation, deadlines, and optional
   telemetry.
 - JSONL tree sessions make branch and compaction boundaries inspectable, and
   the injectable storage contract demonstrates how conversation persistence
   can be separated from the session manager.
 - Task combines scoped child sessions, bounded fan-out, live progress, explicit
-  yield, caller-defined output schemas, optional isolation, and revivable child
-  transcripts. Those are useful patterns for bounded specialist work.
+  yield with defined compatibility fallback, caller-defined output schemas,
+  optional isolation, and revivable child transcripts. Those are useful
+  patterns for bounded specialist work.
 - Capability loading cleanly aggregates heterogeneous discovery sources with
   source metadata, deterministic priority, validation, disablement, and
   collision policy.
@@ -528,9 +554,7 @@ strength but also expands compatibility, retry, privacy, and test surface.
   spill, and optional memory are concrete product integrations absent from a
   minimal loop.
 
-## 16. Mismatches, risks, unresolved questions, and roadmap boundary
-
-### Mismatches and risks for Rollshot
+## 15. Mismatches and risks
 
 - Task is a child-run facility, not a durable workflow engine. Fan-out batches,
   todos, goals, jobs, and session trees do not supply dependency readiness,
@@ -547,9 +571,11 @@ strength but also expands compatibility, retry, privacy, and test surface.
   keep capability declaration, user grant, runtime authorization, and tool
   selection distinct in types and persistence.
 - `skill://` uses a process-global fallback snapshot and local lexical path
-  mapping, with no opaque package authority/version and a possible symlink
-  containment gap. A durable Rollshot run should record exactly which skill
-  package revision it used.
+  mapping. An opaque package authority/version pin
+  was not found in the investigated scope
+  [A6], and the lexical resolver has a possible symlink
+  containment gap inferred from source. A durable Rollshot run should record
+  exactly which skill package revision it used.
 - Memory and managed skills deliberately synthesize durable text. For screenshot
   content, Rollshot would need stronger provenance, retention, deletion,
   sensitivity, and opt-in boundaries than generic project memory.
@@ -559,7 +585,19 @@ strength but also expands compatibility, retry, privacy, and test surface.
   large compatibility surface; Rollshot should adopt contracts selectively,
   not copy feature count.
 
-### Unresolved questions requiring runtime or deeper capability research
+### Feature-gated, example, and roadmap boundary
+
+The following must not be presented as default core behavior: local autonomous
+memory (`memory.backend` defaults off), Hindsight/Mnemopi backends, autolearn
+(experimental and disabled), custom compaction hooks, example Gemini
+compaction, optional Task isolation, async Task (setting/host dependent), ACP
+editor mediation (host dependent), remote compaction (model/endpoint dependent),
+snapcompact continuation (vision-model dependent), and non-file session-storage
+adapters (embedding choice). Repository examples demonstrate extension points;
+they are not evidence that the default CLI invoked them. [O16-O19, O25, O27,
+X1]
+
+## 16. Unresolved questions
 
 1. Does Task cold revival behave correctly after a real process restart when
    plugins, skills, models, MCP tools, or working directories changed?
@@ -576,18 +614,6 @@ strength but also expands compatibility, retry, privacy, and test surface.
    crash faults, and schema upgrades outside their focused tests?
 7. Can optional memory meet image/document privacy requirements, including
    auditable deletion and source-level provenance?
-
-### Feature-gated, example, and roadmap boundary
-
-The following must not be presented as default core behavior: local autonomous
-memory (`memory.backend` defaults off), Hindsight/Mnemopi backends, autolearn
-(experimental and disabled), custom compaction hooks, example Gemini
-compaction, optional Task isolation, async Task (setting/host dependent), ACP
-editor mediation (host dependent), remote compaction (model/endpoint dependent),
-snapcompact continuation (vision-model dependent), and non-file session-storage
-adapters (embedding choice). Repository examples demonstrate extension points;
-they are not evidence that the default CLI invoked them. [O16-O19, O25, O27,
-X1]
 
 ## 17. Evidence index
 
@@ -623,7 +649,8 @@ X1]
 - **O13 — detached jobs:** `packages/coding-agent/src/async/job-manager.ts`,
   `packages/coding-agent/src/tools/hub/`.
 - **O14 — child execution/policy/isolation:**
-  `packages/coding-agent/src/task/executor.ts`,
+  `packages/coding-agent/src/task/executor.ts` (yield reminder driver at
+  lines 1654-1821 and no-yield/schema fallback finalizer at lines 541-671),
   `packages/coding-agent/src/task/spawn-policy.ts`,
   `packages/coding-agent/src/task/worktree.ts`.
 - **O15 — child registry and revival:**
@@ -673,9 +700,12 @@ X1]
   `packages/agent/src/run-collector.ts`, and instrumented loop/compaction paths.
 - **O29 — API boundary:** `packages/ai/src/api-registry.ts`,
   `packages/ai/src/stream.ts`, `packages/ai/src/types.ts`.
-- **O30 — model/provider catalog:**
-  `packages/catalog/src/provider-models/descriptors.ts`,
-  `packages/coding-agent/src/config/model-registry.ts`.
+- **O30 — model/provider catalog:** `CATALOG_PROVIDERS` in
+  `packages/catalog/src/provider-models/descriptors.ts:62-487`, its
+  `KnownProvider` derivation at lines 489-490, and
+  `packages/coding-agent/src/config/model-registry.ts`. Reproduction command
+  `rtk awk 'NR>=62 && NR<=487 && /^[[:space:]]*id:/ {count++} END {print count}' packages/catalog/src/provider-models/descriptors.ts`
+  printed `61` at the pinned revision.
 - **O31 — context checkpoint/rewind:**
   `packages/coding-agent/src/tools/checkpoint.ts`, checkpoint state and rewind
   handling in `packages/coding-agent/src/session/agent-session.ts`, and
@@ -721,36 +751,43 @@ X1]
 - **A1 — workflow/DAG absence:** exact case-insensitive search for
   `dependsOn|depends_on|dependency|DAG|workflowId|workflow_id` across
   `packages/coding-agent/src/task`, `src/async`, `src/tools/todo.ts`,
-  `src/goals`, and relevant tests found only ordinary code-dependency prose,
-  not an execution graph contract.
+  `src/goals`, and relevant tests returned only ordinary code-dependency prose.
+  Conclusion: a host-owned workflow dependency/DAG contract
+  was not found in the investigated scope.
 - **A2 — durable job absence:** search for
   `serialize|deserialize|recover|rehydrate|persist|session` across
   `packages/coding-agent/src/async`, `src/task/index.ts`, and the job manager
-  found in-memory job/delivery state and child-session persistence, but no job
-  serialization/reattachment implementation.
+  returned in-memory job/delivery state and child-session persistence.
+  Conclusion: durable job serialization, rehydration, or reattachment
+  was not found in the investigated scope.
 - **A3 — Capability authority absence:** search for
   `permission|authorize|authorization|grant|sandbox|approval` across
-  `packages/coding-agent/src/capability` found discovery/configuration concepts,
-  not authority grants; approval lives under tools/session/ACP.
+  `packages/coding-agent/src/capability` returned discovery/configuration
+  concepts; approval lives under tools/session/ACP. Conclusion: a
+  Capability-level authority grant or approval contract
+  was not found in the investigated scope.
 - **A4 — typed artifact/review absence:** search and source inspection across
   `src/session/artifacts.ts`, `src/internal-urls/artifact-protocol.ts`,
-  `src/tools/output-meta.ts`, `src/task`, and session entry types found spill
-  logs and Task reports/patches, but no generic artifact revision/provenance/
-  review-decision model.
+  `src/tools/output-meta.ts`, `src/task`, and session entry types returned spill
+  logs and Task reports/patches. Conclusion: a generic typed artifact revision,
+  provenance, expected-artifact, or review-decision model
+  was not found in the investigated scope.
 - **A5 — compaction terminology absence:** exact search for
   `mini-compact|mini compact|microcompact|micro-compact|cached micro` across
   `packages/agent/src/compaction`, coding-agent compaction paths/tests, and
-  `docs/compaction.md` found no mechanism using those names.
+  `docs/compaction.md` returned no matches. Conclusion: a compaction mechanism
+  using those names was not found in the investigated scope.
 - **A6 — skill authority/version absence:** search for
   `authority|version|pin|snapshot|realpath|symlink` in
   `src/internal-urls/skill-protocol.ts`, `src/extensibility/skills.ts`, and
-  `src/capability/skill.ts` found a process-global active snapshot and discovery
-  realpath deduplication, but no opaque skill authority/version pin. The
+  `src/capability/skill.ts` returned a process-global active snapshot and
+  discovery realpath deduplication. Conclusion: an opaque per-run skill
+  authority/version pin was not found in the investigated scope. The
   symlink-containment observation is an inference from the resolver's lexical
   checks, not a runtime exploit result.
 - **A7 — unified budget absence:** source inspection and search across
   `packages/agent/src`, `src/goals`, `src/task`, `src/async`, and session policy
-  found multiple local limits, but no single hierarchical/multidimensional run
-  budget contract.
+  returned multiple local limits. Conclusion: a single hierarchical or
+  multidimensional run-budget contract was not found in the investigated scope.
 
 No runtime observations were collected in this pass.
