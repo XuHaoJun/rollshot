@@ -113,7 +113,7 @@ An implementation may use fewer persisted states, but it must preserve these sem
 | `ValidatedAutomation` | Stores canonical source, language-schema version, capability-API version, output-schema version, IR, and validation summary. `ensure_compatible` revalidates and rejects version/normalization drift. [R1] | It is a domain artifact, not a generic Product Artifact. Generic artifact identity, expected-output, and review-receipt terms were not found in the bounded agent/edit/workbench roots. [A:R-GENERIC] |
 | `AutomationRevision` | Immutable revision identity, preset identity, parent revision, creation time, provenance, and a `ValidatedAutomation`; the preset carries the mutable active-revision pointer. Store reads re-check compatibility and writes atomically. [R2] | Revision provenance is narrower than the full skill/tool/model/provider/source/config/user-decision chain. Exact fields were not found in the bounded artifact-domain roots. [A:R-PROV] |
 | `EditProposal` | Typed proposal/candidate IDs, base document state ID, candidates, confidence/rationale summary, and manual or agent-run provenance; serializable. [R3] | Provenance is only `Manual` or `Agent { run_id }`; it does not itself retain validation, producer versions, or a user-decision receipt. [R3][A:R-PROV] |
-| `ReviewDecision` | Serializable partition of accepted, rejected, and modified candidates plus resulting document state ID. Lowering converts only accepted/modified candidates into document edits. [R4] | The workbench constructs and applies it, then clears pending state; storage roots searched did not contain `ReviewDecision` or pending proposal/draft types. This is a bounded persistence gap, not a repository-wide impossibility claim. [R5][A:R-REVIEW-STORE] |
+| `ReviewDecision` | Serializable schema for the accepted, rejected, and modified candidate partition; its field name/comment intend `resulting_document_state_id` to identify the post-apply document. Lowering converts only accepted/modified candidates into document edits. [R4] | The active workbench populates that field with the current **pre-apply** state ID, then applies the batch; a mutating commit advances the document state ID, but the local decision is neither updated nor returned. It therefore does not currently provide valid resulting-state provenance. The searched stores also did not contain the decision/pending types. [R5][R6][A:R-DECISION-STATE][A:R-REVIEW-STORE] |
 | `ImageDocument` | Stable state ID, atomic batch application, reference validation, and bounded undo/redo snapshots; failed batches restore the prior state. Flattening is explicit. [R6] | History is memory-local and document flattening is a copy/save operation; the crate does not define product artifact retention, review, or publication lifecycle. [R6][A:R-LIFECYCLE] |
 | Smart Redaction `DraftState`/`ReadyForReview` | Generation-bound validation, policy, and dry-run evidence; submit requires current-generation evidence and matching source. The terminal value carries proposal, automation, session/generation, budget use, and assistant text. [R7] | `ReadyForReview` is readiness, not acceptance. The workbench currently restamps the dry-run proposal to the live document state immediately before apply, which protects the active path from a stale base but means the proposal's earlier base is not retained there as enduring lineage. [R5][R7] |
 | Action Guide `ProjectManifestV2` | Deny-unknown typed schema, project revision, frame order and SHA-256/dimensions, ordered steps, annotations/explanations, capture/input metadata, outputs, and import warnings. Project saves validate and use atomic/no-replace commit paths; existing saves enforce revision comparison. [R8] | The manifest is a strong domain artifact, but no product-wide expected-output/review/provenance envelope was found in the bounded generic audit. [A:R-GENERIC] |
@@ -140,7 +140,8 @@ The following are not claims that no related symbol exists anywhere in the repos
 - **No full producer-provenance fields in the bounded artifact-domain records:** [A:R-PROV] returned no matches for skill/tool/model/provider/config/source digest and decision actor/time field families.
 - **No retention/archive lifecycle fields in the bounded domain roots:** [A:R-LIFECYCLE] returned no matches.
 - **No retained workbench review record in searched stores:** [A:R-REVIEW-STORE] returned no matches for review/pending proposal types.
-- **No proposal serialization/store contract in the Action proposal files:** [A:R-ACTION-PROP] found only a test name containing “stored,” not serde/persist/store APIs.
+- **Active workbench decision state is pre-apply, not resulting state:** [A:R-DECISION-STATE] traces construction before `apply_batch`, the state-ID-changing commit, and the absence of a post-apply update/decision return.
+- **No proposal serialization/store contract in the Action proposal files:** the structural, word-bounded [A:R-ACTION-PROP] audit returned no matches in the two literal proposal roots.
 
 These gaps matter only if Rollshot chooses to make reviewed outputs durable, resumable, exportable, or workflow-completing across sessions.
 
@@ -150,7 +151,7 @@ These gaps matter only if Rollshot chooses to make reviewed outputs durable, res
 
 | System | What exists | Product Artifact status | Review/provenance boundary |
 |---|---|---|---|
-| **Rollshot** | Typed automation artifacts/revisions, edit proposals/decisions, revisioned Action Guide manifests, publish freshness, and staleness-aware Action proposals. [R1–R10] | Domain-specific pieces exist. A generic Product Artifact and expected-output contract was not found in bounded roots. [A:R-GENERIC] | Review decisions exist in memory/serde contracts, but retained workbench decision lineage and broad producer provenance were not found in the named audits. [A:R-REVIEW-STORE][A:R-PROV] |
+| **Rollshot** | Typed automation artifacts/revisions, edit proposal/decision schemas, revisioned Action Guide manifests, publish freshness, and staleness-aware Action proposals. [R1–R10] | Domain-specific pieces exist. A generic Product Artifact and expected-output contract was not found in bounded roots. [A:R-GENERIC] | The decision schema names a resulting state, but the active workbench records the pre-apply state and does not return/update the decision; retained decision lineage and broad producer provenance were also not found. [A:R-DECISION-STATE][A:R-REVIEW-STORE][A:R-PROV] |
 | **Pi** | Sessions and extension-local structured outputs/files exist. [P1] | A built-in typed artifact registry with expected completion, review, revision, and provenance was not found by the profile's exact artifact audit. [P1:A4] | Any richer artifact/review semantics are extension-owned; the reviewed profile did not establish a built-in general contract. [P1:A4] |
 | **OMP** | Task outputs and session spill references such as `artifact://` exist. [P2] | The profile found operational spill/task outputs, not a generic typed product-artifact revision/lineage/expected/review model. [P2:A4] | A spill URI is a transport/storage locator; the reviewed audit did not establish product acceptance semantics. [P2:A4] |
 | **Codex** | Tool outputs and a narrow image-generation persisted-artifact path exist. [P3] | Generic `Artifact` type/ID/store was absent from the profile's exact roots; image generation is a narrow extension path. [P3:A6] | No general review/provenance lifecycle is established by that narrow path in the reviewed profile. [P3:A6] |
@@ -201,7 +202,7 @@ A durable review receipt should minimally bind:
 - decision time;
 - optional reason, subject to privacy and retention policy.
 
-Rollshot's `ReviewDecision` already models the candidate partition and resulting document state. [R4] The missing question is whether/where such a receipt should be retained for resumability, provenance, export, and deletion—not whether the UI can apply a proposal today.
+Rollshot's `ReviewDecision` schema already models the candidate partition and names a `resulting_document_state_id`; the schema comment intends that value to be read after apply. [R4] The active workbench does not meet that intent: it builds the decision before applying, copies the current pre-apply state ID into the field, and returns only `Result<(), WorkbenchError>`. A successful mutating `apply_batch` advances the document state ID, while the local decision is not updated or returned. [R5][R6][A:R-DECISION-STATE] Therefore the current field is schema intent, not valid resulting-state provenance. Durability is an additional gap after population is corrected. [A:R-REVIEW-STORE]
 
 ### 7.3 Notification versus acceptance
 
@@ -231,7 +232,7 @@ worker notification
 | Source/input | Prevents a valid result for old bytes being applied to new bytes. | Source object ID/revision/state ID and content/config digests as appropriate. | Strong partial support: document state IDs, project revisions, frame SHA-256, automation source and generation binding. [R1][R3][R7][R8][R10] |
 | Configuration | Reproduces limits, policies, model/tool settings, and export choices. | Canonical privacy-filtered config digest plus versioned policy IDs. | Automation validation limits and version fields exist; a cross-artifact config provenance field family was not found. [R1][A:R-PROV] |
 | Validation | Demonstrates deterministic checks against the produced revision. | Typed receipt with checker/version/outcome/evidence reference. | Strong in-memory/domain evidence for automation and project validation; no generic receipt contract found. [R1][R7][R8][A:R-GENERIC] |
-| User decision | Establishes acceptance, rejection, or correction. | Actor, decision, time, exact reviewed revision, resulting revision. | `ReviewDecision` contains the candidate partition/resulting state, but decision actor/time and retained store linkage were not found in bounded audits. [R4][A:R-PROV][A:R-REVIEW-STORE] |
+| User decision | Establishes acceptance, rejection, or correction. | Actor, decision, time, exact reviewed revision, resulting revision. | `ReviewDecision` has the partition and a resulting-state field by schema intent, but the active workbench fills it from the pre-apply state and does not update/return the decision. Actor/time and retained linkage were also not found. [R4][A:R-DECISION-STATE][A:R-PROV][A:R-REVIEW-STORE] |
 
 ### 8.2 Provenance is not a transcript dump
 
@@ -344,6 +345,8 @@ ReviewedProposal<T>
   resulting_revision/state_id?
 ```
 
+The envelope must be finalized **after** deterministic apply: the resulting state/revision is read from the committed document/project and returned or persisted with the decision. Reusing the current pre-apply workbench field value would preserve the audited bug rather than create a receipt. [A:R-DECISION-STATE]
+
 **Fit:** Smart Redaction and Action Guide caption/annotation proposals.
 
 **Strength:** Smallest change; preserves typed domain payloads and existing deterministic lowering.
@@ -424,7 +427,7 @@ No pattern is selected in Round 4. They can also compose—for example, Pattern 
 2. **Compatibility:** Loading a revision with unsupported artifact/domain schema or altered canonical source fails closed in tests.
 3. **Source binding:** Applying a proposal to a different document/project revision fails deterministically with no partial mutation.
 4. **Validation:** Every accepted artifact revision that requires validation names the checker/policy version and records pass/fail evidence.
-5. **Review:** Every user-visible agent edit applied to a document/project has an approve/reject/correct decision bound to the exact proposal revision; `ReadyForReview` alone cannot satisfy this check.
+5. **Review:** Every user-visible agent edit applied to a document/project has an approve/reject/correct decision bound to the exact proposal revision; its resulting state/revision is captured after apply and equals the committed state/revision. `ReadyForReview` and a pre-apply state ID cannot satisfy this check.
 6. **Atomicity:** Failed apply/save/publish leaves the prior authoritative revision and head unchanged.
 7. **Revision:** Correction or material producer-input change creates a new revision ID and retains parent lineage while policy permits.
 8. **Expected output:** A task cannot become complete from notification or path existence; its test requires a compatible artifact revision plus required validation/review receipts.
@@ -439,13 +442,14 @@ No pattern is selected in Round 4. They can also compose—for example, Pattern 
 
 1. **Retention UX:** Should rejected proposals disappear immediately, remain until document history expires, or be user-configurable? Current bounded code does not answer this. [A:R-LIFECYCLE]
 2. **Decision durability:** Does Smart Redaction need restartable review/history now, or only once agent edits leave the single workbench session? [A:R-REVIEW-STORE]
-3. **Restamp lineage:** Should dry-run preserve an original base-state record and create a distinct revalidation/rebase receipt instead of overwriting the proposal base before apply? [R5][R7]
-4. **Action proposal persistence:** Should pending/stale caption and annotation proposals live in the project manifest, a sidecar, or remain ephemeral? [A:R-ACTION-PROP]
-5. **Publish validation:** Which deterministic media checks and digest policy are sufficient for GIF/MP4 publication receipts? [R9]
-6. **Provider/model identifiers:** What identifiers are stable and useful across Anthropic/OpenAI adapters without pretending provider aliases are immutable model versions? [A:R-PROV]
-7. **Skill provenance:** Should provenance use installed skill package digest, declared semantic version, source commit, or all available identifiers?
-8. **Deletion:** Is a minimal tombstone allowed after “delete artifact,” and which user-visible promise governs derived exports/backups?
-9. **Hyperframes integration:** Resolve the dispatch worker-wave ambiguity before making expected-output cardinality part of a product contract.
+3. **Decision population:** Which product change should build/finalize and return the workbench decision after a successful apply so its resulting state ID is truthful? This documentation task intentionally does not change product code. [A:R-DECISION-STATE]
+4. **Restamp lineage:** Should dry-run preserve an original base-state record and create a distinct revalidation/rebase receipt instead of overwriting the proposal base before apply? [R5][R7]
+5. **Action proposal persistence:** Should pending/stale caption and annotation proposals live in the project manifest, a sidecar, or remain ephemeral? [A:R-ACTION-PROP]
+6. **Publish validation:** Which deterministic media checks and digest policy are sufficient for GIF/MP4 publication receipts? [R9]
+7. **Provider/model identifiers:** What identifiers are stable and useful across Anthropic/OpenAI adapters without pretending provider aliases are immutable model versions? [A:R-PROV]
+8. **Skill provenance:** Should provenance use installed skill package digest, declared semantic version, source commit, or all available identifiers?
+9. **Deletion:** Is a minimal tombstone allowed after “delete artifact,” and which user-visible promise governs derived exports/backups?
+10. **Hyperframes integration:** Resolve the dispatch worker-wave ambiguity before making expected-output cardinality part of a product contract.
 
 ## 15. Exact audits
 
@@ -494,11 +498,30 @@ Result: no matches.
 
 ```text
 rtk rg -n \
-  '#\[derive.*Serialize|#\[derive.*Deserialize|save|load|persist|store|archive|publish|retention|expires|delete_' \
-  crates/rollshot-action/src/{caption_proposal,visual_annotation_proposal}.rs
+  'use[[:space:]]+serde(::|[[:space:]])|#\[derive\([^]]*\b(Serialize|Deserialize)\b|serde_json|fn[[:space:]]+\b(load|save|store|persist|serialize|deserialize)\b|\b(load|save|store|persist|serialize|deserialize)\s*\(' \
+  crates/rollshot-action/src/caption_proposal.rs \
+  crates/rollshot-action/src/visual_annotation_proposal.rs
 ```
 
-Result: only a test name containing `trimmed_rationale_is_stored`; no serde/store contract was found.
+Fresh result: no matches. The literal roots expose proposal state/behavior but no structural serde import/derive, `serde_json` use, named persistence function, or call using those exact words. This narrow conclusion does not exclude persistence under unrelated names elsewhere.
+
+### [A:R-DECISION-STATE] Active workbench decision state-ID population
+
+```text
+rtk rg -n \
+  'pub fn build_review_decision|resulting_document_state_id: doc_state_id|pub fn apply_candidates|let decision = build_review_decision|\.apply_batch\(ops\)|Result<\(\), WorkbenchError>' \
+  crates/rollshot-app/src/result_workspace/workbench/review.rs
+
+rtk rg -n \
+  'pub fn apply_batch|fn commit|self\.next_state_id \+= 1|self\.state_id = self\.next_state_id' \
+  crates/rollshot-image-document/src/document.rs
+
+rtk rg -n \
+  'resulting_document_state_id[[:space:]]*=|\.resulting_document_state_id[[:space:]]*=|Result<ReviewDecision|Result<[^>]*ReviewDecision' \
+  crates/rollshot-app/src/result_workspace/workbench/review.rs
+```
+
+Fresh results: the first audit locates `build_review_decision`, its direct assignment from `doc_state_id`, `apply_candidates` returning `Result<(), WorkbenchError>`, decision construction before `.apply_batch(ops)`, and the batch call. The second locates `apply_batch`, `commit`, and the increment/assignment that stamps a fresh state ID for a semantic mutation. The third returns no matches: there is no assignment updating the decision field after apply and no `ReviewDecision` return in this file. Together these establish a field-population/return gap in the active workbench path, separate from [A:R-REVIEW-STORE]'s persistence gap.
 
 ### [A:R-LIFECYCLE] Retention/archive/delete fields
 
@@ -533,9 +556,9 @@ The inspected pinned `production-loop.md`, `review-loop.md`, `subagent-dispatch.
 - **[R1]** `crates/rollshot-automation/src/frontend/mod.rs`; `crates/rollshot-automation/src/executor.rs`; compatibility/frontend tests in the same crate. `ValidatedAutomation`, schema/API versions, canonical validation, and `ensure_compatible`.
 - **[R2]** `crates/rollshot-preset/src/domain.rs`; `crates/rollshot-preset/src/store.rs`. Immutable automation revisions, parent lineage, active revision, provenance, compatibility checks, and atomic storage.
 - **[R3]** `crates/rollshot-edit-proposal/src/proposal.rs`. Proposal/candidate identity, base state, confidence/rationale, provenance, and serialization.
-- **[R4]** `crates/rollshot-edit-proposal/src/review.rs`. Review decision partition and deterministic lowering.
-- **[R5]** `crates/rollshot-app/src/result_workspace/workbench/{state,run,review}.rs`. Pending proposal/draft handling, candidate review state, apply path, and proposal restamping.
-- **[R6]** `crates/rollshot-image-document/src/document.rs` and its tests. State identity, atomic batch application, rollback, undo/redo, and flattening.
+- **[R4]** `crates/rollshot-edit-proposal/src/review.rs`. Review decision partition, the resulting-state schema intent, and deterministic lowering.
+- **[R5]** `crates/rollshot-app/src/result_workspace/workbench/{state,run,review}.rs`. Pending proposal/draft handling, candidate review state, apply path, proposal restamping, and the current pre-apply decision-state population.
+- **[R6]** `crates/rollshot-image-document/src/document.rs` and its tests. State identity, state-ID advancement on commit, atomic batch application, rollback, undo/redo, and flattening.
 - **[R7]** `crates/rollshot-agent/src/{runtime,driver}.rs` and driver/runtime tests. Generation-bound evidence, dry-run, submit rules, and `ReadyForReview`.
 - **[R8]** `crates/rollshot-action/src/project/{model,assets,store,error}.rs` and project tests. Manifest v2, revisions, frame hashes, validation, conflict handling, and atomic save.
 - **[R9]** `crates/rollshot-action/src/project/publish.rs` and tests. Publish-state schema, revision freshness, and current output-presence checks.
@@ -572,6 +595,7 @@ The inspected pinned `production-loop.md`, `review-loop.md`, `subagent-dispatch.
 - This is a source/profile comparison, not a runtime evaluation of Pi, OMP, Codex, Claude Code, Brag, or Hyperframes.
 - External negatives are limited to the exact reviewed-profile audits and roots cited; extensions, unreleased versions, or uninspected code may add narrower mechanisms.
 - Rollshot negatives are limited to the exact commands and roots in §15. Similar fields under different names may exist elsewhere, but no evidence found here justifies treating them as a coherent Product Artifact contract.
+- `ReviewDecision.resulting_document_state_id` expresses post-apply schema intent, but the active workbench currently fills it before apply and does not return/update it; this document reports rather than fixes that product-code gap. [A:R-DECISION-STATE]
 - No storage migration, privacy UX, schema, or API has been selected or implemented.
 - No final choice among Patterns A–C is made.
 - The Hyperframes workload is deferred and its worker-wave ambiguity remains unresolved.
