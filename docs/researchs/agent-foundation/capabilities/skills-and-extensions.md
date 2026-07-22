@@ -101,10 +101,10 @@ not generalize beyond that path/revision.
 
 | System | Discovery and precedence | Trust boundary | Metadata/catalog disclosure | List/read/search | Explicit versus implicit invocation |
 | --- | --- | --- | --- | --- | --- |
-| **Pi** | Global `~/.pi/agent/skills`, compatibility `~/.agents/skills`, trusted project `.pi/skills`, project/ancestor `.agents/skills`, packages, settings, and CLI paths feed `loadSkills`; canonical realpaths deduplicate and first name wins. A directory containing `SKILL.md` is a skill root and stops recursive descent. [P1] | Project-local resources load only after project trust. Trust gates input loading; Pi explicitly does not sandbox extensions. [P2] | Required `name`/`description`; `disable-model-invocation` controls prompt visibility. Metadata is rendered first with file paths, then the model is told to read the file. Invalid name/description constraints warn or reject as implemented by the loader. [P1] | No provider-neutral opaque list/read/search contract: the prompt lists local entries and ordinary file read resolves content. No source-authority/package/resource types were found in the exact skill path. [A:P1] | `/skill:name` explicitly rereads the current file and injects its body. Model invocation is implicit through metadata plus ordinary Read unless disabled. Explicit reread means invocation can observe post-catalog file changes. [P3] |
-| **OMP** | A capability registry combines native, managed, Codex, Claude, Claude-plugin, OpenCode, GitHub, agents, OMP-plugin, and custom sources. Provider priority, include/ignore, enable/disable, realpath deduplication, and deterministic order select winners; managed entries are lowest priority. [O1] | Source level/provenance is retained, but the inspected `Skill`/protocol types do not bind an authority/package/resource tuple. `activeSkills` is a process-global selection snapshot, not an authorization grant. [O1, A:O1] | Frontmatter plus `_source` and level feed a bounded metadata prompt. Hidden/disable-model-invocation entries are excluded from prompt discovery but remain explicitly addressable. [O1] | Registry/listing and `skill://` reading exist. `SkillProvider.search`-style authority routing was not found in the inspected paths. `skill://` rejects absolute/lexical `..` and checks `path.resolve` containment. [O2, A:O1] | `/skill:` can appear at the beginning or within user input; explicit expansion rereads the file. Model invocation uses prompt metadata. Hidden skills remain explicit-only. [O1] |
+| **Pi** | Global `~/.pi/agent/skills`, compatibility `~/.agents/skills`, trusted project `.pi/skills`, project/ancestor `.agents/skills`, packages, settings, and CLI paths feed `loadSkills`; canonical realpaths deduplicate and first name wins. A directory containing `SKILL.md` is a skill root and stops recursive descent. [P1] | Project-local resources load only after project trust. Trust gates input loading; Pi explicitly does not sandbox extensions. [P2] | Required `name`/`description`; `disable-model-invocation` controls prompt visibility. Metadata is rendered first with file paths, then the model is told to read the file. Invalid name/description constraints warn or reject as implemented by the loader. [P1] | The prompt lists local entries and ordinary filesystem Read resolves content; the focused type audit found no source-authority/package/resource identity in this path. [P1, A:P1] | `/skill:name` explicitly rereads the current file and injects its body. Model invocation is implicit through metadata plus ordinary Read unless disabled. Explicit reread means invocation can observe post-catalog file changes. [P3] |
+| **OMP** | A capability registry combines native, managed, Codex, Claude, Claude-plugin, OpenCode, GitHub, agents, OMP-plugin, and custom sources. Provider priority, include/ignore, enable/disable, realpath deduplication, and deterministic order select winners; managed entries are lowest priority. [O1] | Source level/provenance is retained, but the inspected `Skill`/protocol types do not bind an authority/package/resource tuple. `activeSkills` is a process-global selection snapshot, not an authorization grant. [O1, A:O1] | Frontmatter plus `_source` and level feed metadata into the prompt. Hidden/disable-model-invocation entries are excluded from prompt discovery but remain explicitly addressable. No aggregate metadata cap was found in the focused cap audit. [O1, A:O5] | Capability discovery/listing and `skill://` reading exist. A focused API-symbol audit found provider-labelled discovery comments/source fields and name-based `find`, but no skill search/query/catalog API or authority-routed search. `skill://` rejects absolute/lexical `..` and checks `path.resolve` containment. [O2, A:O4] | `/skill:` can appear at the beginning or within user input; explicit expansion rereads the file. Model invocation uses prompt metadata. Hidden skills remain explicit-only. [O1] |
 | **Codex** | Host, executor, and orchestrator providers produce one catalog. Host discovery considers system/admin/plugin/repo/user roots with bounded traversal; executor sources are selected execution-environment roots; orchestrator entries are bounded MCP resources. [C1] | `SkillAuthority { kind, id }`, opaque package/resource IDs, and optional environment binding preserve provider authority. The provider contract explicitly forbids converting a resource into an ambient local path. [C1] | Enabled/prompt-visible catalog entries expose bounded name/description metadata. Budget is 2% of context, capped at 4,000 tokens; fallback is 8,000 characters. Main prompt content is capped at 8,000 bytes. [C2] | Provider API has `list/read/search`; all three inspected provider `search` implementations return empty results. Model tools expose only orchestrator `list/read`; there is no `search.rs`. Read recatalogs the authority/package before routing an opaque resource. [C1, A:C1] | Explicit mentions select and read main prompts. Separately, core code attributes an implicit invocation when a permitted skill's `SKILL.md` is read or a script below its `scripts/` directory is run. This detects model/tool behavior; it does not preselect content. The candidate selector remains shadow metrics. Host/executor metadata is prompt/world-state input, while model `list/read` says only orchestrator is supported. [C3] |
-| **Claude Code** | Managed, user, project, added directories, legacy commands, plugins, bundled skills, and feature-gated MCP skills converge as commands. Skills use `name/SKILL.md`; dynamic path-dependent project discovery occurs when relevant files are touched. Plugin skills can come from the conventional directory, manifest paths, or marketplace paths. [L1, L2] | Project settings/policy and invocation-time trust gate local discovery. `LoadedFrom` distinguishes managed/bundled/plugin/MCP, but no opaque source-authority/package/resource tuple was found in the inspected skill paths. [L1, A:L1] | Broad frontmatter includes description, allowed-tools, arguments, `when_to_use`, version, model, invocation visibility, hooks, fork/agent/effort, shell, and paths. Only a small name/description/when-to-use estimate is advertised; full loaded content is expanded on invocation. [L1] | Local/plugin/bundled skills are command objects, not a provider-neutral list/read/search API. `SkillTool` lists invocable commands internally. MCP skill fetch callsites are visible, but their required loader source is absent from the pinned tree; exact remote URI/catalog semantics are **unknown**. [L3, A:L2] | Users invoke commands; the model uses `SkillTool` unless model invocation is disabled. Inline and forked contexts exist. Already-loaded Markdown content is used, unlike Pi/OMP invocation-time reread. Invoked content is tracked for compaction. [L1, L4] |
+| **Claude Code** | Managed, user, project, added directories, legacy commands, plugins, bundled skills, and feature-gated MCP skills converge as commands. Skills use `name/SKILL.md`; dynamic path-dependent project discovery occurs when relevant files are touched. Plugin skills can come from the conventional directory, manifest paths, or marketplace paths. [L1, L2] | Project settings/policy and invocation-time trust gate local discovery. `LoadedFrom` distinguishes managed/bundled/plugin/MCP, but no opaque source-authority/package/resource tuple was found in the inspected skill paths. [L1, A:L1] | Broad frontmatter includes description, allowed-tools, arguments, `when_to_use`, version, model, invocation visibility, hooks, fork/agent/effort, shell, and paths. Only a small name/description/when-to-use estimate is advertised; full loaded content is expanded on invocation. [L1] | Local/plugin/bundled skills are command objects. A focused audit found direct `SKILL.md` reads and a separate experimental remote-search gate, but no authority-bound list/read/search API for those local sources. MCP fetch callsites are visible, but their required loader source is absent; exact MCP URI/catalog semantics are **unknown**. [A:L4, L3, A:L2] | Users invoke commands; the model uses `SkillTool` unless model invocation is disabled. Inline and forked contexts exist. Already-loaded Markdown content is used, unlike Pi/OMP invocation-time reread. Invoked content is tracked for compaction. [L1, L4] |
 
 ### Progressive disclosure consequence
 
@@ -219,8 +219,8 @@ than silently substituting current content.
 
 | System | Metadata/body budget | Compaction preservation | Session resume |
 | --- | --- | --- | --- |
-| **Pi** | Metadata-first disclosure; no skill-specific metadata/body constant was established in the focused inspected paths. Exact value is **unknown**. [A:P2] | No invoked-skill continuity attachment was found in the focused Pi profile/source scope; this is an inspected-scope negative, not proof that generic messages cannot retain injected text. [A:P2] | Session JSONL retains messages, but no separately pinned skill identity/content contract was established in this focused audit. [A:P2] |
-| **OMP** | Bounded prompt construction and on-demand body loading exist; a cross-system-comparable per-skill persisted cap was not established in the focused paths. **Unknown.** [A:O2] | No dedicated invoked-skill content attachment/version record was found in the exact OMP skill/compaction audit scope. [A:O2] | Process-global `activeSkills` is selection state, not a durable content pin. Durable resume semantics for invoked skill bytes remain **not found in inspected scope**. [A:O2] |
+| **Pi** | Metadata validation caps names at 64 and descriptions at 1,024 characters. The focused loader/expansion audit found no skill-body or aggregate catalog prompt cap; explicit expansion injects the complete stripped body. [A:P3] | No invoked-skill continuity attachment was found in the focused Pi profile/source scope; this is an inspected-scope negative, not proof that generic messages cannot retain injected text. [A:P2] | Session JSONL retains messages, but no separately pinned skill identity/content contract was established in this focused audit. [A:P2] |
+| **OMP** | The general `skill://` reader reports UTF-8 size but the focused general-skill paths contain no rejecting per-skill body or aggregate metadata cap. The managed-skill writer separately caps generated files at 64,000 bytes; that does not bound authored/general reads. [A:O5, O3] | No dedicated invoked-skill content attachment/version record was found in the exact OMP skill/compaction audit scope. [A:O2] | Process-global `activeSkills` is selection state, not a durable content pin. Durable resume semantics for invoked skill bytes remain **not found in inspected scope**. [A:O2] |
 | **Codex** | Metadata: 2% of context, max 4,000 tokens; fallback 8,000 chars. Main prompt: 8,000 bytes. [C2] | No invoked-skill identity/content attachment was found in exact compact sources. Generic injected text may still be summarized; that is not equivalent to preserving the package/digest. [A:C3] | No skill authority/package/resource/version/snapshot record was found in exact rollout reconstruction/thread-store sources. [A:C3] |
 | **Claude Code** | Catalog advertisement is metadata-only. At compaction, each invoked skill is head-truncated to 5,000 tokens and the aggregate is capped at 25,000 tokens, newest first. [L4] | `invoked_skills` attachments preserve agent-scoped content; least-recent skills fall out under aggregate pressure and truncated content carries a marker. [L4] | Resume explicitly rebuilds invoked-skill state from those attachments so later compactions retain it. This preserves bounded content, path, and name—not a package authority or verified digest. [L4] |
 
@@ -249,10 +249,11 @@ OMP has three distinct ideas that should not be collapsed:
    plan mode, and goal mode, and only starts a private capture turn when
    `autoContinue` is explicitly enabled. [O3, A:O3]
 
-Managed writes use lowercase/sanitized names, a 64 KiB cap, a per-name process
-lock, root/directory symlink rejection, exclusive create, and no-follow/link
-checks on update. No cross-process lock was found in the inspected writer;
-this is an exact scoped negative. [O3]
+Managed writes use lowercase/sanitized names, a 64,000-byte cap, a per-name
+in-process promise chain, root/directory symlink rejection, exclusive create,
+and no-follow/link checks on update. The writer explicitly calls the chain
+“in-process only” and cross-process races out of scope; the exact lock audit
+found no file/advisory/OS/process lock primitive. [O3, A:O6]
 
 For Rollshot, automatic skill mutation would combine model output, durable code
 or policy changes, and future implicit prompt influence. It is not an MVP
@@ -459,14 +460,14 @@ This is a scope observation, **not a recommendation or final selection**.
 - **[E1] Revision pins:** `git -C <checkout> rev-parse HEAD` for the four source
   trees; the hashes are recorded at the top of this document.
 - **[E2] Umbrella and Round 0:**
-  `docs/researchs/agent-foundation/README.md` and
-  `docs/researchs/agent-foundation/round-0-contract.md`; workload, authority,
-  evidence, and no-selection requirements.
+  `docs/researchs/agent-foundation/README.md` and the **In Progress** Round 0
+  baseline `docs/researchs/agent-foundation/00-rollshot-baseline-workloads.md`;
+  workload, authority, evidence, and no-selection requirements.
 - **[E3] Rollshot source:** `crates/rollshot-agent/src/{domain,driver,model,
   provider,runtime,tools}.rs`; typed tools, authorized model input, budgets,
-  cancellation, terminal states, and proposal flow. See also the Reviewed
-  Rollshot Round 0 profile and capability comparisons for tools, budgets,
-  context, and persistence.
+  cancellation, terminal states, and proposal flow. See also the **In
+  Progress** Rollshot Round 0 baseline and capability comparisons for tools,
+  budgets, context, and persistence.
 - **[A:R0] Exact negative audit:** semantic graph search for
   `skills extension plugin catalog invocation authority snapshot` returned
   zero Rollshot nodes. Then `rg -n -i '(struct|enum|trait) Skill|SKILL.md|
@@ -498,6 +499,12 @@ This is a scope observation, **not a recommendation or final selection**.
   `core/agent-session-runtime.ts`, and `core/agent-session-services.ts`
   returned zero hits. Generic message persistence is not a substitute for that
   missing skill-specific contract.
+- **[A:P3] Exact cap audit:** search for max/limit/cap/budget/token/body/
+  metadata/size/bytes/truncation/length terms over exactly `core/skills.ts`,
+  `core/agent-session.ts`, and `core/resource-loader.ts` found
+  `MAX_NAME_LENGTH=64`, `MAX_DESCRIPTION_LENGTH=1024`, generic session token
+  accounting, and complete `readFileSync`/frontmatter-strip body expansion. It
+  found no skill-body or aggregate skill-metadata prompt cap in those paths.
 
 ### oh-my-pi
 
@@ -526,6 +533,27 @@ This is a scope observation, **not a recommendation or final selection**.
   `autolearn.enabled` and `autolearn.autoContinue` with `default: false` and
   `minToolCalls` default 5; `discovery/builtin.ts` states managed discovery is
   unconditional and lowest-priority while writing/nudging is gated.
+- **[A:O4] Exact search-API audit:** search for skill-search/search-skill,
+  `SkillSearch`, `search(`, `query(`, `find(`, catalog, and provider over
+  exactly `capability/skill.ts`, `extensibility/skills.ts`,
+  `internal-urls/skill-protocol.ts`, and the built-in/Claude/Codex/OMP-plugin
+  discovery providers found provider-labelled discovery comments/source fields
+  and name-based `find`, but no skill search/query/catalog API or
+  authority-routed search.
+- **[A:O5] Exact cap audit:** search for max/limit/cap/budget/token/body/
+  metadata/size/bytes/truncation/validation terms over exactly
+  `capability/skill.ts`, `extensibility/skills.ts`, `skill-protocol.ts`, and
+  `discovery/builtin.ts` found body construction and a returned byte `size`, but
+  no rejecting general per-skill body or aggregate metadata cap. The distinct
+  managed writer's `MAX_MANAGED_SKILL_BYTES=64_000` is recorded in [O3].
+- **[A:O6] Exact cross-process-lock audit:** search for flock, file/process/
+  advisory/OS lock, lockfile, mutex, semaphore, `withLock`, `O_NOFOLLOW`,
+  `O_EXCL`, `wx`, and link-count terms over exactly `autolearn/managed-skills.ts`,
+  `autolearn/controller.ts`, `tools/learn.ts`, and `tools/manage-skill.ts` found
+  no cross-process lock primitive. Positive evidence is the
+  `skillMutationChains` in-memory `Map`/Promise chain and its explicit
+  “in-process only; cross-process races are out of scope” comment; filesystem
+  hits were `O_NOFOLLOW`, `nlink`, and exclusive `wx` create defenses.
 
 ### Codex
 
@@ -591,6 +619,15 @@ This is a scope observation, **not a recommendation or final selection**.
   `join(pluginPath, relPath)` and `pathExists`; it does not canonicalize and
   compare that component path with the plugin root. Other `realpath` uses exist
   elsewhere in the loader and are not claimed to cover this function.
+- **[A:L4] Exact local list/read/search API audit:** search for provider,
+  catalog, authority/package/resource ID, skill-list/read/search, `search(`,
+  and `query(` terms over exactly `skills/loadSkillsDir.ts`,
+  `skills/bundledSkills.ts`, `utils/plugins/loadPluginCommands.ts`, and
+  `tools/SkillTool/SkillTool.ts` found a direct plugin `SKILL.md` read and
+  feature-gated `EXPERIMENTAL_SKILL_SEARCH` remote-module references. It found
+  no authority-bound list/read/search API for local/plugin/bundled commands.
+  The experimental remote search is a separate source path and is not evidence
+  for the missing MCP loader in [A:L2].
 
 ## 16. Limitations
 
