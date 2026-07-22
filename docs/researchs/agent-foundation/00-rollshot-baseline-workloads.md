@@ -48,10 +48,10 @@ These terms stay distinct in later documents:
 | **Session** | Rollshot's `AgentSession`: a `SessionId`, completed user/assistant text pairs, and at most one pending user message. It is an in-memory product/domain record, not a persisted Rig run. [R2] |
 | **Run** | One invocation of `AgentRunner`, with a fresh Rig `AgentRun`, one budget tracker, one cancellation source, one tool context, and one terminal outcome. [R3, R5] |
 | **Turn** | One model call plus any resulting tool batch and results inside a run. Rig supplies the one-based model-call index; Rollshot accounts usage and streams selected events. [R3, G1] |
-| **Task** | A bounded unit the product asks an agent/model to perform, such as Smart Redaction or one Action Guide visual-annotation suggestion. It is not currently a durable `rollshot-agent` record. |
-| **Workflow** | Multiple dependency-related stages, checkpoints, jobs, or tasks progressing toward artifacts. Neither an `AgentSession` nor a Rig `AgentRun` is by itself a workflow record. |
+| **Task** | A bounded unit the product asks an agent/model to perform, such as Smart Redaction or one Action Guide visual-annotation suggestion. It is not currently a durable `rollshot-agent` record in the six investigated agent files. [R2, R3, R4, R5, R6] |
+| **Workflow** | Multiple dependency-related stages, checkpoints, jobs, or tasks progressing toward artifacts. Neither an `AgentSession` nor a Rig `AgentRun` is by itself a workflow record. [R2, R3, G1] |
 | **Tool call** | One model-requested invocation, correlated with a result by call ID. Rig validates and threads call/result messages; Rollshot registers and executes tools. [R5, G1] |
-| **External job/process** | Work whose lifecycle can outlast the model turn that started it, such as a preview server, audio generation, or render. No such abstraction was found in the investigated `rollshot-agent` files. Hyperframes supplies the workload evidence for it. [H1, H2] |
+| **External job/process** | Work whose lifecycle can outlast the model turn that started it, such as a preview server, audio generation, or render. No such abstraction was found in the six investigated `rollshot-agent` files; Hyperframes supplies the workload evidence for it. [R2, R3, R4, R5, R6, H1, H2] |
 | **Artifact** | A named output whose existence/content is a completion contract: a review proposal, persisted Action Guide project, storyboard frame, render, or share copy. Artifacts are not conversation memory. |
 | **Checkpoint** | A user decision that gates later work. `NeedsUserInput` ends a current Rollshot run; Hyperframes checkpoints instead gate a longer workflow. [R3, H3] |
 | **Resume** | Reconstruct enough durable state to continue after a process/session boundary. Resuming a conversation, a serialized Rig run, and an artifact-driven workflow are three non-equivalent operations. |
@@ -91,6 +91,15 @@ AgentRunner (one invocation)
 `AuthorizedModelInput` validates attachment count, byte count, dimensions,
 media types, and aggregate size before a run. Its debug representation redacts
 user text and bytes. [R2]
+
+For `FullScreenshot`, the workbench PNG-encodes and authorizes the selected
+screenshot bytes. The Smart Redaction driver does not forward those bytes to
+the provider: `run_model_turn_with_provider` constructs every `ModelRequest`
+with `attachments: vec![]`. In the inspected driver, only the visual-annotation
+path calls `take_model_attachments` and sends the attachments on its first
+model turn. Consent and input authorization therefore exist at the workbench
+boundary, but consent-selected screenshot bytes are not currently included in
+Smart Redaction provider requests. [R3, R8]
 
 ### Session and run boundaries
 
@@ -171,6 +180,13 @@ dropped; terminal assistant text is treated as authoritative and reconciles
 the UI. No event log or reconnect reconstruction was found in the investigated
 path. [R3, R5, R8]
 
+`AuditEvent` separately declares `TurnStarted`, `BudgetCharged`,
+`CancellationRequested`, and `RunCompleted` metadata variants. Serialization
+and round-trip tests cover that vocabulary, but a bounded search across
+`crates/` found no production construction or emission outside the declaration
+and `runtime.rs` tests. It is declared and test-covered vocabulary, not an
+observed production audit stream. [R5]
+
 Smart Redaction returns explicit `RunTerminalState` variants:
 `ReadyForReview`, `NeedsUserInput`, `Cancelled`, dimensioned
 `BudgetExhausted`, `SourceValidationFailure`, `RuntimeFailure`,
@@ -230,11 +246,20 @@ listed under the Rollshot model/provider facade. [R3, R4, R6, R7]
 - Turn counting and maximum-depth protocol behavior.
 - Accumulation of assistant messages, tool calls, and correlated tool-result
   messages into the next request history.
-- Validation that streamed tool names are in the advertised/allowed set and
-  assembly of argument deltas into a complete turn.
+- Validation and normalization of Rig provider-stream items, including allowed
+  tool-name checks and streamed-turn event generation.
 - Exactly-once streamed completion-call accounting inside the Rig machine.
 - Requiring a non-empty, complete set of results for every pending tool call
   before the next model request.
+
+Tool-argument assembly has split ownership. Rig ingests provider stream items
+and exposes normalized tool-start, argument-delta, and completion events.
+Rollshot's production driver then stores deltas per call, charges their bytes,
+concatenates the raw strings, parses the completed JSON, constructs final Rig
+`ToolCall` values, and passes that choice back through Rig's
+`finish`/`streamed_turn` boundary. Raw argument accumulation and JSON parsing in
+this driver are therefore Rollshot-owned, not delegated to Rig. [R3, R4, R6,
+G1]
 
 Rollshot does **not** delegate its product budget, cancellation, authorization,
 tool implementations, serial scheduling policy, draft generations, validation,
@@ -263,14 +288,16 @@ must execute all three workloads.
 
 ### Pressure 1: Smart Redaction — bounded review-producing run
 
-**Observed shape.** The current product author/improve flow authorizes at most
-the chosen screenshot payload, exposes a finite inspection/authoring tool set,
-iterates source generation → validation → dry run, and terminates with a typed
-proposal for user review or an actionable failure/clarification state. The
-workbench owns consent, finite budget, cancellation, review, and preset/source
-handoff. [R3, R5, R8]
+**Observed shape.** The current product author/improve flow exposes a finite
+inspection/authoring tool set, iterates source generation → validation → dry
+run, and terminates with a typed proposal for user review or an actionable
+failure/clarification state. The workbench owns consent, finite budget,
+cancellation, review, and preset/source handoff. It can authorize a chosen
+screenshot payload, but the Smart Redaction `ModelRequest` currently carries no
+attachments, so those consent-selected screenshot bytes do not reach the
+provider. [R3, R5, R8]
 
-**Capabilities demonstrated as necessary:**
+**Inference from [R3, R5, R8]: capabilities demonstrated as necessary:**
 
 - provider-neutral streaming with tool-call/result continuity;
 - typed registered tools and explicit per-run availability through which tools
@@ -279,7 +306,8 @@ handoff. [R3, R5, R8]
 - finite multidimensional budgets and cancellation into automation execution;
 - generation-bound validation/dry-run evidence;
 - a typed review artifact and terminal failure taxonomy; and
-- privacy-safe input/debug/event handling plus explicit upload consent.
+- privacy-safe input/debug/event handling plus an explicit disclosure choice;
+  the current image-provider handoff remains a proven gap.
 
 **Not established by this workload:** durable run resume, subagents, parallel
 tool execution, task DAGs, or managed background jobs. Smart Redaction is the
@@ -301,8 +329,8 @@ cancellation source, and a two-turn configuration. Caption suggestions instead
 call the Rollshot provider facade directly for the reviewed guide and lower the
 response into a typed `CaptionProposal`. [A3]
 
-**Capabilities demonstrated as necessary if foundation orchestration owns
-these tasks:**
+**Inference from [A1, A2, A3]: capabilities that would be necessary if
+foundation orchestration owns these tasks:**
 
 - stable references from task output to project revision/document state,
   guide step source, and keyframe artifact;
@@ -320,10 +348,11 @@ is an open product/architecture question.
 
 ### Pressure 3: brag + Hyperframes — artifact-driven multi-stage production
 
-**Observed workflow shape.** brag reads a project, creates a timestamp-safe
-output directory, writes a storyboard plan, hands a focused composition brief
-to Hyperframes, gates on `hyperframes check`, then produces an MP4, selected
-poster, and share copy. [B1]
+**Observed workflow shape.** brag reads a project, uses `brag-output/` by
+default and conditionally selects a timestamped directory to avoid overwriting
+an existing run, writes a storyboard plan, hands a focused composition brief to
+Hyperframes, gates on `hyperframes check`, then produces an MP4, selected poster,
+and share copy. [B1]
 
 Hyperframes expresses production as dependencies: assets must be installed
 before parallel work; audio can render in the background while independent
@@ -338,7 +367,8 @@ notification. Missing artifacts trigger one clean re-dispatch; concurrency caps
 change batching into waves, not scope. A serial inline fallback remains valid.
 [H2]
 
-**Capabilities this deferred workload would pressure:**
+**Inference from [B1, H1, H2, H3]: capabilities this deferred workload would
+pressure:**
 
 - project/resource inspection and skill-to-skill handoff with versioned inputs;
 - explicit dependency/workflow state separate from conversational todos;
@@ -351,9 +381,12 @@ change batching into waves, not scope. A serial inline fallback remains valid.
 - progress/events that aggregate stages and workers without treating transient
   notifications as completion.
 
-These requirements come from the cited brag/Hyperframes steps. Unused features
-elsewhere in those projects are not evidence. The workload does not mandate
-that Rollshot ship video generation, copy Hyperframes, or put every stage inside
+These inferred requirements come from the cited brag/Hyperframes steps. In
+particular, durable checkpoint recovery and managed job
+`start`/`wait`/`cancel`/`collect` semantics are inferences about foundation
+support, not directly specified Rollshot behavior. Unused features elsewhere
+in those projects are not evidence. The workload does not mandate that Rollshot
+ship video generation, copy Hyperframes, or put every stage inside
 `rollshot-agent`.
 
 ## Proven gaps
@@ -363,22 +396,24 @@ workload, not a general platform wish list.
 
 | Current gap (static evidence) | Workload pressure | Why it matters |
 |---|---|---|
-| No Rollshot-owned durable run/checkpoint/resume record in the investigated agent files; a fresh Rig run is created per invocation. [R3, G1] | Hyperframes; potentially multi-step Action Guide orchestration | Artifact/checkpoint continuation cannot be reconstructed from current run memory. Action Guide proves persistence should attach to product records, not merely a transcript. |
-| `AgentSession` exchanges are neither fed into a new Rig run nor returned by the inspected workbench task. [R2, R3, R8] | Longer review cycles in Action Guide/Hyperframes | If conversational continuity is desired, it needs an explicit policy; durable workflow state must still remain separate. |
-| No task/workflow/dependency state model in the investigated agent scope. | Hyperframes | Its stages have prerequisites, conditional stages, checkpoints, and artifact-scoped rework that cannot be represented by a single serial run terminal. |
-| No managed external job/process lifecycle. | Hyperframes | Preview servers, audio/generation, and renders overlap model work and may outlive a turn. A blocking tool result is not the cited lifecycle. |
-| No child-agent/worker registry, scoped child context, concurrency cap, wave scheduler, or artifact-based child completion. | Optional Hyperframes frame fan-out | The cited dispatch contract requires isolation, bounded fan-out, expected-artifact completion, and selective re-dispatch. This gap exists only if Rollshot adopts that optional execution mode. |
-| Run events are transient and narrow; the workbench channel may drop them and relies on terminal reconciliation. [R5, R8] | Hyperframes multi-stage/worker progress and reconnect; longer Action Guide tasks | A longer workflow needs reconstructible state/progress, while transient display events may remain best-effort. |
-| Cancellation stops the current provider/automation run but has no child/job cleanup graph. [R5, R6] | Hyperframes background work and optional workers | Parent cancellation would need explicit propagation and cleanup ownership. |
-| Budget state is run-local; cost is never charged and no child/job/artifact hierarchy exists. [R5] | Current Smart Redaction cost ceiling; Hyperframes fan-out/jobs | Smart Redaction's configured cost ceiling is not enforced. Multi-worker/job work would need allocation distinct from one model loop's counters. |
+| No Rollshot-owned durable run/checkpoint/resume record was found in the investigated agent files; a fresh Rig run is created per invocation. [R3, G1] | Hyperframes | Artifact/checkpoint continuation cannot be reconstructed from current run memory. Action Guide persistence is presently a separate product record; future run/checkpoint ownership is undecided. |
+| `AgentSession` exchanges are neither fed into a new Rig run nor returned by the inspected workbench task. [R2, R3, R8] | Hyperframes | If conversational continuity is desired, it needs an explicit policy; durable workflow state must still remain separate. |
+| Not found in the investigated scope: a task/workflow/dependency state model in `domain.rs`, `driver.rs`, `model.rs`, `provider.rs`, `runtime.rs`, or `tools.rs`. [R2, R3, R4, R5, R6] | Hyperframes | Its stages have prerequisites, conditional stages, checkpoints, and artifact-scoped rework that cannot be represented by a single serial run terminal. |
+| Not found in the same six-file scope: a managed external job/process lifecycle. [R2, R3, R4, R5, R6] | Hyperframes | Preview servers, audio/generation, and renders overlap model work and may outlive a turn. A blocking tool result is not the cited lifecycle. |
+| Not found in the same six-file scope: a child-agent/worker registry, scoped child context, concurrency cap, wave scheduler, or artifact-based child completion. [R2, R3, R4, R5, R6] | Optional Hyperframes frame fan-out | The cited dispatch contract requires isolation, bounded fan-out, expected-artifact completion, and selective re-dispatch. This gap exists only if Rollshot adopts that optional execution mode. |
+| Run events are transient and narrow; the workbench channel may drop them and relies on terminal reconciliation. [R5, R8] | Hyperframes multi-stage/worker progress and reconnect | A longer workflow needs reconstructible state/progress, while transient display events may remain best-effort. |
+| The Smart Redaction workbench authorizes `FullScreenshot` bytes, but its driver builds provider requests with no attachments; only visual annotation forwards authorized attachments in the inspected driver. [R3, R8] | Current Smart Redaction | The consent-selected image is not available to the provider even though the workbench prepares and authorizes it. |
+| Cancellation stops the current provider/automation run; no child/job cleanup graph was found in the same six-file scope. [R2, R3, R4, R5, R6] | Hyperframes background work and optional workers | Parent cancellation would need explicit propagation and cleanup ownership. |
+| Budget state is run-local and cost is never charged; no child/job/artifact budget hierarchy was found in the same six-file scope. [R2, R3, R4, R5, R6] | Current Smart Redaction cost ceiling; Hyperframes fan-out/jobs | Smart Redaction's configured cost ceiling is not enforced. Multi-worker/job work would need allocation distinct from one model loop's counters. |
 
 ## Current strengths
 
 - Rollshot's public provider/model contracts are already independent of Rig,
   keeping retain/fork/replace/remove technically open. [R4, R6]
-- Input authorization, redacted debug output, consent-selected payloads, bounded
-  attachments, and privacy-filtered Action Guide semantics establish useful
-  privacy boundaries. [R2, R8, A1]
+- Input authorization, redacted debug output, explicit payload choice, bounded
+  attachments, and privacy-filtered Action Guide semantics establish current
+  privacy boundaries, though Smart Redaction does not forward the authorized
+  image attachment to its provider request. [R2, R3, R8, A1]
 - The tool registry is typed, JSON-schema-driven, bounded, deterministic, and
   terminates safely on the first successful terminal action. [R5]
 - Draft generations and evidence invalidation prevent stale validation/dry-run
@@ -388,8 +423,9 @@ workload, not a general platform wish list.
 - Budgets, shared cancellation, typed terminals, provider contract tests, and
   cancellation/privacy tests give the bounded loop strong local failure
   semantics even without durable orchestration. [R3, R5, R9]
-- Action Guide already persists product artifacts independently of agent
-  history, a sound boundary to preserve in later designs. [A2]
+- Action Guide currently persists product artifacts independently of agent
+  history. Later synthesis can compare the consequences of retaining or
+  changing that separation. [A2]
 
 ## Unknowns and bounded absences
 
@@ -416,27 +452,27 @@ workload, not a general platform wish list.
 
 ## Evidence index
 
-All paths and symbols refer to the reproducibility baseline above. “Source”
-means static implementation; “test” means executable test source inspected but
-not necessarily run in this round.
+All paths and symbols refer to the reproducibility baseline above. `source`
+means static implementation or inspected workflow source; `test` means
+executable test source inspected but not necessarily run in this round.
 
 | ID | Type | Path / symbol | Supports | Limit |
 |---|---|---|---|---|
-| R1 | policy/source | `AGENTS.md` §11; `docs/researchs/agent-foundation/README.md` §§1, 7 | Code-over-docs rule, workload framing, evidence discipline | Governance, not runtime behavior |
-| R2 | source + unit tests | `crates/rollshot-agent/src/domain.rs`: `AuthorizedModelInput`, `AgentSession`, session/input tests | Authorization/privacy and in-memory exchange model | Does not prove app persistence |
-| R3 | source + unit tests | `crates/rollshot-agent/src/driver.rs`: `AgentRunner::{run_with_provider,drive_streamed_turn,run_tool_turn}`, `RunTerminalState`, terminal/budget/cancellation tests | Run ownership, Rig driving protocol, terminals, tool-result threading | Scripted tests and static production path; no live provider run here |
-| R4 | source + unit tests | `crates/rollshot-agent/src/model.rs`: public model types, `push_model_messages`, `drive_streamed_turn`, conversion tests | Rollshot public facade and private Rig translation | Does not cover provider HTTP behavior |
-| R5 | source + unit tests | `crates/rollshot-agent/src/runtime.rs`: `RunBudget`, `BudgetTracker`, `DraftState`, `RunCancellation`, `RunEvent`; `tools.rs`: `Tool`, `ToolRegistry`, `ToolContext`, authoring tools and serial-order tests | Budgets, cancellation, events, serial tools, generation evidence | Run-local only; cost limitation is documented in source |
-| R6 | source + contract tests | `crates/rollshot-agent/src/provider.rs`: `ProviderAdapter`, `AnthropicAdapter`, `OpenAIAdapter`, `build_completion_request`, `stream_to_model_events`; `tests/provider_contract.rs` | Private Rig provider machinery behind Rollshot events | Contract test source is not a live external-provider observation |
-| R7 | source/lock | `crates/rollshot-agent/Cargo.toml`; `Cargo.lock` `rig-core` entry; `src/lib.rs` re-exports | Exact 0.39 pin and public module/export boundary | Lockfile does not prove which runtime branches execute |
-| R8 | source + unit tests | `crates/rollshot-app/src/result_workspace/workbench/{mod.rs,run.rs,state.rs}`; `result_workspace/update.rs` workbench arms | Active Smart Redaction integration, finite budget, session move, event channel, consent/review ownership | UI path statically inspected, not launched |
-| R9 | tests | `crates/rollshot-agent/tests/provider_contract.rs`; cancellation/privacy tests in `driver.rs`, `runtime.rs`, `tools.rs` | Existing failure/privacy verification surface | Test results are recorded in this task's verification report, not inferred here |
-| G1 | source + tests | Locally resolved `rig-core-0.39.0/src/agent/run/{mod.rs,streamed.rs}`: `AgentRun`, `AgentRunStep`, `tool_results`, `record_streamed_completion_call`, `streamed_turn`, assembler and round-trip tests | Exact pinned state-machine/assembly invariants, serializability, driver-selected concurrency | Local registry path is machine-specific; version/checksum make it reproducible |
-| G2 | reference source | `learn-projects/rig/crates/rig-core/src/agent/run/{mod.rs,streamed.rs}` at the recorded v0.40.0 hash | Current supporting Rig boundary and upstream evolution | Not the version compiled by Rollshot |
-| A1 | source + unit tests | `crates/rollshot-action/src/{models.rs,guide.rs}`: `GuideStep`, `Guide` edit methods, privacy-filtered semantics | Editable guide/workflow artifact and privacy boundary | Headless model, not agent orchestration |
-| A2 | source + tests | `crates/rollshot-action/src/project/{model.rs,store.rs}`: `ProjectManifestV2`, `ProjectStep`, `save_project[_as]`, `load_project` | Durable revision/frame/step/annotation state | Project persistence, not agent-run persistence |
-| A3 | source + tests | `crates/rollshot-app/src/timeline_workspace/{visual_annotation_agent.rs,caption_agent.rs,update.rs}`; `crates/rollshot-action/src/{visual_annotation_proposal.rs,caption_proposal.rs}`: suggestion tasks, proposal validation, stale-result handling | Heterogeneous bounded tasks and typed proposal lowering tied to guide artifacts | No evidence of parallel dispatch or durable agent sessions |
-| B1 | workflow specification | `learn-projects/brag/skills/brag/SKILL.md` steps 1–4 and gates | Project inspection, plan/brief handoff, validation, render/poster/share artifacts | Workflow requirement, not Rollshot implementation |
-| H1 | workflow specification | `learn-projects/hyperframes/skills/hyperframes-core/references/production-loop.md` | Dependency stages, background audio/generation, artifact inputs/outputs, verify/deliver | Describes Hyperframes workflow behavior, not a Rollshot requirement by itself |
-| H2 | workflow specification | `learn-projects/hyperframes/skills/hyperframes-core/references/subagent-dispatch.md` | Optional parallel workers, caps/waves, expected-artifact completion, re-dispatch/fallback | Applies only if the deferred workload adopts worker dispatch |
-| H3 | workflow specification | `learn-projects/hyperframes/skills/hyperframes-core/references/review-loop.md` §§1–4 | Background preview, durable board artifacts/status, approval checkpoints, render gate | User-workflow contract, not runtime observation |
+| R1 | source | `AGENTS.md` §11; `docs/researchs/agent-foundation/README.md` §§1, 7 | Code-over-docs rule, workload framing, evidence discipline | Governance, not runtime behavior |
+| R2 | source + test | `crates/rollshot-agent/src/domain.rs`: `AuthorizedModelInput`, `AgentSession`, session/input tests | Authorization/privacy and in-memory exchange model | Does not prove app persistence |
+| R3 | source + test | `crates/rollshot-agent/src/driver.rs`: `AgentRunner::{run_with_provider,drive_streamed_turn,run_tool_turn}`, `RunTerminalState`, terminal/budget/cancellation tests | Run ownership, Rig driving protocol, terminals, tool-result threading, Smart Redaction attachment omission | Scripted tests and static production path; no live provider run here |
+| R4 | source + test | `crates/rollshot-agent/src/model.rs`: public model types, `push_model_messages`, `drive_streamed_turn`, conversion tests | Rollshot public facade and private Rig translation | Does not cover provider HTTP behavior |
+| R5 | source + test | `crates/rollshot-agent/src/runtime.rs`: `RunBudget`, `BudgetTracker`, `DraftState`, `RunCancellation`, `RunEvent`, `AuditEvent`; `tools.rs`: `Tool`, `ToolRegistry`, `ToolContext`, authoring tools and serial-order tests | Budgets, cancellation, declared events/audit vocabulary, serial tools, generation evidence | Run-local only; `AuditEvent` production emission was not found in the bounded search; cost limitation is documented in source |
+| R6 | source + test | `crates/rollshot-agent/src/provider.rs`: `ProviderAdapter`, `AnthropicAdapter`, `OpenAIAdapter`, `build_completion_request`, `stream_to_model_events`; `tests/provider_contract.rs` | Private Rig provider machinery behind Rollshot events | Contract test source is not a live external-provider observation |
+| R7 | source | `crates/rollshot-agent/Cargo.toml`; `Cargo.lock` `rig-core` entry; `src/lib.rs` re-exports | Exact 0.39 pin and public module/export boundary | Lockfile does not prove which runtime branches execute |
+| R8 | source + test | `crates/rollshot-app/src/result_workspace/workbench/{mod.rs,run.rs,state.rs}`; `result_workspace/update.rs` workbench arms | Active Smart Redaction integration, finite budget, session move, event channel, consent/review ownership | UI path statically inspected, not launched; input authorization does not prove provider attachment forwarding |
+| R9 | test | `crates/rollshot-agent/tests/provider_contract.rs`; cancellation/privacy tests in `driver.rs`, `runtime.rs`, `tools.rs` | Existing failure/privacy verification surface | Test results are recorded in this task's verification report, not inferred here |
+| G1 | source + test | Locally resolved `rig-core-0.39.0/src/agent/run/{mod.rs,streamed.rs}`: `AgentRun`, `AgentRunStep`, `tool_results`, `record_streamed_completion_call`, `streamed_turn`, assembler and round-trip tests | Exact pinned state-machine/assembly invariants, serializability, driver-selected concurrency | Local registry path is machine-specific; version/checksum make it reproducible |
+| G2 | source | `learn-projects/rig/crates/rig-core/src/agent/run/{mod.rs,streamed.rs}` at the recorded v0.40.0 hash | Current supporting Rig boundary and upstream evolution | Not the version compiled by Rollshot |
+| A1 | source + test | `crates/rollshot-action/src/{models.rs,guide.rs}`: `GuideStep`, `Guide` edit methods, privacy-filtered semantics | Editable guide/workflow artifact and privacy boundary | Headless model, not agent orchestration |
+| A2 | source + test | `crates/rollshot-action/src/project/{model.rs,store.rs}`: `ProjectManifestV2`, `ProjectStep`, `save_project[_as]`, `load_project` | Durable revision/frame/step/annotation state | Project persistence, not agent-run persistence |
+| A3 | source + test | `crates/rollshot-app/src/timeline_workspace/{visual_annotation_agent.rs,caption_agent.rs,update.rs}`; `crates/rollshot-action/src/{visual_annotation_proposal.rs,caption_proposal.rs}`: suggestion tasks, proposal validation, stale-result handling | Heterogeneous bounded tasks and typed proposal lowering tied to guide artifacts | No evidence of parallel dispatch or durable agent sessions |
+| B1 | source | `learn-projects/brag/skills/brag/SKILL.md` steps 1–4 and gates | Project inspection, plan/brief handoff, validation, render/poster/share artifacts | Workflow requirement, not Rollshot implementation |
+| H1 | source | `learn-projects/hyperframes/skills/hyperframes-core/references/production-loop.md` | Dependency stages, background audio/generation, artifact inputs/outputs, verify/deliver | Describes Hyperframes workflow behavior, not a Rollshot requirement by itself |
+| H2 | source | `learn-projects/hyperframes/skills/hyperframes-core/references/subagent-dispatch.md` | Optional parallel workers, caps/waves, expected-artifact completion, re-dispatch/fallback | Applies only if the deferred workload adopts worker dispatch |
+| H3 | source | `learn-projects/hyperframes/skills/hyperframes-core/references/review-loop.md` §§1–4 | Background preview, durable board artifacts/status, approval checkpoints, render gate | User-workflow contract, not runtime observation |
