@@ -30,7 +30,7 @@ it. [E:R0, E:R1]
 |---|---|---|
 | **Smart Redaction** | Source generation → validation → dry run → `submit_for_review`, or `request_user_input`. Generation-bound evidence and a typed terminal prevent stale submission. [W1] | Requires deterministic ordering, bounded result/context size, cancellation, and terminal stop-after-success. Mutating authoring Tools have real dependencies. This trace does **not** establish parallel Tool calls, dynamic discovery, or retry of ambiguous effects. |
 | **Action Guide** | Durable project revisions surround independent caption and visual-annotation proposals; stale `document_state_id` results are rejected. [W2] | Requires availability and authority to be resolved from current document/capture state, and outputs tied to a revision. Independent read/inspection calls could be candidates for overlap, but current code does **not** establish that parallel scheduling is needed [A:R-PARALLEL]. |
-| **Deferred brag + Hyperframes** | Project inspection feeds plan/check, optional scene workers, assembly, render, verification, poster, and share-copy Artifacts. Some stages are independent; others wait on explicit Artifact prerequisites. [W3, E:S1, E:J1] | If adopted, requires dependency-aware waves, expected-Artifact gates, background Job separation, attempt identity, and selective retry. A flat parallel Tool batch cannot represent those dependencies. It does not mandate video generation or a general Workflow engine in Rollshot. |
+| **Deferred brag + Hyperframes** | Project inspection feeds plan/check, optional scene workers, assembly, render, verification, poster, and share-copy Artifacts. Some stages are independent; others wait on explicit Artifact prerequisites. [W3, E:S1, E:J1] | If adopted, requires dependency-aware waves, expected-Artifact gates, background Job separation, attempt identity, and selective retry. A flat parallel Tool batch cannot represent those dependencies. It does not mandate video generation or a general Workflow engine in Rollshot [W3, E:S1]. |
 
 The workload ladder therefore keeps three levels distinct: one serial agent
 Tool batch, one safely overlappable batch, and a durable dependency-aware
@@ -122,14 +122,18 @@ Therefore Rollshot is typed and schema-driven at implementation/input decode,
 while model selection guidance is prompt-owned rather than definition-owned.
 [E:R1]
 
-`AuthorizedModelInput` authorizes and bounds provider payloads. It is not a
-per-Tool filesystem/network/capture/credential grant. The product's decision
-to construct a narrow registry is a valuable availability boundary, but a
-separate invocation authority object, approval hook, dynamic Tool registry, or
-sandbox contract was **not found in the investigated agent scope**
-[A:R-DYNAMIC]. Capability status returned by image/OCR inspection indicates
-whether an inspection capability is available/partial/unavailable; it likewise
-does not grant authority.
+`AuthorizedModelInput` encapsulates and bounds a provider payload that upstream
+product code has already selected and authorized; its constructor does not make
+that authorization decision. `payload_mode` upstream chooses whether screenshot
+bytes are included, while `AuthorizedModelInput::new` validates descriptor and
+attachment counts, nonzero dimensions, declared versus actual byte counts, and
+per-attachment/total limits. It is not a per-Tool filesystem/network/capture/
+credential grant. The product's decision to construct a narrow registry is a
+valuable availability boundary, but a separate invocation authority object,
+approval hook, dynamic Tool registry, or sandbox contract was **not found in
+the investigated agent scope** [A:R-AUTH, A:R-DYNAMIC]. Capability status
+returned by image/OCR inspection indicates whether an inspection capability is
+available/partial/unavailable; it likewise does not grant authority.
 
 ### 3.2 Serial batch, terminal Tools, and budgets
 
@@ -163,7 +167,7 @@ kept in the in-memory Rig history, and bounded by registry, driver, and Run
 budgets. A large result fails; it is not spilled. No Tool-result store,
 retention policy, compaction projection, artifact promotion record, pre/post
 hook, generic retry ledger, scheduler dependency, or runtime dynamic Tool was
-found in the investigated scope [A:R-DYNAMIC, A:R-IDEMP]. The typed
+found in the investigated scope [A:R-RESULT, A:R-DYNAMIC, A:R-IDEMP]. The typed
 `ReadyForReview` handoff is stronger: successful validation/dry-run evidence is
 lowered into a Product proposal and terminal, not merely left as a Tool-result
 path. [E:R0, E:R1]
@@ -240,14 +244,14 @@ protocol, not a generic `terminate` field on every Tool result. [E:O1, E:O2]
 Large textual outputs can spill to a session-scoped file and leave an
 `artifact://<numeric-id>` reference. Resume scans existing IDs, and full inline
 resolution is capped at 8 MiB. These are immutable-addressed overflow logs, not
-typed Product Artifacts with revision/provenance/acceptance. OMP pruning can
-elide contextually useless or older Tool material from the model projection.
-[E:O3, E:C1]
+typed Product Artifacts with revision/provenance/acceptance
+[A:O-ARTIFACT]. OMP pruning can elide contextually useless or older Tool
+material from the model projection. [E:O3, E:C1]
 
 OMP has approval tiers and concurrency metadata, but a common side-effect
 class, dependency scheduler, effect idempotency key, or durable attempt ledger
-was **not found in the focused Tool/runtime scope** [A:O-IDEMP,
-A:ALL-DAG].
+was **not found in the focused Tool/runtime scope** [A:O-SIDE,
+A:O-IDEMP, A:ALL-DAG].
 
 ### 4.3 Codex: typed/dynamic router with ordered read/write admission
 
@@ -271,9 +275,12 @@ PreToolUse runs after routing/kind checks and before handler execution; it can
 block or update input through a handler-specific reparse path. PermissionRequest
 hooks participate in approval. PostToolUse runs only for a successful Tool
 output in the inspected registry path; a post hook may replace/block the
-model-visible result, but cannot undo the completed effect. Cancellation either
-aborts the handler future or waits for runtime teardown according to the
-handler contract, then produces one correlated aborted result. [E:C1, E:C3]
+model-visible result, but cannot undo the completed effect. A named
+`PostToolUseFailure` or equivalent generic error hook was **not found in that
+path**; failure lifecycle telemetry/events are not an error hook
+[A:C-ERROR-HOOK]. Cancellation either aborts the handler future or waits for
+runtime teardown according to the handler contract, then produces one
+correlated aborted result. [E:C1, E:C3]
 
 Codex truncates generic model-visible Tool output and preserves the correlated
 result in rollout history, but a generic spill-to-Artifact promotion, terminal
@@ -283,7 +290,7 @@ A:ALL-DAG]. Compaction changes the model projection while original rollout
 history remains; its narrow image-generation Artifact is not a generic Tool
 result lifecycle. [E:C0, E:C1, E:C4]
 
-### 4.4 Claude Code source: rich metadata, deferred search, ordered safe batches
+### 4.4 Claude Code source: rich metadata, deferred search, dual scheduling paths
 
 At the pinned **Reviewed external-source** revision, `Tool` includes Zod/JSON
 input schema, optional output schema, dynamic description, enablement,
@@ -294,14 +301,21 @@ ToolSearch before their schema is considered present. Four availability stages
 are visible: assembled pool, `isEnabled`, direct/deferred advertisement, then
 model selection. [E:L0, E:L1]
 
-Both nonstreaming and streaming schedulers conservatively treat invalid inputs
-or throwing concurrency classifiers as unsafe. Consecutive safe calls form a
-parallel batch with a default cap of ten; unsafe calls form serial barriers.
-Progress can appear immediately, but final results are buffered in Tool source
-order. Context modifiers are applied in original order after a concurrent
-batch. A Bash error aborts running siblings and yields paired synthetic errors;
-other Tool errors do not automatically cancel unrelated siblings. [E:L1,
-T:L1]
+Both schedulers conservatively treat invalid inputs or throwing concurrency
+classifiers as unsafe, but their mechanics differ. The **nonstreaming** path
+partitions consecutive safe calls and feeds their generators to `all()`, whose
+`Promise.race` loop yields results in completion order; only this path has
+`CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`, default 10. It queues concurrent
+context modifiers by Tool ID and applies them in source order after the batch.
+The **streaming** executor has no visible numeric concurrency cap: safe calls
+start while all executing calls are safe, and a completed safe call can be
+yielded ahead of an earlier still-running safe call. An executing unsafe call
+is a barrier that blocks later admission/result emission; unsafe context
+modifiers apply immediately, while concurrent-safe context modifiers are
+explicitly unsupported in the inspected code. Progress remains live. A Bash
+error in the streaming path aborts running siblings and yields paired synthetic
+errors; other Tool errors do not automatically cancel unrelated siblings.
+[A:L-ORDER, E:L1, T:L1]
 
 Input schema/value validation precedes PreToolUse. The pre hook can add context,
 stop, update input, or influence permission; general/tool-specific permission
@@ -330,7 +344,7 @@ lower-confidence [E:L0].
 
 | System | Registration and Tool type | Discovery, schema, and description | Availability | Authorization | Selection |
 |---|---|---|---|---|---|
-| **Rollshot** | Host registers typed Rust `Tool` objects; duplicate names rejected. No runtime dynamic registry found [A:R-DYNAMIC]. | Full registered input schemas advertised every Step; description is currently empty; no deferred discovery. | Product-constructed per-Run registry. Capability result status is separate. | Provider payload authorization exists; per-Tool authority/approval object not found in agent scope [A:R-DYNAMIC]. | Provider call must match registered name; Rig/driver validate call structure and Tool decodes values. |
+| **Rollshot** | Host registers typed Rust `Tool` objects; duplicate names rejected. No runtime dynamic registry found [A:R-DYNAMIC]. | Full registered input schemas advertised every Step; description is currently empty; no deferred discovery [A:R-DYNAMIC]. | Product-constructed per-Run registry. Capability result status is separate. | `payload_mode` upstream selects authorized attachment inclusion; `AuthorizedModelInput::new` only validates payload shape/limits. Per-Tool authority/approval/sandbox not found [A:R-AUTH]. | Provider call must match registered name; Rig/driver validate call structure and Tool decodes values. |
 | **Pi** | Typed `AgentTool`; built-ins plus executable extension registration/replacement. | Active Tools' TypeBox schemas/descriptions are advertised; no built-in deferred ToolSearch found in focused scope [A:P-AUTH]. | Coding-agent active Tool snapshot, refreshable between turns. | Optional extension block hook; built-in grant/sandbox/approval cache not found [A:P-AUTH]. | Model selects an active name; prepare/schema validation then pre-hook. |
 | **OMP** | Typed `AgentTool` adapters over built-ins, extensions, MCP, capability/ACP/client/SDK sources. | Essential full schemas or discoverable metadata via `xd://`/search. | Enabled sources, capability priority, provider/resource health and selection; capability availability is not authority. | Tier/mode/per-Tool approval plus ACP/client mediation; extensions remain unsandboxed code. | Model selects direct or discovered Tool; approval and hooks run per invocation. |
 | **Codex** | Typed core/extension handlers plus runtime dynamic and MCP specs. | Direct/deferred/hidden exposure; ToolSearch supplies deferred specs. | Router rebuilt per Step from current Turn/environment/extensions. | Approval policy, permission profile, environment/sandbox, grants, and permission hooks are separate. | Model-visible call ID maps to handler; payload kind/input reparsed and admitted. |
@@ -349,14 +363,16 @@ needs explicit identities for **implementation**, **schema revision**,
 | **Pi** | Whole batch; one sequential Tool makes whole batch serial. | Default parallel after sequential preflight. | Source order; end events completion order. | Stop only when every finalized result says terminate; siblings complete. | No dependency scheduler found [A:ALL-DAG]; edit/write only serialize same canonical path. |
 | **OMP** | Each call resolves shared/exclusive; barriers preserve declared order. | Shared overlap; exclusive waits on prior shared/exclusive. | Completion order. | Special completed-hook abort reason stops before next sample; Task `yield` supplies policy. | No Tool dependency graph found [A:ALL-DAG]. |
 | **Codex** | Per-handler read/write gate. | Explicit shared opt-in; otherwise exclusive. | Source order via `FuturesOrdered`. | Common terminal Tool flag not found [A:C-LIFECYCLE]. Some Tools affect Turn/run lifecycle through their own handlers. | No Tool dependency graph found [A:ALL-DAG]. |
-| **Claude** | Consecutive safe batch or one unsafe barrier; cap defaults to 10. | Safe calls overlap; unsafe calls serialize. | Final results/context modifiers source order; progress live. | Common terminal Tool flag not found [A:L-LIFECYCLE]; hooks can prevent continuation in specific flows. | No Tool dependency scheduler found [A:ALL-DAG]; work-ledger dependencies are separate. |
+| **Claude** | Nonstreaming partitions consecutive safe calls/unsafe barriers; streaming admits incrementally. | Nonstreaming safe batch cap defaults to 10; streaming has no visible numeric cap. Executing unsafe is a barrier [A:L-ORDER]. | Safe-call results are completion-order in both paths. Nonstreaming concurrent context modifiers apply later in source order; streaming safe modifiers are unsupported [A:L-ORDER]. | Common terminal Tool flag not found [A:L-LIFECYCLE]; hooks can prevent continuation in specific flows. | No Tool dependency scheduler found [A:ALL-DAG]; work-ledger dependencies are separate. |
 
-Unordered completion is therefore real in OMP, but it is not a maturity level
-above ordered completion. It optimizes latency-to-result visibility at the cost
+Unordered completion is therefore real in OMP and Claude safe-call batches,
+but it is not a maturity level above ordered completion. It optimizes
+latency-to-result visibility at the cost
 of nondeterministic transcript/context order. Call IDs preserve protocol
-pairing; they do not make shared-state effects deterministic. Pi, Codex, and
-Claude demonstrate three ways to overlap execution while retaining source-order
-final results.
+pairing; they do not make shared-state effects deterministic. Pi and Codex
+overlap execution while retaining source-order final results; Claude instead
+shows why result order and later context-modifier order must be stated
+separately [A:L-ORDER].
 
 Terminal Tools need stricter admission than ordinary read-only Tools. Running a
 terminal submission alongside mutation, external publication, or another
@@ -421,10 +437,10 @@ At minimum:
 
 | System | Pre/approval order | Post/result/error behavior | Cancellation |
 |---|---|---|---|
-| **Rollshot** | Decode/limits inside Tool; no generic pre-hook or per-call approval layer found [A:R-DYNAMIC]. | Tool returns Success/Recoverable or hard error; driver emits start/end and typed Run terminal. No generic post/error hook found [A:R-DYNAMIC]. | Shared Run cancellation checked before calls; automation receives the paired flag. A Tool must observe its own flag during work. |
+| **Rollshot** | Decode/limits inside Tool; no generic pre-hook or per-call approval layer found [A:R-AUTH, A:R-DYNAMIC]. | Tool returns Success/Recoverable or hard error; driver emits start/end and typed Run terminal. No generic post/error hook found [A:R-DYNAMIC]. | Shared Run cancellation checked before calls; automation receives the paired flag. A Tool must observe its own flag during work. |
 | **Pi** | Argument preparation + schema validation → `beforeToolCall`; coding-agent extension `tool_call` can block/mutate (mutation not revalidated). Built-in authority gate not found [A:P-AUTH]. | `afterToolCall` can rewrite content/details/error/usage/terminate; failures become correlated results. | One AbortSignal reaches providers and Tools; sequential batch stops after observed abort, parallel calls share cancellation. |
 | **OMP** | In extension wrapper: approval policy/prompt → extension `tool_call` → execution. Hook wrappers can separately block. | Extension/hook `tool_result` can rewrite success or error; completed effects remain real. Terminal hook reason stops after batch persistence. | Per-call signals plus special interruptible waits; parent/steering abort behavior is Tool metadata. |
-| **Codex** | Route/kind check → PreToolUse (block/update) → handler; permission hooks/approval/sandbox occur in the handler's execution path. | PostToolUse only for successful output in focused registry; it may block/replace model-visible result after effect. Lifecycle events still record failure/abort. Generic PostToolUseFailure not found in this path [A:C-LIFECYCLE]. | Cancellation either aborts the future or awaits declared teardown, then returns one paired abort output. |
+| **Codex** | Route/kind check → PreToolUse (block/update) → handler; permission hooks/approval/sandbox occur in the handler's execution path. | PostToolUse only for successful output in focused registry; it may block/replace model-visible result after effect. Lifecycle events still record failure/abort, but named `PostToolUseFailure` or equivalent generic error hook was not found [A:C-ERROR-HOOK]. | Cancellation either aborts the future or awaits declared teardown, then returns one paired abort output. |
 | **Claude** | Schema/value validation → PreToolUse/update/stop → permission resolution → call. | PostToolUse for success; explicit PostToolUseFailure for errors; output can add context/stop signals. | Child AbortControllers; Tool chooses interrupt `cancel` or conservative `block`; Bash failure may cancel siblings. |
 
 Hooks run inside a security- and privacy-sensitive path. They need bounded
@@ -439,11 +455,11 @@ mutation as “skipped.”
 
 | System | Pairing/order | Retention and spill | Compaction interaction | Artifact promotion |
 |---|---|---|---|---|
-| **Rollshot** | Rig requires one result per pending nonterminal call; driver preserves source order. Terminal Run exits before another provider request. | In-memory result string, registry/driver/Run byte caps; oversize fails. No spill store found [A:R-DYNAMIC]. | No Rollshot compaction layer found in current agent boundary [E:C1]. | `ReadyForReview` is explicit Product handoff after deterministic evidence; ordinary results are not promoted. |
+| **Rollshot** | Rig requires one result per pending nonterminal call; driver preserves source order. Terminal Run exits before another provider request. | In-memory result string, registry/driver/Run byte caps; oversize fails. No result store/retention/spill contract found [A:R-RESULT]. | No Rollshot compaction layer found in current agent boundary [A:R-RESULT]. | `ReadyForReview` is explicit Product handoff after deterministic evidence; no generic ordinary-result promotion record was found [A:R-RESULT]. |
 | **Pi** | Source-order result messages after parallel execution; call ID pairing. | JSONL transcript/details; built-in bash may persist truncated full output path, but no common typed Artifact store found [A:P-ARTIFACT]. | Full summary + recent tail; old transcript remains. Tool details may reconstruct extension state. | Extension-specific only; generic promotion contract not found [A:P-ARTIFACT]. |
-| **OMP** | Completion-order results, paired by call ID. | Session `artifact://` spill files with resumed numeric ID scan and 8 MiB inline cap. | Full/remote/snap/shake/prune paths can summarize or elide model-visible result content; stored session/artifact data remains separate. | Spill files are untyped overflow logs; Product validation/acceptance not found [A:O-IDEMP]. |
+| **OMP** | Completion-order results, paired by call ID. | Session `artifact://` spill files with resumed numeric ID scan and 8 MiB inline cap. | Full/remote/snap/shake/prune paths can summarize or elide model-visible result content; stored session/artifact data remains separate. | Spill files are untyped overflow logs; Product Artifact validation/acceptance/promotion not found [A:O-ARTIFACT]. |
 | **Codex** | `FuturesOrdered` source-order recording and call ID pairing. | Model-visible output truncation plus rollout records; generic spill Artifact not found [A:C-LIFECYCLE]. | Persisted compaction checkpoint replaces projection; original rollout remains. | Narrow extension-specific image path only; no generic promotion in focused Tool paths [A:C-LIFECYCLE]. |
-| **Claude** | Final results buffered source order; progress completion order; paired by `tool_use_id`. | Per-Tool and aggregate thresholds spill text by ID to session files; preview/path retained; content-replacement decisions can persist for resume. | Tool-result budget runs before microcompact; traditional/micro/hidden projection mechanisms may replace results while retained files/transcript records remain separate. Hidden algorithms limit confidence [E:L0]. | Paths/attachments remain heterogeneous; common typed Product Artifact contract not found [A:L-LIFECYCLE]. |
+| **Claude** | Safe-call results are completion-order in nonstreaming and streaming paths; unsafe barriers constrain streaming emission. Paired by `tool_use_id` [A:L-ORDER]. | Per-Tool and aggregate thresholds spill text by ID to session files; preview/path retained; content-replacement decisions can persist for resume. | Tool-result budget runs before microcompact; traditional/micro/hidden projection mechanisms may replace results while retained files/transcript records remain separate. Hidden algorithms limit confidence [E:L0]. | Paths/attachments remain heterogeneous; common typed Product Artifact contract not found [A:L-LIFECYCLE]. |
 
 Spill and Artifact promotion solve different problems:
 
@@ -481,15 +497,18 @@ cancellation, failure, retry, and Artifact behavior.
 
 | Pattern | Smart Redaction | Action Guide | Deferred brag + Hyperframes |
 |---|---|---|---|
-| **A: bounded serial** | Exact current semantic fit; simplest terminal/evidence reasoning. | Fits one revision-bound caption/annotation proposal. | Correct inline fallback but cannot overlap independent stages or survive as Workflow state. |
-| **B: ordered parallel** | Benefit unproven; inspection reads may be measurable candidates, while authoring chain remains exclusive. | Could overlap independent revision-bound inspections/proposals if product demand appears. | Useful inside one ready wave, but not sufficient for dependencies, Jobs, checkpoints or durable Artifacts. |
-| **C: Artifact waves** | Unjustified overhead for the current bounded Run. | Plausible only if the product orchestrates multiple revision-bound units rather than today's independent calls. | Strong semantic match if the deferred workflow is adopted; still does not imply every node needs an Agent. |
+| **A: bounded serial** | Exact current semantic fit; simplest terminal/evidence reasoning [E:R1, W1]. | Fits one revision-bound caption/annotation proposal [W2]. | Correct inline fallback but cannot overlap independent stages or survive as Workflow state [W3, E:S1]. |
+| **B: ordered parallel** | Benefit unproven; inspection reads may be measurable candidates, while authoring chain remains exclusive [A:R-PARALLEL, W1]. | Could overlap independent revision-bound inspections/proposals if product demand appears [A:R-PARALLEL, W2]. | Useful inside one ready wave, but not sufficient for dependencies, Jobs, checkpoints or durable Artifacts [W3, E:S1]. |
+| **C: Artifact waves** | Unjustified overhead for the current bounded Run [E:R1, W1]. | Plausible only if the product orchestrates multiple revision-bound units rather than today's independent calls [W2]. | Strong semantic match if the deferred workflow is adopted; still does not imply every node needs an Agent [W3, E:S1]. |
 
 Pattern B is materially different from Pi's batch-wide sequential override and
-OMP's completion-order publication: it combines conservative classification
-with source-order final results. Pattern C is materially different from any
-flat Tool scheduler because durable Product state, not one model response,
-determines readiness and completion.
+from OMP/Claude completion-order publication: it combines conservative
+classification with source-order final results. Claude also shows that a
+streaming scheduler needs an explicit concurrency cap and context-modifier
+policy rather than inheriting assumptions from its nonstreaming path
+[A:L-ORDER]. Pattern C is materially different from any flat Tool scheduler
+because durable Product state, not one model response, determines readiness and
+completion.
 
 ## 11. Security, privacy, and authority consequences
 
@@ -593,12 +612,35 @@ was required [G0].
   generic pre/post/error hook, common side-effect/idempotency/attempt metadata,
   dependency scheduler, or host-parallel executor was **not found in this
   scope**. Direct reading separately establishes the typed serial registry.
+- **[A:R-AUTH] Rollshot payload-authority audit.** The same six agent files;
+  regex `authority|authoriz|approval|permission|sandbox`. Hits were
+  `AuthorizedInputManifest`/`AuthorizedModelInput` names and uses plus prompt
+  wording. Direct inspection of `domain.rs::AuthorizedModelInput::new` and
+  `rollshot-app/src/result_workspace/workbench/run.rs` established that
+  `payload_mode` upstream selects whether image bytes are included, while the
+  constructor validates counts, dimensions, declared/actual bytes and limits.
+  A per-Tool authority object, approval mechanism or sandbox contract was
+  **not found in the named agent scope**; the type name is not evidence that
+  its constructor performs authorization.
+- **[A:R-RESULT] Rollshot result-lifecycle audit.** The same six agent files;
+  regex
+  `result.?store|retention|spill|compaction|compact|artifact.?promot|artifact.?accept|review.?decision`.
+  It returned no matches. A common Tool-result store, retention policy, spill,
+  compaction projection or generic Product Artifact promotion/acceptance record
+  was therefore **not found in this exact scope**. Direct source separately
+  establishes bounded inline results and the task-specific `ReadyForReview`
+  terminal [E:R1].
 - **[A:R-PARALLEL] Current Action Guide scheduling gap.** Reused Round 0 and
-  subagent comparison evidence for
-  `rollshot-app/src/timeline_workspace/{visual_annotation_agent,caption_agent,update}.rs`
-  and proposal types. Positive hits establish independent bounded calls and
-  stale-result checks; a product requirement or scheduler for parallel per-step
-  proposals was **not found in the investigated scope**.
+  subagent comparison evidence, then audited the literal files
+  `rollshot-app/src/timeline_workspace/{visual_annotation_agent,caption_agent,update}.rs`.
+  Exact scheduling regex
+  `tokio::join!|join_all|select!|futuresunordered|parallel|concurr` returned
+  only two unrelated bounded frame-decode concurrency comments in `update.rs`.
+  Identity/result terms
+  `caption_suggestions_running|visual_annotation_suggestion|caption_agent_run_id|visual_annotation_agent_run_id|document_state_id|stale`
+  positively found separate Run state and stale/revision checks. A join or
+  scheduler for parallel caption/visual proposal execution, or a measured
+  requirement for it, was **not found in these files**.
 - **[A:R-IDEMP] Rollshot replay identity audit.** Same six agent files and
   exact terms `idempotenc|attempt.?id|dedup|replay|retry`; the only relevant
   hit was `cumulative_usage_deduplicates_within_turn`, which deduplicates
@@ -632,18 +674,54 @@ was required [G0].
   Positive hits were the special terminal abort reason and unrelated credential
   deduplication. A common Tool effect idempotency/attempt/dependency contract
   and generic stop-after-success field were **not found in this scope**.
+- **[A:O-SIDE] OMP side-effect-class audit.** The same OMP literal roots;
+  PCRE2 identifier regex
+  `\b(?:sideEffect|isReadOnly|isDestructive|isOpenWorld|irreversible|effectClass)\b`.
+  It returned no matches. OMP's positive `approval` tier, `intent`,
+  `interruptible`, and shared/exclusive `concurrency` fields remain [E:O1], but
+  a common Tool side-effect class equivalent to the audited identifiers was
+  **not found in these roots**.
+- **[A:O-ARTIFACT] OMP Product Artifact audit.** The same roots, including
+  `session/artifacts.ts`; PCRE2 identifier regex
+  `\b(?:artifactValidation|validateArtifact|artifactAcceptance|acceptArtifact|reviewDecision|expectedArtifact|productArtifact|promoteArtifact)\b`.
+  It returned no matches. The positive session spill manager allocates and
+  resolves overflow files [E:O3]; Product Artifact validation, review
+  acceptance, expected-output gating or promotion was **not found in this
+  exact scope**.
 - **[A:C-LIFECYCLE] Codex Tool lifecycle audit.** Literal roots
   `codex-rs/core/src/{session/turn.rs,tools/parallel.rs,tools/router.rs,tools/registry.rs,hook_runtime.rs}`
   and `tools/handlers/dynamic.rs`; regex
-  `idempotenc|attempt.?id|dedup|dependency|depends.?on|dag|terminal.?tool|stop.?after.?success|artifact.?promot`.
-  No matches. A generic Tool effect idempotency/attempt/dependency/terminal/
-  Artifact-promotion contract was **not found in this focused scope**.
+  `idempotenc|attempt.?id|dedup|dependency|depends.?on|dag|terminal.?tool|stop.?after.?success|result.?store|retention|spill|artifact.?promot`.
+  No matches. A generic Tool effect idempotency/attempt/dependency/terminal,
+  result spill/store/retention, or Artifact-promotion contract was **not found
+  in this focused scope**.
   Direct source separately establishes runtime call IDs, gate ordering,
   dynamic calls and hook behavior [E:C1-E:C3].
+- **[A:C-ERROR-HOOK] Codex Tool-error-hook audit.** The same Codex literal
+  roots; exact regex
+  `PostToolUseFailure|post_tool_use_failure|post_tool_failure|run_post_tool_failure_hooks|run_tool_error_hooks|ToolErrorHook`.
+  It returned no matches. Direct reading of `tools/registry.rs` and
+  `hook_runtime.rs` shows `PostToolUse` is built only when Tool execution reports
+  success; failed/aborted lifecycle events and telemetry remain positive
+  evidence, but a named `PostToolUseFailure` or equivalent generic Tool-error
+  hook was **not found in this path** [E:C3].
+- **[A:L-ORDER] Claude scheduling order/cap audit.** Literal files
+  `src/services/tools/{toolOrchestration,StreamingToolExecutor}.ts`,
+  `src/utils/generators.ts`, and `src/query.ts`; regex
+  `getMaxToolUseConcurrency|CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY|all\(|Promise\.race|runToolsConcurrently|queuedContextModifiers|contextModifiers|getCompletedResults|getRemainingResults|canExecuteTool|isConcurrencySafe|status === 'executing'|status === 'completed'`.
+  The only numeric Tool concurrency cap is passed by nonstreaming
+  `runToolsConcurrently` to `all()`, whose `Promise.race` yields completion
+  order. The streaming executor has no visible numeric cap; its queue admits
+  safe calls together, yields completed safe calls without waiting for earlier
+  executing safe calls, and stops result traversal at an executing unsafe call.
+  Nonstreaming concurrent context modifiers are replayed in source order;
+  streaming concurrent-safe modifiers are explicitly unsupported in the
+  inspected implementation.
 - **[A:L-LIFECYCLE] Claude Tool lifecycle audit.** Literal files
   `src/{Tool.ts,query.ts}`,
   `src/services/tools/{toolOrchestration,StreamingToolExecutor,toolExecution,toolHooks}.ts`,
-  and `src/utils/toolResultStorage.ts`; same regex as [A:C-LIFECYCLE].
+  and `src/utils/toolResultStorage.ts`; regex
+  `idempotenc|attempt.?id|dedup|dependency|depends.?on|dag|terminal.?tool|stop.?after.?success|artifact.?promot`.
   Hits were a sibling-error comment about implicit command dependencies and
   unrelated memory deduplication. A generic Tool effect idempotency/attempt,
   dependency scheduler, terminal Tool, or Product Artifact promotion contract
@@ -743,15 +821,17 @@ or product layer cannot provide the capability.
 - **[E:L0] Claude Code Reviewed profile:** `systems/claude-code.md`; external
   build gates and hidden/unavailable modules remain limitations.
 - **[E:L1] Claude source:** `src/Tool.ts`,
-  `services/tools/{toolOrchestration,StreamingToolExecutor,toolExecution,toolHooks}.ts`.
-  Supports metadata, deferred selection, ordered batching, hooks, permission,
-  sibling error and cancellation.
+  `services/tools/{toolOrchestration,StreamingToolExecutor,toolExecution,toolHooks}.ts`,
+  `src/utils/generators.ts`, and `src/query.ts`. Supports metadata, deferred
+  selection, the distinct nonstreaming/streaming schedulers, completion-order
+  safe-call results, nonstreaming-only cap/source-ordered context modifiers,
+  hooks, permission, sibling error and cancellation [A:L-ORDER].
 - **[E:L2] Claude source:** `src/utils/toolResultStorage.ts` and `query.ts`.
   Supports per-Tool/aggregate spill, call-ID create-new behavior, replacement
   persistence gate and ordering before microcompact.
-- **[T:L1] Claude test/source confidence:** focused scheduling behavior is
-  source-backed and recorded in the Reviewed profile; the external suite was
-  not run in this task.
+- **[T:L1] Claude test/source confidence:** focused scheduling behavior was
+  rechecked against the pinned source paths in [A:L-ORDER]; the external suite
+  was not run in this task.
 - **[G0] Graph evidence:** Rollshot file summaries plus four reference
   architecture queries. Reference roots returned zero communities/nodes; this
   is a coverage limitation, not source evidence.
@@ -781,4 +861,3 @@ Open questions for synthesis are:
    outside the bounded agent loop and reuse Pattern A/B only within ready nodes?
 7. What runtime evidence is required before trusting third-party read-only,
    concurrency, idempotency, or cancellation declarations?
-
