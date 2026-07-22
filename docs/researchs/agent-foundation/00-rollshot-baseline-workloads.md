@@ -1,15 +1,15 @@
 # Rollshot agent foundation: Round 0 baseline and workloads
 
-**Research date:** 2026-07-22 (Asia/Taipei)  
-**Status:** In Progress  
-**Umbrella revision:** 1  
-**Research round:** 0  
+**Research date:** 2026-07-22 (Asia/Taipei)
+**Status:** In Progress
+**Umbrella revision:** 1
+**Research round:** 0
 **Systems/capabilities:** Rollshot bounded agent; Rig boundary; Smart Redaction,
-Action Guide, and brag/Hyperframes workload requirements  
+Action Guide, and brag/Hyperframes workload requirements
 **Evidence baseline:** Rollshot `42afd1fcdfa58e9b76912a02e140ab820d233f9d`;
 Rig `2f37dfcd0156bdceab3eabe6f0a953f9202e2d77`; brag
 `357a805e76a93a528ac6cccac28c8da3e893272b`; Hyperframes
-`807078c7cde9d5c8403588722d1cd9397c513a0d`  
+`807078c7cde9d5c8403588722d1cd9397c513a0d`
 **Evidence mode:** Static source and test inspection only; no provider, UI, or
 long-running workflow was exercised for this round.
 
