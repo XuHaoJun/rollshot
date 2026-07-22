@@ -144,16 +144,27 @@ tests. They do not establish a reusable Job abstraction by themselves.
 ### 4.3 Managed FFmpeg: reusable supply-chain boundary, not Job management
 
 `managed_ffmpeg.rs` resolves explicit environment overrides, PATH binaries, or
-a pinned managed install; validates FFmpeg/FFprobe; pins URL/version/license,
-archive size and SHA-256; stages download/unpack in a `ScratchDir`; validates
-both binaries; and writes a versioned manifest. [E:R6]
+a pinned managed install; validates FFmpeg/FFprobe; and pins URL/version/
+license, archive size and SHA-256. The downloaded archive is staged and hash-
+checked in a `ScratchDir`, but `unpack_ffmpeg` writes directly into the live
+managed `root/bin` directory. The function then validates both live binaries
+and writes the versioned manifest last; on observed unpack, permission,
+validation, or manifest errors it attempts to remove both binaries. [E:R6]
 
 The pin/hash/license/validation and scratch-cleanup practices are relevant to
 secure Job **prerequisites**. The module does not own video-import/render child
 processes, Job status/progress/cost/log retention, cancellation, collection, or
 reattachment; those concepts were **not found in its investigated source**
 [A:R-MANAGED]. The manifest proves installed toolchain provenance, not a running
-Job receipt. This comparison does not propose refactoring either app module.
+Job receipt.
+
+Atomic install publication (for example, complete-tree rename), inter-setup
+locking, and startup/process-crash cleanup of partial live installs were **not
+found in the investigated production scope** [A:R-MANAGED-INSTALL]. This leaves
+a bounded risk to test, not a demonstrated product bug: concurrent setup calls
+target the same live binary/manifest paths, and process death can bypass
+`ScratchDir::drop` or interrupt the live-bin-then-manifest sequence. This
+comparison does not propose refactoring either app module.
 
 ## 5. Per-system behavior
 
@@ -162,9 +173,11 @@ Job receipt. This comparison does not propose refactoring either app module.
 Pi's uninstalled `subagent` extension spawns one `pi --mode json --no-session`
 process per item. It parses message/tool-result events, emits live updates, and
 accumulates turns, tokens, cache use and cost. Parallel mode caps eight items
-and four subprocesses. One Tool-call abort signal sends `SIGTERM`, then attempts
-`SIGKILL` after five seconds; temporary prompt files are removed in `finally`.
-[E:P1]
+and four subprocesses. One Tool-call abort handler sets `wasAborted`, calls
+`proc.kill("SIGTERM")`, and after five seconds attempts
+`proc.kill("SIGKILL")` only when `!proc.killed`; temporary prompt files are
+removed in `finally`. Whether that condition provides reliable termination or
+escalation was not runtime-verified. [E:P1]
 
 This is a Child Agent example using processes, not a built-in process Job
 contract. It returns no addressable process handle, durable status, retention
@@ -274,7 +287,7 @@ Every negative or unknown cell names the exact bounded audit in Section 13.
 | System | Handle / status | Progress / logs / cost | Cancel / collect / cleanup | Idempotency / retention / crash reattach |
 |---|---|---|---|---|
 | **Rollshot video import** | Live operation ID + pass state; child handles are encapsulated [E:R2,R4]. | Structured pass progress; bounded stderr ring; cost/log cursor **not found** [A:R-JOB]. | Atomic flag; child kill+wait/drop reap; scratch cleanup; collect is an in-memory workspace seed [E:R3-R5]. | Durable key/record/retention/reattach **not found** [A:R-JOB]. |
-| **Pi extension example** | One closure-local subprocess/result; no returned addressable handle [A:P-JOB]. | Streamed messages/tools plus token/cache/cost totals [E:P1]. | Shared abort; SIGTERM then conditional SIGKILL; temp prompt cleanup [E:P1]. Expected Artifact collection **not found** [A:P-JOB]. | Built-in Job persistence/idempotency/retention/reattach **not found** [A:P-JOB]. |
+| **Pi extension example** | One closure-local subprocess/result; no returned addressable handle [A:P-JOB]. | Streamed messages/tools plus token/cache/cost totals [E:P1]. | Shared abort calls `SIGTERM`; after five seconds it attempts `SIGKILL` only when `!proc.killed`. Termination reliability is runtime-unverified [E:P1]. Expected Artifact collection **not found** [A:P-JOB]. | Built-in Job persistence/idempotency/retention/reattach **not found** [A:P-JOB]. |
 | **oh-my-pi** | Addressable process-local ID/status/owner/queued flag [E:O1]. | Latest details, result/error text, watch/wait and delivery diagnostics; provider Job cost **not found** [A:O-JOB]. | Abort-controller cancel; result delivery retry; timed dispose and eviction [E:O1]. Typed Artifact collect **not found** [A:O-JOB]. | Five-minute live retention; durable serialization/idempotency/reattach **not found** [A:O-JOB]. |
 | **Codex terminal** | Live item/process ID, command, cwd [E:C1]. | Process stream elsewhere; structured Job progress/cost **not found** [A:C-TERMINAL]. | Addressable terminate and live cleanup [E:C1]. Artifact collect **not found** [A:C-TERMINAL]. | Thread-restart handle recovery **not found** [A:C-TERMINAL]. |
 | **Codex exec-server** | Session/process identity with acknowledged recoverable flag [E:C2]. | Bounded sequenced stdout/stderr replay; cost/Artifact progress **not found** [A:C-RECOVERY]. | Terminate RPC; gap/TTL cleanup [E:C2]. Typed Artifact collect **not found** [A:C-RECOVERY]. | 30-second live reattach; server-restart durability/idempotent start **not found** [A:C-RECOVERY]. |
@@ -394,6 +407,16 @@ attempt, or reattaches only to an explicitly supported remote provider.
 observability needs. It does not turn `managed_ffmpeg` or the current coordinator
 into a general scheduler.
 
+### 9.1 Per-pattern lifecycle semantics (comparison gate)
+
+These are candidate semantics for comparison, not selected requirements.
+
+| Pattern | Owner | Admission / concurrency | Observe | Completion | Cancel | Failure | Retry | Artifact collect / validate / partial handling |
+|---|---|---|---|---|---|---|---|---|
+| **A: live registry** | App host registry owns identity, child/service handles and short terminal retention; product owns accepted Artifacts. | Revalidate authority and enforce per-kind live slots/resource caps before spawn; reject admission during shutdown. | Read Job ID/version, live status, structured progress and bounded log tail; reconnect only within the same app process. | Child exit plus output validation, or confirmed service stop, produces one retained terminal; owner death is not completion. | Record in-memory intent, signal the child/service, escalate under declared policy, reap, then report confirmed/unknown; intent is lost with the host. | Typed spawn/exit/health/resource failure; app death yields unsupported reattach/orphan reconciliation rather than fabricated `failed`. | New attempt ID after a terminal or known-no-start result; never retry an ambiguous external effect and never adopt a bare PID. | Collect staged output once, validate, then atomically publish; quarantine/delete partial scratch. A preview service normally has no output Artifact. |
+| **B: durable remote receipt** | Rollshot receipt store owns intent/cursors/collection; provider owns execution status; product owns Artifact acceptance. | Persist intent/idempotency key first, then enforce provider concurrency, cost and current credential/egress authority. | Query by provider handle/key and cursor; callbacks are hints. Return authoritative status, progress/log references, cost and warnings. | Provider terminal plus a durable local collect receipt and validated expected Artifact; notification alone is insufficient. | Persist intent, request provider cancellation, query until confirmed/already-terminal/not-found/unknown, and retain the outcome. | Represent `start_unknown`, provider failure, `lost`, `expired` and collection failure distinctly; reconcile rather than infer. | Resolve ambiguity with the same key; create a new attempt only under provider/product retry policy and visible prior cost. | Download to temporary storage, verify hash/decode/schema, atomically publish and record collection; quarantine/delete partial local downloads and apply remote retention policy. |
+| **C: product media operation** | Action Guide/future media domain owns operation/revision/passes and Artifact truth; a local-process or remote adapter owns execution handles. | Apply product-specific input revision, privacy, CPU/disk/process/provider and attempt limits before starting a pass. | Expose domain pass/processed/total/candidate state, bounded diagnostics and Artifact revision; stale operation/attempt updates are ignored. | Product terminal occurs only after required passes finish and the domain Artifact validates/publishes; process exit alone is insufficient. | Persist intent only when recovery is promised; fan out to all active children/provider, reap/query, and expose confirmed/unknown. | Typed preflight, pass, validation, orphan/lost and resource failures stay on the domain operation with no false success. | New pass/operation attempt with unique scratch; reuse only immutable accepted inputs and provider keys permitted by domain policy. | Validate/decode/hash staged media, publish marker-last/atomically, keep accepted Artifacts immutable, and quarantine/delete incomplete attempts. |
+
 No pattern is selected. Patterns A and B are materially different (live-only
 versus durable/authoritative recovery); Pattern C is a different ownership
 choice that could use either lifecycle internally.
@@ -446,10 +469,14 @@ This comparison does not:
 3. Supervise one preview fixture: port collision, early exit, health failure,
    app shutdown and stale orphan marker. Measure whether a live registry adds
    user value over simple restart.
-4. If a durable pattern remains plausible, compare one receipt Snapshot against
+4. Exercise managed FFmpeg setup twice concurrently and inject process death
+   after archive verification, during live unpack, during validation, and
+   before/while manifest write. Inventory live binaries, manifest and scratch
+   after restart; this bounds [A:R-MANAGED-INSTALL] without presupposing a bug.
+5. If a durable pattern remains plausible, compare one receipt Snapshot against
    an append journal for write atomicity, migration, privacy deletion and
    p50/p95 resume. Do not introduce Workflow dependencies in this spike.
-5. Runtime-test OMP process death, Codex reconnect at/gap/beyond TTL, Claude
+6. Runtime-test OMP process death, Codex reconnect at/gap/beyond TTL, Claude
    remote sidecar auth/404/archive paths, and Hyperframes remote cancellation
    only if a Rollshot pattern depends on those behaviors.
 
@@ -477,13 +504,27 @@ communities/nodes, so bounded shell inspection followed.
 - **[A:R-MANAGED] managed toolchain audit.** Literal file
   `crates/rollshot-app/src/managed_ffmpeg.rs`; direct reading of all production
   functions and the [A:R-JOB] terms. Positive fields/functions cover metadata,
-  binary paths, resolution, validation, download/hash/unpack, scratch and
-  manifest. A running operation lifecycle was **not found in this scope**.
+  binary paths, resolution, validation, archive-in-scratch download/hash,
+  live-bin unpack and manifest. A running operation lifecycle was **not found
+  in this scope**.
+- **[A:R-MANAGED-INSTALL] managed install publication/concurrency audit.**
+  Literal production functions `download_managed_ffmpeg`, `write_manifest`,
+  `ScratchDir::{new,drop}`, managed path helpers, and their app call sites;
+  direct control-flow reading plus terms
+  `lock|mutex|flock|create_new|rename|atomic|staging|partial|recover|scavenge`.
+  Positive source puts the archive in per-call scratch, unpacks directly to
+  shared `root/bin`, validates live binaries, writes the final manifest last,
+  and removes binaries on handled error paths. Atomic whole-install
+  publication, inter-setup locking, and cleanup/reconciliation after process
+  death were **not found in the investigated production scope**; test-only
+  `ENV_LOCK` guards environment-variable tests, not product setup.
 - **[A:P-JOB] Pi process/Job audit.** Literal example
   `packages/coding-agent/examples/extensions/subagent/{index,agents}.ts` and
   `README.md`, plus `docs/extensions.md`; terms
   `job id|process handle|reattach|rehydrate|persist|serialize|idempotenc|retention|cost|progress|log|cancel|abort|SIGTERM|SIGKILL|spawn`.
-  Hits establish spawn, stream progress/usage/cost and whole-Tool abort. No
+  Hits establish spawn, stream progress/usage/cost and the exact abort handler:
+  call `SIGTERM`, then after five seconds attempt `SIGKILL` only when
+  `!proc.killed`. Termination/escalation reliability was not runtime-verified. No
   returned child handle, built-in Job registry, durable lifecycle, Artifact
   contract, idempotency key, retention, or restart reattachment was found.
 - **[A:O-JOB] oh-my-pi Job durability/completion audit.** Literal
@@ -556,8 +597,11 @@ communities/nodes, so bounded shell inspection followed.
   `rollshot-action/src/video_import/{mod,scratch}.rs` — pass progress, resource
   limits, staged extraction, scratch and fault/cancellation cleanup tests.
 - **[E:R6] Rollshot source/test source:** `rollshot-app/src/managed_ffmpeg.rs`
-  — pinned metadata, resolution, validation, hash, download/unpack, manifest
-  versions and scratch cleanup. Download not executed.
+  — pinned metadata, resolution, validation, archive-in-scratch download/hash,
+  direct-to-live-bin unpack, handled-error binary removal, manifest-last write,
+  manifest versions and scratch cleanup. Download/setup not executed; atomic
+  publication, concurrent setup and process-crash cleanup remain unestablished
+  [A:R-MANAGED-INSTALL].
 - **[E:S1] Capability evidence:** reviewed
   `subagents-and-parallelism.md` and system profiles. Supports separate Child
   Agent context/authority/budget/completion semantics.
