@@ -114,7 +114,46 @@ decision—it does not make that decision. In the current Smart Redaction path,
 still empty; visual annotation is the separate path that forwards attachments.
 [E:R1]
 
-### 4.2 Product-owned capture, input, and export
+### 4.2 Existing restricted-automation enforcement
+
+Rollshot already has an active, purpose-built enforcement layer for generated
+Smart Redaction automation. Every `QuickJsExecutor::execute` creates a fresh
+`LockedContext`; the rquickjs runtime receives memory and stack ceilings, and
+an interrupt handler checks the shared cancellation flag and wall-time
+deadline. The context installs only selected ECMAScript intrinsics, explicitly
+strips and verifies `eval`, `Function`, `queueMicrotask`, `globalThis`, and
+`Reflect`, and does not expose ambient platform globals such as `fetch`,
+`require`, `process`, timers, workers, DOM, or browser network APIs. Runtime,
+allocation, stack, timeout, evaluation, capability, output, and cancellation
+failures remain typed. Fresh-context, lockdown, resource-ceiling, and
+in-flight-cancellation tests cover these boundaries. [E:R4, T:R4]
+
+The only installed host API is a frozen `rollshot` object with typed `ocr`,
+`layout`, `regionFeatures`, and `templateMatch` callbacks. The validated
+artifact's capability manifest supplies the maximum result count per call;
+an absent capability or a runtime limit above the manifest is rejected. The
+bridge also validates queries/results, truncates even an over-returning host,
+charges global and per-capability call ceilings, and charges serialized host
+allocation. The execution policy separately caps output bytes and restricts
+decoded proposal edit kinds, annotation IDs, candidate count, total affected
+area, and bounds. Input and returned host values are deeply frozen. [E:R4,
+T:R4]
+
+| Restricted-automation stage | Current enforcement | Boundary it does **not** establish |
+|---|---|---|
+| **Validated artifact** | Canonical source is revalidated for compatibility; static language/cost rules produce a capability manifest and reject unsupported syntax/imports and configured cost overages. | User consent or authority to acquire the image/capability data [A:R-AUTOMATION-AUTH]. |
+| **Fresh language runtime** | New `LockedContext` per execution; dangerous/ambient globals absent; memory, stack, wall-time, cancellation, and typed sandbox errors. | An operating-system sandbox for the Rust host process or arbitrary Tool implementations [A:R-AUTOMATION-AUTH]. |
+| **Host bridge** | Only OCR, layout, region-features, and template-match callbacks; manifest result caps, global/per-capability call caps, result validation/truncation, and allocation bounds. | General filesystem, process, network, credential, Screen Capture, input-event, or publish/export authority [A:R-AUTOMATION-AUTH]. |
+| **Proposal output** | Byte ceiling, strict decode, allowed edit/annotation sets, and proposal geometry/count/area policy. | Review/apply authorization or permission to publish the proposal [A:R-AUTOMATION-AUTH]. |
+| **Active Product wiring** | Existing presets run `QuickJsExecutor` locally through `execute_to_proposal`; the agent workbench builds `RealAutomationHost`, installs `QuickJsExecutor` in `DryRunTool`, uses `smart_redaction_default`, and shares Run cancellation. | A generic Product grant, approval cache, authority receipt, or remote executor lease [A:R-AUTOMATION-AUTH]. |
+
+This is a real sandbox for the restricted JavaScript language/runtime and a
+narrow host-capability enforcement seam. Despite the `SandboxError` name, it is
+not an OS sandbox or a Product authority broker. The conclusion in Section 4.1
+therefore stays narrow: the agent core lacks a generic invocation grant, while
+the automation called by one active Tool is already strongly confined.
+
+### 4.3 Product-owned capture, input, and export
 
 macOS streaming capture checks `scap::has_permission()`, may request Screen
 Recording, and returns typed `PermissionDenied`; a stable environment flag can
@@ -141,15 +180,16 @@ publishing has cancellation and atomic/no-replace machinery. These functions
 enforce file-integrity semantics, but no Agent-side publish grant or remote
 audience authority was found [A:R-PUBLISH]. [E:R3]
 
-### 4.3 Rollshot gap statement
+### 4.4 Rollshot gap statement
 
 Current product paths correctly own the sensitive decisions they already make.
-The missing abstraction is not “a stronger Tool registry”; it is a typed bridge
-between Product intent/OS permission and a concrete executor operation. Any
-future bridge must preserve Smart Redaction disclosure consent, Action Guide's
-listen-only semantics, review-before-apply, and product-owned export. It must
-not move those decisions into prompts, model output, or a generic coding-agent
-permission mode.
+The missing abstraction is not “a stronger Tool registry” or “a first
+automation sandbox”; it is a typed authority bridge between Product intent/OS
+permission and a concrete executor operation. Any future bridge can retain the
+existing restricted executor underneath it, but must preserve Smart Redaction
+disclosure consent, Action Guide's listen-only semantics,
+review-before-apply, and product-owned export. It must not move those decisions
+into prompts, model output, or a generic coding-agent permission mode.
 
 ## 5. Per-system factual behavior and status
 
@@ -302,7 +342,7 @@ permission/sandbox/Agent scope [A:L-SPECIAL].
 
 | System | Availability | Request | Grant/cache | Execution | Audit |
 |---|---|---|---|---|---|
-| **Rollshot** | Product builds typed per-Run Tool registry; capture/input capabilities report available/degraded. | Product UI chooses payload/capture/input/export; no generic invocation request in agent core [A:R-AUTH]. | OS permission plus product flow; no generic grant/cache [A:R-AUTH]. | Typed Tool call; restricted JS; platform capture/input; direct export filesystem calls. | Stable structured tracing and typed errors, but no unified authority receipt [A:R-AUDIT]. |
+| **Rollshot** | Product builds typed per-Run Tool registry; capture/input capabilities report available/degraded. | Product UI chooses payload/capture/input/export; no generic invocation request in agent core or restricted-automation boundary [A:R-AUTH, A:R-AUTOMATION-AUTH]. | OS permission plus product flow; no generic grant/cache [A:R-AUTH, A:R-AUTOMATION-AUTH]. | Typed Tool call; active fresh-context restricted JavaScript with a manifest/policy-bounded vision bridge; platform capture/input; direct export filesystem calls. [E:R4] | Restricted execution emits typed errors/metrics and Product paths use structured tracing, but no unified authority receipt [A:R-AUDIT, A:R-AUTOMATION-AUTH]. |
 | **Pi** | Trusted resources plus active Tools/extensions. | Project trust prompt; extension hook may block a Tool. | Nearest canonical-directory persisted trust or session decision; no built-in operation grant/cache [A:P-AUTH]. | Ambient host process; external sandbox only. | Session/Tool events exist; privacy-safe authority receipt not found [A:P-AUDIT]. |
 | **OMP** | Enabled Tools and current policy/bridge. | Approval tier; ACP destructive-intent request. | Live per-Tool/intent allow-always cache; cleared on bridge change; not resumed. | Ambient host; optional Task workspace isolation. | Tool/session events; durable authority receipt not found [A:O-AUDIT]. |
 | **Codex** | Tool registry, environment, permission profile, feature gates. | Command approval and default-off additional fs/network permission request. | One-shot/session approval cache; Turn/Session additional grants in live state. | Platform or remote enforced permission profile. | Approval telemetry and events; complete durable privacy-minimal authority ledger not found [A:C-AUDIT]. |
@@ -455,9 +495,14 @@ Product intent + OS state -> AuthoritySnapshot -> Tool admission -> sandbox
 ```
 
 **Strengths:** fits current per-Run registry and typed state; deterministic;
-keeps pixels/input/publish product-owned; relatively small surface.  
+keeps pixels/input/publish product-owned; can retain the fresh-context
+QuickJS executor and narrow vision bridge as an inner enforcement layer while
+the Product authority owner/broker governs acquisition and delegation;
+relatively small surface.  
 **Costs:** snapshots age; mid-run policy/OS revocation needs an epoch check;
-background Jobs need a lease layer; sandbox portability work remains.
+background Jobs need a lease layer; the current language sandbox cannot replace
+the Product authority broker or an OS sandbox for broader Tools; sandbox
+portability work remains.
 
 ### Pattern B — live capability broker with short-lived operation tokens
 
@@ -482,16 +527,21 @@ token semantics must resist confused-deputy bugs.
 ### Pattern C — product-specific gates plus external sandbox boundary
 
 Keep the current narrow registries and explicit Product consent for pixels,
-input, review, and export. Run agent execution inside a separately configured
-OS/container sandbox with minimal mounts, environment, and network. Do not add
-a universal grant object; each sensitive Product adapter checks its own typed
-state.
+input, review, and export. Retain or extend the current fresh-context QuickJS
+and manifest-bounded host bridge, and run its Rust host plus any broader agent
+execution inside a separately configured OS/container sandbox with minimal
+mounts, environment, and network. Do not add a universal grant object; each
+sensitive Product adapter and the Product authority owner/broker still checks
+its own typed state.
 
 **Strengths:** smallest change; preserves current product semantics; external
-isolation can be independently hardened.  
+isolation can be independently hardened; reuses proven narrow automation
+enforcement.  
 **Costs:** fragmented audit/revocation; child/background/remote delegation is
 awkward; approval cache semantics remain duplicated; external sandbox policy
-can drift from product state.
+can drift from product state. Neither the restricted executor nor the external
+sandbox supplies Product disclosure, credential, capture/input, or publish
+grants.
 
 ### Pattern comparison
 
@@ -609,6 +659,18 @@ Screen Capture/input/publish/credential authority model.
 - **[E:R3]** `crates/rollshot-action/src/export/mod.rs`, `gif.rs`,
   `storyboard.rs`, and `project/{store,publish}.rs`: caller-selected destination,
   cleanup, atomic/no-replace operations, cancellation, tracing.
+- **[E:R4]** `crates/rollshot-automation-rquickjs/src/{execution,lockdown,bridge}.rs`;
+  `crates/rollshot-automation/src/{executor,policy,capability,host,output}.rs`;
+  `crates/rollshot-agent/src/tools.rs`; and
+  `crates/rollshot-app/src/result_workspace/workbench/run.rs`: fresh restricted
+  runtime, manifest/policy-bounded vision bridge, typed failures, proposal
+  policy, and active preset/agent dry-run wiring.
+- **[T:R4]** `crates/rollshot-automation-rquickjs/tests/{lockdown,resources,end_to_end}.rs`,
+  its execution unit tests, and Rollshot automation frontend/output/executor
+  contract tests: absent globals, fresh state, compatibility, cancellation,
+  memory/stack/time/output/allocation/call/result limits, typed capability
+  failures, and edit-proposal policy. Tests were inspected but not rerun for
+  this documentation-only correction.
 - **[E:H0]** Round 0 deferred brag/Hyperframes workload plus the Round 3/4
   capability documents for durable Job, spill, Artifact, and authority
   separation. This is requirement evidence only.
@@ -646,6 +708,7 @@ credentials, and user-input protocol events were inspected and excluded.
 | Audit ID | Exact scope and question | Result |
 |---|---|---|
 | **[A:R-AUTH]** | Six Rollshot agent-core files for `permission`, `approval`, `sandbox`, `grant`, `authority`, `credential`, `network`, `filesystem`, plus `Tool` call signature. | No generic invocation grant, approval cache, sandbox profile, or credential lease; registry availability and bounded execution are present. |
+| **[A:R-AUTOMATION-AUTH]** | `rollshot-automation-rquickjs` execution/lockdown/bridge, `rollshot-automation` policy/capability/host/executor/output contracts and tests, plus active workbench/`DryRunTool` callsites; searched for filesystem/process/network/credential/capture/input/publish plus grant/approval/permission and inspected every installed bridge capability. | Positive narrow enforcement found: fresh restricted JS runtime and OCR/layout/region-features/template-match bridge with resource/output/proposal limits. No user grant, approval/cache, OS sandbox, or general filesystem/process/network/credential/Screen Capture/input-event/publish authority bridge found. |
 | **[A:R-CAPTURE]** | Rollshot capture backends/errors for permission request/status, prompt suppression, session/token, expiry/revoke/audit. | OS/backend checks and typed denial found; unified per-capture grant/revocation receipt not found. |
 | **[A:R-PUBLISH]** | Action Guide export/project publish and app callsites for authority/grant/approval/audience. | Caller-selected local path, integrity, cancellation, and tracing found; Agent-side publish grant or remote audience authority not found. |
 | **[A:R-AUDIT]** | Rollshot agent/capture/input/export diagnostics and models for a correlated authority request→decision→grant→attempt receipt. | Stable structured events and typed errors found; unified receipt not found. |
@@ -667,9 +730,11 @@ credentials, and user-input protocol events were inspected and excluded.
 
 All findings are pinned snapshots. Static source inspection establishes types,
 branches, ownership, and test intent; it does not prove kernel enforcement,
-prompt UX, race behavior, remote server behavior, or crash safety. GrowthBook,
-build-flavor, platform, managed-policy, and external-package behavior can alter
-Claude availability. Codex under-development features are not default product
-guarantees. OMP and Pi extensions can implement policies beyond core. No claim
-about a negative audit should be generalized outside its listed files and
-revision.
+prompt UX, race behavior, remote server behavior, or crash safety. Rollshot's
+restricted-automation tests were source-inspected rather than rerun for this
+documentation correction, and their language-runtime confinement is not proof
+of host-process or kernel isolation. GrowthBook, build-flavor, platform,
+managed-policy, and external-package behavior can alter Claude availability.
+Codex under-development features are not default product guarantees. OMP and Pi
+extensions can implement policies beyond core. No claim about a negative audit
+should be generalized outside its listed files and revision.
