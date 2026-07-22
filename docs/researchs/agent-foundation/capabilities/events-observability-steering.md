@@ -257,7 +257,7 @@ observability. These are useful live orchestration surfaces, not proof of
 durable task/job reconstruction after process death [E:O4-O6,
 A:O-REPLAY].
 
-### 4.3 Codex: correlated protocol events, selective rollout, explicit gaps
+### 4.3 Codex: correlated protocol events and layer-scoped loss contracts
 
 Codex core wraps each outward `EventMsg` in `Event { id, msg }`; the ID
 correlates the event to a submission. The protocol includes warnings/errors,
@@ -270,22 +270,37 @@ timestamp; tool items carry call IDs/status. There is no documented global
 monotonic sequence in the core `Event` envelope [E:C1-C3,
 A:C-IDENTITY].
 
-Codex separates three recovery stories:
+Rollout persistence stores selected response items, event messages, turn
+context, world state and compaction records for transcript reconstruction. It
+does not promise that every outward event is a durable replayable journal.
+[E:C4]
 
-1. **Rollout reconstruction:** selected response items, event messages, turn
-   context, world state and compaction records are persisted for transcript
-   reconstruction. This is not a promise that every outward event is a
-   durable replayable journal. [E:C4]
-2. **App-server live transport:** delivery-required messages await send;
-   other notifications can use best-effort delivery. A lagging receiver gets
-   an explicit `Lagged { skipped }` indication rather than silent continuity.
-   The compared in-process stream has no general replay cursor
-   [A:C-APP-REPLAY].
-3. **Exec-server process output:** retained process handlers support
-   `resume_session_id` and `after_seq` replay inside bounded retention
-   (30-second handler TTL and a 1 MiB/50,000-chunk buffer in the inspected
-   source). A replay gap is an explicit failure/termination, not an invented
-   continuous stream. [E:C5]
+Codex's live/recovery behavior then separates into three transport layers that
+must not be collapsed:
+
+1. **Raw in-process app-server runtime:** a small delivery-required
+   notification set awaits channel capacity. Other server notifications use
+   `try_send`; on a full queue the runtime logs a warning and drops the
+   notification. Although the shared event enum declares `Lagged`, the exact
+   raw-runtime source constructs no lag marker for this overflow, so the raw
+   consumer sees silent discontinuity. Server requests have a separate
+   overload-rejection path. [E:C3, A:C-APP-REPLAY]
+2. **`app-server-client` forwarding queue:** the facade drains the raw handle
+   into another bounded consumer queue. When this downstream queue drops one
+   of its own best-effort events, it increments `skipped_events` and later
+   emits `Lagged { skipped }`; delivery-required transcript/terminal events
+   wait for capacity. That marker counts only facade-layer drops. It cannot
+   detect or retroactively report a notification already dropped by the raw
+   runtime. Neither app-server layer supplies a general replay cursor.
+   [E:C3, A:C-APP-REPLAY]
+3. **Exec-server process recovery:** this independent, process-scoped contract
+   reconnects with `resume_session_id`, requests retained output with
+   `after_seq`, and validates recovered process-event sequences. Retention is
+   bounded (30-second session/process windows and a 1 MiB/50,000-chunk output
+   buffer in the inspected source); if required events are no longer retained,
+   recovery records a protocol failure and attempts to terminate the process
+   rather than inventing continuity. This stronger behavior does not apply to
+   the general app-server notification stream. [E:C5, A:C-EXEC-REPLAY]
 
 `Op::UserInput` first attempts to steer the active regular turn. Optional
 `expected_turn_id` prevents misapplication and `client_user_message_id`
@@ -372,9 +387,9 @@ audit below.
 | Sequence/order contract | Channel arrival/UI vector order only; activity `sequence` is display index, not producer sequence [A:R-IDENTITY]. | Awaited emitter order; no explicit monotonic sequence [A:P-IDENTITY]. | Live emitter/manager order; no unified monotonic sequence [A:O-IDENTITY]. | No global core sequence [A:C-IDENTITY]; exec output has a specialized chunk sequence. | FIFO queue order for surviving SDK events; no explicit sequence [A:L-SDK-IDENTITY]. |
 | Causality/correlation | Tool/source labels and generations; no causation/correlation envelope [A:R-IDENTITY]. | Tool-call IDs; broader causality implicit in loop order [A:P-IDENTITY]. | Tool/parent-child/job/session IDs; broader causality implicit. | submission event ID, trace/turn/thread/item/tool IDs and client message ID provide layered correlation. | session/message/task/tool-use IDs; no common causation link [A:L-SDK-IDENTITY]. |
 | Schema/domain revision | Serde type shape has no event schema revision; Action Guide manifest schema/project revisions are positive domain evidence. | Session entry variants/versioning, but no event-envelope revision [A:P-IDENTITY]. | Session formats/extensions, but no unified event-envelope revision [A:O-IDENTITY]. | Versioned protocol/app-server surfaces; core event envelope has no per-record schema revision [A:C-IDENTITY]. | SDK schemas and transcript records, but task SDK record has no schema revision [A:L-SDK-IDENTITY]. |
-| Drop/gap behavior | `try_send` silently drops; no gap marker [A:R-REPLAY]. | Subscriber behavior is awaited in core; no reconnect-gap contract [A:P-REPLAY]. | Task/job delivery has local retry/retention; no restart cursor/gap contract [A:O-REPLAY]. | App-server reports lag; exec replay rejects gaps. | SDK queue drops oldest silently at cap [A:L-SDK-IDENTITY]. |
+| Drop/gap behavior | `try_send` silently drops; no gap marker [A:R-REPLAY]. | Subscriber behavior is awaited in core; no reconnect-gap contract [A:P-REPLAY]. | Task/job delivery has local retry/retention; no restart cursor/gap contract [A:O-REPLAY]. | Raw app-server best-effort overflow warns and drops without a gap marker; `app-server-client` reports only drops in its own forwarding queue; exec process recovery rejects missing retained sequences [A:C-APP-REPLAY, A:C-EXEC-REPLAY]. | SDK queue drops oldest silently at cap [A:L-SDK-IDENTITY]. |
 | Deduplication | No event dedup key [A:R-REPLAY]; domain operation/revision stale checks exist. | Tool-call correlation, but no generic replay dedup contract [A:P-REPLAY]. | Manager IDs/local state; no restart event dedup contract [A:O-REPLAY]. | Client message IDs/turn expectation and exec `after_seq` support scoped dedup/replay. | User UUID dedup checks transcript + memory; task SDK notifications have no stable pre-enqueue event key [A:L-SDK-IDENTITY]. |
-| Reconnect/replay | No agent event replay/cursor [A:R-REPLAY]. Reload Action Guide from manifest/publish state instead. | Rebuild conversation from JSONL, not live event stream; steering queues not restored [A:P-REPLAY]. | Rebuild conversation/child artifacts selectively; process-local jobs/events not generically restored [A:O-REPLAY]. | Rollout reconstructs selected conversation state; app stream exposes lag; exec output supports bounded cursor replay. | Resume conversation/interrupted prompt selectively; no SDK task-event replay cursor and no generic task resurrection [A:L-TASK-RECOVERY]. |
+| Reconnect/replay | No agent event replay/cursor [A:R-REPLAY]. Reload Action Guide from manifest/publish state instead. | Rebuild conversation from JSONL, not live event stream; steering queues not restored [A:P-REPLAY]. | Rebuild conversation/child artifacts selectively; process-local jobs/events not generically restored [A:O-REPLAY]. | Rollout reconstructs selected conversation state. Raw app-server has neither replay nor an overflow marker; the facade's local `Lagged` marker has no replay; only exec process output has bounded `after_seq` recovery with gap rejection [A:C-APP-REPLAY, A:C-EXEC-REPLAY]. | Resume conversation/interrupted prompt selectively; no SDK task-event replay cursor and no generic task resurrection [A:L-TASK-RECOVERY]. |
 | UI reconstruction authority | Typed run terminal plus proposal/document/project/publish state; activity feed is advisory. | Session tree/transcript plus current Agent/session state; events drive live UI. | Session state plus Todo/Goal/task/job managers; persisted and live portions differ. | Thread/rollout/state DB plus current protocol snapshots; live notifications are projections. | Transcript/work ledger/runtime task/output sidecars; `session_state_changed` is only a live turn boundary. |
 
 ### 6.1 UI reconstruction rule for Rollshot comparisons
@@ -421,7 +436,7 @@ will take effect.
 
 | Concern | Comparative finding | Rollshot implication, not selection |
 |---|---|---|
-| Progress | Fine-grained model/tool/task progress is broadly live and can be lossy; domain state/terminal must repair it. Codex is strongest at explicit lag/gap semantics; Action Guide already rejects stale operation updates. | A progress card should say “updates skipped” or refresh an authoritative snapshot. Never infer success from 100% progress without terminal/artifact validation. |
+| Progress | Fine-grained model/tool/task progress is broadly live and can be lossy; domain state/terminal must repair it. Codex demonstrates that loss claims are layer-scoped: its client facade marks its own forwarding drops, its raw app-server can silently drop best-effort notifications, and its exec recovery separately rejects process-event gaps. Action Guide already rejects stale operation updates. | A progress card should say “updates skipped” only for loss the reporting layer can observe, or refresh an authoritative snapshot. Never infer end-to-end continuity from a downstream lag marker or success from 100% progress without terminal/artifact validation. |
 | Logs | Tool arguments/results, source diffs, prompts and assistant text can contain pixels-derived text, filenames, secrets or user content. Pi/OMP/Claude can expose rich tool/message payloads; Rollshot's current `TextChunk` and diff lines are also sensitive. | Default durable audit should store allowlisted metadata/digests, not raw prompts, model text, tool args/results, OCR text, source diff lines or image bytes. Rich logs require a separate access/retention policy. |
 | Cost/usage | Codex/Claude/OMP expose token/cost/usage telemetry in several events. Pi provides usage through messages/session surfaces. Rollshot budgets include cost, but the reviewed production provider accounting leaves cost at zero; therefore current cost progress is not an enforceable or truthful provider-cost meter. [E:R9] | Distinguish observed usage, estimated cost, reserved budget and enforceable charged budget. Include source/currency/model and “unknown” rather than zero when unavailable. |
 | Cancellation | An accepted cancel command and an observed cancelled terminal are separate facts; external effects can remain unknown. | Audit command acceptance, requested target/revision and final reconciled terminal separately. A dropped progress event must not erase cancellation truth. |
@@ -448,7 +463,9 @@ product-owned proposal/document/project/publish records. Emit a bounded
 to detect channel loss. Payloads exclude prompts, assistant text, raw tool
 arguments/results, OCR, filenames, pixels and diff lines by default. On
 reconnect/gap the UI queries the terminal/proposal/product snapshot rather
-than demanding full event replay.
+than demanding full event replay. A downstream `ProgressGap` may report only
+the sequence or drops visible at that layer; it must not imply that an
+unsequenced upstream producer was lossless.
 
 **Fit/trade-off:** minimal for Smart Redaction and close to existing Action
 Guide operation/revision patterns. It improves correlation and honest gaps
@@ -499,7 +516,10 @@ may expire quickly while receipts follow product retention.
 **Fit/trade-off:** bounds durable privacy/cost while supporting deferred
 approvals and recovery. It creates two schemas and requires the UI to avoid
 treating rich live detail as authority. Whether the extra split is justified
-depends on workload adoption and operational/audit needs.
+depends on workload adoption and operational/audit needs. If delivery crosses
+multiple bounded queues, each receipt/gap claim needs an end-to-end sequence
+or an explicitly named hop; a downstream skip counter cannot repair upstream
+silent loss.
 
 ### 9.1 Concrete privacy-safe Rollshot event patterns
 
@@ -594,8 +614,11 @@ Any later Rollshot design should be testable against these criteria:
 2. Exercise Pi/oh-my-pi steering while a parallel/serial tool batch is active,
    including cancellation and compaction boundaries; static control flow is
    strong evidence but not a race/latency measurement.
-3. Exercise Codex app-server lag and exec-server `after_seq` inside/outside TTL
-   to confirm exact client-visible errors and retained buffer behavior.
+3. Exercise Codex's three loss layers independently: overflow the raw
+   app-server best-effort queue, overflow the `app-server-client` forwarding
+   queue, and reconnect exec-server with `after_seq` inside/outside retention.
+   Confirm raw silent loss, facade-local `Lagged { skipped }`, and exec recovery
+   failure/termination without treating one layer's result as another's.
 4. Exercise Claude's 1,000-event SDK overflow, prompt batching, UUID duplicate
    handling and interrupted-turn auto-resume. Verify whether build/server gates
    change the compared behaviors.
@@ -681,9 +704,32 @@ Any later Rollshot design should be testable against these criteria:
   inspection covered `Event`, `EventMsg`, turn/item/tool event definitions and
   converters. Exact group:
   `event_id|sequence|causation|correlation|schema_revision|occurred_at|recorded_at|trace_id|turn_id|thread_id|call_id`. Positive identities/times are described in §4.3; no global monotonic sequence or per-record schema revision was **found in the core outward Event envelope**. Specialized exec-server chunk sequencing is explicitly excluded from that absence.
-- **[A:C-APP-REPLAY] Codex app transport audit.** Roots:
-  `codex-rs/app-server/src` and in-process protocol notification plumbing.
-  Exact group `Lagged|skipped|try_send|send\(await|after_seq|cursor|replay|resume`. Positive results were lag notification and mixed delivery behavior; no general app-event replay cursor was **found in the investigated in-process stream**. Exec-server `after_seq` is separately positive and excluded.
+- **[A:C-APP-REPLAY] Codex app transport audit.** Exact roots:
+  `learn-projects/codex/codex-rs/app-server/src/in_process.rs` and
+  `learn-projects/codex/codex-rs/app-server-client/src/lib.rs`, including the
+  latter file's inline tests. Exact groups:
+  `InProcessServerEvent::Lagged|Lagged \{|skipped_events|try_send|send\(|queue is full|dropping in-process|forward_in_process_event|next_event_surfaces_lagged_markers`.
+  The raw runtime hit its delivery classifier and awaited-send branch, plus a
+  best-effort `try_send` branch whose full case warns and drops. Its only
+  `Lagged` hit was the enum declaration; no raw-runtime `Lagged` construction
+  was found. The facade hit `forward_in_process_event`, its local
+  `skipped_events` counter/marker constructions, and inline
+  `forward_in_process_event_preserves_transcript_notifications_under_backpressure`
+  and `next_event_surfaces_lagged_markers` tests. Thus facade
+  `Lagged { skipped }` reports only facade forwarding loss and cannot account
+  for raw-runtime drops; a general app-event replay cursor was **not found in
+  these exact roots**. Exec-server is excluded.
+- **[A:C-EXEC-REPLAY] Codex exec process recovery audit.** Exact roots:
+  `learn-projects/codex/codex-rs/exec-server/src/local_process.rs`,
+  `client_recovery.rs`, `client_recovery_tests.rs`, and
+  `server/session_registry.rs`. Exact group:
+  `resume_session_id|after_seq|next_seq|recover_events|recover_processes|missing_count|recovery_gap_error|no longer retained|RETAINED_OUTPUT|RETENTION|DETACHED_SESSION_TTL`.
+  Hits showed process-scoped retained output and `after_seq` reads, bounded
+  output/session retention, and recovery validation that turns missing
+  required sequences into a protocol failure followed by a process-termination
+  attempt. This is a stronger specialized process-recovery contract, not an
+  app-server notification guarantee; the exact gap-failure branch was
+  source-inspected but not runtime-executed here.
 - **[A:C-DOMAIN] Codex product-domain audit.** Roots:
   `codex-rs/{core,protocol,app-server,ext}/src`, Rust files only. Exact
   declarations:
@@ -753,9 +799,9 @@ used for Pi, oh-my-pi, Codex and Claude Code.
 | O6 | source | pinned oh-my-pi | telemetry/run-summary/coverage integration | Optional observability; export is not product authority. |
 | C1 | source | pinned Codex | `codex-rs/protocol/src/protocol.rs`: `Event`, `EventMsg` | Event envelope and broad protocol lifecycle. |
 | C2 | source | pinned Codex | protocol turn/item/tool event definitions | Turn/item identities, timing, abort reasons and call status. |
-| C3 | source | pinned Codex | app-server protocol converters/notifications | Projection of core events to server clients. |
+| C3 | source + test source | pinned Codex | `app-server/src/in_process.rs`; `app-server-client/src/lib.rs` and inline tests | Raw best-effort warning/drop versus facade-local skipped counter and `Lagged` marker. No overflow path was executed here. |
 | C4 | source + reviewed capability evidence | pinned Codex | core rollout/session persistence and context-compaction sources | Selective reconstruction boundary, not generic event sourcing. |
-| C5 | source | pinned Codex | exec-server process manager/protocol tests | `resume_session_id`, `after_seq`, TTL/buffer and explicit gap behavior. Tests not executed. |
+| C5 | source + test source | pinned Codex | exec-server `local_process.rs`, `client_recovery.rs`, `client_recovery_tests.rs`, `server/session_registry.rs`; [A:C-EXEC-REPLAY] | Process-scoped `resume_session_id`/`after_seq`, retention bounds and missing-sequence failure/termination. Gap branch not executed. |
 | C6 | source + test source | pinned Codex | core session user-input/steer handlers | Active regular-turn steer-first behavior, expected turn and client ID. |
 | C7 | source + test source | pinned Codex | turn input-queue drain/compaction/interrupt paths | Exact current-versus-next sampling boundary and typed abort. |
 | L1 | source | pinned Claude Code | `src/utils/sdkEventQueue.ts` | SDK task/session events, queue cap/drop and drain UUID. |
