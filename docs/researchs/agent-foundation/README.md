@@ -1,7 +1,7 @@
 # Rollshot Agent Foundation Umbrella Research Specification
 
 **Date:** 2026-07-22  
-**Status:** Active Research  
+**Status:** Frozen  
 **Umbrella revision:** 1  
 **Area:** Agent foundation  
 **Output root:** `docs/researchs/agent-foundation/`
@@ -582,4 +582,5 @@ This umbrella research is complete only when:
 | Revision | Date | Trigger | Change | Affected documents | Review impact |
 |---:|---|---|---|---|---|
 | 1 | 2026-07-22 | Initial approved research design | Established the hybrid two-pass program, fixed core systems, revision-1 capability set, research rounds, evidence gates, and governance | Entire inventory | Begins Active Research |
+| 2 | 2026-07-23 | Research program frozen | All 14 research areas dispositioned; 6 staged implementation slices recommended. Decision matrix and Rollshot recommendation reviewed and approved. 3 Round 5 gaps deferred with restart conditions. | `decision-matrix.md`, `rollshot-recommendation.md`, umbrella status | Program frozen |
 
