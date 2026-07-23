@@ -1,8 +1,9 @@
 # Skills and extensions comparison
 
-Status: In Progress (Round 4 capability comparison; no final selection)
+Status: Reviewed
 
 Research date: 2026-07-22 (Asia/Taipei)
+**Umbrella revision:** 1
 
 Compared revisions:
 

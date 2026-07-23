@@ -1,7 +1,7 @@
 # Task, Todo, and Workflow state comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)  
-**Status:** In Progress (Round 2 capability comparison)  
+**Status:** Reviewed  
 **Umbrella revision:** 1  
 **Current Rollshot revision:** `dbaf22bb99d55cc39b1983aebdd8baaad26bb56d`  
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;

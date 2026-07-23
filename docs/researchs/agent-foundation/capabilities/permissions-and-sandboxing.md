@@ -1,7 +1,7 @@
 # Permissions and sandboxing comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)  
-**Status:** In Progress (Round 4 capability comparison)  
+**Status:** Reviewed  
 **Umbrella revision:** 1  
 **Current Rollshot revision:** `4bb11350a9b54638cc623db316885db58595a47a`  
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;

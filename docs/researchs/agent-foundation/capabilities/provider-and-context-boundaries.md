@@ -2,7 +2,7 @@
 
 **Research date:** 2026-07-23 (Asia/Taipei)
 
-**Status:** In Progress (Round 4 capability comparison)
+**Status:** Reviewed
 
 **Umbrella revision:** 1
 

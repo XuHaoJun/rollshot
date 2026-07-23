@@ -1,8 +1,9 @@
 # Agent memory boundaries
 
-Status: In Progress (Round 2 capability comparison)
+Status: Reviewed
 
 Research date: 2026-07-22 (Asia/Taipei)
+**Umbrella revision:** 1
 
 Rollshot revision inspected: `9e333035e450cc8df4aeacde2be086457e97ec08`
 

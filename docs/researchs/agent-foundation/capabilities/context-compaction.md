@@ -1,7 +1,7 @@
 # Context compaction and continuity comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)  
-**Status:** In Progress (Round 2 capability comparison)  
+**Status:** Reviewed  
 **Umbrella revision:** 1  
 **Current Rollshot revision:** `edaf0abe0dd9140e3b22f0fcf73c0ff79e4a2dc6`  
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;

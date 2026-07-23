@@ -1,14 +1,15 @@
 # Artifacts, review, and provenance
 
-**Status:** In Progress — Round 4 capability comparison; no final selection
+**Status:** Reviewed
 
-**Date:** 2026-07-22
+**Date:** 2026-07-22 (Asia/Taipei)
+**Umbrella revision:** 1
 
 **Scope:** Product artifacts, expected outputs, validation, review, revision, publish/archive, and provenance across Rollshot, Pi, Oh My Pi (OMP), Codex, Claude Code, and the deferred Brag/Hyperframes workload.
 
 **Method:** Code is the source of truth for Rollshot. External-system claims use the reviewed system profiles and their exact audits. Hyperframes and Brag are workload evidence, not evidence of a Rollshot implementation.
 
-**Pinned workload evidence:** Brag `357a805e`; Hyperframes `807078c7`.
+**Pinned workload evidence:** Brag `357a805ed7d0cf2b2f2cf53185f4f2e29e18ba3d`; Hyperframes `807078c721df55decd25825ed11bf6b81652583e`.
 
 This is a comparison artifact, not an architecture decision. It identifies candidate patterns and measurable boundaries without selecting a final product-wide artifact model.
 
@@ -585,10 +586,10 @@ The inspected pinned `production-loop.md`, `review-loop.md`, `subagent-dispatch.
 
 ### Workload evidence
 
-- **[B1]** `docs/ideas/2026-07-22-agent-skills-action-guide-launch-video.md`; `learn-projects/brag/skills/brag/SKILL.md` at Brag `357a805e`.
-- **[H1]** Hyperframes `core/production-loop.md` and general-video skill at `807078c7`: dependency staging, frame/audio production, synchronization, assembly, verification, delivery, and edit-loop re-entry.
-- **[H2]** Hyperframes `core/review-loop.md` at `807078c7`: plan, sketch, and final-look gates; explicit approval before final render.
-- **[H3]** Hyperframes `core/subagent-dispatch.md`, general-video skill, and frame-worker delta at `807078c7`: best-effort notification, expected-file waits, paired HTML/motion outputs, and bounded redispatch.
+- **[B1]** `docs/ideas/2026-07-22-agent-skills-action-guide-launch-video.md`; `learn-projects/brag/skills/brag/SKILL.md` at Brag `357a805ed7d0cf2b2f2cf53185f4f2e29e18ba3d`.
+- **[H1]** Hyperframes `core/production-loop.md` and general-video skill at `807078c721df55decd25825ed11bf6b81652583e`: dependency staging, frame/audio production, synchronization, assembly, verification, delivery, and edit-loop re-entry.
+- **[H2]** Hyperframes `core/review-loop.md` at `807078c721df55decd25825ed11bf6b81652583e`: plan, sketch, and final-look gates; explicit approval before final render.
+- **[H3]** Hyperframes `core/subagent-dispatch.md`, general-video skill, and frame-worker delta at `807078c721df55decd25825ed11bf6b81652583e`: best-effort notification, expected-file waits, paired HTML/motion outputs, and bounded redispatch.
 
 ## 17. Limitations
 

@@ -1,7 +1,7 @@
 # Persistence, checkpoint, and resume comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)
-**Status:** In Progress (Round 2 capability comparison)
+**Status:** Reviewed
 **Umbrella revision:** 1
 **Current Rollshot revision:** `ebaf37a42b8212465ef184fccf3336e1d3dd0d5f`
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;

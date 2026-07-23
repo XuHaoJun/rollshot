@@ -1,7 +1,7 @@
 # Subagents and parallelism comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)
-**Status:** In Progress (Round 3 capability comparison)
+**Status:** Reviewed
 **Umbrella revision:** 1
 **Current Rollshot revision:** `3211433e2ba3d0153160d993573c6011f8176502`
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;

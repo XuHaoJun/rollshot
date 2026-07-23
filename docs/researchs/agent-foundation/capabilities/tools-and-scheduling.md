@@ -1,7 +1,7 @@
 # Tools and scheduling comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)
-**Status:** In Progress (Round 3 capability comparison)
+**Status:** Reviewed
 **Umbrella revision:** 1
 **Current Rollshot revision:** `70b5a4ce17a1d2cd4d7ed9731678834bad1e12bf`
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;

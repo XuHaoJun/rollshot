@@ -1,7 +1,7 @@
 # Budgets, cancellation, retries, and failures comparison
 
 **Research date:** 2026-07-22 (Asia/Taipei)  
-**Status:** In Progress (Round 3 capability comparison)  
+**Status:** Reviewed  
 **Umbrella revision:** 1  
 **Current Rollshot revision:** `709d4ca7fd3c83ee388f2b4a8798f9ea13d34924`  
 **Reference revisions:** Pi `dd6bea41efa8caa7a10fe5a6401676dc5699f83f`;
