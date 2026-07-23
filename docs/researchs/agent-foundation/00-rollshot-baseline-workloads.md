@@ -1,7 +1,7 @@
 # Rollshot agent foundation: Round 0 baseline and workloads
 
 **Research date:** 2026-07-22 (Asia/Taipei)
-**Status:** In Progress
+**Status:** Reviewed
 **Umbrella revision:** 1
 **Research round:** 0
 **Systems/capabilities:** Rollshot bounded agent; Rig boundary; Smart Redaction,
