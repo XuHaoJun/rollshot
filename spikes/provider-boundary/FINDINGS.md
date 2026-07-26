@@ -30,7 +30,7 @@ Determine whether Rig 0.39 or 0.40 provides enough normalized completion evidenc
 | Rig-level completion distinguishability | H2 hard | runtime | PASS (expected FAIL) | Rig synthesizes Final on bare EOF for both 0.39 and 0.40; production-layer gate is the real H2 checkpoint (Tasks 4-6) |
 | Production-layer completion tracking | H2 production | compile/automated | PENDING | Tasks 4-5 implement `saw_completed` in `stream_to_model_events` |
 | Host wakes ignored bounds | H1 hard | automated | PASS | 7/7 tests: `provider_progress_cancel_wakes_pending_future`, `provider_progress_deadline_wakes_pending_future`, `provider_progress_same_poll_tie_prefers_cancel`, `runner_cancels_pending_provider_establishment`, `runner_deadlines_pending_provider_establishment`, `runner_cancels_pending_provider_item_after_partial_text`, `runner_deadlines_pending_provider_item_after_partial_text` — `rtk cargo test -p rollshot-agent` 235/235 green |
-| Rig 0.40 compatibility | H3 upgrade | compile/automated | PENDING | Conditional on Task 6 |
+| Rig 0.40 compatibility | H3 upgrade | compile/automated | PASS | Compile clean; 38+235=273 tests pass; tree shows only 0.40.0; no public Rig types leaked |
 
 ## Observations
 
