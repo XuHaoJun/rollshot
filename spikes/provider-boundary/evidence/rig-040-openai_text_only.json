@@ -1,0 +1,17 @@
+[
+  {
+    "kind": "text",
+    "text": "Hello"
+  },
+  {
+    "kind": "text",
+    "text": ", world!"
+  },
+  {
+    "kind": "final",
+    "total_tokens": 0
+  },
+  {
+    "kind": "end"
+  }
+]
