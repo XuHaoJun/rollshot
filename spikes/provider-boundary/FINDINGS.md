@@ -29,8 +29,8 @@ Determine whether Rig 0.39 or 0.40 provides enough normalized completion evidenc
 |---|---|---|---|---|
 | Rig-level completion distinguishability | H2 hard | runtime | PASS (expected FAIL) | Rig synthesizes Final on bare EOF for both 0.39 and 0.40; production-layer gate is the real H2 checkpoint (Tasks 4-6) |
 | Production-layer completion tracking | H2 production | compile/automated | PASS | 40/40 provider_contract tests green; 237/237 total tests green; incomplete streams yield StreamIncomplete; valid completions pass through; partial tools rejected |
-| Host wakes ignored bounds | H1 hard | automated | PASS | 7/7 tests: `provider_progress_cancel_wakes_pending_future`, `provider_progress_deadline_wakes_pending_future`, `provider_progress_same_poll_tie_prefers_cancel`, `runner_cancels_pending_provider_establishment`, `runner_deadlines_pending_provider_establishment`, `runner_cancels_pending_provider_item_after_partial_text`, `runner_deadlines_pending_provider_item_after_partial_text` — `rtk cargo test -p rollshot-agent` 235/235 green |
-| Rig 0.40 compatibility | H3 upgrade | compile/automated | PASS | Compile clean; 38+235=273 tests pass; tree shows only 0.40.0; no public Rig types leaked |
+| Host wakes ignored bounds | H1 hard | automated | PASS | 7/7 tests: `provider_progress_cancel_wakes_pending_future`, `provider_progress_deadline_wakes_pending_future`, `provider_progress_same_poll_tie_prefers_cancel`, `runner_cancels_pending_provider_establishment`, `runner_deadlines_pending_provider_establishment`, `runner_cancels_pending_provider_item_after_partial_text`, `runner_deadlines_pending_provider_item_after_partial_text` — `rtk cargo test -p rollshot-agent` 237/237 green |
+| Rig 0.40 compatibility | H3 upgrade | compile/automated | PASS | Compile clean; 40+237=277 tests pass; tree shows only 0.40.0; no public Rig types leaked |
 
 ## Observations
 
@@ -129,3 +129,41 @@ rtk cargo clippy --workspace --all-targets -- -D warnings                       
 ### Fixture update
 
 Added usage chunks to 3 OpenAI fixtures (`openai_text_only`, `openai_done_marker`, `openai_malformed_json`) to model `stream_options.include_usage` behavior that Rig requests in production. This was a fixture-data gap, not a code issue.
+
+## Independent Review (Task 7)
+
+**Reviewer:** Senior code review subagent
+**Range:** `50402f8..4b2db21` (9 commits)
+**Verdict:** Ready to merge — yes, with one recommended follow-up
+
+### Strengths
+
+- Two-layer completion integrity is architecturally sound (provider gate + driver gate)
+- `await_provider_progress` correctly implements biased select with cancellation-first
+- Host-owned guards are adapter-independent (PendingProvider proves this)
+- Partial state cannot cross the commit boundary
+- Rig 0.40 migration is minimal (Cargo.toml + Cargo.lock only)
+- Spike isolation is correct
+- Privacy-safe error handling
+
+### Issues
+
+**Critical:** None
+
+**Important (2):**
+1. `has_real_usage` gate in `stream_to_model_events` is defense-in-depth only — not independently reliable for OpenAI. Added clarifying comment. Driver layer is authoritative.
+2. Duplicate cancellation/deadline logic in provider layer — documented as best-effort adapter-side cleanup.
+
+**Minor (3):**
+1. FINDINGS.md test count inconsistency — fixed (237/237)
+2. `runner_does_not_wait_for_eof_after_valid_completion` watchdog timeout could be increased for CI
+3. Inner `tokio::select!` duplicates `await_provider_progress` pattern — documented
+
+### Answers to review questions
+
+1. Can any adapter bypass bounds? No — host-owned `await_provider_progress` wraps provider futures.
+2. Does cancellation win same-poll tie? Yes — biased select checks cancellation first.
+3. Can partial state cross commit boundary? No — local buffers dropped on failure.
+4. Is completion proof protocol-backed? Driver layer yes. Provider gate is defense-in-depth.
+5. Did Rig migration stay private? Yes — only Cargo.toml + Cargo.lock.
+6. Are errors/logs privacy-safe? Yes — sanitize_error + stable tracing targets.

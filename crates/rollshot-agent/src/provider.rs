@@ -352,6 +352,12 @@ where
         // OpenAI streams. The assembler converts Final into Completed with zero
         // usage when no proper stop signal was received. Check the accumulated
         // response usage to distinguish real completions from bare-EOF synthesis.
+        //
+        // NOTE: This gate is defense-in-depth. The driver layer's `saw_completed`
+        // check is the authoritative completion proof. For OpenAI, usage alone is
+        // not independently reliable — an incomplete stream may report usage if
+        // the provider sent partial usage before truncation. Do not remove the
+        // driver-layer check believing this gate is sufficient on its own.
         let response_usage = stream.response.as_ref().map(|r| r.token_usage());
         let has_real_usage = response_usage.as_ref().is_some_and(|u| u.total_tokens > 0);
 
