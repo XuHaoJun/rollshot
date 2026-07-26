@@ -1025,8 +1025,6 @@ impl AgentRunner {
                 .map_err(|error| DriverError::ProviderFailure(error.to_string()))?;
 
         let asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
-        let mut turn_input_tokens: u64 = 0;
-        let mut turn_output_tokens: u64 = 0;
         // The model's streamed prose for this turn.
         let mut turn_text = String::new();
 
@@ -1037,12 +1035,13 @@ impl AgentRunner {
         let mut tool_calls_with_deltas: HashSet<String> = HashSet::new();
 
         use futures_util::StreamExt;
-        loop {
+        let completion_usage = loop {
             let next = await_provider_progress(cancellation, deadline, stream.next()).await?;
             let Some(event_result) = next else {
-                // Task 5 will add the completion-required break here.
-                // For now, preserve the current behavior of treating EOF as end-of-stream.
-                break;
+                // Bare EOF without a proven Completed event is an error.
+                return Err(DriverError::ProviderFailure(
+                    "provider stream ended before completion".to_string(),
+                ));
             };
 
             if let Err(BudgetError::Exceeded(dim)) =
@@ -1100,19 +1099,17 @@ impl AgentRunner {
                         tool_call_arg_deltas.push(serialized);
                     }
                 }
-                ModelStreamEvent::UsageDelta(u) => {
-                    turn_input_tokens = u.input_tokens;
-                    turn_output_tokens = u.output_tokens;
+                ModelStreamEvent::UsageDelta(_) => {
+                    // Final usage is authoritative from Completed; skip deltas.
                 }
                 ModelStreamEvent::Completed(c) => {
-                    turn_input_tokens = c.usage.input_tokens;
-                    turn_output_tokens = c.usage.output_tokens;
+                    break c.usage;
                 }
                 ModelStreamEvent::Error(e) => {
                     return Err(DriverError::ProviderFailure(e.to_string()));
                 }
             }
-        }
+        };
 
         // Commit this turn's prose as the run's latest assistant message.
         *last_assistant_text = turn_text;
@@ -1154,16 +1151,16 @@ impl AgentRunner {
 
         let turn_usage = UsageSnapshot {
             model_calls: 1,
-            input_tokens: turn_input_tokens,
-            output_tokens: turn_output_tokens,
+            input_tokens: completion_usage.input_tokens,
+            output_tokens: completion_usage.output_tokens,
             ..Default::default()
         };
         tracker.charge(turn_usage)?;
 
         let usage = Usage {
-            input_tokens: turn_input_tokens,
-            output_tokens: turn_output_tokens,
-            total_tokens: turn_input_tokens + turn_output_tokens,
+            input_tokens: completion_usage.input_tokens,
+            output_tokens: completion_usage.output_tokens,
+            total_tokens: completion_usage.total_tokens,
             ..Usage::new()
         };
         rig_run
