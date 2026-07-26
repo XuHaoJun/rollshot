@@ -1041,6 +1041,8 @@ async fn openai_stream_consumes_at_least_two_chunks() {
 
 mod visual_annotation {
     use super::*;
+    use rollshot_agent::runtime::BudgetDimension;
+    use std::sync::Arc;
 
     struct ScriptedProvider {
         requests: Mutex<Vec<ModelRequest>>,
@@ -1091,6 +1093,114 @@ mod visual_annotation {
                     >)
             })
         }
+    }
+
+    // ---- PendingProvider: ignores StreamBounds intentionally ----
+
+    #[derive(Clone, Copy)]
+    enum PendingMode {
+        Establishment,
+        AfterText,
+    }
+
+    struct PendingProvider {
+        mode: PendingMode,
+        entered: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    impl ProviderAdapter for PendingProvider {
+        fn stream(
+            &self,
+            _request: ModelRequest,
+            _bounds: StreamBounds,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >,
+                            ModelError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            match self.mode {
+                PendingMode::Establishment => {
+                    let mut entered = self.entered.lock().unwrap();
+                    if let Some(tx) = entered.take() {
+                        let _ = tx.send(());
+                    }
+                    Box::pin(async { std::future::pending().await })
+                }
+                PendingMode::AfterText => {
+                    let entered = Arc::clone(&self.entered);
+                    Box::pin(async move {
+                        let (tx, events) = {
+                            let mut guard = entered.lock().unwrap();
+                            let tx = guard.take();
+                            let events: Vec<Result<ModelStreamEvent, ModelError>> =
+                                vec![Ok(ModelStreamEvent::TextDelta("partial".to_string()))];
+                            (tx, events)
+                        };
+                        Ok(Box::pin(async_stream::stream! {
+                            for event in events {
+                                yield event;
+                            }
+                            if let Some(tx) = tx {
+                                let _ = tx.send(());
+                            }
+                            // Remain pending — never yield a completion.
+                            std::future::pending::<()>().await;
+                        })
+                            as Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >)
+                    })
+                }
+            }
+        }
+    }
+
+    fn spawn_pending_run(
+        mode: PendingMode,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        RunCancellation,
+        tokio::task::JoinHandle<VisualAnnotationRunTerminal>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let provider = PendingProvider {
+            mode,
+            entered: Arc::new(Mutex::new(Some(entered_tx))),
+        };
+        let cancellation = RunCancellation::new();
+        let run_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            let mut budget = visual_annotation_run_budget();
+            budget.wall_time = std::time::Duration::from_secs(10);
+            AgentRunner::new(AgentConfig {
+                max_turns: 2,
+                ..AgentConfig::default()
+            })
+            .run_visual_annotation_with_provider(
+                authorized_input_with_one_png(),
+                &provider,
+                budget,
+                &run_cancellation,
+            )
+            .await
+        });
+        (entered_rx, cancellation, task)
     }
 
     fn authorized_input_with_one_png() -> AuthorizedModelInput {
@@ -1364,6 +1474,58 @@ mod visual_annotation {
             !debug_str.contains("89504e47"),
             "Debug output must not contain attachment hex bytes: {}",
             debug_str
+        );
+    }
+
+    // ---- PendingProvider host-bounds tests ----
+
+    #[tokio::test]
+    async fn runner_cancels_pending_provider_establishment() {
+        let (entered, cancellation, task) = spawn_pending_run(PendingMode::Establishment);
+        entered.await.expect("provider entered establishment");
+        cancellation.cancel();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("runner must not hang")
+            .expect("runner task");
+        assert_eq!(terminal, VisualAnnotationRunTerminal::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runner_deadlines_pending_provider_establishment() {
+        let (entered, _cancellation, task) = spawn_pending_run(PendingMode::Establishment);
+        entered.await.expect("provider entered establishment");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            task.await.expect("runner task"),
+            VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: BudgetDimension::WallTime,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_cancels_pending_provider_item_after_partial_text() {
+        let (entered, cancellation, task) = spawn_pending_run(PendingMode::AfterText);
+        entered.await.expect("provider entered pending item poll");
+        cancellation.cancel();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("runner must not hang")
+            .expect("runner task");
+        assert_eq!(terminal, VisualAnnotationRunTerminal::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runner_deadlines_pending_provider_item_after_partial_text() {
+        let (entered, _cancellation, task) = spawn_pending_run(PendingMode::AfterText);
+        entered.await.expect("provider entered pending item poll");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            task.await.expect("runner task"),
+            VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: BudgetDimension::WallTime,
+            }
         );
     }
 }
