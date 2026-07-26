@@ -1,0 +1,74 @@
+{
+  "anthropic_text_only": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop"
+      ],
+      "substitutions": "Content scrubbed: IDs replaced with fake msg_/msg- IDs, model replaced with claude-sonnet-4-6, text replaced with test payload."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_001\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\", world!\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  },
+  "anthropic_incomplete_stream": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta"
+      ],
+      "substitutions": "Content scrubbed. Stream ends prematurely after content_block_delta \u2014 no content_block_stop, message_delta, or message_stop."
+    },
+    "chunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_007\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial...\"}}\n\n"
+    ]
+  },
+  "openai_text_only": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
+      "substitutions": "Content scrubbed: IDs replaced with chatcmpl-test, model replaced with gpt-4, text replaced with test payload."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", world!\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n"
+    ]
+  },
+  "openai_incomplete_stream": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
+      "retrieved": "2026-06-23",
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
+      "substitutions": "Content scrubbed. Stream ends prematurely \u2014 no finish_reason, no [DONE] marker."
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-test-007\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test-007\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Partial...\"},\"finish_reason\":null}]}\n\n"
+    ]
+  }
+}
