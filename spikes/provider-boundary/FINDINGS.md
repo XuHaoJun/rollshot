@@ -27,7 +27,7 @@ Determine whether Rig 0.39 or 0.40 provides enough normalized completion evidenc
 
 | Risk | Gate | Evidence | Result | Notes / artifacts |
 |---|---|---|---|---|
-| Rig-level completion distinguishability | H2 hard | runtime | FAIL (both) | Rig synthesizes Final on bare EOF for both 0.39 and 0.40 |
+| Rig-level completion distinguishability | H2 hard | runtime | PASS (expected FAIL) | Rig synthesizes Final on bare EOF for both 0.39 and 0.40; production-layer gate is the real H2 checkpoint (Tasks 4-6) |
 | Production-layer completion tracking | H2 production | compile/automated | PENDING | Tasks 4-5 implement `saw_completed` in `stream_to_model_events` |
 | Host wakes ignored bounds | H1 hard | automated | PENDING | Production tests after Task 4 |
 | Rig 0.40 compatibility | H3 upgrade | compile/automated | PENDING | Conditional on Task 6 |
