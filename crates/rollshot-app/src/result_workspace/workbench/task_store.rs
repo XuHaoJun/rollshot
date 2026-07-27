@@ -17,6 +17,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tracing::warn;
+
 use rollshot_agent::product_task::{
     ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus,
 };
@@ -487,20 +489,29 @@ impl TaskStore {
         let dir_file = fs::File::open(dir).map_err(|e| TaskStoreError::PreCommit {
             reason: format!("open dir for sync: {}", e),
         })?;
-        dir_file.sync_all().map_err(|e| {
-            // Directory sync failed after rename.
-            // Re-read and compare to classify.
-            match fs::read(target) {
-                Ok(disk_bytes) if disk_bytes == bytes => {
-                    // We can't return from a map_err closure, so this is
-                    // handled at the call site below.
-                }
-                _ => {}
+        match dir_file.sync_all() {
+            Ok(()) => {}
+            Err(_e) => {
+                // Directory sync failed after rename — re-read and compare to classify.
+                let commit_outcome = match fs::read(target) {
+                    Ok(disk_bytes) if disk_bytes == bytes => {
+                        StoreCommitOutcome::CommitVisibleDurabilityUncertain
+                    }
+                    Ok(_) => {
+                        return Err(TaskStoreError::IntegrityFailure {
+                            reason: "re-read mismatch after rename with directory sync failure"
+                                .to_owned(),
+                        });
+                    }
+                    Err(read_err) => {
+                        return Err(TaskStoreError::IntegrityFailure {
+                            reason: format!("re-read failed after dir sync error: {read_err}"),
+                        });
+                    }
+                };
+                return Ok(commit_outcome);
             }
-            TaskStoreError::CommitVisibleDurabilityUncertain {
-                reason: format!("dir sync: {e}"),
-            }
-        })?;
+        }
 
         Ok(StoreCommitOutcome::Committed)
     }
@@ -676,11 +687,13 @@ impl TaskStore {
                         // Re-read to confirm current matches.
                         if let Ok(current) = self.read_snapshot(&task_id) {
                             if current == snapshot {
-                                let _ = self.atomic_write(
+                                if let Err(e) = self.atomic_write(
                                     &path,
                                     &reconciled,
                                     None,
-                                );
+                                ) {
+                                    warn!(error = %e, task_id = task_id.as_str(), "reconcile interrupted: atomic_write failed");
+                                }
                             }
                         }
                         // Lock released on drop.
@@ -732,11 +745,13 @@ impl TaskStore {
                             }
                             if let Ok(current) = self.read_snapshot(&task_id) {
                                 if current == snapshot {
-                                    let _ = self.atomic_write(
+                                    if let Err(e) = self.atomic_write(
                                         &path,
                                         &stale,
                                         None,
-                                    );
+                                    ) {
+                                        warn!(error = %e, task_id = task_id.as_str(), "mark stale: atomic_write failed");
+                                    }
                                 }
                             }
                         }
@@ -829,14 +844,6 @@ impl fmt::Debug for TaskStore {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Compare source bindings for equality: base image, annotation state,
-/// and document state ID.
-fn source_binding_matches(a: &SourceBinding, b: &SourceBinding) -> bool {
-    a.base_image_sha256() == b.base_image_sha256()
-        && a.annotation_state_sha256() == b.annotation_state_sha256()
-        && a.document_state_id() == b.document_state_id()
-}
 
 /// Truncate an error string to avoid leaking full paths or payloads.
 fn truncate_error(s: &str) -> String {
