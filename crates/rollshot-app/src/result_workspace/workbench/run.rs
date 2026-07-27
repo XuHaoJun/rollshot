@@ -3901,4 +3901,354 @@ mod reducer_tests {
             "stale restore completion must be ignored"
         );
     }
+
+    // -- V2 artifact provenance tests (Finding 3) ---------------------------
+
+    fn authority_receipt_for_provenance() -> rollshot_agent::authority::AuthoritySnapshotReceiptV1 {
+        use rollshot_agent::authority::{DisclosureCeiling, PreparedCapability, RunOperation};
+        rollshot_agent::authority::AuthoritySnapshotReceiptV1 {
+            schema_version: 1,
+            task_id: "task-00000000-0000-4000-8000-000000000001".to_owned(),
+            attempt_id: 1,
+            run_id: "run-00000000-0000-4000-8000-000000000001".to_owned(),
+            policy_revision: "rollshot-v1".to_owned(),
+            disclosure_ceiling: DisclosureCeiling::FullScreenshot,
+            existing_product_capture: true,
+            document_binding_digest: "ab".repeat(32),
+            prepared_capabilities: vec![PreparedCapability::RegionFeatures],
+            granted_operations: vec![
+                RunOperation::ReadDraft,
+                RunOperation::WriteDraft,
+                RunOperation::InspectPreparedImage,
+                RunOperation::ExecuteRestrictedAutomation,
+                RunOperation::SubmitReviewCandidate,
+                RunOperation::RequestUserInput,
+            ],
+            snapshot_digest: "cd".repeat(32),
+            created_at_unix_ms: 10,
+        }
+    }
+
+    fn skill_use_receipt_for_provenance() -> rollshot_agent::skills::SkillUseReceiptV1 {
+        rollshot_agent::skills::SkillUseReceiptV1 {
+            schema_version: 1,
+            source_authority: "rollshot.bundled".to_owned(),
+            package_id: "smart-redaction".to_owned(),
+            main_resource_id: "smart-redaction/SKILL.md".to_owned(),
+            package_digest: "aa".repeat(32),
+            declared_version: None,
+            invocation_kind: rollshot_agent::skills::SkillInvocationKind::HostExplicit,
+            resolved_at_unix_ms: 10,
+        }
+    }
+
+    fn run_contract_for_provenance(
+        authority: rollshot_agent::authority::AuthoritySnapshotReceiptV1,
+        skill: rollshot_agent::skills::SkillUseReceiptV1,
+    ) -> rollshot_agent::product_task::RunContractReceiptV1 {
+        rollshot_agent::product_task::RunContractReceiptV1 {
+            authority,
+            skill_use: skill,
+            bound_at_unix_ms: 20,
+        }
+    }
+
+    fn run_config_v2_with(
+        contract: &rollshot_agent::product_task::RunContractReceiptV1,
+    ) -> rollshot_agent::product_task::RunConfigFingerprintV2 {
+        rollshot_agent::product_task::RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: std::collections::BTreeMap::new(),
+            authority_snapshot_digest: contract.authority.snapshot_digest.clone(),
+            skill_use: contract.skill_use.clone(),
+        }
+    }
+
+    fn v2_metadata_for_provenance(
+        contract: &rollshot_agent::product_task::RunContractReceiptV1,
+    ) -> rollshot_agent::product_task::ProductArtifactMetadata {
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, SmartRedactionReviewPayload,
+            TaskAttemptId,
+        };
+        let config = run_config_v2_with(contract);
+        let config_digest = rollshot_agent::product_task::canonical_config_v2_digest(&config).unwrap();
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0 nodes".into() },
+            proposal: PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
+            dry_run: PayloadDryRunV1 { candidate_count: 1, affected_area: 0.42 },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(), model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let payload_bytes = rollshot_agent::product_task::canonical_payload_bytes(&payload).unwrap();
+        let payload_sha = {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(&payload_bytes);
+            hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        ProductArtifactMetadata::new_v2(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            2,
+            payload_sha,
+            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            TaskAttemptId::new(1),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+            "anthropic".to_owned(),
+            "claude-sonnet-4-20250514".to_owned(),
+            config_digest,
+            1,
+            0.42,
+            15,
+            contract.clone(),
+        )
+    }
+
+    fn ready_v2_with_contract(
+        contract: &rollshot_agent::product_task::RunContractReceiptV1,
+    ) -> rollshot_agent::product_task::ProductTaskSnapshot {
+        use rollshot_agent::product_task::{
+            PayloadConfigV1, PayloadDryRunV1, PayloadProposalV1, PayloadSourceV1,
+            ProductTaskSnapshot, SmartRedactionReviewPayload,
+            TaskAttempt, TaskAttemptId,
+        };
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let snapshot = ProductTaskSnapshot::new_v2(task_id, Tk::SmartRedactionAuthor, Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None), 10).unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        let bound = running.bind_run_contract(contract.clone(), 25).unwrap();
+        let meta = v2_metadata_for_provenance(contract);
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0 nodes".into() },
+            proposal: PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
+            dry_run: PayloadDryRunV1 { candidate_count: 1, affected_area: 0.42 },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(), model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        bound.record_ready_for_review(meta, payload, None, 30).unwrap()
+    }
+
+    #[test]
+    fn v2_artifact_metadata_receipt_equals_active_attempt_receipt() {
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let ready = ready_v2_with_contract(&contract);
+
+        let artifact = ready.artifact_metadata().expect("artifact metadata");
+        let active_contract = ready.active_run_contract().expect("active contract");
+        assert_eq!(artifact.run_contract(), Some(active_contract));
+        assert_eq!(artifact.run_contract().unwrap().authority.snapshot_digest,
+            contract.authority.snapshot_digest);
+        assert_eq!(artifact.run_contract().unwrap().skill_use.package_digest,
+            contract.skill_use.package_digest);
+    }
+
+    #[test]
+    fn v2_run_config_digest_changes_if_authority_digest_changes() {
+        let contract_a = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let mut auth_b = authority_receipt_for_provenance();
+        auth_b.snapshot_digest = "ff".repeat(32);
+        let contract_b = run_contract_for_provenance(auth_b, skill_use_receipt_for_provenance());
+
+        let digest_a = rollshot_agent::product_task::canonical_config_v2_digest(
+            &run_config_v2_with(&contract_a),
+        )
+        .unwrap();
+        let digest_b = rollshot_agent::product_task::canonical_config_v2_digest(
+            &run_config_v2_with(&contract_b),
+        )
+        .unwrap();
+        assert_ne!(digest_a, digest_b, "digest must change when authority digest changes");
+    }
+
+    #[test]
+    fn v2_run_config_digest_changes_if_skill_digest_changes() {
+        let contract_a = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let mut skill_b = skill_use_receipt_for_provenance();
+        skill_b.package_digest = "ff".repeat(32);
+        let contract_b = run_contract_for_provenance(authority_receipt_for_provenance(), skill_b);
+
+        let digest_a = rollshot_agent::product_task::canonical_config_v2_digest(
+            &run_config_v2_with(&contract_a),
+        )
+        .unwrap();
+        let digest_b = rollshot_agent::product_task::canonical_config_v2_digest(
+            &run_config_v2_with(&contract_b),
+        )
+        .unwrap();
+        assert_ne!(digest_a, digest_b, "digest must change when skill digest changes");
+    }
+
+    #[test]
+    fn v2_persisted_json_and_debug_omit_skill_body_and_forbidden_privacy_terms() {
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let ready = ready_v2_with_contract(&contract);
+
+        let json = serde_json::to_string(&ready).unwrap();
+        assert!(!json.contains("hide the URL bar"), "JSON must not contain skill body content");
+        assert!(!json.contains("GRANT filesystem"), "JSON must not contain injected body text");
+        assert!(!json.contains("api_key"), "JSON must not contain api_key");
+        assert!(!json.contains("password"), "JSON must not contain password");
+        assert!(!json.contains("secret"), "JSON must not contain secret");
+        assert!(!json.contains("/home/"), "JSON must not contain home paths");
+
+        let contract_json = serde_json::to_string(ready.active_run_contract().unwrap()).unwrap();
+        assert!(!contract_json.contains("body"), "contract JSON must not contain body field");
+        assert!(contract_json.contains("package_digest"), "contract must carry digest");
+
+        let dbg = format!("{:?}", ready.active_run_contract().unwrap());
+        assert!(!dbg.contains("GRANT filesystem"), "Debug must not contain injection");
+    }
+
+    // -- Ordering and CAS-failure tests (Finding 2) ------------------------
+
+    #[test]
+    fn run_contract_is_committed_before_promotion() {
+        // Verifies the ordering invariant: the run contract must be bound
+        // before record_ready_for_review can succeed.
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
+        };
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        let snapshot = ProductTaskSnapshot::new_v2(task_id, Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        // No contract yet.
+        assert!(running.active_run_contract().is_none());
+
+        // Promotion without contract → rejected.
+        let meta = rollshot_agent::product_task::ProductArtifactMetadata::new(
+            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactRevision::new(1),
+            rollshot_agent::product_task::ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            run_id.clone(),
+            "proposal-test".into(),
+            String::new(), String::new(), String::new(), 0, 0.0, 25,
+        );
+        let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
+            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-test".into(), candidate_count: 0 },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 0, affected_area: 0.0 },
+            config: rollshot_agent::product_task::PayloadConfigV1 {
+                provider: String::new(), model: String::new(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let result = running.record_ready_for_review(meta, payload, None, 30);
+        assert!(
+            matches!(result, Err(rollshot_agent::product_task::TaskContractError::MissingRunContract)),
+            "promotion must fail without bound run contract"
+        );
+
+        // Bind contract → then promotion succeeds.
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let bound = running.bind_run_contract(contract, 25).unwrap();
+        assert!(bound.active_run_contract().is_some());
+
+        let v2_meta = v2_metadata_for_provenance(bound.active_run_contract().unwrap());
+        let v2_payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
+            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 1, affected_area: 0.42 },
+            config: rollshot_agent::product_task::PayloadConfigV1 {
+                provider: "anthropic".into(), model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let ready = bound.record_ready_for_review(v2_meta, v2_payload, None, 30).unwrap();
+        assert_eq!(ready.status(), Ts::ReadyForReview);
+    }
+
+    #[test]
+    fn run_contract_cas_failure_suppresses_promotion_and_proposal() {
+        // When CAS bind of the run contract fails, the snapshot remains
+        // Running and no ReadyForReview is produced.
+        use super::super::task_store::{Failpoint, TaskStore};
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_with_failpoint(tmp.path(), Failpoint::Rename).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        store.create_without_failpoint(&running).unwrap();
+
+        // CAS bind with failpoint → fails.
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let bound = running.bind_run_contract(contract, 25).unwrap();
+        let result = store.compare_and_swap(&running, &bound);
+        assert!(result.is_err(), "CAS must fail with rename failpoint");
+
+        // Still Running — no contract, no proposal.
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(loaded.status(), Ts::Running);
+        assert!(loaded.active_run_contract().is_none(), "no contract after CAS failure");
+        assert!(loaded.artifact_metadata().is_none(), "no artifact after CAS failure");
+    }
 }
