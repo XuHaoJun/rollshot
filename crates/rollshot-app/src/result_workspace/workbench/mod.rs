@@ -4,6 +4,7 @@ pub mod provider_config;
 pub mod review;
 pub mod run;
 pub mod state;
+pub mod task_store;
 pub mod view;
 
 #[cfg(test)]
@@ -116,7 +117,10 @@ impl Default for WorkbenchState {
         Self {
             preset: None,
             active_revision: None,
-            session: AgentSession::new(SessionId::new(0), RunId::parse("run-00000000-0000-4000-8000-000000000000").unwrap()),
+            session: AgentSession::new(
+                SessionId::new(0),
+                RunId::parse("run-00000000-0000-4000-8000-000000000000").unwrap(),
+            ),
             run_state: RunState::default(),
             live_activity: Vec::new(),
             pending_proposal: None,

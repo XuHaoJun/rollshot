@@ -23,6 +23,7 @@ notify-rust = { version = "4", optional = true }
 etcetera = { workspace = true }
 ffmpeg-sidecar = { workspace = true }
 fs4 = { workspace = true }
+uuid = { workspace = true }
 iced = { version = "0.14", features = ["advanced", "canvas", "image", "tokio"] }
 image = { workspace = true }
 rfd = "0.15"
@@ -47,7 +48,7 @@ zip = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
-uuid = { workspace = true }
+thiserror = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.8"
