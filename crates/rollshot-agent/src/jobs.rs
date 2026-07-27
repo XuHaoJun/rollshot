@@ -143,7 +143,7 @@ pub enum DirectUserAction {
 pub enum JobAuthoritySource {
     DirectUserAction(DirectUserAction),
     AgentTask {
-        authority_snapshot: AuthoritySnapshot,
+        authority_snapshot: Box<AuthoritySnapshot>,
         task: JobTaskRef,
     },
 }
@@ -188,7 +188,7 @@ impl JobAdmission {
             execution_class,
             owner: JobOwner::ProductTask(task.clone()),
             authority: JobAuthoritySource::AgentTask {
-                authority_snapshot,
+                authority_snapshot: Box::new(authority_snapshot),
                 task,
             },
         }
@@ -1073,18 +1073,17 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
             }
             let terminal_at = record.terminal_at_ms.unwrap_or(record.created_at_ms);
             let elapsed = now_ms.saturating_sub(terminal_at);
-            if elapsed >= TERMINAL_TTL_MS {
-                if record.state == JobState::Succeeded
-                    && record.result.is_some()
-                    && !record.result_collected
-                {
-                    // Drop the result and mark expired. Tombstone so collect
-                    // can return ResultExpired even after cap eviction.
-                    record.result = None;
-                    record.result_expired = true;
-                    if state.tombstones.len() < MAX_TERMINAL_JOBS {
-                        state.tombstones.insert(id.as_str().to_owned());
-                    }
+            if elapsed >= TERMINAL_TTL_MS
+                && record.state == JobState::Succeeded
+                && record.result.is_some()
+                && !record.result_collected
+            {
+                // Drop the result and mark expired. Tombstone so collect
+                // can return ResultExpired even after cap eviction.
+                record.result = None;
+                record.result_expired = true;
+                if state.tombstones.len() < MAX_TERMINAL_JOBS {
+                    state.tombstones.insert(id.as_str().to_owned());
                 }
             }
         }
@@ -2159,7 +2158,10 @@ mod tests {
         drop(registry);
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observer.snapshot(&id).unwrap().state(), JobState::Cancelling);
+        assert_eq!(
+            observer.snapshot(&id).unwrap().state(),
+            JobState::Cancelling
+        );
         reporter.cancelled(12).unwrap();
         assert_eq!(observer.snapshot(&id).unwrap().state(), JobState::Cancelled);
     }
@@ -2178,29 +2180,27 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let log_check = log_buffer.clone();
 
-        let make_subscriber =
-            |buf: Arc<std::sync::Mutex<Vec<u8>>>| {
-                let buf2 = buf.clone();
-                let fmt_layer = tracing_subscriber::fmt::layer()
-                    .with_writer(move || WriteAdaptor { buf: buf2.clone() })
-                    .with_ansi(false)
-                    .with_target(true)
-                    .without_time()
-                    .with_filter(tracing::level_filters::LevelFilter::TRACE);
-                Registry::default().with(fmt_layer)
-            };
+        let make_subscriber = |buf: Arc<std::sync::Mutex<Vec<u8>>>| {
+            let buf2 = buf.clone();
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_writer(move || WriteAdaptor { buf: buf2.clone() })
+                .with_ansi(false)
+                .with_target(true)
+                .without_time()
+                .with_filter(tracing::level_filters::LevelFilter::TRACE);
+            Registry::default().with(fmt_layer)
+        };
 
         // Try to register as global first. On failure (already set),
         // use a thread-local subscriber so this test's events still
         // route to our capturing writer.
-        let _local_guard = match tracing::subscriber::set_global_default(
-            make_subscriber(log_buffer),
-        ) {
-            Ok(()) => None,
-            Err(_) => Some(tracing::subscriber::set_default(
-                make_subscriber(log_check.clone()),
-            )),
-        };
+        let _local_guard =
+            match tracing::subscriber::set_global_default(make_subscriber(log_buffer)) {
+                Ok(()) => None,
+                Err(_) => Some(tracing::subscriber::set_default(make_subscriber(
+                    log_check.clone(),
+                ))),
+            };
 
         let result = run();
         let logs = String::from_utf8(log_check.lock().unwrap().to_vec()).unwrap();
