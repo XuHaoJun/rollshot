@@ -1,6 +1,7 @@
 pub mod domain;
 pub mod driver;
 pub mod model;
+pub mod product_task;
 pub(crate) mod provider;
 pub mod runtime;
 pub mod tools;

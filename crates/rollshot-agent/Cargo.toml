@@ -20,6 +20,7 @@ futures-util = { workspace = true }
 schemars = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
