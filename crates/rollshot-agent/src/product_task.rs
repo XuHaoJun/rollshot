@@ -792,9 +792,7 @@ impl ProductTaskSnapshot {
         // Stale and Interrupted have dedicated reducers with specific origin
         // states; record_terminal must not duplicate those paths.
         if matches!(terminal, TaskTerminal::Stale | TaskTerminal::Interrupted) {
-            return Err(TaskContractError::UnsupportedTerminal {
-                terminal,
-            });
+            return Err(TaskContractError::UnsupportedTerminal { terminal });
         }
         let status = match terminal {
             TaskTerminal::NeedsUserInput => TaskStatus::NeedsUserInput,

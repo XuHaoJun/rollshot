@@ -36,11 +36,11 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use serde::{Deserialize, Serialize};
 use rig_core::agent::run::StreamedTurnAssembler;
 use rig_core::completion::Usage;
 use rig_core::message::{AssistantContent, ToolCall as RigToolCall, ToolFunction};
 use rig_core::OneOrMany;
+use serde::{Deserialize, Serialize};
 // Rig stream types are used only by the crate-internal scripted `run` harness.
 #[cfg(test)]
 use rig_core::streaming::StreamedAssistantContent;
