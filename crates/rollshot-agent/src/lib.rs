@@ -1,3 +1,4 @@
+pub mod authority;
 pub mod domain;
 pub mod driver;
 pub mod model;
