@@ -21,8 +21,11 @@ schemars = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 sha2 = "0.10"
+toml = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 rollshot-automation-rquickjs = { path = "../rollshot-automation-rquickjs" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }

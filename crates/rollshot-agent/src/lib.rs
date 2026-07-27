@@ -1,9 +1,11 @@
+pub mod authority;
 pub mod domain;
 pub mod driver;
 pub mod model;
 pub mod product_task;
 pub(crate) mod provider;
 pub mod runtime;
+pub mod skills;
 pub mod tools;
 pub mod visual_annotation;
 

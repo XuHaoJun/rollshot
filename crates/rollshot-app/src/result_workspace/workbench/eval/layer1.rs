@@ -57,6 +57,7 @@ pub(crate) async fn replay_full_loop(
         0,
     )
     .unwrap();
+    let binding_for_authority = binding.clone();
     let tool_ctx = Arc::new(ToolContext::new_with_capability_handles(
         SessionId::new(1),
         RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
@@ -106,6 +107,36 @@ pub(crate) async fn replay_full_loop(
     .map_err(|e| format!("input: {e:?}"))?;
 
     // 4. Run the full loop against the replayed cassette.
+    let skill_use =
+        rollshot_agent::skills::bundled_smart_redaction_use().expect("bundled skill should load");
+    let authority_binding = rollshot_agent::authority::AuthorityBinding::new(
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap(),
+        rollshot_agent::product_task::TaskAttemptId::new(1),
+        RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        binding_for_authority,
+    );
+    let mut grants = std::collections::BTreeSet::new();
+    use rollshot_agent::authority::RunOperation;
+    grants.insert(RunOperation::ReadDraft);
+    grants.insert(RunOperation::WriteDraft);
+    grants.insert(RunOperation::InspectPreparedImage);
+    grants.insert(RunOperation::ExecuteRestrictedAutomation);
+    grants.insert(RunOperation::SubmitReviewCandidate);
+    grants.insert(RunOperation::RequestUserInput);
+    let mut caps = std::collections::BTreeSet::new();
+    caps.insert(rollshot_agent::authority::PreparedCapability::RegionFeatures);
+    let authority = rollshot_agent::authority::AuthoritySnapshot::new(
+        authority_binding,
+        "rollshot-eval-v1".into(),
+        rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
+        true,
+        caps,
+        grants,
+    )
+    .expect("eval authority should be valid");
     let runner = AgentRunner::new(AgentConfig::default());
     let mut session = rollshot_agent::domain::AgentSession::new(
         SessionId::new(1),
@@ -121,6 +152,8 @@ pub(crate) async fn replay_full_loop(
             &NullSink,
             &tool_ctx,
             &adapter,
+            &authority,
+            &skill_use,
         )
         .await;
 

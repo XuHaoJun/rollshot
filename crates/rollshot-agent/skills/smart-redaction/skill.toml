@@ -1,0 +1,6 @@
+schema_version = 1
+package_id = "smart-redaction"
+name = "Smart Redaction"
+description = "Author and improve reviewable Smart Redaction detector proposals."
+declared_version = "1"
+main = "SKILL.md"
