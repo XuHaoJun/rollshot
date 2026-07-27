@@ -1488,7 +1488,9 @@ mod tests {
         reporter
             .report_progress(progress(VideoImportPass::Extract), t + 2)
             .unwrap();
-        reporter.succeed(dummy_seed(&scratch_parent), t + 3).unwrap();
+        reporter
+            .succeed(dummy_seed(&scratch_parent), t + 3)
+            .unwrap();
 
         assert_eq!(
             home.import_jobs()
@@ -1514,8 +1516,7 @@ mod tests {
         let (_project_dir, mut home) = setup_home();
         let scratch_parent = tempfile::tempdir().unwrap();
         let (seed, scratch_root) = seed_with_root(&scratch_parent);
-        let (job_id, mut reporter, observed_cancel) =
-            home.bind_test_import_with_cancel_probe();
+        let (job_id, mut reporter, observed_cancel) = home.bind_test_import_with_cancel_probe();
         reporter.mark_running(10).unwrap();
 
         home.update(Message::CancelImport);
@@ -1599,8 +1600,7 @@ mod tests {
                 .unwrap_err(),
             rollshot_agent::jobs::JobCollectError::ResultExpired
         );
-        assert!(!format!("{:?}", home.import_jobs().watch()).contains(
-            scratch_root.to_string_lossy().as_ref()
-        ));
+        assert!(!format!("{:?}", home.import_jobs().watch())
+            .contains(scratch_root.to_string_lossy().as_ref()));
     }
 }
