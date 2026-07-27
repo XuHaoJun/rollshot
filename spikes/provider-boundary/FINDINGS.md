@@ -2,10 +2,12 @@
 
 ## Status
 
-- Lifecycle: active
+- Lifecycle: retained-reference
 - Decision owner: Rollshot agent-foundation Gate G0
 - Started: 2026-07-26
 - Last updated: 2026-07-27
+- Approved: 2026-07-27
+- Decision commit: `2b15a80`
 
 ## Decision
 
