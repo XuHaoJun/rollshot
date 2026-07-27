@@ -25,3 +25,4 @@ spikes/*/target/
 
 # Python virtual environment for tray icon generator.
 .venv/
+.pi-subagents/
