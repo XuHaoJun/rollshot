@@ -231,10 +231,11 @@ one `JobAuthoritySource`:
   detached Job start. A later workload must add a dedicated operation and exact
   task/run binding before enabling this source.
 
-Admission fails before allocating a Job record or launching work for missing
-control, kind/source mismatch, owner/task mismatch, terminal-capacity pressure,
-active-capacity exhaustion, or unsupported authority. No fallback converts an
-invalid agent admission into direct user authority.
+`JobControl` is required by the `admit` signature, so missing control is
+unrepresentable. Admission fails before allocating a Job record or launching
+work for kind/source mismatch, owner/task mismatch, terminal-capacity pressure,
+active-capacity exhaustion, unsupported authority, or registry shutdown. No
+fallback converts an invalid agent admission into direct user authority.
 
 This is the Gate G2 dependency: static skill availability and content cannot
 create direct-product authority, mutate the registry, or borrow
@@ -259,12 +260,14 @@ Rules:
 - `cancel` changes an active record to `Cancelling`, invokes the cancellation
   callback outside the registry lock, and returns a typed outcome;
 - only the worker may confirm `Cancelled`, after import cancellation has
-  returned and child/scratch cleanup has run;
+  returned and child/scratch cleanup has run; dropping the worker reporter
+  while `Cancelling` is confirmation because reporter-stack destruction follows
+  the concrete resource owners;
 - a worker success report received while `Cancelling` drops the result and
   terminalizes as `Cancelled`, because worker return confirms resource cleanup
   but the cancellation boundary forbids result acceptance;
-- worker lease loss before a terminal report becomes
-  `Failed(WorkerAbandoned)`, never success;
+- worker reporter loss from `Starting` or `Running` before a terminal report
+  becomes `Failed(WorkerAbandoned)`, never success;
 - every terminal is immutable; duplicate identical reports are idempotent,
   while conflicting terminal reports return a typed conflict;
 - late progress and terminal writes cannot revive a terminal or mutate a
@@ -285,10 +288,11 @@ failure category, start/update/terminal times, cancellation-request time,
 collection status, and revision. It never contains `R`, a cancellation callback,
 path, PID, child handle, or raw log.
 
-Diagnostics are bounded to 64 sanitized entries of at most 256 bytes each.
-Video import records stable categories and numeric summaries only; it does not
-copy the existing 64 KiB stderr ring into the registry. Overflow drops the
-oldest entry and increments a dropped count.
+Diagnostics are bounded to 64 code-owned entries of at most 256 bytes each.
+Messages are static, host-authored strings rather than runtime paths or process
+output. Video import records stable categories and numeric summaries only; it
+does not copy the existing 64 KiB stderr ring into the registry. Overflow drops
+the oldest entry and increments a dropped count.
 
 Subscribers treat notifications as hints. On any notification they query the
 latest snapshot; coalesced, duplicate, reordered, or dropped transient
@@ -304,14 +308,18 @@ before success returns a typed state error.
 V1 limits are fixed constants, not user configuration:
 
 - maximum 4 active Jobs per registry;
-- maximum 128 retained terminal records;
-- terminal/result TTL of 5 minutes after terminal time; and
+- maximum 4 combined active Jobs and uncollected successful results;
+- maximum 128 retained terminal metadata records;
+- logical terminal/result TTL of 5 minutes after terminal time; and
 - the diagnostic bounds above.
 
-Admission prunes expired terminal records first. If the terminal cap remains
-full, the oldest collected terminal is pruned before an uncollected success.
-An uncollected successful result may be dropped only at TTL expiry; expiry is an
-explicit `ResultExpired` collection outcome. Active Jobs are never evicted.
+Admission and collection prune expired terminal records first. If the terminal
+cap remains full, the oldest collected or result-free terminal is pruned before
+an uncollected success. An uncollected successful result may be dropped only at
+TTL expiry; expiry is an explicit `ResultExpired` collection outcome. TTL is
+observable immediately, while physical memory is reclaimed on the next
+registry mutation/prune or owner drop—no background timer is created. Active
+Jobs are never evicted, and admission reserves result capacity before launch.
 Tests inject timestamps directly rather than sleeping.
 
 ## 9. Action Guide migration
@@ -379,8 +387,8 @@ record is read, and no old process is attached or signalled by guessed identity.
 
 Shared errors are typed by boundary:
 
-- `JobAdmissionError`: invalid/missing control, kind-authority mismatch,
-  owner-task mismatch, unsupported authority, shutting down, active limit, or
+- `JobAdmissionError`: kind-authority mismatch, owner-task mismatch,
+  unsupported authority, shutting down, active limit, reserved-result limit, or
   terminal capacity;
 - `JobTransitionError`: not found, invalid transition, stale reporter, or
   terminal conflict;
@@ -388,8 +396,7 @@ Shared errors are typed by boundary:
 - `JobCollectError`: not found, not succeeded, already collected, result
   expired; and
 - `JobFailureCategory`: bounded stable categories including worker abandoned,
-  worker panic, cancellation cleanup failure, and mapped video-import error
-  categories.
+  worker panic, and mapped video-import error categories.
 
 No speculative global error abstraction is introduced. User-facing strings stay
 in `rollshot-app`; the registry stores stable categories.
@@ -419,16 +426,19 @@ Cover:
 - unique typed ID and exact metadata binding;
 - fail-closed missing, mismatched, stale, and unsupported admission;
 - active limit at 1/2/4 and fifth-job rejection;
+- combined active/uncollected-result reservation at the four-slot boundary;
 - every allowed lifecycle transition and every forbidden transition;
 - cancellation request versus confirmed cancellation;
 - no success/result after cancellation request;
-- worker lease abandonment;
+- worker lease abandonment from running and cancellation confirmation on
+  reporter drop while cancelling;
 - stale reporter and cross-Job update rejection;
 - progress revision monotonicity under duplicate/reordered notifications;
 - dropped/coalesced watch notification repaired from snapshot;
-- bounded diagnostics and dropped-entry count;
+- bounded static diagnostics and dropped-entry count;
 - collect-once result movement without cloning;
-- 5-minute TTL, 128-terminal cap, pruning order, and result expiry; and
+- 5-minute logical TTL, 128-terminal metadata cap, pruning order, result expiry,
+  and lazy physical reclamation; and
 - shutdown rejection of admission plus cancellation of all active Jobs.
 
 Use deterministic timestamps and synchronization barriers, not sleeps, except
@@ -502,8 +512,9 @@ Slice 4 passes only when all are true:
    reported before worker cleanup.
 7. Successful result collection is exactly once; cancelled, failed, stale, or
    expired results never open a timeline.
-8. Active Jobs are bounded; terminal records and uncollected results expire
-   after five minutes; no active Job is evicted.
+8. Active Jobs and heavy uncollected results are each bounded to the shared
+   four-slot reservation; terminal metadata is bounded to 128 records; terminal
+   and result access expires after five minutes; no active Job is evicted.
 9. Registry shutdown requests cancellation for all active work; startup begins
    empty, scavenges unlocked stale scratch, and performs no PID adoption or
    durable reattachment.
