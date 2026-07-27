@@ -552,6 +552,8 @@ pub enum TaskContractError {
         expected: TaskAttemptId,
         got: TaskAttemptId,
     },
+    #[error("unsupported terminal for record_terminal: {terminal:?}; use mark_stale or reconcile_interrupted instead")]
+    UnsupportedTerminal { terminal: TaskTerminal },
     #[error("run ID mismatch: expected {expected}, got {got}")]
     RunMismatch { expected: String, got: String },
     #[error("proposal ID mismatch: expected {expected}, got {got}")]
@@ -759,11 +761,16 @@ impl ProductTaskSnapshot {
                 attempted: now,
             });
         }
+        // Stale and Interrupted have dedicated reducers with specific origin
+        // states; record_terminal must not duplicate those paths.
+        if matches!(terminal, TaskTerminal::Stale | TaskTerminal::Interrupted) {
+            return Err(TaskContractError::UnsupportedTerminal {
+                terminal,
+            });
+        }
         let status = match terminal {
             TaskTerminal::NeedsUserInput => TaskStatus::NeedsUserInput,
             TaskTerminal::Cancelled => TaskStatus::Cancelled,
-            TaskTerminal::Interrupted => TaskStatus::Interrupted,
-            TaskTerminal::Stale => TaskStatus::Stale,
             ref other => TaskStatus::Failed {
                 terminal: other.clone(),
             },
@@ -1891,5 +1898,70 @@ mod tests {
         let json = serde_json::to_string(&payload).unwrap();
         let restored: SmartRedactionReviewPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(payload, restored);
+    }
+
+    // ------------------------------------------------------------------
+    // Finding 1: ConflictingAttempt test
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn mismatched_attempt_id_rejected_on_record_ready_for_review() {
+        let running = running_task_fixture();
+        // running_task_fixture uses attempt_id=1; pass metadata with attempt_id=99
+        let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(99));
+        assert!(matches!(
+            running.record_ready_for_review(meta, payload_fixture(), 30),
+            Err(TaskContractError::ConflictingAttempt {
+                expected: _,
+                got: _
+            })
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // Finding 3: Stale/Interrupted rejected by record_terminal
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn record_terminal_rejects_stale() {
+        let running = running_task_fixture();
+        assert!(matches!(
+            running.record_terminal(TaskTerminal::Stale, 30),
+            Err(TaskContractError::UnsupportedTerminal { .. })
+        ));
+    }
+
+    #[test]
+    fn record_terminal_rejects_interrupted() {
+        let running = running_task_fixture();
+        assert!(matches!(
+            running.record_terminal(TaskTerminal::Interrupted, 30),
+            Err(TaskContractError::UnsupportedTerminal { .. })
+        ));
+    }
+
+    #[test]
+    fn record_terminal_allows_other_terminals() {
+        let running = running_task_fixture();
+        // Cancelled, NeedsUserInput, and Failed variants should still work
+        let cancelled = running
+            .record_terminal(TaskTerminal::Cancelled, 30)
+            .unwrap();
+        assert_eq!(cancelled.status(), TaskStatus::Cancelled);
+
+        let needs_input = running_task_fixture()
+            .record_terminal(TaskTerminal::NeedsUserInput, 30)
+            .unwrap();
+        assert_eq!(needs_input.status(), TaskStatus::NeedsUserInput);
+
+        let budget = running_task_fixture()
+            .record_terminal(
+                TaskTerminal::BudgetExhausted {
+                    dimension: "model_calls".to_owned(),
+                },
+                30,
+            )
+            .unwrap();
+        assert!(matches!(budget.status(), TaskStatus::Failed { .. }));
     }
 }
