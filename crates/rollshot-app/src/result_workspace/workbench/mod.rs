@@ -112,11 +112,11 @@ pub enum RunKind {
 
 impl Default for WorkbenchState {
     fn default() -> Self {
-        use rollshot_agent::domain::{AgentSession, SessionId};
+        use rollshot_agent::domain::{AgentSession, RunId, SessionId};
         Self {
             preset: None,
             active_revision: None,
-            session: AgentSession::new(SessionId::new(0)),
+            session: AgentSession::new(SessionId::new(0), RunId::parse("run-00000000-0000-4000-8000-000000000000").unwrap()),
             run_state: RunState::default(),
             live_activity: Vec::new(),
             pending_proposal: None,

@@ -38,10 +38,10 @@ fn run(scene: image::RgbaImage) -> EditProposal {
         capability_handles: std::collections::BTreeMap::new(),
     };
     let proposal_ctx = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         provenance: Provenance {
-            source: ProvenanceSource::Agent { run_id: 1 },
+            source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000001".to_string() },
         },
     };
     let mut policy = ExecutionPolicy::smart_redaction_default(

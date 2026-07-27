@@ -104,7 +104,7 @@ mod tests {
             label: "test".into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 1 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000001".to_string() },
             },
         }
     }

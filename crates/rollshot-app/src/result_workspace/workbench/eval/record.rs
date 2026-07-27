@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use image::GenericImageView;
-use rollshot_agent::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType, SessionId};
+use rollshot_agent::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType, RunId, SessionId};
 use rollshot_agent::driver::{AgentConfig, AgentRunner, RunTerminalState};
 use rollshot_agent::runtime::{RunBudget, RunCancellation, RunEvent, RunEventSink};
 use rollshot_agent::tools::ToolContext;
@@ -282,6 +282,7 @@ pub(crate) async fn record_cassette(
     let cancellation = RunCancellation::new();
     let tool_ctx = Arc::new(ToolContext::new_with_capability_handles(
         SessionId::new(1),
+        RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
         String::new(),
         rollshot_automation::ValidationLimits::default(),
         rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -326,7 +327,7 @@ pub(crate) async fn record_cassette(
     .map_err(|e| format!("input: {e:?}"))?;
 
     let runner = AgentRunner::new(AgentConfig::default());
-    let mut session = rollshot_agent::domain::AgentSession::new(SessionId::new(1));
+    let mut session = rollshot_agent::domain::AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
     let terminal = runner
         .run_with_provider(
             input,

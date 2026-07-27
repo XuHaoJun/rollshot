@@ -6288,6 +6288,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "url",
+ "uuid",
  "winit",
  "wiremock",
  "zbus 4.4.0",

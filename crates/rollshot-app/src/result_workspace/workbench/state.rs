@@ -424,7 +424,7 @@ pub(crate) fn workbench_with_pending_candidate() -> super::WorkbenchState {
 
     let id = CandidateId(1);
     let proposal = EditProposal {
-        id: ProposalId(1),
+        id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         candidates: vec![ProposedCandidate {
             id,
@@ -534,7 +534,7 @@ mod tests {
             ProvenanceSource,
         };
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 ProposedCandidate {
@@ -629,7 +629,7 @@ mod tests {
         };
 
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 ProposedCandidate {
@@ -696,7 +696,7 @@ mod tests {
         // — must NOT count as a warning (it will not apply). cid(3): low-confidence
         // and still pending — the only will-apply warning.
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 ProposedCandidate {
@@ -811,7 +811,7 @@ mod gating_tests {
             })
             .collect();
         EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),

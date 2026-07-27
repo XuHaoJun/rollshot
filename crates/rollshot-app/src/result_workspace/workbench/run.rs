@@ -614,7 +614,7 @@ pub(crate) fn run_existing_preset_with_capabilities(
         capability_handles: bundle.capability_handles.clone(),
     };
     let ctx = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         provenance: Provenance {
             source: ProvenanceSource::Manual,
@@ -822,6 +822,7 @@ pub fn start_agent_run(
         );
         let tool_ctx = Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
             session_id,
+            session.run_id.clone(),
             active_source,
             validation_limits,
             policy,
@@ -956,7 +957,7 @@ mod tests {
             capability_handles: Default::default(),
         };
         let ctx = ProposalContext {
-            proposal_id: ProposalId(1),
+            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             provenance: Provenance {
                 source: ProvenanceSource::Manual,
@@ -1423,6 +1424,7 @@ mod prepare_tests {
         std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1620,6 +1622,7 @@ function main(input) {
         let ctx = std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1715,6 +1718,7 @@ function main(input) {
         let ctx = std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1886,7 +1890,7 @@ mod reducer_tests {
 
     fn proposal(cands: Vec<ProposedCandidate>) -> EditProposal {
         EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
@@ -1926,7 +1930,7 @@ mod reducer_tests {
             label: "agent".into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
             },
         }
     }
@@ -2275,7 +2279,7 @@ mod reducer_tests {
                 },
             },
             proposal: rollshot_edit_proposal::EditProposal {
-                id: rollshot_edit_proposal::ProposalId(1),
+                id: rollshot_edit_proposal::ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
                 base_document_state_id: 0,
                 candidates: vec![],
                 confidence_summary: rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[]),

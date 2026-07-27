@@ -23,7 +23,7 @@ pub fn build_review_decision(
 ) -> ReviewDecision {
     let (accepted, rejected, modified) = review.decision_sets();
     ReviewDecision {
-        proposal_id: proposal.id,
+        proposal_id: proposal.id.clone(),
         accepted,
         rejected,
         modified,
@@ -294,7 +294,7 @@ mod tests {
     }
     fn proposal(cands: Vec<ProposedCandidate>) -> EditProposal {
         EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
@@ -576,7 +576,7 @@ mod evidence_tests {
             label: label.into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
             },
         }
     }
@@ -621,7 +621,7 @@ mod evidence_tests {
             height: 8.0,
         };
         let p = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 agent_candidate(1, "email", original_a),
@@ -631,7 +631,7 @@ mod evidence_tests {
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9, 0.9, 1.0]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[
@@ -671,13 +671,13 @@ mod evidence_tests {
             height: 7.0,
         };
         let p = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![agent_candidate(1, "url-bar", bounds)],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);
@@ -696,13 +696,13 @@ mod evidence_tests {
             height: 77.0,
         };
         let p = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![manual_candidate(9, bounds)],
             confidence_summary: ConfidenceSummary::from_confidences(&[1.0]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(9)]);
@@ -721,13 +721,13 @@ mod evidence_tests {
             height: 10.0,
         };
         let p = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![agent_candidate(1, "email", original)],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);

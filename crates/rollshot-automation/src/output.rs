@@ -476,7 +476,7 @@ pub fn decode_proposal(
     )?;
 
     Ok(EditProposal {
-        id: context.proposal_id,
+        id: context.proposal_id.clone(),
         base_document_state_id: context.base_document_state_id,
         candidates,
         confidence_summary: ConfidenceSummary::from_confidences(&confidences),

@@ -10,10 +10,10 @@ use rollshot_image_document::{AnnotationId, ImagePoint, ImageRect};
 
 fn context() -> ProposalContext {
     ProposalContext {
-        proposal_id: ProposalId(7),
+        proposal_id: ProposalId::parse("proposal-00000007-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 11,
         provenance: Provenance {
-            source: ProvenanceSource::Agent { run_id: 42 },
+            source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-00000000002a".to_string() },
         },
     }
 }
@@ -76,7 +76,7 @@ fn decodes_complete_crud_union_in_output_order() {
     }"#;
     let proposal =
         decode_proposal(json, &input(&[AnnotationId(42)]), &context(), &allow_all()).unwrap();
-    assert_eq!(proposal.id, ProposalId(7));
+    assert_eq!(proposal.id, ProposalId::parse("proposal-00000007-0000-4000-8000-000000000000").unwrap());
     assert_eq!(proposal.base_document_state_id, 11);
     assert_eq!(proposal.candidates.len(), 8);
     assert!(matches!(

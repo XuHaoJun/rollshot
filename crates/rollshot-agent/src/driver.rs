@@ -1667,7 +1667,7 @@ fn map_budget_error_to_visual_annotation(
 #[allow(clippy::useless_vec)]
 pub(crate) mod tests {
     use super::*;
-    use crate::domain::SessionId;
+    use crate::domain::{RunId, SessionId};
     use crate::runtime::{EvidenceKind, NullEventSink, RunBudget};
     use crate::tools::{
         DryRunTool, EditSourceTool, GetContextSummaryTool, InspectImageContextTool, OcrTool,
@@ -1753,6 +1753,7 @@ pub(crate) mod tests {
         policy.proposal_limits.max_total_area_fraction = 0.5;
         Arc::new(ToolContext::new(
             SessionId::new(42),
+            RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
             source.into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
@@ -1923,7 +1924,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(42));
+        let mut session = AgentSession::new(SessionId::new(42), RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap());
         let cancel = RunCancellation::new();
         let sink = CollectingSink::new();
 
@@ -2045,7 +2046,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2078,7 +2079,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         cancel.cancel();
 
@@ -2122,7 +2123,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             input_tokens: 50,
@@ -2173,7 +2174,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             output_tokens: 10,
@@ -2231,7 +2232,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             tool_calls: 1,
@@ -2287,7 +2288,7 @@ pub(crate) mod tests {
             max_assistant_bytes: 100,
             ..AgentConfig::default()
         });
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2340,7 +2341,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             model_calls: 1,
@@ -2404,7 +2405,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             candidate_count: 0,
@@ -2468,7 +2469,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             affected_area: 100, // 400 > 100
@@ -2542,7 +2543,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             capability_calls: 2, // 5 > 2
@@ -2601,7 +2602,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2649,7 +2650,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2702,7 +2703,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2768,7 +2769,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2831,7 +2832,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2879,7 +2880,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2914,7 +2915,7 @@ pub(crate) mod tests {
             |_turn: usize| -> Option<Vec<StreamedAssistantContent<MockResponse>>> { None };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -2985,7 +2986,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         // validation_attempts budget of 1 should allow one validation
         let budget = RunBudget {
@@ -3045,7 +3046,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         // Budget allows 0 validation attempts — the validate_source call
         // in the turn should cause BudgetExhausted.
@@ -3104,7 +3105,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
 
         let result = runner
             .run(
@@ -3153,7 +3154,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -3195,7 +3196,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             wall_time: std::time::Duration::from_micros(1),
@@ -3264,7 +3265,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
 
         let result = runner
@@ -3313,7 +3314,7 @@ pub(crate) mod tests {
         };
 
         let runner = AgentRunner::new(AgentConfig::default());
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
         let cancel = RunCancellation::new();
         let budget = RunBudget {
             input_tokens: 100,
@@ -3411,7 +3412,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -3473,7 +3474,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -3525,7 +3526,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -3582,7 +3583,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -3772,7 +3773,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(7));
+            let mut session = AgentSession::new(SessionId::new(7), RunId::parse("run-00000000-0000-4000-8000-000000000007").unwrap());
             let cancel = RunCancellation::new();
 
             let _result = runner
@@ -4113,7 +4114,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
 
             let result = runner
                 .run(
@@ -4178,7 +4179,7 @@ pub(crate) mod tests {
                 max_argument_bytes: 100,
                 ..AgentConfig::default()
             });
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -4254,7 +4255,7 @@ pub(crate) mod tests {
                 max_result_bytes: 50,
                 ..AgentConfig::default()
             });
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -4310,7 +4311,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
 
             // Budget with 1 nanosecond wall time — expires immediately
             let budget = RunBudget {
@@ -4368,7 +4369,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner
@@ -4443,7 +4444,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
             let sink = CollectingSink::new();
 
@@ -4535,6 +4536,7 @@ pub(crate) mod tests {
             let cancel = RunCancellation::new();
             let ctx = Arc::new(ToolContext::new(
                 SessionId::new(42),
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
                 valid_source.into(),
                 rollshot_automation::ValidationLimits::default(),
                 policy,
@@ -4597,7 +4599,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(42));
+            let mut session = AgentSession::new(SessionId::new(42), RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap());
 
             let result = runner
                 .run(
@@ -4672,6 +4674,7 @@ pub(crate) mod tests {
             let valid_source = "function main(input) { return {candidates: []}; }";
             let ctx = Arc::new(ToolContext::new(
                 SessionId::new(1),
+                RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
                 valid_source.into(),
                 rollshot_automation::ValidationLimits::default(),
                 policy,
@@ -4738,7 +4741,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
 
             let result = runner
                 .run(
@@ -4826,7 +4829,7 @@ pub(crate) mod tests {
             };
 
             let runner = AgentRunner::new(AgentConfig::default());
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
             let sink = CollectingSink::new();
 
@@ -4971,7 +4974,7 @@ pub(crate) mod tests {
                 max_argument_bytes: 60,
                 ..AgentConfig::default()
             });
-            let mut session = AgentSession::new(SessionId::new(1));
+            let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
             let cancel = RunCancellation::new();
 
             let result = runner

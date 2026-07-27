@@ -26,7 +26,7 @@ pub(crate) fn run_golden_source(
         capability_handles: Default::default(),
     };
     let ctx = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         provenance: Provenance {
             source: ProvenanceSource::Manual,

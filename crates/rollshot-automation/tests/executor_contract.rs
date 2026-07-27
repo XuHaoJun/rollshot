@@ -50,10 +50,10 @@ fn executor_contract_checks_compatibility_and_cancellation() {
         capability_handles: Default::default(),
     };
     let context = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         provenance: Provenance {
-            source: ProvenanceSource::Agent { run_id: 1 },
+            source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000001".to_string() },
         },
     };
     let policy = ExecutionPolicy::smart_redaction_default(

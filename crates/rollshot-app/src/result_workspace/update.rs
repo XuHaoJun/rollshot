@@ -2015,9 +2015,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     let revision_note = params.revision_note.clone();
                     let image = state.document.image.source().clone();
                     let session_id = workbench.session.session_id;
+                    let run_id = rollshot_agent::domain::RunId::parse(
+                        format!("run-{}", uuid::Uuid::new_v4()),
+                    )
+                    .expect("v4 UUID is valid");
                     let session = std::mem::replace(
                         &mut workbench.session,
-                        rollshot_agent::domain::AgentSession::new(session_id),
+                        rollshot_agent::domain::AgentSession::new(session_id, run_id),
                     );
                     match super::workbench::run::start_agent_run(
                         &params,

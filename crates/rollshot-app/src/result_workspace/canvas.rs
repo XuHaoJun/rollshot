@@ -1400,7 +1400,7 @@ mod tests {
         };
 
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![ProposedCandidate {
                 id: CandidateId(1),

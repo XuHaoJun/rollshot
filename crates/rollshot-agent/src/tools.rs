@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::SessionId;
+use crate::domain::{RunId, SessionId};
 use crate::runtime::{
     DraftState, EvidenceKind, RunCancellation, SourceDiffLine, SourceDiffLineKind,
     SourceDiffSummary,
@@ -565,6 +565,7 @@ pub struct ToolContext {
     pub execution_policy: rollshot_automation::ExecutionPolicy,
     pub automation_cancellation: rollshot_automation::CancellationFlag,
     pub session_id: SessionId,
+    pub run_id: RunId,
     pub image_dims: (u32, u32),
     pub capability_handles: BTreeMap<String, String>,
     pub pending_ready_for_review: Mutex<Option<crate::driver::ReadyForReview>>,
@@ -583,6 +584,7 @@ impl ToolContext {
     /// primitive (§10 / D2).
     pub fn new(
         session_id: SessionId,
+        run_id: RunId,
         initial_source: String,
         validation_limits: rollshot_automation::ValidationLimits,
         execution_policy: rollshot_automation::ExecutionPolicy,
@@ -591,6 +593,7 @@ impl ToolContext {
     ) -> Self {
         Self::new_with_capability_handles(
             session_id,
+            run_id,
             initial_source,
             validation_limits,
             execution_policy,
@@ -602,6 +605,7 @@ impl ToolContext {
 
     pub fn new_with_capability_handles(
         session_id: SessionId,
+        run_id: RunId,
         initial_source: String,
         validation_limits: rollshot_automation::ValidationLimits,
         execution_policy: rollshot_automation::ExecutionPolicy,
@@ -616,6 +620,7 @@ impl ToolContext {
             execution_policy,
             automation_cancellation: cancellation.automation_flag().clone(),
             session_id,
+            run_id,
             image_dims,
             capability_handles,
             pending_ready_for_review: Mutex::new(None),
@@ -942,11 +947,11 @@ impl Tool for DryRunTool {
                     })?;
 
             let proposal_ctx = rollshot_automation::ProposalContext {
-                proposal_id: rollshot_edit_proposal::ProposalId(1),
+                proposal_id: rollshot_edit_proposal::ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
                 base_document_state_id: 0,
                 provenance: rollshot_edit_proposal::Provenance {
                     source: rollshot_edit_proposal::ProvenanceSource::Agent {
-                        run_id: self.ctx.session_id.get(),
+                        run_id: self.ctx.run_id.as_str().to_owned(),
                     },
                 },
             };
@@ -1973,6 +1978,7 @@ pub(crate) mod tests {
         policy.proposal_limits.max_total_area_fraction = 0.5;
         Arc::new(ToolContext::new_with_capability_handles(
             SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
             source.into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
@@ -2066,6 +2072,7 @@ pub(crate) mod tests {
         );
         let ctx = ToolContext::new(
             SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
             "src".into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
