@@ -250,4 +250,20 @@ mod tests {
         assert!(coordinator.pending_path().is_none());
         assert!(coordinator.operation_id().is_none());
     }
+
+    #[test]
+    fn cancel_signals_worker_before_coordinator_detaches() {
+        let mut coordinator = ImportCoordinator::default();
+        let id = coordinator.begin(PathBuf::from("test.mp4"));
+        let cancellation = VideoImportCancellation::default();
+        let observed = cancellation.clone();
+        coordinator.set_cancellation(cancellation);
+
+        coordinator.cancel(id);
+
+        assert!(observed.is_cancelled());
+        assert_eq!(coordinator.state(), ImportState::Idle);
+        assert!(coordinator.operation_id().is_none());
+        assert!(coordinator.pending_path().is_none());
+    }
 }
