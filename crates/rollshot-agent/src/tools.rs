@@ -585,6 +585,7 @@ impl ToolContext {
     /// same `RunCancellation` passed to [`AgentRunner::run`](crate::driver::AgentRunner)
     /// must be passed here. There is no second, independent cancellation
     /// primitive (§10 / D2).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: SessionId,
         run_id: RunId,
@@ -610,6 +611,7 @@ impl ToolContext {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_capability_handles(
         session_id: SessionId,
         run_id: RunId,

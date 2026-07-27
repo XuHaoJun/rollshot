@@ -864,8 +864,8 @@ async fn persist_terminal_outcome(
                 },
             };
             // Serialize proposal for persistence alongside the review payload.
-            let proposal_bytes = serde_json::to_vec(&ready.proposal)
-                .map_err(|e| format!("serialize proposal: {e}"));
+            let proposal_bytes =
+                serde_json::to_vec(&ready.proposal).map_err(|e| format!("serialize proposal: {e}"));
             let proposal_payload = match proposal_bytes {
                 Ok(b) => Some(b),
                 Err(e) => return Some(e),
@@ -3562,12 +3562,7 @@ mod reducer_tests {
 
         let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
         running
-            .record_ready_for_review(
-                metadata,
-                payload,
-                Some(proposal_bytes),
-                now + 2,
-            )
+            .record_ready_for_review(metadata, payload, Some(proposal_bytes), now + 2)
             .unwrap()
     }
 

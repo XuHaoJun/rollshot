@@ -758,7 +758,6 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-
     /// Transition: Running → terminal Failed status.
     pub fn record_terminal(
         &self,
