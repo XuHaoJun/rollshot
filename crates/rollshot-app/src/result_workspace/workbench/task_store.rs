@@ -331,7 +331,7 @@ impl TaskStore {
         })?;
 
         // Validate schema version.
-        if snapshot.store_schema_version() > 1 {
+        if snapshot.store_schema_version() > 2 {
             return Err(TaskStoreError::UnsupportedSchema {
                 version: snapshot.store_schema_version(),
             });
@@ -817,11 +817,15 @@ fn truncate_error(s: &str) -> String {
 mod tests {
     use super::*;
     use rollshot_agent::domain::RunId;
+    use rollshot_agent::authority::{AuthoritySnapshotReceiptV1, DisclosureCeiling,
+        PreparedCapability, RunOperation};
     use rollshot_agent::product_task::{
         ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode,
         PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1,
-        SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind, TaskTerminal,
+        RunConfigFingerprintV2, RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt,
+        TaskAttemptId, TaskKind, TaskTerminal, canonical_config_v2_digest, canonical_payload_bytes,
     };
+    use rollshot_agent::skills::{SkillInvocationKind, SkillUseReceiptV1};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
@@ -958,6 +962,135 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = TaskStore::open_with_failpoint(dir.path(), fp).unwrap();
         (s, dir)
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn authority_receipt_fixture() -> AuthoritySnapshotReceiptV1 {
+        AuthoritySnapshotReceiptV1 {
+            schema_version: 1,
+            task_id: "task-00000000-0000-4000-8000-000000000001".to_owned(),
+            attempt_id: 1,
+            run_id: "run-00000000-0000-4000-8000-000000000001".to_owned(),
+            policy_revision: "rev-1".to_owned(),
+            disclosure_ceiling: DisclosureCeiling::FullScreenshot,
+            existing_product_capture: false,
+            document_binding_digest: "ab".repeat(32),
+            prepared_capabilities: vec![PreparedCapability::Ocr],
+            granted_operations: vec![RunOperation::SubmitReviewCandidate],
+            snapshot_digest: "cd".repeat(32),
+            created_at_unix_ms: 10,
+        }
+    }
+
+    fn skill_use_receipt_fixture() -> SkillUseReceiptV1 {
+        SkillUseReceiptV1 {
+            schema_version: 1,
+            source_authority: "authority://test".to_owned(),
+            package_id: "package-1".to_owned(),
+            main_resource_id: "resource-1".to_owned(),
+            package_digest: "ab".repeat(32),
+            declared_version: Some("1.0.0".to_owned()),
+            invocation_kind: SkillInvocationKind::HostExplicit,
+            resolved_at_unix_ms: 10,
+        }
+    }
+
+    fn run_contract_fixture() -> RunContractReceiptV1 {
+        RunContractReceiptV1 {
+            authority: authority_receipt_fixture(),
+            skill_use: skill_use_receipt_fixture(),
+            bound_at_unix_ms: 20,
+        }
+    }
+
+    fn v2_metadata_with_contract(
+        contract: &RunContractReceiptV1,
+    ) -> ProductArtifactMetadata {
+        let payload = payload_fixture();
+        let payload_bytes = canonical_payload_bytes(&payload).unwrap();
+        let payload_sha = {
+            let hash = Sha256::digest(&payload_bytes);
+            hex_encode(&hash)
+        };
+        let config = RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("wall_time_ms".to_owned(), 30_000);
+                m.insert("model_calls".to_owned(), 10);
+                m
+            },
+            authority_snapshot_digest: contract.authority.snapshot_digest.clone(),
+            skill_use: contract.skill_use.clone(),
+        };
+        let config_digest = canonical_config_v2_digest(&config).unwrap();
+        ProductArtifactMetadata::new_v2(
+            artifact_id_fixture(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            2,
+            payload_sha,
+            source_binding_fixture(),
+            task_id_fixture(),
+            TaskAttemptId::new(1),
+            run_id_fixture(),
+            "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+            "anthropic".to_owned(),
+            "claude-sonnet-4-20250514".to_owned(),
+            config_digest,
+            3,
+            0.42,
+            15,
+            contract.clone(),
+        )
+    }
+
+    fn running_with_contract_fixture() -> ProductTaskSnapshot {
+        let created = ProductTaskSnapshot::new_v2(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            10,
+        )
+        .unwrap();
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+        let receipt = run_contract_fixture();
+        running.bind_run_contract(receipt, 25).unwrap()
+    }
+
+    fn v2_ready_task_fixture() -> ProductTaskSnapshot {
+        let bound = running_with_contract_fixture();
+        let contract = bound.active_run_contract().unwrap().clone();
+        let meta = v2_metadata_with_contract(&contract);
+        bound
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .unwrap()
+    }
+
+    fn write_literal_v1_running_snapshot(store: &TaskStore) -> PathBuf {
+        let snapshot = running_task_fixture();
+        let path = store.task_path(snapshot.task_id()).unwrap();
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    fn load_snapshot_with_schema(version: u32) -> Result<ProductTaskSnapshot, TaskStoreError> {
+        let (store, _dir) = store();
+        let snapshot = running_task_fixture();
+        store.create(&snapshot).unwrap();
+        let path = store.task_path(snapshot.task_id()).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        raw["store_schema_version"] = serde_json::json!(version);
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        store.load(snapshot.task_id())
     }
 
     // ------------------------------------------------------------------
@@ -1517,5 +1650,93 @@ mod tests {
         let lock_path = store.config_dir().join("agent-tasks").join(".lock");
         let mode = fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    // ------------------------------------------------------------------
+    // V2 persistence and V1 compatibility tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn startup_reads_v1_without_rewriting_or_synthesizing_provenance() {
+        let (store, _dir) = store();
+        let path = write_literal_v1_running_snapshot(&store);
+        let before = fs::read(&path).unwrap();
+        let loaded = store.load(&task_id_fixture()).unwrap();
+        assert_eq!(loaded.store_schema_version(), 1);
+        assert!(loaded.attempts()[0].run_contract().is_none());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn schema_three_fails_closed() {
+        let error = load_snapshot_with_schema(3).unwrap_err();
+        assert!(matches!(error, TaskStoreError::UnsupportedSchema { version: 3 }));
+    }
+
+    #[test]
+    fn v2_create_and_load_round_trip() {
+        let (store, _dir) = store();
+        let bound = running_with_contract_fixture();
+        store.create(&bound).unwrap();
+        let loaded = store.load(bound.task_id()).unwrap();
+        assert_eq!(loaded.store_schema_version(), 2);
+        assert_eq!(loaded, bound);
+        assert!(loaded.active_run_contract().is_some());
+        assert_eq!(
+            loaded.active_run_contract(),
+            bound.active_run_contract()
+        );
+    }
+
+    #[test]
+    fn v2_cas_round_trip_with_bound_contract() {
+        let (store, _dir) = store();
+        let bound = running_with_contract_fixture();
+        store.create(&bound).unwrap();
+
+        let contract = bound.active_run_contract().unwrap().clone();
+        let meta = v2_metadata_with_contract(&contract);
+        let ready = bound
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .unwrap();
+
+        assert_eq!(
+            store.compare_and_swap(&bound, &ready).unwrap(),
+            StoreCommitOutcome::Committed
+        );
+
+        let loaded = store.load(bound.task_id()).unwrap();
+        assert_eq!(loaded.store_schema_version(), 2);
+        assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+        assert_eq!(loaded.active_run_contract(), Some(&contract));
+    }
+
+    #[test]
+    fn v2_ready_task_survives_reconciliation() {
+        let (store, _dir) = store();
+        let ready = v2_ready_task_fixture();
+        store.create_without_failpoint(&ready).unwrap();
+
+        let binding = source_binding_fixture();
+        store.reconcile_for_source(&binding, 100).unwrap();
+
+        // Same source binding — ready task should remain ReadyForReview.
+        let loaded = store.load(ready.task_id()).unwrap();
+        assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+        assert_eq!(loaded.store_schema_version(), 2);
+    }
+
+    #[test]
+    fn v1_ready_task_survives_reconciliation() {
+        let (store, _dir) = store();
+        let ready = ready_task_fixture();
+        store.create_without_failpoint(&ready).unwrap();
+
+        let binding = source_binding_fixture();
+        store.reconcile_for_source(&binding, 100).unwrap();
+
+        let loaded = store.load(ready.task_id()).unwrap();
+        assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+        assert_eq!(loaded.store_schema_version(), 1);
     }
 }
