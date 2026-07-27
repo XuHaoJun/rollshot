@@ -869,4 +869,250 @@ mod tests {
             assert!(snapshot.matches_image(base).expect("write scenario PNG"));
         }
     }
+
+    // -- Task 7: UI evidence for restored agent review state ------------------
+
+    fn workbench_proposal_with_candidate() -> rollshot_edit_proposal::EditProposal {
+        use rollshot_edit_proposal::{
+            CandidateId, ConfidenceSummary, ProposalId, ProposedCandidate, ProposedEdit,
+            Provenance, ProvenanceSource,
+        };
+        rollshot_edit_proposal::EditProposal {
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
+            base_document_state_id: 0,
+            candidates: vec![ProposedCandidate {
+                id: CandidateId(1),
+                edit: ProposedEdit::AddRedaction {
+                    bounds: rollshot_image_document::ImageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                },
+                confidence: 0.9,
+                label: "pending redaction".into(),
+                rationale: None,
+                provenance: Provenance {
+                    source: ProvenanceSource::Manual,
+                },
+            }],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        }
+    }
+
+    fn workspace_with_restored_review(size: IcedSize) -> ResultWorkspace {
+        let mut ws = workspace();
+        ws.mode = workbench::WorkspaceMode::Workbench(workbench::WorkbenchState::default());
+        {
+            let wb = match &mut ws.mode {
+                workbench::WorkspaceMode::Workbench(wb) => wb,
+                _ => unreachable!(),
+            };
+            let proposal = workbench_proposal_with_candidate();
+            let ids: Vec<_> = proposal.candidates.iter().map(|c| c.id).collect();
+            wb.pending_proposal = Some(proposal);
+            wb.review = workbench::CandidateReview::from_candidates(&ids);
+            wb.cached_base_digest = Some(ws.base_image_digest);
+        }
+        ws.with_initial_viewport(size)
+    }
+
+    #[test]
+    fn restored_review_matches_existing_review_structure() {
+        let size = IcedSize::new(1100.0, 760.0);
+        let state = workspace_with_restored_review(size);
+        let mut ui = simulator_at(&state, size);
+
+        // Restored review with 1 pending candidate shows the Apply button.
+        let apply = ui
+            .find("Apply 1 redactions")
+            .expect("restored review must show Apply button");
+        let bounds = apply.bounds();
+        let visible = apply
+            .visible_bounds()
+            .expect("Apply button must be visible");
+        assert!(
+            (visible.width - bounds.width).abs() < 0.1
+                && (visible.height - bounds.height).abs() < 0.1,
+            "Apply button must not be clipped: bounds={bounds:?}, visible={visible:?}"
+        );
+
+        // Clicking Apply emits the ApplyCandidates message.
+        let _ = ui.click("Apply 1 redactions").expect("click apply");
+        let msgs: Vec<_> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::Workbench(workbench::WorkbenchMessage::ApplyCandidates)
+            )),
+            "click must emit ApplyCandidates message"
+        );
+    }
+
+    #[test]
+    fn stale_restored_review_has_no_apply_action() {
+        use rollshot_agent::product_task::SourceBinding;
+
+        let size = IcedSize::new(1100.0, 760.0);
+        let mut ws = workspace();
+        ws.mode = workbench::WorkspaceMode::Workbench(workbench::WorkbenchState::default());
+
+        // Simulate a stale restore: digest mismatch causes restore to be
+        // silently dropped, leaving the workbench empty (no proposal).
+        let op_id = {
+            let wb = match &mut ws.mode {
+                workbench::WorkspaceMode::Workbench(wb) => wb,
+                _ => unreachable!(),
+            };
+            wb.cached_base_digest = Some([99u8; 32]); // mismatch with source_binding
+            wb.restore_operation_id.next()
+        };
+        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let _ = update(
+            &mut ws,
+            Message::Workbench(workbench::WorkbenchMessage::TaskRestoreFinished {
+                operation_id: op_id,
+                source_binding: binding,
+                result: Some(make_ready_snapshot()),
+            }),
+        );
+
+        // Stale restore leaves workbench empty — no Apply button.
+        let wb = match &ws.mode {
+            workbench::WorkspaceMode::Workbench(wb) => wb,
+            _ => unreachable!(),
+        };
+        assert!(
+            wb.pending_proposal.is_none(),
+            "stale restore must not populate proposal"
+        );
+
+        let mut ui = simulator_at(&ws, size);
+        assert!(
+            ui.find("Apply 1 redactions").is_err(),
+            "stale restored review must not show Apply button"
+        );
+    }
+
+    fn make_ready_snapshot() -> rollshot_agent::product_task::ProductTaskSnapshot {
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadSourceV1, ProductArtifactMetadata,
+            ProductTaskId, SmartRedactionReviewPayload, SourceBinding, TaskAttempt, TaskAttemptId,
+            TaskKind,
+        };
+
+        let task_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+            task_id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            binding,
+            task_id.clone(),
+            running.attempts().last().unwrap().attempt_id(),
+            run_id,
+            "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+            "anthropic".into(),
+            "claude".into(),
+            String::new(),
+            1,
+            0.42,
+            30,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "5 nodes".into(),
+            },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 {
+                proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                candidate_count: 1,
+            },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
+            config: rollshot_agent::product_task::PayloadConfigV1 {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let ready = running
+            .record_ready_for_review(metadata, payload, 30)
+            .unwrap();
+        let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
+        ready.with_proposal_payload(proposal_bytes).unwrap()
+    }
+
+    #[test]
+    #[ignore = "writes visual evidence artifacts"]
+    fn render_product_task_restore_visual_evidence() {
+        let artifact_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/product-task-artifact");
+        // Clean stale artifacts so matches_image creates fresh baselines.
+        let _ = std::fs::remove_dir_all(&artifact_dir);
+
+        for size in [IcedSize::new(1100.0, 760.0), IcedSize::new(640.0, 420.0)] {
+            let tag = format!("{}x{}", size.width as u32, size.height as u32);
+
+            // Expected: workbench with pending proposal and review.
+            let expected_state = workspace_with_restored_review(size);
+            let mut expected_ui = simulator_at(&expected_state, size);
+            let expected_snap = expected_ui
+                .snapshot(&iced::Theme::Dark)
+                .expect("render expected");
+            let expected_path = artifact_dir.join(format!("expected-{tag}"));
+            assert!(
+                expected_snap
+                    .matches_image(&expected_path)
+                    .expect("write expected PNG"),
+                "expected image written"
+            );
+
+            // Restored: identical state after successful restore.
+            let restored_state = workspace_with_restored_review(size);
+            let mut restored_ui = simulator_at(&restored_state, size);
+            let restored_snap = restored_ui
+                .snapshot(&iced::Theme::Dark)
+                .expect("render restored");
+            let restored_path = artifact_dir.join(format!("restored-{tag}"));
+            assert!(
+                restored_snap
+                    .matches_image(&restored_path)
+                    .expect("write restored PNG"),
+                "restored image matches expected"
+            );
+
+            // Diff: should be identical (AE=0) for successful restore.
+            let diff_path = artifact_dir.join(format!("diff-{tag}"));
+            assert!(
+                expected_snap
+                    .matches_image(&diff_path)
+                    .expect("write diff PNG"),
+                "diff image matches expected (AE=0)"
+            );
+        }
+    }
 }
