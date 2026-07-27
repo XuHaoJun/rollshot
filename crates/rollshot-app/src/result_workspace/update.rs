@@ -1963,21 +1963,259 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::ApplyCandidates => {
-                    if let Some(proposal) = workbench.pending_proposal.clone() {
+                    if workbench.review_operation_active {
+                        return Task::none();
+                    }
+                    if workbench.pending_proposal.is_none() {
+                        return Task::none();
+                    }
+                    // Phase 1: Mark operation active and disable gestures.
+                    let token = workbench.review_operation_id.next();
+                    workbench.review_operation_active = true;
+
+                    // If no task store, synchronous apply (tests / no config dir).
+                    if workbench.task_store.is_none() {
+                        let proposal = workbench.pending_proposal.clone().unwrap();
                         match super::workbench::review::apply_candidates(
                             &proposal,
                             &workbench.review,
                             &mut state.document.image,
                         ) {
-                            Ok(()) => {
+                            Ok(_outcome) => {
                                 workbench.pending_proposal = None;
-                                workbench.review = super::workbench::CandidateReview::default();
+                                workbench.review =
+                                    super::workbench::CandidateReview::default();
                                 workbench.selected_candidate = None;
                                 workbench.corrections_non_empty = false;
                             }
                             Err(e) => workbench.error = Some(e),
                         }
+                        workbench.review_operation_active = false;
+                        return Task::none();
                     }
+
+                    // Async path: CAS ReadyForReview → Applying.
+                    let store = workbench.task_store.as_ref().unwrap().clone();
+                    let snapshot = workbench
+                        .cached_task_snapshot
+                        .clone()
+                        .expect("task store present implies cached snapshot");
+                    Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                let now = chrono::Utc::now().timestamp_millis();
+                                match snapshot.begin_apply(now) {
+                                    Err(e) => Err(format!("begin_apply: {e}")),
+                                    Ok(applying) => {
+                                        store
+                                            .compare_and_swap(&snapshot, &applying)
+                                            .map_err(|e| format!("CAS: {e}"))?;
+                                        Ok(applying)
+                                    }
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("spawn: {e}")))
+                        },
+                        move |result| {
+                            Message::Workbench(
+                                super::workbench::WorkbenchMessage::ApplyingPersisted {
+                                    operation_id: token,
+                                    outcome: result.map(|_| ()),
+                                },
+                            )
+                        },
+                    )
+                }
+                super::workbench::WorkbenchMessage::ApplyingPersisted {
+                    operation_id,
+                    outcome,
+                } => {
+                    // Stale guard.
+                    if operation_id != workbench.review_operation_id {
+                        return Task::none();
+                    }
+                    if let Err(e) = outcome {
+                        workbench.error =
+                            Some(super::workbench::WorkbenchError::StorePersist {
+                                message: e,
+                            });
+                        workbench.review_operation_active = false;
+                        return Task::none();
+                    }
+
+                    // Phase 2: apply candidates to document.
+                    let Some(proposal) = workbench.pending_proposal.clone() else {
+                        workbench.review_operation_active = false;
+                        return Task::none();
+                    };
+                    let apply_result = super::workbench::review::apply_candidates(
+                        &proposal,
+                        &workbench.review,
+                        &mut state.document.image,
+                    );
+
+                    match apply_result {
+                        Ok(outcome) => {
+                            // Build receipt.
+                            let (accepted, rejected, _) =
+                                workbench.review.decision_sets();
+                            let receipt =
+                                rollshot_agent::product_task::ReviewReceipt {
+                                    artifact_id: workbench
+                                        .cached_task_snapshot
+                                        .as_ref()
+                                        .map(|s| {
+                                            s.artifact_metadata()
+                                                .map(|m| m.artifact_id().clone())
+                                        })
+                                        .flatten()
+                                        .unwrap_or_else(|| {
+                                            rollshot_agent::product_task::ArtifactId::parse(
+                                                "artifact-00000000-0000-4000-8000-000000000000",
+                                            )
+                                            .unwrap()
+                                        }),
+                                    artifact_revision: workbench
+                                        .cached_task_snapshot
+                                        .as_ref()
+                                        .map(|s| {
+                                            s.artifact_metadata()
+                                                .map(|m| m.artifact_revision())
+                                        })
+                                        .flatten()
+                                        .unwrap_or(
+                                            rollshot_agent::product_task::ArtifactRevision::new(
+                                                0,
+                                            ),
+                                        ),
+                                    proposal_id: proposal.id.as_str().to_owned(),
+                                    applied_candidates: accepted
+                                        .iter()
+                                        .map(|c| c.0 as u32)
+                                        .collect(),
+                                    rejected_candidates: rejected
+                                        .iter()
+                                        .map(|c| c.0 as u32)
+                                        .collect(),
+                                    local_delta: outcome.local_delta.clone(),
+                                    resulting_document_state_id:
+                                        Some(outcome.post_state as u32),
+                                    resulting_document_digest: None,
+                                    decided_at_unix_ms: chrono::Utc::now()
+                                        .timestamp_millis(),
+                                };
+
+                            // CAS Applying → Completed.
+                            if let Some(snapshot) = workbench.cached_task_snapshot.take() {
+                                if let Some(store) = workbench.task_store.clone() {
+                                    let token2 = operation_id;
+                                    let now =
+                                        chrono::Utc::now().timestamp_millis();
+                                    let complete_result =
+                                        snapshot.complete_apply(receipt, now);
+                                    match complete_result {
+                                        Ok(completed) => {
+                                            return Task::perform(
+                                                async move {
+                                                    tokio::task::spawn_blocking(
+                                                        move || {
+                                                            store
+                                                                .compare_and_swap(
+                                                                    &snapshot,
+                                                                    &completed,
+                                                                )
+                                                                .map_err(|e| {
+                                                                    format!(
+                                                                        "CAS: {e}"
+                                                                    )
+                                                                })
+                                                        },
+                                                    )
+                                                    .await
+                                                    .unwrap_or_else(|e| {
+                                                        Err(format!(
+                                                            "spawn: {e}"
+                                                        ))
+                                                    })
+                                                },
+                                                move |res| {
+                                                    Message::Workbench(
+                                                        super::workbench::WorkbenchMessage::ReceiptPersisted {
+                                                            operation_id: token2,
+                                                            outcome: res.map(|_| ()),
+                                                        },
+                                                    )
+                                                },
+                                            );
+                                        }
+                                        Err(e) => {
+                                            workbench.error = Some(
+                                                super::workbench::WorkbenchError::StorePersist {
+                                                    message: format!(
+                                                        "complete_apply: {e}"
+                                                    ),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // No store or CAS setup — commit locally.
+                            workbench.pending_proposal = None;
+                            workbench.review =
+                                super::workbench::CandidateReview::default();
+                            workbench.selected_candidate = None;
+                            workbench.corrections_non_empty = false;
+                            workbench.review_operation_active = false;
+                        }
+                        Err(e) => {
+                            // Pre-commit failure: undo if document changed.
+                            if state.document.image.can_undo() {
+                                state.document.image.undo();
+                            }
+                            workbench.error = Some(e);
+                            workbench.review_operation_active = false;
+                        }
+                    }
+                    Task::none()
+                }
+                super::workbench::WorkbenchMessage::ReceiptPersisted {
+                    operation_id,
+                    outcome,
+                } => {
+                    // Stale guard.
+                    if operation_id != workbench.review_operation_id {
+                        return Task::none();
+                    }
+                    match outcome {
+                        Ok(()) => {
+                            workbench.pending_proposal = None;
+                            workbench.review =
+                                super::workbench::CandidateReview::default();
+                            workbench.selected_candidate = None;
+                            workbench.corrections_non_empty = false;
+                        }
+                        Err(e) => {
+                            // Commit-visible: keep document/task completed,
+                            // surface warning.
+                            workbench.error = Some(
+                                super::workbench::WorkbenchError::StorePersist {
+                                    message: e,
+                                },
+                            );
+                            // Still clear the local UI state since document
+                            // was mutated successfully.
+                            workbench.pending_proposal = None;
+                            workbench.review =
+                                super::workbench::CandidateReview::default();
+                            workbench.selected_candidate = None;
+                            workbench.corrections_non_empty = false;
+                        }
+                    }
+                    workbench.review_operation_active = false;
+                    workbench.cached_task_snapshot = None;
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateSelected(id) => {
@@ -1989,6 +2227,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateDeleted(id) => {
+                    if workbench.review_operation_active {
+                        return Task::none();
+                    }
                     workbench.review.mark_rejected(id);
                     if workbench.selected_candidate == Some(id) {
                         workbench.selected_candidate = None;
@@ -1997,11 +2238,17 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateUnrejected(id) => {
+                    if workbench.review_operation_active {
+                        return Task::none();
+                    }
                     workbench.review.mark_pending(id);
                     workbench.recompute_corrections_non_empty();
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::CandidateMoved { id, new_bounds } => {
+                    if workbench.review_operation_active {
+                        return Task::none();
+                    }
                     workbench.review.mark_modified(
                         id,
                         rollshot_edit_proposal::ProposedEdit::AddRedaction { bounds: new_bounds },
@@ -2010,6 +2257,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::AddManualCandidate { bounds } => {
+                    if workbench.review_operation_active {
+                        return Task::none();
+                    }
                     let max_proposal_id = workbench
                         .pending_proposal
                         .as_ref()
@@ -2295,6 +2545,58 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::DiscardCandidates => {
+                    // Persist rejection before clearing UI.
+                    if let Some(snapshot) = workbench.cached_task_snapshot.as_ref() {
+                        if let Some(store) = workbench.task_store.clone() {
+                            let receipt =
+                                rollshot_agent::product_task::ReviewReceipt {
+                                    artifact_id: snapshot
+                                        .artifact_metadata()
+                                        .map(|m| m.artifact_id().clone())
+                                        .unwrap_or_else(|| {
+                                            rollshot_agent::product_task::ArtifactId::parse(
+                                                "artifact-00000000-0000-4000-8000-000000000000",
+                                            )
+                                            .unwrap()
+                                        }),
+                                    artifact_revision: snapshot
+                                        .artifact_metadata()
+                                        .map(|m| m.artifact_revision())
+                                        .unwrap_or(
+                                            rollshot_agent::product_task::ArtifactRevision::new(
+                                                0,
+                                            ),
+                                        ),
+                                    proposal_id: workbench
+                                        .pending_proposal
+                                        .as_ref()
+                                        .map(|p| p.id.as_str().to_owned())
+                                        .unwrap_or_default(),
+                                    applied_candidates: Vec::new(),
+                                    rejected_candidates: workbench
+                                        .review
+                                        .per_candidate
+                                        .keys()
+                                        .map(|c| c.0 as u32)
+                                        .collect(),
+                                    local_delta:
+                                        rollshot_agent::product_task::LocalReviewDeltaV1 {
+                                            moved_candidates: Vec::new(),
+                                            manual_additions: Vec::new(),
+                                        },
+                                    resulting_document_state_id: None,
+                                    resulting_document_digest: None,
+                                    decided_at_unix_ms: chrono::Utc::now()
+                                        .timestamp_millis(),
+                                };
+                            let now = chrono::Utc::now().timestamp_millis();
+                            if let Ok(rejected) = snapshot.reject(receipt, now) {
+                                let _ =
+                                    store.compare_and_swap(snapshot, &rejected);
+                            }
+                        }
+                    }
+                    workbench.cached_task_snapshot = None;
                     workbench.pending_proposal = None;
                     workbench.review = super::workbench::CandidateReview::default();
                     workbench.selected_candidate = None;

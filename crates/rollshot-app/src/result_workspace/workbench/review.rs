@@ -5,7 +5,19 @@ use rollshot_preset::{
     AutomationRevision, PresetId, PresetStore, RevisionId, RevisionOrigin, RevisionProvenance,
 };
 
+use rollshot_agent::product_task::{LocalReviewDeltaV1, ManualCandidateV1};
+
 use super::state::{CandidateReview, WorkbenchError};
+
+/// Outcome of a successful `apply_candidates`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewApplyOutcome {
+    pub decision: ReviewDecision,
+    pub local_delta: LocalReviewDeltaV1,
+    pub pre_state: u64,
+    pub post_state: u64,
+    pub zero_op: bool,
+}
 
 /// Re-stamp a proposal's `base_document_state_id` from the live document.
 /// DryRunTool hardcodes 0/1; this corrects it before `lower` (§10.5).
@@ -31,24 +43,83 @@ pub fn build_review_decision(
     }
 }
 
-/// Lower the proposal to `EditOp`s via the `ReviewDecision`, then apply as
-/// one undoable `ImageDocument::apply_batch` transaction. Returns
-/// `WorkbenchError::RuntimeFailure` if the document rejects the batch.
+/// Build a `LocalReviewDeltaV1` capturing the manual additions and
+/// modifications the user made to the proposal's candidates.
+fn build_local_delta(
+    proposal: &EditProposal,
+    review: &CandidateReview,
+) -> LocalReviewDeltaV1 {
+    let (_, _, modified_pairs) = review.decision_sets();
+    let mut moved_candidates = Vec::new();
+    let mut manual_additions = Vec::new();
+
+    for (id, _edit) in &modified_pairs {
+        // Check if this candidate was from the agent (moved/resized) or manual.
+        if let Some(candidate) = proposal.candidates.iter().find(|c| c.id == *id) {
+            match &candidate.provenance.source {
+                ProvenanceSource::Manual => {
+                    manual_additions.push(ManualCandidateV1 {
+                        local_id: id.0 as u32,
+                        kind: "redaction".to_string(),
+                    });
+                }
+                ProvenanceSource::Agent { .. } => {
+                    moved_candidates.push((id.0 as u32, id.0 as u32));
+                }
+            }
+        }
+    }
+
+    LocalReviewDeltaV1 {
+        moved_candidates,
+        manual_additions,
+    }
+}
+
+/// Verify the proposal, validate current review edits/manual additions, lower
+/// original + local delta, apply one batch, and return `ReviewApplyOutcome`.
+///
+/// Returns `WorkbenchError::StaleArtifact` if the proposal's
+/// `base_document_state_id` does not match the document's current `state_id()`.
 pub fn apply_candidates(
     proposal: &EditProposal,
     review: &CandidateReview,
     document: &mut ImageDocument,
-) -> Result<(), WorkbenchError> {
-    let restamped = restamp_proposal(proposal, document.state_id());
-    let decision = build_review_decision(&restamped, review, document.state_id());
-    let ops = lower(&restamped, &decision);
-    if ops.is_empty() {
-        return Ok(());
+) -> Result<ReviewApplyOutcome, WorkbenchError> {
+    let pre_state = document.state_id();
+
+    // Reject stale proposals — the document has changed since the proposal
+    // was generated. No mutation occurs.
+    if proposal.base_document_state_id != pre_state {
+        return Err(WorkbenchError::StaleArtifact);
     }
-    document
+
+    let decision = build_review_decision(proposal, review, pre_state);
+    let local_delta = build_local_delta(proposal, review);
+    let ops = lower(proposal, &decision);
+
+    if ops.is_empty() {
+        return Ok(ReviewApplyOutcome {
+            decision,
+            local_delta,
+            pre_state,
+            post_state: pre_state,
+            zero_op: true,
+        });
+    }
+
+    let post_state = document
         .apply_batch(ops)
-        .map(|_| ())
-        .map_err(|_| WorkbenchError::RuntimeFailure)
+        .map(|_| document.state_id())
+        .map_err(|_| WorkbenchError::RuntimeFailure)?;
+
+    Ok(ReviewApplyOutcome {
+        decision,
+        local_delta,
+        pre_state,
+        post_state,
+        zero_op: false,
+    })
 }
 
 /// Save a validated automation as a new revision and set it active.
@@ -390,6 +461,135 @@ mod tests {
         let b = annotation_bounds(&doc.annotations()[0]);
         assert!((b.x - 70.0).abs() < 1e-5);
     }
+
+    fn proposal_for_state(doc_state_id: u64) -> EditProposal {
+        EditProposal {
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
+            base_document_state_id: doc_state_id,
+            candidates: vec![candidate(1, rect(0.0, 0.0, 10.0, 10.0))],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        }
+    }
+
+    fn document_at_state(desired_state_id: u64) -> ImageDocument {
+        let mut doc = ImageDocument::new(image::RgbaImage::new(200, 200));
+        // Add annotations until we reach the desired state_id.
+        while doc.state_id() < desired_state_id {
+            doc.add_redaction(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            })
+            .unwrap();
+        }
+        doc
+    }
+
+    fn review_all(proposal: &EditProposal) -> CandidateReview {
+        CandidateReview::from_candidates(
+            &proposal
+                .candidates
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn apply_rejects_stale_without_mutation() {
+        let proposal = proposal_for_state(7);
+        let mut document = document_at_state(8);
+        let before = document.state_id();
+        assert_eq!(
+            apply_candidates(&proposal, &review_all(&proposal), &mut document),
+            Err(WorkbenchError::StaleArtifact)
+        );
+        assert_eq!(document.state_id(), before);
+    }
+
+    #[test]
+    fn apply_returns_actual_post_state_and_local_additions() {
+        use rollshot_edit_proposal::Provenance;
+
+        // Agent candidate (moved/resized by user).
+        let agent_cand = ProposedCandidate {
+            id: CandidateId(1),
+            edit: ProposedEdit::AddRedaction {
+                bounds: rect(10.0, 10.0, 50.0, 50.0),
+            },
+            confidence: 0.9,
+            label: "email".into(),
+            rationale: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
+            },
+        };
+        // Manual candidate (user-added, then modified).
+        let manual_cand = ProposedCandidate {
+            id: CandidateId(2),
+            edit: ProposedEdit::AddRedaction {
+                bounds: rect(80.0, 80.0, 20.0, 20.0),
+            },
+            confidence: 1.0,
+            label: "manual".into(),
+            rationale: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Manual,
+            },
+        };
+
+        let proposal = EditProposal {
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
+            base_document_state_id: 7,
+            candidates: vec![agent_cand, manual_cand],
+            confidence_summary: ConfidenceSummary::from_confidences(&[0.9, 1.0]),
+            rationale_summary: None,
+            provenance: Provenance {
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
+            },
+        };
+
+        let mut review = CandidateReview::from_candidates(&[CandidateId(1), CandidateId(2)]);
+        review.mark_modified(
+            CandidateId(1),
+            ProposedEdit::AddRedaction {
+                bounds: rect(15.0, 15.0, 45.0, 45.0),
+            },
+        );
+        review.mark_modified(
+            CandidateId(2),
+            ProposedEdit::AddRedaction {
+                bounds: rect(85.0, 85.0, 15.0, 15.0),
+            },
+        );
+
+        let mut document = document_at_state(7);
+        let outcome = apply_candidates(&proposal, &review, &mut document).unwrap();
+
+        assert_eq!(outcome.post_state, document.state_id());
+        assert_eq!(outcome.local_delta.manual_additions.len(), 1);
+        assert_eq!(outcome.local_delta.moved_candidates.len(), 1);
+    }
+
+    #[test]
+    fn apply_zero_op_returns_same_state() {
+        let p = proposal(vec![candidate(1, rect(0.0, 0.0, 10.0, 10.0))]);
+        let mut review = CandidateReview::from_candidates(&[CandidateId(1)]);
+        review.mark_rejected(CandidateId(1));
+        let mut doc = ImageDocument::new(image::RgbaImage::new(200, 200));
+        let outcome = apply_candidates(&p, &review, &mut doc).unwrap();
+        assert!(outcome.zero_op);
+        assert_eq!(outcome.pre_state, outcome.post_state);
+    }
 }
 
 #[cfg(test)]
@@ -576,7 +776,9 @@ mod evidence_tests {
             label: label.into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         }
     }
@@ -631,7 +833,9 @@ mod evidence_tests {
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9, 0.9, 1.0]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[
@@ -677,7 +881,9 @@ mod evidence_tests {
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);
@@ -702,7 +908,9 @@ mod evidence_tests {
             confidence_summary: ConfidenceSummary::from_confidences(&[1.0]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(9)]);
@@ -727,7 +935,9 @@ mod evidence_tests {
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         };
         let mut review = super::super::state::CandidateReview::from_candidates(&[CandidateId(1)]);

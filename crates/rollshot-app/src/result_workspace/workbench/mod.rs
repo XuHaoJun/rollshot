@@ -37,6 +37,23 @@ pub enum PayloadMode {
     OcrLayoutOnly,
 }
 
+/// Monotonically increasing token that guards stale review completions.
+/// Incremented on every new review-apply attempt; a completion whose
+/// `ReviewOperationId` doesn't match the current one is silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReviewOperationId(u64);
+
+impl ReviewOperationId {
+    pub fn next(&mut self) -> Self {
+        self.0 += 1;
+        *self
+    }
+
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Monotonically increasing token that guards stale restore completions.
 /// Incremented on every new restore or run start; a completion whose
 /// `RestoreOperationId` doesn't match the current one is silently dropped.
@@ -118,6 +135,13 @@ pub struct WorkbenchState {
     /// Base-image digest cached at restore time; a new image invalidates
     /// any in-flight restore.
     pub cached_base_digest: Option<[u8; 32]>,
+    /// Monotonically increasing token for review-apply guards.
+    pub review_operation_id: ReviewOperationId,
+    /// True while an apply/reject operation is in flight. Disables
+    /// candidate gestures and document mutations.
+    pub review_operation_active: bool,
+    /// Cached task snapshot for CAS operations during apply/reject.
+    pub cached_task_snapshot: Option<rollshot_agent::product_task::ProductTaskSnapshot>,
 }
 
 /// Parameters captured at Send time and consumed when disclosure is confirmed.
@@ -175,6 +199,9 @@ impl Default for WorkbenchState {
             restore_operation_id: RestoreOperationId::default(),
             cached_source_binding: None,
             cached_base_digest: None,
+            review_operation_id: ReviewOperationId::default(),
+            review_operation_active: false,
+            cached_task_snapshot: None,
         }
     }
 }
@@ -246,6 +273,16 @@ pub enum WorkbenchMessage {
     },
     // Actions
     ApplyCandidates,
+    /// Phase 2: CAS ReadyForReview→Applying persisted successfully.
+    ApplyingPersisted {
+        operation_id: ReviewOperationId,
+        outcome: Result<(), String>,
+    },
+    /// Phase 3: receipt (Completed or Rejected) persisted.
+    ReceiptPersisted {
+        operation_id: ReviewOperationId,
+        outcome: Result<(), String>,
+    },
     SavePresetOrRevision,
     AskAgentToRevise,
     DiscardDraft,

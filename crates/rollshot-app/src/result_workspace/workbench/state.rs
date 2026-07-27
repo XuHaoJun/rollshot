@@ -93,6 +93,8 @@ pub enum WorkbenchError {
     StorePersist {
         message: String,
     },
+    /// Proposal artifact is stale (document state changed since proposal).
+    StaleArtifact,
     Config,
     CapabilityUnavailable {
         message: String,
@@ -113,6 +115,7 @@ impl std::fmt::Display for WorkbenchError {
             Self::VisionPrepare { message } => write!(f, "Vision prepare: {message}"),
             Self::Store { message } => write!(f, "Preset store: {message}"),
             Self::StorePersist { message } => write!(f, "Store persist: {message}"),
+            Self::StaleArtifact => write!(f, "Artifact is stale — document changed"),
             Self::Config => write!(f, "Provider not configured"),
             Self::CapabilityUnavailable { message } => {
                 write!(f, "Capability unavailable: {message}")
@@ -142,6 +145,7 @@ impl WorkbenchError {
                 dimension: format!("{dimension:?}"),
             },
             Self::Cancelled => TaskTerminal::Cancelled,
+            Self::StaleArtifact => TaskTerminal::Stale,
         }
     }
 
