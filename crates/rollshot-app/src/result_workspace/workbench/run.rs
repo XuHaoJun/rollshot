@@ -755,26 +755,14 @@ pub(crate) fn build_authoring_tool_registry(
 async fn persist_terminal_if_possible(
     task_store: Option<Arc<super::task_store::TaskStore>>,
     task_id: &rollshot_agent::product_task::ProductTaskId,
-    run_id: &rollshot_agent::domain::RunId,
+    _run_id: &rollshot_agent::domain::RunId,
     error: &WorkbenchError,
 ) {
     let Some(store) = task_store else { return };
-    use rollshot_agent::product_task::{
-        ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
-    };
     let now = chrono::Utc::now().timestamp_millis();
-    // Minimal snapshot just to record the terminal state.
-    let source_binding = SourceBinding::new(
-        [0u8; 32], [0u8; 32], 0, String::new(), None,
-    );
-    let snapshot = match ProductTaskSnapshot::new(
-        task_id.clone(), TaskKind::SmartRedactionAuthor, source_binding, now,
-    ) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
-    let running = match snapshot.start_attempt(attempt, now) {
+    // Load the running snapshot from the store so the CAS expected value
+    // matches what is actually persisted (including real source bindings).
+    let running = match store.load(task_id) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -3297,8 +3285,8 @@ mod reducer_tests {
         );
     }
 
-    #[test]
-    fn setup_failure_persists_terminal() {
+    #[tokio::test]
+    async fn setup_failure_persists_terminal() {
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId,
             TaskKind, TaskStatus, TaskTerminal,
@@ -3316,7 +3304,7 @@ mod reducer_tests {
         )
         .unwrap();
 
-        // Create and persist running snapshot.
+        // Create and persist running snapshot with real source binding.
         let now = chrono::Utc::now().timestamp_millis();
         let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
@@ -3330,15 +3318,18 @@ mod reducer_tests {
         let running = snapshot.start_attempt(attempt, now).unwrap();
         store.create(&running).unwrap();
 
-        // Simulate setup failure: persist terminal via CAS.
-        let now2 = now + 1;
-        let terminal_snap = running
-            .record_terminal(TaskTerminal::RuntimeFailure, now2)
-            .unwrap();
-        store.compare_and_swap(&running, &terminal_snap).unwrap();
+        // Exercise the actual helper: persist terminal via store-loaded CAS.
+        let store_arc = std::sync::Arc::new(store);
+        super::persist_terminal_if_possible(
+            Some(store_arc.clone()),
+            &task_id,
+            &run_id,
+            &super::super::WorkbenchError::RuntimeFailure,
+        )
+        .await;
 
         // Verify: terminal persisted before RunFailed would be yielded.
-        let loaded = store.load(&task_id).unwrap();
+        let loaded = store_arc.load(&task_id).unwrap();
         assert_eq!(
             loaded.status(),
             TaskStatus::Failed { terminal: TaskTerminal::RuntimeFailure },
