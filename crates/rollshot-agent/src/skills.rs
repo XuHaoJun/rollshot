@@ -306,6 +306,7 @@ impl StaticSkillCatalog {
     pub fn build(sources: Vec<SkillSource<'_>>, limits: &SkillCatalogLimits) -> CatalogBuildReport {
         let mut entries = Vec::new();
         let mut omitted_count: u32 = 0;
+        let mut entry_limit_omitted: u32 = 0;
         let mut diagnostics = Vec::new();
 
         for (source_idx, source) in sources.into_iter().enumerate() {
@@ -316,7 +317,7 @@ impl StaticSkillCatalog {
                         {
                             Ok(entry) => {
                                 if entries.len() >= limits.max_entries {
-                                    omitted_count += 1;
+                                    entry_limit_omitted += 1;
                                 } else {
                                     entries.push(entry);
                                 }
@@ -335,10 +336,11 @@ impl StaticSkillCatalog {
                     #[cfg(unix)]
                     {
                         match load_host_packages(&root, limits, source_idx) {
-                            Ok(host_entries) => {
+                            Ok((host_entries, host_diagnostics)) => {
+                                diagnostics.extend(host_diagnostics);
                                 for entry in host_entries {
                                     if entries.len() >= limits.max_entries {
-                                        omitted_count += 1;
+                                        entry_limit_omitted += 1;
                                     } else {
                                         entries.push(entry);
                                     }
@@ -374,10 +376,12 @@ impl StaticSkillCatalog {
 
         let pre_truncate = entries.len();
         if pre_truncate > limits.max_entries {
-            omitted_count += (pre_truncate - limits.max_entries) as u32;
+            entry_limit_omitted += (pre_truncate - limits.max_entries) as u32;
             entries.truncate(limits.max_entries);
         }
 
+        // Enforce metadata budget: keep entries in priority order until budget
+        // is exhausted, then reject the remaining (lowest-priority) entries.
         let mut total_metadata: usize = 0;
         for entry in &entries {
             total_metadata += entry.name.len()
@@ -387,6 +391,22 @@ impl StaticSkillCatalog {
         }
 
         if total_metadata > limits.max_metadata_bytes {
+            let mut running = 0usize;
+            let mut cutoff = entries.len();
+            for (i, entry) in entries.iter().enumerate() {
+                let entry_meta = entry.name.len()
+                    + entry.description.len()
+                    + entry.declared_version.as_ref().map_or(0, |v| v.len())
+                    + entry.digest.len();
+                if running + entry_meta > limits.max_metadata_bytes {
+                    cutoff = i;
+                    break;
+                }
+                running += entry_meta;
+            }
+            let rejected = entries.len() - cutoff;
+            entries.truncate(cutoff);
+            omitted_count += rejected as u32;
             diagnostics.push(CatalogDiagnostic::MetadataLimitReached {
                 total_bytes: total_metadata,
             });
@@ -404,6 +424,14 @@ impl StaticSkillCatalog {
                 });
                 omitted_count += 1;
             }
+        }
+
+        if entry_limit_omitted > 0 {
+            diagnostics.push(CatalogDiagnostic::EntryLimitReached {
+                omitted_count: entry_limit_omitted,
+                max_entries: limits.max_entries,
+            });
+            omitted_count += entry_limit_omitted;
         }
 
         CatalogBuildReport {
@@ -739,10 +767,11 @@ fn load_host_packages(
     root: &HostSkillRoot,
     limits: &SkillCatalogLimits,
     source_idx: usize,
-) -> Result<Vec<CatalogEntry>, SkillError> {
+) -> Result<(Vec<CatalogEntry>, Vec<CatalogDiagnostic>), SkillError> {
     use rustix::fs::{openat, FileType, Mode, OFlags};
 
     let mut entries = Vec::new();
+    let mut diagnostics = Vec::new();
 
     let dir = std::fs::read_dir(&root.root_path)
         .map_err(|e| SkillError::Io(format!("read_dir({}): {e}", root.root_path)))?;
@@ -781,7 +810,14 @@ fn load_host_packages(
             Mode::empty(),
         ) {
             Ok(fd) => fd,
-            Err(_) => continue,
+            Err(e) => {
+                diagnostics.push(CatalogDiagnostic::PackageLoadError {
+                    source_index: source_idx,
+                    package_hint: format!("{pkg_name}/skill.toml"),
+                    error: e.to_string(),
+                });
+                continue;
+            }
         };
 
         let manifest_stat =
@@ -814,7 +850,14 @@ fn load_host_packages(
             Mode::empty(),
         ) {
             Ok(fd) => fd,
-            Err(_) => continue,
+            Err(e) => {
+                diagnostics.push(CatalogDiagnostic::PackageLoadError {
+                    source_index: source_idx,
+                    package_hint: format!("{pkg_name}/SKILL.md"),
+                    error: e.to_string(),
+                });
+                continue;
+            }
         };
 
         let body_stat = rustix::fs::fstat(&body_fd).map_err(|e| SkillError::Io(e.to_string()))?;
@@ -852,7 +895,7 @@ fn load_host_packages(
         });
     }
 
-    Ok(entries)
+    Ok((entries, diagnostics))
 }
 
 #[cfg(unix)]
@@ -1480,6 +1523,79 @@ main = "SKILL.md"
                 )
                 .unwrap();
             assert_eq!(skill_use.body(), "# My Skill\nContent here.");
+        }
+
+        #[test]
+        fn fifo_as_skill_toml_rejects_package() {
+            let tmp = TempDir::new().unwrap();
+            let pkg_dir = tmp.path().join("fifo-pkg");
+            std::fs::create_dir(&pkg_dir).unwrap();
+
+            // Create a FIFO (named pipe) where skill.toml should be
+            let fifo_path = pkg_dir.join("skill.toml");
+            std::process::Command::new("mkfifo")
+                .arg(&fifo_path)
+                .status()
+                .expect("mkfifo failed");
+            std::fs::write(pkg_dir.join("SKILL.md"), b"body").unwrap();
+
+            // Open a writer end in a background thread so the read-side
+            // openat does not block indefinitely.
+            let fifo_for_writer = fifo_path.clone();
+            let writer = std::thread::spawn(move || {
+                let _writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(fifo_for_writer)
+                    .unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            });
+
+            let root = HostSkillRoot::open(tmp.path().to_str().unwrap()).unwrap();
+            let limits = SkillCatalogLimits::v1();
+            let report = StaticSkillCatalog::build(vec![SkillSource::HostRoot(root)], &limits);
+            // FIFO is not a regular file — should be rejected (SpecialFileRejected)
+            assert!(
+                report.catalog.entries.is_empty(),
+                "FIFO as skill.toml should reject the package"
+            );
+            assert!(
+                report.diagnostics.iter().any(|d| matches!(
+                    d,
+                    CatalogDiagnostic::PackageLoadError { .. }
+                )),
+                "expected a PackageLoadError diagnostic for FIFO"
+            );
+            drop(report);
+            let _ = writer.join();
+        }
+
+        #[test]
+        fn unix_socket_as_skill_md_rejects_package() {
+            let tmp = TempDir::new().unwrap();
+            let pkg_dir = tmp.path().join("socket-pkg");
+            std::fs::create_dir(&pkg_dir).unwrap();
+
+            let manifest = br#"schema_version = 1
+package_id = "socket-pkg"
+name = "Socket"
+description = "desc"
+main = "SKILL.md"
+"#;
+            std::fs::write(pkg_dir.join("skill.toml"), manifest).unwrap();
+
+            // Remove SKILL.md if it exists, then create a Unix socket in its place
+            let _ = std::fs::remove_file(pkg_dir.join("SKILL.md"));
+            let socket_path = pkg_dir.join("SKILL.md");
+            use std::os::unix::net::UnixListener;
+            UnixListener::bind(&socket_path).unwrap();
+
+            let root = HostSkillRoot::open(tmp.path().to_str().unwrap()).unwrap();
+            let limits = SkillCatalogLimits::v1();
+            let report = StaticSkillCatalog::build(vec![SkillSource::HostRoot(root)], &limits);
+            // Unix socket is not a regular file — should be rejected
+            assert!(report.catalog.entries.is_empty(),
+                "Unix socket as SKILL.md should reject the package"
+            );
         }
     }
 
