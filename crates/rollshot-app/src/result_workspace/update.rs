@@ -25,6 +25,7 @@ use rollshot_image_document::{
 /// Messages produced by the Result Workspace UI.
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     /// User requested window close (Close button, Esc, or window-manager close).
     RequestClose,
@@ -2089,8 +2090,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 artifact_id: workbench
                                     .cached_task_snapshot
                                     .as_ref()
-                                    .map(|s| s.artifact_metadata().map(|m| m.artifact_id().clone()))
-                                    .flatten()
+                                    .and_then(|s| {
+                                        s.artifact_metadata().map(|m| m.artifact_id().clone())
+                                    })
                                     .unwrap_or_else(|| {
                                         rollshot_agent::product_task::ArtifactId::parse(
                                             "artifact-00000000-0000-4000-8000-000000000000",
@@ -2100,8 +2102,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 artifact_revision: workbench
                                     .cached_task_snapshot
                                     .as_ref()
-                                    .map(|s| s.artifact_metadata().map(|m| m.artifact_revision()))
-                                    .flatten()
+                                    .and_then(|s| {
+                                        s.artifact_metadata().map(|m| m.artifact_revision())
+                                    })
                                     .unwrap_or(
                                         rollshot_agent::product_task::ArtifactRevision::new(0),
                                     ),

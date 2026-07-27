@@ -796,7 +796,7 @@ async fn persist_terminal_outcome(
         TaskTerminal,
     };
 
-    let Some(store) = task_store else { return None };
+    let store = task_store?;
 
     // Load current snapshot from store (must exist — we persisted running).
     let current = match store.load(task_id) {

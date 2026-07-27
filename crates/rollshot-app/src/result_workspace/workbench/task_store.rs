@@ -168,6 +168,7 @@ impl TaskStore {
         if !lock_path.exists() {
             fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&lock_path)
                 .map_err(|e| TaskStoreError::Io {
@@ -616,7 +617,7 @@ impl TaskStore {
             let path = entry.path();
 
             // Validate file metadata.
-            if let Err(_) = Self::validate_file_meta(&path, true) {
+            if Self::validate_file_meta(&path, true).is_err() {
                 continue; // Skip invalid files.
             }
 
@@ -769,7 +770,7 @@ impl TaskStore {
         }
 
         // Sort deterministically by filename.
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        entries.sort_by_key(|e| e.file_name().to_owned());
 
         Ok(entries)
     }
@@ -1098,7 +1099,7 @@ mod tests {
             let insert_pos = padded.len().saturating_sub(1);
             let pad_len = MAX_FILE_BYTES - padded.len();
             let padding = vec![b' '; pad_len];
-            padded.splice(insert_pos..insert_pos, padding.into_iter());
+            padded.splice(insert_pos..insert_pos, padding);
             padded.truncate(MAX_FILE_BYTES);
             fs::write(&path, &padded).unwrap();
         } else if bytes.len() == MAX_FILE_BYTES {
@@ -1213,7 +1214,7 @@ mod tests {
         // Use a valid-looking but unsafe ID by going through the path
         // validation directly.
         let bad_path = store.tasks_dir().join("../../../etc/passwd.json");
-        assert!(bad_path.exists() == false || true); // Just verify the test setup.
+        assert!(!bad_path.exists() || true); // Just verify the test setup.
 
         // Test that the path validation rejects unsafe IDs.
         // ProductTaskId::parse already rejects non-UUID formats,
