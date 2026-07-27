@@ -32,6 +32,11 @@ pub enum ToolError {
     PerToolCallLimitExceeded { name: String, count: u32, max: u32 },
     #[error("cancelled before tool call")]
     Cancelled,
+    #[error("authority denied for tool `{tool}`: missing operation {operation:?}")]
+    AuthorityDenied {
+        tool: String,
+        operation: crate::authority::RunOperation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +57,15 @@ pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn json_schema(&self) -> Value;
     fn call<'a>(&'a self, arguments: &'a Value) -> ToolFuture<'a>;
+
+    /// The authority operations required to invoke this tool.
+    ///
+    /// Returns a static slice so tools never allocate per call.
+    /// The default is empty — test-only tools and tools that predate
+    /// the authority system declare no required operations.
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,9 +136,27 @@ impl ToolRegistry {
         index: usize,
         call: &ToolCall,
         cancellation: &RunCancellation,
+        authority: Option<&crate::authority::AuthoritySnapshot>,
+        tool_ctx: Option<&ToolContext>,
     ) -> Result<ToolOutcome, ToolError> {
         if cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
+        }
+
+        // Authority check — immediately after cancellation, before counters
+        // and before the tool body is entered.
+        if let (Some(snapshot), Some(ctx)) = (authority, tool_ctx) {
+            let tool = &self.tools[index];
+            for &op in tool.required_operations() {
+                if let Err(_auth_err) =
+                    snapshot.authorize_tool(&ctx.run_id, &ctx.content_binding, op)
+                {
+                    return Err(ToolError::AuthorityDenied {
+                        tool: tool.name().to_string(),
+                        operation: op,
+                    });
+                }
+            }
         }
 
         let tool = &self.tools[index];
@@ -197,7 +229,50 @@ impl ToolRegistry {
                 }
             };
 
-            let result = self.execute_single(index, call, cancellation).await;
+            let result = self.execute_single(index, call, cancellation, None, None).await;
+            let stop = match &result {
+                Err(_) => true,
+                Ok(ToolOutcome::Success { .. }) => stop_after_success.contains(&call.name),
+                Ok(ToolOutcome::Recoverable { .. }) => false,
+            };
+            results.push(result);
+
+            if stop {
+                break;
+            }
+        }
+        results
+    }
+
+    /// Execute the batch with authority enforcement.
+    ///
+    /// This is the only authority-bearing entry point. It checks each tool's
+    /// [`Tool::required_operations()`] against the provided authority snapshot
+    /// before the tool body is entered, before per-tool counters increment.
+    ///
+    /// Stops after a hard error or after the first successful call whose name
+    /// is in `stop_after_success`.
+    pub async fn execute_authorized_calls(
+        &self,
+        calls: &[ToolCall],
+        cancellation: &RunCancellation,
+        stop_after_success: &std::collections::BTreeSet<String>,
+        authority: &crate::authority::AuthoritySnapshot,
+        tool_ctx: &ToolContext,
+    ) -> Vec<Result<ToolOutcome, ToolError>> {
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            let index = match self.tools.iter().position(|t| t.name() == call.name) {
+                Some(i) => i,
+                None => {
+                    results.push(Err(ToolError::UnknownTool(call.name.clone())));
+                    break;
+                }
+            };
+
+            let result = self
+                .execute_single(index, call, cancellation, Some(authority), Some(tool_ctx))
+                .await;
             let stop = match &result {
                 Err(_) => true,
                 Ok(ToolOutcome::Success { .. }) => stop_after_success.contains(&call.name),
@@ -662,6 +737,10 @@ impl Tool for ReplaceSourceTool {
         "replace_source"
     }
 
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::WriteDraft]
+    }
+
     fn json_schema(&self) -> Value {
         tool_schema::<ReplaceSourceArgs>()
     }
@@ -718,6 +797,10 @@ impl ReadCurrentSourceTool {
 impl Tool for ReadCurrentSourceTool {
     fn name(&self) -> &str {
         "read_current_source"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::ReadDraft]
     }
 
     fn json_schema(&self) -> Value {
@@ -778,6 +861,13 @@ impl EditSourceTool {
 impl Tool for EditSourceTool {
     fn name(&self) -> &str {
         "edit_source"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[
+            crate::authority::RunOperation::ReadDraft,
+            crate::authority::RunOperation::WriteDraft,
+        ]
     }
 
     fn json_schema(&self) -> Value {
@@ -855,6 +945,10 @@ impl Tool for ValidateSourceTool {
         "validate_source"
     }
 
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::ReadDraft]
+    }
+
     fn json_schema(&self) -> Value {
         tool_schema::<ValidateSourceArgs>()
     }
@@ -930,6 +1024,14 @@ impl DryRunTool {
 impl Tool for DryRunTool {
     fn name(&self) -> &str {
         "dry_run"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[
+            crate::authority::RunOperation::ReadDraft,
+            crate::authority::RunOperation::InspectPreparedImage,
+            crate::authority::RunOperation::ExecuteRestrictedAutomation,
+        ]
     }
 
     fn json_schema(&self) -> Value {
@@ -1070,6 +1172,13 @@ impl Tool for SubmitForReviewTool {
         "submit_for_review"
     }
 
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[
+            crate::authority::RunOperation::ReadDraft,
+            crate::authority::RunOperation::SubmitReviewCandidate,
+        ]
+    }
+
     fn json_schema(&self) -> Value {
         tool_schema::<SubmitForReviewArgs>()
     }
@@ -1184,6 +1293,10 @@ impl Tool for RequestUserInputTool {
         "request_user_input"
     }
 
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::RequestUserInput]
+    }
+
     fn json_schema(&self) -> Value {
         tool_schema::<RequestUserInputArgs>()
     }
@@ -1218,6 +1331,10 @@ impl InspectImageContextTool {
 impl Tool for InspectImageContextTool {
     fn name(&self) -> &str {
         "inspect_image_context"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::InspectPreparedImage]
     }
 
     fn json_schema(&self) -> Value {
@@ -1328,6 +1445,10 @@ impl Tool for GetContextSummaryTool {
         "inspect_context_summary"
     }
 
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::ReadDraft]
+    }
+
     fn json_schema(&self) -> Value {
         tool_schema::<EmptyArgs>()
     }
@@ -1371,6 +1492,10 @@ impl OcrTool {
 impl Tool for OcrTool {
     fn name(&self) -> &str {
         "inspect_ocr"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::InspectPreparedImage]
     }
 
     fn json_schema(&self) -> Value {
@@ -1462,6 +1587,10 @@ impl LayoutTool {
 impl Tool for LayoutTool {
     fn name(&self) -> &str {
         "inspect_layout"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::InspectPreparedImage]
     }
 
     fn json_schema(&self) -> Value {
@@ -1573,6 +1702,10 @@ impl RegionFeaturesTool {
 impl Tool for RegionFeaturesTool {
     fn name(&self) -> &str {
         "inspect_region_features"
+    }
+
+    fn required_operations(&self) -> &'static [crate::authority::RunOperation] {
+        &[crate::authority::RunOperation::InspectPreparedImage]
     }
 
     fn json_schema(&self) -> Value {
@@ -3227,7 +3360,426 @@ function main(input) {
                     5
                 );
             }
-            other => panic!("expected success, got {other:?}"),
+            other => panic!("expected dry-run success, got {other:?}"),
         }
+    }
+
+    // ---- Authority enforcement ----
+
+    use crate::authority::{
+        AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
+    };
+    use std::collections::BTreeSet;
+    use crate::product_task::{AnnotationStateV1, TaskAttemptId};
+
+    /// Counting tool that tracks call count via an atomic counter.
+    struct CountingTool {
+        call_count: Arc<AtomicUsize>,
+        ops: &'static [RunOperation],
+    }
+
+    impl CountingTool {
+        fn new(call_count: Arc<AtomicUsize>, ops: &'static [RunOperation]) -> Self {
+            Self { call_count, ops }
+        }
+    }
+
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn json_schema(&self) -> Value {
+            tool_schema::<EmptyArgs>()
+        }
+
+        fn required_operations(&self) -> &'static [RunOperation] {
+            self.ops
+        }
+
+        fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
+            let count = self.call_count.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolOutcome::Success {
+                    result_json: serde_json::json!({}),
+                })
+            })
+        }
+    }
+
+    /// Create a snapshot granting the given operations, bound to the same
+    /// run_id and content_binding as the standard test_context.
+    fn snapshot_granting(
+        ops: impl IntoIterator<Item = RunOperation>,
+    ) -> AuthoritySnapshot {
+        let annotation_state = AnnotationStateV1 {
+            width: 100,
+            height: 100,
+            state_id: 0,
+            annotations: vec![],
+        };
+        let binding = DocumentContentBinding::new([1u8; 32], &annotation_state, 0).unwrap();
+        let auth_binding = AuthorityBinding::new(
+            crate::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            TaskAttemptId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            binding,
+        );
+        // InspectPreparedImage requires existing_product_capture = true.
+        let ops_vec: Vec<_> = ops.into_iter().collect();
+        let needs_capture = ops_vec.contains(&RunOperation::InspectPreparedImage);
+        AuthoritySnapshot::new(
+            auth_binding,
+            "test-rev".into(),
+            DisclosureCeiling::FullScreenshot,
+            needs_capture,
+            BTreeSet::new(),
+            ops_vec.into_iter().collect(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn advertised_registered_tool_without_grant_never_enters_tool_body() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::WriteDraft],
+            )))
+            .unwrap();
+        assert!(registry.tool_names().contains(&"counting"));
+
+        let result = registry
+            .execute_authorized_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+                &snapshot_granting([RunOperation::ReadDraft]),
+                &test_context("source"),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Err(ToolError::AuthorityDenied {
+                operation: RunOperation::WriteDraft,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "tool body must not execute");
+    }
+
+    #[tokio::test]
+    async fn tool_with_grant_succeeds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::WriteDraft],
+            )))
+            .unwrap();
+
+        let result = registry
+            .execute_authorized_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+                &snapshot_granting([RunOperation::WriteDraft]),
+                &test_context("source"),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_operation_requirement_denied_when_one_missing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::ReadDraft, RunOperation::WriteDraft],
+            )))
+            .unwrap();
+
+        // Grant only ReadDraft — WriteDraft is missing.
+        let result = registry
+            .execute_authorized_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+                &snapshot_granting([RunOperation::ReadDraft]),
+                &test_context("source"),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Err(ToolError::AuthorityDenied {
+                operation: RunOperation::WriteDraft,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mismatched_run_id_denied() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::ReadDraft],
+            )))
+            .unwrap();
+
+        let annotation_state = AnnotationStateV1 {
+            width: 100,
+            height: 100,
+            state_id: 0,
+            annotations: vec![],
+        };
+        let binding = DocumentContentBinding::new([1u8; 32], &annotation_state, 0).unwrap();
+        let auth_binding = AuthorityBinding::new(
+            crate::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            TaskAttemptId::new(1),
+            // Wrong run ID
+            RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap(),
+            binding,
+        );
+        let stale_snapshot = AuthoritySnapshot::new(
+            auth_binding,
+            "test-rev".into(),
+            DisclosureCeiling::FullScreenshot,
+            false,
+            BTreeSet::new(),
+            [RunOperation::ReadDraft].into_iter().collect(),
+        )
+        .unwrap();
+
+        let result = registry
+            .execute_authorized_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+                &stale_snapshot,
+                &test_context("source"),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Err(ToolError::AuthorityDenied { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mismatched_document_binding_denied() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::ReadDraft],
+            )))
+            .unwrap();
+
+        // Different state_id (1 vs 0) — binding mismatch.
+        let annotation_state = AnnotationStateV1 {
+            width: 100,
+            height: 100,
+            state_id: 1,
+            annotations: vec![],
+        };
+        let binding = DocumentContentBinding::new([1u8; 32], &annotation_state, 1).unwrap();
+        let auth_binding = AuthorityBinding::new(
+            crate::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            TaskAttemptId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            binding,
+        );
+        let stale_snapshot = AuthoritySnapshot::new(
+            auth_binding,
+            "test-rev".into(),
+            DisclosureCeiling::FullScreenshot,
+            false,
+            BTreeSet::new(),
+            [RunOperation::ReadDraft].into_iter().collect(),
+        )
+        .unwrap();
+
+        let result = registry
+            .execute_authorized_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+                &stale_snapshot,
+                &test_context("source"),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Err(ToolError::AuthorityDenied { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn authority_denial_stops_later_calls_in_batch() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        // First tool requires WriteDraft — not granted.
+        registry
+            .register(Arc::new(CountingTool::new(
+                counter.clone(),
+                &[RunOperation::WriteDraft],
+            )))
+            .unwrap();
+        // Second tool requires ReadDraft — granted.
+        struct SecondTool(Arc<AtomicUsize>);
+        impl Tool for SecondTool {
+            fn name(&self) -> &str { "second" }
+            fn json_schema(&self) -> Value { tool_schema::<EmptyArgs>() }
+            fn required_operations(&self) -> &'static [RunOperation] { &[RunOperation::ReadDraft] }
+            fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
+                let c = self.0.clone();
+                Box::pin(async move {
+                    c.fetch_add(100, Ordering::SeqCst);
+                    Ok(ToolOutcome::Success { result_json: serde_json::json!({}) })
+                })
+            }
+        }
+        registry.register(Arc::new(SecondTool(counter.clone()))).unwrap();
+
+        let result = registry
+            .execute_authorized_calls(
+                &[
+                    ToolCall {
+                        name: "counting".into(),
+                        arguments_json: serde_json::json!({}),
+                    },
+                    ToolCall {
+                        name: "second".into(),
+                        arguments_json: serde_json::json!({}),
+                    },
+                ],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+                &snapshot_granting([RunOperation::ReadDraft]),
+                &test_context("source"),
+            )
+            .await;
+
+        // Authority denial is a hard error → stops after first call.
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Err(ToolError::AuthorityDenied { .. })
+        ));
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "neither tool body must execute");
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_over_authority_check() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::WriteDraft],
+            )))
+            .unwrap();
+
+        let cancel = RunCancellation::new();
+        cancel.cancel();
+
+        // Snapshot has the right grant — but cancellation fires first.
+        let result = registry
+            .execute_authorized_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &cancel,
+                &BTreeSet::new(),
+                &snapshot_granting([RunOperation::WriteDraft]),
+                &test_context("source"),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0],
+            Err(ToolError::Cancelled),
+            "cancellation must fire before authority check"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn existing_execute_calls_path_unchanged() {
+        // The existing execute_calls (no authority) must continue to work
+        // as before — no authority enforcement.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        registry
+            .register(Arc::new(CountingTool::new(
+                calls.clone(),
+                &[RunOperation::WriteDraft],
+            )))
+            .unwrap();
+
+        let result = registry
+            .execute_calls(
+                &[ToolCall {
+                    name: "counting".into(),
+                    arguments_json: serde_json::json!({}),
+                }],
+                &RunCancellation::new(),
+                &BTreeSet::new(),
+            )
+            .await;
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "tool body must execute without authority");
     }
 }
