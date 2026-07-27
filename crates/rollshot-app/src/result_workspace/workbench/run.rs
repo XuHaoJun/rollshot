@@ -4139,6 +4139,11 @@ mod reducer_tests {
     fn run_contract_is_committed_before_promotion() {
         // Verifies the ordering invariant: the run contract must be bound
         // before record_ready_for_review can succeed.
+        //
+        // This test exercises both the in-memory reducer and the store-level
+        // CAS path to prove that contract binding is a prerequisite for
+        // promotion at every level of the run flow.
+        use super::super::task_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
         };
@@ -4150,7 +4155,7 @@ mod reducer_tests {
         let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new_v2(task_id, Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
@@ -4188,15 +4193,36 @@ mod reducer_tests {
             "promotion must fail without bound run contract"
         );
 
-        // Bind contract → then promotion succeeds.
+        // Store-level CAS ordering: persist running snapshot, then CAS-bind.
+        // Verify the store only reflects the contract after CAS succeeds.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        store.create(&running).unwrap();
+
+        let stored_before = store.load(&task_id).unwrap();
+        assert!(
+            stored_before.active_run_contract().is_none(),
+            "store snapshot must not have contract before CAS"
+        );
+
+        // CAS-bind the contract through the store.
         let contract = run_contract_for_provenance(
             authority_receipt_for_provenance(),
             skill_use_receipt_for_provenance(),
         );
         let bound = running.bind_run_contract(contract, 25).unwrap();
         assert!(bound.active_run_contract().is_some());
+        store.compare_and_swap(&running, &bound).unwrap();
 
-        let v2_meta = v2_metadata_for_provenance(bound.active_run_contract().unwrap());
+        // After CAS succeeds, the store reflects the bound contract.
+        let stored_after = store.load(&task_id).unwrap();
+        assert!(
+            stored_after.active_run_contract().is_some(),
+            "store snapshot must have contract after CAS"
+        );
+
+        // Promotion succeeds now that the contract is CAS'd.
+        let v2_meta = v2_metadata_for_provenance(stored_after.active_run_contract().unwrap());
         let v2_payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
             source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
             proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
@@ -4208,14 +4234,16 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let ready = bound.record_ready_for_review(v2_meta, v2_payload, None, 30).unwrap();
+        let ready = stored_after.record_ready_for_review(v2_meta, v2_payload, None, 30).unwrap();
         assert_eq!(ready.status(), Ts::ReadyForReview);
     }
 
     #[test]
     fn run_contract_cas_failure_suppresses_promotion_and_proposal() {
         // When CAS bind of the run contract fails, the snapshot remains
-        // Running and no ReadyForReview is produced.
+        // Running and no ReadyForReview is produced.  Additionally verifies
+        // that promotion is suppressed (no provider could have run) by
+        // attempting record_ready_for_review on the CAS-failed store state.
         use super::super::task_store::{Failpoint, TaskStore};
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
@@ -4231,7 +4259,7 @@ mod reducer_tests {
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
-        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
         store.create_without_failpoint(&running).unwrap();
@@ -4245,10 +4273,179 @@ mod reducer_tests {
         let result = store.compare_and_swap(&running, &bound);
         assert!(result.is_err(), "CAS must fail with rename failpoint");
 
-        // Still Running — no contract, no proposal.
+        // Still Running — no contract, no proposal, no terminal.
         let loaded = store.load(&task_id).unwrap();
         assert_eq!(loaded.status(), Ts::Running);
         assert!(loaded.active_run_contract().is_none(), "no contract after CAS failure");
         assert!(loaded.artifact_metadata().is_none(), "no artifact after CAS failure");
+
+        // Provider suppression: attempting promotion on the CAS-failed store
+        // state must reject with MissingRunContract — proving no provider
+        // output could have been persisted.
+        let meta = rollshot_agent::product_task::ProductArtifactMetadata::new(
+            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactRevision::new(1),
+            rollshot_agent::product_task::ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            run_id.clone(),
+            "proposal-test".into(),
+            String::new(), String::new(), String::new(), 0, 0.0, 25,
+        );
+        let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
+            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-test".into(), candidate_count: 0 },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 0, affected_area: 0.0 },
+            config: rollshot_agent::product_task::PayloadConfigV1 {
+                provider: String::new(), model: String::new(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let promo_result = loaded.record_ready_for_review(meta, payload, None, 30);
+        assert!(
+            matches!(promo_result, Err(rollshot_agent::product_task::TaskContractError::MissingRunContract)),
+            "promotion on CAS-failed state must fail — provider output is suppressed"
+        );
+    }
+
+    // -- Additional provenance tests (Finding 4) -----------------------------
+
+    #[test]
+    fn mismatched_run_id_between_contract_and_promotion_fails() {
+        // When the run contract was bound for a different run_id than the
+        // promotion metadata carries, record_ready_for_review must reject
+        // the mismatch and yield no proposal.
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
+        };
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        // Bind contract with the correct run_id.
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let bound = running.bind_run_contract(contract, 25).unwrap();
+        assert!(bound.active_run_contract().is_some());
+
+        // Promotion metadata references a DIFFERENT run_id.
+        let wrong_run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-999999999999").unwrap();
+        let meta = rollshot_agent::product_task::ProductArtifactMetadata::new(
+            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactRevision::new(1),
+            rollshot_agent::product_task::ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            task_id.clone(),
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            wrong_run_id,
+            "proposal-mismatch".into(),
+            String::new(), String::new(), String::new(), 0, 0.0, 25,
+        );
+        let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
+            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-mismatch".into(), candidate_count: 0 },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 0, affected_area: 0.0 },
+            config: rollshot_agent::product_task::PayloadConfigV1 {
+                provider: "anthropic".into(), model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let result = bound.record_ready_for_review(meta, payload, None, 30);
+        assert!(
+            matches!(result, Err(rollshot_agent::product_task::TaskContractError::RunMismatch { .. })),
+            "mismatched run_id between contract and promotion must fail, got: {result:?}"
+        );
+
+        // Snapshot unchanged — still Running, no artifact.
+        assert_eq!(bound.status(), Ts::Running);
+        assert!(bound.artifact_metadata().is_none());
+    }
+
+    #[test]
+    fn stale_source_binding_rejected_even_when_skill_digest_matches() {
+        // When the document source binding has changed (stale), a stale
+        // snapshot cannot overwrite the store even though the skill digest
+        // in the contract matches.  The store's CAS compares
+        // snapshot_revision: a stale snapshot has a lower revision and
+        // therefore loses the CAS race.
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
+        };
+        use super::super::task_store::TaskStore;
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+
+        // Original source binding (what the run was started with).
+        let original_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, original_binding, 10).unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        // Bind contract — the contract's skill digest is fine.
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let bound = running.bind_run_contract(contract.clone(), 25).unwrap();
+        assert!(bound.active_run_contract().is_some());
+
+        // Persist to a real store (no failpoint).
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        store.create(&bound).unwrap();
+
+        // Advance the store to a terminal state — this increments the
+        // snapshot_revision, making the original `bound` stale.
+        let loaded = store.load(&task_id).unwrap();
+        let terminal = loaded.record_terminal(
+            rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+            30,
+        ).unwrap();
+        store.compare_and_swap(&loaded, &terminal).unwrap();
+
+        // Now `bound` is stale (its snapshot_revision is behind the store).
+        // CAS of the stale snapshot must fail — proving stale state cannot
+        // win even though the skill digest in the contract matches.
+        let cas_result = store.compare_and_swap(&bound, &bound);
+        assert!(
+            cas_result.is_err(),
+            "CAS of stale snapshot must fail even though skill digest matches"
+        );
+
+        // The store retains the terminal state — stale promotion was rejected.
+        let final_loaded = store.load(&task_id).unwrap();
+        assert!(
+            final_loaded.active_run_contract().is_some(),
+            "store retains the contract from the terminal snapshot"
+        );
+        assert_ne!(
+            final_loaded.snapshot_revision(),
+            bound.snapshot_revision(),
+            "store revision must be ahead of stale snapshot"
+        );
     }
 }
