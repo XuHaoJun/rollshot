@@ -248,10 +248,14 @@ impl HostSkillRoot {
 
         let mut current_fd = start_fd;
         for component in &components {
+            // Intermediate components allow symlink following — standard path
+            // resolution.  Symlink protection (NOFOLLOW) is enforced at the
+            // leaf level: package directories, skill.toml, and SKILL.md are
+            // all opened with NOFOLLOW in load_host_packages.
             let new_fd = openat(
                 &current_fd,
                 *component,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+                OFlags::RDONLY | OFlags::DIRECTORY,
                 Mode::empty(),
             )
             .map_err(|e| SkillError::Io(format!("openat({component}): {e}")))?;
