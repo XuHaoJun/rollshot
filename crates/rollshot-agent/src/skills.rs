@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -962,6 +962,55 @@ fn compute_package_digest(manifest: &SkillManifestV1, body: &[u8]) -> String {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ========================================================================
+// Bundled Smart Redaction package
+// ========================================================================
+
+/// Well-known package ID for the bundled Smart Redaction skill.
+pub const SMART_REDACTION_PACKAGE_ID: &str = "smart-redaction";
+
+const BUNDLED_MANIFEST: &str =
+    include_str!("../skills/smart-redaction/skill.toml");
+const BUNDLED_BODY: &str =
+    include_str!("../skills/smart-redaction/SKILL.md");
+
+static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
+    let limits = SkillCatalogLimits::v1();
+    let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(vec![
+        (
+            SMART_REDACTION_PACKAGE_ID,
+            vec![
+                ("skill.toml", BUNDLED_MANIFEST.as_bytes()),
+                ("SKILL.md", BUNDLED_BODY.as_bytes()),
+            ],
+        ),
+    ])];
+    StaticSkillCatalog::build(sources, &limits)
+});
+
+/// Build a catalog from the bundled Smart Redaction skill package and return
+/// the build report.  Panics at startup only if the bundled package fails
+/// manifest/limit/digest validation — which indicates a compile-time packaging
+/// bug, not a runtime condition.
+pub fn bundled_skill_catalog() -> &'static CatalogBuildReport {
+    &BUNDLED_REPORT
+}
+
+/// Resolve the bundled Smart Redaction skill.  Returns `None` if the package
+/// was not loaded (diagnostic in the build report).
+pub fn bundled_smart_redaction_use() -> Option<SkillUse> {
+    let report = bundled_skill_catalog();
+    report.catalog.invoke(
+        &SkillInvocationRequest {
+            source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+            package_id: SkillPackageId::parse(SMART_REDACTION_PACKAGE_ID).unwrap(),
+            expected_digest: None,
+            invocation_kind: SkillInvocationKind::HostExplicit,
+        },
+        0,
+    ).ok()
 }
 
 // ========================================================================
@@ -1972,5 +2021,63 @@ main = "SKILL.md"
         assert_eq!(limits.max_manifest_bytes, 4 * 1024);
         assert_eq!(limits.max_body_bytes, 16 * 1024);
         assert_eq!(limits.max_metadata_bytes, 128 * 1024);
+    }
+
+    // ---- Bundled Smart Redaction skill tests ----
+
+    #[test]
+    fn bundled_smart_redaction_package_id_and_authority() {
+        let skill_use = super::bundled_smart_redaction_use()
+            .expect("bundled skill should resolve");
+        assert_eq!(skill_use.package_id().as_str(), "smart-redaction");
+        assert_eq!(skill_use.source_authority().as_str(), "rollshot.bundled");
+    }
+
+    #[test]
+    fn bundled_smart_redaction_manifest_accepted() {
+        let report = super::bundled_skill_catalog();
+        assert_eq!(report.omitted_count, 0, "unexpected omission");
+        assert!(report.diagnostics.is_empty(), "unexpected diagnostics: {:?}", report.diagnostics);
+        assert_eq!(report.catalog.entries.len(), 1);
+    }
+
+    #[test]
+    fn bundled_smart_redaction_body_below_16kib() {
+        let skill_use = super::bundled_smart_redaction_use()
+            .expect("bundled skill should resolve");
+        assert!(
+            skill_use.body().len() <= 16 * 1024,
+            "body {} bytes exceeds 16 KiB",
+            skill_use.body().len()
+        );
+    }
+
+    #[test]
+    fn bundled_smart_redaction_golden_digest_stable() {
+        let skill_use = super::bundled_smart_redaction_use()
+            .expect("bundled skill should resolve");
+        // Golden digest — update only when SKILL.md or skill.toml content changes.
+        let expected = "26c33ddd48b6f437bce4c375bf6150e9d8254527f13f909d3208099cc5a74644";
+        assert_eq!(
+            skill_use.digest(),
+            expected,
+            "digest mismatch — if SKILL.md or skill.toml changed, update the golden digest"
+        );
+    }
+
+    #[test]
+    fn bundled_smart_redaction_single_explicit_invocation() {
+        let report = super::bundled_skill_catalog();
+        let skill_use = report.catalog.invoke(
+            &SkillInvocationRequest {
+                source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+                package_id: SkillPackageId::parse("smart-redaction").unwrap(),
+                expected_digest: None,
+                invocation_kind: SkillInvocationKind::HostExplicit,
+            },
+            0,
+        ).unwrap();
+        assert_eq!(skill_use.package_id().as_str(), "smart-redaction");
+        assert!(skill_use.body().len() > 0);
     }
 }
