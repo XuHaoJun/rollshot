@@ -11,9 +11,12 @@
 //! `JobKind` V1 contains only `ActionGuideVideoImport`.
 //! `JobExecutionClass` V1 contains only `LocalWorkerWithChildProcesses`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
+
+use tracing::{event, Level};
 
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -440,7 +443,7 @@ pub struct JobSnapshot<P> {
     terminal_at_ms: Option<u64>,
     cancelled_at_ms: Option<u64>,
     result_collected: bool,
-    diagnostics: Vec<JobDiagnostic>,
+    diagnostics: VecDeque<JobDiagnostic>,
     dropped_diagnostics: u32,
 }
 
@@ -521,7 +524,7 @@ impl<P> JobSnapshot<P> {
         self.result_collected
     }
 
-    pub fn diagnostics(&self) -> &[JobDiagnostic] {
+    pub fn diagnostics(&self) -> &VecDeque<JobDiagnostic> {
         &self.diagnostics
     }
 
@@ -550,7 +553,7 @@ struct JobRecord<P> {
     updated_at_ms: u64,
     terminal_at_ms: Option<u64>,
     cancelled_at_ms: Option<u64>,
-    diagnostics: Vec<JobDiagnostic>,
+    diagnostics: VecDeque<JobDiagnostic>,
     dropped_diagnostics: u32,
 }
 
@@ -562,6 +565,7 @@ struct RegistryState<P> {
     jobs: HashMap<JobId, JobRecord<P>>,
     shutting_down: bool,
     watch_revision: u64,
+    tombstones: HashSet<String>,
 }
 
 // ========================================================================
@@ -586,6 +590,29 @@ pub struct JobWatch {
     receiver: watch::Receiver<u64>,
 }
 
+impl fmt::Debug for JobWatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobWatch")
+            .field("registry_key", &self.registry_key)
+            // Receiver internals are omitted to avoid leaking state.
+            .finish()
+    }
+}
+
+impl Hash for JobWatch {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.registry_key.hash(state);
+    }
+}
+
+impl PartialEq for JobWatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.registry_key == other.registry_key
+    }
+}
+
+impl Eq for JobWatch {}
+
 impl JobWatch {
     /// Access the underlying receiver for change detection.
     pub fn receiver(&mut self) -> watch::Receiver<u64> {
@@ -606,6 +633,14 @@ impl JobWatch {
 #[derive(Clone)]
 pub struct JobObserver<P, R> {
     inner: Arc<Inner<P, R>>,
+}
+
+impl<P, R> fmt::Debug for JobObserver<P, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobObserver")
+            // Inner state is omitted to prevent leaking registry contents.
+            .finish()
+    }
 }
 
 impl<P: Clone, R: 'static> JobObserver<P, R> {
@@ -653,7 +688,7 @@ impl<P: Clone, R: 'static> JobObserver<P, R> {
 
 /// Process-local live job registry. Generic over structured progress `P`
 /// and successful result `R`.
-pub struct LiveJobRegistry<P, R> {
+pub struct LiveJobRegistry<P, R: Send + 'static> {
     inner: Arc<Inner<P, R>>,
 }
 
@@ -667,6 +702,7 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
                     jobs: HashMap::new(),
                     shutting_down: false,
                     watch_revision: 0,
+                    tombstones: HashSet::new(),
                 }),
                 watch_tx,
                 _result_marker: std::marker::PhantomData,
@@ -689,6 +725,10 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
 
         // 1. Registry open?
         if state.shutting_down {
+            event!(target: "rollshot::agent::jobs", Level::WARN,
+                kind = ?admission.kind,
+                "admission_rejected_shutting_down"
+            );
             return Err(JobAdmissionError::ShuttingDown);
         }
 
@@ -705,6 +745,11 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
             .filter(|r| r.state.is_terminal())
             .count();
         if terminal_count >= MAX_TERMINAL_JOBS {
+            event!(target: "rollshot::agent::jobs", Level::WARN,
+                kind = ?admission.kind,
+                terminal_count = terminal_count,
+                "admission_rejected_terminal_capacity"
+            );
             return Err(JobAdmissionError::TerminalCapacity {
                 limit: MAX_TERMINAL_JOBS,
             });
@@ -713,6 +758,11 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
         // 5. Active capacity
         let active_count = state.jobs.values().filter(|r| r.state.is_active()).count();
         if active_count >= MAX_ACTIVE_JOBS {
+            event!(target: "rollshot::agent::jobs", Level::WARN,
+                kind = ?admission.kind,
+                active_count = active_count,
+                "admission_rejected_active_limit"
+            );
             return Err(JobAdmissionError::ActiveLimit {
                 limit: MAX_ACTIVE_JOBS,
             });
@@ -725,6 +775,11 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
             .filter(|r| r.state.is_active() || r.result.is_some())
             .count();
         if reserved_slots >= MAX_UNCOLLECTED_RESULT_SLOTS {
+            event!(target: "rollshot::agent::jobs", Level::WARN,
+                kind = ?admission.kind,
+                reserved_slots = reserved_slots,
+                "admission_rejected_result_capacity"
+            );
             return Err(JobAdmissionError::ResultCapacity {
                 limit: MAX_UNCOLLECTED_RESULT_SLOTS,
             });
@@ -748,13 +803,20 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
             updated_at_ms: now_ms,
             terminal_at_ms: None,
             cancelled_at_ms: None,
-            diagnostics: Vec::new(),
+            diagnostics: VecDeque::new(),
             dropped_diagnostics: 0,
         };
 
         state.jobs.insert(id.clone(), record);
         state.watch_revision += 1;
         let _ = self.inner.watch_tx.send(state.watch_revision);
+
+        event!(target: "rollshot::agent::jobs", Level::INFO,
+            job_id = %id.as_str(),
+            kind = ?admission.kind,
+            revision = 1u64,
+            "admitted"
+        );
 
         let reporter = JobReporter {
             inner: Arc::clone(&self.inner),
@@ -816,6 +878,10 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
 
         // Invoke callback outside lock.
         if let Some(ctrl) = callback {
+            event!(target: "rollshot::agent::jobs", Level::INFO,
+                job_id = %id.as_str(),
+                "cancellation_requested"
+            );
             ctrl.invoke();
         }
 
@@ -829,7 +895,17 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
         // Prune expired terminals first.
         Self::prune_terminals(&mut state, now_ms, false);
 
-        let record = state.jobs.get_mut(id).ok_or(JobCollectError::NotFound)?;
+        let record = match state.jobs.get_mut(id) {
+            Some(r) => r,
+            None => {
+                // Check tombstone set: the record was evicted with an
+                // uncollected result, so ResultExpired is the correct answer.
+                if state.tombstones.contains(id.as_str()) {
+                    return Err(JobCollectError::ResultExpired);
+                }
+                return Err(JobCollectError::NotFound);
+            }
+        };
 
         if record.state != JobState::Succeeded {
             return Err(JobCollectError::NotSucceeded);
@@ -842,10 +918,25 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
         match record.result.take() {
             Some(boxed) => {
                 record.result_collected = true;
+                event!(target: "rollshot::agent::jobs", Level::INFO,
+                    job_id = %id.as_str(),
+                    kind = ?record.kind,
+                    revision = record.revision,
+                    "result_collected"
+                );
                 // Downcast from Box<dyn Any + Send> to R.
                 Ok(*boxed.downcast::<R>().expect("result type mismatch"))
             }
-            None => Err(JobCollectError::ResultExpired),
+            None => {
+                record.result_expired = true;
+                event!(target: "rollshot::agent::jobs", Level::INFO,
+                    job_id = %id.as_str(),
+                    kind = ?record.kind,
+                    revision = record.revision,
+                    "result_expired"
+                );
+                Err(JobCollectError::ResultExpired)
+            }
         }
     }
 
@@ -913,6 +1004,11 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
             ctrl.invoke();
         }
 
+        event!(target: "rollshot::agent::jobs", Level::INFO,
+            requested_count = requested_ids.len(),
+            "shutdown"
+        );
+
         requested_ids
     }
 
@@ -971,7 +1067,7 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
     fn prune_terminals(state: &mut RegistryState<P>, now_ms: u64, make_room: bool) {
         // 1. At TTL: drop results from uncollected successes (mark expired).
         //    Terminal records persist until cap eviction or owner drop.
-        for record in state.jobs.values_mut() {
+        for (id, record) in state.jobs.iter_mut() {
             if !record.state.is_terminal() {
                 continue;
             }
@@ -982,9 +1078,13 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
                     && record.result.is_some()
                     && !record.result_collected
                 {
-                    // Drop the result and mark expired.
+                    // Drop the result and mark expired. Tombstone so collect
+                    // can return ResultExpired even after cap eviction.
                     record.result = None;
                     record.result_expired = true;
+                    if state.tombstones.len() < MAX_TERMINAL_JOBS {
+                        state.tombstones.insert(id.as_str().to_owned());
+                    }
                 }
             }
         }
@@ -998,7 +1098,7 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
 
         if make_room && terminal_count >= MAX_TERMINAL_JOBS {
             // Collect terminal job IDs sorted by terminal_at_ms ascending.
-            let mut terminal_ids: Vec<(JobId, u64, bool)> = state
+            let mut terminal_ids: Vec<(JobId, u64, bool, bool)> = state
                 .jobs
                 .iter()
                 .filter(|(_, r)| r.state.is_terminal())
@@ -1006,21 +1106,23 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
                     let has_uncollected_result = r.state == JobState::Succeeded
                         && (r.result.is_some() || r.result_expired)
                         && !r.result_collected;
+                    let is_succeeded = r.state == JobState::Succeeded && !r.result_collected;
                     (
                         id.clone(),
                         r.terminal_at_ms.unwrap_or(r.created_at_ms),
                         has_uncollected_result,
+                        is_succeeded,
                     )
                 })
                 .collect();
 
-            terminal_ids.sort_by_key(|(_, ts, _)| *ts);
+            terminal_ids.sort_by_key(|(_, ts, _, _)| *ts);
 
             let excess = terminal_count - MAX_TERMINAL_JOBS + 1;
             let mut removed = 0;
 
             // First pass: remove collected or result-free terminals.
-            for (id, _, has_uncollected) in &terminal_ids {
+            for (id, _, has_uncollected, _) in &terminal_ids {
                 if removed >= excess {
                     break;
                 }
@@ -1031,23 +1133,36 @@ impl<P, R: Send + 'static> LiveJobRegistry<P, R> {
             }
 
             // Second pass: if still over, remove uncollected (oldest first).
-            for (id, _, has_uncollected) in &terminal_ids {
+            // Tombstone so collect can return ResultExpired.
+            for (id, _, has_uncollected, is_succeeded) in &terminal_ids {
                 if removed >= excess {
                     break;
                 }
                 if *has_uncollected && state.jobs.contains_key(id) {
+                    if *is_succeeded && state.tombstones.len() < MAX_TERMINAL_JOBS {
+                        state.tombstones.insert(id.as_str().to_owned());
+                    }
                     state.jobs.remove(id);
                     removed += 1;
                 }
             }
         }
     }
-
 }
 
 impl<P, R: Send + 'static> Default for LiveJobRegistry<P, R> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<P, R: Send + 'static> Drop for LiveJobRegistry<P, R> {
+    fn drop(&mut self) {
+        // Idempotent shutdown: sets shutting_down, requests cancellation of
+        // any remaining active jobs, and invokes their callbacks.
+        // Reporter/observer Arcs may outlive us, but shutdown state remains
+        // visible to them.
+        self.shutdown(0);
     }
 }
 
@@ -1095,8 +1210,16 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
         record.state = JobState::Running;
         record.updated_at_ms = now_ms;
         record.revision += 1;
+        let rev = record.revision;
         state.watch_revision += 1;
         let _ = self.inner.watch_tx.send(state.watch_revision);
+
+        event!(target: "rollshot::agent::jobs", Level::INFO,
+            job_id = %self.job_id.as_str(),
+            state = ?JobState::Running,
+            revision = rev,
+            "running"
+        );
 
         Ok(())
     }
@@ -1156,7 +1279,7 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
             record.diagnostics.remove(0);
             record.dropped_diagnostics += 1;
         }
-        record.diagnostics.push(diagnostic);
+        record.diagnostics.push_back(diagnostic);
         record.updated_at_ms = now_ms;
         record.revision += 1;
         state.watch_revision += 1;
@@ -1190,8 +1313,15 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
             record.terminal_at_ms = Some(now_ms);
             record.updated_at_ms = now_ms;
             record.revision += 1;
+            let rev = record.revision;
             state.watch_revision += 1;
             let _ = self.inner.watch_tx.send(state.watch_revision);
+            event!(target: "rollshot::agent::jobs", Level::INFO,
+                job_id = %self.job_id.as_str(),
+                state = ?JobState::Cancelled,
+                revision = rev,
+                "terminal"
+            );
             return Ok(());
         }
 
@@ -1201,8 +1331,16 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
         record.terminal_at_ms = Some(now_ms);
         record.updated_at_ms = now_ms;
         record.revision += 1;
+        let rev = record.revision;
         state.watch_revision += 1;
         let _ = self.inner.watch_tx.send(state.watch_revision);
+
+        event!(target: "rollshot::agent::jobs", Level::INFO,
+            job_id = %self.job_id.as_str(),
+            state = ?JobState::Succeeded,
+            revision = rev,
+            "terminal"
+        );
 
         Ok(())
     }
@@ -1231,8 +1369,17 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
         record.terminal_at_ms = Some(now_ms);
         record.updated_at_ms = now_ms;
         record.revision += 1;
+        let rev = record.revision;
         state.watch_revision += 1;
         let _ = self.inner.watch_tx.send(state.watch_revision);
+
+        event!(target: "rollshot::agent::jobs", Level::INFO,
+            job_id = %self.job_id.as_str(),
+            state = ?JobState::Failed,
+            failure_category = ?category,
+            revision = rev,
+            "terminal"
+        );
 
         Ok(())
     }
@@ -1267,8 +1414,16 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
         record.terminal_at_ms = Some(now_ms);
         record.updated_at_ms = now_ms;
         record.revision += 1;
+        let rev = record.revision;
         state.watch_revision += 1;
         let _ = self.inner.watch_tx.send(state.watch_revision);
+
+        event!(target: "rollshot::agent::jobs", Level::INFO,
+            job_id = %self.job_id.as_str(),
+            state = ?JobState::Cancelled,
+            revision = rev,
+            "terminal"
+        );
 
         Ok(())
     }
@@ -1302,16 +1457,31 @@ impl<P, R: Send + 'static> Drop for JobReporter<P, R> {
             record.state = JobState::Cancelled;
             record.terminal_at_ms = Some(record.updated_at_ms);
             record.revision += 1;
+            let rev = record.revision;
             state.watch_revision += 1;
             let _ = self.inner.watch_tx.send(state.watch_revision);
+            event!(target: "rollshot::agent::jobs", Level::WARN,
+                job_id = %self.job_id.as_str(),
+                state = ?JobState::Cancelled,
+                revision = rev,
+                "terminal"
+            );
         } else {
             // Starting or Running: worker abandoned.
             record.state = JobState::Failed;
             record.failure_category = Some(JobFailureCategory::WorkerAbandoned);
             record.terminal_at_ms = Some(record.updated_at_ms);
             record.revision += 1;
+            let rev = record.revision;
             state.watch_revision += 1;
             let _ = self.inner.watch_tx.send(state.watch_revision);
+            event!(target: "rollshot::agent::jobs", Level::WARN,
+                job_id = %self.job_id.as_str(),
+                state = ?JobState::Failed,
+                failure_category = ?JobFailureCategory::WorkerAbandoned,
+                revision = rev,
+                "worker_abandoned"
+            );
         }
     }
 }
@@ -1519,14 +1689,8 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         reporter.cancelled(104).unwrap();
-        assert_eq!(
-            registry.snapshot(&id).unwrap().state(),
-            JobState::Cancelled
-        );
-        assert_eq!(
-            registry.cancel(&id, 105),
-            JobCancelOutcome::AlreadyTerminal
-        );
+        assert_eq!(registry.snapshot(&id).unwrap().state(), JobState::Cancelled);
+        assert_eq!(registry.cancel(&id, 105), JobCancelOutcome::AlreadyTerminal);
     }
 
     #[test]
@@ -1542,10 +1706,7 @@ mod tests {
         reporter.succeed(DropProbe(dropped.clone()), 103).unwrap();
 
         assert!(dropped.load(Ordering::SeqCst));
-        assert_eq!(
-            registry.snapshot(&id).unwrap().state(),
-            JobState::Cancelled
-        );
+        assert_eq!(registry.snapshot(&id).unwrap().state(), JobState::Cancelled);
         assert_eq!(
             registry.collect(&id, 104).unwrap_err(),
             JobCollectError::NotSucceeded
@@ -1727,15 +1888,17 @@ mod tests {
                 .admit(direct_admission(i), no_op_control(), i)
                 .unwrap();
             reporter.mark_running(i + 1).unwrap();
-            reporter
-                .succeed(format!("result-{i}"), i + 2)
-                .unwrap();
+            reporter.succeed(format!("result-{i}"), i + 2).unwrap();
             registry.collect(&id, i + 3).unwrap();
         }
 
         // All 128 terminal records still exist (collected but within TTL).
         let state = registry.inner.state.lock().unwrap();
-        let terminal_count = state.jobs.values().filter(|r| r.state.is_terminal()).count();
+        let terminal_count = state
+            .jobs
+            .values()
+            .filter(|r| r.state.is_terminal())
+            .count();
         assert_eq!(terminal_count, 128);
         drop(state);
 
@@ -1743,11 +1906,18 @@ mod tests {
         let (new_id, _reporter) = registry
             .admit(direct_admission(999), no_op_control(), 200)
             .unwrap();
-        assert_eq!(registry.snapshot(&new_id).unwrap().state(), JobState::Starting);
+        assert_eq!(
+            registry.snapshot(&new_id).unwrap().state(),
+            JobState::Starting
+        );
 
         // The oldest collected record is gone.
         let state = registry.inner.state.lock().unwrap();
-        let terminal_count = state.jobs.values().filter(|r| r.state.is_terminal()).count();
+        let terminal_count = state
+            .jobs
+            .values()
+            .filter(|r| r.state.is_terminal())
+            .count();
         assert_eq!(terminal_count, 127);
     }
 
@@ -1811,7 +1981,11 @@ mod tests {
 
         // All 128 still exist (within TTL).
         let state = registry.inner.state.lock().unwrap();
-        let terminal_count = state.jobs.values().filter(|r| r.state.is_terminal()).count();
+        let terminal_count = state
+            .jobs
+            .values()
+            .filter(|r| r.state.is_terminal())
+            .count();
         assert_eq!(terminal_count, 128);
         drop(state);
 
@@ -1819,28 +1993,79 @@ mod tests {
         registry.prune(129 + TERMINAL_TTL_MS);
 
         let state = registry.inner.state.lock().unwrap();
-        let terminal_count = state.jobs.values().filter(|r| r.state.is_terminal()).count();
+        let terminal_count = state
+            .jobs
+            .values()
+            .filter(|r| r.state.is_terminal())
+            .count();
         assert_eq!(terminal_count, 128);
         drop(state);
 
         // Cap eviction: admitting a new job prunes the oldest terminal.
         let (_new_id, _reporter) = registry
-            .admit(direct_admission(999), no_op_control(), 129 + TERMINAL_TTL_MS)
+            .admit(
+                direct_admission(999),
+                no_op_control(),
+                129 + TERMINAL_TTL_MS,
+            )
             .unwrap();
 
         let state = registry.inner.state.lock().unwrap();
-        let terminal_count = state.jobs.values().filter(|r| r.state.is_terminal()).count();
+        let terminal_count = state
+            .jobs
+            .values()
+            .filter(|r| r.state.is_terminal())
+            .count();
         assert_eq!(terminal_count, 127);
+    }
+
+    #[test]
+    fn ttl_expired_result_is_tombstoned_for_collect_after_eviction() {
+        let registry = LiveJobRegistry::<u32, String>::new();
+        let (id, mut reporter) = registry
+            .admit(direct_admission(7), no_op_control(), 0)
+            .unwrap();
+        reporter.mark_running(1).unwrap();
+        reporter.succeed("result".to_string(), 2).unwrap();
+
+        // Prune at TTL: result dropped, tombstoned.
+        registry.prune(2 + TERMINAL_TTL_MS);
+
+        // Verify tombstone exists.
+        let state = registry.inner.state.lock().unwrap();
+        assert!(
+            state.tombstones.contains(id.as_str()),
+            "should be tombstoned"
+        );
+        drop(state);
+
+        // Record still exists in registry.
+        assert!(registry.snapshot(&id).is_some());
+
+        // collect returns ResultExpired via the result-expired path.
+        assert_eq!(
+            registry.collect(&id, 2 + TERMINAL_TTL_MS).unwrap_err(),
+            JobCollectError::ResultExpired
+        );
+
+        // Now manually evict the record and verify the tombstone still works.
+        {
+            let mut state = registry.inner.state.lock().unwrap();
+            state.jobs.remove(&id);
+        }
+
+        // collect returns ResultExpired via the tombstone path (record evicted).
+        assert_eq!(
+            registry.collect(&id, 3 + TERMINAL_TTL_MS).unwrap_err(),
+            JobCollectError::ResultExpired
+        );
     }
 
     #[test]
     fn cancel_not_found_returns_not_found() {
         let registry = LiveJobRegistry::<u32, String>::new();
         let fake_id = JobId::parse("job-00000000-0000-4000-8000-000000000099").unwrap();
-        assert_eq!(
-            registry.cancel(&fake_id, 100),
-            JobCancelOutcome::NotFound
-        );
+        assert_eq!(registry.cancel(&fake_id, 100), JobCancelOutcome::NotFound);
     }
 
     #[test]
@@ -1885,10 +2110,7 @@ mod tests {
         // Drop reporter — should confirm cancellation.
         drop(reporter);
 
-        assert_eq!(
-            registry.snapshot(&id).unwrap().state(),
-            JobState::Cancelled
-        );
+        assert_eq!(registry.snapshot(&id).unwrap().state(), JobState::Cancelled);
     }
 
     #[test]
