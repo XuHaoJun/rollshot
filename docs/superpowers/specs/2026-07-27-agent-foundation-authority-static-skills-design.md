@@ -1,8 +1,8 @@
 # Rollshot Agent Foundation Slice 3: Authority and Static Skills Design
 
-**Date:** 2026-07-27  
-**Status:** Approved for planning in brainstorming auto mode  
-**Area:** Agent foundation / authority / static instruction skills  
+**Date:** 2026-07-27
+**Status:** Approved for planning in brainstorming auto mode
+**Area:** Agent foundation / authority / static instruction skills
 **Governing design:**
 [`2026-07-26-agent-foundation-umbrella-design.md`](./2026-07-26-agent-foundation-umbrella-design.md)
 
