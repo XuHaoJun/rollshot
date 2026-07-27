@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use image::GenericImageView;
-use rollshot_agent::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType, SessionId};
+use rollshot_agent::domain::{
+    AttachmentDescriptor, AuthorizedModelInput, MediaType, RunId, SessionId,
+};
 use rollshot_agent::driver::{AgentConfig, AgentRunner, RunTerminalState};
 use rollshot_agent::runtime::{RunBudget, RunCancellation, RunEvent, RunEventSink};
 use rollshot_agent::tools::ToolContext;
@@ -280,8 +282,23 @@ pub(crate) async fn record_cassette(
     let vision = prepare_vision_context(&image, &ProductCapabilityBundle::empty())
         .map_err(|e| format!("prepare: {e:?}"))?;
     let cancellation = RunCancellation::new();
+    let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+        [1u8; 32],
+        &rollshot_agent::product_task::AnnotationStateV1 {
+            width: 100,
+            height: 100,
+            state_id: 0,
+            annotations: vec![],
+        },
+        0,
+    )
+    .unwrap();
     let tool_ctx = Arc::new(ToolContext::new_with_capability_handles(
         SessionId::new(1),
+        RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        rollshot_edit_proposal::ProposalId::parse("proposal-00000000-0000-4000-8000-000000000001")
+            .unwrap(),
+        binding,
         String::new(),
         rollshot_automation::ValidationLimits::default(),
         rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -326,7 +343,10 @@ pub(crate) async fn record_cassette(
     .map_err(|e| format!("input: {e:?}"))?;
 
     let runner = AgentRunner::new(AgentConfig::default());
-    let mut session = rollshot_agent::domain::AgentSession::new(SessionId::new(1));
+    let mut session = rollshot_agent::domain::AgentSession::new(
+        SessionId::new(1),
+        RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+    );
     let terminal = runner
         .run_with_provider(
             input,

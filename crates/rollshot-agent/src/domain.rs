@@ -1,5 +1,7 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 // ---------- Opaque IDs ----------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -15,16 +17,45 @@ impl SessionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RunId(u64);
+fn valid_uuid_suffix(value: &str, prefix: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return false;
+    };
+    suffix.len() == 36
+        && suffix.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RunId(String);
 
 impl RunId {
-    pub fn new(raw: u64) -> Self {
-        Self(raw)
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if valid_uuid_suffix(&value, "run-") {
+            Ok(Self(value))
+        } else {
+            Err(format!("invalid RunId: {value}"))
+        }
     }
 
-    pub fn get(self) -> u64 {
-        self.0
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for RunId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RunId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -234,14 +265,16 @@ pub enum SessionError {
 #[derive(Debug, Clone)]
 pub struct AgentSession {
     pub session_id: SessionId,
+    pub run_id: RunId,
     exchanges: Vec<CompletedExchange>,
     pending_user: Option<String>,
 }
 
 impl AgentSession {
-    pub fn new(session_id: SessionId) -> Self {
+    pub fn new(session_id: SessionId, run_id: RunId) -> Self {
         Self {
             session_id,
+            run_id,
             exchanges: Vec::new(),
             pending_user: None,
         }
@@ -287,8 +320,8 @@ mod tests {
 
     #[test]
     fn run_ids_with_different_values_are_not_equal() {
-        let a = RunId::new(10);
-        let b = RunId::new(20);
+        let a = RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let b = RunId::parse("run-00000000-0000-4000-8000-000000000002").unwrap();
         assert_ne!(a, b);
     }
 
@@ -300,8 +333,16 @@ mod tests {
 
     #[test]
     fn run_id_preserves_inner_value() {
-        let id = RunId::new(99);
-        assert_eq!(id.get(), 99);
+        let id = RunId::parse("run-00000000-0000-4000-8000-000000000063").unwrap();
+        assert_eq!(id.as_str(), "run-00000000-0000-4000-8000-000000000063");
+    }
+
+    #[test]
+    fn run_id_requires_run_uuid_prefix() {
+        let id = RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        assert_eq!(id.as_str(), "run-00000000-0000-4000-8000-000000000001");
+        assert!(RunId::parse("proposal-00000000-0000-4000-8000-000000000001").is_err());
+        assert!(RunId::parse("run-../escape").is_err());
     }
 
     #[test]
@@ -534,7 +575,10 @@ mod tests {
 
     #[test]
     fn session_stores_completed_exchanges() {
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         session.push_user("what is 2+2?".into());
         session.push_assistant("4".into()).unwrap();
         assert_eq!(session.exchanges().len(), 1);
@@ -544,14 +588,20 @@ mod tests {
 
     #[test]
     fn session_rejects_assistant_without_pending_user() {
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         let result = session.push_assistant("hello".into());
         assert_eq!(result.unwrap_err(), SessionError::IncompleteTurn);
     }
 
     #[test]
     fn session_multiple_exchanges_in_order() {
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         session.push_user("first".into());
         session.push_assistant("reply-1".into()).unwrap();
         session.push_user("second".into());
@@ -563,7 +613,10 @@ mod tests {
 
     #[test]
     fn session_debug_shows_exchanges() {
-        let mut session = AgentSession::new(SessionId::new(1));
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         session.push_user("q".into());
         session.push_assistant("a".into()).unwrap();
         let dbg = format!("{session:?}");

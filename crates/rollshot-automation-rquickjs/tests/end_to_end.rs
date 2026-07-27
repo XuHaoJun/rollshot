@@ -59,10 +59,12 @@ fn run_source(
         capability_handles: Default::default(),
     };
     let proposal = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 9,
         provenance: Provenance {
-            source: ProvenanceSource::Agent { run_id: 3 },
+            source: ProvenanceSource::Agent {
+                run_id: "run-00000000-0000-4000-8000-000000000003".to_string(),
+            },
         },
     };
     let mut policy = ExecutionPolicy::smart_redaction_default(
@@ -133,10 +135,12 @@ function main(input) {
         ..Default::default()
     };
     let proposal = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 9,
         provenance: Provenance {
-            source: ProvenanceSource::Agent { run_id: 3 },
+            source: ProvenanceSource::Agent {
+                run_id: "run-00000000-0000-4000-8000-000000000003".to_string(),
+            },
         },
     };
     let policy = ExecutionPolicy::smart_redaction_default(
@@ -382,10 +386,12 @@ function main(input) {
         capability_handles: Default::default(),
     };
     let proposal = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         provenance: Provenance {
-            source: ProvenanceSource::Agent { run_id: 1 },
+            source: ProvenanceSource::Agent {
+                run_id: "run-00000000-0000-4000-8000-000000000001".to_string(),
+            },
         },
     };
     let policy = ExecutionPolicy::smart_redaction_default(

@@ -7,14 +7,53 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CandidateId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ProposalId(pub u64);
+fn valid_uuid_suffix(value: &str, prefix: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return false;
+    };
+    suffix.len() == 36
+        && suffix.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProposalId(String);
+
+impl ProposalId {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if valid_uuid_suffix(&value, "proposal-") {
+            Ok(Self(value))
+        } else {
+            Err(format!("invalid ProposalId: {value}"))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for ProposalId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProposalId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(s).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Where a proposal/candidate came from. Privacy-safe: ids/counts only, never prompts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProvenanceSource {
     Manual,
-    Agent { run_id: u64 },
+    Agent { run_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +218,7 @@ mod tests {
     fn proposal_serde_round_trip() {
         let r = ImageRect::from_corners(ImagePoint::new(1.0, 1.0), ImagePoint::new(9.0, 9.0));
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 7,
             candidates: vec![ProposedCandidate {
                 id: CandidateId(1),
@@ -188,13 +227,17 @@ mod tests {
                 label: "email".into(),
                 rationale: Some("matches email pattern".into()),
                 provenance: Provenance {
-                    source: ProvenanceSource::Agent { run_id: 42 },
+                    source: ProvenanceSource::Agent {
+                        run_id: "run-00000000-0000-4000-8000-00000000002a".into(),
+                    },
                 },
             }],
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 42 },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-00000000002a".into(),
+                },
             },
         };
         let json = serde_json::to_string(&proposal).unwrap();
@@ -202,6 +245,19 @@ mod tests {
         assert_eq!(back.id, proposal.id);
         assert_eq!(back.candidates.len(), 1);
         assert_eq!(back.candidates[0].label, "email");
+    }
+
+    #[test]
+    fn proposal_id_serde_rejects_wrong_prefix() {
+        let id = ProposalId::parse("proposal-00000000-0000-4000-8000-000000000002").unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProposalId>(&serde_json::to_string(&id).unwrap()).unwrap(),
+            id
+        );
+        assert!(serde_json::from_str::<ProposalId>(
+            r#""task-00000000-0000-4000-8000-000000000002""#
+        )
+        .is_err());
     }
 
     #[test]

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::SessionId;
+use crate::domain::{RunId, SessionId};
+use crate::product_task::DocumentContentBinding;
 use crate::runtime::{
     DraftState, EvidenceKind, RunCancellation, SourceDiffLine, SourceDiffLineKind,
     SourceDiffSummary,
@@ -565,6 +566,9 @@ pub struct ToolContext {
     pub execution_policy: rollshot_automation::ExecutionPolicy,
     pub automation_cancellation: rollshot_automation::CancellationFlag,
     pub session_id: SessionId,
+    pub run_id: RunId,
+    pub proposal_id: rollshot_edit_proposal::ProposalId,
+    pub content_binding: DocumentContentBinding,
     pub image_dims: (u32, u32),
     pub capability_handles: BTreeMap<String, String>,
     pub pending_ready_for_review: Mutex<Option<crate::driver::ReadyForReview>>,
@@ -581,8 +585,12 @@ impl ToolContext {
     /// same `RunCancellation` passed to [`AgentRunner::run`](crate::driver::AgentRunner)
     /// must be passed here. There is no second, independent cancellation
     /// primitive (§10 / D2).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: SessionId,
+        run_id: RunId,
+        proposal_id: rollshot_edit_proposal::ProposalId,
+        content_binding: DocumentContentBinding,
         initial_source: String,
         validation_limits: rollshot_automation::ValidationLimits,
         execution_policy: rollshot_automation::ExecutionPolicy,
@@ -591,6 +599,9 @@ impl ToolContext {
     ) -> Self {
         Self::new_with_capability_handles(
             session_id,
+            run_id,
+            proposal_id,
+            content_binding,
             initial_source,
             validation_limits,
             execution_policy,
@@ -600,8 +611,12 @@ impl ToolContext {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_capability_handles(
         session_id: SessionId,
+        run_id: RunId,
+        proposal_id: rollshot_edit_proposal::ProposalId,
+        content_binding: DocumentContentBinding,
         initial_source: String,
         validation_limits: rollshot_automation::ValidationLimits,
         execution_policy: rollshot_automation::ExecutionPolicy,
@@ -616,6 +631,9 @@ impl ToolContext {
             execution_policy,
             automation_cancellation: cancellation.automation_flag().clone(),
             session_id,
+            run_id,
+            proposal_id,
+            content_binding,
             image_dims,
             capability_handles,
             pending_ready_for_review: Mutex::new(None),
@@ -942,11 +960,11 @@ impl Tool for DryRunTool {
                     })?;
 
             let proposal_ctx = rollshot_automation::ProposalContext {
-                proposal_id: rollshot_edit_proposal::ProposalId(1),
-                base_document_state_id: 0,
+                proposal_id: self.ctx.proposal_id.clone(),
+                base_document_state_id: self.ctx.content_binding.state_id() as u64,
                 provenance: rollshot_edit_proposal::Provenance {
                     source: rollshot_edit_proposal::ProvenanceSource::Agent {
-                        run_id: self.ctx.session_id.get(),
+                        run_id: self.ctx.run_id.as_str().to_owned(),
                     },
                 },
             };
@@ -1965,14 +1983,32 @@ pub(crate) mod tests {
         source: &str,
         capability_handles: std::collections::BTreeMap<String, String>,
     ) -> Arc<ToolContext> {
+        use crate::product_task::DocumentContentBinding;
         let mut policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(5),
             4 * 1024 * 1024,
             1024 * 1024,
         );
         policy.proposal_limits.max_total_area_fraction = 0.5;
+        let binding = DocumentContentBinding::new(
+            [1u8; 32],
+            &crate::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         Arc::new(ToolContext::new_with_capability_handles(
             SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            binding,
             source.into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
@@ -2064,8 +2100,25 @@ pub(crate) mod tests {
             4 * 1024 * 1024,
             1024 * 1024,
         );
+        let binding = DocumentContentBinding::new(
+            [1u8; 32],
+            &crate::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         let ctx = ToolContext::new(
             SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            binding,
             "src".into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
@@ -2328,6 +2381,67 @@ pub(crate) mod tests {
 
         // Evidence should be recorded.
         assert_eq!(ctx.draft.lock().unwrap().evidence().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dry_run_uses_run_proposal_and_content_binding() {
+        use crate::product_task::DocumentContentBinding;
+
+        let proposal_id = rollshot_edit_proposal::ProposalId::parse(
+            "proposal-00000000-0000-4000-8000-000000000042",
+        )
+        .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-000000000042").unwrap();
+        let binding = DocumentContentBinding::new(
+            [42u8; 32],
+            &crate::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 42,
+                annotations: vec![],
+            },
+            42,
+        )
+        .unwrap();
+
+        let mut policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
+            std::time::Duration::from_secs(5),
+            4 * 1024 * 1024,
+            1024 * 1024,
+        );
+        policy.proposal_limits.max_total_area_fraction = 0.5;
+        let ctx = Arc::new(ToolContext::new_with_capability_handles(
+            SessionId::new(1),
+            run_id.clone(),
+            proposal_id.clone(),
+            binding,
+            valid_js_source().into(),
+            rollshot_automation::ValidationLimits::default(),
+            policy,
+            (100, 100),
+            BTreeMap::new(),
+            &RunCancellation::new(),
+        ));
+
+        let executor = Arc::new(FakeExecutor::with_valid_proposal());
+        let host = Arc::new(Mutex::new(
+            rollshot_automation::FakeAutomationHost::default(),
+        ));
+        let tool = DryRunTool::new(ctx.clone(), executor, host);
+
+        let args = serde_json::json!({"source": valid_js_source(), "generation": 0});
+        let _ = tool.call(&args).await.unwrap();
+
+        let cached = ctx.last_dry_run_proposal.lock().unwrap();
+        let proposal = cached.as_ref().expect("proposal cached");
+        assert_eq!(proposal.id, proposal_id);
+        assert_eq!(proposal.base_document_state_id, 42);
+        assert_eq!(
+            proposal.provenance.source,
+            rollshot_edit_proposal::ProvenanceSource::Agent {
+                run_id: run_id.as_str().to_owned(),
+            }
+        );
     }
 
     #[tokio::test]

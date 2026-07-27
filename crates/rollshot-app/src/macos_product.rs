@@ -70,6 +70,7 @@ const INITIAL_WORKSPACE_VIEWPORT: Size = Size::new(1084.0, 650.0);
 /// their owners; the remaining variants drive the thumbnail phase and host-side
 /// window-open resolutions.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     /// A capture-component message (opaque to the host except for window-ready).
     Capture(rollshot_iced_overlay::macos_capture::Message),

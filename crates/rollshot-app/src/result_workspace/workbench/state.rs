@@ -14,6 +14,8 @@ pub enum RunState {
         cancellation: RunCancellation,
         parent_revision_id: Option<rollshot_preset::RevisionId>,
         revision_note: Option<String>,
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        run_id: rollshot_agent::domain::RunId,
     },
     Terminal(RunTerminalState),
 }
@@ -87,6 +89,12 @@ pub enum WorkbenchError {
     Store {
         message: String,
     },
+    /// Task-store persistence failure (running or terminal snapshot).
+    StorePersist {
+        message: String,
+    },
+    /// Proposal artifact is stale (document state changed since proposal).
+    StaleArtifact,
     Config,
     CapabilityUnavailable {
         message: String,
@@ -106,6 +114,8 @@ impl std::fmt::Display for WorkbenchError {
             Self::BudgetExhausted { dimension } => write!(f, "Budget exhausted: {dimension:?}"),
             Self::VisionPrepare { message } => write!(f, "Vision prepare: {message}"),
             Self::Store { message } => write!(f, "Preset store: {message}"),
+            Self::StorePersist { message } => write!(f, "Store persist: {message}"),
+            Self::StaleArtifact => write!(f, "Artifact is stale — document changed"),
             Self::Config => write!(f, "Provider not configured"),
             Self::CapabilityUnavailable { message } => {
                 write!(f, "Capability unavailable: {message}")
@@ -116,6 +126,29 @@ impl std::fmt::Display for WorkbenchError {
 }
 
 impl WorkbenchError {
+    /// Map a `WorkbenchError` to the corresponding `TaskTerminal` for store
+    /// persistence.  `StorePersist` and `Cancelled` map to `RuntimeFailure`
+    /// and `Cancelled` respectively.
+    pub fn to_task_terminal(&self) -> rollshot_agent::product_task::TaskTerminal {
+        use rollshot_agent::product_task::TaskTerminal;
+        match self {
+            Self::ProviderFailure { .. } => TaskTerminal::ProviderFailure,
+            Self::SourceValidationFailure => TaskTerminal::SourceValidationFailure,
+            Self::RuntimeFailure
+            | Self::VisionPrepare { .. }
+            | Self::Config
+            | Self::CapabilityUnavailable { .. }
+            | Self::Store { .. }
+            | Self::StorePersist { .. } => TaskTerminal::RuntimeFailure,
+            Self::AgentProtocolFailure { .. } => TaskTerminal::AgentProtocolFailure,
+            Self::BudgetExhausted { dimension } => TaskTerminal::BudgetExhausted {
+                dimension: format!("{dimension:?}"),
+            },
+            Self::Cancelled => TaskTerminal::Cancelled,
+            Self::StaleArtifact => TaskTerminal::Stale,
+        }
+    }
+
     /// Map a terminal state to the workbench error it represents (if any).
     /// `ReadyForReview` / `NeedsUserInput` / `Cancelled` are not errors.
     pub fn from_terminal(terminal: &RunTerminalState) -> Option<Self> {
@@ -424,7 +457,7 @@ pub(crate) fn workbench_with_pending_candidate() -> super::WorkbenchState {
 
     let id = CandidateId(1);
     let proposal = EditProposal {
-        id: ProposalId(1),
+        id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         candidates: vec![ProposedCandidate {
             id,
@@ -534,7 +567,7 @@ mod tests {
             ProvenanceSource,
         };
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 ProposedCandidate {
@@ -629,7 +662,7 @@ mod tests {
         };
 
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 ProposedCandidate {
@@ -696,7 +729,7 @@ mod tests {
         // — must NOT count as a warning (it will not apply). cid(3): low-confidence
         // and still pending — the only will-apply warning.
         let proposal = EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: vec![
                 ProposedCandidate {
@@ -811,7 +844,7 @@ mod gating_tests {
             })
             .collect();
         EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),

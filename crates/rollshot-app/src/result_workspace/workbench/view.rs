@@ -203,12 +203,19 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
 
     let selected_reject = wb.selected_candidate.map(|id| {
         if super::state::is_candidate_rejected(&wb.review, id) {
-            button(text("Undo reject")).on_press(Message::Workbench(
-                WorkbenchMessage::CandidateUnrejected(id),
-            ))
+            button(text("Undo reject")).on_press_maybe(if wb.review_operation_active {
+                None
+            } else {
+                Some(Message::Workbench(WorkbenchMessage::CandidateUnrejected(
+                    id,
+                )))
+            })
         } else {
-            button(text("Reject"))
-                .on_press(Message::Workbench(WorkbenchMessage::CandidateDeleted(id)))
+            button(text("Reject")).on_press_maybe(if wb.review_operation_active {
+                None
+            } else {
+                Some(Message::Workbench(WorkbenchMessage::CandidateDeleted(id)))
+            })
         }
     });
 
@@ -217,10 +224,13 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
         actions = actions.push(reject);
     }
     if proposal.is_some() {
-        actions = actions.push(
-            button(text("Discard all"))
-                .on_press(Message::Workbench(WorkbenchMessage::DiscardCandidates)),
-        );
+        actions = actions.push(button(text("Discard all")).on_press_maybe(
+            if wb.review_operation_active {
+                None
+            } else {
+                Some(Message::Workbench(WorkbenchMessage::DiscardCandidates))
+            },
+        ));
     }
     actions = actions.push(button(text("Revise")).on_press_maybe(
         revise_enabled.then_some(Message::Workbench(WorkbenchMessage::AskAgentToRevise)),
@@ -228,7 +238,7 @@ fn review_bar<'a>(wb: &'a WorkbenchState) -> Element<'a, Message> {
     actions = actions.push(
         button(text(format!("Apply {} redactions", summary.apply)))
             .style(button::primary)
-            .on_press_maybe(if summary.apply > 0 {
+            .on_press_maybe(if summary.apply > 0 && !wb.review_operation_active {
                 Some(Message::Workbench(WorkbenchMessage::ApplyCandidates))
             } else {
                 None
@@ -481,8 +491,11 @@ fn result_state_banner<'a>(wb: &'a WorkbenchState) -> Option<Element<'a, Message
                             .on_press(Message::Workbench(WorkbenchMessage::NextWarning)),
                         button(text("Improve preset"))
                             .on_press(Message::Workbench(WorkbenchMessage::ImStart)),
-                        button(text("Discard"))
-                            .on_press(Message::Workbench(WorkbenchMessage::DiscardCandidates)),
+                        button(text("Discard")).on_press_maybe(if wb.review_operation_active {
+                            None
+                        } else {
+                            Some(Message::Workbench(WorkbenchMessage::DiscardCandidates))
+                        }),
                     ]
                     .spacing(8),
                 ]

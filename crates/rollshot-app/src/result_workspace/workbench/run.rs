@@ -614,7 +614,7 @@ pub(crate) fn run_existing_preset_with_capabilities(
         capability_handles: bundle.capability_handles.clone(),
     };
     let ctx = ProposalContext {
-        proposal_id: ProposalId(1),
+        proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
         base_document_state_id: 0,
         provenance: Provenance {
             source: ProvenanceSource::Manual,
@@ -746,6 +746,166 @@ pub(crate) fn build_authoring_tool_registry(
     Ok(registry)
 }
 
+// ── Persistence-before-delivery helpers ────────────────────────────────
+
+/// Persist a terminal snapshot for a setup failure.  Called before yielding
+/// `RunFailed` to iced so the store always reflects the terminal state.
+/// Returns silently on success or store error (the store error is not
+/// surfaced to the user — the `RunFailed` message carries the real cause).
+async fn persist_terminal_if_possible(
+    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_id: &rollshot_agent::product_task::ProductTaskId,
+    _run_id: &rollshot_agent::domain::RunId,
+    error: &WorkbenchError,
+) {
+    let Some(store) = task_store else { return };
+    let now = chrono::Utc::now().timestamp_millis();
+    // Load the running snapshot from the store so the CAS expected value
+    // matches what is actually persisted (including real source bindings).
+    let running = match store.load(task_id) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let terminal = error.to_task_terminal();
+    let terminal_snap = match running.record_terminal(terminal, now) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let store = store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = store.compare_and_swap(&running, &terminal_snap);
+    })
+    .await;
+}
+
+/// Persist a `RunTerminal` outcome (artifact for `ReadyForReview`, terminal
+/// for others) before yielding to iced.  Returns `Some(err_msg)` if the store
+/// failed — caller should yield a bounded `StorePersist` error and suppress
+/// the proposal.
+async fn persist_terminal_outcome(
+    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_id: &rollshot_agent::product_task::ProductTaskId,
+    _run_id: &rollshot_agent::domain::RunId,
+    proposal_id_str: &str,
+    content_binding: &rollshot_agent::product_task::DocumentContentBinding,
+    terminal: &rollshot_agent::driver::RunTerminalState,
+) -> Option<String> {
+    use rollshot_agent::driver::RunTerminalState;
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, ProductArtifactMetadata, SourceBinding,
+        TaskTerminal,
+    };
+
+    let store = task_store?;
+
+    // Load current snapshot from store (must exist — we persisted running).
+    let current = match store.load(task_id) {
+        Ok(s) => s,
+        Err(e) => return Some(format!("load for terminal: {e}")),
+    };
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let next = match terminal {
+        RunTerminalState::ReadyForReview(ready) => {
+            let source_binding = SourceBinding::new(
+                *content_binding.base_image_digest(),
+                *content_binding.annotation_state_digest(),
+                content_binding.state_id(),
+                current.source_binding().preset_id().to_owned(),
+                current
+                    .source_binding()
+                    .active_preset_revision_id()
+                    .map(String::from),
+            );
+            let artifact_id = ArtifactId::parse(format!("artifact-{}", uuid::Uuid::new_v4()))
+                .expect("v4 UUID is valid");
+            let metadata = ProductArtifactMetadata::new(
+                artifact_id,
+                ArtifactRevision::new(1),
+                ArtifactKind::SmartRedaction,
+                1,
+                String::new(), // canonical payload digest — computed on apply
+                source_binding,
+                task_id.clone(),
+                current.attempts().last().unwrap().attempt_id(),
+                current.attempts().last().unwrap().run_id().clone(),
+                proposal_id_str.to_owned(),
+                String::new(), // provider_id — not available here
+                String::new(), // model_id — not available here
+                String::new(), // run_config_digest
+                ready.automation.dry_run.candidate_count,
+                ready.automation.dry_run.affected_area,
+                now,
+            );
+            // Build a minimal SmartRedactionReviewPayload for persistence.
+            let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
+                source: rollshot_agent::product_task::PayloadSourceV1 {
+                    kind: "agent_run".into(),
+                    validation_summary: format!(
+                        "{} nodes",
+                        ready.automation.validation_summary.ast_nodes
+                    ),
+                },
+                proposal: rollshot_agent::product_task::PayloadProposalV1 {
+                    proposal_id: proposal_id_str.to_owned(),
+                    candidate_count: ready.proposal.candidates.len() as u32,
+                },
+                dry_run: rollshot_agent::product_task::PayloadDryRunV1 {
+                    candidate_count: ready.automation.dry_run.candidate_count,
+                    affected_area: ready.automation.dry_run.affected_area,
+                },
+                config: rollshot_agent::product_task::PayloadConfigV1 {
+                    provider: String::new(),
+                    model: String::new(),
+                    payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                    run_kind: "smart_redaction".into(),
+                    budget_dimensions: std::collections::BTreeMap::new(),
+                },
+            };
+            // Serialize proposal for persistence alongside the review payload.
+            let proposal_bytes =
+                serde_json::to_vec(&ready.proposal).map_err(|e| format!("serialize proposal: {e}"));
+            let proposal_payload = match proposal_bytes {
+                Ok(b) => Some(b),
+                Err(e) => return Some(e),
+            };
+            match current.record_ready_for_review(metadata, payload, proposal_payload, now) {
+                Ok(s) => s,
+                Err(e) => return Some(format!("record ready: {e}")),
+            }
+        }
+        other => {
+            let task_terminal = match other {
+                RunTerminalState::NeedsUserInput(_) => TaskTerminal::NeedsUserInput,
+                RunTerminalState::Cancelled => TaskTerminal::Cancelled,
+                RunTerminalState::BudgetExhausted { dimension } => TaskTerminal::BudgetExhausted {
+                    dimension: format!("{dimension:?}"),
+                },
+                RunTerminalState::SourceValidationFailure => TaskTerminal::SourceValidationFailure,
+                RunTerminalState::RuntimeFailure => TaskTerminal::RuntimeFailure,
+                RunTerminalState::AgentProtocolFailure { .. } => TaskTerminal::AgentProtocolFailure,
+                RunTerminalState::ProviderFailure { .. } => TaskTerminal::ProviderFailure,
+                RunTerminalState::ReadyForReview(_) => unreachable!(),
+            };
+            match current.record_terminal(task_terminal, now) {
+                Ok(s) => s,
+                Err(e) => return Some(format!("record terminal: {e}")),
+            }
+        }
+    };
+
+    let store = store.clone();
+    let expected = current.clone();
+    let result =
+        tokio::task::spawn_blocking(move || store.compare_and_swap(&expected, &next)).await;
+    match result {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(format!("persist terminal: {e}")),
+        Err(e) => Some(format!("spawn_blocking: {e}")),
+    }
+}
+
 /// Start a bounded agent run as an iced `Task` that streams `RunEvent`s and
 /// emits a final `RunTerminal`. The `AgentSession` is moved into the spawned
 /// task by value (not held in any Mutex) so the spawned future stays `Send`
@@ -760,6 +920,7 @@ pub fn start_agent_run(
     budget: &RunBudget,
     session: rollshot_agent::domain::AgentSession,
     payload_mode: PayloadMode,
+    task_store: Option<Arc<super::task_store::TaskStore>>,
 ) -> Result<
     (
         iced::Task<crate::result_workspace::Message>,
@@ -788,6 +949,15 @@ pub fn start_agent_run(
     let active_source = params.active_revision_source.clone().unwrap_or_default();
     let preset_store_root = params.preset_store_root.clone();
     let preset_id = params.preset_id.clone();
+    let task_id = params.task_id.clone();
+    let run_id = params.run_id.clone();
+    let proposal_id = params.proposal_id.clone();
+    let content_binding = params.content_binding.clone();
+    let task_kind = match params.mode {
+        super::RunKind::Author => rollshot_agent::product_task::TaskKind::SmartRedactionAuthor,
+        super::RunKind::Improve => rollshot_agent::product_task::TaskKind::SmartRedactionImprove,
+    };
+    let task_store = task_store.clone();
     let image = image.clone();
     let budget = budget.clone();
 
@@ -795,13 +965,109 @@ pub fn start_agent_run(
     let cancellation_for_task = cancellation.clone();
 
     let stream = async_stream::stream! {
+        // ── Persistence-before-delivery protocol ──────────────────────
+        // Step 1: persist running snapshot before any setup work.
+        if let Some(ref store) = task_store {
+            use rollshot_agent::product_task::{
+                ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId,
+            };
+            let now = chrono::Utc::now().timestamp_millis();
+            let source_binding = SourceBinding::new(
+                *content_binding.base_image_digest(),
+                *content_binding.annotation_state_digest(),
+                content_binding.state_id(),
+                preset_id.0.clone(),
+                if active_source.is_empty() { None } else { Some(active_source.clone()) },
+            );
+            let attempt = TaskAttempt::new(
+                TaskAttemptId::new(1),
+                run_id.clone(),
+                now,
+            );
+            let snapshot = match ProductTaskSnapshot::new(
+                task_id.clone(),
+                task_kind,
+                source_binding,
+                now,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    yield crate::result_workspace::Message::Workbench(
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: WorkbenchError::StorePersist {
+                                message: format!("create snapshot: {e}"),
+                            },
+                        },
+                    );
+                    return;
+                }
+            };
+            let running = match snapshot.start_attempt(attempt, now) {
+                Ok(s) => s,
+                Err(e) => {
+                    yield crate::result_workspace::Message::Workbench(
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: WorkbenchError::StorePersist {
+                                message: format!("start attempt: {e}"),
+                            },
+                        },
+                    );
+                    return;
+                }
+            };
+            let store_clone = store.clone();
+            let running_clone = running.clone();
+            let persist_result = tokio::task::spawn_blocking(move || {
+                store_clone.create(&running_clone)
+            }).await;
+            match persist_result {
+                Ok(Ok(_)) => {} // running snapshot persisted
+                Ok(Err(e)) => {
+                    yield crate::result_workspace::Message::Workbench(
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: WorkbenchError::StorePersist {
+                                message: format!("persist running: {e}"),
+                            },
+                        },
+                    );
+                    return;
+                }
+                Err(e) => {
+                    yield crate::result_workspace::Message::Workbench(
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: WorkbenchError::StorePersist {
+                                message: format!("spawn_blocking: {e}"),
+                            },
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+
         // Heavy work runs inside the spawned task (B5).
         let preset_store = rollshot_preset::PresetStore::open(preset_store_root);
         let capability_bundle = match ProductCapabilityBundle::load(&preset_store, Some(&preset_id)) {
             Ok(bundle) => bundle,
             Err(e) => {
+                // Persist terminal before yielding setup failure.
+                persist_terminal_if_possible(
+                    task_store.clone(), &task_id, &run_id, &e,
+                ).await;
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(e),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: e,
+                    },
                 );
                 return;
             }
@@ -809,8 +1075,15 @@ pub fn start_agent_run(
         let vision = match prepare_vision_context(&image, &capability_bundle) {
             Ok(v) => v,
             Err(e) => {
+                persist_terminal_if_possible(
+                    task_store.clone(), &task_id, &run_id, &e,
+                ).await;
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(e),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: e,
+                    },
                 );
                 return;
             }
@@ -822,6 +1095,9 @@ pub fn start_agent_run(
         );
         let tool_ctx = Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
             session_id,
+            session.run_id.clone(),
+            proposal_id.clone(),
+            content_binding.clone(),
             active_source,
             validation_limits,
             policy,
@@ -845,8 +1121,15 @@ pub fn start_agent_run(
         ) {
             Ok(registry) => registry,
             Err(e) => {
+                persist_terminal_if_possible(
+                    task_store.clone(), &task_id, &run_id, &e,
+                ).await;
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(e),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: e,
+                    },
                 );
                 return;
             }
@@ -860,10 +1143,18 @@ pub fn start_agent_run(
                 if let Err(e) = image::DynamicImage::ImageRgba8(image.clone())
                     .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
                 {
+                    let err = WorkbenchError::VisionPrepare {
+                        message: format!("png encode: {e}"),
+                    };
+                    persist_terminal_if_possible(
+                        task_store.clone(), &task_id, &run_id, &err,
+                    ).await;
                     yield crate::result_workspace::Message::Workbench(
-                        super::WorkbenchMessage::RunFailed(WorkbenchError::VisionPrepare {
-                            message: format!("png encode: {e}"),
-                        }),
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: err,
+                        },
                     );
                     return;
                 }
@@ -886,8 +1177,16 @@ pub fn start_agent_run(
         ) {
             Ok(input) => input,
             Err(_) => {
+                let err = WorkbenchError::RuntimeFailure;
+                persist_terminal_if_possible(
+                    task_store.clone(), &task_id, &run_id, &err,
+                ).await;
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(WorkbenchError::RuntimeFailure),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: err,
+                    },
                 );
                 return;
             }
@@ -908,12 +1207,36 @@ pub fn start_agent_run(
 
         while let Some(event) = rx.recv().await {
             yield crate::result_workspace::Message::Workbench(
-                super::WorkbenchMessage::RunEvent(event),
+                super::WorkbenchMessage::RunEvent {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    event,
+                },
             );
         }
         if let Ok(terminal) = run_task.await {
+            // Persist terminal/artifact before yielding to iced.
+            let persist_err = persist_terminal_outcome(
+                task_store.clone(), &task_id, &run_id, proposal_id.as_str(),
+                &content_binding, &terminal,
+            ).await;
+            if let Some(err_msg) = persist_err {
+                // Store failure: yield bounded warning, do NOT yield proposal.
+                yield crate::result_workspace::Message::Workbench(
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: WorkbenchError::StorePersist { message: err_msg },
+                    },
+                );
+                return;
+            }
             yield crate::result_workspace::Message::Workbench(
-                super::WorkbenchMessage::RunTerminal(terminal),
+                super::WorkbenchMessage::RunTerminal {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    terminal,
+                },
             );
         }
     };
@@ -956,7 +1279,8 @@ mod tests {
             capability_handles: Default::default(),
         };
         let ctx = ProposalContext {
-            proposal_id: ProposalId(1),
+            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000")
+                .unwrap(),
             base_document_state_id: 0,
             provenance: Provenance {
                 source: ProvenanceSource::Manual,
@@ -1420,9 +1744,27 @@ mod prepare_tests {
 
     fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
         let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &rollshot_agent::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1617,9 +1959,27 @@ function main(input) {
         let mut handles = std::collections::BTreeMap::new();
         handles.insert("mark".to_string(), "mark".to_string());
         let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &rollshot_agent::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         let ctx = std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1712,9 +2072,27 @@ function main(input) {
             &ocr_catalog,
         );
         let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &rollshot_agent::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         let ctx = std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1886,7 +2264,7 @@ mod reducer_tests {
 
     fn proposal(cands: Vec<ProposedCandidate>) -> EditProposal {
         EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
@@ -1926,7 +2304,9 @@ mod reducer_tests {
             label: "agent".into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 7 },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         }
     }
@@ -1974,6 +2354,14 @@ mod reducer_tests {
         use rollshot_agent::runtime::UsageSnapshot;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         wb_mut(&mut ws).selected_candidate = Some(CandidateId(99));
         let p = proposal(vec![
             candidate(1, rect(10.0, 10.0, 50.0, 50.0)),
@@ -2008,9 +2396,11 @@ mod reducer_tests {
         };
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunTerminal(
-                RunTerminalState::ReadyForReview(Box::new(ready)),
-            )),
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: tid,
+                run_id: rid,
+                terminal: RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
         );
         let state = wb(&ws);
         assert!(state.pending_proposal.is_some(), "proposal populated");
@@ -2149,16 +2539,7 @@ mod reducer_tests {
     fn disclosure_cancelled_clears_pending_run_and_flag() {
         let mut ws = ws_with_workbench();
         wb_mut(&mut ws).disclosure_pending = true;
-        wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
-            user_message: "test".into(),
-            image_dims: (100, 100),
-            active_revision_source: None,
-            mode: super::super::RunKind::Author,
-            parent_revision_id: None,
-            revision_note: None,
-            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
-            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
-        });
+        wb_mut(&mut ws).pending_run = Some(test_pending_run_params());
 
         let _ = update(
             &mut ws,
@@ -2174,11 +2555,23 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "hello".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid,
+                run_id: rid,
+                event: RunEvent::TextChunk {
+                    text: "hello".into(),
+                },
+            }),
         );
         let state = wb(&ws);
         assert_eq!(state.live_activity.len(), 1);
@@ -2189,17 +2582,33 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "hello ".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk {
+                    text: "hello ".into(),
+                },
+            }),
         );
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "world".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid,
+                run_id: rid,
+                event: RunEvent::TextChunk {
+                    text: "world".into(),
+                },
+            }),
         );
         let state = wb(&ws);
         assert_eq!(state.live_activity.len(), 1, "two chunks → one entry");
@@ -2216,26 +2625,40 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         // Streamed chunks (may have gaps from dropped try_send).
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "hel".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk { text: "hel".into() },
+            }),
         );
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "lo".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk { text: "lo".into() },
+            }),
         );
         // Terminal with authoritative full text.
         let ready = ready_for_review_with_text("hello world");
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunTerminal(
-                RunTerminalState::ReadyForReview(Box::new(ready)),
-            )),
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: tid,
+                run_id: rid,
+                terminal: RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
         );
         let state = wb(&ws);
         // Find the AssistantText entry (before the TerminalLabel).
@@ -2275,7 +2698,10 @@ mod reducer_tests {
                 },
             },
             proposal: rollshot_edit_proposal::EditProposal {
-                id: rollshot_edit_proposal::ProposalId(1),
+                id: rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000001-0000-4000-8000-000000000000",
+                )
+                .unwrap(),
                 base_document_state_id: 0,
                 candidates: vec![],
                 confidence_summary: rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[]),
@@ -2292,16 +2718,73 @@ mod reducer_tests {
         }
     }
 
+    fn test_pending_run_params() -> super::super::PendingRunParams {
+        super::super::PendingRunParams {
+            user_message: "test".into(),
+            image_dims: (100, 100),
+            active_revision_source: None,
+            mode: super::super::RunKind::Author,
+            parent_revision_id: None,
+            revision_note: None,
+            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
+            task_id: rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            run_id: rollshot_agent::domain::RunId::parse(
+                "run-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            proposal_id: rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            artifact_id: rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            content_binding: rollshot_agent::product_task::DocumentContentBinding::new(
+                [1u8; 32],
+                &rollshot_agent::product_task::AnnotationStateV1 {
+                    width: 100,
+                    height: 100,
+                    state_id: 0,
+                    annotations: vec![],
+                },
+                0,
+            )
+            .unwrap(),
+        }
+    }
+
+    fn test_run_ids() -> (
+        rollshot_agent::product_task::ProductTaskId,
+        rollshot_agent::domain::RunId,
+    ) {
+        (
+            rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
+        )
+    }
+
     #[test]
     fn cancel_run_calls_cancellation() {
         use rollshot_agent::runtime::RunCancellation;
 
         let mut ws = ws_with_workbench();
         let cancel = RunCancellation::new();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: cancel.clone(),
             parent_revision_id: None,
             revision_note: None,
+            task_id: tid,
+            run_id: rid,
         };
 
         let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::CancelRun));
@@ -2311,19 +2794,24 @@ mod reducer_tests {
     #[test]
     fn run_failed_sets_error_and_terminal() {
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: None,
             revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
         };
 
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunFailed(
-                super::WorkbenchError::VisionPrepare {
+            Message::Workbench(WorkbenchMessage::RunFailed {
+                task_id: tid,
+                run_id: rid,
+                error: super::WorkbenchError::VisionPrepare {
                     message: "region_too_large".into(),
                 },
-            )),
+            }),
         );
         let state = wb(&ws);
         assert!(
@@ -2342,22 +2830,16 @@ mod reducer_tests {
     #[test]
     fn disclosure_confirmed_blocked_while_running() {
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: None,
             revision_note: None,
+            task_id: tid,
+            run_id: rid,
         };
         wb_mut(&mut ws).disclosure_pending = true;
-        wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
-            user_message: "test".into(),
-            image_dims: (100, 100),
-            active_revision_source: None,
-            mode: super::super::RunKind::Author,
-            parent_revision_id: None,
-            revision_note: None,
-            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
-            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
-        });
+        wb_mut(&mut ws).pending_run = Some(test_pending_run_params());
 
         let _ = update(
             &mut ws,
@@ -2378,19 +2860,24 @@ mod reducer_tests {
     #[test]
     fn run_terminal_carries_lineage_into_pending_draft() {
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: Some(rollshot_preset::RevisionId("rev-parent".into())),
             revision_note: Some(
                 "improved from rev-parent; 1 rejected, 0 resized, 0 manually added".into(),
             ),
+            task_id: tid.clone(),
+            run_id: rid.clone(),
         };
         let ready = ready_for_review_with_text("done");
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunTerminal(
-                RunTerminalState::ReadyForReview(Box::new(ready)),
-            )),
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: tid,
+                run_id: rid,
+                terminal: RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
         );
         let draft = wb(&ws).pending_draft.as_ref().expect("draft populated");
         assert_eq!(draft.parent_revision_id.as_ref().unwrap().0, "rev-parent");
@@ -2504,5 +2991,765 @@ mod reducer_tests {
             "no run queued without corrections"
         );
         assert!(!state.disclosure_pending, "disclosure not opened");
+    }
+
+    #[test]
+    fn stale_run_messages_are_ignored() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+
+        // Set up a "current" run with specific task_id/run_id.
+        let current_task = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000099",
+        )
+        .unwrap();
+        let current_run =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099")
+                .unwrap();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: current_task.clone(),
+            run_id: current_run.clone(),
+        };
+
+        // A stale message from a different run.
+        let stale_task = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let stale_run =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+
+        // Stale RunEvent should be ignored.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: stale_task.clone(),
+                run_id: stale_run.clone(),
+                event: RunEvent::TextChunk {
+                    text: "stale".into(),
+                },
+            }),
+        );
+        assert!(
+            wb(&ws).live_activity.is_empty(),
+            "stale RunEvent must not produce activity"
+        );
+
+        // Stale RunFailed should be ignored.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunFailed {
+                task_id: stale_task.clone(),
+                run_id: stale_run.clone(),
+                error: super::WorkbenchError::RuntimeFailure,
+            }),
+        );
+        assert!(
+            wb(&ws).error.is_none(),
+            "stale RunFailed must not set error"
+        );
+        assert!(
+            wb(&ws).run_state.is_running(),
+            "stale RunFailed must not change run state"
+        );
+
+        // Stale RunTerminal should be ignored.
+        let ready = ready_for_review_with_text("stale terminal");
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: stale_task,
+                run_id: stale_run,
+                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
+        );
+        assert!(
+            wb(&ws).run_state.is_running(),
+            "stale RunTerminal must not change run state"
+        );
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "stale RunTerminal must not populate proposal"
+        );
+    }
+
+    #[test]
+    fn correlated_run_messages_are_accepted() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
+
+        // Matching RunEvent should be accepted.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk {
+                    text: "hello".into(),
+                },
+            }),
+        );
+        assert_eq!(
+            wb(&ws).live_activity.len(),
+            1,
+            "correlated RunEvent must produce activity"
+        );
+    }
+
+    // -- Persistence-ordering tests (Finding 2) ----------------------------
+
+    #[test]
+    fn running_is_persisted_before_setup() {
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+
+        // Simulate what the stream does: create a running snapshot.
+        let now = chrono::Utc::now().timestamp_millis();
+        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding,
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = snapshot.start_attempt(attempt, now).unwrap();
+
+        // Persist running snapshot.
+        store.create(&running).unwrap();
+
+        // Verify: running snapshot exists in store before any setup.
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            rollshot_agent::product_task::TaskStatus::Running
+        );
+        assert_eq!(loaded.task_id(), &task_id);
+    }
+
+    #[test]
+    fn ready_artifact_precedes_correlated_terminal() {
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskSnapshot,
+            SmartRedactionReviewPayload, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
+            TaskStatus,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000002",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000002")
+                .unwrap();
+
+        // Create and persist running snapshot.
+        let now = chrono::Utc::now().timestamp_millis();
+        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding,
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = snapshot.start_attempt(attempt, now).unwrap();
+        store.create(&running).unwrap();
+
+        // Simulate ReadyForReview: persist artifact via CAS.
+        let now2 = now + 1;
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000002").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            SourceBinding::new([1u8; 32], [0u8; 32], 0, "test".into(), None),
+            task_id.clone(),
+            running.attempts().last().unwrap().attempt_id(),
+            run_id.clone(),
+            "proposal-test".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            0.0,
+            now2,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-test".into(),
+                candidate_count: 0,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 0,
+                affected_area: 0.0,
+            },
+            config: PayloadConfigV1 {
+                provider: String::new(),
+                model: String::new(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let ready = running
+            .record_ready_for_review(metadata, payload, None, now2)
+            .unwrap();
+        store.compare_and_swap(&running, &ready).unwrap();
+
+        // Verify: artifact is in store (ReadyForReview persisted before terminal).
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+        assert!(loaded.artifact_metadata().is_some(), "artifact persisted");
+        assert!(
+            loaded.pending_artifact_payload().is_some(),
+            "payload persisted"
+        );
+    }
+
+    #[test]
+    fn store_precommit_failure_delivers_no_proposal() {
+        use super::super::task_store::{Failpoint, TaskStore};
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_with_failpoint(tmp.path(), Failpoint::Rename).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000003",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000003")
+                .unwrap();
+
+        // Create running snapshot (without failpoint).
+        let now = chrono::Utc::now().timestamp_millis();
+        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding,
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = snapshot.start_attempt(attempt, now).unwrap();
+        store.create_without_failpoint(&running).unwrap();
+
+        // Attempt CAS with failpoint → should fail.
+        let now2 = now + 1;
+        let terminal_snap = running
+            .record_terminal(
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                now2,
+            )
+            .unwrap();
+        let result = store.compare_and_swap(&running, &terminal_snap);
+        assert!(result.is_err(), "CAS must fail with rename failpoint");
+
+        // Verify: snapshot is still Running (terminal not persisted).
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            rollshot_agent::product_task::TaskStatus::Running,
+            "must still be running after failed CAS"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_failure_persists_terminal() {
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind, TaskStatus,
+            TaskTerminal,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000004",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000004")
+                .unwrap();
+
+        // Create and persist running snapshot with real source binding.
+        let now = chrono::Utc::now().timestamp_millis();
+        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding,
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = snapshot.start_attempt(attempt, now).unwrap();
+        store.create(&running).unwrap();
+
+        // Exercise the actual helper: persist terminal via store-loaded CAS.
+        let store_arc = std::sync::Arc::new(store);
+        super::persist_terminal_if_possible(
+            Some(store_arc.clone()),
+            &task_id,
+            &run_id,
+            &super::super::WorkbenchError::RuntimeFailure,
+        )
+        .await;
+
+        // Verify: terminal persisted before RunFailed would be yielded.
+        let loaded = store_arc.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            TaskStatus::Failed {
+                terminal: TaskTerminal::RuntimeFailure
+            },
+        );
+    }
+
+    // -- Enhanced stale message guard (Finding 3) ---------------------------
+
+    #[test]
+    fn stale_messages_rejected_when_terminal() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+        // Transition to Terminal state.
+        wb_mut(&mut ws).run_state = super::super::RunState::Terminal(
+            rollshot_agent::driver::RunTerminalState::RuntimeFailure,
+        );
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000099",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099")
+                .unwrap();
+
+        // RunEvent must be rejected when Terminal.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                event: RunEvent::TextChunk {
+                    text: "late".into(),
+                },
+            }),
+        );
+        assert!(
+            wb(&ws).live_activity.is_empty(),
+            "RunEvent must be rejected when Terminal"
+        );
+
+        // RunFailed must be rejected when Terminal.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunFailed {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                error: super::WorkbenchError::RuntimeFailure,
+            }),
+        );
+        assert!(
+            wb(&ws).error.is_none(),
+            "RunFailed must be rejected when Terminal"
+        );
+    }
+
+    #[test]
+    fn stale_messages_rejected_when_idle() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+        // Idle state (default).
+        assert!(wb(&ws).run_state.is_idle());
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000099",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099")
+                .unwrap();
+
+        // All run messages must be rejected when Idle.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                event: RunEvent::TextChunk {
+                    text: "orphan".into(),
+                },
+            }),
+        );
+        assert!(
+            wb(&ws).live_activity.is_empty(),
+            "RunEvent must be rejected when Idle"
+        );
+
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunFailed {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                error: super::WorkbenchError::RuntimeFailure,
+            }),
+        );
+        assert!(
+            wb(&ws).error.is_none(),
+            "RunFailed must be rejected when Idle"
+        );
+
+        let ready = ready_for_review_with_text("orphan terminal");
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id,
+                run_id,
+                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
+        );
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "RunTerminal must be rejected when Idle"
+        );
+    }
+
+    // -- Restore tests (Task 5) --------------------------------------------
+
+    use rollshot_agent::product_task::{SourceBinding as Sb, TaskKind as Tk, TaskStatus as Ts};
+
+    /// Create a ReadyForReview snapshot with a serialized EditProposal.
+    fn ready_snapshot_with_proposal(
+        task_id: &rollshot_agent::product_task::ProductTaskId,
+        source_binding: Sb,
+    ) -> rollshot_agent::product_task::ProductTaskSnapshot {
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskSnapshot,
+            SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
+        };
+
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let now = 1000i64;
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            source_binding.clone(),
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = snapshot.start_attempt(attempt, now + 1).unwrap();
+
+        let proposal = rollshot_edit_proposal::EditProposal {
+            id: rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000001-0000-4000-8000-000000000000",
+            )
+            .unwrap(),
+            base_document_state_id: 0,
+            candidates: vec![rollshot_edit_proposal::ProposedCandidate {
+                id: rollshot_edit_proposal::CandidateId(1),
+                edit: rollshot_edit_proposal::ProposedEdit::AddRedaction {
+                    bounds: rollshot_image_document::ImageRect {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 50.0,
+                        height: 50.0,
+                    },
+                },
+                confidence: 0.9,
+                label: "email".into(),
+                rationale: None,
+                provenance: rollshot_edit_proposal::Provenance {
+                    source: rollshot_edit_proposal::ProvenanceSource::Agent {
+                        run_id: run_id.as_str().to_string(),
+                    },
+                },
+            }],
+            confidence_summary: rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: rollshot_edit_proposal::Provenance {
+                source: rollshot_edit_proposal::ProvenanceSource::Manual,
+            },
+        };
+
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            source_binding.clone(),
+            task_id.clone(),
+            running.attempts().last().unwrap().attempt_id(),
+            run_id.clone(),
+            "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            1,
+            0.42,
+            now + 2,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "5 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+
+        let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
+        running
+            .record_ready_for_review(metadata, payload, Some(proposal_bytes), now + 2)
+            .unwrap()
+    }
+
+    #[test]
+    fn restore_compatible_review() {
+        // 1. matching content restores exact artifact without provider call.
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
+        store.create(&snapshot).unwrap();
+
+        let mut ws = ws_with_workbench();
+        let store_arc = std::sync::Arc::new(store);
+        {
+            let wb = wb_mut(&mut ws);
+            wb.task_store = Some(store_arc.clone());
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            // Simulate what reconcile_for_source returns.
+            let result = store_arc.reconcile_for_source(&binding, 2000).unwrap();
+
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result,
+                }),
+            );
+        }
+        assert!(
+            wb(&ws).pending_proposal.is_some(),
+            "matching content must restore proposal"
+        );
+        assert_eq!(
+            wb(&ws).pending_proposal.as_ref().unwrap().candidates.len(),
+            1,
+            "restored proposal has 1 candidate"
+        );
+    }
+
+    #[test]
+    fn same_state_different_image_is_ignored() {
+        // 2. unrelated image with same state ID is ignored;
+        //    its task remains ReadyForReview (not restored, not stale).
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        // Task was created with base_image = [1u8; 32].
+        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
+        store.create(&snapshot).unwrap();
+
+        // Current source has a DIFFERENT base image but same state_id.
+        let current_binding = Sb::new([99u8; 32], [2u8; 32], 0, "p".into(), None);
+        let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
+
+        // reconcile_for_source returns None — unrelated image skipped.
+        assert!(result.is_none(), "unrelated image must not be returned");
+        // The original task is untouched.
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            Ts::ReadyForReview,
+            "unrelated task must remain ReadyForReview"
+        );
+    }
+
+    #[test]
+    fn same_image_changed_annotations_marks_stale() {
+        // 3. same image, different annotation state → task marked stale.
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        // Task: base=[1], annotations=[2], state_id=0.
+        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
+        store.create(&snapshot).unwrap();
+
+        // Current: base=[1], annotations=[99], state_id=0.
+        let current_binding = Sb::new([1u8; 32], [99u8; 32], 0, "p".into(), None);
+        let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
+
+        assert!(result.is_none(), "changed annotations must not restore");
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            Ts::Stale,
+            "same-image changed-annotations task must be marked stale"
+        );
+    }
+
+    #[test]
+    fn running_becomes_interrupted_on_reconcile() {
+        // 4. running/applying → interrupted on reconcile_for_source.
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(
+            TaskAttemptId::new(1),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
+            10,
+        );
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        store.create(&running).unwrap();
+
+        // Reconcile — running task becomes interrupted.
+        let result = store.reconcile_for_source(&binding, 2000).unwrap();
+        assert!(
+            result.is_none(),
+            "interrupted task is not returned for restore"
+        );
+
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            Ts::Interrupted,
+            "running task must become interrupted"
+        );
+    }
+
+    #[test]
+    fn stale_restore_completion_is_ignored() {
+        // 5. old restore completion delivered after a new restore/run is ignored.
+        let mut ws = ws_with_workbench();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        // Set up workbench with a restore operation in progress.
+        let stale_op = {
+            let wb = wb_mut(&mut ws);
+            wb.cached_base_digest = Some([1u8; 32]);
+            wb.restore_operation_id.next() // op 1
+        };
+
+        // A new restore starts — bumps the operation ID.
+        {
+            let wb = wb_mut(&mut ws);
+            wb.restore_operation_id.next(); // op 2
+            wb.cached_base_digest = Some([1u8; 32]);
+        }
+
+        // Deliver the old completion (stale_op = 1, current = 2).
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                operation_id: stale_op,
+                source_binding: binding,
+                result: None,
+            }),
+        );
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "stale restore completion must be ignored"
+        );
     }
 }

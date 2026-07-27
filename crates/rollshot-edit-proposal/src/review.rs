@@ -57,19 +57,23 @@ mod tests {
             label: "test".into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 1 },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000001".to_string(),
+                },
             },
         }
     }
     fn proposal(cands: Vec<ProposedCandidate>) -> EditProposal {
         EditProposal {
-            id: ProposalId(1),
+            id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
             base_document_state_id: 0,
             candidates: cands,
             confidence_summary: ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: 1 },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000001".to_string(),
+                },
             },
         }
     }
@@ -97,7 +101,8 @@ mod tests {
             ),
         ]);
         let decision = ReviewDecision {
-            proposal_id: ProposalId(1),
+            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000")
+                .unwrap(),
             accepted: vec![CandidateId(1), CandidateId(3)],
             rejected: vec![CandidateId(2)],
             modified: vec![],
@@ -126,7 +131,8 @@ mod tests {
             },
         )]);
         let decision = ReviewDecision {
-            proposal_id: ProposalId(1),
+            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000")
+                .unwrap(),
             accepted: vec![CandidateId(1)],
             rejected: vec![],
             modified: vec![(
@@ -155,7 +161,8 @@ mod tests {
             },
         )]);
         let decision = ReviewDecision {
-            proposal_id: ProposalId(1),
+            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000")
+                .unwrap(),
             accepted: vec![CandidateId(1), CandidateId(99)], // 99 absent from proposal -> skipped
             rejected: vec![],
             modified: vec![(
@@ -178,7 +185,8 @@ mod tests {
     fn review_decision_serde_round_trip() {
         use rollshot_image_document::AnnotationId;
         let decision = ReviewDecision {
-            proposal_id: ProposalId(3),
+            proposal_id: ProposalId::parse("proposal-00000003-0000-4000-8000-000000000000")
+                .unwrap(),
             accepted: vec![CandidateId(1), CandidateId(2)],
             rejected: vec![CandidateId(9)],
             modified: vec![(
