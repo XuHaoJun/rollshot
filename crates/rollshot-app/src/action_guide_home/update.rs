@@ -777,6 +777,8 @@ mod tests {
     use super::*;
     use crate::action_guide_home::recent::RecentEntry;
     use crate::action_guide_home::video_import::ImportState;
+    use rollshot_action::VideoImportPass;
+    use rollshot_agent::jobs::{JobFailureCategory, JobState, TERMINAL_TTL_MS};
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
@@ -1461,5 +1463,144 @@ mod tests {
             job_failure_message(Category::WorkerPanic),
             "Import worker stopped unexpectedly."
         );
+    }
+
+    // ---- Task 5: adversarial failure-injection tests ----
+
+    fn seed_with_root(
+        parent: &tempfile::TempDir,
+    ) -> (rollshot_action::ImportedWorkspaceSeed, std::path::PathBuf) {
+        let seed = dummy_seed(parent);
+        let root = seed.scratch.root().to_path_buf();
+        (seed, root)
+    }
+
+    #[test]
+    fn notification_loss_does_not_lose_terminal_or_duplicate_collection() {
+        let (_project_dir, mut home) = setup_home();
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let (job_id, mut reporter) = home.bind_test_import();
+        let t = now_unix_ms();
+        reporter.mark_running(t).unwrap();
+        reporter
+            .report_progress(progress(VideoImportPass::Analyze), t + 1)
+            .unwrap();
+        reporter
+            .report_progress(progress(VideoImportPass::Extract), t + 2)
+            .unwrap();
+        reporter.succeed(dummy_seed(&scratch_parent), t + 3).unwrap();
+
+        assert_eq!(
+            home.import_jobs()
+                .snapshot(&job_id)
+                .unwrap()
+                .progress()
+                .unwrap()
+                .pass,
+            VideoImportPass::Extract
+        );
+        let first = home.update(Message::ImportJobsChanged);
+        assert!(matches!(first.effect, Effect::OpenImportedTimeline(_)));
+        let second = home.update(Message::ImportJobsChanged);
+        assert!(matches!(second.effect, Effect::None));
+        assert_eq!(
+            home.import_jobs().collect(&job_id, t + 4).unwrap_err(),
+            rollshot_agent::jobs::JobCollectError::AlreadyCollected
+        );
+    }
+
+    #[test]
+    fn cancel_wins_against_late_success_and_drops_seed() {
+        let (_project_dir, mut home) = setup_home();
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let (seed, scratch_root) = seed_with_root(&scratch_parent);
+        let (job_id, mut reporter, observed_cancel) =
+            home.bind_test_import_with_cancel_probe();
+        reporter.mark_running(10).unwrap();
+
+        home.update(Message::CancelImport);
+        reporter.succeed(seed, 11).unwrap();
+        let update = home.update(Message::ImportJobsChanged);
+
+        assert!(observed_cancel.load(Ordering::SeqCst));
+        assert!(!scratch_root.exists());
+        assert!(matches!(update.effect, Effect::None));
+        assert_eq!(
+            home.import_jobs().snapshot(&job_id).unwrap().state(),
+            JobState::Cancelled
+        );
+    }
+
+    #[test]
+    fn stale_terminal_from_old_job_cannot_open_over_new_import() {
+        let (_project_dir, mut home) = setup_home();
+        let (old_id, mut old_reporter) = home.bind_test_import();
+        old_reporter.mark_running(10).unwrap();
+        home.import_coordinator_mut().detach();
+        let (new_id, mut new_reporter) = home.bind_test_import();
+        new_reporter.mark_running(11).unwrap();
+
+        old_reporter
+            .fail(JobFailureCategory::DecodeFailed, 12)
+            .unwrap();
+        let update = home.update(Message::ImportJobsChanged);
+
+        assert!(matches!(update.effect, Effect::None));
+        assert_eq!(home.import_coordinator().job_id(), Some(&new_id));
+        assert_eq!(
+            home.import_jobs().snapshot(&old_id).unwrap().state(),
+            JobState::Failed
+        );
+        assert_eq!(
+            home.import_jobs().snapshot(&new_id).unwrap().state(),
+            JobState::Running
+        );
+    }
+
+    #[test]
+    fn reporter_drop_becomes_worker_abandoned_and_is_repairable() {
+        let (_project_dir, mut home) = setup_home();
+        let (job_id, mut reporter) = home.bind_test_import();
+        reporter.mark_running(10).unwrap();
+        drop(reporter);
+
+        let update = home.update(Message::ImportJobsChanged);
+
+        assert!(matches!(update.effect, Effect::None));
+        assert_eq!(home.import_coordinator().state(), ImportState::Idle);
+        assert_eq!(
+            home.import_jobs()
+                .snapshot(&job_id)
+                .unwrap()
+                .failure_category(),
+            Some(JobFailureCategory::WorkerAbandoned)
+        );
+        assert_eq!(
+            home.message.as_deref(),
+            Some("Import worker stopped unexpectedly.")
+        );
+    }
+
+    #[test]
+    fn expired_uncollected_seed_is_dropped_and_scratch_is_removed() {
+        let (_project_dir, mut home) = setup_home();
+        let scratch_parent = tempfile::tempdir().unwrap();
+        let (seed, scratch_root) = seed_with_root(&scratch_parent);
+        let (job_id, mut reporter) = home.bind_test_import();
+        reporter.mark_running(10).unwrap();
+        reporter.succeed(seed, 11).unwrap();
+
+        home.import_jobs().prune(11 + TERMINAL_TTL_MS);
+
+        assert!(!scratch_root.exists());
+        assert_eq!(
+            home.import_jobs()
+                .collect(&job_id, 11 + TERMINAL_TTL_MS)
+                .unwrap_err(),
+            rollshot_agent::jobs::JobCollectError::ResultExpired
+        );
+        assert!(!format!("{:?}", home.import_jobs().watch()).contains(
+            scratch_root.to_string_lossy().as_ref()
+        ));
     }
 }

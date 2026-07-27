@@ -2136,4 +2136,140 @@ mod tests {
         registry.prune(200 + TERMINAL_TTL_MS);
         assert!(registry.snapshot(&id).is_some());
     }
+
+    // ---- Task 5: owner-drop and privacy tests ----
+
+    #[test]
+    fn owner_drop_requests_cancel_while_observer_and_reporter_finish_cleanup() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let registry = LiveJobRegistry::<u32, String>::new();
+        let observer = registry.observer();
+        let (id, mut reporter) = registry
+            .admit(
+                direct_admission(7),
+                JobControl::new(move || {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }),
+                10,
+            )
+            .unwrap();
+        reporter.mark_running(11).unwrap();
+
+        drop(registry);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.snapshot(&id).unwrap().state(), JobState::Cancelling);
+        reporter.cancelled(12).unwrap();
+        assert_eq!(observer.snapshot(&id).unwrap().state(), JobState::Cancelled);
+    }
+
+    /// Capture tracing output for the duration of `run`.
+    ///
+    /// Registers a capturing tracing subscriber and runs `run` inside its
+    /// scope. Uses `set_global_default` (ignoring the "already set" error
+    /// when a prior test registered first) and falls back to `set_default`.
+    fn capture_job_tracing<T>(run: impl FnOnce() -> T) -> (T, String) {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::Registry;
+
+        let log_buffer: Arc<std::sync::Mutex<Vec<u8>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_check = log_buffer.clone();
+
+        let make_subscriber =
+            |buf: Arc<std::sync::Mutex<Vec<u8>>>| {
+                let buf2 = buf.clone();
+                let fmt_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(move || WriteAdaptor { buf: buf2.clone() })
+                    .with_ansi(false)
+                    .with_target(true)
+                    .without_time()
+                    .with_filter(tracing::level_filters::LevelFilter::TRACE);
+                Registry::default().with(fmt_layer)
+            };
+
+        // Try to register as global first. On failure (already set),
+        // use a thread-local subscriber so this test's events still
+        // route to our capturing writer.
+        let _local_guard = match tracing::subscriber::set_global_default(
+            make_subscriber(log_buffer),
+        ) {
+            Ok(()) => None,
+            Err(_) => Some(tracing::subscriber::set_default(
+                make_subscriber(log_check.clone()),
+            )),
+        };
+
+        let result = run();
+        let logs = String::from_utf8(log_check.lock().unwrap().to_vec()).unwrap();
+        (result, logs)
+    }
+
+    /// Adapts `Arc<Mutex<Vec<u8>>>` to `std::io::Write` for tracing subscriber.
+    struct WriteAdaptor {
+        buf: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for WriteAdaptor {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.lock().unwrap().write(data)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn job_debug_and_tracing_omit_control_and_result_sentinels() {
+        let sentinels = [
+            "/home/alice/SECRET-recording.mp4",
+            "RAW-FFMPEG-SECRET",
+            "api_key=SECRET",
+            "SECRET-skill-body",
+            "SECRET-seed-payload",
+        ];
+        let captured_by_control = sentinels.join("|");
+        let result_payload = sentinels.join("|");
+        let ((registry, id), logs) = capture_job_tracing(move || {
+            let registry = LiveJobRegistry::<u32, String>::new();
+            let control_secret = captured_by_control;
+            let (id, mut reporter) = registry
+                .admit(
+                    direct_admission(7),
+                    JobControl::new(move || {
+                        std::hint::black_box(&control_secret);
+                    }),
+                    10,
+                )
+                .unwrap();
+            reporter.mark_running(11).unwrap();
+            reporter.report_progress(25, 12).unwrap();
+            reporter.succeed(result_payload, 13).unwrap();
+            (registry, id)
+        });
+        let rendered = format!(
+            "{:?}{:?}{:?}",
+            registry.snapshot(&id).unwrap(),
+            registry.watch(),
+            logs
+        );
+
+        for sentinel in sentinels {
+            assert!(!rendered.contains(sentinel), "leaked sentinel: {sentinel}");
+        }
+        assert!(
+            logs.contains("rollshot::agent::jobs"),
+            "logs must contain target, got: {logs:?}"
+        );
+        assert!(
+            logs.contains(id.as_str()),
+            "logs must contain job id, got: {logs:?}"
+        );
+        assert!(
+            logs.contains("Succeeded"),
+            "logs must contain 'Succeeded', got: {logs:?}"
+        );
+    }
 }
