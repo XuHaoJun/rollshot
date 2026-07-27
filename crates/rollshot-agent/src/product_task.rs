@@ -847,7 +847,6 @@ impl ProductTaskSnapshot {
     /// - Any different existing receipt is `RunContractConflict`.
     pub fn bind_run_contract(
         &self,
-        _run_id: RunId,
         receipt: RunContractReceiptV1,
         now: i64,
     ) -> Result<Self, TaskContractError> {
@@ -2281,7 +2280,7 @@ mod tests {
     fn running_with_contract_fixture() -> ProductTaskSnapshot {
         let running = running_task_fixture();
         let receipt = run_contract_fixture(&running);
-        running.bind_run_contract(run_id_fixture(), receipt, 25).unwrap()
+        running.bind_run_contract(receipt, 25).unwrap()
     }
 
     fn v2_metadata_with_contract(
@@ -2334,7 +2333,7 @@ mod tests {
         let running = running_task_fixture();
         let receipt = run_contract_fixture(&running);
         let bound = running
-            .bind_run_contract(run_id_fixture(), receipt.clone(), 20)
+            .bind_run_contract(receipt.clone(), 20)
             .unwrap();
         assert_eq!(
             bound.attempts().last().unwrap().run_contract(),
@@ -2348,7 +2347,7 @@ mod tests {
         // Second conflicting receipt → RunContractConflict
         let conflict = run_contract_with_skill_digest(&running, &"ff".repeat(32));
         assert!(matches!(
-            bound.bind_run_contract(run_id_fixture(), conflict, 21),
+            bound.bind_run_contract(conflict, 21),
             Err(TaskContractError::RunContractConflict)
         ));
     }
@@ -2358,12 +2357,12 @@ mod tests {
         let running = running_task_fixture();
         let receipt = run_contract_fixture(&running);
         let bound = running
-            .bind_run_contract(run_id_fixture(), receipt.clone(), 20)
+            .bind_run_contract(receipt.clone(), 20)
             .unwrap();
         let revision_after_first = bound.snapshot_revision();
         // Identical receipt → no revision bump
         let again = bound
-            .bind_run_contract(run_id_fixture(), receipt, 21)
+            .bind_run_contract(receipt, 21)
             .unwrap();
         assert_eq!(again.snapshot_revision(), revision_after_first);
         assert_eq!(again, bound);
@@ -2417,7 +2416,7 @@ mod tests {
         let created = created_task_fixture();
         let receipt = run_contract_fixture(&created);
         assert!(matches!(
-            created.bind_run_contract(run_id_fixture(), receipt, 20),
+            created.bind_run_contract(receipt, 20),
             Err(TaskContractError::IllegalTransition { .. })
         ));
     }
@@ -2429,7 +2428,7 @@ mod tests {
             .unwrap();
         let receipt = run_contract_fixture(&cancelled);
         assert!(matches!(
-            cancelled.bind_run_contract(run_id_fixture(), receipt, 40),
+            cancelled.bind_run_contract(receipt, 40),
             Err(TaskContractError::IllegalTransition { .. })
         ));
     }
@@ -2439,7 +2438,7 @@ mod tests {
         let running = running_task_fixture();
         let receipt = run_contract_fixture(&running);
         assert!(matches!(
-            running.bind_run_contract(run_id_fixture(), receipt, 5),
+            running.bind_run_contract(receipt, 5),
             Err(TaskContractError::TimestampRegression { .. })
         ));
     }
@@ -2450,7 +2449,7 @@ mod tests {
         let mut receipt = run_contract_fixture(&running);
         receipt.authority.run_id = "run-99999999-9999-4999-8999-999999999999".to_owned();
         assert!(matches!(
-            running.bind_run_contract(run_id_fixture(), receipt, 20),
+            running.bind_run_contract(receipt, 20),
             Err(TaskContractError::RunMismatch { .. })
         ));
     }
@@ -2461,7 +2460,7 @@ mod tests {
         let mut receipt = run_contract_fixture(&running);
         receipt.authority.task_id = "task-99999999-9999-4999-8999-999999999999".to_owned();
         assert!(matches!(
-            running.bind_run_contract(run_id_fixture(), receipt, 20),
+            running.bind_run_contract(receipt, 20),
             Err(TaskContractError::RunMismatch { .. })
         ));
     }
@@ -2472,7 +2471,7 @@ mod tests {
         let mut receipt = run_contract_fixture(&running);
         receipt.authority.attempt_id = 99;
         assert!(matches!(
-            running.bind_run_contract(run_id_fixture(), receipt, 20),
+            running.bind_run_contract(receipt, 20),
             Err(TaskContractError::ConflictingAttempt { .. })
         ));
     }
@@ -2662,7 +2661,7 @@ mod tests {
         let running = task.start_attempt(attempt_fixture(), 20).unwrap();
         let receipt = run_contract_fixture(&running);
         let bound = running
-            .bind_run_contract(run_id_fixture(), receipt.clone(), 25)
+            .bind_run_contract(receipt.clone(), 25)
             .unwrap();
         let meta = v2_metadata_with_contract(&receipt);
         let ready = bound
